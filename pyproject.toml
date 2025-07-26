@@ -1,0 +1,111 @@
+################################################
+# Project
+################################################
+
+[project]
+name = "NeMo-Gym"
+version = "0.0.1"
+license = {text = ""}
+requires-python = ">=3.13"
+readme = {file = "README.md", content-type = "text/markdown"}
+dependencies = [
+    # OpenAI: We leverage OpenAI Responses, Chat Completions, and Completions schemas for Nemo Gym abstractions. It may also be used to directly query endpoints.
+    # Updated Fri Jul 25, 2025
+    "openai==1.97.1",
+    # tqdm: Use for progress tracking on batch operations.
+    # Updated Fri Jul 25, 2025
+    "tqdm==4.67.1",
+    # Datasets: Used for batch processing and HuggingFace integration.
+    # Updated Fri Jul 25, 2025
+    "datasets==4.0.0",
+    # HuggingFace Hub: Used for Huggingface integration
+    # Updated Fri Jul 25, 2025
+    "huggingface-hub[hf_transfer]==0.34.1",
+    # Numpy: Freeze numpy version for compatibility
+    # Updated Fri Jul 25, 2025
+    "numpy==2.2.6",
+    # Pydantic: Used for typing and import/export.
+    # Updated Fri Jul 25, 2025
+    "pydantic==2.11.7",
+    "pydantic_core==2.33.2",
+    "devtools",
+    # Asyncer: Used for making sync/async operations more resource efficient.
+    # Updated Fri Jul 25, 2025
+    "asyncer==0.0.8",
+    # FastAPI: Used for server infrastructure
+    # Updated Fri Jul 25, 2025
+    "fastapi==0.116.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff==0.12.5",
+    "coverage[toml]==7.10.0",
+    "pytest-cov==5.0.0",
+    "pytest-xdist==3.6.1",
+    "pytest==7.4.3",
+    "pytest-asyncio==0.21.1",
+    "requests-mock==1.12.1",
+]
+
+[build-system]
+requires = ["setuptools", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[tool.distutils.egg_info]
+egg_base = "cache"
+
+[project.scripts]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["resources_servers", "responses_api_agents", "responses_api_models"]
+
+################################################
+# Testing
+################################################
+
+[tool.pytest.ini_options]
+log_cli = true
+log_cli_level = "INFO"
+cache_dir = "cache/.pytest_cache"
+filterwarnings = "ignore::DeprecationWarning"
+testpaths = "tests"
+
+[tool.coverage.run]
+source = ["."]
+command_line = "-m pytest --durations=10"
+omit = [
+    "tests/*",
+    "temp*",
+    "results/*",
+]
+data_file = "results/.coverage"
+
+[tool.coverage.html]
+directory = "results/htmlcov"
+
+[tool.coverage.report]
+skip_covered = true
+sort = "miss"
+fail_under = 95.0
+exclude_also = [
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+    "pass",
+]
+omit = []
+
+################################################
+# Linting, formatting, and QOL
+################################################
+[tool.ruff]
+cache-dir = "cache/.ruff_cache"

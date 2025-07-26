@@ -1,13 +1,45 @@
-# You can override the included template(s) by including variable overrides
-# SAST customization: https://docs.gitlab.com/ee/user/application_security/sast/#customizing-the-sast-settings
-# Secret Detection customization: https://docs.gitlab.com/ee/user/application_security/secret_detection/pipeline/#customization
-# Dependency Scanning customization: https://docs.gitlab.com/ee/user/application_security/dependency_scanning/#customizing-the-dependency-scanning-settings
-# Container Scanning customization: https://docs.gitlab.com/ee/user/application_security/container_scanning/#customizing-the-container-scanning-settings
-# Note that environment variables can be set in several places
-# See https://docs.gitlab.com/ee/ci/variables/#cicd-variable-precedence
 stages:
 - test
+
 sast:
   stage: test
+
 include:
 - template: Security/SAST.gitlab-ci.yml
+
+
+before_script:
+  - |
+    if [[ "$CI_PIPELINE_SOURCE" == "merge_request_event" && "$CI_MERGE_REQUEST_TITLE" == Draft:\ * ]]; then
+      echo "Failing on draft MR to enforce this check to run"
+      exit 1
+    fi
+  - apt-get update
+  # Curl is required for setup_nvidia.sh to download uv
+  # ca-certificates is there to support curl and mitigate `curl: (77) error setting certificate file: /etc/ssl/certs/ca-certificates.crt`
+  - apt-get install -y --no-install-recommends git-lfs curl ca-certificates
+  # The flow below should be used and synced with any Docker or container related flows. There is no script here to keep it 100% explicit.
+  # This is how we test and this is how you should use/consume.
+  - curl -LsSf https://astral.sh/uv/install.sh | sh
+  - source $HOME/.local/bin/env
+  - uv venv --python 3.13
+  - source .venv/bin/activate
+  - uv pip install -e ".[dev]"
+  - git lfs install
+  - git lfs pull
+
+default:
+  image: ubuntu:latest
+
+run_continuous_integration_tests:
+  stage: test
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  script:
+    - ruff format --check
+    - ruff check
+    - pytest --cov="." -n 8 --durations=10
+  tags:
+    - linux
