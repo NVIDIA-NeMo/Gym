@@ -35,6 +35,9 @@ dependencies = [
     # FastAPI: Used for server infrastructure
     # Updated Fri Jul 25, 2025
     "fastapi==0.116.1",
+    # Uvicorn: Used to serve FastAPI apps
+    # Updated Mon Jul 28, 2025
+    "uvicorn==0.35.0",
 ]
 
 [project.optional-dependencies]
@@ -59,7 +62,7 @@ egg_base = "cache"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["resources_servers", "responses_api_agents", "responses_api_models"]
+include = ["resources_servers", "responses_api_agents", "responses_api_models", "nemo_gym"]
 
 ################################################
 # Testing
