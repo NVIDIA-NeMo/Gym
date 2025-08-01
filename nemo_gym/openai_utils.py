@@ -1,10 +1,14 @@
-from typing import List, Union
-
+from typing import Optional, List, Union
 from openai import AsyncOpenAI
 from openai.types.responses.response_input_param import FunctionCallOutput
 from openai.types.responses.response_create_params import (
     ResponseCreateParamsNonStreaming,
 )
+from openai.types.shared.chat_model import ChatModel
+from openai.types.chat.completion_create_params import (
+    CompletionCreateParamsNonStreaming,
+)
+from openai.types.chat import ChatCompletion
 from openai.types.responses import Response, ResponseOutputItem
 
 from nemo_gym.server_utils import GLOBAL_HTTPX_CLIENT
@@ -19,6 +23,16 @@ NeMoGymResponseOutputItem = Union[FunctionCallOutput, ResponseOutputItem]
 
 class NeMoGymResponse(Response):
     output: List[NeMoGymResponseOutputItem]
+
+
+class NeMoGymChatCompletionCreateParamsNonStreaming(
+    CompletionCreateParamsNonStreaming, total=False
+):
+    model: Optional[Union[str, ChatModel]]
+
+
+class NeMoGymChatCompletionResponse(ChatCompletion):
+    pass
 
 
 class NeMoGymAsyncOpenAI(AsyncOpenAI):
