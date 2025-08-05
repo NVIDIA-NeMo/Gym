@@ -24,7 +24,7 @@ before_script:
   - source $HOME/.local/bin/env
   - uv venv --python 3.13
   - source .venv/bin/activate
-  - uv pip install -e ".[dev]"
+  - uv sync
   - git lfs install
   - git lfs pull
 
@@ -40,6 +40,7 @@ run_continuous_integration_tests:
   script:
     - ruff format --check
     - ruff check
-    - pytest --cov="." -n 8 --durations=10
+    - ng_dev_test
+    - ng_test_all
   tags:
     - linux

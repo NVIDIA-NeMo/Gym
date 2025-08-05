@@ -3,6 +3,9 @@ from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.server_utils import ServerClient
+
+from unittest.mock import MagicMock
 
 
 class TestBaseResponsesAPIAgent:
@@ -17,5 +20,10 @@ class TestBaseResponsesAPIAgent:
             async def responses(self, body=...):
                 raise NotImplementedError
 
-        agent = TestSimpleResponsesAPIAgent(config=config)
+            async def run(self, body=...):
+                raise NotImplementedError
+
+        agent = TestSimpleResponsesAPIAgent(
+            config=config, server_client=MagicMock(spec=ServerClient)
+        )
         agent.setup_webserver()

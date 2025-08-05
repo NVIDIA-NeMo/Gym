@@ -3,11 +3,14 @@ from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
     SimpleResponsesAPIModel,
 )
+from nemo_gym.server_utils import ServerClient
 from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymChatCompletionResponse,
     NeMoGymResponse,
 )
+
+from unittest.mock import MagicMock
 
 
 class TestBaseResponsesAPIModel:
@@ -33,5 +36,7 @@ class TestBaseResponsesAPIModel:
             ) -> NeMoGymResponse:
                 raise NotImplementedError
 
-        model = TestSimpleResponsesAPIModel(config=config)
+        model = TestSimpleResponsesAPIModel(
+            config=config, server_client=MagicMock(spec=ServerClient)
+        )
         model.setup_webserver()

@@ -1,4 +1,4 @@
-simple_weather:
+multineedle:
   resources_servers:
-    simple_weather:
+    multineedle:
       entrypoint: app.py

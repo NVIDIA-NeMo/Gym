@@ -1,7 +1,7 @@
-my_gpt4p1_simple_model_server:
+openai_model:
   responses_api_models:
-    simple_model_server:
+    openai_model:
       entrypoint: app.py
       openai_base_url: https://api.openai.com/v1
       openai_api_key: ???
-      openai_model_name: gpt-4.1-2025-04-14
+      openai_model_name: gpt-4.1-2025-04-14  # Default here

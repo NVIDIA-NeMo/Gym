@@ -5,6 +5,8 @@ from fastapi import FastAPI
 from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
     BaseResourcesServerConfig,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
 )
 
 
@@ -25,7 +27,7 @@ class SimpleWeatherResourcesServer(SimpleResourcesServer):
     config: SimpleWeatherResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:
-        app = FastAPI()
+        app = super().setup_webserver()
 
         app.post("/get_weather")(self.get_weather)
 
@@ -35,6 +37,9 @@ class SimpleWeatherResourcesServer(SimpleResourcesServer):
         return GetWeatherResponse(
             city=body.city, weather_description=f"The weather in {body.city} is cold."
         )
+
+    async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+        return BaseVerifyResponse(**body.model_dump(), reward=1.0)
 
 
 if __name__ == "__main__":

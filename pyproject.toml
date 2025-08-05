@@ -15,15 +15,6 @@ dependencies = [
     # tqdm: Use for progress tracking on batch operations.
     # Updated Fri Jul 25, 2025
     "tqdm==4.67.1",
-    # Datasets: Used for batch processing and HuggingFace integration.
-    # Updated Fri Jul 25, 2025
-    "datasets==4.0.0",
-    # HuggingFace Hub: Used for Huggingface integration
-    # Updated Fri Jul 25, 2025
-    "huggingface-hub[hf_transfer]==0.34.1",
-    # Numpy: Freeze numpy version for compatibility
-    # Updated Fri Jul 25, 2025
-    "numpy==2.2.6",
     # Pydantic: Used for typing and import/export.
     # Updated Fri Jul 25, 2025
     "pydantic==2.11.7",
@@ -38,13 +29,19 @@ dependencies = [
     # Uvicorn: Used to serve FastAPI apps
     # Updated Mon Jul 28, 2025
     "uvicorn==0.35.0",
+    # UVLoop: a faster async event loop than Python's native asyncio.
+    # Updated Fri Aug 01, 2025
+    "uvloop==0.21.0",
     # Hydra and OmegaConf: CLI Configuration utilities
     # Updated Tue Jul 29, 2025
     "hydra-core==1.3.2",
     "omegaconf==2.3.0",
+    # Gradio: For simple frontend interfaces for viewing data
+    # Updated Sun Aug 03, 2025
+    "gradio==5.16.0",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
     "ruff==0.12.5",
     "coverage[toml]==7.10.0",
@@ -63,10 +60,27 @@ build-backend = "setuptools.build_meta"
 egg_base = "cache"
 
 [project.scripts]
+# Run/test scripts for servers.
 nemo_gym_run = "nemo_gym.cli:run"
 ng_run = "nemo_gym.cli:run"
 nemo_gym_test = "nemo_gym.cli:test"
 ng_test = "nemo_gym.cli:test"
+nemo_gym_test_all = "nemo_gym.cli:test_all"
+ng_test_all = "nemo_gym.cli:test_all"
+
+# Dataset viewing
+nemo_gym_viewer = "nemo_gym.dataset_viewer:main"
+ng_viewer = "nemo_gym.dataset_viewer:main"
+
+# Development convenience aliases.
+nemo_gym_dev_test = "nemo_gym.cli:dev_test"
+ng_dev_test = "nemo_gym.cli:dev_test"
+nemo_gym_init_resources_server = "nemo_gym.cli:init_resources_server"
+ng_init_resources_server = "nemo_gym.cli:init_resources_server"
+
+# Trajectory collection
+nemo_gym_collect_traj = "nemo_gym.trajectory_collection:collect_trajectories"
+ng_collect_traj = "nemo_gym.trajectory_collection:collect_trajectories"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -121,3 +135,6 @@ omit = []
 ################################################
 [tool.ruff]
 cache-dir = "cache/.ruff_cache"
+exclude = [
+    "resources"
+]

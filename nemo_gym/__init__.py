@@ -24,3 +24,6 @@ environ["TRANSFORMERS_CACHE"] = environ["HF_DATASETS_CACHE"]
 
 # UV caching directory overrides to local folders.
 environ["UV_CACHE_DIR"] = join(CACHE_DIR, "uv")
+
+# Turn off Gradio analytics
+environ["GRADIO_ANALYTICS_ENABLED"] = "False"

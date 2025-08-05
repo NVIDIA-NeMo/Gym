@@ -1,8 +1,12 @@
-from pytest import MonkeyPatch
-from unittest.mock import AsyncMock
 from fastapi.testclient import TestClient
-from app import SimpleModelServer, SimpleModelServerConfig
+
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymChatCompletionResponse
+from nemo_gym.server_utils import ServerClient
+
+from app import SimpleModelServer, SimpleModelServerConfig
+
+from unittest.mock import AsyncMock, MagicMock
+from pytest import MonkeyPatch
 
 
 class TestApp:
@@ -15,7 +19,9 @@ class TestApp:
             openai_model_name="dummy_model",
             entrypoint="",
         )
-        return SimpleModelServer(config=config)
+        return SimpleModelServer(
+            config=config, server_client=MagicMock(spec=ServerClient)
+        )
 
     async def test_sanity(self) -> None:
         self._setup_server()

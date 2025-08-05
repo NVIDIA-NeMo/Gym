@@ -98,6 +98,7 @@ class TestServerUtils:
         global_config_dict = get_global_config_dict()
         assert {
             "config_paths": ["/var", "var"],
+            "extra_dot_env_key": 2,
             "head_server": {"host": "127.0.0.1", "port": 11000},
         } == global_config_dict
 
@@ -125,7 +126,13 @@ class TestServerUtils:
         hydra_main_mock = MagicMock()
 
         def hydra_main_wrapper(fn):
-            config_dict = DictConfig({"a": {"b": {"c": {}}}})
+            config_dict = DictConfig(
+                {
+                    "a": {"responses_api_models": {"c": {}}},
+                    "b": {"c": {"d": {}}},
+                    "c": 2,
+                }
+            )
             return lambda: fn(config_dict)
 
         hydra_main_mock.return_value = hydra_main_wrapper
@@ -133,7 +140,9 @@ class TestServerUtils:
 
         global_config_dict = get_global_config_dict()
         assert {
-            "a": {"b": {"c": {"host": "127.0.0.1", "port": 12345}}},
+            "a": {"responses_api_models": {"c": {"host": "127.0.0.1", "port": 12345}}},
+            "b": {"c": {"d": {}}},
+            "c": 2,
             "head_server": {"host": "127.0.0.1", "port": 11000},
         } == global_config_dict
 
@@ -335,7 +344,7 @@ class TestServerUtils:
         assert actual_config.host == ""
         assert actual_config.port == 0
 
-    async def test_ServerClient_load_from_global_config(
+    def test_ServerClient_load_from_global_config(
         self, monkeypatch: MonkeyPatch
     ) -> None:
         global_config_dict = DictConfig(
@@ -352,15 +361,13 @@ class TestServerUtils:
             nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock
         )
 
-        httpx_client_mock = AsyncMock()
+        httpx_client_mock = MagicMock()
         httpx_response_mock = MagicMock()
         httpx_client_mock.return_value = httpx_response_mock
         httpx_response_mock.content = b'"a: 2"'
-        monkeypatch.setattr(
-            nemo_gym.server_utils.GLOBAL_HTTPX_CLIENT, "get", httpx_client_mock
-        )
+        monkeypatch.setattr(nemo_gym.server_utils.requests, "get", httpx_client_mock)
 
-        actual_client = await ServerClient.load_from_global_config()
+        actual_client = ServerClient.load_from_global_config()
         assert {"a": 2} == actual_client.global_config_dict
 
     async def test_ServerClient_get_post_sanity(self, monkeypatch: MonkeyPatch) -> None:

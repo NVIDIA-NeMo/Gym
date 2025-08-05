@@ -7,6 +7,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponse,
 )
+from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 
 
 class BaseResponsesAPIAgentConfig(BaseRunServerConfig):
@@ -24,6 +25,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, SimpleServer):
         app = FastAPI()
 
         app.post("/v1/responses")(self.responses)
+        app.post("/run")(self.run)
 
         return app
 
@@ -33,4 +35,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, SimpleServer):
     async def responses(
         self, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:
+        pass
+
+    @abstractmethod
+    async def run(self, body: BaseRunRequest = Body()) -> BaseVerifyResponse:
         pass

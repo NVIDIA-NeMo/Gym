@@ -6,6 +6,7 @@ from os import getenv
 
 from pathlib import Path
 
+import requests
 
 from threading import Thread
 
@@ -44,6 +45,8 @@ In order to get the most benefit from connection pooling, make sure you're not i
 In principle, we use no timeout since various api or model calls may take an indefinite amount of time. Right now, we have no timeout, even for connection errors which may be problematic. We may want to revisit more granular httpx.Timeout later on.
 
 Eventually, we may also want to parameterize the max connections. For now, we set the max connections to just some very large number.
+
+It's critical that this client is NOT used before uvicorn.run is called. Under the hood, this async client will start and use an event loop, and store a handle to that specific event loop. When uvicorn.run is called, it will replace the event loop policy with its own. So the handle that the async client has is now outdated.
 """
 GLOBAL_HTTPX_CLIENT = AsyncClient(
     limits=Limits(max_keepalive_connections=1500, max_connections=1500),
@@ -111,10 +114,20 @@ def get_global_config_dict() -> DictConfig:
 
     global_config_dict: DictConfig = config_list[0]
 
+    # Load the env.yaml config. We load it early so that people can use it to conveniently store config paths.
+    dotenv_path = Path(PARENT_DIR) / "env.yaml"
+    dotenv_extra_config = DictConfig({})
+    if dotenv_path.exists():
+        dotenv_extra_config = OmegaConf.load(dotenv_path)
+
+    merged_config_for_config_paths = OmegaConf.merge(
+        dotenv_extra_config, global_config_dict
+    )
     ta = TypeAdapter(List[str])
-    config_paths = global_config_dict.get(CONFIG_PATHS_KEY_NAME) or []
+    config_paths = merged_config_for_config_paths.get(CONFIG_PATHS_KEY_NAME) or []
     config_paths = ta.validate_python(config_paths)
 
+    # ----- Load extra configs from config paths -----
     extra_configs: List[DictConfig] = []
     if config_paths:
         for config_path in config_paths:
@@ -126,22 +139,9 @@ def get_global_config_dict() -> DictConfig:
             extra_config = OmegaConf.load(config_path)
             extra_configs.append(extra_config)
 
-    dotenv_path = Path(PARENT_DIR) / "env.yaml"
-    if dotenv_path.exists():
-        dotenv_extra_config = OmegaConf.load(dotenv_path)
-        # For every top level key in dotenv_extra_config, we need to check if it's relevant to any of the existing top level keys
-        all_dotenv_extra_keys = set(dotenv_extra_config.keys()) - set(
-            NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
-        )
-        for extra_config in extra_configs:
-            all_dotenv_extra_keys -= set(extra_config.keys())
-        all_dotenv_extra_keys -= set(global_config_dict.keys())
+    extra_configs.append(dotenv_extra_config)
 
-        for k in all_dotenv_extra_keys:
-            dotenv_extra_config.pop(k)
-
-        extra_configs.append(dotenv_extra_config)
-
+    # Merge config dicts
     # global_config_dict is the last config arg here since we want command line args to override everything else.
     global_config_dict = OmegaConf.merge(*extra_configs, global_config_dict)
 
@@ -155,6 +155,9 @@ def get_global_config_dict() -> DictConfig:
     # Do one pass to get the available servers and server types.
     server_refs: List[ServerRef] = []
     for server_name, server_type_config_dict in non_reserved_items:
+        if not isinstance(server_type_config_dict, DictConfig):
+            continue
+
         server_ref = is_server_ref(
             {"type": list(server_type_config_dict)[0], "name": server_name}
         )
@@ -163,6 +166,19 @@ def get_global_config_dict() -> DictConfig:
 
     default_host = global_config_dict.get(DEFAULT_HOST_KEY_NAME) or "127.0.0.1"
     for _, server_type_config_dict in non_reserved_items:
+        if not isinstance(server_type_config_dict, DictConfig):
+            continue
+
+        if not any(
+            server_type in server_type_config_dict
+            for server_type in (
+                "responses_api_models",
+                "resources_servers",
+                "responses_api_agents",
+            )
+        ):
+            continue
+
         server_type_config_dict: DictConfig
         for server_config_dict in server_type_config_dict.values():
             server_config_dict: DictConfig
@@ -265,10 +281,14 @@ class ServerClient(BaseModel):
         return config
 
     @classmethod
-    async def load_from_global_config(cls) -> "ServerClient":
-        head_server_config = cls.load_head_server_config()
+    def load_from_global_config(
+        cls, head_server_config: Optional[BaseServerConfig] = None
+    ) -> "ServerClient":
+        if head_server_config is None:
+            head_server_config = cls.load_head_server_config()
 
-        response = await GLOBAL_HTTPX_CLIENT.get(
+        # It's critical we use requests here instead of the global httpx client since a FastAPI server may be run downstream of this function call.
+        response = requests.get(
             f"http://{head_server_config.host}:{head_server_config.port}/global_config_dict_yaml",
         )
 
@@ -370,6 +390,8 @@ class BaseServer(BaseModel):
 
 
 class SimpleServer(BaseServer):
+    server_client: ServerClient
+
     @abstractmethod
     def setup_webserver(self) -> FastAPI:
         pass
@@ -377,7 +399,11 @@ class SimpleServer(BaseServer):
     @classmethod
     def run_webserver(cls) -> None:  # pragma: no cover
         server_config = cls.load_config_from_global_config()
-        server = cls(config=server_config)
+        server_client = ServerClient(
+            head_server_config=ServerClient.load_head_server_config(),
+            global_config_dict=get_global_config_dict(),
+        )
+        server = cls(config=server_config, server_client=server_client)
 
         app = server.setup_webserver()
 
@@ -394,7 +420,7 @@ class SimpleServer(BaseServer):
         )
 
 
-class HeadServer(SimpleServer):
+class HeadServer(BaseServer):
     config: BaseServerConfig
 
     def setup_webserver(self) -> FastAPI:

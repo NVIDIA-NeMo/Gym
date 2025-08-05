@@ -6,9 +6,9 @@ from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 
 
-server_client = run(ServerClient.load_from_global_config())
+server_client = ServerClient.load_from_global_config()
 task = server_client.post(
-    server_name="my_gpt4p1_simple_chat_agent",
+    server_name="simple_agent",
     url_path="/v1/responses",
     json=NeMoGymResponseCreateParamsNonStreaming(
         input=[
