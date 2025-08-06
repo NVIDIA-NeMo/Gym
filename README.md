@@ -329,6 +329,8 @@ Run a query with your new resources server! Your agent should say that it's cold
 python responses_api_agents/simple_agent/client.py
 ```
 
+After you implement your server, please make sure to update the README.md with appropriate licensing information! Your PR will not be merged unless licensing information is present and accurate.
+
 
 # How To: Upload and download a dataset from Gitlab
 We use Gitlab's model artifact registry to store datasets. Gitlab uses MLFlow to interface with its model artifact registry. You will need:

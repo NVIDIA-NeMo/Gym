@@ -160,6 +160,7 @@ def test_all():  # pragma: no cover
     dir_paths = [p for p in dir_paths if "pycache" not in p]
     print(f"Found {len(dir_paths)} modules to test:{_display_list_of_paths(dir_paths)}")
     dir_paths: List[Path] = list(map(Path, dir_paths))
+    dir_paths = [p for p in dir_paths if (p / "README.md").exists()]
 
     tests_passed: List[Path] = []
     tests_failed: List[Path] = []
@@ -244,4 +245,18 @@ def init_resources_server():  # pragma: no cover
     requirements_fpath = dirpath / "requirements.txt"
     with open(requirements_fpath, "w") as f:
         f.write("""-e nemo-gym @ ../../
+""")
+
+    readme_fpath = dirpath / "README.md"
+    with open(readme_fpath, "w") as f:
+        f.write("""# Description
+
+
+# Licensing information
+Code: ?
+Data: ?
+
+Dependencies
+- nemo_gym: Apache 2.0
+?
 """)
