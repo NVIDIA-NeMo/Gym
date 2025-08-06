@@ -9,6 +9,7 @@
   - [Running servers](#running-servers)
   - [Run tests for simple agent](#run-tests-for-simple-agent)
 - [How To: Add a resource server](#how-to-add-a-resource-server)
+- [How To: Upload and download a dataset from Gitlab](#how-to-upload-and-download-a-dataset-from-gitlab)
 - [How To: Offline trajectory collection](#how-to-offline-trajectory-collection)
 
 # NeMo-Gym
@@ -329,6 +330,37 @@ python responses_api_agents/simple_agent/client.py
 ```
 
 
+# How To: Upload and download a dataset from Gitlab
+We use Gitlab's model artifact registry to store datasets. Gitlab uses MLFlow to interface with its model artifact registry. You will need:
+1. The NeMo Gym repository Gitlab URI.
+   1. Go to the Model Registry page, click the "..." next to "Create model", then click "Using the MLFlow client".
+   2. The URI will look something like `https://gitlab-master.nvidia.com/api/v4/projects/191584/ml/mlflow/`
+2. Your Gitlab token. Your Gitlab token must have the `api` and `read_api` scopes.
+
+Provide your MLFlow credentials in `env.yaml`. 
+```yaml
+mlflow_tracking_uri: {your NeMo Gym Gitlab URI}
+mlflow_tracking_token: {your Gitlab PAT}
+```
+
+Upload a dataset to Gitlab model artifact registry. Dataset name will be your model artifact name. Version must be a str in the format `x.x.x`.
+```bash
+ng_upload_dataset_to_gitlab \
+    +dataset_name=multineedle \
+    +version=0.0.1 \
+    +input_jsonl_fpath=data/multineedle_benchmark.jsonl
+```
+
+Download a dataset from Gitlab model artifact registry.
+```bash
+ng_download_dataset_to_gitlab \
+    +dataset_name=multineedle \
+    +version=0.0.1 \
+    +artifact_fpath=multineedle_benchmark.jsonl \
+    +output_fpath=data/multineedle_benchmark.jsonl
+```
+
+
 # How To: Offline trajectory collection
 Reading time: 5 mins
 Date: Tue Aug 05, 2025
@@ -344,15 +376,24 @@ ng_run "+config_paths=[$config_paths]" \
     +simple_agent.responses_api_agents.simple_agent.resources_server.name=multineedle
 ```
 
+Download the MultiNeedle data
+```bash
+ng_download_dataset_to_gitlab \
+    +dataset_name=multineedle \
+    +version=0.0.1 \
+    +artifact_fpath=multineedle_benchmark.jsonl \
+    +output_fpath=data/multineedle_benchmark.jsonl
+```
+
 Run trajectory collection.
 ```bash
 ng_collect_traj +agent_name=simple_agent \
-    +input_jsonl_fpath=resources_servers/multineedle/data/multineedle_benchmark.jsonl \
-    +output_jsonl_fpath=temp_trajectory_collection.jsonl \
+    +input_jsonl_fpath=data/multineedle_benchmark.jsonl \
+    +output_jsonl_fpath=results/multineedle_trajectory_collection.jsonl \
     +limit=null
 ```
 
 View the trajectories just collected!
 ```
-ng_viewer +jsonl_fpath=temp_trajectory_collection.jsonl
+ng_viewer +jsonl_fpath=results/multineedle_trajectory_collection.jsonl
 ```

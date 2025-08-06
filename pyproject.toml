@@ -39,6 +39,9 @@ dependencies = [
     # Gradio: For simple frontend interfaces for viewing data
     # Updated Sun Aug 03, 2025
     "gradio==5.16.0",
+    # MLFlow: used for interacting with the Gitlab model registry
+    # Updated Tue Aug 05, 2025
+    "mlflow==3.2.0",
 ]
 
 [dependency-groups]
@@ -81,6 +84,12 @@ ng_init_resources_server = "nemo_gym.cli:init_resources_server"
 # Trajectory collection
 nemo_gym_collect_traj = "nemo_gym.trajectory_collection:collect_trajectories"
 ng_collect_traj = "nemo_gym.trajectory_collection:collect_trajectories"
+
+# Dataset management
+nemo_gym_upload_dataset_to_gitlab = "nemo_gym.gitlab_utils:upload_jsonl_dataset_cli"
+ng_upload_dataset_to_gitlab = "nemo_gym.gitlab_utils:upload_jsonl_dataset_cli"
+nemo_gym_download_dataset_to_gitlab = "nemo_gym.gitlab_utils:download_jsonl_dataset_cli"
+ng_download_dataset_to_gitlab = "nemo_gym.gitlab_utils:download_jsonl_dataset_cli"
 
 [tool.setuptools.packages.find]
 where = ["."]

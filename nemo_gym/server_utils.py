@@ -7,6 +7,7 @@ from os import getenv
 from pathlib import Path
 
 import requests
+from requests.exceptions import ConnectionError
 
 from threading import Thread
 
@@ -288,9 +289,15 @@ class ServerClient(BaseModel):
             head_server_config = cls.load_head_server_config()
 
         # It's critical we use requests here instead of the global httpx client since a FastAPI server may be run downstream of this function call.
-        response = requests.get(
-            f"http://{head_server_config.host}:{head_server_config.port}/global_config_dict_yaml",
-        )
+        head_server_url = f"http://{head_server_config.host}:{head_server_config.port}"
+        try:
+            response = requests.get(
+                f"{head_server_url}/global_config_dict_yaml",
+            )
+        except ConnectionError as e:
+            raise ValueError(
+                f"Could not connect to the head server at {head_server_url}. Perhaps you are not running a server or your head server is on a different port?"
+            ) from e
 
         global_config_dict_yaml = response.content.decode()
         global_config_dict = OmegaConf.create(json.loads(global_config_dict_yaml))
