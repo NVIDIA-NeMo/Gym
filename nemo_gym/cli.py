@@ -251,6 +251,7 @@ def init_resources_server():  # pragma: no cover
     with open(readme_fpath, "w") as f:
         f.write("""# Description
 
+Data links: ?
 
 # Licensing information
 Code: ?

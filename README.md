@@ -327,6 +327,13 @@ Resource servers live in the `resources_servers` folder. Initialize a resource s
 ng_init_resources_server +entrypoint=resources_servers/test_weather
 ```
 
+For the purposes of this example, we don't have any external dependencies, but if you want to add server-specific requirements, you would do so in the `requirements.txt` file. You can add requirements for external PyPI packages or Github repos.
+```txt
+-e nemo-gym @ ../../
+{additional dependencies here}
+```
+
+
 Implement a tool for your agent to use in `app.py`. Start by adding your request and response schemas
 ```python
 ...
@@ -399,7 +406,11 @@ After you implement your server, please make sure to update the README.md with a
 
 
 # How To: Upload and download a dataset from Gitlab
-We use Gitlab's model artifact registry to store datasets. Gitlab uses MLFlow to interface with its model artifact registry. You will need:
+We want to track and version golden versions of our datasets so that we always know what data is being trained on and that the data we are training on is high quality. Major versions of all training datasets should be tracked in NeMo Gym. For example, the HelpSteer dataset https://huggingface.co/datasets/nvidia/HelpSteer3 has 3 major versions 1, 2, and 3. Each of these major versions would be uploaded and tracked in NeMo Gym.
+
+Right now, NeMo Gym is hosted in Nvidia Gitlab and we use Gitlab's model artifact registry to store datasets. https://gitlab-master.nvidia.com/bxyu/nemo-gym/-/ml/models?first=30&orderBy=created_at&sort=desc#/
+
+Gitlab uses MLFlow to interface with its model artifact registry. You will need:
 1. The NeMo Gym repository Gitlab URI.
    1. Go to the Model Registry page, click the "..." next to "Create model", then click "Using the MLFlow client".
    2. The URI will look something like `https://gitlab-master.nvidia.com/api/v4/projects/191584/ml/mlflow/`
