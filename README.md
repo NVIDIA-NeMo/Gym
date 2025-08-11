@@ -7,6 +7,7 @@
   - [Introduction](#introduction)
   - [Configs](#configs)
   - [Running servers](#running-servers)
+  - [Reasoning in the Response API](#reasoning-in-the-response-api)
   - [Run tests for simple agent](#run-tests-for-simple-agent)
 - [How To: Add a resource server](#how-to-add-a-resource-server)
 - [How To: Upload and download a dataset from Gitlab](#how-to-upload-and-download-a-dataset-from-gitlab)
@@ -239,6 +240,71 @@ You should see an output like this:
 
 
 When you run NeMo Gym, a head server will spin up that contains the single source of truth configuration for all of its servers. This header server is what the `ServerClient.load_from_global_config()` reads from in order to get information about how to query each individual server. This way, all hostnames and ports are abstracted away from any consumers of NeMo Gym. However, a host and port can still be specified for any server if the orchestrator wishes so. If no port is specified, a random one will be chosen by the operating system.
+
+
+## Reasoning in the Response API
+Agents and verifiers work with responses in a standardized format based on the OpenAI Responses API schema. The verifier receives an object where the `output` field conforms to the Response object output [documented here]("https://platform.openai.com/docs/api-reference/responses/object#responses/object-output").
+
+The `output` list may contain multiple item types, such as:
+- `ResponseOutputMessage` - The main user-facing message content returned by the model.
+- `ResponseOutputItemReasoning` - Internal reasoning or "thinking" traces that explain the model’s thought process.
+- `ResponseFunctionToolCall` - A request from the model to invoke an external function or tool.
+
+**Example**
+If a chat completion contains both thinking traces and user-facing text:
+```python
+ChatCompletion(
+    Choices=[
+        Choice(
+            message=ChatCompletionMessage(
+                content="<think>I'm thinking</think>Hi there!",
+                tool_calls=[{...}, {...}],
+                ...
+            )
+        )
+    ],
+    ...
+)
+```
+In the Responses schema, this would be represented as:
+```python
+Response(
+    output=[
+        ResponseOutputItemReasoning(
+            type="reasoning",
+            summary=[
+                Summary(
+                    type="summary_text",
+                    text="I'm thinking",
+                )
+            ]
+        ),
+        ResponseOutputMessage(
+            role="assistant",
+            type="message",
+            content=[
+                ResponseOutputText(
+                    type="output_text",
+                    text="Hi there!",
+                )
+            ]
+        ),
+        ResponseFunctionToolCall(
+            type="function_call",
+            ...
+
+        ),
+        ResponseFunctionToolCall(
+            type="function_call",
+            ...
+
+        ),
+        ...
+    ]
+)
+```
+
+Reasoning traces (`Reasoning` items) are parsed before the verifier processes the output. The parsing is **model-specific**, and the verifier does not need to worry about the extracting or interpreting reasoning traces. The verifier receives these items already separated and clearly typed.
 
 
 ## Run tests for simple agent
