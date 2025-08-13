@@ -135,11 +135,9 @@ omegaconf.errors.MissingMandatoryValue: Missing mandatory value: openai_model.re
 ## Running servers
 In NeMo Gym, you run servers using the `ng_run` or `nemo_gym_run` bash commands. You can pass in configurations in three ways: as YAML config paths, as part of a local `env.yaml` file, or as part of command line args. For example, a run command might look like:
 ```bash
-config_paths=(
-    "responses_api_agents/simple_agent/configs/simple_agent.yaml,"
-    "responses_api_models/openai_model/configs/openai_model.yaml",
-    "resources_servers/simple_weather/configs/simple_weather.yaml"
-)
+config_paths="responses_api_agents/simple_agent/configs/simple_agent.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/simple_weather/configs/simple_weather.yaml"
 ng_run "+config_paths=[$config_paths]" \
     +simple_agent.responses_api_agents.simple_agent.resources_server.name=simple_weather
 ```
@@ -388,11 +386,9 @@ You can see a complete example of `app.py` in `resources_servers/simple_weather/
 
 Run an agent with your new server!
 ```bash
-config_paths=(
-    "responses_api_agents/simple_agent/configs/simple_agent.yaml,"
-    "responses_api_models/openai_model/configs/openai_model.yaml",
-    "resources_servers/test_weather/configs/test_weather.yaml"
-)
+config_paths="responses_api_agents/simple_agent/configs/simple_agent.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/simple_weather/configs/simple_weather.yaml"
 ng_run "+config_paths=[$config_paths]" \
     +simple_agent.responses_api_agents.simple_agent.resources_server.name=test_weather
 ```
@@ -446,11 +442,9 @@ Date: Tue Aug 05, 2025
 
 Spin up your agent. For this example, we will use the multineedle resources server!
 ```bash
-config_paths=(
-    "responses_api_agents/simple_agent/configs/simple_agent.yaml,"
-    "responses_api_models/openai_model/configs/openai_model.yaml",
-    "resources_servers/multineedle/configs/multineedle.yaml"
-)
+config_paths="responses_api_agents/simple_agent/configs/simple_agent.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/simple_weather/configs/simple_weather.yaml"
 ng_run "+config_paths=[$config_paths]" \
     +simple_agent.responses_api_agents.simple_agent.resources_server.name=multineedle
 ```
