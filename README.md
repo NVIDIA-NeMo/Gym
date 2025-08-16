@@ -11,7 +11,8 @@
   - [Run tests for simple agent](#run-tests-for-simple-agent)
 - [How To: Add a resource server](#how-to-add-a-resource-server)
 - [How To: Upload and download a dataset from Gitlab](#how-to-upload-and-download-a-dataset-from-gitlab)
-- [How To: Offline trajectory collection](#how-to-offline-trajectory-collection)
+- [How To: Offline trajectory collection or synthetic data generation](#how-to-offline-trajectory-collection-or-synthetic-data-generation)
+- [FAQ: SFT and RL](#faq-sft-and-rl)
 
 # NeMo-Gym
 # Setup
@@ -436,9 +437,11 @@ ng_download_dataset_to_gitlab \
 ```
 
 
-# How To: Offline trajectory collection
+# How To: Offline trajectory collection or synthetic data generation
 Reading time: 5 mins
 Date: Tue Aug 05, 2025
+
+NeMo Gym can be used for trajectory collection e.g. for DPO or for synthetic data generation e.g. for SFT!
 
 Spin up your agent. For this example, we will use the multineedle resources server!
 ```bash
@@ -470,3 +473,20 @@ View the trajectories just collected!
 ```
 ng_viewer +jsonl_fpath=results/multineedle_trajectory_collection.jsonl
 ```
+
+# FAQ: SFT and RL
+Reading time: 5 mins
+Date: Fri Aug 15, 2025
+
+SFT (supervised fine tuning) and RL (reinforcement learning) are two different ways of optimizing your model for different tasks and each have their own use cases.
+
+Let's say you wanted to train your model to be really good at math.
+- For SFT, you would take some input math questions and either ask human annotators to provide a gold response, or run it through a stronger teacher model and get your SFT target. And then you would SFT on these input + gold response pairs.
+- For RL, you would take some input math questions and implement a way to score model answers. During RL training, you would ask the model you are trying to train these math questions, score the model responses using your scorer, and use the scores as a signal on how to optimize your model. Model responses with higher scores would be encouraged.
+
+
+One way I like to think about these things is:
+- You can do RL on SFT data, where your input is your SFT input, and the model answer scorer is just an exact match on the SFT gold label.
+- You can also do SFT on RL data via synthetic data generation, where you run your inputs into some strong teacher model, score the responses, and use the scores to pick your SFT gold label.
+
+Tying back to NeMo Gym, NeMo gym can be used to create synthetic data for SFT training by running strong teacher models on the different environments. Critically, it will also be used as the source of data during RL training.
