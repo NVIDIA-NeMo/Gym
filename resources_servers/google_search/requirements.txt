@@ -1,0 +1,2 @@
+-e nemo-gym @ ../../
+trafilatura==2.0.0

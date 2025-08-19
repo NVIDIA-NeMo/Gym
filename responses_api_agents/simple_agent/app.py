@@ -3,7 +3,10 @@ import json
 from pydantic import ConfigDict
 
 from openai.types.responses import ResponseFunctionToolCall
-from openai.types.responses.response_input_param import FunctionCallOutput
+from openai.types.responses.response_input_param import (
+    FunctionCallOutput,
+    EasyInputMessageParam,
+)
 
 from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
@@ -46,6 +49,15 @@ class SimpleAgent(SimpleResponsesAPIAgent):
     async def responses(
         self, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:
+        if isinstance(body["input"], str):
+            body["input"] = [
+                EasyInputMessageParam(
+                    content=body["input"],
+                    role="user",
+                    type="message",
+                )
+            ]
+
         new_outputs = []
         while True:
             new_body: NeMoGymResponseCreateParamsNonStreaming = body.copy()

@@ -1,0 +1,4 @@
+google_search:
+  resources_servers:
+    google_search:
+      entrypoint: app.py
