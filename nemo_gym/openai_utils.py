@@ -17,7 +17,6 @@ from openai.types.responses import (
     ResponseOutputText,
     ResponseOutputTextParam,
     ResponseInputTextParam,
-    EasyInputMessageParam,
     ResponseFunctionToolCallParam,
     FunctionToolParam,
     ResponseOutputRefusalParam,
@@ -34,7 +33,7 @@ from openai.types.responses.response_create_params import (
     ToolChoice,
 )
 from openai.types.responses.response_input_param import (
-    Message,
+    ResponseInputMessageContentListParam,
 )
 from openai.types.responses.response_reasoning_item import (
     Summary,
@@ -42,7 +41,6 @@ from openai.types.responses.response_reasoning_item import (
 )
 from openai.types.shared.chat_model import ChatModel
 from openai.types.chat.completion_create_params import (
-    ChatCompletionMessageParam,
     ChatCompletionAudioParam,
     ChatCompletionPredictionContentParam,
     ReasoningEffort,
@@ -64,6 +62,9 @@ from openai.types.chat import (
     ChatCompletionMessageToolCall,
     ChatCompletionContentPartTextParam,
     ChatCompletionToolMessageParam,
+)
+from openai.types.chat.chat_completion_assistant_message_param import (
+    ContentArrayOfContentPart,
 )
 from openai.types.chat.completion_create_params import Function
 from openai.types.chat.chat_completion import Choice
@@ -116,12 +117,17 @@ class NeMoGymResponseOutputMessageParam(BaseModel):
     type: Literal["message"]
 
 
-class NeMoGymEasyInputMessageParam(EasyInputMessageParam):
-    pass
+class NeMoGymEasyInputMessageParam(BaseModel):
+    content: Union[str, ResponseInputMessageContentListParam]
+    role: Literal["user", "assistant", "system", "developer"]
+    type: Literal["message"] = "message"
 
 
-class NeMoGymMessage(Message):
-    pass
+class NeMoGymMessage(BaseModel):
+    content: ResponseInputMessageContentListParam
+    role: Literal["user", "system", "developer"]
+    status: Literal["in_progress", "completed", "incomplete"] = "completed"
+    type: Literal["message"] = "message"
 
 
 class NeMoGymFunctionCallOutput(BaseModel):
@@ -248,8 +254,77 @@ class NeMoGymFunctionCall(FunctionCall):
     pass
 
 
+class NeMoGymChatCompletionMessage(ChatCompletionMessage):
+    pass
+
+
+class NeMoGymChatCompletion(ChatCompletion):
+    pass
+
+
+class NeMoGymChatCompletionContentPartTextParam(ChatCompletionContentPartTextParam):
+    pass
+
+
+class NeMoGymChatCompletionUserMessageParam(ChatCompletionUserMessageParam):
+    # Override the iterable which is annoying to work with.
+    content: Required[Union[str, List[NeMoGymChatCompletionContentPartTextParam]]]
+
+
+class NeMoGymChatCompletionSystemMessageParam(ChatCompletionSystemMessageParam):
+    # Override the iterable which is annoying to work with.
+    content: Required[Union[str, List[NeMoGymChatCompletionContentPartTextParam]]]
+
+
+class NeMoGymChatCompletionDeveloperMessageParam(ChatCompletionDeveloperMessageParam):
+    # Override the iterable which is annoying to work with.
+    content: Required[Union[str, List[NeMoGymChatCompletionContentPartTextParam]]]
+
+
+class NeMoGymChatCompletionMessageToolCallParam(ChatCompletionMessageToolCallParam):
+    pass
+
+
+class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageParam):
+    # Override the iterable which is annoying to work with.
+    content: Union[str, List[ContentArrayOfContentPart], None]
+    tool_calls: List[NeMoGymChatCompletionMessageToolCallParam]
+
+
+class NeMoGymChatCompletionMessageToolCall(ChatCompletionMessageToolCall):
+    pass
+
+
+class NeMoGymChatCompletionToolMessageParam(ChatCompletionToolMessageParam):
+    # Override the iterable which is annoying to work with.
+    content: Required[Union[str, List[NeMoGymChatCompletionContentPartTextParam]]]
+
+
+class NeMoGymChoice(Choice):
+    pass
+
+
+class NeMoGymFunction(Function):
+    pass
+
+
+class NeMoGymFunctionToolParam(FunctionToolParam):
+    pass
+
+
+NeMoGymChatCompletionMessageParam: TypeAlias = Union[
+    NeMoGymChatCompletionDeveloperMessageParam,
+    NeMoGymChatCompletionSystemMessageParam,
+    NeMoGymChatCompletionUserMessageParam,
+    NeMoGymChatCompletionAssistantMessageParam,
+    NeMoGymChatCompletionToolMessageParam,
+    # Don't add deprecated.
+    # NeMoGymChatCompletionFunctionMessageParam,
+]
+
+
 class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
-    messages: List[ChatCompletionMessageParam]
+    messages: List[NeMoGymChatCompletionMessageParam]
     model: Optional[Union[str, ChatModel]] = None
     audio: Optional[ChatCompletionAudioParam] = None
     frequency_penalty: Optional[float] = None
@@ -284,58 +359,6 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     # Disallow deprecated args
     # function_call: FunctionCall
     # functions: Iterable[Function]
-
-
-class NeMoGymChatCompletionMessage(ChatCompletionMessage):
-    pass
-
-
-class NeMoGymChatCompletion(ChatCompletion):
-    pass
-
-
-class NeMoGymChatCompletionUserMessageParam(ChatCompletionUserMessageParam):
-    pass
-
-
-class NeMoGymChatCompletionSystemMessageParam(ChatCompletionSystemMessageParam):
-    pass
-
-
-class NeMoGymChatCompletionDeveloperMessageParam(ChatCompletionDeveloperMessageParam):
-    pass
-
-
-class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageParam):
-    pass
-
-
-class NeMoGymChatCompletionMessageToolCallParam(ChatCompletionMessageToolCallParam):
-    pass
-
-
-class NeMoGymChatCompletionMessageToolCall(ChatCompletionMessageToolCall):
-    pass
-
-
-class NeMoGymChatCompletionToolMessageParam(ChatCompletionToolMessageParam):
-    pass
-
-
-class NeMoGymChatCompletionContentPartTextParam(ChatCompletionContentPartTextParam):
-    pass
-
-
-class NeMoGymChoice(Choice):
-    pass
-
-
-class NeMoGymFunction(Function):
-    pass
-
-
-class NeMoGymFunctionToolParam(FunctionToolParam):
-    pass
 
 
 class NeMoGymAsyncOpenAI(AsyncOpenAI):

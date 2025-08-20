@@ -1,6 +1,9 @@
 from nemo_gym.server_utils import ServerClient
 
-from app import MultiNeedleResourcesServer, MultiNeedleResourcesServerConfig
+from resources_servers.multineedle.app import (
+    MultiNeedleResourcesServer,
+    MultiNeedleResourcesServerConfig,
+)
 
 from unittest.mock import MagicMock
 

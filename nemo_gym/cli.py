@@ -157,15 +157,18 @@ def _format_pct(count: int, total: int) -> str:  # pragma: no cover
 
 
 def test_all():  # pragma: no cover
-    dir_paths = [
+    candidate_dir_paths = [
         *glob("resources_servers/*"),
         *glob("responses_api_agents/*"),
         *glob("responses_api_models/*"),
     ]
-    dir_paths = [p for p in dir_paths if "pycache" not in p]
-    print(f"Found {len(dir_paths)} modules to test:{_display_list_of_paths(dir_paths)}")
-    dir_paths: List[Path] = list(map(Path, dir_paths))
+    candidate_dir_paths = [p for p in candidate_dir_paths if "pycache" not in p]
+    print(
+        f"Found {len(candidate_dir_paths)} total modules:{_display_list_of_paths(candidate_dir_paths)}"
+    )
+    dir_paths: List[Path] = list(map(Path, candidate_dir_paths))
     dir_paths = [p for p in dir_paths if (p / "README.md").exists()]
+    print(f"Found {len(dir_paths)} modules to test:{_display_list_of_paths(dir_paths)}")
 
     tests_passed: List[Path] = []
     tests_failed: List[Path] = []
@@ -186,7 +189,11 @@ def test_all():  # pragma: no cover
                     f"Hit unrecognized exit code {return_code} while running tests for {dir_path}"
                 )
 
-    print(f"""Tests passed {_format_pct(len(tests_passed), len(dir_paths))}:{_display_list_of_paths(tests_passed)}
+    print(f"""Found {len(candidate_dir_paths)} total modules:{_display_list_of_paths(candidate_dir_paths)}          
+
+Found {len(dir_paths)} modules to test:{_display_list_of_paths(dir_paths)}
+
+Tests passed {_format_pct(len(tests_passed), len(dir_paths))}:{_display_list_of_paths(tests_passed)}
 
 Tests failed {_format_pct(len(tests_failed), len(dir_paths))}:{_display_list_of_paths(tests_failed)}
 

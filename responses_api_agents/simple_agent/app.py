@@ -53,7 +53,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         new_outputs = []
         while True:
             new_body: NeMoGymResponseCreateParamsNonStreaming = body_dict.copy()
-            new_body["input"] = body.input + new_outputs
+            new_body["input"] = new_body["input"] + new_outputs
 
             model_response = await self.server_client.post(
                 server_name=self.config.model_server.name,

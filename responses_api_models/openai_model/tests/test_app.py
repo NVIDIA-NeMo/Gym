@@ -3,7 +3,10 @@ from fastapi.testclient import TestClient
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymChatCompletion
 from nemo_gym.server_utils import ServerClient
 
-from app import SimpleModelServer, SimpleModelServerConfig
+from responses_api_models.openai_model.app import (
+    SimpleModelServer,
+    SimpleModelServerConfig,
+)
 
 from unittest.mock import AsyncMock, MagicMock
 from pytest import MonkeyPatch

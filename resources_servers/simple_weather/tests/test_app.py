@@ -1,6 +1,9 @@
 from nemo_gym.server_utils import ServerClient
 
-from app import SimpleWeatherResourcesServer, SimpleWeatherResourcesServerConfig
+from resources_servers.simple_weather.app import (
+    SimpleWeatherResourcesServer,
+    SimpleWeatherResourcesServerConfig,
+)
 
 from unittest.mock import MagicMock
 

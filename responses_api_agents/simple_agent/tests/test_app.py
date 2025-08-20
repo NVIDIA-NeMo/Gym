@@ -1,8 +1,12 @@
 from nemo_gym.server_utils import ServerClient
 
+from responses_api_agents.simple_agent.app import (
+    SimpleAgent,
+    SimpleAgentConfig,
+    ResourcesServerRef,
+    ModelServerRef,
+)
 from fastapi.testclient import TestClient
-
-from app import SimpleAgent, SimpleAgentConfig, ResourcesServerRef, ModelServerRef
 
 from unittest.mock import MagicMock
 from pytest import MonkeyPatch
@@ -80,7 +84,7 @@ class TestApp:
         server.server_client.post.assert_called_with(
             server_name="my server name",
             url_path="/v1/responses",
-            json={"input": [{"role": "user", "content": "hello"}]},
+            json={"input": [{"content": "hello", "role": "user"}]},
         )
 
         actual_responses_dict = res_no_model.json()
