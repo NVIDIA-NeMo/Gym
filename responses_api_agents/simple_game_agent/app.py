@@ -3,6 +3,9 @@ from typing import Dict, Any
 
 from pydantic import ConfigDict
 
+from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses.response_input_param import FunctionCallOutput
+
 from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     BaseRunRequest,
@@ -68,46 +71,50 @@ class SimpleGameAgent(SimpleResponsesAPIAgent):
         new_outputs = []
         
         # Step 1: Get initial board from environment
-        try:
-            game_params = self._current_game_params
-            
-            initial_board_response = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/get_initial_board",
-                json=game_params,
-            )
-            board_data = initial_board_response.json()
-            game_state = board_data.get("game_state")
-            
-            # Add the board and instructions to conversation
-            game_intro = {
-                "role": "assistant",
-                "content": f"{board_data['board_text']}\n\n{board_data['instructions']}"
-            }
-            conversation.append(game_intro)
-            
-        except Exception as e:
-            error_msg = {
-                "role": "assistant", 
-                "content": f"Error initializing game: {str(e)}"
-            }
-            conversation.append(error_msg)
-            return {
-                "output": [{"type": "text", "text": error_msg["content"]}]
-            }
+    
+        game_params = self._current_game_params
+        
+        initial_board_response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/get_initial_board",
+            json=game_params,
+        )
+        board_data = initial_board_response.json()
+        game_state = board_data.get("game_state")
+
+        tool_response = FunctionCallOutput(
+            type="function_call_output",
+            call_id="get_initial_board",          # any unique id is fine
+            output=json.dumps({
+                "instructions": board_data["instructions"],
+                "board_text":  board_data["board_text"],
+                "game_state":  board_data["game_state"],
+            }),
+        )
+
+        new_outputs.append(tool_response)
+
+
+        
+        # Add the board and instructions to conversation
+        initial_message = {
+            "role": "user", 
+            "content": f"{board_data['instructions']}\n\n{board_data['board_text']}"
+        }
+
+        conversation.append(initial_message)
+    
+        print("Starting game loop")
 
         # Step 2: Game loop continues...
-        while moves_made < self.config.max_moves:
-            # Get model response
-            model_body = NeMoGymResponseCreateParamsNonStreaming(
-                input=conversation,
-                tools=[],
-            )
+        while True:
+            new_body = body.copy()
+            new_body["input"] = conversation
             
             model_response = await self.server_client.post(
                 server_name=self.config.model_server.name,
                 url_path="/v1/responses",
-                json=model_body,
+                json=new_body,
             )
             model_response = NeMoGymResponse.model_validate(model_response.json())
             
@@ -119,96 +126,68 @@ class SimpleGameAgent(SimpleResponsesAPIAgent):
             output = model_response.output
             new_outputs.extend((o.model_dump() for o in output))
             
-            # Extract the text response
-            output_item = model_response.output[-1]
-
-            # 1️⃣ accept both plain text-style or message style
-            if output_item.type not in {"message", "text"}:
+            if output[-1].type != "function_call":
                 break
-
-            # 2️⃣ pull the text out correctly
-            if output_item.type == "message":
-                # concatenate every output_text chunk
-                model_text = "".join(
-                    part.text for part in output_item.content
-                    if part.type == "output_text"
-                )
-            else:   # legacy 'text'
-                model_text = output_item.text
-            conversation.append({"role": "assistant", "content": model_text})
+                
+            # Handle the function call exactly like simple_agent
+            output_function_call = output[-1]
+            # Merge model-provided args with the current game-state
+            function_args = json.loads(output_function_call.arguments)
+            function_args["game_state"] = game_state        # <-- always send it
+            api_response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path=f"/{output_function_call.name}",    # "/make_move"
+                json=function_args,
+            )
             
-            # Pass model's raw text directly to environment
-            try:
-                move_response = await self.server_client.post(
-                    server_name=self.config.resources_server.name,
-                    url_path="/make_move",
-                    json={
-                        "game_state": game_state,
-                        "move": model_text
-                    },
-                )
-                move_data = move_response.json()
-                game_state = move_data.get("game_state")
-                moves_made += 1
-                reward += move_data.get("move_reward", 0.0)
-                
-                # Add environment's response back to conversation
-                env_feedback = {
-                    "role": "user",
-                    "content": f"{move_data['message']}\n\n{move_data['board_text']}"
-                }
-                conversation.append(env_feedback)
-                
-                print("== ENVIRONMENT RESPONSE ==")
-                print(move_data)
-                print("== ENVIRONMENT RESPONSE ==")
-                
-                # Check if game is complete
-                if move_data.get("is_complete", False):
-                    is_complete = True
-                    completion_msg = {
-                        "role": "user",
-                        "content": "🎉 Game completed successfully!"
-                    }
-                    conversation.append(completion_msg)
-                    break
-                    
-            except Exception as e:
-                error_msg = {
-                    "role": "user",
-                    "content": f"Move error: {str(e)}"
-                }
-                conversation.append(error_msg)
+            tool_response = FunctionCallOutput(
+                type="function_call_output",
+                call_id=output_function_call.call_id,
+                output=json.dumps(api_response.json()),
+            )
+            new_outputs.append(tool_response)
+            
+            # ---- handle environment reply ---------------------------------
+            move_data   = api_response.json()
+            game_state  = move_data.get("game_state", game_state)
+            moves_made += 1
+            reward     += move_data.get("move_reward", 0.0)
 
+            # Compose feedback safely (no KeyError)
+            msg       = move_data.get("message", str(move_data))
+            board_txt = move_data.get("board_text", "")
+            print(f"board_txt: {board_txt}")
+            env_feedback = {
+                "role": "user",
+                "content": f"{msg}\n\n{board_txt}"
+            }
+            conversation.append(env_feedback)
+            
+            # Check completion
+            if move_data.get("is_complete", False):
+                is_complete = True
+                break
+                
+            if moves_made >= self.config.max_moves:
+                break
+        
         # Store metrics for verify step
         self._reward = reward
         self._total_moves = moves_made
         self._is_complete = is_complete
-        # NEW: Store conversation for later use
-        # self._final_conversation = conversation
+        
 
         # NEW: Return accumulated outputs like simple_agent does
         final_response_dict = model_response.model_dump()
         final_response_dict["output"] = new_outputs
         return final_response_dict
-    
-    def _format_conversation(self, conversation: list) -> str:
-        """Format the conversation into a readable string."""
-        formatted_parts = []
-        for msg in conversation:
-            role = msg["role"].upper()
-            content = msg["content"]
-            formatted_parts.append(f"[{role}]: {content}")
-        return "\n\n".join(formatted_parts)
+
 
     async def run(self, body: SimpleGameAgentRunRequest) -> SimpleGameAgentVerifyResponse:
         """Run a complete game session."""
         
         # Prepare the conversation
-        conversation_body = NeMoGymResponseCreateParamsNonStreaming(
-            input=body.responses_create_params["input"],
-            tools=[],
-        )
+        conversation_body = body.responses_create_params
         
         # Extract game parameters
         game_params = {k: v for k, v in body.model_dump().items() 

@@ -33,7 +33,9 @@ class GetInitialBoardResponse(BaseModel):
 
 class MakeMoveRequest(BaseModel):
     game_state: dict
-    move: str  # Raw move string from the model
+    row: int   # 1-based row index
+    col: int   # 1-based column index
+    number: int  # value to place
 
 
 class MakeMoveResponse(BaseModel):
@@ -100,17 +102,9 @@ class SudokuResourcesServer(SimpleResourcesServer):
         solution = game_state["solution"]
         scale = game_state["scale"]
         
-        # Parse the move
-        action_search_pattern = re.compile(r"\\boxed{(\d+)\s(\d+)\s(\d+)}")
-        matches = list(action_search_pattern.finditer(body.move))
-        clean_action = matches[-1] if matches else None
-        
-        try:
-            row = int(clean_action.group(1)) if clean_action else None
-            col = int(clean_action.group(2)) if clean_action else None
-            guess_num = int(clean_action.group(3)) if clean_action else None
-        except Exception:
-            row, col, guess_num = None, None, None
+        row  = body.row
+        col  = body.col
+        guess_num = body.number
 
         game_state["moves_made"] += 1
 
@@ -298,10 +292,6 @@ class SudokuResourcesServer(SimpleResourcesServer):
             row, col = cells.pop()
             removed = puzzle[row][col]
             puzzle[row][col] = 0
-
-            # Check if puzzle still has unique solution (simplified check)
-            # For efficiency, we'll skip the full uniqueness check in this implementation
-            # In production, you'd want to verify uniqueness
 
         return puzzle
 
