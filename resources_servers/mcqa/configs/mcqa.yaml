@@ -1,0 +1,6 @@
+mcqa:
+  resources_servers:
+    mcqa:
+      entrypoint: app.py
+
+
