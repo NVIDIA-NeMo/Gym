@@ -168,6 +168,16 @@ policy_base_url: https://api.openai.com/v1
 policy_api_key: {your OpenAI API key}
 policy_model_name: gpt-4.1-2025-04-14
 ```
+Please never commit any secrets in your config files! We explicitly provide a way to avoid this using the `env.yaml`. You should run `touch env.yaml` and your NeMo Gym folder should look like this i.e. if you run `ls .` you should see something like:
+```
+...
+cache
+data
+nemo_gym
+...
+env.yaml
+...
+```
 
 You can also use env.yaml to store config values for convenience e.g. in `env.yaml`:
 ```yaml
