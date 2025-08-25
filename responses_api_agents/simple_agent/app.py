@@ -17,7 +17,7 @@ from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
 )
-from nemo_gym.server_utils import ResourcesServerRef, ModelServerRef
+from nemo_gym.config_types import ResourcesServerRef, ModelServerRef
 
 from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
@@ -49,6 +49,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         self, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:
         body_dict = body.model_dump(exclude_unset=True)
+
+        if isinstance(body_dict["input"], str):
+            body_dict["input"] = [{"role": "user", "content": body_dict["input"]}]
 
         new_outputs = []
         while True:

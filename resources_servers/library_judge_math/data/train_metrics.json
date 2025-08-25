@@ -1,0 +1,36 @@
+{
+    "name": "train",
+    "type": "train",
+    "jsonl_fpath": "resources_servers/library_judge_math/data/train.jsonl",
+    "gitlab_identifier": {
+        "dataset_name": "math_open_math_reasoning",
+        "version": "0.0.1",
+        "artifact_fpath": "open_math_reasoning_problems.jsonl"
+    },
+    "license": "Apache 2.0",
+    "Number of examples": 112867,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 112867,
+        "Average": 61.097176322574356,
+        "Min": 28.0,
+        "Max": 458.0
+    },
+    "Number of turns": {
+        "Total # non-null values": 112867,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0
+    }
+}

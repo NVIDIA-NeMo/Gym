@@ -6,12 +6,16 @@
 - [How To: Run a simple agent](#how-to-run-a-simple-agent)
   - [Introduction](#introduction)
   - [Configs](#configs)
+    - [Special policy model placeholders](#special-policy-model-placeholders)
   - [Running servers](#running-servers)
-  - [Reasoning in the Response API](#reasoning-in-the-response-api)
+  - [OpenAI Responses vs Chat Completions API](#openai-responses-vs-chat-completions-api)
   - [Run tests for simple agent](#run-tests-for-simple-agent)
 - [How To: Add a resource server](#how-to-add-a-resource-server)
+  - [TLDR final expected artifacts](#tldr-final-expected-artifacts)
 - [How To: Upload and download a dataset from Gitlab](#how-to-upload-and-download-a-dataset-from-gitlab)
-- [How To: Offline trajectory collection or synthetic data generation](#how-to-offline-trajectory-collection-or-synthetic-data-generation)
+- [How To: Offline rollout collection or synthetic data generation](#how-to-offline-rollout-collection-or-synthetic-data-generation)
+- [How To: Prepare and validate data for PR submission or RL training](#how-to-prepare-and-validate-data-for-pr-submission-or-rl-training)
+- [How To: ng\_dump\_config - Dump a YAML config as exactly as NeMo Gym sees it](#how-to-ng_dump_config---dump-a-yaml-config-as-exactly-as-nemo-gym-sees-it)
 - [FAQ: SFT and RL](#faq-sft-and-rl)
 
 # NeMo-Gym
@@ -133,6 +137,19 @@ omegaconf.errors.MissingMandatoryValue: Missing mandatory value: openai_model.re
 ```
 
 
+### Special policy model placeholders
+There is one set of special NeMo Gym variables relating to the target agent model. These are the `policy_base_url`, `policy_api_key`, `policy_model_name` variables. When you go to train a model, these are the information that will be used to query the model server endpoint you are trying to train. By default, every agent will refer to this shared `openai_model` model server.
+```yaml
+openai_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${policy_base_url}
+      openai_api_key: ${policy_api_key}
+      openai_model_name: ${policy_model_name}
+```
+
+
 ## Running servers
 In NeMo Gym, you run servers using the `ng_run` or `nemo_gym_run` bash commands. You can pass in configurations in three ways: as YAML config paths, as part of a local `env.yaml` file, or as part of command line args. For example, a run command might look like:
 ```bash
@@ -144,12 +161,11 @@ ng_run "+config_paths=[$config_paths]" \
 ```
 We provide our Yaml config files using the `config_paths` command line argument. We specify 3 configs, one for our simple agent, which relies on our simple model server and simple weather servers. By default, the simple agent doesn't point to any specific resources server (see the `resources_server... name: ???` above), so we provide this pointer via command line using Hydra syntax `simple_agent.responses_api_agents.simple_agent.resources_server.name=simple_weather`.
 
-Our example relies on an OpenAI model server that uses GPT 4.1 by default. We also need to provide our OpenAI API key in order to properly run this example. At runtime, NeMo Gym will read from a local and git-ignored file at `env.yaml`. This `env.yaml` file is intended to hold sensitive information that should not be checked in, like API keys or other secrets. Create your `env.yaml` file in this directory, copy in the following information, and add your OpenAI API key.
+Our example relies on an OpenAI model server. We need to provide our OpenAI API key and other model information in order to properly run this example. At runtime, NeMo Gym will read from a local and git-ignored file at `env.yaml`. This `env.yaml` file is intended to hold sensitive information that should not be checked in, like API keys or other secrets. Create your `env.yaml` file in this directory, copy in the following information, and add your OpenAI API key.
 ```yaml
-openai_model:
-  responses_api_models:
-    openai_model:
-      openai_api_key: {your OpenAI API key}
+policy_base_url: https://api.openai.com/v1
+policy_api_key: {your OpenAI API key}
+policy_model_name: gpt-4.1-2025-04-14
 ```
 
 You can also use env.yaml to store config values for convenience e.g. in `env.yaml`:
@@ -166,9 +182,16 @@ ng_run '+config_paths=${simple_weather_config_paths}' \
 ```
 
 
-Config values will be resolved in the following order: Earlier config paths < later config paths < env.yaml < command line args.
+**Config values will be resolved in the following order: Earlier config paths < later config paths < env.yaml < command line args.**
 
-After filling in your OpenAI API key, run the `ng_run` command above. You should see an output that looks like this:
+
+After filling in your OpenAI API key, run the `ng_run` command below.
+```bash
+config_paths="resources_servers/simple_weather/configs/simple_weather.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml"
+ng_run "+config_paths=[${config_paths}]"
+```
+You should see an output that looks like this:
 ```bash
 INFO:     Started server process [49744]
 INFO:     Waiting for application startup.
@@ -197,7 +220,7 @@ from nemo_gym.server_utils import ServerClient
 
 server_client = ServerClient.load_from_global_config()
 server_client.post(
-    server_name="simple_agent",  # This is your server name or ID
+    server_name="simple_weather_agent",  # This is your server name or ID
     url_path="/v1/responses",
     json=NeMoGymResponseCreateParamsNonStreaming(...),
 )
@@ -209,23 +232,25 @@ You should see an output like this:
 [
     {
         "arguments": "{\"city\":\"San Francisco\"}",
-        "call_id": "call_LUyS0YUp4TMk7IjHR1ZQPDr7",
+        "call_id": "call_OnWAk719Jr3tte4OmCJtJOB4",
         "name": "get_weather",
         "type": "function_call",
-        "id": "fc_68917bf6d228819ca904b692df8406fc0f318621c04a7037",
+        "id": "fc_68a3739f2f0081a1aae4b93d5df07c100cb216b5cc4adbc4",
         "status": "completed"
     },
     {
-        "call_id": "call_LUyS0YUp4TMk7IjHR1ZQPDr7",
+        "call_id": "call_OnWAk719Jr3tte4OmCJtJOB4",
         "output": "{\"city\": \"San Francisco\", \"weather_description\": \"The weather in San Francisco is cold.\"}",
-        "type": "function_call_output"
+        "type": "function_call_output",
+        "id": null,
+        "status": null
     },
     {
-        "id": "msg_68917bf79324819c9a004816a1b2f47e0f318621c04a7037",
+        "id": "msg_68a373a1099081a1bb265ecf3b26c0dc0cb216b5cc4adbc4",
         "content": [
             {
                 "annotations": [],
-                "text": "The weather in San Francisco is currently cold. If you need more details, such as temperature or a specific forecast, let me know!",
+                "text": "The weather in San Francisco tonight is cold. You might want to wear layers or bring a jacket to stay comfortable while you're out. Let me know if you want outfit advice or tips on where to go!",
                 "type": "output_text",
                 "logprobs": []
             }
@@ -241,7 +266,7 @@ You should see an output like this:
 When you run NeMo Gym, a head server will spin up that contains the single source of truth configuration for all of its servers. This header server is what the `ServerClient.load_from_global_config()` reads from in order to get information about how to query each individual server. This way, all hostnames and ports are abstracted away from any consumers of NeMo Gym. However, a host and port can still be specified for any server if the orchestrator wishes so. If no port is specified, a random one will be chosen by the operating system.
 
 
-## Reasoning in the Response API
+## OpenAI Responses vs Chat Completions API
 Agents and verifiers work with responses in a standardized format based on the OpenAI Responses API schema. The verifier receives an object where the `output` field conforms to the Response object output [documented here]("https://platform.openai.com/docs/api-reference/responses/object#responses/object-output").
 
 The `output` list may contain multiple item types, such as:
@@ -402,6 +427,51 @@ python responses_api_agents/simple_agent/client.py
 After you implement your server, please make sure to update the README.md with appropriate licensing information! Your PR will not be merged unless licensing information is present and accurate.
 
 
+Run the tests for your server
+```bash
+ng_test +entrypoint=resources_servers/simple_weather
+```
+
+
+You can also run detailed tests after running tests the first time
+```bash
+cd resources_servers/simple_weather
+source .venv/bin/activate
+pytest
+```
+
+At some point, you will want to actually add data that can be used to query your server. Please follow the instructions for [How To: Prepare and validate data for PR submission or RL training](#how-to-prepare-and-validate-data-for-pr-submission-or-rl-training). 
+
+
+You are required to have the following 3 files in your resources server data folder:
+1. example.jsonl - contains 5 example inputs to an agent server that uses your resources server. These examples need to be created on your own using whatever data processing script you want. It's highly suggested to store the data processing scripts in each folder if possible.
+2. example_metrics.json - the metrics for the examples above, as output by `ng_prepare_data` in the data validation flow above.
+
+
+## TLDR final expected artifacts
+1. All the artifacts produced by `ng_init_resources_server +entrypoint=resources_servers/test_weather`. Your agent and resources server must be runnable.
+```bash
+multineedle_config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/multineedle/configs/multineedle.yaml"
+ng_run "+config_paths=[${multineedle_config_paths}]"
+```
+2. At least 1 test at `resources_servers/test_weather/tests/test_app.py`.
+3. 5 examples found at `resources_servers/test_weather/data/examples.jsonl`
+4. Example metrics as output by `ng_prepare_data` found at `resources_servers/test_weather/data/example_metrics.json`
+```bash
+ng_prepare_data "+config_paths=[resources_servers/multineedle/configs/multineedle.yaml]" \
+    +output_dirpath=data/multineedle \
+    +mode=example_validation
+```
+5. Example rollouts as output by `ng_collect_rollouts` found at `resources_servers/test_weather/data/example_rollouts.jsonl`
+```bash
+ng_collect_rollouts +agent_name=multineedle_simple_agent \
+    +input_jsonl_fpath=resources_servers/multineedle/data/example.jsonl \
+    +output_jsonl_fpath=resources_servers/multineedle/data/example_rollouts.jsonl \
+    +limit=null
+```
+
+
 # How To: Upload and download a dataset from Gitlab
 We want to track and version golden versions of our datasets so that we always know what data is being trained on and that the data we are training on is high quality. Major versions of all training datasets should be tracked in NeMo Gym. For example, the HelpSteer dataset https://huggingface.co/datasets/nvidia/HelpSteer3 has 3 major versions 1, 2, and 3. Each of these major versions would be uploaded and tracked in NeMo Gym.
 
@@ -429,7 +499,7 @@ ng_upload_dataset_to_gitlab \
 
 Download a dataset from Gitlab model artifact registry.
 ```bash
-ng_download_dataset_to_gitlab \
+ng_download_dataset_from_gitlab \
     +dataset_name=multineedle \
     +version=0.0.1 \
     +artifact_fpath=multineedle_benchmark.jsonl \
@@ -437,11 +507,11 @@ ng_download_dataset_to_gitlab \
 ```
 
 
-# How To: Offline trajectory collection or synthetic data generation
+# How To: Offline rollout collection or synthetic data generation
 Reading time: 5 mins
 Date: Tue Aug 05, 2025
 
-NeMo Gym can be used for trajectory collection e.g. for DPO or for synthetic data generation e.g. for SFT!
+NeMo Gym can be used for rollout collection e.g. for DPO or for synthetic data generation e.g. for SFT!
 
 Spin up your agent. For this example, we will use the multineedle resources server!
 ```bash
@@ -454,25 +524,137 @@ ng_run "+config_paths=[$config_paths]" \
 
 Download the MultiNeedle data
 ```bash
-ng_download_dataset_to_gitlab \
+ng_download_dataset_from_gitlab \
     +dataset_name=multineedle \
     +version=0.0.1 \
     +artifact_fpath=multineedle_benchmark.jsonl \
     +output_fpath=data/multineedle_benchmark.jsonl
 ```
 
-Run trajectory collection.
+Run rollout collection.
 ```bash
-ng_collect_traj +agent_name=simple_agent \
+ng_collect_rollouts +agent_name=simple_agent \
     +input_jsonl_fpath=data/multineedle_benchmark.jsonl \
-    +output_jsonl_fpath=results/multineedle_trajectory_collection.jsonl \
+    +output_jsonl_fpath=results/multineedle_rollout_collection.jsonl \
     +limit=null
 ```
 
-View the trajectories just collected!
+View the rollouts just collected!
 ```
-ng_viewer +jsonl_fpath=results/multineedle_trajectory_collection.jsonl
+ng_viewer +jsonl_fpath=results/multineedle_rollout_collection.jsonl
 ```
+
+# How To: Prepare and validate data for PR submission or RL training
+When you use `ng_init_resources_server +entrypoint=resources_servers/multineedle` to initialize a resources server, you will get a config.yaml that looks like the below code block. The dataset information for training, validation, and example will be inside the scope of your agent config (e.g. under simple_agent) and is a list of dataset objects.
+
+```yaml
+multineedle_resources_server:
+  resources_servers:
+    multineedle:
+      entrypoint: app.py
+multineedle_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: multineedle_resources_server
+      model_server:
+        type: responses_api_models
+        name: openai_model
+      datasets:
+      - name: train
+        type: train
+        license: Apache 2.0
+        jsonl_fpath: resources_servers/multineedle/data/train.jsonl
+        gitlab_identifier:
+          dataset_name: multineedle
+          version: 0.0.1
+          artifact_fpath: multineedle/train.jsonl
+        license: Apache 2.0
+      - name: validation
+        type: validation
+        license: Apache 2.0
+        jsonl_fpath: resources_servers/multineedle/data/validation.jsonl
+        gitlab_identifier:
+          dataset_name: multineedle
+          version: 0.0.1
+          artifact_fpath: multineedle/validation.jsonl
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/multineedle/data/example.jsonl
+```
+
+A dataset object consists of:
+- Name: An identifier for you
+- Type: train, validation, or example. Train and validation are as used in NeMo RL or other train frameworks. More information about the example type is in the next section.
+- Jsonl fpath: the local file path to your jsonl file for this dataset.
+- Gitlab identifier: The remote path to the dataset as held in the Gitlab dataset registry. This field is required for train and validation datasets. (Not required for example datasets since those are required to be committed to Git).
+- License: The license of that dataset. Required for train and validation datasets and not required for example datasets, similar in principle to the Gitlab identifier.
+- Start idx, end idx: used for slicing your dataset.
+```yaml
+- name: train
+  type: train
+  jsonl_fpath: resources_servers/multineedle/data/train.jsonl
+  gitlab_identifier:
+    dataset_name: multineedle
+    version: 0.0.1
+    artifact_fpath: multineedle/validation.jsonl
+  license: Apache 2.0
+```
+
+Each config.yaml in the resources server requires at least one agent with one example dataset. This example dataset is the first 5 rows of your train dataset that is used for sanity checks on the format for your dataset and the format of each individual example and for others to quickly understand your data.
+
+For every PR that contributes data, we require common dataset statistics and sanity checks on the data itself. This process is also helpful to catch any simple issues before you ever train with NeMo RL. NeMo Gym provides a helper command ng_prepare_data to do so.
+```bash
+config_paths="resources_servers/multineedle/configs/multineedle.yaml"
+ng_prepare_data "+config_paths=[$config_paths]" \
+    +output_dirpath=data/multineedle \
+    +mode=example_validation
+
+# Run NeMo Gym servers the exact same way with the same configs!
+ng_run "+config_paths=[$config_paths]"
+```
+
+The `ng_prepare_data` command will:
+1. Attempt to load all the datasets you specified from disk. Missing datasets will be reported before any processing is done.
+2. For each dataset, read example by example. Check the format and report the filepaths and indices/ranges of offending examples if any.
+   1. We only require that the dataset has one key responses_create_params which is valid Responses API schema.
+3. Compute aggregate statistics, print them to terminal, and save them next to the jsonl fpaths.
+   1. Number of examples
+   2. Avg/max/min number of tools
+   3. Input length in terms of OpenAI tokens
+   4. Avg/max/min number of turns
+   5. Number of unique create params
+   6. Avg/max/min temperature and other sampling params
+   7. Number of unique user messages
+4. Check that the aggregate statistics of individual datasets match those of existing aggregate statistics.
+5. Collate all the examples into one final train and validation dataset jsonl files at the output dirpath specified for downstream NeMo RL or other train framework consumption.
+6. The final aggregate statistics are reported and saved next to the train and validation datasets.
+7. [NeMo RL train] Use the exact same config paths to ng_prepare_data and the train/validation dataset paths output in step 5. There is no special pre or post processing done in the NeMo Gym/RL integration other than shuffling and distributed data loading. What you see is what you get.
+
+
+The `ng_prepare_data` command has 2 modes, one for actual train and validation set preparation, and one for example validation intended to sanity check your data format. You would typically run `+mode=example_validation` when first contributing a resources server, and then run with `+mode=train_preparation` when you actually go to train.
+```bash
+config_paths="resources_servers/multineedle/configs/multineedle.yaml"
+ng_prepare_data "+config_paths=[$config_paths]" \
+    +output_dirpath=data/multineedle \
+    +mode=example_validation
+```
+
+
+# How To: ng_dump_config - Dump a YAML config as exactly as NeMo Gym sees it
+```bash
+# Example ng_run command
+config_paths="resources_servers/multineedle/configs/multineedle.yaml"
+ng_run "+config_paths=[$config_paths]"
+
+
+# Dump the exact yaml config that NeMo gym sees, just by swapping ng_run -> ng_dump_config
+ng_dump_config "+config_paths=[$config_paths]"
+```
+
 
 # FAQ: SFT and RL
 Reading time: 5 mins

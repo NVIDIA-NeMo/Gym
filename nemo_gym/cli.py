@@ -9,6 +9,8 @@ from glob import glob
 
 from subprocess import Popen
 
+import json
+
 import asyncio
 
 import shlex
@@ -19,13 +21,13 @@ from omegaconf import OmegaConf, DictConfig
 
 from pydantic import BaseModel
 
-from nemo_gym.server_utils import (
+from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
-    HeadServer,
     get_global_config_dict,
 )
+from nemo_gym.server_utils import HeadServer
 
 
 def _setup_env_command(dir_path: Path) -> str:  # pragma: no cover
@@ -47,6 +49,20 @@ def _run_command(command: str, working_directory: Path) -> Popen:  # pragma: no 
 
 class RunConfig(BaseModel):
     entrypoint: str
+
+
+class TestConfig(RunConfig):
+    should_validate_data: bool = False
+
+    dir_path: Path = None  # initialized in model_post_init
+
+    def model_post_init(self, context):  # pragma: no cover
+        # TODO: This currently only handles relative entrypoints. Later on we can resolve the absolute path.
+        self.dir_path = Path(self.entrypoint)
+        assert not self.dir_path.is_absolute()
+        assert len(self.dir_path.parts) == 2
+
+        return super().model_post_init(context)
 
 
 def run(
@@ -128,23 +144,103 @@ def run(
         print("NeMo Gym finished!")
 
 
-def _test_single(dir_path: Path) -> Popen:  # pragma: no cover
+def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover
+    if not test_config.should_validate_data:
+        return
+
+    # We have special data checks for resources servers
+    if test_config.dir_path.parts[0] != "resources_servers":
+        return
+
+    # Check that the required examples and example metrics are present.
+    example_fpath = test_config.dir_path / "data/example.jsonl"
+    assert example_fpath.exists(), (
+        f"A jsonl file containing 5 examples is required for the {test_config.dir_path} resources server. The file must be found at {example_fpath}. Usually this example data is just the first 5 examples of your train dataset."
+    )
+    with open(example_fpath) as f:
+        count = sum(1 for _ in f)
+    assert count == 5, f"Expected 5 examples at {example_fpath} but got {count}."
+
+    server_type_name = test_config.dir_path.parts[1]
+    example_metrics_fpath = test_config.dir_path / "data/example_metrics.json"
+    assert example_metrics_fpath.exists(), f"""You must run the example data validation for the example data found at {example_fpath}.
+Your command should look something like:
+```bash
+ng_prepare_data "+config_paths=[configs/{server_type_name}.yaml]" \\
+    +output_dirpath=data/{server_type_name} \\
+    +mode=example_validation
+```
+and your config must include an agent server config with an example dataset like:
+```yaml
+multineedle_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      ...
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/multineedle/data/example.jsonl
+```
+
+See `resources_servers/multineedle/configs/multineedle.yaml` for a full config example.
+"""
+    with open(example_metrics_fpath) as f:
+        example_metrics = json.load(f)
+    assert example_metrics["Number of examples"] == 5, (
+        f"Expected 5 examples in the metrics at {example_metrics_fpath}, but got {example_metrics['Number of examples']}"
+    )
+
+    conflict_paths = glob(str(test_config.dir_path / "data/*conflict*"))
+    conflict_paths_str = "\n- ".join([""] + conflict_paths)
+    assert not conflict_paths, (
+        f"Found {len(conflict_paths)} conflicting paths: {conflict_paths_str}"
+    )
+
+    example_rollouts_fpath = test_config.dir_path / "data/example_rollouts.jsonl"
+    assert example_rollouts_fpath.exists(), f"""You must run the example data through your agent and provide the example rollouts at `{example_rollouts_fpath}`.
+
+Your commands should look something like:
+```bash
+# Server spinup
+multineedle_config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/multineedle/configs/multineedle.yaml"
+ng_run "+config_paths=[${{multineedle_config_paths}}]"
+
+# Collect the rollouts
+ng_collect_rollouts +agent_name=multineedle_simple_agent \
+    +input_jsonl_fpath=resources_servers/multineedle/data/example.jsonl \
+    +output_jsonl_fpath=resources_servers/multineedle/data/example_rollouts.jsonl \
+    +limit=null
+
+# View your rollouts
+ng_viewer +jsonl_fpath=resources_servers/multineedle/data/example_rollouts.jsonl
+```
+"""
+    with open(example_rollouts_fpath) as f:
+        count = sum(1 for _ in f)
+    assert count == 5, (
+        f"Expected 5 example rollouts in {example_rollouts_fpath}, but got {count}"
+    )
+
+    print(f"The data for {test_config.dir_path} has been successfully validated!")
+
+
+def _test_single(test_config: TestConfig) -> Popen:  # pragma: no cover
     # Eventually we may want more sophisticated testing here, but this is sufficient for now.
-    command = f"""{_setup_env_command(dir_path)} && pytest"""
-    return _run_command(command, dir_path)
+    command = f"""{_setup_env_command(test_config.dir_path)} && pytest"""
+    return _run_command(command, test_config.dir_path)
 
 
 def test():  # pragma: no cover
     config_dict = get_global_config_dict()
-    run_config = RunConfig.model_validate(config_dict)
+    test_config = TestConfig.model_validate(config_dict)
 
-    # TODO: This currently only handles relative entrypoints. Later on we can resolve the absolute path.
-    dir_path = Path(run_config.entrypoint)
-    assert not dir_path.is_absolute()
-
-    proc = _test_single(dir_path)
+    proc = _test_single(test_config)
     return_code = proc.wait()
-    exit(return_code)
+    if return_code != 0:
+        exit(return_code)
+
+    _validate_data_single(test_config)
 
 
 def _display_list_of_paths(paths: List[Path]) -> str:  # pragma: no cover
@@ -164,17 +260,24 @@ def test_all():  # pragma: no cover
     ]
     candidate_dir_paths = [p for p in candidate_dir_paths if "pycache" not in p]
     print(
-        f"Found {len(candidate_dir_paths)} total modules:{_display_list_of_paths(candidate_dir_paths)}"
+        f"Found {len(candidate_dir_paths)} total modules:{_display_list_of_paths(candidate_dir_paths)}\n"
     )
     dir_paths: List[Path] = list(map(Path, candidate_dir_paths))
     dir_paths = [p for p in dir_paths if (p / "README.md").exists()]
-    print(f"Found {len(dir_paths)} modules to test:{_display_list_of_paths(dir_paths)}")
+    print(
+        f"Found {len(dir_paths)} modules to test:{_display_list_of_paths(dir_paths)}\n"
+    )
 
     tests_passed: List[Path] = []
     tests_failed: List[Path] = []
     tests_missing: List[Path] = []
+    data_validation_failed: List[Path] = []
     for dir_path in tqdm(dir_paths, desc="Running tests"):
-        proc = _test_single(dir_path)
+        test_config = TestConfig(
+            entrypoint=str(dir_path),
+            should_validate_data=True,  # Test all always validates data.
+        )
+        proc = _test_single(test_config)
         return_code = proc.wait()
 
         match return_code:
@@ -189,6 +292,11 @@ def test_all():  # pragma: no cover
                     f"Hit unrecognized exit code {return_code} while running tests for {dir_path}"
                 )
 
+        try:
+            _validate_data_single(test_config)
+        except AssertionError:
+            data_validation_failed.append(dir_path)
+
     print(f"""Found {len(candidate_dir_paths)} total modules:{_display_list_of_paths(candidate_dir_paths)}          
 
 Found {len(dir_paths)} modules to test:{_display_list_of_paths(dir_paths)}
@@ -198,6 +306,21 @@ Tests passed {_format_pct(len(tests_passed), len(dir_paths))}:{_display_list_of_
 Tests failed {_format_pct(len(tests_failed), len(dir_paths))}:{_display_list_of_paths(tests_failed)}
 
 Tests missing {_format_pct(len(tests_missing), len(dir_paths))}:{_display_list_of_paths(tests_missing)}
+
+Data validation failed {_format_pct(len(data_validation_failed), len(dir_paths))}:{_display_list_of_paths(data_validation_failed)}
+""")
+
+    if tests_failed or tests_missing:
+        print(f"""You can rerun just the server with failed or missing tests like:
+```bash
+ng_test +entrypoint={(tests_failed + tests_missing)[0]}
+```
+""")
+    if data_validation_failed:
+        print(f"""You can rerun just the server with failed data validation like:
+```bash
+ng_test +entrypoint={data_validation_failed[0]} +should_validate_data=true
+```
 """)
 
     if tests_missing or tests_failed:
@@ -231,10 +354,40 @@ def init_resources_server():  # pragma: no cover
 
     config_fpath = configs_dirpath / f"{server_type_name}.yaml"
     with open(config_fpath, "w") as f:
-        f.write(f"""{server_type_name}:
+        f.write(f"""{server_type_name}_resources_server:
   {server_type}:
     {server_type_name}:
       entrypoint: app.py
+{server_type_name}_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: {server_type_name}_resources_server
+      model_server:
+        type: responses_api_models
+        name: openai_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/{server_type_name}/data/train.jsonl
+        gitlab_identifier:
+          dataset_name: {server_type_name}
+          version: 0.0.1
+          artifact_fpath: train.jsonl
+        license: Apache 2.0
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/{server_type_name}/data/validation.jsonl
+        gitlab_identifier:
+          dataset_name: {server_type_name}
+          version: 0.0.1
+          artifact_fpath: validation.jsonl
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/{server_type_name}/data/example.jsonl
 """)
 
     app_fpath = dirpath / "app.py"
@@ -251,6 +404,9 @@ def init_resources_server():  # pragma: no cover
     with open("resources/resources_server_test_template.py") as f:
         tests_template = f.read()
     tests_content = tests_template.replace("MultiNeedle", server_type_title)
+    tests_content = tests_template.replace(
+        "from app", f"from resources_servers.{server_type_name}.app"
+    )
     with open(tests_fpath, "w") as f:
         f.write(tests_content)
 
@@ -273,3 +429,20 @@ Dependencies
 - nemo_gym: Apache 2.0
 ?
 """)
+
+    data_dirpath = dirpath / "data"
+    data_dirpath.mkdir(exist_ok=True)
+
+    data_gitignore_fpath = data_dirpath / ".gitignore"
+    with open(data_gitignore_fpath, "w") as f:
+        f.write("""*train.jsonl
+*validation.jsonl
+*train_prepare.jsonl
+*validation_prepare.jsonl
+*example_prepare.jsonl
+""")
+
+
+def dump_config():  # pragma: no cover
+    global_config_dict = get_global_config_dict()
+    print(OmegaConf.to_yaml(global_config_dict, resolve=True))

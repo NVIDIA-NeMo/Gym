@@ -1,6 +1,6 @@
 from nemo_gym.server_utils import ServerClient
 
-from app import (
+from resources_servers.google_search.app import (
     GoogleSearchResourcesServer,
     GoogleSearchResourcesServerConfig,
     box_parser,

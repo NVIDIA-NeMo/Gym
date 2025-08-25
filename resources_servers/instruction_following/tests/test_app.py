@@ -1,7 +1,7 @@
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.base_resources_server import NeMoGymResponse
 
-from app import (
+from resources_servers.instruction_following.app import (
     InstructionFollowingResourcesServer,
     InstructionFollowingResourcesServerConfig,
     InstructionFollowingVerifyRequest,
@@ -57,7 +57,7 @@ class TestApp:
             instruction_id_list=instruction_ids,
             prompt=prompt,
             kwargs=kwargs,
-            responses_create_params={},
+            responses_create_params={"input": []},
             response=response,
         )
 
