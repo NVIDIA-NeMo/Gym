@@ -444,6 +444,9 @@ pytest
 At some point, you will want to actually add data that can be used to query your server. Please follow the instructions for [How To: Prepare and validate data for PR submission or RL training](#how-to-prepare-and-validate-data-for-pr-submission-or-rl-training). 
 
 
+If you need some dataset preprocessing or formatting scripts, please place them your resources server directory e.g. `resources_servers/simple_weather/my_preprocess_script.py`.
+
+
 You are required to have the following 3 files in your resources server data folder:
 1. example.jsonl - contains 5 example inputs to an agent server that uses your resources server. These examples need to be created on your own using whatever data processing script you want. It's highly suggested to store the data processing scripts in each folder if possible.
 2. example_metrics.json - the metrics for the examples above, as output by `ng_prepare_data` in the data validation flow above.
