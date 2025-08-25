@@ -12,7 +12,7 @@ from openai.types.responses import (
 from pydantic import ValidationError
 from pytest import approx, fixture, raises
 
-from app import (
+from resources_servers.library_judge_math.app import (
     JudgeEvaluation,
     LibraryJudgeMathResourcesServer,
     LibraryJudgeMathResourcesServerConfig,
@@ -23,7 +23,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputItem,
 )
-from nemo_gym.server_utils import ModelServerRef, ServerClient
+from nemo_gym.config_types import ModelServerRef
+from nemo_gym.server_utils import ServerClient
 
 
 class TestApp:

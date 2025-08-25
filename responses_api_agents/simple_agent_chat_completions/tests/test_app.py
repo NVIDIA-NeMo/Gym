@@ -1,6 +1,10 @@
-from nemo_gym.server_utils import ServerClient, ModelServerRef
+from nemo_gym.config_types import ModelServerRef
+from nemo_gym.server_utils import ServerClient
 
-from app import SimpleAgentChatCompletions, SimpleAgentChatCompletionsConfig
+from responses_api_agents.simple_agent_chat_completions.app import (
+    SimpleAgentChatCompletions,
+    SimpleAgentChatCompletionsConfig,
+)
 
 from fastapi.testclient import TestClient
 

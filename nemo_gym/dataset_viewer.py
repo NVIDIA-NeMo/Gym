@@ -122,7 +122,7 @@ def convert_single_message(m: ResponseInputItemParam) -> List[ChatMessage]:
             raise NotImplementedError(f"Unsupported message type: {m}")
 
 
-def trajectory_to_messages(create_params: dict, response: dict) -> List[ChatMessage]:
+def rollout_to_messages(create_params: dict, response: dict) -> List[ChatMessage]:
     messages = []
 
     sampling_params = create_params.copy()
@@ -149,9 +149,12 @@ def trajectory_to_messages(create_params: dict, response: dict) -> List[ChatMess
             )
         )
 
+    input = create_params["input"]
+    if isinstance(input, str):
+        input = [{"role": "user", "content": input}]
     turn = 0
     step = 0
-    for m in create_params["input"] + response["output"]:
+    for m in input + response["output"]:
         if m.get("role") == "user":
             turn += 1
             step = 0
@@ -210,7 +213,7 @@ def build_jsonl_dataset_viewer(config: JsonlDatasetViewerConfig) -> Blocks:
 
     def select_item(value: int):
         d = data[value]
-        return extra_info_to_messages(d.model_dump()) + trajectory_to_messages(
+        return extra_info_to_messages(d.model_dump()) + rollout_to_messages(
             d.responses_create_params.model_dump(), d.response.model_dump()
         )
 
@@ -226,7 +229,7 @@ def build_jsonl_dataset_viewer(config: JsonlDatasetViewerConfig) -> Blocks:
             type="messages",
             height="80vh",
             layout="panel",
-            label="Trajectory",
+            label="Rollout",
         )
         item_dropdown.select(
             fn=select_item, inputs=item_dropdown, outputs=chatbot, show_api=False

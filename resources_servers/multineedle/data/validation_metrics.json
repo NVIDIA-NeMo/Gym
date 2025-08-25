@@ -1,0 +1,36 @@
+{
+    "name": "validation",
+    "type": "validation",
+    "jsonl_fpath": "resources_servers/multineedle/data/validation.jsonl",
+    "gitlab_identifier": {
+        "dataset_name": "multineedle",
+        "version": "0.0.1",
+        "artifact_fpath": "validation.jsonl"
+    },
+    "license": "Apache 2.0",
+    "Number of examples": 1,
+    "Number of tools": {
+        "Total # non-null values": 1,
+        "Average": 2.0,
+        "Min": 2.0,
+        "Max": 2.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 1,
+        "Average": 1506.0,
+        "Min": 1506.0,
+        "Max": 1506.0
+    },
+    "Number of turns": {
+        "Total # non-null values": 1,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0
+    }
+}

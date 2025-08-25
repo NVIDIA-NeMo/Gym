@@ -2,7 +2,7 @@ from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 
 from nemo_gym.base_responses_api_agent import Body, BaseResponsesAPIAgentConfig
 
-from nemo_gym.server_utils import ModelServerRef
+from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponse,

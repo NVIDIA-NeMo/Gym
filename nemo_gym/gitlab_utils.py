@@ -1,5 +1,7 @@
 from os import environ
 
+from pathlib import Path
+
 import requests
 
 from pydantic import BaseModel
@@ -9,6 +11,10 @@ from mlflow.environment_variables import MLFLOW_TRACKING_TOKEN
 from mlflow.artifacts import get_artifact_repository
 from mlflow.exceptions import RestException
 
+from nemo_gym.config_types import (
+    UploadJsonlDatasetGitlabConfig,
+    DownloadJsonlDatasetGitlabConfig,
+)
 from nemo_gym.server_utils import get_global_config_dict
 
 
@@ -27,13 +33,9 @@ def create_mlflow_client() -> MlflowClient:  # pragma: no cover
     return client
 
 
-class UploadJsonlDatasetConfig(BaseModel):
-    dataset_name: str
-    version: str  # Must be x.x.x
-    input_jsonl_fpath: str
-
-
-def upload_jsonl_dataset(config: UploadJsonlDatasetConfig) -> None:  # pragma: no cover
+def upload_jsonl_dataset(
+    config: UploadJsonlDatasetGitlabConfig,
+) -> None:  # pragma: no cover
     client = create_mlflow_client()
 
     try:
@@ -42,36 +44,33 @@ def upload_jsonl_dataset(config: UploadJsonlDatasetConfig) -> None:  # pragma: n
         pass
 
     tags = {"gitlab.version": config.version}
-    model_version = client.create_model_version(
-        config.dataset_name, config.version, tags=tags
-    )
+    try:
+        model_version = client.get_model_version(config.dataset_name, config.version)
+    except RestException:
+        model_version = client.create_model_version(
+            config.dataset_name, config.version, tags=tags
+        )
 
     run_id = model_version.run_id
     client.log_artifact(run_id, config.input_jsonl_fpath, artifact_path="")
 
+    filename = Path(config.input_jsonl_fpath).name
     print(f"""Download this artifact:
 ng_download_dataset_from_gitlab \\
     +run_id={run_id} \\
-    +artifact_fpath={config.input_jsonl_fpath} \\
+    +artifact_fpath={filename} \\
     +output_fpath=<your output fpath>
 """)
 
 
 def upload_jsonl_dataset_cli() -> None:  # pragma: no cover
     global_config = get_global_config_dict()
-    config = UploadJsonlDatasetConfig.model_validate(global_config)
+    config = UploadJsonlDatasetGitlabConfig.model_validate(global_config)
     upload_jsonl_dataset(config)
 
 
-class DownloadJsonlDatasetConfig(BaseModel):
-    dataset_name: str
-    version: str
-    artifact_fpath: str
-    output_fpath: str
-
-
 def download_jsonl_dataset(
-    config: DownloadJsonlDatasetConfig,
+    config: DownloadJsonlDatasetGitlabConfig,
 ) -> None:  # pragma: no cover
     # TODO: There is probably a much better way to do this, but it is not clear at the moment.
     client = create_mlflow_client()
@@ -94,5 +93,5 @@ def download_jsonl_dataset(
 
 def download_jsonl_dataset_cli() -> None:  # pragma: no cover
     global_config = get_global_config_dict()
-    config = DownloadJsonlDatasetConfig.model_validate(global_config)
+    config = DownloadJsonlDatasetGitlabConfig.model_validate(global_config)
     download_jsonl_dataset(config)

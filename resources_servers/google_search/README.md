@@ -1,21 +1,24 @@
 # Google Search Resource Server
 
 ## Table of Contents
-1. [Description](#description)
-   - [Overview](#overview)
-   - [Dataset Description](#dataset-description)
-   - [Environment Tools](#environment-tools)
-   - [Verifier](#verifier)
-   - [Legal Status](#legal-status)
-2. [Requirements](#requirements)
-3. [Environment Inheritance](#environment-inheritance)
-4. [Usage Commands](#usage-commands)
-   - [Running the Server](#running-the-server)
-5. [Samples](#samples)
-   - [Sample Prompts](#sample-prompts)
-   - [Complete Rollout](#complete-rollout)
-   - [Prompts (truncated) + Rewards](#prompts-truncated--rewards)
-6. [Licensing Information](#licensing-information)
+- [Google Search Resource Server](#google-search-resource-server)
+  - [Table of Contents](#table-of-contents)
+  - [Description](#description)
+    - [Overview](#overview)
+    - [Dataset Description](#dataset-description)
+    - [Environment Tools](#environment-tools)
+    - [Verifier](#verifier)
+    - [Legal Status](#legal-status)
+  - [Requirements](#requirements)
+  - [Environment Inheritance](#environment-inheritance)
+  - [Usage Commands](#usage-commands)
+    - [Running the Server](#running-the-server)
+  - [Samples](#samples)
+    - [Sample Prompts](#sample-prompts)
+  - [Complete Rollout](#complete-rollout)
+  - [Prompts (truncated) + Rewards](#prompts-truncated--rewards)
+  - [Licensing Information](#licensing-information)
+    - [Licensing information](#licensing-information-1)
 
 ## Description
 
@@ -96,19 +99,18 @@ tools=[
 ## Usage Commands
 
 ### Running the Server
-```
-config_paths="responses_api_agents/simple_agent/configs/simple_agent.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml,\
+```bash
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
 resources_servers/google_search/configs/google_search.yaml"
-ng_run "+config_paths=[$config_paths]" "+simple_agent.responses_api_agents.simple_agent.resources_server.name=google_search"
+ng_run "+config_paths=[$config_paths]"
 
-ng_download_dataset_to_gitlab \
-    +dataset_name=search_STEM_syn_gpqa_v1_2 \
+ng_download_dataset_from_gitlab \
+    +dataset_name=search_STEM_syn_gpqa_v1_2_difficulty_filtered \
     +version=0.0.1 \
     +artifact_fpath=MCQA_syn_gpqa_1_2_difficulty_filtered_responses_api.jsonl \
     +output_fpath=data/MCQA_syn_gpqa_1_2_difficulty_filtered_responses_api.jsonl
 
-ng_collect_traj +agent_name=simple_agent \
+ng_collect_rollouts +agent_name=simple_agent \
     +input_jsonl_fpath=data/MCQA_syn_gpqa_1_2_difficulty_filtered_responses_api.jsonl \
     +output_jsonl_fpath=results/MCQA_syn_gpqa_1_2_difficulty_filtered_responses_api.jsonl \
     +limit=1

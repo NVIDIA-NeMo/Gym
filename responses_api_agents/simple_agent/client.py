@@ -8,11 +8,15 @@ from nemo_gym.server_utils import ServerClient
 
 server_client = ServerClient.load_from_global_config()
 task = server_client.post(
-    server_name="simple_agent",
+    server_name="simple_weather_agent",
     url_path="/v1/responses",
     json=NeMoGymResponseCreateParamsNonStreaming(
         input=[
-            {"role": "user", "content": "what's it like in sf?"},
+            {
+                "role": "developer",
+                "content": "You are a helpful personal assistant that aims to be helpful and reduce any pain points the user has.",
+            },
+            {"role": "user", "content": "going out in sf tn"},
         ],
         tools=[
             {

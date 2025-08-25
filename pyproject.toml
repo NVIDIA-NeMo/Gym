@@ -131,15 +131,22 @@ ng_dev_test = "nemo_gym.cli:dev_test"
 nemo_gym_init_resources_server = "nemo_gym.cli:init_resources_server"
 ng_init_resources_server = "nemo_gym.cli:init_resources_server"
 
-# Trajectory collection
-nemo_gym_collect_traj = "nemo_gym.trajectory_collection:collect_trajectories"
-ng_collect_traj = "nemo_gym.trajectory_collection:collect_trajectories"
+# Rollout collection
+nemo_gym_collect_rollouts = "nemo_gym.rollout_collection:collect_rollouts"
+ng_collect_rollouts = "nemo_gym.rollout_collection:collect_rollouts"
 
 # Dataset management
 nemo_gym_upload_dataset_to_gitlab = "nemo_gym.gitlab_utils:upload_jsonl_dataset_cli"
 ng_upload_dataset_to_gitlab = "nemo_gym.gitlab_utils:upload_jsonl_dataset_cli"
-nemo_gym_download_dataset_to_gitlab = "nemo_gym.gitlab_utils:download_jsonl_dataset_cli"
-ng_download_dataset_to_gitlab = "nemo_gym.gitlab_utils:download_jsonl_dataset_cli"
+nemo_gym_download_dataset_from_gitlab = "nemo_gym.gitlab_utils:download_jsonl_dataset_cli"
+ng_download_dataset_from_gitlab = "nemo_gym.gitlab_utils:download_jsonl_dataset_cli"
+nemo_gym_prepare_data = "nemo_gym.train_data_utils:prepare_data"
+ng_prepare_data = "nemo_gym.train_data_utils:prepare_data"
+
+# Configuration utils
+nemo_gym_dump_config = "nemo_gym.cli:dump_config"
+ng_dump_config = "nemo_gym.cli:dump_config"
+
 
 [tool.setuptools.packages.find]
 where = ["."]
