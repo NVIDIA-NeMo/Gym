@@ -41,6 +41,6 @@ run_continuous_integration_tests:
     - ruff format --check
     - ruff check
     - ng_dev_test
-    - ng_test_all
+    - ng_test_all +fail_on_total_and_test_mismatch=true
   tags:
     - linux

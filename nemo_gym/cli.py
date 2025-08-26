@@ -252,7 +252,14 @@ def _format_pct(count: int, total: int) -> str:  # pragma: no cover
     return f"{count} / {total} ({100 * count / total:.2f}%)"
 
 
+class TestAllConfig(BaseModel):
+    fail_on_total_and_test_mismatch: bool = False
+
+
 def test_all():  # pragma: no cover
+    global_config_dict = get_global_config_dict()
+    test_all_config = TestAllConfig.model_validate(global_config_dict)
+
     candidate_dir_paths = [
         *glob("resources_servers/*"),
         *glob("responses_api_agents/*"),
@@ -322,6 +329,14 @@ ng_test +entrypoint={(tests_failed + tests_missing)[0]}
 ng_test +entrypoint={data_validation_failed[0]} +should_validate_data=true
 ```
 """)
+
+    if test_all_config.fail_on_total_and_test_mismatch:
+        extra_candidates = [p for p in candidate_dir_paths if Path(p) not in dir_paths]
+        assert (
+            len(candidate_dir_paths) == len(dir_paths)
+        ), f"""Mismatch on the number of total modules found ({len(candidate_dir_paths)}) and the number of actual modules tested ({len(dir_paths)})!
+
+Extra candidate paths:{_display_list_of_paths(extra_candidates)}"""
 
     if tests_missing or tests_failed:
         exit(1)
