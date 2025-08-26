@@ -473,7 +473,9 @@ ng_run "+config_paths=[${multineedle_config_paths}]"
 3. 5 examples found at `resources_servers/test_weather/data/examples.jsonl`
 4. Example metrics as output by `ng_prepare_data` found at `resources_servers/test_weather/data/example_metrics.json`
 ```bash
-ng_prepare_data "+config_paths=[resources_servers/multineedle/configs/multineedle.yaml]" \
+multineedle_config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/multineedle/configs/multineedle.yaml"
+ng_prepare_data "+config_paths=[${multineedle_config_paths}]" \
     +output_dirpath=data/multineedle \
     +mode=example_validation
 ```
@@ -529,8 +531,7 @@ NeMo Gym can be used for rollout collection e.g. for DPO or for synthetic data g
 
 Spin up your agent. For this example, we will use the multineedle resources server!
 ```bash
-config_paths="responses_api_agents/simple_agent/configs/simple_agent.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml,\
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
 resources_servers/multineedle/configs/multineedle.yaml"
 ng_run "+config_paths=[$config_paths]" \
     +simple_agent.responses_api_agents.simple_agent.resources_server.name=multineedle
@@ -622,7 +623,8 @@ Each config.yaml in the resources server requires at least one agent with one ex
 
 For every PR that contributes data, we require common dataset statistics and sanity checks on the data itself. This process is also helpful to catch any simple issues before you ever train with NeMo RL. NeMo Gym provides a helper command ng_prepare_data to do so.
 ```bash
-config_paths="resources_servers/multineedle/configs/multineedle.yaml"
+config_paths="resources_servers/multineedle/configs/multineedle.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml"
 ng_prepare_data "+config_paths=[$config_paths]" \
     +output_dirpath=data/multineedle \
     +mode=example_validation
@@ -651,7 +653,8 @@ The `ng_prepare_data` command will:
 
 The `ng_prepare_data` command has 2 modes, one for actual train and validation set preparation, and one for example validation intended to sanity check your data format. You would typically run `+mode=example_validation` when first contributing a resources server, and then run with `+mode=train_preparation` when you actually go to train.
 ```bash
-config_paths="resources_servers/multineedle/configs/multineedle.yaml"
+config_paths="resources_servers/multineedle/configs/multineedle.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml"
 ng_prepare_data "+config_paths=[$config_paths]" \
     +output_dirpath=data/multineedle \
     +mode=example_validation
@@ -661,7 +664,8 @@ ng_prepare_data "+config_paths=[$config_paths]" \
 # How To: ng_dump_config - Dump a YAML config as exactly as NeMo Gym sees it
 ```bash
 # Example ng_run command
-config_paths="resources_servers/multineedle/configs/multineedle.yaml"
+config_paths="resources_servers/multineedle/configs/multineedle.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml"
 ng_run "+config_paths=[$config_paths]"
 
 
