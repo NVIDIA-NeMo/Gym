@@ -1,0 +1,430 @@
+import re
+from typing import List, Tuple
+from time import time
+from uuid import uuid4
+from nemo_gym.base_responses_api_model import (
+    BaseResponsesAPIModelConfig,
+    SimpleResponsesAPIModel,
+    Body,
+)
+from nemo_gym.openai_utils import (
+    NeMoGymChatCompletionMessageParam,
+    NeMoGymResponseOutputItem,
+    NeMoGymAsyncOpenAI,
+    NeMoGymChatCompletion,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseOutputMessage,
+    NeMoGymResponseFunctionToolCallParam,
+    NeMoGymResponseReasoningItem,
+    NeMoGymResponseOutputText,
+    NeMoGymResponseFunctionToolCall,
+    NeMoGymFunctionDefinition,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymChatCompletionToolParam,
+    NeMoGymChatCompletionUserMessageParam,
+    NeMoGymChatCompletionSystemMessageParam,
+    NeMoGymChatCompletionDeveloperMessageParam,
+    NeMoGymChatCompletionAssistantMessageParam,
+    NeMoGymChatCompletionMessageToolCallParam,
+    NeMoGymChatCompletionToolMessageParam,
+    NeMoGymChatCompletionContentPartTextParam,
+    NeMoGymChoice,
+    NeMoGymFunction,
+    NeMoGymSummary,
+)
+
+
+class VLLMModelConfig(BaseResponsesAPIModelConfig):
+    base_url: str
+    api_key: str
+    model: str
+
+
+class VLLMModel(SimpleResponsesAPIModel):
+    config: VLLMModelConfig
+
+    def model_post_init(self, context):
+        self._client = NeMoGymAsyncOpenAI(
+            base_url=self.config.base_url,
+            api_key=self.config.api_key,
+        )
+        self._converter = VLLMConverter()
+        return super().model_post_init(context)
+
+    async def responses(
+        self, body: NeMoGymResponseCreateParamsNonStreaming = Body()
+    ) -> NeMoGymResponse:
+        # Response Create Params -> Chat Completion Create Params
+        chat_completion_create_params = (
+            self._converter.responses_to_chat_completion_create_params(body)
+        )
+        if not body.model:
+            body.model = self.config.model
+
+        # Chat Completion Create Params -> Chat Completion
+        chat_completion_response = await self.chat_completions(
+            chat_completion_create_params
+        )
+
+        choice = chat_completion_response.choices[0]
+
+        response_output = self._converter.postprocess_chat_response(choice)
+
+        # Chat Completion -> Response
+        return NeMoGymResponse(
+            id=f"resp_{uuid4().hex}",
+            created_at=int(time()),
+            model=body.model,
+            object="response",
+            output=[item.model_dump() for item in response_output],
+            tool_choice=body.tool_choice if "tool_choice" in body else "auto",
+            parallel_tool_calls=body.parallel_tool_calls,
+            tools=body.tools,
+            temperature=body.temperature,
+            top_p=body.top_p,
+            background=body.background,
+            max_output_tokens=body.max_output_tokens,
+            max_tool_calls=body.max_tool_calls,
+            previous_response_id=body.previous_response_id,
+            prompt=body.prompt,
+            reasoning=body.reasoning,
+            service_tier=body.service_tier,
+            text=body.text,
+            top_logprobs=body.top_logprobs,
+            truncation=body.truncation,
+            metadata=body.metadata,
+            instructions=body.instructions,
+            user=body.user,
+        )
+
+    async def chat_completions(
+        self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
+    ) -> NeMoGymChatCompletion:
+        body_dict = body.model_dump(exclude_unset=True)
+        body_dict.setdefault("model", self.config.model)
+        openai_response = await self._client.chat.completions.create(**body_dict)
+        return NeMoGymChatCompletion(**openai_response.model_dump())
+
+
+class VLLMConverter:
+    THINK_TAG_PATTERN = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+
+    @staticmethod
+    def _wrap_reasoning_in_think_tags(texts: List[str]) -> str:
+        return "".join(f"<think>{t}</think>" for t in texts if t)
+
+    @classmethod
+    def _parse_think_tags(cls, content: str) -> Tuple[List[str], str]:
+        # Extract reasoning content from between <think></think> tags.
+        matches = cls.THINK_TAG_PATTERN.findall(content)
+        # Remove reasoning from main content
+        cleaned = cls.THINK_TAG_PATTERN.sub("", content).strip()
+        return matches, cleaned
+
+    # =======================================================
+    # Response create params to Chat Completion create params
+    # =======================================================
+
+    def responses_to_chat_completion_create_params(
+        self,
+        responses_create_params: NeMoGymResponseCreateParamsNonStreaming,
+    ) -> NeMoGymChatCompletionCreateParamsNonStreaming:
+        responses_create_params = responses_create_params.model_dump(exclude_unset=True)
+
+        # Tracks messages including reasoning for each respective message type helper function
+        state: Tuple[List[NeMoGymChatCompletionMessageParam], str] = ([], "")
+
+        # Input can be a string. Wrap in a ResponseInput-like
+        response_input = responses_create_params["input"]
+        if isinstance(response_input, str):
+            wrapped_input = {
+                "content": [
+                    {
+                        "text": response_input,
+                        "type": "input_text",
+                    }
+                ],
+                "role": "user",
+                "type": "message",
+            }
+            input_messages = [wrapped_input]
+        else:
+            input_messages = responses_create_params.pop("input", [])
+
+        for m in input_messages:
+            if not m.get("type") and m.get("role"):
+                m["type"] = "message"
+
+            match m["type"]:
+                case "message":
+                    state = self._format_message(m, state)
+                case "reasoning":
+                    state = self._format_reasoning(m, state)
+                case "function_call":
+                    state = self._format_function_call(m, state)
+                case "function_call_output":
+                    state = self._format_function_call_output(m, state)
+                case _:  # pragma: no cover
+                    raise NotImplementedError(f"Unsupported message type: {m}")
+
+        # No messages remaining, add reasoning message if present
+        messages, reasoning_text_buffer = state
+        if reasoning_text_buffer:
+            messages.append(
+                NeMoGymChatCompletionAssistantMessageParam(
+                    content=[
+                        NeMoGymChatCompletionAssistantMessageParam(
+                            type="text", text=reasoning_text_buffer
+                        )
+                    ],
+                    role="assistant",
+                    tool_calls=[],
+                )
+            )
+            reasoning_text_buffer = ""
+
+        model = responses_create_params.pop("model", None)
+        if model is not None:
+            responses_create_params["model"] = model
+
+        tools = responses_create_params.pop("tools", None)
+        if tools is not None:
+            responses_create_params["tools"] = []
+            for tool_dict in tools:
+                tool_dict = tool_dict.copy()
+                tool_dict.pop("type", None)
+                responses_create_params["tools"].append(
+                    NeMoGymChatCompletionToolParam(
+                        type="function", function=NeMoGymFunctionDefinition(**tool_dict)
+                    )
+                )
+
+        chat_completion_create_params = NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=messages,
+            **responses_create_params,
+        )
+
+        return chat_completion_create_params
+
+    def _create_tool_call_from_function_param(
+        self,
+        m: NeMoGymResponseFunctionToolCallParam,
+    ) -> NeMoGymChatCompletionMessageToolCallParam:
+        assert "call_id" in m
+        return NeMoGymChatCompletionMessageToolCallParam(
+            id=m["call_id"],
+            function=NeMoGymFunction(
+                arguments=m["arguments"],
+                name=m["name"],
+            ),
+            type="function",
+        )
+
+    def _format_function_call_output(
+        self,
+        m: dict,
+        state: Tuple[List[NeMoGymChatCompletionMessageParam], str],
+    ) -> Tuple[List[NeMoGymChatCompletionMessageParam], str]:
+        messages, _ = state
+        assert "call_id" in m
+        converted = [
+            NeMoGymChatCompletionToolMessageParam(
+                content=m["output"],
+                role="tool",
+                tool_call_id=m["call_id"],
+            )
+        ]
+        messages.extend(converted)
+        return messages, _
+
+    def _format_message(
+        self,
+        m: dict,
+        state: Tuple[List[NeMoGymChatCompletionMessageParam], str],
+    ) -> Tuple[List[NeMoGymChatCompletionMessageParam], str]:
+        messages, reasoning_text_buffer = state
+
+        content = m["content"]
+
+        if isinstance(content, list) and m["role"] != "assistant":
+            for part_param in content:
+                match part_param["type"]:
+                    case "input_text":
+                        part_param["type"] = "text"
+                    case _:
+                        raise NotImplementedError(
+                            f"Unsupported part param type: {part_param['type']}"
+                        )
+
+        match m["role"]:
+            case "user":
+                converted = [
+                    NeMoGymChatCompletionUserMessageParam(
+                        content=content,
+                        role="user",
+                    )
+                ]
+            # TODO: Revisit this in case we need separate handling. Not all chat templates may support the 'developer' role.
+            case "system":
+                converted = [
+                    NeMoGymChatCompletionSystemMessageParam(
+                        content=content,
+                        role="system",
+                    )
+                ]
+            case "developer":
+                converted = [
+                    NeMoGymChatCompletionDeveloperMessageParam(
+                        content=content,
+                        role="developer",
+                    )
+                ]
+            case "assistant":
+                # Handle reasoning
+                final_content = ""
+                if reasoning_text_buffer:
+                    final_content = reasoning_text_buffer
+                    reasoning_text_buffer = ""
+
+                if isinstance(m["content"], list):
+                    content_str = " ".join(
+                        [part.get("text", "") for part in m["content"]]
+                    )
+                    final_content += content_str
+                elif isinstance(m["content"], str):
+                    final_content += m["content"]
+                else:
+                    raise NotImplementedError(
+                        f"Expected m['content'] to be str or list[dict], but got {type(m['content']).__name__!r}: {m['content']!r}"
+                    )
+
+                # Final concatenated message (may or may not contain reasoning)
+                converted = [
+                    NeMoGymChatCompletionAssistantMessageParam(
+                        content=[
+                            NeMoGymChatCompletionContentPartTextParam(
+                                type="text",
+                                text=final_content,
+                            )
+                        ],
+                        role="assistant",
+                        tool_calls=[],
+                    )
+                ]
+            case _:  # pragma: no cover
+                raise NotImplementedError(
+                    f"Unrecognized role for message: `{m['role']}`"
+                )
+
+        messages.extend(converted)
+        return messages, reasoning_text_buffer
+
+    def _format_reasoning(
+        self,
+        m: dict,
+        state: Tuple[List[NeMoGymChatCompletionMessageParam], str],
+    ) -> Tuple[List[NeMoGymChatCompletionMessageParam], str]:
+        _, reasoning_text_buffer = state
+        """
+        Collects text from 'reasoning' messages and appends it to a buffer.
+
+        This is done to group together one (or multiple) reasoning message(s) into a single,
+        cohesive block, later prepending it to a subsequent assistant message.
+        See: https://gitlab-master.nvidia.com/bxyu/nemo-gym#reasoning-in-the-response-api
+        """
+        # Reasoning: Init beginning of message <think></think> tags
+        if "summary" in m and m["summary"]:
+            texts = [s["text"] for s in m["summary"]]
+            reasoning_text_buffer += self._wrap_reasoning_in_think_tags(texts)
+        return _, reasoning_text_buffer
+
+    def _format_function_call(
+        self,
+        m: dict,
+        state: Tuple[List[NeMoGymChatCompletionMessageParam], str],
+    ) -> Tuple[List[NeMoGymChatCompletionMessageParam], str]:
+        # Function Calls: Concat to a single message
+        messages, _ = state
+        if messages and messages[-1].get("role") == "assistant":
+            tool_call = self._create_tool_call_from_function_param(m)
+            if "tool_calls" in messages[-1] and len(messages[-1]["tool_calls"]) > 0:
+                messages[-1]["tool_calls"].append(tool_call)
+            else:
+                messages[-1]["tool_calls"] = [tool_call]
+        else:
+            # Non-Parallel tool calls, new message
+            new_assistant_message = NeMoGymChatCompletionAssistantMessageParam(
+                content=None,
+                role="assistant",
+                tool_calls=[self._create_tool_call_from_function_param(m)],
+            )
+            messages.append(new_assistant_message)
+
+        return messages, _
+
+    # =======================================================
+    # Chat Completion to Response
+    # =======================================================
+
+    def postprocess_chat_response(
+        self, choice: NeMoGymChoice
+    ) -> List[NeMoGymResponseOutputItem]:
+        raw_message = choice.message.model_dump()
+        response_output = []
+
+        content = raw_message.get("content") or ""
+        reasoning_matches, content = self._extract_reasoning_from_content(content)
+        if reasoning_matches:
+            reasoning_item = NeMoGymResponseReasoningItem(
+                id=f"rs_{uuid4().hex}",
+                type="reasoning",
+                summary=[
+                    NeMoGymSummary(text=reasoning_text.strip(), type="summary_text")
+                    for reasoning_text in reasoning_matches
+                ],
+                status="completed",
+            )
+            response_output.append(reasoning_item)
+
+        if content:
+            response_output.append(
+                NeMoGymResponseOutputMessage(
+                    id=f"msg_{uuid4().hex}",
+                    role=raw_message.get("role"),
+                    content=[
+                        NeMoGymResponseOutputText(
+                            type="output_text",
+                            text=content,
+                            annotations=[],
+                        )
+                    ],
+                    status="completed",
+                    type="message",
+                )
+            )
+
+        tool_calls_raw = raw_message.get("tool_calls", []) or []
+        for tc in tool_calls_raw:
+            assert "id" in tc
+            response_output.append(
+                NeMoGymResponseFunctionToolCall(
+                    name=tc["function"]["name"],
+                    arguments=tc["function"]["arguments"],
+                    call_id=tc["id"],
+                    type="function_call",
+                    status="completed",
+                    id=tc["id"],
+                )
+            )
+
+        return response_output
+
+    def _extract_reasoning_from_content(self, content: str) -> Tuple[List[str], str]:
+        # TODO: Currently only parses reasoning wrapped in <think>...</think> tags.
+        # Maybe parameterize to support other model formats in the future.
+        return self._parse_think_tags(content)
+
+
+if __name__ == "__main__":
+    VLLMModel.run_webserver()
