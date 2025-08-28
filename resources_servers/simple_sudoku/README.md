@@ -2,20 +2,26 @@
 
 This is a resource server for sudoku text based game. The correctness is checked programtically. The reward is returned at each step (each call of the `make_move` function. The final reward is the sum)
 
-**Dataset**: There is no dataset since its proceduraly generated. Although for trajectory collection purposes, I have added a .jsonl dataset which just tells the model what tool it can use (the tool the model can use is `make_move` basically if its sudoku the model will output e.g. `make_move(0,0,4)` if its wordle it will output `make_move("guess")` etc.)
+**Dataset**: The dataset is proceduraly generated. But for it to be compatible with current trajectory generation framework. We have a `simple_sudoku.jsonl` and a script (steps below) that can be used to create a jsonl to use for trajectory generation. This would be changed later
+
 
 ## Steps to run
 
 
-1. Download dataset (Ideally we shouldn't have a dataset since everything is generated on fly. Right now to be compatible with the trajetory collection logic we have a test dataset called "sudoku_test.jsonl"). To download it
-
+1. Download reference dataset
 
 ```
 ng_download_dataset_from_gitlab \
-    +dataset_name=sudoku_test \
+    +dataset_name=sudoku_simple \
     +version=0.0.2 \
-    +artifact_fpath=sudoku_test.jsonl \
-    +output_fpath=data/sudoku_test.jsonl
+    +artifact_fpath=sudoku_simple.jsonl \
+    +output_fpath=data/sudoku_simple.jsonl
+```
+
+2. Create a larger jsonl (the reference dataset just has 1 data point as reference for how the system prompt, tool definition should look like). Below generates 5 examples.
+
+```
+python generate_sudoku_jsonl.py ../../data/simple_sudoku.jsonl 5 ../../data/sudoku_batch.jsonl
 ```
 
 
@@ -28,7 +34,7 @@ ng_run "+config_paths=[responses_api_agents/simple_game_agent/configs/simple_gam
 3. Start trajectory collection
 ```
 ```
-ng_collect_traj +agent_name=simple_game_agent +input_jsonl_fpath=data/sudoku_test.jsonl +output_jtssonl_fpath=results/sudoku_output.jsonl
+ng_collect_traj +agent_name=simple_game_agent +input_jsonl_fpath=data/sudoku_batch.jsonl +output_jtssonl_fpath=results/sudoku_output.jsonl
 ```
 ```
 
