@@ -1,1 +1,1 @@
--e nemo-gym @ ../../
+-e nemo-gym[dev] @ ../../
