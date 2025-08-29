@@ -74,10 +74,9 @@ ng_run "+config_paths=[responses_api_agents/simple_game_agent/configs/simple_gam
 ```
 
 3. Start trajectory collection
-```
+
 ```
 ng_collect_traj +agent_name=simple_game_agent +input_jsonl_fpath=data/sudoku_batch.jsonl +output_jtssonl_fpath=results/sudoku_output.jsonl
-```
 ```
 
 ---
