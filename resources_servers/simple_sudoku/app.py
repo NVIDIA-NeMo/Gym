@@ -1,8 +1,6 @@
 import copy
 import random
-import re
-import json
-from typing import List, Optional, Tuple, Any
+from typing import List, Optional, Tuple
 from pydantic import BaseModel
 
 from fastapi import FastAPI
@@ -302,7 +300,6 @@ class SudokuResourcesServer(SimpleResourcesServer):
 
         while len(cells) > ((scale**2) - clues):
             row, col = cells.pop()
-            removed = puzzle[row][col]
             puzzle[row][col] = 0
 
         return puzzle

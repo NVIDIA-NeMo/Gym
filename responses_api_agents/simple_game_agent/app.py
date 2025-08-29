@@ -1,9 +1,7 @@
 import json
-from typing import Dict, Any
 
 from pydantic import ConfigDict
 
-from openai.types.responses import ResponseFunctionToolCall
 from openai.types.responses.response_input_param import FunctionCallOutput
 
 from nemo_gym.base_resources_server import (

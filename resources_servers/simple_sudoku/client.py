@@ -1,4 +1,3 @@
-import json
 from asyncio import run
 
 from nemo_gym.server_utils import ServerClient
