@@ -5,6 +5,8 @@ from os.path import exists
 
 from pathlib import Path
 
+from devtools import pprint
+
 from glob import glob
 
 from subprocess import Popen
@@ -67,9 +69,23 @@ class TestConfig(RunConfig):
         return super().model_post_init(context)
 
 
+class ServerInstance(BaseModel):
+    process_name: str
+    server_type: str
+    name: str
+    dir_path: Path
+    entrypoint: str
+    host: Optional[str] = None
+    port: Optional[int] = None
+    pid: Optional[int] = None
+    config_path: str
+    url: Optional[str] = None
+
+
 class RunHelper:  # pragma: no cover
     _head_server_thread: Thread
     _processes: Dict[str, Popen]
+    _server_instances: List[ServerInstance]
 
     def start(
         self,
@@ -96,6 +112,8 @@ class RunHelper:  # pragma: no cover
         ]
 
         processes: Dict[str, Popen] = dict()
+        server_instances: List[ServerInstance] = []
+
         for top_level_path in top_level_paths:
             server_config_dict = global_config_dict[top_level_path]
             if not isinstance(server_config_dict, DictConfig):
@@ -127,7 +145,47 @@ class RunHelper:  # pragma: no cover
             process = _run_command(command, dir_path)
             processes[top_level_path] = process
 
+            host = server_config_dict.get("host")
+            port = server_config_dict.get("port")
+
+            server_instances.append(
+                ServerInstance(
+                    process_name=top_level_path,
+                    server_type=first_key,
+                    name=second_key,
+                    dir_path=str(dir_path),
+                    entrypoint=str(entrypoint_fpath),
+                    host=host,
+                    port=port,
+                    url=f"http://{host}:{port}" if host and port else None,
+                    pid=process.pid,
+                    config_path=top_level_path,
+                )
+            )
+
         self._processes = processes
+        self._server_instances = server_instances
+
+        # TODO: Server block summaries may get cut off/interleaved by other process output(s)
+        self.display_server_instance_info()
+
+    def display_server_instance_info(self) -> None:
+        if not getattr(self, "_server_instances", None):
+            print("No server instances to display.")
+            return
+
+        print(f"""
+{"#" * 100}
+# 
+# Server Instances
+# 
+{"#" * 100}
+""")
+
+        for i, inst in enumerate(self._server_instances, 1):
+            print(f"[{i}] {inst.process_name} ({inst.server_type}/{inst.name})")
+            pprint(inst.model_dump())
+        print(f"{'#' * 100}\n")
 
     def poll(self) -> None:
         if not self._head_server_thread.is_alive():
