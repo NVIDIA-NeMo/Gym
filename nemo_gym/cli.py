@@ -507,7 +507,7 @@ def init_resources_server():  # pragma: no cover
 
     requirements_fpath = dirpath / "requirements.txt"
     with open(requirements_fpath, "w") as f:
-        f.write("""-e nemo-gym @ ../../
+        f.write("""-e nemo-gym[dev] @ ../../
 """)
 
     readme_fpath = dirpath / "README.md"

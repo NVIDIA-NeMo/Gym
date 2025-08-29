@@ -17,16 +17,14 @@ before_script:
   - apt-get update
   # Curl is required for setup_nvidia.sh to download uv
   # ca-certificates is there to support curl and mitigate `curl: (77) error setting certificate file: /etc/ssl/certs/ca-certificates.crt`
-  - apt-get install -y --no-install-recommends git-lfs curl ca-certificates
+  - apt-get install -y --no-install-recommends git curl ca-certificates
   # The flow below should be used and synced with any Docker or container related flows. There is no script here to keep it 100% explicit.
   # This is how we test and this is how you should use/consume.
   - curl -LsSf https://astral.sh/uv/install.sh | sh
   - source $HOME/.local/bin/env
   - uv venv --python 3.13
   - source .venv/bin/activate
-  - uv sync
-  - git lfs install
-  - git lfs pull
+  - uv sync --extra dev
 
 default:
   image: ubuntu:latest

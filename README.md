@@ -35,7 +35,7 @@ source .venv/bin/activate
 
 Install NeMo Gym
 ```bash
-uv sync
+uv sync --extra dev
 ```
 
 
@@ -364,7 +364,7 @@ ng_init_resources_server +entrypoint=resources_servers/test_weather
 
 For the purposes of this example, we don't have any external dependencies, but if you want to add server-specific requirements, you would do so in the `requirements.txt` file. You can add requirements for external PyPI packages or Github repos.
 ```txt
--e nemo-gym @ ../../
+-e nemo-gym[dev] @ ../../
 {additional dependencies here}
 ```
 
