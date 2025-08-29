@@ -6,7 +6,7 @@ from nemo_gym.server_utils import ServerClient
 
 async def test_text_game_agent():
     server_client = ServerClient.load_from_global_config()
-    
+
     # Run a complete game
     task = server_client.post(
         server_name="simple_game_agent",
@@ -14,15 +14,14 @@ async def test_text_game_agent():
         json={
             "responses_create_params": {
                 "input": [{"role": "user", "content": "Let's play Sudoku!"}],
-                "tools": []
+                "tools": [],
             },
             "clues": 30,
-            "scale": 9
+            "scale": 9,
         },
     )
-    
-    result = await task
 
+    result = await task
 
     print("=== RAW RESPONSE DEBUG ===")
     print(f"Status Code: {result.status_code}")
@@ -31,7 +30,7 @@ async def test_text_game_agent():
     print(f"Raw Content (as text): {result.text}")
     print(f"Content Length: {len(result.content)}")
     print("=========================")
-    
+
     print("Game Result:")
     print(json.dumps(result.json(), indent=2))
 

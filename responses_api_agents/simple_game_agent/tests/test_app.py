@@ -11,10 +11,12 @@ class TestApp:
             host="0.0.0.0",
             port=8080,
             entrypoint="",
-            resources_server=ResourcesServerRef(type="resources_servers", name="simple_sudoku"),
-            model_server=ModelServerRef(type="responses_api_models", name="openai_model"),
+            resources_server=ResourcesServerRef(
+                type="resources_servers", name="simple_sudoku"
+            ),
+            model_server=ModelServerRef(
+                type="responses_api_models", name="openai_model"
+            ),
             max_moves=50,
         )
-        TextGameAgent(
-            config=config, server_client=MagicMock(spec=ServerClient)
-        )
+        TextGameAgent(config=config, server_client=MagicMock(spec=ServerClient))

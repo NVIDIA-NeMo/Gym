@@ -12,6 +12,4 @@ class TestApp:
             port=8080,
             entrypoint="",
         )
-        SudokuResourcesServer(
-            config=config, server_client=MagicMock(spec=ServerClient)
-        )
+        SudokuResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
