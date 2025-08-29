@@ -25,10 +25,12 @@ from omegaconf import OmegaConf, DictConfig
 
 from pydantic import BaseModel
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
+    GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
 from nemo_gym.server_utils import HeadServer
@@ -88,13 +90,10 @@ class RunHelper:  # pragma: no cover
     _server_instances: List[ServerInstance]
 
     def start(
-        self,
-        dotenv_path: Optional[Path] = None,
-        initial_global_config_dict: Optional[DictConfig] = None,
+        self, global_config_dict_parser_config: GlobalConfigDictParserConfig
     ) -> None:
         global_config_dict = get_global_config_dict(
-            dotenv_path=dotenv_path,
-            initial_global_config_dict=initial_global_config_dict,
+            global_config_dict_parser_config=global_config_dict_parser_config
         )
 
         # Assume Nemo Gym Run is for a single agent.
@@ -114,6 +113,7 @@ class RunHelper:  # pragma: no cover
         processes: Dict[str, Popen] = dict()
         server_instances: List[ServerInstance] = []
 
+        # TODO there is a better way to resolve this that uses nemo_gym/global_config.py::ServerInstanceConfig
         for top_level_path in top_level_paths:
             server_config_dict = global_config_dict[top_level_path]
             if not isinstance(server_config_dict, DictConfig):
@@ -135,7 +135,7 @@ class RunHelper:  # pragma: no cover
             entrypoint_fpath = Path(server_config_dict.entrypoint)
             assert not entrypoint_fpath.is_absolute()
 
-            dir_path = Path(first_key, second_key)
+            dir_path = PARENT_DIR / Path(first_key, second_key)
 
             command = f"""{_setup_env_command(dir_path)} \\
     && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
@@ -216,11 +216,10 @@ class RunHelper:  # pragma: no cover
 
 
 def run(
-    dotenv_path: Optional[Path] = None,
-    initial_global_config_dict: Optional[DictConfig] = None,
+    global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
 ):  # pragma: no cover
     rh = RunHelper()
-    rh.start()
+    rh.start(global_config_dict_parser_config)
     rh.run_forever()
 
 
