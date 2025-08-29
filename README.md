@@ -29,7 +29,7 @@ source $HOME/.local/bin/env
 
 Initialize environment
 ```bash
-uv venv --python 3.13
+uv venv --python 3.12
 source .venv/bin/activate
 ```
 
