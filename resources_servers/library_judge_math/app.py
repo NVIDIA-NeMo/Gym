@@ -21,7 +21,7 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymEasyInputMessageParam,
+    NeMoGymEasyInputMessage,
 )
 from nemo_gym.config_types import ModelServerRef
 
@@ -240,11 +240,11 @@ Example output: "My final verdict is different [[A!=B]]"."""
             question=question, first_answer=first_answer, second_answer=second_answer
         )
         responses_create_params.input = [
-            NeMoGymEasyInputMessageParam(
+            NeMoGymEasyInputMessage(
                 role="system",
                 content=self.JUDGE_SYSTEM_MESSAGE,
             ),
-            NeMoGymEasyInputMessageParam(
+            NeMoGymEasyInputMessage(
                 role="user",
                 content=judge_prompt,
             ),

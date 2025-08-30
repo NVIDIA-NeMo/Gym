@@ -11,17 +11,13 @@ from responses_api_models.vllm_model.app import (
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
-    NeMoGymResponseInputParam,
+    NeMoGymResponseInput,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
-    NeMoGymResponseFunctionToolCall,
-    NeMoGymResponseReasoningItemParam,
     NeMoGymResponseReasoningItem,
     NeMoGymResponseOutputText,
-    NeMoGymResponseOutputTextParam,
-    NeMoGymResponseInputTextParam,
-    NeMoGymResponseFunctionToolCallParam,
-    NeMoGymResponseOutputMessageParam,
+    NeMoGymResponseInputText,
+    NeMoGymResponseFunctionToolCall,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionMessage,
@@ -35,7 +31,7 @@ from nemo_gym.openai_utils import (
     NeMoGymFunction,
     NeMoGymMessage,
     NeMoGymSummary,
-    NeMoGymEasyInputMessageParam,
+    NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymFunctionToolParam,
 )
@@ -75,7 +71,7 @@ PARAMETERIZE_DATA = [
     # ----- EasyInputMessageParam: content as a list, id: "ez_list" -----
     (
         [
-            NeMoGymEasyInputMessageParam(
+            NeMoGymEasyInputMessage(
                 role="user",
                 content=[{"type": "input_text", "text": "hello"}],
                 type="message",
@@ -137,7 +133,7 @@ PARAMETERIZE_DATA = [
     # ----- EasyInputMessageParam: content as a string, id: "ez_str" -----
     (
         [
-            NeMoGymEasyInputMessageParam(
+            NeMoGymEasyInputMessage(
                 role="user",
                 content="hello",
                 type="message",
@@ -317,7 +313,7 @@ PARAMETERIZE_DATA = [
     # ----- ResponseFunctionToolCallParam, id: "tc" -----
     (
         [
-            NeMoGymResponseFunctionToolCallParam(
+            NeMoGymResponseFunctionToolCall(
                 arguments='{"city":"San Francisco"}',
                 call_id="call_123",
                 name="get_weather",
@@ -469,7 +465,7 @@ PARAMETERIZE_DATA = [
     # ----- ResponseReasoningItemParam, id: "rzning" -----
     (
         [
-            NeMoGymResponseReasoningItemParam(
+            NeMoGymResponseReasoningItem(
                 id="rs_123",
                 summary=[
                     NeMoGymSummary(
@@ -537,7 +533,7 @@ PARAMETERIZE_DATA = [
     # ----- Multi-reasoning, id: "multi_rzning" -----
     (
         [
-            NeMoGymResponseReasoningItemParam(
+            NeMoGymResponseReasoningItem(
                 id="rs_123",
                 summary=[
                     NeMoGymSummary(
@@ -623,11 +619,11 @@ PARAMETERIZE_DATA = [
     # ----- ResponseOutputMessageParam, id: "output_msg" -----
     (
         [
-            NeMoGymResponseOutputMessageParam(
+            NeMoGymResponseOutputMessage(
                 id="msg_123",
                 role="assistant",
                 content=[
-                    NeMoGymResponseOutputTextParam(
+                    NeMoGymResponseOutputText(
                         text="Hello! How can I assist you today?",
                         type="output_text",
                         annotations=[],
@@ -751,23 +747,21 @@ class TestApp:
         )
 
         input_messages = [
-            NeMoGymEasyInputMessageParam(
+            NeMoGymEasyInputMessage(
                 type="message",
                 role="user",
                 content=[
-                    NeMoGymResponseInputTextParam(
+                    NeMoGymResponseInputText(
                         text="Check my order status", type="input_text"
                     )
                 ],
                 status="completed",
             ),
-            NeMoGymEasyInputMessageParam(
+            NeMoGymEasyInputMessage(
                 type="message",
                 role="assistant",
                 content=[
-                    NeMoGymResponseInputTextParam(
-                        text="Sure, one sec.", type="input_text"
-                    )
+                    NeMoGymResponseInputText(text="Sure, one sec.", type="input_text")
                 ],
                 status="completed",
             ),
@@ -949,12 +943,10 @@ class TestApp:
             NeMoGymMessage(
                 type="message",
                 role="user",
-                content=[
-                    NeMoGymResponseInputTextParam(text="Hello", type="input_text")
-                ],
+                content=[NeMoGymResponseInputText(text="Hello", type="input_text")],
                 status="completed",
             ),
-            NeMoGymResponseReasoningItemParam(
+            NeMoGymResponseReasoningItem(
                 id="rs_123",
                 type="reasoning",
                 summary=[
@@ -965,13 +957,13 @@ class TestApp:
                 ],
                 status="completed",
             ),
-            NeMoGymResponseOutputMessageParam(
+            NeMoGymResponseOutputMessage(
                 id="msg_123",
                 type="message",
                 role="assistant",
                 status="completed",
                 content=[
-                    NeMoGymResponseOutputTextParam(
+                    NeMoGymResponseOutputText(
                         type="output_text", text="Hi, how can I help?", annotations=[]
                     ),
                 ],
@@ -980,7 +972,7 @@ class TestApp:
                 type="message",
                 role="user",
                 content=[
-                    NeMoGymResponseInputTextParam(
+                    NeMoGymResponseInputText(
                         type="input_text", text="What's the weather?"
                     )
                 ],
@@ -1131,13 +1123,13 @@ class TestApp:
                 type="message",
                 role="user",
                 content=[
-                    NeMoGymResponseInputTextParam(
+                    NeMoGymResponseInputText(
                         text="Hi, can you check my order?", type="input_text"
                     )
                 ],
                 status="completed",
             ),
-            NeMoGymResponseReasoningItemParam(
+            NeMoGymResponseReasoningItem(
                 id="rs_123",
                 type="reasoning",
                 summary=[
@@ -1148,31 +1140,31 @@ class TestApp:
                 ],
                 status="completed",
             ),
-            NeMoGymResponseOutputMessageParam(
+            NeMoGymResponseOutputMessage(
                 id="msg_123",
                 type="message",
                 role="assistant",
                 status="completed",
                 content=[
-                    NeMoGymResponseOutputTextParam(
+                    NeMoGymResponseOutputText(
                         text="Sure, one sec.", type="output_text", annotations=[]
                     )
                 ],
             ),
-            NeMoGymResponseOutputMessageParam(
+            NeMoGymResponseOutputMessage(
                 id="msg_123",
                 type="message",
                 role="assistant",
                 status="completed",
                 content=[
-                    NeMoGymResponseOutputTextParam(
+                    NeMoGymResponseOutputText(
                         text="Gathering order status and delivery info..",
                         type="output_text",
                         annotations=[],
                     )
                 ],
             ),
-            NeMoGymResponseFunctionToolCallParam(
+            NeMoGymResponseFunctionToolCall(
                 type="function_call",
                 call_id="call_123",
                 name="get_order_status",
@@ -1184,7 +1176,7 @@ class TestApp:
                 output='{"order_status": "shipped"}',
                 type="function_call_output",
             ),
-            NeMoGymResponseFunctionToolCallParam(
+            NeMoGymResponseFunctionToolCall(
                 type="function_call",
                 call_id="call_123",
                 name="get_delivery_date",
@@ -1196,13 +1188,13 @@ class TestApp:
                 output='{"delivery_date": "2025-08-14"}',
                 type="function_call_output",
             ),
-            NeMoGymResponseOutputMessageParam(
+            NeMoGymResponseOutputMessage(
                 id="msg_123",
                 type="message",
                 role="assistant",
                 status="completed",
                 content=[
-                    NeMoGymResponseOutputTextParam(
+                    NeMoGymResponseOutputText(
                         text="Order #1234 is shipped and arrives tomorrow.",
                         type="output_text",
                         annotations=[],
@@ -1213,7 +1205,7 @@ class TestApp:
                 type="message",
                 role="user",
                 content=[
-                    NeMoGymResponseInputTextParam(
+                    NeMoGymResponseInputText(
                         text="I need to change my delivery date to the day after.",
                         type="input_text",
                     )
@@ -1458,7 +1450,7 @@ class TestApp:
     def test_responses_e2e(
         self,
         monkeypatch: MonkeyPatch,
-        single_input: Union[str, NeMoGymResponseInputParam],
+        single_input: Union[str, NeMoGymResponseInput],
         _,
         mock_chat_completion: NeMoGymChatCompletion,
         expected_response: NeMoGymResponse,
@@ -1514,7 +1506,7 @@ class TestApp:
     def test_responses_to_chat_completion_create_params(
         self,
         monkeypatch: MonkeyPatch,
-        single_input: Union[str, NeMoGymResponseInputParam],
+        single_input: Union[str, NeMoGymResponseInput],
         expected_chat_completion_create_params: NeMoGymChatCompletionCreateParamsNonStreaming,
         _,
         __,
@@ -1577,19 +1569,19 @@ class TestVLLMConverter:
             **COMMON_RESPONSE_PARAMS,
             input=[
                 # ----- Baseline -----
-                NeMoGymEasyInputMessageParam(
+                NeMoGymEasyInputMessage(
                     content="my content",
                     role="user",
                     type="message",
                 ),
                 # ----- Ablate `content` -----
-                NeMoGymEasyInputMessageParam(
+                NeMoGymEasyInputMessage(
                     content=[
-                        NeMoGymResponseInputTextParam(
+                        NeMoGymResponseInputText(
                             type="input_text",
                             text="my content 1",
                         ),
-                        NeMoGymResponseInputTextParam(
+                        NeMoGymResponseInputText(
                             type="input_text",
                             text="my content 2",
                         ),
@@ -1598,27 +1590,27 @@ class TestVLLMConverter:
                     type="message",
                 ),
                 # ----- Ablate `role` -----
-                NeMoGymEasyInputMessageParam(
+                NeMoGymEasyInputMessage(
                     content=[
-                        NeMoGymResponseInputTextParam(
+                        NeMoGymResponseInputText(
                             text="assistant content", type="input_text"
                         )
                     ],
                     role="assistant",
                     type="message",
                 ),
-                NeMoGymEasyInputMessageParam(
+                NeMoGymEasyInputMessage(
                     content=[
-                        NeMoGymResponseInputTextParam(
+                        NeMoGymResponseInputText(
                             text="system content", type="input_text"
                         )
                     ],
                     role="system",
                     type="message",
                 ),
-                NeMoGymEasyInputMessageParam(
+                NeMoGymEasyInputMessage(
                     content=[
-                        NeMoGymResponseInputTextParam(
+                        NeMoGymResponseInputText(
                             text="developer content", type="input_text"
                         )
                     ],
@@ -1626,11 +1618,9 @@ class TestVLLMConverter:
                     type="message",
                 ),
                 # ----- Ablate `type` -----
-                NeMoGymEasyInputMessageParam(
+                NeMoGymEasyInputMessage(
                     content=[
-                        NeMoGymResponseInputTextParam(
-                            text="user content", type="input_text"
-                        )
+                        NeMoGymResponseInputText(text="user content", type="input_text")
                     ],
                     role="user",
                     # type (omitted)
@@ -1835,7 +1825,7 @@ class TestVLLMConverter:
     )
     def test_responses_to_chat_completion_create_params_converter(
         self,
-        single_input: Union[str, NeMoGymResponseInputParam],
+        single_input: Union[str, NeMoGymResponseInput],
         expected_chat_completion_create_params: NeMoGymChatCompletionCreateParamsNonStreaming,
         _,
         __,

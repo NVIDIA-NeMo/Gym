@@ -18,10 +18,9 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
-    NeMoGymResponseFunctionToolCallParam,
+    NeMoGymResponseFunctionToolCall,
     NeMoGymResponseReasoningItem,
     NeMoGymResponseOutputText,
-    NeMoGymResponseFunctionToolCall,
     NeMoGymFunctionDefinition,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionToolParam,
@@ -264,7 +263,7 @@ class VLLMConverter:
 
     def _create_tool_call_from_function_param(
         self,
-        m: NeMoGymResponseFunctionToolCallParam,
+        m: NeMoGymResponseFunctionToolCall,
     ) -> NeMoGymChatCompletionMessageToolCallParam:
         assert "call_id" in m
         return NeMoGymChatCompletionMessageToolCallParam(

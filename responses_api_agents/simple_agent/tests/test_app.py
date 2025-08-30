@@ -1,4 +1,8 @@
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.openai_utils import (
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymEasyInputMessage,
+)
 
 from responses_api_agents.simple_agent.app import (
     SimpleAgent,
@@ -84,7 +88,13 @@ class TestApp:
         server.server_client.post.assert_called_with(
             server_name="my server name",
             url_path="/v1/responses",
-            json={"input": [{"content": "hello", "role": "user"}]},
+            json=NeMoGymResponseCreateParamsNonStreaming(
+                input=[
+                    NeMoGymEasyInputMessage(
+                        content="hello", role="user", type="message"
+                    )
+                ]
+            ),
         )
 
         actual_responses_dict = res_no_model.json()

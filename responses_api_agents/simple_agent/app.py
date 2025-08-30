@@ -4,9 +4,6 @@ import json
 
 from pydantic import ConfigDict
 
-from openai.types.responses import ResponseFunctionToolCall
-from openai.types.responses.response_input_param import FunctionCallOutput
-
 from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     BaseRunRequest,
@@ -22,6 +19,9 @@ from nemo_gym.config_types import ResourcesServerRef, ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponse,
+    NeMoGymResponseFunctionToolCall,
+    NeMoGymFunctionCallOutput,
+    NeMoGymEasyInputMessage,
 )
 
 
@@ -48,15 +48,14 @@ class SimpleAgent(SimpleResponsesAPIAgent):
     async def responses(
         self, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:
-        body_dict = body.model_dump(exclude_unset=True)
+        body = body.model_copy(deep=True)
 
-        if isinstance(body_dict["input"], str):
-            body_dict["input"] = [{"role": "user", "content": body_dict["input"]}]
+        if isinstance(body.input, str):
+            body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
         new_outputs = []
         while True:
-            new_body: NeMoGymResponseCreateParamsNonStreaming = body_dict.copy()
-            new_body["input"] = new_body["input"] + new_outputs
+            new_body = body.model_copy(update={"input": body.input + new_outputs})
 
             model_response = await self.server_client.post(
                 server_name=self.config.model_server.name,
@@ -66,9 +65,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             model_response = NeMoGymResponse.model_validate(model_response.json())
 
             output = model_response.output
-            new_outputs.extend((o.model_dump() for o in output))
+            new_outputs.extend(output)
 
-            all_fn_calls: List[ResponseFunctionToolCall] = [
+            all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [
                 o for o in output if o.type == "function_call"
             ]
             if not all_fn_calls:
@@ -81,16 +80,15 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     json=json.loads(output_function_call.arguments),
                 )
 
-                tool_response = FunctionCallOutput(
+                tool_response = NeMoGymFunctionCallOutput(
                     type="function_call_output",
                     call_id=output_function_call.call_id,
                     output=json.dumps(api_response.json()),
                 )
                 new_outputs.append(tool_response)
 
-        final_response_dict = model_response.model_dump()
-        final_response_dict["output"] = new_outputs
-        return final_response_dict
+        model_response.output = new_outputs
+        return model_response
 
     async def run(self, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
         response = await self.responses(body.responses_create_params)
