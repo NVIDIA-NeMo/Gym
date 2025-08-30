@@ -375,7 +375,8 @@ def test_all():  # pragma: no cover
                 tests_missing.append(dir_path)
             case _:
                 raise ValueError(
-                    f"Hit unrecognized exit code {return_code} while running tests for {dir_path}"
+                    f"""Hit unrecognized exit code {return_code} while running tests for {dir_path}.
+You can rerun just these tests using `ng_test +entrypoint={dir_path}` or run detailed tests via `cd {dir_path} && source .venv/bin/activate && pytest`."""
                 )
 
         try:
