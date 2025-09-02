@@ -317,6 +317,9 @@ def test():  # pragma: no cover
     proc = _test_single(test_config)
     return_code = proc.wait()
     if return_code != 0:
+        print(
+            f"You can run detailed tests via `cd {test_config.entrypoint} && source .venv/bin/activate && pytest`."
+        )
         exit(return_code)
 
     _validate_data_single(test_config)

@@ -8281,7 +8281,7 @@
         "top_logprobs": null,
         "truncation": null,
         "usage": null,
-        "user": ""
+        "user": null
     },
     "expected_output": {
         "messages": [
@@ -8369,7 +8369,7 @@
         "tools": null,
         "top_logprobs": null,
         "top_p": null,
-        "user": "",
+        "user": null,
         "web_search_options": null,
         "stream": null
     }

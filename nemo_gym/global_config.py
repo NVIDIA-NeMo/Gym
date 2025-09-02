@@ -1,4 +1,4 @@
-from typing import List, Tuple, Type, Optional
+from typing import ClassVar, List, Tuple, Type, Optional
 
 from os import getenv
 
@@ -34,6 +34,10 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     HEAD_SERVER_KEY_NAME,
 ]
 
+POLICY_BASE_URL_KEY_NAME = "policy_base_url"
+POLICY_API_KEY_KEY_NAME = "policy_api_key"
+POLICY_MODEL_NAME_KEY_NAME = "policy_model_name"
+
 DEFAULT_HEAD_SERVER_PORT = 11000
 
 
@@ -44,6 +48,14 @@ class GlobalConfigDictParserConfig(BaseModel):
     initial_global_config_dict: Optional[DictConfig] = None
     skip_load_from_cli: bool = False
     skip_load_from_dotenv: bool = False
+
+    NO_MODEL_GLOBAL_CONFIG_DICT: ClassVar[DictConfig] = DictConfig(
+        {
+            POLICY_BASE_URL_KEY_NAME: "",
+            POLICY_API_KEY_KEY_NAME: "",
+            POLICY_MODEL_NAME_KEY_NAME: "",
+        }
+    )
 
 
 class GlobalConfigDictParser(BaseModel):

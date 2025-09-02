@@ -55,23 +55,8 @@ class FakeUUID:
 
 
 COMMON_RESPONSE_PARAMS = dict(
-    background=None,
-    instructions=None,
-    max_output_tokens=None,
-    max_tool_calls=None,
-    metadata=None,
     parallel_tool_calls=True,
-    previous_response_id=None,
-    prompt=None,
-    reasoning=None,
-    service_tier=None,
-    temperature=None,
-    text={},
     tool_choice="auto",
-    top_p=None,
-    top_logprobs=None,
-    truncation=None,
-    user="",
 )
 
 PARAMETERIZE_DATA = [
@@ -85,7 +70,6 @@ PARAMETERIZE_DATA = [
             )
         ],
         NeMoGymChatCompletionCreateParamsNonStreaming(
-            **COMMON_RESPONSE_PARAMS,
             messages=[
                 NeMoGymChatCompletionUserMessageParam(
                     content=[
@@ -147,7 +131,6 @@ PARAMETERIZE_DATA = [
             )
         ],
         NeMoGymChatCompletionCreateParamsNonStreaming(
-            **COMMON_RESPONSE_PARAMS,
             messages=[
                 NeMoGymChatCompletionUserMessageParam(
                     content="hello",
@@ -198,7 +181,6 @@ PARAMETERIZE_DATA = [
     (
         "hello",
         NeMoGymChatCompletionCreateParamsNonStreaming(
-            **COMMON_RESPONSE_PARAMS,
             messages=[
                 NeMoGymChatCompletionUserMessageParam(
                     content=[
@@ -266,7 +248,6 @@ PARAMETERIZE_DATA = [
             )
         ],
         NeMoGymChatCompletionCreateParamsNonStreaming(
-            **COMMON_RESPONSE_PARAMS,
             messages=[
                 NeMoGymChatCompletionUserMessageParam(
                     content=[
@@ -330,7 +311,6 @@ PARAMETERIZE_DATA = [
             )
         ],
         NeMoGymChatCompletionCreateParamsNonStreaming(
-            **COMMON_RESPONSE_PARAMS,
             messages=[
                 NeMoGymChatCompletionAssistantMessageParam(
                     content=None,
@@ -416,7 +396,6 @@ PARAMETERIZE_DATA = [
             )
         ],
         NeMoGymChatCompletionCreateParamsNonStreaming(
-            **COMMON_RESPONSE_PARAMS,
             messages=[
                 NeMoGymChatCompletionToolMessageParam(
                     content='{"temperature": 65, "condition": "partly cloudy", "humidity": 72}',
@@ -481,7 +460,6 @@ PARAMETERIZE_DATA = [
             )
         ],
         NeMoGymChatCompletionCreateParamsNonStreaming(
-            **COMMON_RESPONSE_PARAMS,
             messages=[
                 NeMoGymChatCompletionAssistantMessageParam(
                     role="assistant",
@@ -545,7 +523,6 @@ PARAMETERIZE_DATA = [
             )
         ],
         NeMoGymChatCompletionCreateParamsNonStreaming(
-            **COMMON_RESPONSE_PARAMS,
             messages=[
                 NeMoGymChatCompletionAssistantMessageParam(
                     role="assistant",
@@ -627,7 +604,6 @@ PARAMETERIZE_DATA = [
             )
         ],
         NeMoGymChatCompletionCreateParamsNonStreaming(
-            **COMMON_RESPONSE_PARAMS,
             messages=[
                 NeMoGymChatCompletionAssistantMessageParam(
                     role="assistant",
@@ -843,7 +819,6 @@ class TestApp:
         )
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
-            **COMMON_RESPONSE_PARAMS,
             input=input_messages,
             tools=input_tools,
         )
@@ -1028,7 +1003,6 @@ class TestApp:
         )
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
-            **COMMON_RESPONSE_PARAMS,
             input=input_messages,
         )
 
@@ -1295,7 +1269,6 @@ class TestApp:
         )
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
-            **COMMON_RESPONSE_PARAMS,
             input=input_messages,
             tools=input_tools,
         )
@@ -1445,7 +1418,7 @@ class TestApp:
         )
 
         responses_create_params = NeMoGymResponseCreateParamsNonStreaming(
-            **COMMON_RESPONSE_PARAMS, input=single_input
+            input=single_input
         )
 
         monkeypatch.setattr(
@@ -1494,7 +1467,7 @@ class TestApp:
         client = TestClient(app)
 
         responses_create_params = NeMoGymResponseCreateParamsNonStreaming(
-            **COMMON_RESPONSE_PARAMS, input=single_input
+            input=single_input
         )
 
         captured_params: dict[str, Any] = {}
@@ -1540,7 +1513,6 @@ class TestVLLMConverter:
         """
 
         responses_create_params = NeMoGymResponseCreateParamsNonStreaming(
-            **COMMON_RESPONSE_PARAMS,
             input=[
                 # ----- Baseline -----
                 NeMoGymEasyInputMessage(
@@ -1805,7 +1777,7 @@ class TestVLLMConverter:
         __,
     ):
         responses_create_params = NeMoGymResponseCreateParamsNonStreaming(
-            **COMMON_RESPONSE_PARAMS, input=single_input
+            input=single_input
         )
 
         actual_chat_completion_create_params = (

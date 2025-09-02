@@ -55,11 +55,13 @@ def upload_jsonl_dataset(
     client.log_artifact(run_id, config.input_jsonl_fpath, artifact_path="")
 
     filename = Path(config.input_jsonl_fpath).name
+    DownloadJsonlDatasetGitlabConfig
     print(f"""Download this artifact:
 ng_download_dataset_from_gitlab \\
-    +run_id={run_id} \\
+    +dataset_name={config.dataset_name} \\
+    +version={config.version} \\
     +artifact_fpath={filename} \\
-    +output_fpath=<your output fpath>
+    +output_fpath={config.input_jsonl_fpath}
 """)
 
 
