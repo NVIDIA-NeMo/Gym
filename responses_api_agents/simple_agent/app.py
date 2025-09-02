@@ -2,7 +2,7 @@ from typing import List
 
 import json
 
-from pydantic import ConfigDict
+from pydantic import ConfigDict, ValidationError
 
 from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
@@ -62,7 +62,13 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 url_path="/v1/responses",
                 json=new_body,
             )
-            model_response = NeMoGymResponse.model_validate(model_response.json())
+            model_response_json = model_response.json()
+            try:
+                model_response = NeMoGymResponse.model_validate(model_response_json)
+            except ValidationError as e:
+                raise RuntimeError(
+                    f"Received an invalid response from model server: {json.dumps(model_response_json)}"
+                ) from e
 
             output = model_response.output
             new_outputs.extend(output)

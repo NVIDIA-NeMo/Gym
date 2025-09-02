@@ -60,7 +60,6 @@ from openai.types.chat import (
 from openai.types.chat.chat_completion_assistant_message_param import (
     ContentArrayOfContentPart,
 )
-from openai.types.chat.completion_create_params import Function
 from openai.types.chat.chat_completion import Choice
 from openai.types.responses import (
     Response,
@@ -269,8 +268,9 @@ class NeMoGymResponse(Response):
 ########################################
 
 
-class NeMoGymFunction(Function):
-    pass
+class NeMoGymFunction(BaseModel):
+    arguments: str
+    name: str
 
 
 class NeMoGymChatCompletionMessageToolCall(ChatCompletionMessageToolCall):
@@ -329,8 +329,13 @@ class NeMoGymChatCompletionDeveloperMessageParam(ChatCompletionDeveloperMessageP
     content: Required[Union[str, List[NeMoGymChatCompletionContentPartTextParam]]]
 
 
+class NeMoGymChatCompletionMessageToolCallFunctionParam(TypedDict, total=False):
+    arguments: Required[str]
+    name: Required[str]
+
+
 class NeMoGymChatCompletionMessageToolCallParam(ChatCompletionMessageToolCallParam):
-    pass
+    function: NeMoGymChatCompletionMessageToolCallFunctionParam
 
 
 class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageParam):

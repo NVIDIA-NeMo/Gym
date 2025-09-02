@@ -27,8 +27,10 @@ from nemo_gym.config_types import ModelServerRef
 
 
 class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
-    judge_model_server: ModelServerRef
-    judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+    judge_model_server: Optional[ModelServerRef] = None
+    judge_responses_create_params: Optional[NeMoGymResponseCreateParamsNonStreaming] = (
+        None
+    )
 
 
 class LibraryJudgeMathRunRequest(BaseRunRequest):
@@ -145,7 +147,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
         library_reward, extracted_answer = self._verify_answer_with_library(
             expected_answer, generated_answer
         )
-        if library_reward > 0.5:
+        if not self.config.judge_model_server or library_reward > 0.5:
             return library_reward, extracted_answer, library_reward, None
 
         judge_reward, judge_evaluations = await self._verify_answer_with_judge(
