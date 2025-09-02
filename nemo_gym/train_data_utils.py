@@ -18,6 +18,8 @@ from tqdm.auto import tqdm
 
 from pydantic import BaseModel, Field, ConfigDict, ValidationError
 
+from omegaconf import DictConfig
+
 from nemo_gym.config_types import (
     AGENT_REF_KEY,
     ServerInstanceConfig,
@@ -28,8 +30,8 @@ from nemo_gym.config_types import (
 )
 from nemo_gym.global_config import (
     GlobalConfigDictParser,
+    GlobalConfigDictParserConfig,
     get_global_config_dict,
-    DictConfig,
 )
 from nemo_gym.gitlab_utils import download_jsonl_dataset
 from nemo_gym.base_resources_server import BaseRunRequest
@@ -497,6 +499,7 @@ class TrainDataProcessor(BaseModel):
         server_instance_configs: List[ServerInstanceConfig],
         dataset_type_to_aggregate_metrics: Dict[str, DatasetMetrics],
     ) -> None:
+        final_fpaths: Dict[DatasetType, Path] = dict()
         conflicting_fpaths: List[str] = []
         for type in config.in_scope_dataset_types:
             if type not in dataset_type_to_aggregate_metrics:
@@ -536,15 +539,26 @@ class TrainDataProcessor(BaseModel):
             print(f"Aggregate metrics for {metrics_fpath}")
             pprint(aggregate_metrics_dict)
 
+            final_fpaths[type] = collated_fpath
+
         if conflicting_fpaths:
             conflicting_fpaths_str = "\n- ".join([""] + conflicting_fpaths)
             raise ValueError(
                 f"Found conflicting aggregate metrics that need to be corrected:{conflicting_fpaths_str}"
             )
 
+        final_fpaths_str = "\n- ".join(
+            [""] + [f"{type}: {fpath}" for type, fpath in final_fpaths.items()]
+        )
+        print(f"View your final data!{final_fpaths_str}")
+
 
 def prepare_data():  # pragma: no cover
-    global_config_dict = get_global_config_dict()
+    global_config_dict = get_global_config_dict(
+        global_config_dict_parser_config=GlobalConfigDictParserConfig(
+            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        )
+    )
 
     data_processor = TrainDataProcessor()
     data_processor.run(global_config_dict)

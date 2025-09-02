@@ -231,7 +231,7 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
     max_tool_calls: Optional[int] = None
     metadata: Optional[Metadata] = None
     model: Optional[ResponsesModel] = None
-    parallel_tool_calls: Optional[bool] = None
+    parallel_tool_calls: bool = True  # OpenAI default
     previous_response_id: Optional[str] = None
     prompt: Optional[ResponsePromptParam] = None
     reasoning: Optional[Reasoning] = None
@@ -241,13 +241,13 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
     store: Optional[bool] = None
     temperature: Optional[float] = None
     text: Optional[ResponseTextConfigParam] = None
-    tool_choice: Optional[ToolChoice] = None
+    tool_choice: ToolChoice = "auto"  # OpenAI default
     # Override the Iterable to avoid lazy iterators in Pydantic validation.
     tools: List[ToolParam] = Field(default_factory=list)
     top_logprobs: Optional[int] = None
     top_p: Optional[float] = None
     truncation: Optional[Literal["auto", "disabled"]] = None
-    user: str = ""
+    user: Optional[str] = None
     stream: Optional[Literal[False]] = None
 
 
@@ -384,7 +384,7 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     metadata: Optional[Metadata] = None
     modalities: Optional[List[Literal["text", "audio"]]] = None
     n: Optional[int] = None
-    parallel_tool_calls: bool = True
+    parallel_tool_calls: bool = True  # OpenAI default
     prediction: Optional[ChatCompletionPredictionContentParam] = None
     presence_penalty: Optional[float] = None
     reasoning_effort: Optional[ReasoningEffort] = None
@@ -401,7 +401,7 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     tools: Optional[List[NeMoGymChatCompletionToolParam]] = None
     top_logprobs: Optional[int] = None
     top_p: Optional[float] = None
-    user: str = ""
+    user: Optional[str] = None
     web_search_options: Optional[WebSearchOptions] = None
     stream: Optional[Literal[False]] = None
 

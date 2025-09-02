@@ -8,6 +8,7 @@ library_judge_math:
       judge_responses_create_params: {
         input: []
       }
+      should_use_judge: true
 library_judge_math_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -26,6 +27,14 @@ library_judge_math_simple_agent:
           dataset_name: math_open_math_reasoning
           version: 0.0.1
           artifact_fpath: open_math_reasoning_problems.jsonl
+        license: Apache 2.0
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/library_judge_math/data/aime24_validation.jsonl
+        gitlab_identifier:
+          dataset_name: aime24
+          version: 0.0.1
+          artifact_fpath: aime24.jsonl
         license: Apache 2.0
       - name: example
         type: example
