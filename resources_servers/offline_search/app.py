@@ -10,12 +10,12 @@ from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     BaseVerifyResponse,
 )
-from nemo_gym.search_parsing_utils import box_parser, _extract_last_assistant_text  
+from nemo_gym.search_parsing_utils import box_parser  
 
 
 class BaseSearchQueryRequest(BaseModel):
     query: str
-    topk: int
+    topk: int = 10
 
 
 class OfflineSearchResourcesServerConfig(BaseResourcesServerConfig):
@@ -33,6 +33,14 @@ class OfflineSearchVerifyRequest(BaseVerifyRequest, OfflineSearchRunRequest):
 class OfflineSearchVerifyResponse(BaseVerifyResponse):
     parsed_option: str
 
+
+def _extract_last_assistant_text(body: OfflineSearchVerifyRequest) -> str:
+    last_message = body.response.output[-1]
+    if last_message.type == "message" and last_message.role == "assistant":
+        return last_message.content
+    else:
+        return None
+
 class OfflineSearchResourcesServer(SimpleResourcesServer):
     config: OfflineSearchResourcesServerConfig
 
@@ -44,10 +52,9 @@ class OfflineSearchResourcesServer(SimpleResourcesServer):
     
     async def search(self, body: BaseSearchQueryRequest) -> BaseGetSearchQueryResponse:
         url = f"{self.config.base_url}/retrieve"
-        
         payload = {
             "queries": [body.query],
-            "topk": 10,
+            "topk": body.topk,
             "return_scores": False #FIXME: we keep this as false for now
         }
         
@@ -55,13 +62,12 @@ class OfflineSearchResourcesServer(SimpleResourcesServer):
             response = requests.post(url, json=payload)
             response.raise_for_status()
             json_str = json.dumps(response.json())
-            print(f"offline search results: {json_str}")
             return BaseGetSearchQueryResponse(search_results=json_str)
         except Exception as e:
             return BaseGetSearchQueryResponse(search_results=f"Error: Unexpected error - {str(e)}")
         
 
-    async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+    async def verify(self, body: OfflineSearchVerifyRequest) -> OfflineSearchVerifyResponse:
         expected_answer = body.expected_answer
         response_text = _extract_last_assistant_text(body)
         parsed_option = box_parser(response_text)
@@ -69,8 +75,24 @@ class OfflineSearchResourcesServer(SimpleResourcesServer):
             reward = 1.0
         else:
             reward = 0.0
-        return BaseVerifyResponse(**body.model_dump(), reward=reward, parsed_option=parsed_option)
+        return OfflineSearchVerifyResponse(**body.model_dump(), reward=reward, parsed_option=parsed_option)
 
 
 if __name__ == "__main__":
     OfflineSearchResourcesServer.run_webserver()
+
+'''
+TODOs:
+ - [done] create chatcompletionparams dataset
+ - [done]test ng server
+ - [done]test with ng collect
+ - write README:
+    - [done] write tests for server
+    - collect examples.json (start from train as we will have two)
+    - create updated config with the two datasets
+    - run ng_prepare_data
+    - run example_rollouts. 
+    - check on git commit.
+- Get reward profiling numbers
+I think this should maybe take an hour to run and create?
+'''

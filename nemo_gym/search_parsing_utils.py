@@ -25,9 +25,3 @@ def box_parser(output_str: str) -> Optional[str]:
         return None
 
 
-def _extract_last_assistant_text(body: GoogleSearchVerifyRequest) -> str:
-    last_message = body.response.output[-1]
-    if last_message.type == "message" and last_message.role == "assistant":
-        return last_message.content
-    else:
-        return None

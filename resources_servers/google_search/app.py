@@ -14,7 +14,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     BaseVerifyResponse,
 )
-from nemo_gym.search_parsing_utils import box_parser, _extract_last_assistant_text  
+from nemo_gym.search_parsing_utils import box_parser  
 
 
 class GoogleSearchResourcesServerConfig(BaseResourcesServerConfig):
@@ -49,6 +49,13 @@ class GoogleSearchVerifyRequest(GoogleSearchRunRequest, BaseVerifyRequest):
 
 class GoogleSearchVerifyResponse(BaseVerifyResponse):
     parsed_option: str
+
+def _extract_last_assistant_text(body: GoogleSearchVerifyRequest ) -> str:
+    last_message = body.response.output[-1]
+    if last_message.type == "message" and last_message.role == "assistant":
+        return last_message.content
+    else:
+        return None
 
 
 class GoogleSearchResourcesServer(SimpleResourcesServer):
