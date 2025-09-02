@@ -499,7 +499,7 @@ def init_resources_server():  # pragma: no cover
     with open("resources/resources_server_test_template.py") as f:
         tests_template = f.read()
     tests_content = tests_template.replace("MultiNeedle", server_type_title)
-    tests_content = tests_template.replace(
+    tests_content = tests_content.replace(
         "from app", f"from resources_servers.{server_type_name}.app"
     )
     with open(tests_fpath, "w") as f:
