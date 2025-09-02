@@ -1,13 +1,18 @@
+from typing import Union, Any
+
+import json
+
 from pytest import MonkeyPatch, mark
 from unittest.mock import AsyncMock, MagicMock
-from typing import Union, Any
 from fastapi.testclient import TestClient
+
 from responses_api_models.vllm_model.app import (
     VLLMModel,
     VLLMModelConfig,
     VLLMConverter,
 )
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -24,6 +29,7 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionUserMessageParam,
     NeMoGymChatCompletionMessageToolCallParam,
     NeMoGymChatCompletionAssistantMessageParam,
+    NeMoGymChatCompletionSystemMessageParam,
     NeMoGymChatCompletionMessageToolCall,
     NeMoGymChatCompletionToolMessageParam,
     NeMoGymChatCompletionContentPartTextParam,
@@ -34,6 +40,7 @@ from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymFunctionToolParam,
+    NeMoGymChatCompletionMessageToolCallFunctionParam,
 )
 
 # Used for mocking created_at timestamp generation
@@ -332,7 +339,7 @@ PARAMETERIZE_DATA = [
                         NeMoGymChatCompletionMessageToolCallParam(
                             id="call_123",
                             type="function",
-                            function=NeMoGymFunction(
+                            function=NeMoGymChatCompletionMessageToolCallFunctionParam(
                                 arguments='{"city":"San Francisco"}',
                                 name="get_weather",
                             ),
@@ -350,10 +357,6 @@ PARAMETERIZE_DATA = [
                     message=NeMoGymChatCompletionMessage(
                         role="assistant",
                         content="Getting the weather for San Francisco, CA..",
-                        function_call=NeMoGymFunction(
-                            arguments='{"city":"San Francisco"}',
-                            name="get_weather",
-                        ),
                         tool_calls=[
                             NeMoGymChatCompletionMessageToolCall(
                                 id="call_123",
@@ -482,12 +485,7 @@ PARAMETERIZE_DATA = [
             messages=[
                 NeMoGymChatCompletionAssistantMessageParam(
                     role="assistant",
-                    content=[
-                        NeMoGymChatCompletionContentPartTextParam(
-                            type="text",
-                            text="<think>I have identified the city as San Francisco based on user input.</think>",
-                        )
-                    ],
+                    content="<think>I have identified the city as San Francisco based on user input.</think>",
                     tool_calls=[],
                 )
             ],
@@ -551,12 +549,7 @@ PARAMETERIZE_DATA = [
             messages=[
                 NeMoGymChatCompletionAssistantMessageParam(
                     role="assistant",
-                    content=[
-                        NeMoGymChatCompletionContentPartTextParam(
-                            type="text",
-                            text="<think>I'll first think about the user's question.</think><think>Then I will answer.</think>",
-                        )
-                    ],
+                    content="<think>I'll first think about the user's question.</think><think>Then I will answer.</think>",
                     tool_calls=[],
                 )
             ],
@@ -638,12 +631,7 @@ PARAMETERIZE_DATA = [
             messages=[
                 NeMoGymChatCompletionAssistantMessageParam(
                     role="assistant",
-                    content=[
-                        NeMoGymChatCompletionContentPartTextParam(
-                            type="text",
-                            text="Hello! How can I assist you today?",
-                        )
-                    ],
+                    content="Hello! How can I assist you today?",
                     tool_calls=[],
                 )
             ],
@@ -876,9 +864,20 @@ class TestApp:
         called_args, _ = mock_method.await_args
         sent_tools = called_args[0].tools
 
-        assert [(i.role, i.content[0]["text"]) for i in input_messages] == [
-            (i["role"], i["content"][0]["text"]) for i in called_args[0].messages
-        ]
+        def _standardize(messages: list) -> list:
+            return [
+                (
+                    i["role"],
+                    i["content"][0]["text"]
+                    if isinstance(i["content"], list)
+                    else i["content"],
+                )
+                for i in messages
+            ]
+
+        assert _standardize([m.model_dump() for m in input_messages]) == _standardize(
+            called_args[0].messages
+        )
 
         actual_sent_tools = [t["function"] for t in sent_tools]
         expected_sent_tools = [
@@ -1052,12 +1051,7 @@ class TestApp:
         expected_sent_messages = [
             {"content": [{"text": "Hello", "type": "text"}], "role": "user"},
             {
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "<think>Considering ways to greet the user...</think>Hi, how can I help?",
-                    }
-                ],
+                "content": "<think>Considering ways to greet the user...</think>Hi, how can I help?",
                 "role": "assistant",
                 "tool_calls": [],
             },
@@ -1329,22 +1323,7 @@ class TestApp:
                 "role": "user",
             },
             {
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "<think>Checking order details...</think>Sure, one sec.",
-                    }
-                ],
-                "role": "assistant",
-                "tool_calls": [],
-            },
-            {
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "Gathering order status and delivery info..",
-                    }
-                ],
+                "content": "<think>Checking order details...</think>Sure, one sec.Gathering order status and delivery info..",
                 "role": "assistant",
                 "tool_calls": [
                     {
@@ -1382,12 +1361,7 @@ class TestApp:
                 "tool_call_id": "call_123",
             },
             {
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "Order #1234 is shipped and arrives tomorrow.",
-                    }
-                ],
+                "content": "Order #1234 is shipped and arrives tomorrow.",
                 "role": "assistant",
                 "tool_calls": [],
             },
@@ -1645,7 +1619,7 @@ class TestVLLMConverter:
                     },
                     {
                         "role": "assistant",
-                        "content": [{"type": "text", "text": "assistant content"}],
+                        "content": "assistant content",
                         "tool_calls": [],
                     },
                     {
@@ -1844,3 +1818,109 @@ class TestVLLMConverter:
             actual_chat_completion_create_params.messages
             == expected_chat_completion_create_params.messages
         )
+
+    def test_round_trip_chat_completions(self) -> None:
+        message = NeMoGymChatCompletionMessage(
+            content="<think>I'm thinking</think>I'm chatting!",
+            role="assistant",
+            tool_calls=[
+                NeMoGymChatCompletionMessageToolCall(
+                    id="tool call 1",
+                    function=NeMoGymFunction(
+                        name="get_weather", arguments='{"city_name": "new york"}'
+                    ),
+                    type="function",
+                ),
+                NeMoGymChatCompletionMessageToolCall(
+                    id="tool call 2",
+                    function=NeMoGymFunction(
+                        name="get_weather", arguments='{"city_name": "boston"}'
+                    ),
+                    type="function",
+                ),
+            ],
+        )
+        actual_response_output_items = self.converter.postprocess_chat_response(
+            choice=NeMoGymChoice(
+                finish_reason="tool_calls",
+                index=0,
+                message=message,
+            )
+        )
+        assert len(actual_response_output_items) == 4
+
+        chat_completion_create_params = (
+            self.converter.responses_to_chat_completion_create_params(
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                    input=[
+                        NeMoGymEasyInputMessage(
+                            content="system",
+                            role="system",
+                        ),
+                        NeMoGymEasyInputMessage(
+                            content="hello!",
+                            role="user",
+                        ),
+                        *actual_response_output_items,
+                    ],
+                )
+            )
+        )
+        actual_messages = chat_completion_create_params.messages
+
+        expected_messages = [
+            NeMoGymChatCompletionSystemMessageParam(
+                content="system",
+                role="system",
+            ),
+            NeMoGymChatCompletionUserMessageParam(
+                content="hello!",
+                role="user",
+            ),
+            NeMoGymChatCompletionAssistantMessageParam(
+                role="assistant",
+                content="<think>I'm thinking</think>I'm chatting!",
+                tool_calls=[
+                    NeMoGymChatCompletionMessageToolCallParam(
+                        id="tool call 1",
+                        function=NeMoGymChatCompletionMessageToolCallFunctionParam(
+                            name="get_weather", arguments='{"city_name": "new york"}'
+                        ),
+                        type="function",
+                    ),
+                    NeMoGymChatCompletionMessageToolCallParam(
+                        id="tool call 2",
+                        function=NeMoGymChatCompletionMessageToolCallFunctionParam(
+                            name="get_weather", arguments='{"city_name": "boston"}'
+                        ),
+                        type="function",
+                    ),
+                ],
+            ),
+        ]
+        assert expected_messages == actual_messages
+
+        test_data_fpath = f"{PARENT_DIR}/responses_api_models/vllm_model/tests/round_trip_test_data.json"
+        with open(test_data_fpath) as f:
+            test_data = json.load(f)
+
+        chat_completion_create_params = (
+            self.converter.responses_to_chat_completion_create_params(
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                    input=[
+                        NeMoGymEasyInputMessage(
+                            content="system",
+                            role="system",
+                        ),
+                        NeMoGymEasyInputMessage(
+                            content="hello!",
+                            role="user",
+                        ),
+                        *test_data["input"]["output"],
+                    ],
+                )
+            )
+        )
+
+        expected_output = test_data["expected_output"]
+        assert expected_output == chat_completion_create_params.model_dump()
