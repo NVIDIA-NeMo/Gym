@@ -28,6 +28,7 @@ from nemo_gym.openai_utils import (
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
+    max_turns: int = None
 
 
 class SimpleAgentRunRequest(BaseRunRequest):
@@ -54,7 +55,10 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
         new_outputs = []
+        turn = 0
+
         while True:
+            turn += 1
             new_body = body.model_copy(update={"input": body.input + new_outputs})
 
             model_response = await self.server_client.post(
@@ -93,6 +97,10 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 )
                 new_outputs.append(tool_response)
 
+            # Check if max turns is not None and if we have exhausted it.
+            if self.config.max_turns and turn >= self.config.max_turns:
+                break
+
         model_response.output = new_outputs
         return model_response
 
@@ -102,6 +110,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         verify_request = SimpleAgentVerifyRequest.model_validate(
             body.model_dump() | {"response": response}
         )
+
         verify_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/verify",
