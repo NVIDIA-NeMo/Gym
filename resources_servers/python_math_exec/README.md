@@ -11,7 +11,7 @@
 Download the `open_math_reasoning_problems` dataset (no python tool)
 
 ```
-ng_download_dataset_to_gitlab \
+ng_download_dataset_from_gitlab \
     +dataset_name=math_open_math_reasoning \
     +version=0.0.1 \
     +artifact_fpath=open_math_reasoning_problems.jsonl \
@@ -103,7 +103,7 @@ OR
 If you want to download directly
 
 ```
-ng_download_dataset_to_gitlab \
+ng_download_dataset_from_gitlab \
     +dataset_name=open_math_reasoning_problems_tool \
     +version=0.0.1 \
     +artifact_fpath=open_math_reasoning_problems_tool.jsonl \
