@@ -1,4 +1,4 @@
-from typing import List, Tuple, Type, Optional
+from typing import ClassVar, List, Tuple, Type, Optional
 
 from os import getenv
 
@@ -10,7 +10,7 @@ import hydra
 
 from omegaconf import DictConfig, OmegaConf, open_dict
 
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, TypeAdapter, ConfigDict
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.config_types import (
@@ -34,7 +34,28 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     HEAD_SERVER_KEY_NAME,
 ]
 
+POLICY_BASE_URL_KEY_NAME = "policy_base_url"
+POLICY_API_KEY_KEY_NAME = "policy_api_key"
+POLICY_MODEL_NAME_KEY_NAME = "policy_model_name"
+
 DEFAULT_HEAD_SERVER_PORT = 11000
+
+
+class GlobalConfigDictParserConfig(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    dotenv_path: Optional[Path] = None
+    initial_global_config_dict: Optional[DictConfig] = None
+    skip_load_from_cli: bool = False
+    skip_load_from_dotenv: bool = False
+
+    NO_MODEL_GLOBAL_CONFIG_DICT: ClassVar[DictConfig] = DictConfig(
+        {
+            POLICY_BASE_URL_KEY_NAME: "",
+            POLICY_API_KEY_KEY_NAME: "",
+            POLICY_MODEL_NAME_KEY_NAME: "",
+        }
+    )
 
 
 class GlobalConfigDictParser(BaseModel):
@@ -124,30 +145,29 @@ class GlobalConfigDictParser(BaseModel):
                     run_server_config_dict["port"] = find_open_port()
 
     def parse(
-        self,
-        dotenv_path: Optional[Path] = None,
-        initial_global_config_dict: Optional[DictConfig] = None,
-        skip_load_from_cli: bool = False,
-        skip_load_from_dotenv: bool = False,
+        self, parse_config: Optional[GlobalConfigDictParserConfig] = None
     ) -> DictConfig:
+        if parse_config is None:
+            parse_config = GlobalConfigDictParserConfig()
+
         global_config_dict = (
             DictConfig(dict())
-            if skip_load_from_cli
+            if parse_config.skip_load_from_cli
             else self.parse_global_config_dict_from_cli()
         )
 
         # Command line overrides function input.
         initial_global_config_dict = OmegaConf.create(
-            initial_global_config_dict or dict()
+            parse_config.initial_global_config_dict or dict()
         )
         global_config_dict: DictConfig = OmegaConf.merge(
             initial_global_config_dict, global_config_dict
         )
 
         # Load the env.yaml config. We load it early so that people can use it to conveniently store config paths.
-        dotenv_path = dotenv_path or Path(PARENT_DIR) / "env.yaml"
+        dotenv_path = parse_config.dotenv_path or Path(PARENT_DIR) / "env.yaml"
         dotenv_extra_config = DictConfig({})
-        if dotenv_path.exists() and not skip_load_from_dotenv:
+        if dotenv_path.exists() and not parse_config.skip_load_from_dotenv:
             dotenv_extra_config = OmegaConf.load(dotenv_path)
 
         merged_config_for_config_paths = OmegaConf.merge(
@@ -195,16 +215,17 @@ class GlobalConfigDictParser(BaseModel):
         initial_global_config_dict: Optional[DictConfig] = None,
     ) -> DictConfig:
         return self.parse(
-            dotenv_path=None,
-            initial_global_config_dict=initial_global_config_dict,
-            skip_load_from_cli=True,
-            skip_load_from_dotenv=True,
+            parse_config=GlobalConfigDictParserConfig(
+                dotenv_path=None,
+                initial_global_config_dict=initial_global_config_dict,
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+            )
         )
 
 
 def get_global_config_dict(
-    dotenv_path: Optional[Path] = None,
-    initial_global_config_dict: Optional[DictConfig] = None,
+    global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
     global_config_dict_parser_cls: Type[
         GlobalConfigDictParser
     ] = GlobalConfigDictParser,
@@ -239,8 +260,7 @@ def get_global_config_dict(
         return global_config_dict
 
     global_config_dict = global_config_dict_parser_cls().parse(
-        dotenv_path=dotenv_path,
-        initial_global_config_dict=initial_global_config_dict,
+        global_config_dict_parser_config
     )
 
     _GLOBAL_CONFIG_DICT = global_config_dict

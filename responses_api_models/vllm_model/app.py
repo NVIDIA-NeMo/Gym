@@ -3,6 +3,8 @@ from typing import List, Tuple
 from time import time
 from uuid import uuid4
 
+from pydantic import BaseModel, Field
+
 from openai import BaseModel as OpenAIBaseModel
 
 from nemo_gym.base_responses_api_model import (
@@ -18,10 +20,9 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
-    NeMoGymResponseFunctionToolCallParam,
+    NeMoGymResponseFunctionToolCall,
     NeMoGymResponseReasoningItem,
     NeMoGymResponseOutputText,
-    NeMoGymResponseFunctionToolCall,
     NeMoGymFunctionDefinition,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionToolParam,
@@ -31,9 +32,8 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionAssistantMessageParam,
     NeMoGymChatCompletionMessageToolCallParam,
     NeMoGymChatCompletionToolMessageParam,
-    NeMoGymChatCompletionContentPartTextParam,
     NeMoGymChoice,
-    NeMoGymFunction,
+    NeMoGymChatCompletionMessageToolCallFunctionParam,
     NeMoGymSummary,
 )
 
@@ -132,6 +132,11 @@ class VLLMModel(SimpleResponsesAPIModel):
                 "return_tokens_as_token_ids": True,
             },
         )
+        assert not getattr(
+            openai_response.choices[0].message, "reasoning_content", None
+        ), (
+            "Please do not use a reasoning parser in vLLM! There is one source of truth for handling data (including reasoning), which is NeMo Gym!"
+        )
         openai_response: NeMoGymChatCompletion
 
         log_probs = openai_response.choices[0].logprobs.content
@@ -162,6 +167,31 @@ class VLLMModel(SimpleResponsesAPIModel):
         return NeMoGymChatCompletion(**chat_completion_dict)
 
 
+class VLLMConverterResponsesToChatCompletionsState(BaseModel):
+    messages: List[NeMoGymChatCompletionMessageParam] = Field(default_factory=list)
+
+    # We are mapping from Response input items to chat completions messages, which is many to one.
+    # Our state will accumulate the reasoning, chat, and tool calls for assistant messages.
+    content_buffer: str = ""  # Buffer for reasoning and chat
+    tool_calls_buffer: List[NeMoGymChatCompletionMessageToolCallParam] = Field(
+        default_factory=list
+    )
+
+    def flush_assistant(self) -> None:
+        if not (self.content_buffer or self.tool_calls_buffer):
+            return
+
+        self.messages.append(
+            NeMoGymChatCompletionAssistantMessageParam(
+                content=self.content_buffer or None,
+                role="assistant",
+                tool_calls=self.tool_calls_buffer,
+            )
+        )
+        self.content_buffer = ""
+        self.tool_calls_buffer = []
+
+
 class VLLMConverter:
     THINK_TAG_PATTERN = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 
@@ -188,7 +218,7 @@ class VLLMConverter:
         responses_create_params = responses_create_params.model_dump(exclude_unset=True)
 
         # Tracks messages including reasoning for each respective message type helper function
-        state: Tuple[List[NeMoGymChatCompletionMessageParam], str] = ([], "")
+        state = VLLMConverterResponsesToChatCompletionsState()
 
         # Input can be a string. Wrap in a ResponseInput-like
         response_input = responses_create_params["input"]
@@ -213,31 +243,17 @@ class VLLMConverter:
 
             match m["type"]:
                 case "message":
-                    state = self._format_message(m, state)
+                    self._format_message(m, state)
                 case "reasoning":
-                    state = self._format_reasoning(m, state)
+                    self._format_reasoning(m, state)
                 case "function_call":
-                    state = self._format_function_call(m, state)
+                    self._format_function_call(m, state)
                 case "function_call_output":
-                    state = self._format_function_call_output(m, state)
+                    self._format_function_call_output(m, state)
                 case _:  # pragma: no cover
                     raise NotImplementedError(f"Unsupported message type: {m}")
 
-        # No messages remaining, add reasoning message if present
-        messages, reasoning_text_buffer = state
-        if reasoning_text_buffer:
-            messages.append(
-                NeMoGymChatCompletionAssistantMessageParam(
-                    content=[
-                        NeMoGymChatCompletionAssistantMessageParam(
-                            type="text", text=reasoning_text_buffer
-                        )
-                    ],
-                    role="assistant",
-                    tool_calls=[],
-                )
-            )
-            reasoning_text_buffer = ""
+        state.flush_assistant()
 
         model = responses_create_params.pop("model", None)
         if model is not None:
@@ -256,50 +272,32 @@ class VLLMConverter:
                 )
 
         chat_completion_create_params = NeMoGymChatCompletionCreateParamsNonStreaming(
-            messages=messages,
+            messages=state.messages,
             **responses_create_params,
         )
 
         return chat_completion_create_params
 
-    def _create_tool_call_from_function_param(
-        self,
-        m: NeMoGymResponseFunctionToolCallParam,
-    ) -> NeMoGymChatCompletionMessageToolCallParam:
-        assert "call_id" in m
-        return NeMoGymChatCompletionMessageToolCallParam(
-            id=m["call_id"],
-            function=NeMoGymFunction(
-                arguments=m["arguments"],
-                name=m["name"],
-            ),
-            type="function",
-        )
-
     def _format_function_call_output(
         self,
         m: dict,
-        state: Tuple[List[NeMoGymChatCompletionMessageParam], str],
-    ) -> Tuple[List[NeMoGymChatCompletionMessageParam], str]:
-        messages, _ = state
+        state: VLLMConverterResponsesToChatCompletionsState,
+    ) -> None:
+        state.flush_assistant()
+
         assert "call_id" in m
-        converted = [
-            NeMoGymChatCompletionToolMessageParam(
-                content=m["output"],
-                role="tool",
-                tool_call_id=m["call_id"],
-            )
-        ]
-        messages.extend(converted)
-        return messages, _
+        converted = NeMoGymChatCompletionToolMessageParam(
+            content=m["output"],
+            role="tool",
+            tool_call_id=m["call_id"],
+        )
+        state.messages.append(converted)
 
     def _format_message(
         self,
         m: dict,
-        state: Tuple[List[NeMoGymChatCompletionMessageParam], str],
-    ) -> Tuple[List[NeMoGymChatCompletionMessageParam], str]:
-        messages, reasoning_text_buffer = state
-
+        state: VLLMConverterResponsesToChatCompletionsState,
+    ) -> None:
         content = m["content"]
 
         if isinstance(content, list) and m["role"] != "assistant":
@@ -313,35 +311,9 @@ class VLLMConverter:
                         )
 
         match m["role"]:
-            case "user":
-                converted = [
-                    NeMoGymChatCompletionUserMessageParam(
-                        content=content,
-                        role="user",
-                    )
-                ]
-            # TODO: Revisit this in case we need separate handling. Not all chat templates may support the 'developer' role.
-            case "system":
-                converted = [
-                    NeMoGymChatCompletionSystemMessageParam(
-                        content=content,
-                        role="system",
-                    )
-                ]
-            case "developer":
-                converted = [
-                    NeMoGymChatCompletionDeveloperMessageParam(
-                        content=content,
-                        role="developer",
-                    )
-                ]
             case "assistant":
                 # Handle reasoning
                 final_content = ""
-                if reasoning_text_buffer:
-                    final_content = reasoning_text_buffer
-                    reasoning_text_buffer = ""
-
                 if isinstance(m["content"], list):
                     content_str = " ".join(
                         [part.get("text", "") for part in m["content"]]
@@ -354,17 +326,31 @@ class VLLMConverter:
                         f"Expected m['content'] to be str or list[dict], but got {type(m['content']).__name__!r}: {m['content']!r}"
                     )
 
-                # Final concatenated message (may or may not contain reasoning)
+                converted = []
+                state.content_buffer += final_content
+            case "user":
+                state.flush_assistant()
                 converted = [
-                    NeMoGymChatCompletionAssistantMessageParam(
-                        content=[
-                            NeMoGymChatCompletionContentPartTextParam(
-                                type="text",
-                                text=final_content,
-                            )
-                        ],
-                        role="assistant",
-                        tool_calls=[],
+                    NeMoGymChatCompletionUserMessageParam(
+                        content=content,
+                        role="user",
+                    )
+                ]
+            # TODO: Revisit this in case we need separate handling. Not all chat templates may support the 'developer' role.
+            case "system":
+                state.flush_assistant()
+                converted = [
+                    NeMoGymChatCompletionSystemMessageParam(
+                        content=content,
+                        role="system",
+                    )
+                ]
+            case "developer":
+                state.flush_assistant()
+                converted = [
+                    NeMoGymChatCompletionDeveloperMessageParam(
+                        content=content,
+                        role="developer",
                     )
                 ]
             case _:  # pragma: no cover
@@ -372,15 +358,13 @@ class VLLMConverter:
                     f"Unrecognized role for message: `{m['role']}`"
                 )
 
-        messages.extend(converted)
-        return messages, reasoning_text_buffer
+        state.messages.extend(converted)
 
     def _format_reasoning(
         self,
         m: dict,
-        state: Tuple[List[NeMoGymChatCompletionMessageParam], str],
-    ) -> Tuple[List[NeMoGymChatCompletionMessageParam], str]:
-        _, reasoning_text_buffer = state
+        state: VLLMConverterResponsesToChatCompletionsState,
+    ) -> None:
         """
         Collects text from 'reasoning' messages and appends it to a buffer.
 
@@ -388,35 +372,25 @@ class VLLMConverter:
         cohesive block, later prepending it to a subsequent assistant message.
         See: https://gitlab-master.nvidia.com/bxyu/nemo-gym#reasoning-in-the-response-api
         """
-        # Reasoning: Init beginning of message <think></think> tags
         if "summary" in m and m["summary"]:
             texts = [s["text"] for s in m["summary"]]
-            reasoning_text_buffer += self._wrap_reasoning_in_think_tags(texts)
-        return _, reasoning_text_buffer
+            state.content_buffer += self._wrap_reasoning_in_think_tags(texts)
 
     def _format_function_call(
         self,
         m: dict,
-        state: Tuple[List[NeMoGymChatCompletionMessageParam], str],
-    ) -> Tuple[List[NeMoGymChatCompletionMessageParam], str]:
-        # Function Calls: Concat to a single message
-        messages, _ = state
-        if messages and messages[-1].get("role") == "assistant":
-            tool_call = self._create_tool_call_from_function_param(m)
-            if "tool_calls" in messages[-1] and len(messages[-1]["tool_calls"]) > 0:
-                messages[-1]["tool_calls"].append(tool_call)
-            else:
-                messages[-1]["tool_calls"] = [tool_call]
-        else:
-            # Non-Parallel tool calls, new message
-            new_assistant_message = NeMoGymChatCompletionAssistantMessageParam(
-                content=None,
-                role="assistant",
-                tool_calls=[self._create_tool_call_from_function_param(m)],
-            )
-            messages.append(new_assistant_message)
-
-        return messages, _
+        state: VLLMConverterResponsesToChatCompletionsState,
+    ) -> None:
+        assert "call_id" in m
+        tool_call = NeMoGymChatCompletionMessageToolCallParam(
+            id=m["call_id"],
+            function=NeMoGymChatCompletionMessageToolCallFunctionParam(
+                arguments=m["arguments"],
+                name=m["name"],
+            ),
+            type="function",
+        )
+        state.tool_calls_buffer.append(tool_call)
 
     # =======================================================
     # Chat Completion to Response

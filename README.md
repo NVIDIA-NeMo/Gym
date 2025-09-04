@@ -29,13 +29,13 @@ source $HOME/.local/bin/env
 
 Initialize environment
 ```bash
-uv venv --python 3.13
+uv venv --python 3.12
 source .venv/bin/activate
 ```
 
 Install NeMo Gym
 ```bash
-uv sync
+uv sync --extra dev
 ```
 
 
@@ -154,11 +154,10 @@ openai_model:
 ## Running servers
 In NeMo Gym, you run servers using the `ng_run` or `nemo_gym_run` bash commands. You can pass in configurations in three ways: as YAML config paths, as part of a local `env.yaml` file, or as part of command line args. For example, a run command might look like:
 ```bash
-config_paths="responses_api_agents/simple_agent/configs/simple_agent.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml,\
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
 resources_servers/simple_weather/configs/simple_weather.yaml"
 ng_run "+config_paths=[$config_paths]" \
-    +simple_agent.responses_api_agents.simple_agent.resources_server.name=simple_weather
+    +simple_weather_simple_agent.responses_api_agents.simple_agent.resources_server.name=simple_weather
 ```
 We provide our Yaml config files using the `config_paths` command line argument. We specify 3 configs, one for our simple agent, which relies on our simple model server and simple weather servers. By default, the simple agent doesn't point to any specific resources server (see the `resources_server... name: ???` above), so we provide this pointer via command line using Hydra syntax `simple_agent.responses_api_agents.simple_agent.resources_server.name=simple_weather`.
 
@@ -364,7 +363,7 @@ ng_init_resources_server +entrypoint=resources_servers/test_weather
 
 For the purposes of this example, we don't have any external dependencies, but if you want to add server-specific requirements, you would do so in the `requirements.txt` file. You can add requirements for external PyPI packages or Github repos.
 ```txt
--e nemo-gym @ ../../
+-e nemo-gym[dev] @ ../../
 {additional dependencies here}
 ```
 
@@ -484,7 +483,9 @@ ng_prepare_data "+config_paths=[${multineedle_config_paths}]" \
 ng_collect_rollouts +agent_name=multineedle_simple_agent \
     +input_jsonl_fpath=resources_servers/multineedle/data/example.jsonl \
     +output_jsonl_fpath=resources_servers/multineedle/data/example_rollouts.jsonl \
-    +limit=null
+    +limit=null \
+    +num_repeats=null \
+    +num_samples_in_parallel=null
 ```
 
 
@@ -551,7 +552,9 @@ Run rollout collection.
 ng_collect_rollouts +agent_name=simple_agent \
     +input_jsonl_fpath=data/multineedle_benchmark.jsonl \
     +output_jsonl_fpath=results/multineedle_rollout_collection.jsonl \
-    +limit=null
+    +limit=null \
+    +num_repeats=null \
+    +num_samples_in_parallel=null
 ```
 
 View the rollouts just collected!

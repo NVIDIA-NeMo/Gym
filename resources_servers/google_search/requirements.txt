@@ -1,2 +1,2 @@
--e nemo-gym @ ../../
+-e nemo-gym[dev] @ ../../
 trafilatura==2.0.0

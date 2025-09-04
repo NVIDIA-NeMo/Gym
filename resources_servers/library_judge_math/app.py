@@ -21,7 +21,7 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymEasyInputMessageParam,
+    NeMoGymEasyInputMessage,
 )
 from nemo_gym.config_types import ModelServerRef
 
@@ -29,6 +29,7 @@ from nemo_gym.config_types import ModelServerRef
 class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+    should_use_judge: bool = True
 
 
 class LibraryJudgeMathRunRequest(BaseRunRequest):
@@ -145,7 +146,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
         library_reward, extracted_answer = self._verify_answer_with_library(
             expected_answer, generated_answer
         )
-        if library_reward > 0.5:
+        if not self.config.should_use_judge or library_reward > 0.5:
             return library_reward, extracted_answer, library_reward, None
 
         judge_reward, judge_evaluations = await self._verify_answer_with_judge(
@@ -240,11 +241,11 @@ Example output: "My final verdict is different [[A!=B]]"."""
             question=question, first_answer=first_answer, second_answer=second_answer
         )
         responses_create_params.input = [
-            NeMoGymEasyInputMessageParam(
+            NeMoGymEasyInputMessage(
                 role="system",
                 content=self.JUDGE_SYSTEM_MESSAGE,
             ),
-            NeMoGymEasyInputMessageParam(
+            NeMoGymEasyInputMessage(
                 role="user",
                 content=judge_prompt,
             ),

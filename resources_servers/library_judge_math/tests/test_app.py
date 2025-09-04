@@ -3,9 +3,6 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 from math_verify.errors import TimeoutException
-from openai.types.responses import (
-    ResponseOutputRefusal,
-)
 from pydantic import ValidationError
 from pytest import approx, fixture, raises
 
@@ -22,6 +19,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
+    NeMoGymResponseOutputRefusal,
 )
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.server_utils import ServerClient
@@ -190,7 +188,7 @@ class TestApp:
             NeMoGymResponseOutputMessage(
                 id="refusal_finish",
                 content=[
-                    ResponseOutputRefusal(refusal="no response", type="refusal"),
+                    NeMoGymResponseOutputRefusal(refusal="no response", type="refusal"),
                 ],
                 role="assistant",
                 status="completed",
@@ -559,7 +557,7 @@ class TestApp:
         refusal_item = NeMoGymResponseOutputMessage(
             id="refusal_item",
             content=[
-                ResponseOutputRefusal(refusal="I refuse", type="refusal"),
+                NeMoGymResponseOutputRefusal(refusal="I refuse", type="refusal"),
             ],
             role="assistant",
             status="completed",

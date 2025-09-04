@@ -8,7 +8,7 @@ from nemo_gym.server_utils import ServerClient
 
 server_client = ServerClient.load_from_global_config()
 task = server_client.post(
-    server_name="simple_weather_agent",
+    server_name="simple_weather_simple_agent",
     url_path="/v1/responses",
     json=NeMoGymResponseCreateParamsNonStreaming(
         input=[
