@@ -1,0 +1,121 @@
+from typing import List
+
+
+from fastapi import FastAPI
+
+from nemo_gym.base_resources_server import (
+    SimpleResourcesServer,
+    BaseResourcesServerConfig,
+    BaseVerifyRequest,
+    BaseRunRequest,
+    BaseVerifyResponse,
+)
+
+from verifiable_instructions import instructions_registry
+
+
+class InstructionFollowingResourcesServerConfig(BaseResourcesServerConfig):
+    pass
+
+
+class InstructionFollowingRunRequest(BaseRunRequest):
+    id: int
+    instruction_id_list: List
+    prompt: str
+    kwargs: List
+
+
+class InstructionFollowingVerifyRequest(
+    InstructionFollowingRunRequest, BaseVerifyRequest
+):
+    pass
+
+
+class InstructionFollowingVerifyResponse(BaseVerifyResponse):
+    follow_all_instructions: bool
+    follow_instruction_list: List[bool]
+    kwargs: List
+    instruction_id_list: List
+    prompt: str
+
+
+class InstructionFollowingResourcesServer(SimpleResourcesServer):
+    config: InstructionFollowingResourcesServerConfig
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._ensure_nltk_data()
+
+    def _ensure_nltk_data(self):
+        """Download required NLTK data at startup."""
+        try:
+            import nltk
+
+            nltk.download("punkt_tab", quiet=True)
+        except ImportError:
+            # ifbench not available, skip
+            pass
+        except Exception as e:
+            print(f"NLTK setup warning: {e}")
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+
+        return app
+
+    async def verify(
+        self, body: InstructionFollowingVerifyRequest
+    ) -> InstructionFollowingVerifyResponse:
+        # Get the final text response from the last output item
+        final_response_text = ""
+        if body.response.output:
+            last_output = body.response.output[-1]
+            if hasattr(last_output, "content") and last_output.content:
+                # Extract text from the nested content structure
+                final_response_text = last_output.content[0].text
+
+        # Verify each instruction using the verifiable instructions
+        instruction_list = body.instruction_id_list
+        kwargs_list = body.kwargs
+        is_following_list = []
+
+        for instruction_id, kwargs in zip(instruction_list, kwargs_list):
+            try:
+                # Create instruction instance
+                instruction_cls = instructions_registry.INSTRUCTION_DICT[instruction_id]
+                instruction = instruction_cls(instruction_id)
+
+                # Handle None kwargs
+                if kwargs is None:
+                    kwargs = {}
+
+                # Filter out None values from kwargs
+                filtered_kwargs = {k: v for k, v in kwargs.items() if v is not None}
+
+                # Build the instruction description with the provided kwargs
+                instruction.build_description(**filtered_kwargs)
+
+                # Check if the response follows the instruction
+                if instruction.check_following(final_response_text):
+                    is_following_list.append(True)
+                else:
+                    is_following_list.append(False)
+
+            except Exception as e:
+                # If there's an error processing the instruction, mark as failed
+                print(f"Error processing instruction {instruction_id}: {e}")
+                is_following_list.append(False)
+
+        # Calculate overall success
+        follow_all_instructions = all(is_following_list) if is_following_list else False
+
+        return InstructionFollowingVerifyResponse(
+            **body.model_dump(),
+            reward=float(follow_all_instructions),
+            follow_all_instructions=follow_all_instructions,
+            follow_instruction_list=is_following_list,
+        )
+
+
+if __name__ == "__main__":
+    InstructionFollowingResourcesServer.run_webserver()
