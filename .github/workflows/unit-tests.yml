@@ -1,0 +1,54 @@
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+name: Unit tests
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  workflow_call:
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+
+      - name: Fail on draft PRs
+        if: github.event.pull_request.draft == true
+        run: |
+          echo "Failing on draft PR to enforce this check to run"
+          exit 1
+
+      - name: Setup for test
+        run: |
+          sudo apt-get update
+          # Curl is required for setup_nvidia.sh to download uv
+          # ca-certificates is there to support curl and mitigate `curl: (77) error setting certificate file: /etc/ssl/certs/ca-certificates.crt`
+          sudo apt-get install -y --no-install-recommends git curl ca-certificates
+          # The flow below should be used and synced with any Docker or container related flows. There is no script here to keep it 100% explicit.
+          # This is how we test and this is how you should use/consume.
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          uv venv --python 3.12
+          source .venv/bin/activate
+          uv sync --extra dev
+
+      - name: Test
+        run: |
+          source .venv/bin/activate
+          ng_dev_test
+          ng_test_all +fail_on_total_and_test_mismatch=true

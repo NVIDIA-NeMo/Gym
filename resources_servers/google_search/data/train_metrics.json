@@ -1,0 +1,36 @@
+{
+    "name": "train",
+    "type": "train",
+    "jsonl_fpath": "resources_servers/google_search/data/train.jsonl",
+    "gitlab_identifier": {
+        "dataset_name": "search_STEM_syn_gpqa_v1_2_difficulty_filtered",
+        "version": "0.0.1",
+        "artifact_fpath": "MCQA_syn_gpqa_1_2_difficulty_filtered_responses_api.jsonl"
+    },
+    "license": "Apache 2.0",
+    "Number of examples": 2907,
+    "Number of tools": {
+        "Total # non-null values": 2907,
+        "Average": 2.0,
+        "Min": 2.0,
+        "Max": 2.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 2907,
+        "Average": 282.97557619539043,
+        "Min": 207.0,
+        "Max": 439.0
+    },
+    "Number of turns": {
+        "Total # non-null values": 2907,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0
+    },
+    "Temperature": {
+        "Total # non-null values": 2907,
+        "Average": 0.5999999999999719,
+        "Min": 0.6,
+        "Max": 0.6
+    }
+}

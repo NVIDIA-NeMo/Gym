@@ -1,0 +1,36 @@
+{
+    "name": "validation",
+    "type": "validation",
+    "jsonl_fpath": "resources_servers/library_judge_math/data/aime24_validation.jsonl",
+    "gitlab_identifier": {
+        "dataset_name": "aime24",
+        "version": "0.0.1",
+        "artifact_fpath": "aime24.jsonl"
+    },
+    "license": "Apache 2.0",
+    "Number of examples": 30,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 30,
+        "Average": 80.46666666666667,
+        "Min": 42.0,
+        "Max": 149.0
+    },
+    "Number of turns": {
+        "Total # non-null values": 30,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0
+    }
+}

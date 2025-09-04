@@ -1,0 +1,36 @@
+{
+    "name": "train",
+    "type": "train",
+    "jsonl_fpath": "resources_servers/instruction_following/data/train.jsonl",
+    "gitlab_identifier": {
+        "dataset_name": "instruction_following",
+        "version": "0.0.1",
+        "artifact_fpath": "instruction_following.jsonl"
+    },
+    "license": "Apache 2.0",
+    "Number of examples": 46391,
+    "Number of tools": {
+        "Total # non-null values": 46391,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 46391,
+        "Average": 98.33702657843116,
+        "Min": 20.0,
+        "Max": 855.0
+    },
+    "Number of turns": {
+        "Total # non-null values": 46391,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0
+    }
+}

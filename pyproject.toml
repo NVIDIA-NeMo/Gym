@@ -12,15 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+################################################
+# Project
+################################################
+
 [project]
-name = "nemo-gym"
+name = "NeMo-Gym"
 dynamic = [
     "version",
     "readme",
 ]
-description = "NeMo project description"
+description = "NeMo Gym is a collection of verifiers."
 license = {file = "LICENSE"}
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 authors = [{ name = "NVIDIA", email = "nemo-toolkit@nvidia.com" }]
 maintainers = [{ name = "NVIDIA", email = "nemo-toolkit@nvidia.com" }]
 keywords = [
@@ -54,11 +58,70 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
     "Topic :: Utilities",
 ]
-dependencies = []
+dependencies = [
+    ########################################
+    # Every dependency listed here contains the following information:
+    # 1. Why this dependency is here in NeMo Gym
+    # 2. When this dependency was last updated
+    # 3. The license of the dependencies.
+    # 
+    # If you are adding or removing dependencies, please do your due diligience to update this information. PRs to main that modify dependencies will not be accepted unless this information is provided.
+    # The licenses of the below dependencies include: Apache 2.0, MIT, and BSD 3-Clause
+    # 
+    # By design, most (if not all) dependencies are unfrozen here to be easier to consume. The core pieces we need are server infra like FastAPI, etc.
+    ########################################
 
-[build-system]
-requires = ["setuptools>=61"]
-build-backend = "setuptools.build_meta"
+    # OpenAI: We leverage OpenAI Responses, Chat Completions, and Completions schemas for Nemo Gym abstractions. It may also be used to directly query endpoints.
+    # Updated Fri Jul 25, 2025 with openai==1.97.1
+    # License: Apache 2.0 https://github.com/openai/openai-python/blob/a8258744cbecf51321587fc870e8920bd2c07809/LICENSE
+    "openai<=1.97.1",
+
+    # tqdm: Use for progress tracking on batch operations.
+    # Updated Fri Jul 25, 2025 with tqdm==4.67.1
+    # License: MIT https://github.com/tqdm/tqdm/blob/0ed5d7f18fa3153834cbac0aa57e8092b217cc16/LICENCE
+    "tqdm",
+
+    # Pydantic: Used for typing and import/export.
+    # Updated Fri Jul 25, 2025 with pydantic==2.11.7 and pydantic_core==2.33.2
+    # pydantic license: MIT https://github.com/pydantic/pydantic/blob/1c79f0e4d3fbdb8b93e837175d7098e016117237/LICENSE
+    # pydantic_core license: MIT https://github.com/pydantic/pydantic-core/blob/17cbe988de187701dd21d5cd2306086ced5a8872/LICENSE
+    # devtools license: MIT https://github.com/samuelcolvin/python-devtools/blob/5022f1f6f1c55d871b1db208c9c1b2ab0df488fe/LICENSE
+    "pydantic",
+    "pydantic_core",
+    "devtools",
+
+    # FastAPI: Used for server infrastructure
+    # Updated Fri Jul 25, 2025 with fastapi==0.116.1
+    # License: MIT https://github.com/fastapi/fastapi/blob/6df50d40fe195adc026af169d6ebf298a1c183a5/LICENSE
+    "fastapi",
+
+    # Uvicorn: Used to serve FastAPI apps
+    # Updated Mon Jul 28, 2025 with uvicorn==0.35.0
+    # License: BSD 3-Clause https://github.com/encode/uvicorn/blob/c1144fd4f130388cffc05ee17b08747ce8c1be11/LICENSE.md
+    "uvicorn",
+
+    # UVLoop: a faster async event loop than Python's native asyncio. Used automatically by Uvicorn as an async loop backend.
+    # Updated Fri Aug 01, 2025 with uvloop==0.21.0
+    # License: Apache 2.0 and MIT https://github.com/MagicStack/uvloop/blob/96b7ed31afaf02800d779a395591da6a2c8c50e1/LICENSE-APACHE https://github.com/MagicStack/uvloop/blob/96b7ed31afaf02800d779a395591da6a2c8c50e1/LICENSE-MIT
+    "uvloop",
+
+    # Hydra and OmegaConf: CLI Configuration utilities
+    # Updated Tue Jul 29, 2025 with hydra-core==1.3.2 and omegaconf==2.3.0
+    # hydra-core license: MIT https://github.com/facebookresearch/hydra/blob/737fc3349ef3a4031035645f7e8c80be66a57042/LICENSE
+    # omegaconf license: BSD 3-Clause https://github.com/omry/omegaconf/blob/117f7de07285e4d1324b9229eaf873de15279457/LICENSE
+    "hydra-core",
+    "omegaconf",
+
+    # Gradio: For simple frontend interfaces for viewing data
+    # Updated Sun Aug 03, 2025 with gradio==5.16.0
+    # License: Apache 2.0 https://github.com/gradio-app/gradio/blob/2b4432edea8a62659e180e24eedd2bddbed08e77/LICENSE
+    "gradio",
+
+    # MLFlow: used for interacting with the Gitlab model registry
+    # Updated Tue Aug 05, 2025 with mlflow==3.2.0
+    # License: Apache 2.0 https://github.com/mlflow/mlflow/blob/1510ed1bc92d3a4258973005d64f64a43136e251/LICENSE.txt
+    "mlflow",
+]
 
 [dependency-groups]
 docs = [
@@ -69,30 +132,105 @@ docs = [
     "sphinx-autodoc2>=0.5.0",
     "sphinx-copybutton>=0.5.2",
 ]
-test = [
-    "coverage>=7.8.1",
-    "flake8>=7.2.0",
-    "pylint>=3.3.7",
-    "pytest>=8.3.5",
-    "pytest-mock>=3.14.0",
-    "pytest-runner>=6.0.1",
-]
+
+[project.optional-dependencies]
+# We include dev dependencies as an extra since technically each server module is a consumer (which means we cannot use dependency groups, which are intended to be within a project).
 dev = [
+    # Pre-commit: Used for pre-commit hooks.
+    # Updated: Thu Sep 04, 2025 with pre-commit==4.3.0
+    # License: MIT https://github.com/pre-commit/pre-commit/blob/e70b313c8017b2b6d7844e91795c9d41b9ceb9fb/LICENSE
     "pre-commit>=3.6.0",
-    "ruff>=0.9.9",
+
+    # Mypy: Used for Python type checking.
+    # Updated: Thu Sep 04, 2025 with mypy==1.17.1
+    # License: MIT https://github.com/python/mypy/blob/645b421fa23a3f0d63f651059fa1e8318a6f214a/LICENSE
     "mypy>=1.8.0",
+
+    # Ruff: Used for Python code formatting and linting.
+    # Updated: Fri Jul 25, 2025 with ruff==0.12.5
+    # License: MIT https://github.com/astral-sh/ruff/blob/21ac16db85452c2c196d3b9cc61fb27b7b81f3f7/LICENSE
+    "ruff",
+
+    # Coverage: Used for Python code coverage.
+    # Updated: Fri Jul 25, 2025 with coverage[toml]==7.10.0
+    # License: Apache 2.0 https://github.com/nedbat/coveragepy/blob/a2baa66b55ca71ea6b35009f2b4a51ff8fda1753/LICENSE.txt
+    "coverage[toml]",
+
+    # Pytest: Used for Python test orchestration.
+    # Updated: Fri Jul 25, 2025 with pytest-cov==5.0.0, pytest-xdist==3.6.1, pytest==7.4.3, and pytest-asyncio==0.21.1
+    # pytest-cov license: MIT https://github.com/pytest-dev/pytest-cov/blob/9d6d57c78627d4811fc473610d61a0b7225e4b40/LICENSE
+    # pytest-xdist license: MIT https://github.com/pytest-dev/pytest-xdist/blob/2f1d80cb9d83ea2d91bba741ef5deffa9f8f85bf/LICENSE
+    # pytest license: MIT https://github.com/pytest-dev/pytest/blob/5989efe3efec31a9d14f550d89903b6311dfc828/LICENSE
+    # pytest-asyncio: Apache 2.0 https://github.com/pytest-dev/pytest-asyncio/blob/66b9f8e31f5f3c3bcf124a52f316516e70c90b46/LICENSE
+    "pytest-cov",
+    "pytest-xdist",
+    "pytest",
+    "pytest-asyncio",
+
+    # Requests-mock: Used in pytest asyncio
+    # Updated: Fri Jul 25, 2025 and requests-mock==1.12.1
+    # License: Apache 2.0 https://github.com/jamielennox/requests-mock/blob/9742d02a8cad17276dbeba7b300b6d27ae1b6fb1/LICENSE
+    "requests-mock",
 ]
 
-[tool.setuptools]
-packages = ["nemo_gym"]
+[build-system]
+requires = ["setuptools>=61", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
 
 [tool.setuptools.dynamic]
 version = {attr = "nemo_gym.__version__"}
 readme = {file = "README.md", content-type = "text/markdown"}
 
+[tool.distutils.egg_info]
+egg_base = "cache"
+
 [project.urls]
 Download = "https://github.com/NVIDIA-NeMo/NeMo-Gym/releases"
 Homepage = "https://github.com/NVIDIA-NeMo/NeMo-Gym"
+
+[project.scripts]
+# Run/test scripts for servers.
+nemo_gym_run = "nemo_gym.cli:run"
+ng_run = "nemo_gym.cli:run"
+nemo_gym_test = "nemo_gym.cli:test"
+ng_test = "nemo_gym.cli:test"
+nemo_gym_test_all = "nemo_gym.cli:test_all"
+ng_test_all = "nemo_gym.cli:test_all"
+
+# Dataset viewing
+nemo_gym_viewer = "nemo_gym.dataset_viewer:main"
+ng_viewer = "nemo_gym.dataset_viewer:main"
+
+# Development convenience aliases.
+nemo_gym_dev_test = "nemo_gym.cli:dev_test"
+ng_dev_test = "nemo_gym.cli:dev_test"
+nemo_gym_init_resources_server = "nemo_gym.cli:init_resources_server"
+ng_init_resources_server = "nemo_gym.cli:init_resources_server"
+
+# Rollout collection
+nemo_gym_collect_rollouts = "nemo_gym.rollout_collection:collect_rollouts"
+ng_collect_rollouts = "nemo_gym.rollout_collection:collect_rollouts"
+
+# Dataset management
+nemo_gym_upload_dataset_to_gitlab = "nemo_gym.gitlab_utils:upload_jsonl_dataset_cli"
+ng_upload_dataset_to_gitlab = "nemo_gym.gitlab_utils:upload_jsonl_dataset_cli"
+nemo_gym_download_dataset_from_gitlab = "nemo_gym.gitlab_utils:download_jsonl_dataset_cli"
+ng_download_dataset_from_gitlab = "nemo_gym.gitlab_utils:download_jsonl_dataset_cli"
+nemo_gym_prepare_data = "nemo_gym.train_data_utils:prepare_data"
+ng_prepare_data = "nemo_gym.train_data_utils:prepare_data"
+
+# Configuration utils
+nemo_gym_dump_config = "nemo_gym.cli:dump_config"
+ng_dump_config = "nemo_gym.cli:dump_config"
+
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["resources_servers", "responses_api_agents", "responses_api_models", "nemo_gym"]
+
+################################################
+# Testing
+################################################
 
 [tool.pytest.ini_options]
 # durations=0 will display all tests execution time, sorted in ascending order starting from from the slowest one.
@@ -117,6 +255,11 @@ norecursedirs = [
     "venv",
     "{arch}"
 ]
+log_cli = true
+log_cli_level = "INFO"
+cache_dir = "cache/.pytest_cache"
+filterwarnings = "ignore::DeprecationWarning"
+asyncio_mode = "auto"
 # markers to select tests, use `pytest --markers` to see all available markers, `pytest -m "<marker>"` to select tests
 markers = [
     "unit: marks unit test, i.e. testing a single, well isolated functionality (deselect with '-m \"not unit\"')",
@@ -128,14 +271,54 @@ markers = [
     "pleasefixme: marks tests that are broken and need fixing",
 ]
 
-[tool.ruff]
+[tool.coverage.run]
+command_line = "-m pytest --durations=10"
+omit = [
+    "tests/*",
+    "temp*",
+    "results/*",
+    "/tmp/*",
+]
+data_file = "results/.coverage"
+concurrency = ["thread", "multiprocessing"]
 
+[tool.coverage.paths]
+source = ["nemo_gym/", "/workspace/nemo_gym"]
+
+[tool.coverage.html]
+directory = "results/htmlcov"
+
+[tool.coverage.report]
+skip_covered = true
+sort = "miss"
+fail_under = 95.0
+exclude_also = [
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+    "pass",
+]
+omit = []
+
+################################################
+# Linting, formatting, and QOL
+################################################
+[tool.ruff]
 # Match black's line length
 line-length = 119
-target-version = "py310"
+target-version = "py312"
 
+cache-dir = "cache/.ruff_cache"
 # Exclude common directories that shouldn't be linted
 exclude = [
+    "resources",
     ".git",
     ".github",
     ".venv",
@@ -147,12 +330,10 @@ exclude = [
     "docs/source/conf.py",
     "setup.py",
 ]
-
 # Files to completely ignore
 extend-exclude = [
     "*.ipynb",
 ]
-
 [tool.ruff.lint]
 # Configure imports sorting to match isort
 select = [
@@ -163,8 +344,6 @@ select = [
     "F821",  # undefined name
     "E266",  # too many leading '#' for block comment
     "I",     # isort
-    "D101",  # docstring
-    "D103",
 ]
 
 # Additional rules can be added here
@@ -190,10 +369,3 @@ lines-after-imports = 2
 quote-style = "double"
 skip-magic-trailing-comma = false
 line-ending = "auto"
-
-[tool.coverage.run]
-concurrency = ["thread", "multiprocessing"]
-omit = ["/tmp/*"]
-
-[tool.coverage.paths]
-source = ["nemo_gym/", "/workspace/nemo_gym"]

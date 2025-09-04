@@ -1,0 +1,26 @@
+mcqa:
+  resources_servers:
+    mcqa:
+      entrypoint: app.py
+mcqa_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: mcqa
+      model_server:
+        type: responses_api_models
+        name: openai_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/mcqa/data/train.jsonl
+        gitlab_identifier:
+          dataset_name: syn_gpqa_v1.1
+          version: 1.1.2
+          artifact_fpath: filtered_decontaminated.jsonl
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/mcqa/data/example.jsonl
