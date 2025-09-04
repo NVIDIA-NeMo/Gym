@@ -1,0 +1,4 @@
+-e nemo-gym @ ../../
+numpy
+scipy
+pandas

@@ -1,0 +1,32 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/workbench/data/example.jsonl",
+    "gitlab_identifier": null,
+    "license": null,
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 5,
+        "Average": 27.0,
+        "Min": 27.0,
+        "Max": 27.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 1732.2,
+        "Min": 1726.0,
+        "Max": 1737.0
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0
+    },
+    "Temperature": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0
+    }
+}

@@ -1,0 +1,36 @@
+{
+    "name": "train",
+    "type": "train",
+    "jsonl_fpath": "resources_servers/mcqa/data/train.jsonl",
+    "gitlab_identifier": {
+        "dataset_name": "syn_gpqa_v1.1",
+        "version": "1.1.2",
+        "artifact_fpath": "filtered_decontaminated.jsonl"
+    },
+    "license": "Apache 2.0",
+    "Number of examples": 27568,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 27568,
+        "Average": 159.00163232733604,
+        "Min": 36.0,
+        "Max": 732.0
+    },
+    "Number of turns": {
+        "Total # non-null values": 27568,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0
+    }
+}
