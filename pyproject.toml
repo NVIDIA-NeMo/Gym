@@ -1,13 +1,63 @@
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 ################################################
 # Project
 ################################################
 
 [project]
 name = "NeMo-Gym"
-version = "0.0.1"
-license = {text = ""}
+dynamic = [
+    "version",
+    "readme",
+]
+description = "NeMo Gym is a collection of verifiers."
+license = {file = "LICENSE"}
 requires-python = ">=3.12"
-readme = {file = "README.md", content-type = "text/markdown"}
+authors = [{ name = "NVIDIA", email = "nemo-toolkit@nvidia.com" }]
+maintainers = [{ name = "NVIDIA", email = "nemo-toolkit@nvidia.com" }]
+keywords = [
+    "NLP",
+    "NeMo",
+    "deep",
+    "gpu",
+    "language",
+    "learning",
+    "machine",
+    "nvidia",
+    "pytorch",
+    "torch",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Utilities",
+]
 dependencies = [
     ########################################
     # Every dependency listed here contains the following information:
@@ -77,6 +127,16 @@ dependencies = [
 [project.optional-dependencies]
 # We include dev dependencies as an extra since technically each server module is a consumer (which means we cannot use dependency groups, which are intended to be within a project).
 dev = [
+    # Pre-commit: Used for pre-commit hooks.
+    # Updated: Thu Sep 04, 2025 with pre-commit==4.3.0
+    # License: MIT https://github.com/pre-commit/pre-commit/blob/e70b313c8017b2b6d7844e91795c9d41b9ceb9fb/LICENSE
+    "pre-commit>=3.6.0",
+
+    # Mypy: Used for Python type checking.
+    # Updated: Thu Sep 04, 2025 with mypy==1.17.1
+    # License: MIT https://github.com/python/mypy/blob/645b421fa23a3f0d63f651059fa1e8318a6f214a/LICENSE
+    "mypy>=1.8.0",
+
     # Ruff: Used for Python code formatting and linting.
     # Updated: Fri Jul 25, 2025 with ruff==0.12.5
     # License: MIT https://github.com/astral-sh/ruff/blob/21ac16db85452c2c196d3b9cc61fb27b7b81f3f7/LICENSE
