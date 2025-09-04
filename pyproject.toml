@@ -272,8 +272,6 @@ markers = [
 ]
 
 [tool.coverage.run]
-[tool.coverage.paths]
-source = ["nemo_gym/", "/workspace/nemo_gym"]
 command_line = "-m pytest --durations=10"
 omit = [
     "tests/*",
@@ -283,6 +281,9 @@ omit = [
 ]
 data_file = "results/.coverage"
 concurrency = ["thread", "multiprocessing"]
+
+[tool.coverage.paths]
+source = ["nemo_gym/", "/workspace/nemo_gym"]
 
 [tool.coverage.html]
 directory = "results/htmlcov"
