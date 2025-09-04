@@ -43,7 +43,6 @@ jobs:
           # The flow below should be used and synced with any Docker or container related flows. There is no script here to keep it 100% explicit.
           # This is how we test and this is how you should use/consume.
           curl -LsSf https://astral.sh/uv/install.sh | sh
-          source $HOME/.local/bin/env
           uv venv --python 3.12
           source .venv/bin/activate
           uv sync --extra dev
