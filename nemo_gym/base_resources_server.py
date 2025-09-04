@@ -13,16 +13,14 @@
 # limitations under the License.
 from abc import abstractmethod
 
+from fastapi import FastAPI
 from pydantic import BaseModel
 
-from fastapi import FastAPI
-
-from nemo_gym.server_utils import BaseRunServerConfig, BaseServer, SimpleServer
-
 from nemo_gym.openai_utils import (
-    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.server_utils import BaseRunServerConfig, BaseServer, SimpleServer
 
 
 class BaseResourcesServerConfig(BaseRunServerConfig):

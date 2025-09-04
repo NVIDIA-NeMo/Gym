@@ -13,10 +13,11 @@
 # limitations under the License.
 import argparse
 import json
-import random
 import math
-from datasets import load_dataset, Dataset
+import random
+
 import numpy as np
+from datasets import Dataset, load_dataset
 
 
 def multiply(a: float, b: float) -> float:
@@ -124,9 +125,7 @@ sin_fc = {
     "description": "The sine of an angle in radians.",
     "parameters": {
         "type": "object",
-        "properties": {
-            "radians": {"type": "number", "description": "Angle in radians"}
-        },
+        "properties": {"radians": {"type": "number", "description": "Angle in radians"}},
         "required": ["radians"],
     },
     "returns": {"type": "number", "description": "The cosine of the angle (not sine)"},
@@ -137,9 +136,7 @@ cos_fc = {
     "description": "The cosine of an angle in radians.",
     "parameters": {
         "type": "object",
-        "properties": {
-            "radians": {"type": "number", "description": "Angle in radians"}
-        },
+        "properties": {"radians": {"type": "number", "description": "Angle in radians"}},
         "required": ["radians"],
     },
     "returns": {"type": "number", "description": "The sine of the angle (not cosine)"},
@@ -348,18 +345,14 @@ def get_depth_n_tree(n, values):
             values.append(tree_value)
         elif num_branches == 2:
             if random.random() < 0.5:
-                left_branch_str, left_branch_gt_str, left_branch_value = (
-                    get_depth_n_tree(n - 1, values)
-                )
-                right_branch_str, right_branch_gt_str, right_branch_value = (
-                    get_depth_n_tree(random.choice(range(1, n)), values)
+                left_branch_str, left_branch_gt_str, left_branch_value = get_depth_n_tree(n - 1, values)
+                right_branch_str, right_branch_gt_str, right_branch_value = get_depth_n_tree(
+                    random.choice(range(1, n)), values
                 )
             else:
-                left_branch_str, left_branch_gt_str, left_branch_value = (
-                    get_depth_n_tree(n - 1, values)
-                )
-                right_branch_str, right_branch_gt_str, right_branch_value = (
-                    get_depth_n_tree(random.choice(range(1, n)), values)
+                left_branch_str, left_branch_gt_str, left_branch_value = get_depth_n_tree(n - 1, values)
+                right_branch_str, right_branch_gt_str, right_branch_value = get_depth_n_tree(
+                    random.choice(range(1, n)), values
                 )
             tree_str, gt_str = repr_fn(
                 left_branch_str,
@@ -398,19 +391,11 @@ def make_sample(breadth, depth):
             values = []
             sample = get_depth_n_tree(depth, values)
             # print(sample[2])
-            if (
-                np.iscomplex(sample[2])
-                or isinstance(sample[2], complex)
-                or not isinstance(sample[2], (float, int))
-            ):
+            if np.iscomplex(sample[2]) or isinstance(sample[2], complex) or not isinstance(sample[2], (float, int)):
                 raise NotImplementedError
             breadth_samples.append(sample)
             for value in values:
-                if (
-                    np.iscomplex(value)
-                    or isinstance(value, complex)
-                    or not isinstance(value, (float, int))
-                ):
+                if np.iscomplex(value) or isinstance(value, complex) or not isinstance(value, (float, int)):
                     raise NotImplementedError
             all_values.extend(values)
         except Exception as e:
@@ -433,9 +418,7 @@ def make_sample(breadth, depth):
     prompt = format_prompt(tree_strs)
     solutions = tree_values
 
-    problem = json.dumps(
-        {"messages": [{"role": "user", "content": prompt}], "tools": PROBLEM_TOOLS}
-    )
+    problem = json.dumps({"messages": [{"role": "user", "content": prompt}], "tools": PROBLEM_TOOLS})
 
     return {
         "environment_name": ENV_NAME,
@@ -471,9 +454,7 @@ def make_random_data(depths, breadths, num_rows_per_subset):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Generate a dataset and push to Hugging Face Hub."
-    )
+    parser = argparse.ArgumentParser(description="Generate a dataset and push to Hugging Face Hub.")
     parser.add_argument(
         "--output_dataset",
         type=str,

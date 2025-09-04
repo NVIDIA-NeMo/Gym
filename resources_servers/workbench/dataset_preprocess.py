@@ -11,14 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import pandas as pd
+import argparse
 import json
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
-from copy import deepcopy
+
+import pandas as pd
 from datasets import load_dataset
+
 from resources_servers.workbench.utils import get_tools
-import argparse
 
 
 @dataclass
@@ -93,9 +95,7 @@ Below is a reasoning template to guide your thinking process as you solve the pr
                 }
             )
 
-            ground_truth = json.loads(
-                d["solution"]
-            )  # json loads ground truths/solutions
+            ground_truth = json.loads(d["solution"])  # json loads ground truths/solutions
 
             processed_samples.append(
                 self.WorkbenchSample(
@@ -109,9 +109,7 @@ Below is a reasoning template to guide your thinking process as you solve the pr
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Generate samples for Workbench environment."
-    )
+    parser = argparse.ArgumentParser(description="Generate samples for Workbench environment.")
     parser.add_argument(
         "--prompt",
         type=str,

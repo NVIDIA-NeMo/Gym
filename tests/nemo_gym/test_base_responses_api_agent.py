@@ -11,14 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from unittest.mock import MagicMock
+
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgent,
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.server_utils import ServerClient
-
-from unittest.mock import MagicMock
 
 
 class TestBaseResponsesAPIAgent:
@@ -36,7 +36,5 @@ class TestBaseResponsesAPIAgent:
             async def run(self, body=...):
                 raise NotImplementedError
 
-        agent = TestSimpleResponsesAPIAgent(
-            config=config, server_client=MagicMock(spec=ServerClient)
-        )
+        agent = TestSimpleResponsesAPIAgent(config=config, server_client=MagicMock(spec=ServerClient))
         agent.setup_webserver()

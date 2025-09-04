@@ -13,10 +13,10 @@
 # limitations under the License.
 from unittest.mock import MagicMock
 
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.openai_utils import NeMoGymResponse
-
 from app import MCQAResourcesServer, MCQAResourcesServerConfig, MCQAVerifyRequest
+
+from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.server_utils import ServerClient
 
 
 class TestApp:
@@ -103,9 +103,7 @@ class TestApp:
             tools=[],
         )
 
-        verify_request_boxed = verify_request.model_copy(
-            update={"response": response_boxed}
-        )
+        verify_request_boxed = verify_request.model_copy(update={"response": response_boxed})
         result2 = await server.verify(verify_request_boxed)
         assert result2.reward == 1.0
 

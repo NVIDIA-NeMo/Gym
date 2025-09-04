@@ -11,22 +11,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.openai_utils import (
-    NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymEasyInputMessage,
-)
+from unittest.mock import MagicMock
 
+from fastapi.testclient import TestClient
+from pytest import MonkeyPatch
+
+from nemo_gym.openai_utils import (
+    NeMoGymEasyInputMessage,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.server_utils import ServerClient
 from responses_api_agents.simple_agent.app import (
+    ModelServerRef,
+    ResourcesServerRef,
     SimpleAgent,
     SimpleAgentConfig,
-    ResourcesServerRef,
-    ModelServerRef,
 )
-from fastapi.testclient import TestClient
-
-from unittest.mock import MagicMock
-from pytest import MonkeyPatch
 
 
 class TestApp:
@@ -94,19 +94,13 @@ class TestApp:
         server.server_client.post.return_value = dotjson_mock
 
         # No model provided should use the one from the config
-        res_no_model = client.post(
-            "/v1/responses", json={"input": [{"role": "user", "content": "hello"}]}
-        )
+        res_no_model = client.post("/v1/responses", json={"input": [{"role": "user", "content": "hello"}]})
         assert res_no_model.status_code == 200
         server.server_client.post.assert_called_with(
             server_name="my server name",
             url_path="/v1/responses",
             json=NeMoGymResponseCreateParamsNonStreaming(
-                input=[
-                    NeMoGymEasyInputMessage(
-                        content="hello", role="user", type="message"
-                    )
-                ]
+                input=[NeMoGymEasyInputMessage(content="hello", role="user", type="message")]
             ),
         )
 

@@ -13,18 +13,16 @@
 # limitations under the License.
 from typing import List
 
-
 from fastapi import FastAPI
+from verifiable_instructions import instructions_registry
 
 from nemo_gym.base_resources_server import (
-    SimpleResourcesServer,
     BaseResourcesServerConfig,
-    BaseVerifyRequest,
     BaseRunRequest,
+    BaseVerifyRequest,
     BaseVerifyResponse,
+    SimpleResourcesServer,
 )
-
-from verifiable_instructions import instructions_registry
 
 
 class InstructionFollowingResourcesServerConfig(BaseResourcesServerConfig):
@@ -38,9 +36,7 @@ class InstructionFollowingRunRequest(BaseRunRequest):
     kwargs: List
 
 
-class InstructionFollowingVerifyRequest(
-    InstructionFollowingRunRequest, BaseVerifyRequest
-):
+class InstructionFollowingVerifyRequest(InstructionFollowingRunRequest, BaseVerifyRequest):
     pass
 
 
@@ -76,9 +72,7 @@ class InstructionFollowingResourcesServer(SimpleResourcesServer):
 
         return app
 
-    async def verify(
-        self, body: InstructionFollowingVerifyRequest
-    ) -> InstructionFollowingVerifyResponse:
+    async def verify(self, body: InstructionFollowingVerifyRequest) -> InstructionFollowingVerifyResponse:
         # Get the final text response from the last output item
         final_response_text = ""
         if body.response.output:

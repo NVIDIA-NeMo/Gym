@@ -11,24 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any, Type, Optional
-
+import json
 from abc import abstractmethod
-
 from os import getenv
+from threading import Thread
+from typing import Any, Optional, Type
 
 import requests
-from requests.exceptions import ConnectionError
-
-from threading import Thread
-
-import json
-
-from omegaconf import DictConfig, OmegaConf
-
-from pydantic import BaseModel, ConfigDict
-
-from httpx import Limits, AsyncClient, AsyncHTTPTransport, Response
+import uvicorn
+from fastapi import FastAPI
+from httpx import AsyncClient, AsyncHTTPTransport, Limits, Response
 from httpx._types import (
     HeaderTypes,
     QueryParamTypes,
@@ -36,20 +28,19 @@ from httpx._types import (
     RequestData,
     RequestFiles,
 )
-
-from fastapi import FastAPI
-
-import uvicorn
+from omegaconf import DictConfig, OmegaConf
+from pydantic import BaseModel, ConfigDict
+from requests.exceptions import ConnectionError
 
 from nemo_gym.config_types import (
-    BaseServerConfig,
     BaseRunServerConfig,
+    BaseServerConfig,
 )
 from nemo_gym.global_config import (
-    NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     HEAD_SERVER_KEY_NAME,
-    get_global_config_dict,
+    NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     get_first_server_config_dict,
+    get_global_config_dict,
 )
 
 
@@ -90,9 +81,7 @@ class ServerClient(BaseModel):
         return config
 
     @classmethod
-    def load_from_global_config(
-        cls, head_server_config: Optional[BaseServerConfig] = None
-    ) -> "ServerClient":
+    def load_from_global_config(cls, head_server_config: Optional[BaseServerConfig] = None) -> "ServerClient":
         if head_server_config is None:
             head_server_config = cls.load_head_server_config()
 
@@ -110,9 +99,7 @@ class ServerClient(BaseModel):
         global_config_dict_yaml = response.content.decode()
         global_config_dict = OmegaConf.create(json.loads(global_config_dict_yaml))
 
-        return cls(
-            head_server_config=head_server_config, global_config_dict=global_config_dict
-        )
+        return cls(head_server_config=head_server_config, global_config_dict=global_config_dict)
 
     async def get(
         self,
@@ -133,9 +120,7 @@ class ServerClient(BaseModel):
             The URL path in the server you are trying to call e.g. "/v1/responses".
 
         """
-        server_config_dict = get_first_server_config_dict(
-            self.global_config_dict, server_name
-        )
+        server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
         return await GLOBAL_HTTPX_CLIENT.get(
             f"http://{server_config_dict.host}:{server_config_dict.port}{url_path}",
             params=params,
@@ -166,17 +151,13 @@ class ServerClient(BaseModel):
             The URL path in the server you are trying to call e.g. "/v1/responses".
 
         """
-        server_config_dict = get_first_server_config_dict(
-            self.global_config_dict, server_name
-        )
+        server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
         return await GLOBAL_HTTPX_CLIENT.post(
             f"http://{server_config_dict.host}:{server_config_dict.port}{url_path}",
             content=content,
             data=data,
             files=files,
-            json=json.model_dump(exclude_unset=True)
-            if isinstance(json, BaseModel)
-            else json,
+            json=json.model_dump(exclude_unset=True) if isinstance(json, BaseModel) else json,
             params=params,
             headers=headers,
             **kwargs,
@@ -194,13 +175,9 @@ class BaseServer(BaseModel):
     def load_config_from_global_config(cls) -> "BaseRunServerConfig":
         config_path_str = getenv(NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME)
         global_config_dict = get_global_config_dict()
-        server_config_dict = get_first_server_config_dict(
-            global_config_dict, config_path_str
-        )
+        server_config_dict = get_first_server_config_dict(global_config_dict, config_path_str)
 
-        server_config_cls: Type[BaseRunServerConfig] = cls.model_fields[
-            "config"
-        ].annotation
+        server_config_cls: Type[BaseRunServerConfig] = cls.model_fields["config"].annotation
         server_config = server_config_cls.model_validate(server_config_dict)
 
         return server_config

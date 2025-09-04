@@ -11,21 +11,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import re
 from typing import Optional
-from pydantic import BaseModel
-import requests
-import json
-from fastapi import FastAPI
-import trafilatura
 
+import requests
+import trafilatura
+from fastapi import FastAPI
+from pydantic import BaseModel
 
 from nemo_gym.base_resources_server import (
-    BaseRunRequest,
-    SimpleResourcesServer,
     BaseResourcesServerConfig,
+    BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    SimpleResourcesServer,
 )
 
 
@@ -114,13 +114,9 @@ class GoogleSearchResourcesServer(SimpleResourcesServer):
             json_str = json.dumps(response.json())
             return BaseGetSearchQueryResponse(search_results=json_str)
         except Exception as e:
-            return BaseGetSearchQueryResponse(
-                search_results=f"Error: Unexpected error - {str(e)}"
-            )
+            return BaseGetSearchQueryResponse(search_results=f"Error: Unexpected error - {str(e)}")
 
-    async def browse(
-        self, body: BaseGetPageContentRequest
-    ) -> BaseGetPageContentResponse:
+    async def browse(self, body: BaseGetPageContentRequest) -> BaseGetPageContentResponse:
         try:
             html = trafilatura.fetch_url(body.url)
             if html:
@@ -134,13 +130,9 @@ class GoogleSearchResourcesServer(SimpleResourcesServer):
             else:
                 return BaseGetPageContentResponse(page_content="No HTML found")
         except Exception as e:
-            return BaseGetPageContentResponse(
-                page_content=f"Error: Unexpected error = {str(e)}"
-            )
+            return BaseGetPageContentResponse(page_content=f"Error: Unexpected error = {str(e)}")
 
-    async def verify(
-        self, body: GoogleSearchVerifyRequest
-    ) -> GoogleSearchVerifyResponse:
+    async def verify(self, body: GoogleSearchVerifyRequest) -> GoogleSearchVerifyResponse:
         expected_answer = body.expected_answer
         response_text = _extract_last_assistant_text(body)
         parsed_option = box_parser(response_text)
@@ -148,9 +140,7 @@ class GoogleSearchResourcesServer(SimpleResourcesServer):
             reward = 1.0
         else:
             reward = 0.0
-        return GoogleSearchVerifyResponse(
-            **body.model_dump(), reward=reward, parsed_option=parsed_option
-        )
+        return GoogleSearchVerifyResponse(**body.model_dump(), reward=reward, parsed_option=parsed_option)
 
 
 if __name__ == "__main__":

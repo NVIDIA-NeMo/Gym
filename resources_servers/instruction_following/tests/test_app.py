@@ -11,32 +11,25 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.base_resources_server import NeMoGymResponse
+import asyncio
+from unittest.mock import MagicMock
 
+from nemo_gym.base_resources_server import NeMoGymResponse
+from nemo_gym.server_utils import ServerClient
 from resources_servers.instruction_following.app import (
     InstructionFollowingResourcesServer,
     InstructionFollowingResourcesServerConfig,
     InstructionFollowingVerifyRequest,
 )
 
-from unittest.mock import MagicMock
-import asyncio
-
 
 class TestApp:
     def _create_server(self):
         """Helper to create server instance."""
-        config = InstructionFollowingResourcesServerConfig(
-            host="0.0.0.0", port=8080, entrypoint=""
-        )
-        return InstructionFollowingResourcesServer(
-            config=config, server_client=MagicMock(spec=ServerClient)
-        )
+        config = InstructionFollowingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="")
+        return InstructionFollowingResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
-    def _create_real_request(
-        self, instruction_ids, prompt, kwargs, response_content, request_id=1
-    ):
+    def _create_real_request(self, instruction_ids, prompt, kwargs, response_content, request_id=1):
         """Helper to create real request with NeMoGymResponse."""
         # Create real NeMoGymResponse object
         response = NeMoGymResponse(
@@ -74,9 +67,7 @@ class TestApp:
             response=response,
         )
 
-    def _run_verify_test(
-        self, real_request, expected_follow_all, expected_reward, expected_follow_list
-    ):
+    def _run_verify_test(self, real_request, expected_follow_all, expected_reward, expected_follow_list):
         """Helper to run verify method and check results."""
         server = self._create_server()
 
@@ -94,9 +85,7 @@ class TestApp:
             port=8080,
             entrypoint="",
         )
-        InstructionFollowingResourcesServer(
-            config=config, server_client=MagicMock(spec=ServerClient)
-        )
+        InstructionFollowingResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
     def test_instruction_following_imports(self) -> None:
         """Test that we can import and use the verifiable-instructions library."""
@@ -104,9 +93,7 @@ class TestApp:
 
         # Test that we can access the instruction dictionary
         assert "detectable_format:title" in instructions_registry.INSTRUCTION_DICT
-        assert (
-            "length_constraints:number_words" in instructions_registry.INSTRUCTION_DICT
-        )
+        assert "length_constraints:number_words" in instructions_registry.INSTRUCTION_DICT
 
         # Test that we can create an instruction instance
         title_cls = instructions_registry.INSTRUCTION_DICT["detectable_format:title"]

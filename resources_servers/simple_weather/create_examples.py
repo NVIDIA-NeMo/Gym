@@ -14,9 +14,10 @@
 import json
 
 from nemo_gym.openai_utils import (
-    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymEasyInputMessageParam,
+    NeMoGymResponseCreateParamsNonStreaming,
 )
+
 
 queries = [
     "what's it like in sf?",
@@ -57,14 +58,10 @@ example_strs = []
 for query in queries:
     example = base_response_create_params.model_copy(
         update={
-            "input": base_response_create_params.input
-            + [NeMoGymEasyInputMessageParam(role="user", content=query)]
+            "input": base_response_create_params.input + [NeMoGymEasyInputMessageParam(role="user", content=query)]
         }
     )
-    example_strs.append(
-        json.dumps({"responses_create_params": example.model_dump(exclude_unset=True)})
-        + "\n"
-    )
+    example_strs.append(json.dumps({"responses_create_params": example.model_dump(exclude_unset=True)}) + "\n")
 
 
 with open("resources_servers/simple_weather/data/example.jsonl", "w") as f:

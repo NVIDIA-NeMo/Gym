@@ -11,34 +11,32 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
+from typing import Optional
+
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from fastapi import FastAPI
-
 from nemo_gym.base_resources_server import (
-    SimpleResourcesServer,
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    SimpleResourcesServer,
 )
-import json
-from typing import Optional
-from fastapi import HTTPException
-
 
 # Import all functions from the tools file
 from resources_servers.multiverse_math_hard.multiverse_math_hard_tools import (
     add,
-    subtract,
-    multiply,
-    divide,
-    sin,
     cos,
-    power,
+    divide,
     log,
-    pi,
+    multiply,
     negate,
+    pi,
+    power,
     return_constant,
+    sin,
+    subtract,
 )
 
 
@@ -91,19 +89,13 @@ class MultiVerseMathHardResourcesServer(SimpleResourcesServer):
 
         return app
 
-    async def route_to_python_function(
-        self, path: str, body: MultiVerseMathHardRequest
-    ) -> MultiVerseMathHardResponse:
+    async def route_to_python_function(self, path: str, body: MultiVerseMathHardRequest) -> MultiVerseMathHardResponse:
         func = self._function_map.get(path)
 
         if not func:
             raise HTTPException(status_code=404, detail="Function not found")
 
-        args = {
-            key: value
-            for key, value in body.model_dump(exclude_unset=True).items()
-            if value is not None
-        }
+        args = {key: value for key, value in body.model_dump(exclude_unset=True).items() if value is not None}
 
         try:
             result = func(**args)
@@ -111,9 +103,7 @@ class MultiVerseMathHardResourcesServer(SimpleResourcesServer):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-    async def verify(
-        self, body: MultiVerseMathHardVerifyRequest
-    ) -> MultiVerseMathHardVerifyResponse:
+    async def verify(self, body: MultiVerseMathHardVerifyRequest) -> MultiVerseMathHardVerifyResponse:
         ground_truth = json.loads(body.ground_truth)
         response = body.response.output
 
@@ -122,9 +112,7 @@ class MultiVerseMathHardResourcesServer(SimpleResourcesServer):
             if output.type == "function_call_output":
                 # Add try catch block to catch exceptions if there is a math error while calculation.
                 try:
-                    predicted_tool_call_output.append(
-                        float(json.loads(output.output)["solution"])
-                    )
+                    predicted_tool_call_output.append(float(json.loads(output.output)["solution"]))
                 except Exception:
                     predicted_tool_call_output.append(None)
 

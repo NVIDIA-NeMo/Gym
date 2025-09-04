@@ -13,14 +13,14 @@
 # limitations under the License.
 from abc import abstractmethod
 
-from fastapi import FastAPI, Body
+from fastapi import Body, FastAPI
 
-from nemo_gym.server_utils import BaseRunServerConfig, BaseServer, SimpleServer
-from nemo_gym.openai_utils import (
-    NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponse,
-)
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.openai_utils import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.server_utils import BaseRunServerConfig, BaseServer, SimpleServer
 
 
 class BaseResponsesAPIAgentConfig(BaseRunServerConfig):
@@ -45,9 +45,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, SimpleServer):
     # TODO: right now there is no validation on the TypedDict NeMoGymResponseCreateParamsNonStreaming
     # We should explicitly add validation at this server level or we should explicitly not validate so that there is flexibility in this API.
     @abstractmethod
-    async def responses(
-        self, body: NeMoGymResponseCreateParamsNonStreaming = Body()
-    ) -> NeMoGymResponse:
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         pass
 
     @abstractmethod

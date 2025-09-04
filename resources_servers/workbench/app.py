@@ -11,38 +11,38 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
+from typing import Dict
+
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict
 
-from fastapi import FastAPI
-
 from nemo_gym.base_resources_server import (
-    SimpleResourcesServer,
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    SimpleResourcesServer,
 )
-import os
-from typing import Dict
-from fastapi import HTTPException
 from resources_servers.workbench.utils import is_correct
-from resources_servers.workbench.workbench_tools.project_management import (
-    ProjectManagementTool,
-)
-from resources_servers.workbench.workbench_tools.customer_relationship_manager import (
-    CustomerRelationshipManagerTool,
-)
-from resources_servers.workbench.workbench_tools.company_directory import (
-    CompanyDirectoryTool,
-)
-from resources_servers.workbench.workbench_tools.email import (
-    EmailTool,
-)
 from resources_servers.workbench.workbench_tools.analytics import (
     AnalyticsTool,
 )
 from resources_servers.workbench.workbench_tools.calendar import (
     CalendarTool,
 )
+from resources_servers.workbench.workbench_tools.company_directory import (
+    CompanyDirectoryTool,
+)
+from resources_servers.workbench.workbench_tools.customer_relationship_manager import (
+    CustomerRelationshipManagerTool,
+)
+from resources_servers.workbench.workbench_tools.email import (
+    EmailTool,
+)
+from resources_servers.workbench.workbench_tools.project_management import (
+    ProjectManagementTool,
+)
+
 
 REASONING_TAG = os.getenv("REASONING_TAG", "think")
 
@@ -79,9 +79,7 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
 
         return app
 
-    async def route_to_python_function(
-        self, path: str, body: WorkbenchRequest
-    ) -> WorkbenchResponse:
+    async def route_to_python_function(self, path: str, body: WorkbenchRequest) -> WorkbenchResponse:
         tool_name_to_class_to_function_mapping = {
             "company_directory_find_email_address": {
                 "class": CompanyDirectoryTool,
@@ -188,15 +186,9 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
 
         fn = getattr(class_object, method_name, None)  # bound method on the instance
         if fn is None or not callable(fn):
-            raise HTTPException(
-                status_code=404, detail=f"Method {method_name} not found"
-            )
+            raise HTTPException(status_code=404, detail=f"Method {method_name} not found")
 
-        args = {
-            key: value
-            for key, value in body.model_dump(exclude_unset=True).items()
-            if value is not None
-        }
+        args = {key: value for key, value in body.model_dump(exclude_unset=True).items() if value is not None}
 
         try:
             result = fn(**args)  # sync tool method

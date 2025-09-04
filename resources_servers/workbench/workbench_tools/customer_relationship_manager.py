@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+
 import pandas as pd
 
 
@@ -58,38 +59,22 @@ class CustomerRelationshipManagerTool:
                 follow_up_by_max,
             ]
         ):
-            return (
-                "No search parameters provided. Please provide at least one parameter."
-            )
+            return "No search parameters provided. Please provide at least one parameter."
 
         if customer_name:
-            customers = customers[
-                customers["customer_name"].str.contains(customer_name, case=False)
-            ]
+            customers = customers[customers["customer_name"].str.contains(customer_name, case=False)]
         if customer_email:
-            customers = customers[
-                customers["customer_email"].str.contains(customer_email, case=False)
-            ]
+            customers = customers[customers["customer_email"].str.contains(customer_email, case=False)]
         if product_interest:
-            customers = customers[
-                customers["product_interest"].str.contains(product_interest, case=False)
-            ]
+            customers = customers[customers["product_interest"].str.contains(product_interest, case=False)]
         if status:
             customers = customers[customers["status"].str.contains(status, case=False)]
         if assigned_to_email:
-            customers = customers[
-                customers["assigned_to_email"].str.contains(
-                    assigned_to_email, case=False
-                )
-            ]
+            customers = customers[customers["assigned_to_email"].str.contains(assigned_to_email, case=False)]
         if last_contact_date_min:
-            customers = customers[
-                customers["last_contact_date"] >= last_contact_date_min
-            ]
+            customers = customers[customers["last_contact_date"] >= last_contact_date_min]
         if last_contact_date_max:
-            customers = customers[
-                customers["last_contact_date"] <= last_contact_date_max
-            ]
+            customers = customers[customers["last_contact_date"] <= last_contact_date_max]
         if follow_up_by_min:
             customers = customers[customers["follow_up_by"] >= follow_up_by_min]
         if follow_up_by_max:
@@ -149,9 +134,7 @@ class CustomerRelationshipManagerTool:
 
         if customer_id in self._crm_data["customer_id"].values:
             if field in self._crm_data.columns:
-                self._crm_data.loc[
-                    self._crm_data["customer_id"] == customer_id, field
-                ] = new_value
+                self._crm_data.loc[self._crm_data["customer_id"] == customer_id, field] = new_value
                 return "Customer updated successfully."
             else:
                 return "Field not valid. Please choose from: 'customer_name', 'assigned_to_email', 'customer_email', 'customer_phone', 'last_contact_date', 'product_interest', 'status', 'notes', 'follow_up_by'"
@@ -334,9 +317,7 @@ schema_delete_customer = {
     "description": "Deletes a customer record by ID.",
     "parameters": {
         "type": "object",
-        "properties": {
-            "customer_id": {"type": "string", "description": "ID of the customer"}
-        },
+        "properties": {"customer_id": {"type": "string", "description": "ID of the customer"}},
         "required": ["customer_id"],
         "additionalProperties": False,
     },

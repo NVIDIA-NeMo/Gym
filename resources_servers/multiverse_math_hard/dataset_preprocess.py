@@ -12,23 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, List
-from copy import deepcopy
+
 from datasets import load_dataset
 
 from resources_servers.multiverse_math_hard.multiverse_math_hard_tools import (
     add,
-    subtract,
-    multiply,
-    divide,
-    sin,
     cos,
-    power,
+    divide,
     log,
-    pi,
+    multiply,
     negate,
+    pi,
+    power,
     return_constant,
+    sin,
+    subtract,
 )
 
 
@@ -85,9 +86,7 @@ base_create_params = dict(
             "name": "sin",
             "description": "The sine of an angle in radians.",
             "parameters": {
-                "properties": {
-                    "radians": {"type": "number", "description": "Angle in radians"}
-                },
+                "properties": {"radians": {"type": "number", "description": "Angle in radians"}},
                 "type": "object",
                 "required": ["radians"],
                 "additionalProperties": False,
@@ -99,9 +98,7 @@ base_create_params = dict(
             "name": "cos",
             "description": "The cosine of an angle in radians.",
             "parameters": {
-                "properties": {
-                    "radians": {"type": "number", "description": "Angle in radians"}
-                },
+                "properties": {"radians": {"type": "number", "description": "Angle in radians"}},
                 "type": "object",
                 "required": ["radians"],
                 "additionalProperties": False,
@@ -173,9 +170,7 @@ base_create_params = dict(
             "name": "negate",
             "description": "Negate a number; -a.",
             "parameters": {
-                "properties": {
-                    "a": {"type": "number", "description": "Number to negate"}
-                },
+                "properties": {"a": {"type": "number", "description": "Number to negate"}},
                 "type": "object",
                 "required": ["a"],
                 "additionalProperties": False,
@@ -187,9 +182,7 @@ base_create_params = dict(
             "name": "return_constant",
             "description": "Return a constant number: a with no modifications",
             "parameters": {
-                "properties": {
-                    "a": {"type": "number", "description": "Number to return"}
-                },
+                "properties": {"a": {"type": "number", "description": "Number to return"}},
                 "type": "object",
                 "required": ["a"],
                 "additionalProperties": False,
@@ -236,9 +229,7 @@ class MultiverseMathHardSamples:
 
         for d in dataset:
             # get evaled ground truths for MMH
-            ground_truth_calls = [
-                eval(g.strip(), tool_functions) for g in d["ground_truth"].split(";")
-            ]
+            ground_truth_calls = [eval(g.strip(), tool_functions) for g in d["ground_truth"].split(";")]
             # convert into create params
             create_params = deepcopy(base_create_params)
             create_params["input"].append(

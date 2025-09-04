@@ -14,13 +14,12 @@
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
 
 from omegaconf import DictConfig, OmegaConf
-
 from pydantic import (
     BaseModel,
-    TypeAdapter,
     ConfigDict,
-    ValidationError,
     Field,
+    TypeAdapter,
+    ValidationError,
     model_validator,
 )
 
@@ -93,9 +92,7 @@ class DatasetConfig(BaseModel):
     @model_validator(mode="after")
     def check_train_validation_sets(self) -> "DatasetConfig":
         if self.type in ["train", "validation"]:
-            assert self.gitlab_identifier is not None, (
-                f"A Gitlab path is required for {self.name}"
-            )
+            assert self.gitlab_identifier is not None, f"A Gitlab path is required for {self.name}"
             assert self.license is not None, f"A license is required for {self.name}"
 
         return self
@@ -144,9 +141,7 @@ class ResponsesAPIModelServerTypeConfig(BaseServerTypeConfig):
 
     model_config = ConfigDict(extra="allow")
 
-    responses_api_models: Dict[str, BaseRunServerTypeConfig] = Field(
-        min_length=1, max_length=1
-    )
+    responses_api_models: Dict[str, BaseRunServerTypeConfig] = Field(min_length=1, max_length=1)
 
 
 class ResourcesServerTypeConfig(BaseServerTypeConfig):
@@ -154,9 +149,7 @@ class ResourcesServerTypeConfig(BaseServerTypeConfig):
 
     model_config = ConfigDict(extra="allow")
 
-    resources_servers: Dict[str, BaseRunServerTypeConfig] = Field(
-        min_length=1, max_length=1
-    )
+    resources_servers: Dict[str, BaseRunServerTypeConfig] = Field(min_length=1, max_length=1)
 
 
 class ResponsesAPIAgentServerTypeConfig(BaseServerTypeConfig):
@@ -164,9 +157,7 @@ class ResponsesAPIAgentServerTypeConfig(BaseServerTypeConfig):
 
     model_config = ConfigDict(extra="allow")
 
-    responses_api_agents: Dict[str, BaseRunServerTypeConfig] = Field(
-        min_length=1, max_length=1
-    )
+    responses_api_agents: Dict[str, BaseRunServerTypeConfig] = Field(min_length=1, max_length=1)
 
 
 ServerTypeConfig = Union[
@@ -197,21 +188,15 @@ class BaseServerInstanceConfig(BaseServerTypeConfig):
         return self.get_inner_run_server_config().datasets
 
 
-class ResponsesAPIModelServerInstanceConfig(
-    ResponsesAPIModelServerTypeConfig, BaseServerInstanceConfig
-):
+class ResponsesAPIModelServerInstanceConfig(ResponsesAPIModelServerTypeConfig, BaseServerInstanceConfig):
     pass
 
 
-class ResourcesServerInstanceConfig(
-    ResourcesServerTypeConfig, BaseServerInstanceConfig
-):
+class ResourcesServerInstanceConfig(ResourcesServerTypeConfig, BaseServerInstanceConfig):
     pass
 
 
-class ResponsesAPIAgentServerInstanceConfig(
-    ResponsesAPIAgentServerTypeConfig, BaseServerInstanceConfig
-):
+class ResponsesAPIAgentServerInstanceConfig(ResponsesAPIAgentServerTypeConfig, BaseServerInstanceConfig):
     pass
 
 
@@ -223,9 +208,7 @@ ServerInstanceConfig = Union[
 ServerInstanceConfigTypeAdapter = TypeAdapter(ServerInstanceConfig)
 
 
-def maybe_get_server_instance_config(
-    name: str, server_type_config_dict: Any
-) -> Optional[ServerInstanceConfig]:
+def maybe_get_server_instance_config(name: str, server_type_config_dict: Any) -> Optional[ServerInstanceConfig]:
     if not isinstance(server_type_config_dict, DictConfig):
         return None
 
@@ -235,9 +218,7 @@ def maybe_get_server_instance_config(
         **OmegaConf.to_container(server_type_config_dict),
     }
     try:
-        return ServerInstanceConfigTypeAdapter.validate_python(
-            maybe_server_instance_config_dict
-        )
+        return ServerInstanceConfigTypeAdapter.validate_python(maybe_server_instance_config_dict)
     except ValidationError:
         return None
 

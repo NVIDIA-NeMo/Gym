@@ -11,16 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from nemo_gym.server_utils import ServerClient
+from unittest.mock import MagicMock
 
 from app import (
+    ModelServerRef,
+    ResourcesServerRef,
     SimpleAgentStateful,
     SimpleAgentStatefulConfig,
-    ResourcesServerRef,
-    ModelServerRef,
 )
 
-from unittest.mock import MagicMock
+from nemo_gym.server_utils import ServerClient
 
 
 class TestApp:

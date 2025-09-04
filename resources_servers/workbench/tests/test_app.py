@@ -11,24 +11,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from unittest.mock import MagicMock
-from pytest import fixture
-import pandas as pd
-from nemo_gym.server_utils import ServerClient
+from unittest.mock import MagicMock, patch
 
-from resources_servers.workbench.app import (
-    WorkbenchResourcesServer,
-    WorkbenchResourcesServerConfig,
-    WorkbenchRequest,
-    WorkbenchVerifyRequest,
-)
+import pandas as pd
+from pytest import fixture
 
 from nemo_gym.openai_utils import (
-    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
 )
-
-from unittest.mock import patch
+from nemo_gym.server_utils import ServerClient
+from resources_servers.workbench.app import (
+    WorkbenchRequest,
+    WorkbenchResourcesServer,
+    WorkbenchResourcesServerConfig,
+    WorkbenchVerifyRequest,
+)
 
 
 class TestApp:
@@ -42,22 +40,14 @@ class TestApp:
 
     def init_server(self, config: WorkbenchResourcesServerConfig):
         server_mock = MagicMock(spec=ServerClient)
-        resources_server = WorkbenchResourcesServer(
-            config=config, server_client=server_mock
-        )
+        resources_server = WorkbenchResourcesServer(config=config, server_client=server_mock)
         return resources_server
 
-    async def test_company_directory_find_email_address(
-        self, config: WorkbenchResourcesServerConfig
-    ) -> None:
-        mock_data = {
-            "email_address": ["aisha.chen@atlas.com", "carlos.rodriguez@atlas.com"]
-        }
+    async def test_company_directory_find_email_address(self, config: WorkbenchResourcesServerConfig) -> None:
+        mock_data = {"email_address": ["aisha.chen@atlas.com", "carlos.rodriguez@atlas.com"]}
         mock_df = pd.DataFrame(mock_data)
 
-        with patch(
-            "resources_servers.workbench.workbench_tools.company_directory.pd.read_csv"
-        ) as mock_read_csv:
+        with patch("resources_servers.workbench.workbench_tools.company_directory.pd.read_csv") as mock_read_csv:
             mock_read_csv.return_value = mock_df
 
             resources_server = self.init_server(config)
@@ -70,9 +60,7 @@ class TestApp:
 
             assert response.output == ["aisha.chen@atlas.com"]
 
-    async def test_email_get_email_information_by_id(
-        self, config: WorkbenchResourcesServerConfig
-    ) -> None:
+    async def test_email_get_email_information_by_id(self, config: WorkbenchResourcesServerConfig) -> None:
         mock_data = {
             "email_id": ["00000393", "00000123"],
             "inbox/outbox": ["inbox", "outbox"],
@@ -83,16 +71,12 @@ class TestApp:
         }
         mock_df = pd.DataFrame(mock_data)
 
-        with patch(
-            "resources_servers.workbench.workbench_tools.email.pd.read_csv"
-        ) as mock_read_csv:
+        with patch("resources_servers.workbench.workbench_tools.email.pd.read_csv") as mock_read_csv:
             mock_read_csv.return_value = mock_df
 
             resources_server = self.init_server(config)
 
-            mock_request = WorkbenchRequest(
-                **{"email_id": "00000393", "field": "inbox/outbox"}
-            )
+            mock_request = WorkbenchRequest(**{"email_id": "00000393", "field": "inbox/outbox"})
 
             response = await resources_server.route_to_python_function(
                 path="email_get_email_information_by_id", body=mock_request
@@ -100,9 +84,7 @@ class TestApp:
 
             assert response.output == {"inbox/outbox": "inbox"}
 
-    async def test_email_search_emails(
-        self, config: WorkbenchResourcesServerConfig
-    ) -> None:
+    async def test_email_search_emails(self, config: WorkbenchResourcesServerConfig) -> None:
         mock_data = [
             {
                 "email_id": "match_01",
@@ -133,23 +115,17 @@ class TestApp:
             },
         }
 
-        with patch(
-            "resources_servers.workbench.workbench_tools.email.pd.read_csv"
-        ) as mock_read_csv:
+        with patch("resources_servers.workbench.workbench_tools.email.pd.read_csv") as mock_read_csv:
             mock_read_csv.return_value = mock_df
 
             resources_server = self.init_server(config)
             mock_request = WorkbenchRequest(**{"query": "aisha.chen@atlas.com"})
 
-            response = await resources_server.route_to_python_function(
-                path="email_search_emails", body=mock_request
-            )
+            response = await resources_server.route_to_python_function(path="email_search_emails", body=mock_request)
 
             assert response.output == expected_output
 
-    async def test_email_send_email(
-        self, config: WorkbenchResourcesServerConfig
-    ) -> None:
+    async def test_email_send_email(self, config: WorkbenchResourcesServerConfig) -> None:
         mock_data = [
             {
                 "email_id": "123",
@@ -162,9 +138,7 @@ class TestApp:
         ]
         mock_df = pd.DataFrame(mock_data)
 
-        with patch(
-            "resources_servers.workbench.workbench_tools.email.pd.read_csv"
-        ) as mock_read_csv:
+        with patch("resources_servers.workbench.workbench_tools.email.pd.read_csv") as mock_read_csv:
             mock_read_csv.return_value = mock_df
 
             resources_server = self.init_server(config)
@@ -177,14 +151,10 @@ class TestApp:
                 }
             )
 
-            response = await resources_server.route_to_python_function(
-                path="email_send_email", body=mock_request
-            )
+            response = await resources_server.route_to_python_function(path="email_send_email", body=mock_request)
             assert response.output == "Email sent successfully."
 
-    async def test_email_delete_email(
-        self, config: WorkbenchResourcesServerConfig
-    ) -> None:
+    async def test_email_delete_email(self, config: WorkbenchResourcesServerConfig) -> None:
         mock_data = [
             {
                 "email_id": "00000393",  # The target for deletion
@@ -205,24 +175,18 @@ class TestApp:
         ]
         mock_df = pd.DataFrame(mock_data)
 
-        with patch(
-            "resources_servers.workbench.workbench_tools.email.pd.read_csv"
-        ) as mock_read_csv:
+        with patch("resources_servers.workbench.workbench_tools.email.pd.read_csv") as mock_read_csv:
             mock_read_csv.return_value = mock_df
 
             resources_server = self.init_server(config)
 
             mock_request = WorkbenchRequest(**{"email_id": "00000393"})
 
-            response = await resources_server.route_to_python_function(
-                path="email_delete_email", body=mock_request
-            )
+            response = await resources_server.route_to_python_function(path="email_delete_email", body=mock_request)
 
             assert response.output == "Email deleted successfully."
 
-    async def test_email_forward_email(
-        self, config: WorkbenchResourcesServerConfig
-    ) -> None:
+    async def test_email_forward_email(self, config: WorkbenchResourcesServerConfig) -> None:
         mock_data = [
             {
                 "email_id": "00000393",  # The target email to forward
@@ -235,25 +199,17 @@ class TestApp:
         ]
         mock_df = pd.DataFrame(mock_data)
 
-        with patch(
-            "resources_servers.workbench.workbench_tools.email.pd.read_csv"
-        ) as mock_read_csv:
+        with patch("resources_servers.workbench.workbench_tools.email.pd.read_csv") as mock_read_csv:
             mock_read_csv.return_value = mock_df
 
             resources_server = self.init_server(config)
 
-            mock_request = WorkbenchRequest(
-                **{"email_id": "00000393", "recipient": "aisha.chen@atlas.com"}
-            )
+            mock_request = WorkbenchRequest(**{"email_id": "00000393", "recipient": "aisha.chen@atlas.com"})
 
-            response = await resources_server.route_to_python_function(
-                path="email_forward_email", body=mock_request
-            )
+            response = await resources_server.route_to_python_function(path="email_forward_email", body=mock_request)
             assert response.output == "Email forwarded successfully."
 
-    async def test_calendar_get_event_information_by_id(
-        self, config: WorkbenchResourcesServerConfig
-    ) -> None:
+    async def test_calendar_get_event_information_by_id(self, config: WorkbenchResourcesServerConfig) -> None:
         mock_data = [
             {
                 "event_id": "00000013",  # The target event ID
@@ -265,15 +221,11 @@ class TestApp:
         ]
         mock_df = pd.DataFrame(mock_data)
 
-        with patch(
-            "resources_servers.workbench.workbench_tools.calendar.pd.read_csv"
-        ) as mock_read_csv:
+        with patch("resources_servers.workbench.workbench_tools.calendar.pd.read_csv") as mock_read_csv:
             mock_read_csv.return_value = mock_df
             resources_server = self.init_server(config)
 
-            mock_request = WorkbenchRequest(
-                **{"event_id": "00000013", "field": "event_id"}
-            )
+            mock_request = WorkbenchRequest(**{"event_id": "00000013", "field": "event_id"})
 
             response = await resources_server.route_to_python_function(
                 path="calendar_get_event_information_by_id", body=mock_request
@@ -281,9 +233,7 @@ class TestApp:
 
             assert response.output == {"event_id": "00000013"}
 
-    async def test_calendar_search_events(
-        self, config: WorkbenchResourcesServerConfig
-    ) -> None:
+    async def test_calendar_search_events(self, config: WorkbenchResourcesServerConfig) -> None:
         entry_1 = {
             "event_id": "00000016",
             "event_name": "sync up",
@@ -318,9 +268,7 @@ class TestApp:
             },
         }
 
-        with patch(
-            "resources_servers.workbench.workbench_tools.calendar.pd.read_csv"
-        ) as mock_read_csv:
+        with patch("resources_servers.workbench.workbench_tools.calendar.pd.read_csv") as mock_read_csv:
             mock_read_csv.return_value = mock_df
 
             resources_server = self.init_server(config)
@@ -332,15 +280,11 @@ class TestApp:
 
             assert response.output == expected_output
 
-    async def test_calendar_create_event(
-        self, config: WorkbenchResourcesServerConfig
-    ) -> None:
+    async def test_calendar_create_event(self, config: WorkbenchResourcesServerConfig) -> None:
         mock_data = [{"event_id": "00000299", "event_name": "Existing Event"}]
         mock_df = pd.DataFrame(mock_data)
 
-        with patch(
-            "resources_servers.workbench.workbench_tools.calendar.pd.read_csv"
-        ) as mock_read_csv:
+        with patch("resources_servers.workbench.workbench_tools.calendar.pd.read_csv") as mock_read_csv:
             mock_read_csv.return_value = mock_df
 
             resources_server = self.init_server(config)
@@ -353,38 +297,28 @@ class TestApp:
                 }
             )
 
-            response = await resources_server.route_to_python_function(
-                path="calendar_create_event", body=mock_request
-            )
+            response = await resources_server.route_to_python_function(path="calendar_create_event", body=mock_request)
 
             assert response.output == "00000300"
 
-    async def test_calendar_delete_event(
-        self, config: WorkbenchResourcesServerConfig
-    ) -> None:
+    async def test_calendar_delete_event(self, config: WorkbenchResourcesServerConfig) -> None:
         mock_data = [
             {"event_id": "00000013", "event_name": "Event to Delete"},
             {"event_id": "00000014", "event_name": "Another Event"},
         ]
         mock_df = pd.DataFrame(mock_data)
 
-        with patch(
-            "resources_servers.workbench.workbench_tools.calendar.pd.read_csv"
-        ) as mock_read_csv:
+        with patch("resources_servers.workbench.workbench_tools.calendar.pd.read_csv") as mock_read_csv:
             mock_read_csv.return_value = mock_df
 
             resources_server = self.init_server(config)
             mock_request = WorkbenchRequest(**{"event_id": "00000013"})
 
-            response = await resources_server.route_to_python_function(
-                path="calendar_delete_event", body=mock_request
-            )
+            response = await resources_server.route_to_python_function(path="calendar_delete_event", body=mock_request)
 
             assert response.output == "Event deleted successfully."
 
-    async def test_calendar_update_event(
-        self, config: WorkbenchResourcesServerConfig
-    ) -> None:
+    async def test_calendar_update_event(self, config: WorkbenchResourcesServerConfig) -> None:
         mock_data = [
             {
                 "event_id": "00000013",
@@ -396,25 +330,17 @@ class TestApp:
         ]
         mock_df = pd.DataFrame(mock_data)
 
-        with patch(
-            "resources_servers.workbench.workbench_tools.calendar.pd.read_csv"
-        ) as mock_read_csv:
+        with patch("resources_servers.workbench.workbench_tools.calendar.pd.read_csv") as mock_read_csv:
             mock_read_csv.return_value = mock_df
 
             resources_server = self.init_server(config)
-            mock_request = WorkbenchRequest(
-                **{"event_id": "00000013", "field": "duration", "new_value": "100"}
-            )
+            mock_request = WorkbenchRequest(**{"event_id": "00000013", "field": "duration", "new_value": "100"})
 
-            response = await resources_server.route_to_python_function(
-                path="calendar_update_event", body=mock_request
-            )
+            response = await resources_server.route_to_python_function(path="calendar_update_event", body=mock_request)
 
             assert response.output == "Event updated successfully."
 
-    async def test_analytics_engaged_users_count(
-        self, config: WorkbenchResourcesServerConfig
-    ) -> None:
+    async def test_analytics_engaged_users_count(self, config: WorkbenchResourcesServerConfig) -> None:
         mock_data = [
             {"date_of_visit": "2023-10-22", "user_engaged": "True"},
             {"date_of_visit": "2023-10-22", "user_engaged": "True"},
@@ -425,16 +351,12 @@ class TestApp:
 
         mock_df = pd.DataFrame(mock_data)
 
-        with patch(
-            "resources_servers.workbench.workbench_tools.analytics.pd.read_csv"
-        ) as mock_read_csv:
+        with patch("resources_servers.workbench.workbench_tools.analytics.pd.read_csv") as mock_read_csv:
             mock_read_csv.return_value = mock_df
 
             resources_server = self.init_server(config)
 
-            mock_request = WorkbenchRequest(
-                **{"time_min": "2023-10-22", "time_max": "2023-10-22"}
-            )
+            mock_request = WorkbenchRequest(**{"time_min": "2023-10-22", "time_max": "2023-10-22"})
 
             response = await resources_server.route_to_python_function(
                 path="analytics_engaged_users_count", body=mock_request
@@ -442,9 +364,7 @@ class TestApp:
 
             assert response.output == {"2023-10-22": 3}
 
-    async def test_analytics_get_visitor_information_by_id(
-        self, config: WorkbenchResourcesServerConfig
-    ) -> None:
+    async def test_analytics_get_visitor_information_by_id(self, config: WorkbenchResourcesServerConfig) -> None:
         mock_data = [
             {
                 "date_of_visit": "2023-10-22",
@@ -465,9 +385,7 @@ class TestApp:
         ]
         mock_df = pd.DataFrame(mock_data)
 
-        with patch(
-            "resources_servers.workbench.workbench_tools.analytics.pd.read_csv"
-        ) as mock_read_csv:
+        with patch("resources_servers.workbench.workbench_tools.analytics.pd.read_csv") as mock_read_csv:
             mock_read_csv.return_value = mock_df
 
             resources_server = self.init_server(config)
@@ -489,9 +407,7 @@ class TestApp:
                 }
             ]
 
-    async def test_analytics_create_plot(
-        self, config: WorkbenchResourcesServerConfig
-    ) -> None:
+    async def test_analytics_create_plot(self, config: WorkbenchResourcesServerConfig) -> None:
         mock_data = [
             {
                 "date_of_visit": "2023-10-22",
@@ -501,9 +417,7 @@ class TestApp:
         ]
         mock_df = pd.DataFrame(mock_data)
 
-        with patch(
-            "resources_servers.workbench.workbench_tools.analytics.pd.read_csv"
-        ) as mock_read_csv:
+        with patch("resources_servers.workbench.workbench_tools.analytics.pd.read_csv") as mock_read_csv:
             mock_read_csv.return_value = mock_df
 
             resources_server = self.init_server(config)
@@ -516,15 +430,11 @@ class TestApp:
                 }
             )
 
-            response = await resources_server.route_to_python_function(
-                path="analytics_create_plot", body=mock_request
-            )
+            response = await resources_server.route_to_python_function(path="analytics_create_plot", body=mock_request)
 
             assert response.output == "plots/2023-10-22_2023-10-22_total_visits_bar.png"
 
-    async def test_analytics_traffic_source_count(
-        self, config: WorkbenchResourcesServerConfig
-    ) -> None:
+    async def test_analytics_traffic_source_count(self, config: WorkbenchResourcesServerConfig) -> None:
         mock_data = [
             {
                 "date_of_visit": "2023-10-22",
@@ -549,9 +459,7 @@ class TestApp:
         ]
         mock_df = pd.DataFrame(mock_data)
 
-        with patch(
-            "resources_servers.workbench.workbench_tools.analytics.pd.read_csv"
-        ) as mock_read_csv:
+        with patch("resources_servers.workbench.workbench_tools.analytics.pd.read_csv") as mock_read_csv:
             mock_read_csv.return_value = mock_df
 
             resources_server = self.init_server(config)
@@ -569,23 +477,17 @@ class TestApp:
 
             assert response.output == {"2023-10-22": 2}
 
-    async def test_analytics_total_visits_count(
-        self, config: WorkbenchResourcesServerConfig
-    ) -> None:
-        mock_data = [
-            {"date_of_visit": "2023-10-22", "user_engaged": "False"} for _ in range(13)
-        ] + [{"date_of_visit": "2023-10-23", "user_engaged": "False"} for _ in range(2)]
+    async def test_analytics_total_visits_count(self, config: WorkbenchResourcesServerConfig) -> None:
+        mock_data = [{"date_of_visit": "2023-10-22", "user_engaged": "False"} for _ in range(13)] + [
+            {"date_of_visit": "2023-10-23", "user_engaged": "False"} for _ in range(2)
+        ]
         mock_df = pd.DataFrame(mock_data)
 
-        with patch(
-            "resources_servers.workbench.workbench_tools.analytics.pd.read_csv"
-        ) as mock_read_csv:
+        with patch("resources_servers.workbench.workbench_tools.analytics.pd.read_csv") as mock_read_csv:
             mock_read_csv.return_value = mock_df
 
             resources_server = self.init_server(config)
-            mock_request = WorkbenchRequest(
-                **{"time_min": "2023-10-22", "time_max": "2023-10-22"}
-            )
+            mock_request = WorkbenchRequest(**{"time_min": "2023-10-22", "time_max": "2023-10-22"})
 
             response = await resources_server.route_to_python_function(
                 path="analytics_total_visits_count", body=mock_request
@@ -593,9 +495,7 @@ class TestApp:
 
             assert response.output == {"2023-10-22": 13}
 
-    async def test_analytics_get_average_session_duration(
-        self, config: WorkbenchResourcesServerConfig
-    ) -> None:
+    async def test_analytics_get_average_session_duration(self, config: WorkbenchResourcesServerConfig) -> None:
         mock_data = (
             [
                 {
@@ -622,15 +522,11 @@ class TestApp:
         )
         mock_df = pd.DataFrame(mock_data)
 
-        with patch(
-            "resources_servers.workbench.workbench_tools.analytics.pd.read_csv"
-        ) as mock_read_csv:
+        with patch("resources_servers.workbench.workbench_tools.analytics.pd.read_csv") as mock_read_csv:
             mock_read_csv.return_value = mock_df
 
             resources_server = self.init_server(config)
-            mock_request = WorkbenchRequest(
-                **{"time_min": "2023-10-22", "time_max": "2023-10-22"}
-            )
+            mock_request = WorkbenchRequest(**{"time_min": "2023-10-22", "time_max": "2023-10-22"})
 
             response = await resources_server.route_to_python_function(
                 path="analytics_get_average_session_duration", body=mock_request
@@ -638,21 +534,15 @@ class TestApp:
 
             assert response.output == {"2023-10-22": 15.76923076923077}
 
-    async def test_project_management_get_task_information_by_id(
-        self, config: WorkbenchResourcesServerConfig
-    ) -> None:
+    async def test_project_management_get_task_information_by_id(self, config: WorkbenchResourcesServerConfig) -> None:
         mock_data = [{"task_id": "00000149", "task_name": "Test Task"}]
         mock_df = pd.DataFrame(mock_data)
 
-        with patch(
-            "resources_servers.workbench.workbench_tools.project_management.pd.read_csv"
-        ) as mock_read_csv:
+        with patch("resources_servers.workbench.workbench_tools.project_management.pd.read_csv") as mock_read_csv:
             mock_read_csv.return_value = mock_df
 
             resources_server = self.init_server(config)
-            mock_request = WorkbenchRequest(
-                **{"task_id": "00000149", "field": "task_id"}
-            )
+            mock_request = WorkbenchRequest(**{"task_id": "00000149", "field": "task_id"})
 
             response = await resources_server.route_to_python_function(
                 path="project_management_get_task_information_by_id", body=mock_request
@@ -660,9 +550,7 @@ class TestApp:
 
             assert response.output == {"task_id": "00000149"}
 
-    async def test_project_management_search_tasks(
-        self, config: WorkbenchResourcesServerConfig
-    ) -> None:
+    async def test_project_management_search_tasks(self, config: WorkbenchResourcesServerConfig) -> None:
         expected_tasks = [
             {
                 "task_id": "00000149",
@@ -693,9 +581,7 @@ class TestApp:
         ]
         mock_df = pd.DataFrame(expected_tasks + non_matching_task)
 
-        with patch(
-            "resources_servers.workbench.workbench_tools.project_management.pd.read_csv"
-        ) as mock_read_csv:
+        with patch("resources_servers.workbench.workbench_tools.project_management.pd.read_csv") as mock_read_csv:
             mock_read_csv.return_value = mock_df
 
             resources_server = self.init_server(config)
@@ -715,9 +601,7 @@ class TestApp:
 
             assert response.output == expected_tasks
 
-    async def test_project_management_create_task(
-        self, config: WorkbenchResourcesServerConfig
-    ) -> None:
+    async def test_project_management_create_task(self, config: WorkbenchResourcesServerConfig) -> None:
         mock_data = [
             {
                 "task_id": "00000299",
@@ -727,9 +611,7 @@ class TestApp:
         ]
         mock_df = pd.DataFrame(mock_data)
 
-        with patch(
-            "resources_servers.workbench.workbench_tools.project_management.pd.read_csv"
-        ) as mock_read_csv:
+        with patch("resources_servers.workbench.workbench_tools.project_management.pd.read_csv") as mock_read_csv:
             mock_read_csv.return_value = mock_df
 
             resources_server = self.init_server(config)
@@ -749,15 +631,11 @@ class TestApp:
 
             assert response.output == "00000300"
 
-    async def test_project_management_delete_task(
-        self, config: WorkbenchResourcesServerConfig
-    ) -> None:
+    async def test_project_management_delete_task(self, config: WorkbenchResourcesServerConfig) -> None:
         mock_data = [{"task_id": "00000149", "task_name": "A task to delete"}]
         mock_df = pd.DataFrame(mock_data)
 
-        with patch(
-            "resources_servers.workbench.workbench_tools.project_management.pd.read_csv"
-        ) as mock_read_csv:
+        with patch("resources_servers.workbench.workbench_tools.project_management.pd.read_csv") as mock_read_csv:
             mock_read_csv.return_value = mock_df
 
             resources_server = self.init_server(config)
@@ -769,9 +647,7 @@ class TestApp:
 
             assert response.output == "Task deleted successfully."
 
-    async def test_project_management_update_task(
-        self, config: WorkbenchResourcesServerConfig
-    ) -> None:
+    async def test_project_management_update_task(self, config: WorkbenchResourcesServerConfig) -> None:
         mock_data = [
             {
                 "task_id": "00000149",
@@ -781,15 +657,11 @@ class TestApp:
         ]
         mock_df = pd.DataFrame(mock_data)
 
-        with patch(
-            "resources_servers.workbench.workbench_tools.project_management.pd.read_csv"
-        ) as mock_read_csv:
+        with patch("resources_servers.workbench.workbench_tools.project_management.pd.read_csv") as mock_read_csv:
             mock_read_csv.return_value = mock_df
 
             resources_server = self.init_server(config)
-            mock_request = WorkbenchRequest(
-                **{"task_id": "00000149", "field": "board", "new_value": "Design"}
-            )
+            mock_request = WorkbenchRequest(**{"task_id": "00000149", "field": "board", "new_value": "Design"})
 
             response = await resources_server.route_to_python_function(
                 path="project_management_update_task", body=mock_request
@@ -860,9 +732,7 @@ class TestApp:
                 },
             }
 
-    async def test_customer_relationship_manager_update_customer(
-        self, config: WorkbenchResourcesServerConfig
-    ) -> None:
+    async def test_customer_relationship_manager_update_customer(self, config: WorkbenchResourcesServerConfig) -> None:
         mock_data = [{"customer_id": "00000189", "customer_name": "old name"}]
         mock_df = pd.DataFrame(mock_data)
 
@@ -884,9 +754,7 @@ class TestApp:
 
             assert response.output == "Customer updated successfully."
 
-    async def test_customer_relationship_manager_add_customer(
-        self, config: WorkbenchResourcesServerConfig
-    ) -> None:
+    async def test_customer_relationship_manager_add_customer(self, config: WorkbenchResourcesServerConfig) -> None:
         mock_data = [{"customer_id": "00000199", "customer_name": "Max ID Customer"}]
         mock_df = pd.DataFrame(mock_data)
 
@@ -912,9 +780,7 @@ class TestApp:
 
             assert response.output == "00000200"
 
-    async def test_customer_relationship_manager_delete_customer(
-        self, config: WorkbenchResourcesServerConfig
-    ) -> None:
+    async def test_customer_relationship_manager_delete_customer(self, config: WorkbenchResourcesServerConfig) -> None:
         mock_data = [{"customer_id": "00000189", "customer_name": "Customer to Delete"}]
         mock_df = pd.DataFrame(mock_data)
 
@@ -954,9 +820,7 @@ class TestApp:
             analytics_tool_instance._plots_data = pd.DataFrame(columns=["file_path"])
 
         with (
-            patch(
-                "resources_servers.workbench.workbench_tools.email.pd.read_csv"
-            ) as mock_email_csv,
+            patch("resources_servers.workbench.workbench_tools.email.pd.read_csv") as mock_email_csv,
             patch(
                 "resources_servers.workbench.workbench_tools.analytics.AnalyticsTool.reset_state",
                 side_effect=mock_analytics_reset_state,

@@ -12,21 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from os import environ
-
 from pathlib import Path
 
 import requests
-
+from mlflow import MlflowClient
+from mlflow.artifacts import get_artifact_repository
+from mlflow.environment_variables import MLFLOW_TRACKING_TOKEN
+from mlflow.exceptions import RestException
 from pydantic import BaseModel
 
-from mlflow import MlflowClient
-from mlflow.environment_variables import MLFLOW_TRACKING_TOKEN
-from mlflow.artifacts import get_artifact_repository
-from mlflow.exceptions import RestException
-
 from nemo_gym.config_types import (
-    UploadJsonlDatasetGitlabConfig,
     DownloadJsonlDatasetGitlabConfig,
+    UploadJsonlDatasetGitlabConfig,
 )
 from nemo_gym.server_utils import get_global_config_dict
 
@@ -60,9 +57,7 @@ def upload_jsonl_dataset(
     try:
         model_version = client.get_model_version(config.dataset_name, config.version)
     except RestException:
-        model_version = client.create_model_version(
-            config.dataset_name, config.version, tags=tags
-        )
+        model_version = client.create_model_version(config.dataset_name, config.version, tags=tags)
 
     run_id = model_version.run_id
     client.log_artifact(run_id, config.input_jsonl_fpath, artifact_path="")
@@ -92,9 +87,7 @@ def download_jsonl_dataset(
 
     model_version = client.get_model_version(config.dataset_name, config.version)
     run_id = model_version.run_id
-    repo = get_artifact_repository(
-        artifact_uri=f"runs:/{run_id}", tracking_uri=client.tracking_uri
-    )
+    repo = get_artifact_repository(artifact_uri=f"runs:/{run_id}", tracking_uri=client.tracking_uri)
     artifact_uri = repo.repo.artifact_uri
     download_link = f"{artifact_uri.rstrip('/')}/{config.artifact_fpath.lstrip('/')}"
 

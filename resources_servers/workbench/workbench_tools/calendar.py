@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+
 import pandas as pd
 
 
@@ -21,9 +22,7 @@ class CalendarTool:
 
     def reset_state(self):
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        data_path = os.path.join(
-            current_dir, "..", "csv_data", "processed", "calendar_events.csv"
-        )
+        data_path = os.path.join(current_dir, "..", "csv_data", "processed", "calendar_events.csv")
         self._calendar_events = pd.read_csv(data_path, dtype=str)
 
     def get_event_information_by_id(self, event_id=None, field=None):
@@ -33,9 +32,7 @@ class CalendarTool:
             return "Field not provided."
 
         # Validate event_id format
-        if not (
-            isinstance(event_id, str) and len(event_id) == 8 and event_id.isdigit()
-        ):
+        if not (isinstance(event_id, str) and len(event_id) == 8 and event_id.isdigit()):
             return "Invalid event ID format. Expected 8-digit ID."
 
         # Validate field exists
@@ -49,9 +46,7 @@ class CalendarTool:
         if field not in valid_fields:
             return f"Invalid field. Available fields are: {', '.join(valid_fields)}"
 
-        event = self._calendar_events[
-            self._calendar_events["event_id"] == event_id
-        ].to_dict(orient="records")
+        event = self._calendar_events[self._calendar_events["event_id"] == event_id].to_dict(orient="records")
         if event:
             if field in event[0]:
                 return {field: event[0][field]}
@@ -60,9 +55,7 @@ class CalendarTool:
         else:
             return "Event not found."
 
-    def search_events(
-        self, query="", time_min=None, time_max=None, page=1, page_size=5
-    ):
+    def search_events(self, query="", time_min=None, time_max=None, page=1, page_size=5):
         # Validate time formats if provided
         if time_min:
             try:
@@ -77,30 +70,14 @@ class CalendarTool:
                 return "Invalid time_max format. Expected YYYY-MM-DD HH:MM:SS."
 
         events = self._calendar_events[
-            (
-                self._calendar_events["event_name"].str.contains(
-                    query, case=False, na=False
-                )
-            )
-            | (
-                self._calendar_events["participant_email"].str.contains(
-                    query, case=False, na=False
-                )
-            )
+            (self._calendar_events["event_name"].str.contains(query, case=False, na=False))
+            | (self._calendar_events["participant_email"].str.contains(query, case=False, na=False))
         ].to_dict(orient="records")
 
         if time_min:
-            events = [
-                event
-                for event in events
-                if pd.Timestamp(event["event_start"]) >= time_min
-            ]
+            events = [event for event in events if pd.Timestamp(event["event_start"]) >= time_min]
         if time_max:
-            events = [
-                event
-                for event in events
-                if pd.Timestamp(event["event_start"]) <= time_max
-            ]
+            events = [event for event in events if pd.Timestamp(event["event_start"]) <= time_max]
 
         if events:
             # Sort events by start time (most recent first)
@@ -108,9 +85,7 @@ class CalendarTool:
 
             # Calculate pagination
             total_events = len(events)
-            total_pages = (
-                total_events + page_size - 1
-            ) // page_size  # Ceiling division
+            total_pages = (total_events + page_size - 1) // page_size  # Ceiling division
 
             # Validate page number
             page = max(1, min(page, total_pages)) if total_pages > 0 else 1
@@ -131,9 +106,7 @@ class CalendarTool:
         else:
             return "No events found."
 
-    def create_event(
-        self, event_name=None, participant_email=None, event_start=None, duration=None
-    ):
+    def create_event(self, event_name=None, participant_email=None, event_start=None, duration=None):
         if not event_name:
             return "Event name not provided."
         if not participant_email:
@@ -177,15 +150,11 @@ class CalendarTool:
             return "Event ID not provided."
 
         # Validate event_id format
-        if not (
-            isinstance(event_id, str) and len(event_id) == 8 and event_id.isdigit()
-        ):
+        if not (isinstance(event_id, str) and len(event_id) == 8 and event_id.isdigit()):
             return "Invalid event ID format. Expected 8-digit ID."
 
         if event_id in self._calendar_events["event_id"].values:
-            self._calendar_events = self._calendar_events[
-                self._calendar_events["event_id"] != event_id
-            ]
+            self._calendar_events = self._calendar_events[self._calendar_events["event_id"] != event_id]
             return "Event deleted successfully."
         else:
             return "Event not found."
@@ -195,9 +164,7 @@ class CalendarTool:
             return "Event ID, field, or new value not provided."
 
         # Validate event_id format
-        if not (
-            isinstance(event_id, str) and len(event_id) == 8 and event_id.isdigit()
-        ):
+        if not (isinstance(event_id, str) and len(event_id) == 8 and event_id.isdigit()):
             return "Invalid event ID format. Expected 8-digit ID."
 
         # Validate field name
@@ -222,9 +189,7 @@ class CalendarTool:
         if event_id in self._calendar_events["event_id"].values:
             if field == "participant_email":
                 new_value = new_value.lower()
-            self._calendar_events.loc[
-                self._calendar_events["event_id"] == event_id, field
-            ] = new_value
+            self._calendar_events.loc[self._calendar_events["event_id"] == event_id, field] = new_value
             return "Event updated successfully."
         else:
             return "Event not found."
@@ -316,9 +281,7 @@ schema_delete_event = {
     "description": "Deletes an event.",
     "parameters": {
         "type": "object",
-        "properties": {
-            "event_id": {"type": "string", "description": "8-digit ID of the event"}
-        },
+        "properties": {"event_id": {"type": "string", "description": "8-digit ID of the event"}},
         "required": ["event_id"],
         "additionalProperties": False,
     },

@@ -11,18 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from unittest.mock import AsyncMock, MagicMock
+
 from fastapi.testclient import TestClient
+from pytest import MonkeyPatch
 
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymChatCompletion
+from nemo_gym.openai_utils import NeMoGymChatCompletion, NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
-
 from responses_api_models.openai_model.app import (
     SimpleModelServer,
     SimpleModelServerConfig,
 )
-
-from unittest.mock import AsyncMock, MagicMock
-from pytest import MonkeyPatch
 
 
 class TestApp:
@@ -35,9 +34,7 @@ class TestApp:
             openai_model="dummy_model",
             entrypoint="",
         )
-        return SimpleModelServer(
-            config=config, server_client=MagicMock(spec=ServerClient)
-        )
+        return SimpleModelServer(config=config, server_client=MagicMock(spec=ServerClient))
 
     async def test_sanity(self) -> None:
         self._setup_server()
@@ -144,9 +141,7 @@ class TestApp:
         assert called_args_response.get("model") == "dummy_model"
 
         # model provided should override config
-        res_with_model = client.post(
-            "/v1/responses", json={"input": "hello", "model": "override_model"}
-        )
+        res_with_model = client.post("/v1/responses", json={"input": "hello", "model": "override_model"})
         assert res_with_model.status_code == 200
         assert called_args_response.get("model") == "override_model"
 

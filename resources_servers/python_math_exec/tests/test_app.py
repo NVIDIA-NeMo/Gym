@@ -13,8 +13,9 @@
 # limitations under the License.
 from unittest.mock import MagicMock
 
-from nemo_gym.server_utils import ServerClient
 from app import PythonExecutorResourcesServer, PythonExecutorResourcesServerConfig
+
+from nemo_gym.server_utils import ServerClient
 
 
 class TestApp:
@@ -29,6 +30,4 @@ class TestApp:
             port=8080,
             entrypoint="",
         )
-        PythonExecutorResourcesServer(
-            config=config, server_client=MagicMock(spec=ServerClient)
-        )
+        PythonExecutorResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))

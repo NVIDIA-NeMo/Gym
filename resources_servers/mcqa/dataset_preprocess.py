@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-from typing import Iterable, Any
+from typing import Any, Iterable
 from uuid import uuid4
 
 
@@ -42,11 +42,7 @@ def build_row(
     - uuid (top-level, optional): passthrough identifier
     """
     letters = [chr(ord("A") + i) for i in range(len(choices))]
-    content = (
-        question.strip()
-        + "\n"
-        + "\n".join(f"{letters[i]}: {choices[i]}" for i in range(len(choices)))
-    )
+    content = question.strip() + "\n" + "\n".join(f"{letters[i]}: {choices[i]}" for i in range(len(choices)))
 
     options_list = [{letters[i]: choices[i]} for i in range(len(choices))]
 

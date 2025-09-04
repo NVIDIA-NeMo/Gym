@@ -13,14 +13,14 @@
 # limitations under the License.
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
-    SimpleResponsesAPIModel,
     Body,
+    SimpleResponsesAPIModel,
 )
 from nemo_gym.openai_utils import (
     NeMoGymAsyncOpenAI,
     NeMoGymChatCompletion,
-    NeMoGymResponse,
     NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
 
@@ -41,9 +41,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
         )
         return super().model_post_init(context)
 
-    async def responses(
-        self, body: NeMoGymResponseCreateParamsNonStreaming = Body()
-    ) -> NeMoGymResponse:
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         body_dict = body.model_dump(exclude_unset=True)
         body_dict.setdefault("model", self.config.openai_model)
         openai_response = await self._client.responses.create(**body_dict)

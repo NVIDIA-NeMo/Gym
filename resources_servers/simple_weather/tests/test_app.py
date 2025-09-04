@@ -11,14 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from nemo_gym.server_utils import ServerClient
+from unittest.mock import MagicMock
 
+from nemo_gym.server_utils import ServerClient
 from resources_servers.simple_weather.app import (
     SimpleWeatherResourcesServer,
     SimpleWeatherResourcesServerConfig,
 )
-
-from unittest.mock import MagicMock
 
 
 class TestApp:
@@ -28,6 +27,4 @@ class TestApp:
             port=8080,
             entrypoint="",
         )
-        SimpleWeatherResourcesServer(
-            config=config, server_client=MagicMock(spec=ServerClient)
-        )
+        SimpleWeatherResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))

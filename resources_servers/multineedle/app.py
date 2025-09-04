@@ -11,20 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 from typing import List
 
-import json
-
+from fastapi import FastAPI
 from pydantic import BaseModel
 
-from fastapi import FastAPI
-
 from nemo_gym.base_resources_server import (
-    SimpleResourcesServer,
     BaseResourcesServerConfig,
-    BaseVerifyRequest,
     BaseRunRequest,
+    BaseVerifyRequest,
     BaseVerifyResponse,
+    SimpleResourcesServer,
 )
 
 
@@ -79,14 +77,10 @@ class MultiNeedleResourcesServer(SimpleResourcesServer):
 
         return app
 
-    async def get_synonym_value(
-        self, body: GetSynonymValueRequest
-    ) -> GetSynonymValueResponse:
+    async def get_synonym_value(self, body: GetSynonymValueRequest) -> GetSynonymValueResponse:
         return GetSynonymValueResponse(synonym_value=sum(map(ord, body.synonym)))
 
-    async def extract_synonym_values(
-        self, body: ExtractSynonymValuesRequest
-    ) -> ExtractSynonymValuesResponse:
+    async def extract_synonym_values(self, body: ExtractSynonymValuesRequest) -> ExtractSynonymValuesResponse:
         return ExtractSynonymValuesResponse(success=True)
 
     async def verify(self, body: MultiNeedleVerifyRequest) -> MultiNeedleVerifyResponse:
@@ -94,10 +88,7 @@ class MultiNeedleResourcesServer(SimpleResourcesServer):
 
         actual = []
         for output in reversed(body.response.output):
-            if (
-                output.type == "function_call"
-                and output.name == "extract_synonym_values"
-            ):
+            if output.type == "function_call" and output.name == "extract_synonym_values":
                 actual = json.loads(output.arguments)["synonym_values"]
                 break
 
@@ -109,8 +100,7 @@ class MultiNeedleResourcesServer(SimpleResourcesServer):
             parsed_synonym_values=actual,
             accuracy=accuracy,
             set_overlap=set_overlap,
-            original_term_minefield_hit=body.minefield_label in actual
-            or body.minefield_label_value in actual,
+            original_term_minefield_hit=body.minefield_label in actual or body.minefield_label_value in actual,
             order_instruction_following_failure=not accuracy and set_overlap == 1.0,
         )
 

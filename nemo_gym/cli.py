@@ -11,32 +11,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Dict, List, Optional
-
+import asyncio
+import json
+import shlex
+from glob import glob
 from os import environ, makedirs
 from os.path import exists
-
 from pathlib import Path
+from subprocess import Popen
+from threading import Thread
+from typing import Dict, List, Optional
 
 from devtools import pprint
-
-from glob import glob
-
-from subprocess import Popen
-
-from threading import Thread
-
-import json
-
-import asyncio
-
-import shlex
-
-from tqdm.auto import tqdm
-
-from omegaconf import OmegaConf, DictConfig
-
+from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel
+from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.global_config import (
@@ -59,9 +48,7 @@ def _setup_env_command(dir_path: Path) -> str:  # pragma: no cover
 
 def _run_command(command: str, working_directory: Path) -> Popen:  # pragma: no cover
     custom_env = environ.copy()
-    custom_env["PYTHONPATH"] = (
-        f"{working_directory.absolute()}:{custom_env.get('PYTHONPATH', '')}"
-    )
+    custom_env["PYTHONPATH"] = f"{working_directory.absolute()}:{custom_env.get('PYTHONPATH', '')}"
     print(f"Executing command:\n{command}\n")
     return Popen(command, executable="/bin/bash", shell=True, env=custom_env)
 
@@ -102,26 +89,16 @@ class RunHelper:  # pragma: no cover
     _processes: Dict[str, Popen]
     _server_instances: List[ServerInstance]
 
-    def start(
-        self, global_config_dict_parser_config: GlobalConfigDictParserConfig
-    ) -> None:
-        global_config_dict = get_global_config_dict(
-            global_config_dict_parser_config=global_config_dict_parser_config
-        )
+    def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
+        global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
 
         # Assume Nemo Gym Run is for a single agent.
-        escaped_config_dict_yaml_str = shlex.quote(
-            OmegaConf.to_yaml(global_config_dict)
-        )
+        escaped_config_dict_yaml_str = shlex.quote(OmegaConf.to_yaml(global_config_dict))
 
         # We always run the head server in this `run` command.
         self._head_server_thread = HeadServer.run_webserver()
 
-        top_level_paths = [
-            k
-            for k in global_config_dict.keys()
-            if k not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
-        ]
+        top_level_paths = [k for k in global_config_dict.keys() if k not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS]
 
         processes: Dict[str, Popen] = dict()
         server_instances: List[ServerInstance] = []
@@ -189,9 +166,9 @@ class RunHelper:  # pragma: no cover
 
         print(f"""
 {"#" * 100}
-# 
+#
 # Server Instances
-# 
+#
 {"#" * 100}
 """)
 
@@ -255,7 +232,9 @@ def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover
 
     server_type_name = test_config.dir_path.parts[1]
     example_metrics_fpath = test_config.dir_path / "data/example_metrics.json"
-    assert example_metrics_fpath.exists(), f"""You must run the example data validation for the example data found at {example_fpath}.
+    assert (
+        example_metrics_fpath.exists()
+    ), f"""You must run the example data validation for the example data found at {example_fpath}.
 Your command should look something like:
 ```bash
 ng_prepare_data "+config_paths=[configs/{server_type_name}.yaml]" \\
@@ -284,9 +263,7 @@ See `resources_servers/multineedle/configs/multineedle.yaml` for a full config e
 
     conflict_paths = glob(str(test_config.dir_path / "data/*conflict*"))
     conflict_paths_str = "\n- ".join([""] + conflict_paths)
-    assert not conflict_paths, (
-        f"Found {len(conflict_paths)} conflicting paths: {conflict_paths_str}"
-    )
+    assert not conflict_paths, f"Found {len(conflict_paths)} conflicting paths: {conflict_paths_str}"
 
     example_rollouts_fpath = test_config.dir_path / "data/example_rollouts.jsonl"
     assert example_rollouts_fpath.exists(), f"""You must run the example data through your agent and provide the example rollouts at `{example_rollouts_fpath}`.
@@ -310,9 +287,7 @@ ng_viewer +jsonl_fpath=resources_servers/multineedle/data/example_rollouts.jsonl
 """
     with open(example_rollouts_fpath) as f:
         count = sum(1 for _ in f)
-    assert count == 5, (
-        f"Expected 5 example rollouts in {example_rollouts_fpath}, but got {count}"
-    )
+    assert count == 5, f"Expected 5 example rollouts in {example_rollouts_fpath}, but got {count}"
 
     print(f"The data for {test_config.dir_path} has been successfully validated!")
 
@@ -330,9 +305,7 @@ def test():  # pragma: no cover
     proc = _test_single(test_config)
     return_code = proc.wait()
     if return_code != 0:
-        print(
-            f"You can run detailed tests via `cd {test_config.entrypoint} && source .venv/bin/activate && pytest`."
-        )
+        print(f"You can run detailed tests via `cd {test_config.entrypoint} && source .venv/bin/activate && pytest`.")
         exit(return_code)
 
     _validate_data_single(test_config)
@@ -361,14 +334,10 @@ def test_all():  # pragma: no cover
         *glob("responses_api_models/*"),
     ]
     candidate_dir_paths = [p for p in candidate_dir_paths if "pycache" not in p]
-    print(
-        f"Found {len(candidate_dir_paths)} total modules:{_display_list_of_paths(candidate_dir_paths)}\n"
-    )
+    print(f"Found {len(candidate_dir_paths)} total modules:{_display_list_of_paths(candidate_dir_paths)}\n")
     dir_paths: List[Path] = list(map(Path, candidate_dir_paths))
     dir_paths = [p for p in dir_paths if (p / "README.md").exists()]
-    print(
-        f"Found {len(dir_paths)} modules to test:{_display_list_of_paths(dir_paths)}\n"
-    )
+    print(f"Found {len(dir_paths)} modules to test:{_display_list_of_paths(dir_paths)}\n")
 
     tests_passed: List[Path] = []
     tests_failed: List[Path] = []
@@ -400,7 +369,7 @@ You can rerun just these tests using `ng_test +entrypoint={dir_path}` or run det
         except AssertionError:
             data_validation_failed.append(dir_path)
 
-    print(f"""Found {len(candidate_dir_paths)} total modules:{_display_list_of_paths(candidate_dir_paths)}          
+    print(f"""Found {len(candidate_dir_paths)} total modules:{_display_list_of_paths(candidate_dir_paths)}
 
 Found {len(dir_paths)} modules to test:{_display_list_of_paths(dir_paths)}
 
@@ -515,9 +484,7 @@ def init_resources_server():  # pragma: no cover
     with open("resources/resources_server_test_template.py") as f:
         tests_template = f.read()
     tests_content = tests_template.replace("MultiNeedle", server_type_title)
-    tests_content = tests_content.replace(
-        "from app", f"from resources_servers.{server_type_name}.app"
-    )
+    tests_content = tests_content.replace("from app", f"from resources_servers.{server_type_name}.app")
     with open(tests_fpath, "w") as f:
         f.write(tests_content)
 

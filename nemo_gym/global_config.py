@@ -11,25 +11,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import ClassVar, List, Tuple, Type, Optional
-
 from os import getenv
-
 from pathlib import Path
-
 from socket import socket
+from typing import ClassVar, List, Optional, Tuple, Type
 
 import hydra
-
 from omegaconf import DictConfig, OmegaConf, open_dict
-
-from pydantic import BaseModel, TypeAdapter, ConfigDict
+from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.config_types import (
     ServerInstanceConfig,
-    maybe_get_server_instance_config,
     is_server_ref,
+    maybe_get_server_instance_config,
 )
 
 
@@ -87,9 +82,7 @@ class GlobalConfigDictParser(BaseModel):
 
         return global_config_dict
 
-    def load_extra_config_paths(
-        self, config_paths: List[str]
-    ) -> Tuple[List[str], List[DictConfig]]:
+    def load_extra_config_paths(self, config_paths: List[str]) -> Tuple[List[str], List[DictConfig]]:
         """
         Returns the new total config_paths and the extra configs
         """
@@ -110,14 +103,10 @@ class GlobalConfigDictParser(BaseModel):
 
         return config_paths, extra_configs
 
-    def filter_for_server_instance_configs(
-        self, global_config_dict: DictConfig
-    ) -> List[ServerInstanceConfig]:
+    def filter_for_server_instance_configs(self, global_config_dict: DictConfig) -> List[ServerInstanceConfig]:
         # Get the non-reserved top level items
         non_reserved_items = [
-            (key, v)
-            for key, v in global_config_dict.items()
-            if key not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
+            (key, v) for key, v in global_config_dict.items() if key not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
         ]
 
         # Do one pass to get the server instance configs
@@ -136,9 +125,7 @@ class GlobalConfigDictParser(BaseModel):
     ) -> None:
         server_refs = [c.get_server_ref() for c in server_instance_configs]
         for server_instance_config in server_instance_configs:
-            run_server_config_dict = (
-                server_instance_config.get_inner_run_server_config_dict()
-            )
+            run_server_config_dict = server_instance_config.get_inner_run_server_config_dict()
 
             # Check server refs
             for v in run_server_config_dict.values():
@@ -157,25 +144,17 @@ class GlobalConfigDictParser(BaseModel):
                 if not run_server_config_dict.get("port"):
                     run_server_config_dict["port"] = find_open_port()
 
-    def parse(
-        self, parse_config: Optional[GlobalConfigDictParserConfig] = None
-    ) -> DictConfig:
+    def parse(self, parse_config: Optional[GlobalConfigDictParserConfig] = None) -> DictConfig:
         if parse_config is None:
             parse_config = GlobalConfigDictParserConfig()
 
         global_config_dict = (
-            DictConfig(dict())
-            if parse_config.skip_load_from_cli
-            else self.parse_global_config_dict_from_cli()
+            DictConfig(dict()) if parse_config.skip_load_from_cli else self.parse_global_config_dict_from_cli()
         )
 
         # Command line overrides function input.
-        initial_global_config_dict = OmegaConf.create(
-            parse_config.initial_global_config_dict or dict()
-        )
-        global_config_dict: DictConfig = OmegaConf.merge(
-            initial_global_config_dict, global_config_dict
-        )
+        initial_global_config_dict = OmegaConf.create(parse_config.initial_global_config_dict or dict())
+        global_config_dict: DictConfig = OmegaConf.merge(initial_global_config_dict, global_config_dict)
 
         # Load the env.yaml config. We load it early so that people can use it to conveniently store config paths.
         dotenv_path = parse_config.dotenv_path or Path(PARENT_DIR) / "env.yaml"
@@ -183,9 +162,7 @@ class GlobalConfigDictParser(BaseModel):
         if dotenv_path.exists() and not parse_config.skip_load_from_dotenv:
             dotenv_extra_config = OmegaConf.load(dotenv_path)
 
-        merged_config_for_config_paths = OmegaConf.merge(
-            dotenv_extra_config, global_config_dict
-        )
+        merged_config_for_config_paths = OmegaConf.merge(dotenv_extra_config, global_config_dict)
         ta = TypeAdapter(List[str])
         config_paths = merged_config_for_config_paths.get(CONFIG_PATHS_KEY_NAME) or []
         config_paths = ta.validate_python(config_paths)
@@ -204,9 +181,7 @@ class GlobalConfigDictParser(BaseModel):
             with open_dict(global_config_dict):
                 global_config_dict[CONFIG_PATHS_KEY_NAME] = config_paths
 
-        server_instance_configs = self.filter_for_server_instance_configs(
-            global_config_dict
-        )
+        server_instance_configs = self.filter_for_server_instance_configs(global_config_dict)
 
         # Do one pass through all the configs validate and populate various configs for our servers.
         default_host = global_config_dict.get(DEFAULT_HOST_KEY_NAME) or "127.0.0.1"
@@ -239,9 +214,7 @@ class GlobalConfigDictParser(BaseModel):
 
 def get_global_config_dict(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
-    global_config_dict_parser_cls: Type[
-        GlobalConfigDictParser
-    ] = GlobalConfigDictParser,
+    global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,
 ) -> DictConfig:
     """
     This function provides a handle to the global configuration dict `global_config_dict`. We try to have one source of truth for everything in NeMo gym.
@@ -272,18 +245,14 @@ def get_global_config_dict(
 
         return global_config_dict
 
-    global_config_dict = global_config_dict_parser_cls().parse(
-        global_config_dict_parser_config
-    )
+    global_config_dict = global_config_dict_parser_cls().parse(global_config_dict_parser_config)
 
     _GLOBAL_CONFIG_DICT = global_config_dict
 
     return global_config_dict
 
 
-def get_first_server_config_dict(
-    global_config_dict: DictConfig, top_level_path: str
-) -> DictConfig:
+def get_first_server_config_dict(global_config_dict: DictConfig, top_level_path: str) -> DictConfig:
     # Traverse three levels deep total
     server_config_dict = global_config_dict[top_level_path]
     server_config_dict = list(server_config_dict.values())[0]

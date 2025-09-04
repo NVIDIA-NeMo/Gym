@@ -1,7 +1,6 @@
+import sys
 from os import environ
 from os.path import abspath, dirname, join
-
-import sys
 
 
 ROOT_DIR = dirname(abspath(__file__))

@@ -13,21 +13,20 @@
 # limitations under the License.
 import math
 from unittest.mock import MagicMock
+
 from pytest import approx, fixture
 
+from nemo_gym.openai_utils import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
 from nemo_gym.server_utils import ServerClient
-
 from resources_servers.multiverse_math_hard.app import (
+    MultiVerseMathHardRequest,
     MultiVerseMathHardResourcesServer,
     MultiVerseMathHardResourcesServerConfig,
-    MultiVerseMathHardRequest,
     MultiVerseMathHardResponse,
     MultiVerseMathHardVerifyRequest,
-)
-
-from nemo_gym.openai_utils import (
-    NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponse,
 )
 
 
@@ -42,23 +41,17 @@ class TestApp:
 
     def init_server(self, config: MultiVerseMathHardResourcesServerConfig):
         server_mock = MagicMock(spec=ServerClient)
-        resources_server = MultiVerseMathHardResourcesServer(
-            config=config, server_client=server_mock
-        )
+        resources_server = MultiVerseMathHardResourcesServer(config=config, server_client=server_mock)
         return resources_server
 
-    async def test_multiply(
-        self, config: MultiVerseMathHardResourcesServerConfig
-    ) -> None:
+    async def test_multiply(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
         resources_server = self.init_server(config)
         a = 5.0
         b = 2.0
 
         mock_body = MultiVerseMathHardRequest(**{"a": a, "b": b})
 
-        response = await resources_server.route_to_python_function(
-            "multiply", mock_body
-        )
+        response = await resources_server.route_to_python_function("multiply", mock_body)
 
         expected_solution = 1.1 * a * b
 
@@ -66,9 +59,7 @@ class TestApp:
         assert isinstance(response, MultiVerseMathHardResponse)
         assert isinstance(response.solution, float)
 
-    async def test_divide(
-        self, config: MultiVerseMathHardResourcesServerConfig
-    ) -> None:
+    async def test_divide(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
         resources_server = self.init_server(config)
 
         a = 10.0
@@ -96,16 +87,12 @@ class TestApp:
         assert isinstance(response, MultiVerseMathHardResponse)
         assert isinstance(response.solution, float)
 
-    async def test_return_constant(
-        self, config: MultiVerseMathHardResourcesServerConfig
-    ) -> None:
+    async def test_return_constant(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
         resources_server = self.init_server(config)
         a = 42.0
         mock_body = MultiVerseMathHardRequest(**{"a": a})
 
-        response = await resources_server.route_to_python_function(
-            "return_constant", mock_body
-        )
+        response = await resources_server.route_to_python_function("return_constant", mock_body)
         expected_solution = a
 
         assert response.solution == approx(expected_solution)
@@ -136,17 +123,13 @@ class TestApp:
         assert isinstance(response, MultiVerseMathHardResponse)
         assert isinstance(response.solution, float)
 
-    async def test_subtract(
-        self, config: MultiVerseMathHardResourcesServerConfig
-    ) -> None:
+    async def test_subtract(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
         resources_server = self.init_server(config)
         a = 15.0
         b = 5.0
         mock_body = MultiVerseMathHardRequest(**{"a": a, "b": b})
 
-        response = await resources_server.route_to_python_function(
-            "subtract", mock_body
-        )
+        response = await resources_server.route_to_python_function("subtract", mock_body)
         expected_solution = a - b - 3
 
         assert response.solution == approx(expected_solution)
@@ -179,9 +162,7 @@ class TestApp:
         assert isinstance(response, MultiVerseMathHardResponse)
         assert isinstance(response.solution, float)
 
-    async def test_pi_method_logic_with_magicmock(
-        self, config: MultiVerseMathHardResourcesServerConfig
-    ) -> None:
+    async def test_pi_method_logic_with_magicmock(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
         resources_server = self.init_server(config)
         mock_body = MultiVerseMathHardRequest()  # Use an empty request body
 
@@ -192,9 +173,7 @@ class TestApp:
         assert isinstance(response, MultiVerseMathHardResponse)
         assert isinstance(response.solution, float)
 
-    async def test_negate(
-        self, config: MultiVerseMathHardResourcesServerConfig
-    ) -> None:
+    async def test_negate(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
         resources_server = self.init_server(config)
         a = 7.0
 
@@ -207,9 +186,7 @@ class TestApp:
         assert isinstance(response, MultiVerseMathHardResponse)
         assert isinstance(response.solution, float)
 
-    async def test_verify(
-        self, config: MultiVerseMathHardResourcesServerConfig
-    ) -> None:
+    async def test_verify(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
         resources_server = self.init_server(config)
 
         responses_create_params = NeMoGymResponseCreateParamsNonStreaming(

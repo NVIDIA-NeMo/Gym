@@ -12,41 +12,40 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import re
-from typing import List, Tuple
 from time import time
+from typing import List, Tuple
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
-
 from openai import BaseModel as OpenAIBaseModel
+from pydantic import BaseModel, Field
 
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
-    SimpleResponsesAPIModel,
     Body,
+    SimpleResponsesAPIModel,
 )
 from nemo_gym.openai_utils import (
-    NeMoGymChatCompletionMessageParam,
-    NeMoGymResponseOutputItem,
     NeMoGymAsyncOpenAI,
     NeMoGymChatCompletion,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseOutputMessage,
-    NeMoGymResponseFunctionToolCall,
-    NeMoGymResponseReasoningItem,
-    NeMoGymResponseOutputText,
-    NeMoGymFunctionDefinition,
+    NeMoGymChatCompletionAssistantMessageParam,
     NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymChatCompletionDeveloperMessageParam,
+    NeMoGymChatCompletionMessageParam,
+    NeMoGymChatCompletionMessageToolCallFunctionParam,
+    NeMoGymChatCompletionMessageToolCallParam,
+    NeMoGymChatCompletionSystemMessageParam,
+    NeMoGymChatCompletionToolMessageParam,
     NeMoGymChatCompletionToolParam,
     NeMoGymChatCompletionUserMessageParam,
-    NeMoGymChatCompletionSystemMessageParam,
-    NeMoGymChatCompletionDeveloperMessageParam,
-    NeMoGymChatCompletionAssistantMessageParam,
-    NeMoGymChatCompletionMessageToolCallParam,
-    NeMoGymChatCompletionToolMessageParam,
     NeMoGymChoice,
-    NeMoGymChatCompletionMessageToolCallFunctionParam,
+    NeMoGymFunctionDefinition,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseOutputItem,
+    NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
+    NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
 
@@ -73,20 +72,14 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._converter = VLLMConverter()
         return super().model_post_init(context)
 
-    async def responses(
-        self, body: NeMoGymResponseCreateParamsNonStreaming = Body()
-    ) -> NeMoGymResponse:
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         # Response Create Params -> Chat Completion Create Params
-        chat_completion_create_params = (
-            self._converter.responses_to_chat_completion_create_params(body)
-        )
+        chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(body)
         if not body.model:
             body.model = self.config.model
 
         # Chat Completion Create Params -> Chat Completion
-        chat_completion_response = await self.chat_completions(
-            chat_completion_create_params
-        )
+        chat_completion_response = await self.chat_completions(chat_completion_create_params)
 
         choice = chat_completion_response.choices[0]
         message = choice.message
@@ -145,9 +138,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 "return_tokens_as_token_ids": True,
             },
         )
-        assert not getattr(
-            openai_response.choices[0].message, "reasoning_content", None
-        ), (
+        assert not getattr(openai_response.choices[0].message, "reasoning_content", None), (
             "Please do not use a reasoning parser in vLLM! There is one source of truth for handling data (including reasoning), which is NeMo Gym!"
         )
         openai_response: NeMoGymChatCompletion
@@ -186,9 +177,7 @@ class VLLMConverterResponsesToChatCompletionsState(BaseModel):
     # We are mapping from Response input items to chat completions messages, which is many to one.
     # Our state will accumulate the reasoning, chat, and tool calls for assistant messages.
     content_buffer: str = ""  # Buffer for reasoning and chat
-    tool_calls_buffer: List[NeMoGymChatCompletionMessageToolCallParam] = Field(
-        default_factory=list
-    )
+    tool_calls_buffer: List[NeMoGymChatCompletionMessageToolCallParam] = Field(default_factory=list)
 
     def flush_assistant(self) -> None:
         if not (self.content_buffer or self.tool_calls_buffer):
@@ -279,9 +268,7 @@ class VLLMConverter:
                 tool_dict = tool_dict.copy()
                 tool_dict.pop("type", None)
                 responses_create_params["tools"].append(
-                    NeMoGymChatCompletionToolParam(
-                        type="function", function=NeMoGymFunctionDefinition(**tool_dict)
-                    )
+                    NeMoGymChatCompletionToolParam(type="function", function=NeMoGymFunctionDefinition(**tool_dict))
                 )
 
         chat_completion_create_params = NeMoGymChatCompletionCreateParamsNonStreaming(
@@ -319,18 +306,14 @@ class VLLMConverter:
                     case "input_text":
                         part_param["type"] = "text"
                     case _:
-                        raise NotImplementedError(
-                            f"Unsupported part param type: {part_param['type']}"
-                        )
+                        raise NotImplementedError(f"Unsupported part param type: {part_param['type']}")
 
         match m["role"]:
             case "assistant":
                 # Handle reasoning
                 final_content = ""
                 if isinstance(m["content"], list):
-                    content_str = " ".join(
-                        [part.get("text", "") for part in m["content"]]
-                    )
+                    content_str = " ".join([part.get("text", "") for part in m["content"]])
                     final_content += content_str
                 elif isinstance(m["content"], str):
                     final_content += m["content"]
@@ -367,9 +350,7 @@ class VLLMConverter:
                     )
                 ]
             case _:  # pragma: no cover
-                raise NotImplementedError(
-                    f"Unrecognized role for message: `{m['role']}`"
-                )
+                raise NotImplementedError(f"Unrecognized role for message: `{m['role']}`")
 
         state.messages.extend(converted)
 
@@ -409,9 +390,7 @@ class VLLMConverter:
     # Chat Completion to Response
     # =======================================================
 
-    def postprocess_chat_response(
-        self, choice: NeMoGymChoice
-    ) -> List[NeMoGymResponseOutputItem]:
+    def postprocess_chat_response(self, choice: NeMoGymChoice) -> List[NeMoGymResponseOutputItem]:
         raw_message = choice.message.model_dump()
         response_output = []
 

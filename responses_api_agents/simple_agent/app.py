@@ -11,30 +11,28 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List
-
 import json
+from typing import List
 
 from pydantic import ConfigDict, ValidationError
 
 from nemo_gym.base_resources_server import (
-    BaseVerifyRequest,
     BaseRunRequest,
+    BaseVerifyRequest,
     BaseVerifyResponse,
 )
 from nemo_gym.base_responses_api_agent import (
-    SimpleResponsesAPIAgent,
     BaseResponsesAPIAgentConfig,
     Body,
+    SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ResourcesServerRef, ModelServerRef
-
+from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
-    NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponse,
-    NeMoGymResponseFunctionToolCall,
-    NeMoGymFunctionCallOutput,
     NeMoGymEasyInputMessage,
+    NeMoGymFunctionCallOutput,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseFunctionToolCall,
 )
 
 
@@ -59,9 +57,7 @@ class SimpleAgentVerifyResponse(BaseVerifyResponse):
 class SimpleAgent(SimpleResponsesAPIAgent):
     config: SimpleAgentConfig
 
-    async def responses(
-        self, body: NeMoGymResponseCreateParamsNonStreaming = Body()
-    ) -> NeMoGymResponse:
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         body = body.model_copy(deep=True)
 
         if isinstance(body.input, str):
@@ -90,9 +86,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             output = model_response.output
             new_outputs.extend(output)
 
-            all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [
-                o for o in output if o.type == "function_call"
-            ]
+            all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
             if not all_fn_calls:
                 break
 
@@ -120,9 +114,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
     async def run(self, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
         response = await self.responses(body.responses_create_params)
 
-        verify_request = SimpleAgentVerifyRequest.model_validate(
-            body.model_dump() | {"response": response}
-        )
+        verify_request = SimpleAgentVerifyRequest.model_validate(body.model_dump() | {"response": response})
 
         verify_response = await self.server_client.post(
             server_name=self.config.resources_server.name,

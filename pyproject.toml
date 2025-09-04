@@ -343,8 +343,6 @@ select = [
     "F821",  # undefined name
     "E266",  # too many leading '#' for block comment
     "I",     # isort
-    "D101",  # docstring
-    "D103",
 ]
 
 # Additional rules can be added here

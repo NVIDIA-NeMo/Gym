@@ -11,15 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from nemo_gym.server_utils import ServerClient
+from unittest.mock import MagicMock
 
+from nemo_gym.server_utils import ServerClient
 from resources_servers.google_search.app import (
     GoogleSearchResourcesServer,
     GoogleSearchResourcesServerConfig,
     box_parser,
 )
-
-from unittest.mock import MagicMock
 
 
 class TestApp:
@@ -31,9 +30,7 @@ class TestApp:
             google_api_key="dummy_key",  # pragma: allowlist secret
             google_cx="dummy_cx",
         )
-        GoogleSearchResourcesServer(
-            config=config, server_client=MagicMock(spec=ServerClient)
-        )
+        GoogleSearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
     def test_box_parser_valid_content(self) -> None:
         """Test box_parser with valid boxed content"""

@@ -11,9 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from nemo_gym.dataset_viewer import JsonlDatasetViewerConfig, build_jsonl_dataset_viewer
+from unittest.mock import mock_open, patch
 
-from unittest.mock import patch, mock_open
+from nemo_gym.dataset_viewer import JsonlDatasetViewerConfig, build_jsonl_dataset_viewer
 
 
 class TestDatasetViewer:

@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+
 import pandas as pd
+
 
 METRICS = ["total_visits", "session_duration_seconds", "user_engaged"]
 METRIC_NAMES = ["total visits", "average session duration", "engaged users"]
@@ -27,29 +29,21 @@ class AnalyticsTool:
         Resets the analytics data to the original state.
         """
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        data_path = os.path.join(
-            current_dir, "..", "csv_data", "processed", "analytics_data.csv"
-        )
+        data_path = os.path.join(current_dir, "..", "csv_data", "processed", "analytics_data.csv")
         self._analytics_data = pd.read_csv(data_path, dtype=str)
-        self._analytics_data["user_engaged"] = (
-            self._analytics_data["user_engaged"] == "True"
-        )  # Convert to boolean
+        self._analytics_data["user_engaged"] = self._analytics_data["user_engaged"] == "True"  # Convert to boolean
         self._plots_data = pd.DataFrame(columns=["file_path"])
 
     def get_visitor_information_by_id(self, visitor_id=None):
         if not visitor_id:
             return "Visitor ID not provided."
-        visitor_data = self._analytics_data[
-            self._analytics_data["visitor_id"] == visitor_id
-        ].to_dict(orient="records")
+        visitor_data = self._analytics_data[self._analytics_data["visitor_id"] == visitor_id].to_dict(orient="records")
         if visitor_data:
             return visitor_data
         else:
             return "Visitor not found."
 
-    def create_plot(
-        self, time_min=None, time_max=None, value_to_plot=None, plot_type=None
-    ):
+    def create_plot(self, time_min=None, time_max=None, value_to_plot=None, plot_type=None):
         if not time_min:
             return "Start date not provided."
         if not time_max:
@@ -74,9 +68,7 @@ class AnalyticsTool:
 
     def total_visits_count(self, time_min=None, time_max=None):
         if time_min:
-            data = self._analytics_data[
-                self._analytics_data["date_of_visit"] >= time_min
-            ]
+            data = self._analytics_data[self._analytics_data["date_of_visit"] >= time_min]
         else:
             data = self._analytics_data
         if time_max:
@@ -85,9 +77,7 @@ class AnalyticsTool:
 
     def engaged_users_count(self, time_min=None, time_max=None):
         if time_min:
-            data = self._analytics_data[
-                self._analytics_data["date_of_visit"] >= time_min
-            ]
+            data = self._analytics_data[self._analytics_data["date_of_visit"] >= time_min]
         else:
             data = self._analytics_data[:]
         if time_max:
@@ -98,35 +88,27 @@ class AnalyticsTool:
 
     def traffic_source_count(self, time_min=None, time_max=None, traffic_source=None):
         if time_min:
-            data = self._analytics_data[
-                self._analytics_data["date_of_visit"] >= time_min
-            ]
+            data = self._analytics_data[self._analytics_data["date_of_visit"] >= time_min]
         else:
             data = self._analytics_data[:]
         if time_max:
             data = data[data["date_of_visit"] <= time_max]
 
         if traffic_source:
-            data["visits_from_source"] = (
-                data["traffic_source"] == traffic_source
-            ).astype(int)
+            data["visits_from_source"] = (data["traffic_source"] == traffic_source).astype(int)
             return data.groupby("date_of_visit").sum()["visits_from_source"].to_dict()
         else:
             return data.groupby("date_of_visit").size().to_dict()
 
     def get_average_session_duration(self, time_min=None, time_max=None):
         if time_min:
-            data = self._analytics_data[
-                self._analytics_data["date_of_visit"] >= time_min
-            ]
+            data = self._analytics_data[self._analytics_data["date_of_visit"] >= time_min]
         else:
             data = self._analytics_data
         if time_max:
             data = data[data["date_of_visit"] <= time_max]
 
-        data["session_duration_seconds"] = data["session_duration_seconds"].astype(
-            float
-        )
+        data["session_duration_seconds"] = data["session_duration_seconds"].astype(float)
         return (
             data[["date_of_visit", "session_duration_seconds"]]
             .groupby("date_of_visit")
@@ -141,9 +123,7 @@ schema_get_visitor_information = {
     "description": "Returns the analytics data for a given visitor ID.",
     "parameters": {
         "type": "object",
-        "properties": {
-            "visitor_id": {"type": "string", "description": "ID of the visitor"}
-        },
+        "properties": {"visitor_id": {"type": "string", "description": "ID of the visitor"}},
         "required": ["visitor_id"],
         "additionalProperties": False,
     },

@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
-import pandas as pd
 import re
+
+import pandas as pd
 
 
 class ProjectManagementTool:
@@ -22,9 +23,7 @@ class ProjectManagementTool:
 
     def reset_state(self):
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        data_path = os.path.join(
-            current_dir, "..", "csv_data", "processed", "project_tasks.csv"
-        )
+        data_path = os.path.join(current_dir, "..", "csv_data", "processed", "project_tasks.csv")
         self._project_tasks = pd.read_csv(data_path, dtype=str)
 
     def get_task_information_by_id(self, task_id=None, field=None):
@@ -32,9 +31,7 @@ class ProjectManagementTool:
             return "Task ID not provided."
         if not field:
             return "Field not provided."
-        task = self._project_tasks[self._project_tasks["task_id"] == task_id].to_dict(
-            orient="records"
-        )
+        task = self._project_tasks[self._project_tasks["task_id"] == task_id].to_dict(orient="records")
         if task:
             if field in task[0]:
                 return {field: task[0][field]}
@@ -65,9 +62,7 @@ class ProjectManagementTool:
             tasks = tasks[tasks["task_name"].str.contains(task_name, case=False)]
         if assigned_to_email:
             # Use exact matching instead of contains
-            tasks = tasks[
-                tasks["assigned_to_email"].str.lower() == assigned_to_email.lower()
-            ]
+            tasks = tasks[tasks["assigned_to_email"].str.lower() == assigned_to_email.lower()]
         if list_name:
             tasks = tasks[tasks["list_name"].str.contains(list_name, case=False)]
         if due_date:
@@ -88,13 +83,8 @@ class ProjectManagementTool:
             return "Missing task details."
 
         assigned_to_email = assigned_to_email.lower()
-        if (
-            assigned_to_email
-            not in self._project_tasks["assigned_to_email"].str.lower().values
-        ):
-            return (
-                "Assignee email not valid. Please choose from the list of team members."
-            )
+        if assigned_to_email not in self._project_tasks["assigned_to_email"].str.lower().values:
+            return "Assignee email not valid. Please choose from the list of team members."
         if list_name not in ["Backlog", "In Progress", "In Review", "Completed"]:
             return "List not valid. Please choose from: 'Backlog', 'In Progress', 'In Review', 'Completed'."
         if board not in ["Back end", "Front end", "Design"]:
@@ -111,9 +101,7 @@ class ProjectManagementTool:
                 "board": [board],
             }
         )
-        self._project_tasks = pd.concat(
-            [self._project_tasks, new_task], ignore_index=True
-        )
+        self._project_tasks = pd.concat([self._project_tasks, new_task], ignore_index=True)
         return task_id
 
     def delete_task(self, task_id=None):
@@ -121,9 +109,7 @@ class ProjectManagementTool:
             return "Task ID not provided."
 
         if task_id in self._project_tasks["task_id"].values:
-            self._project_tasks = self._project_tasks[
-                self._project_tasks["task_id"] != task_id
-            ]
+            self._project_tasks = self._project_tasks[self._project_tasks["task_id"] != task_id]
             return "Task deleted successfully."
         else:
             return "Task not found."
@@ -146,18 +132,13 @@ class ProjectManagementTool:
             return "List not valid. Please choose from: 'Backlog', 'In Progress', 'In Review', 'Completed'."
         if (
             field == "assigned_to_email"
-            and new_value
-            not in self._project_tasks["assigned_to_email"].str.lower().values
+            and new_value not in self._project_tasks["assigned_to_email"].str.lower().values
         ):
-            return (
-                "Assignee email not valid. Please choose from the list of team members."
-            )
+            return "Assignee email not valid. Please choose from the list of team members."
 
         if task_id in self._project_tasks["task_id"].values:
             if field in self._project_tasks.columns:
-                self._project_tasks.loc[
-                    self._project_tasks["task_id"] == task_id, field
-                ] = new_value
+                self._project_tasks.loc[self._project_tasks["task_id"] == task_id, field] = new_value
                 return "Task updated successfully."
             else:
                 return "Field not valid."
@@ -258,9 +239,7 @@ schema_delete_task = {
     "description": "Deletes a task by ID.",
     "parameters": {
         "type": "object",
-        "properties": {
-            "task_id": {"type": "string", "description": "8-digit ID of the task"}
-        },
+        "properties": {"task_id": {"type": "string", "description": "8-digit ID of the task"}},
         "required": ["task_id"],
         "additionalProperties": False,
     },

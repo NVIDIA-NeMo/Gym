@@ -13,14 +13,15 @@
 # limitations under the License.
 from abc import abstractmethod
 
-from fastapi import FastAPI, Body
-from nemo_gym.server_utils import BaseRunServerConfig, BaseServer, SimpleServer
+from fastapi import Body, FastAPI
+
 from nemo_gym.openai_utils import (
-    NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponse,
-    NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletion,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.server_utils import BaseRunServerConfig, BaseServer, SimpleServer
 
 
 class BaseResponsesAPIModelConfig(BaseRunServerConfig):
@@ -48,7 +49,5 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         pass
 
     @abstractmethod
-    async def responses(
-        self, body: NeMoGymResponseCreateParamsNonStreaming = Body()
-    ) -> NeMoGymResponse:
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         pass

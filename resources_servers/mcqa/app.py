@@ -12,14 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import re
-from typing import Optional, Literal, Any
+from typing import Any, Literal, Optional
+
 from fastapi import FastAPI
+
 from nemo_gym.base_resources_server import (
-    SimpleResourcesServer,
     BaseResourcesServerConfig,
-    BaseVerifyRequest,
     BaseRunRequest,
+    BaseVerifyRequest,
     BaseVerifyResponse,
+    SimpleResourcesServer,
 )
 
 
@@ -59,10 +61,7 @@ def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
     # TODO: @fsoares should we just assume we are always receiving the last message only? Not sure if this is always true.
     texts: list[str] = []
     for o in body.response.output:
-        if (
-            getattr(o, "type", None) == "message"
-            and getattr(o, "role", None) == "assistant"
-        ):
+        if getattr(o, "type", None) == "message" and getattr(o, "role", None) == "assistant":
             # Each message has content which can be text parts; normalize to string
             content = getattr(o, "content", None)
             if isinstance(content, list):
@@ -88,9 +87,7 @@ STRICT_BOXED_PATTERN = re.compile(r"\\boxed\{\s*[^A-Za-z]*([A-Z])[^A-Za-z]*\s*\}
 ANSWER_COLON_PATTERN = re.compile(r"(?i)answer\s*:\s*(.+)")
 
 
-def _parse_answer_letter_strict_boxed(
-    text: str, allowed_letters: set[str]
-) -> tuple[Optional[str], str, bool]:
+def _parse_answer_letter_strict_boxed(text: str, allowed_letters: set[str]) -> tuple[Optional[str], str, bool]:
     parsed_text = text
     m = STRICT_BOXED_PATTERN.search(text)
     if not m:
@@ -120,9 +117,7 @@ def _normalize_for_match(s: str) -> str:
     return " ".join(s.lower().split())
 
 
-def _match_option_text(
-    text: str, options: list[dict[str, str]], allowed_letters: set[str]
-) -> Optional[str]:
+def _match_option_text(text: str, options: list[dict[str, str]], allowed_letters: set[str]) -> Optional[str]:
     """Match boxed content against option texts and return the option letter.
 
     - Looks ONLY inside the first \boxed{...} region; returns None if absent.
@@ -198,10 +193,7 @@ class MCQAResourcesServer(SimpleResourcesServer):
                     for entry in options or []:
                         for k, v in entry.items():
                             k_up = k.upper()
-                            if (
-                                k_up in allowed_letters
-                                and _normalize_for_match(v) == cand_norm
-                            ):
+                            if k_up in allowed_letters and _normalize_for_match(v) == cand_norm:
                                 pred = k_up
                                 break
                         if pred is not None:

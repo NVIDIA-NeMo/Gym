@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+
 import pandas as pd
+
 
 HARDCODED_CURRENT_TIME = pd.to_datetime("2023-11-30T23:59:00")
 
@@ -23,9 +25,7 @@ class EmailTool:
 
     def reset_state(self):
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        data_path = os.path.join(
-            current_dir, "..", "csv_data", "processed", "emails.csv"
-        )
+        data_path = os.path.join(current_dir, "..", "csv_data", "processed", "emails.csv")
         self._emails = pd.read_csv(data_path, dtype=str)
 
     def get_email_information_by_id(self, email_id=None, field=None):
@@ -35,9 +35,7 @@ class EmailTool:
             return "Field not provided."
 
         try:
-            email = self._emails[self._emails["email_id"] == email_id].to_dict(
-                orient="records"
-            )
+            email = self._emails[self._emails["email_id"] == email_id].to_dict(orient="records")
             if email:
                 if field in email[0]:
                     return {field: email[0][field]}
@@ -48,17 +46,13 @@ class EmailTool:
         except Exception as e:
             return f"Error retrieving email information: {e}"
 
-    def search_emails(
-        self, query="", date_min=None, date_max=None, page=1, page_size=5
-    ):
+    def search_emails(self, query="", date_min=None, date_max=None, page=1, page_size=5):
         try:
             query_words = query.lower().split()
 
             # Filter function to check if all query words are in any of the specified fields
             def filter_emails(row):
-                combined_fields = (
-                    f"{row['subject']} {row['body']} {row['sender/recipient']}".lower()
-                )
+                combined_fields = f"{row['subject']} {row['body']} {row['sender/recipient']}".lower()
                 return all(word in combined_fields for word in query_words)
 
             # Apply filter function across all rows
@@ -73,23 +67,19 @@ class EmailTool:
                 emails = [
                     email
                     for email in emails
-                    if pd.Timestamp(email["sent_datetime"]).date()
-                    >= pd.Timestamp(date_min).date()
+                    if pd.Timestamp(email["sent_datetime"]).date() >= pd.Timestamp(date_min).date()
                 ]
             if date_max:
                 # inclusive, remove time from timestamp
                 emails = [
                     email
                     for email in emails
-                    if pd.Timestamp(email["sent_datetime"]).date()
-                    <= pd.Timestamp(date_max).date()
+                    if pd.Timestamp(email["sent_datetime"]).date() <= pd.Timestamp(date_max).date()
                 ]
 
             # Calculate pagination
             total_emails = len(emails)
-            total_pages = (
-                total_emails + page_size - 1
-            ) // page_size  # Ceiling division
+            total_pages = (total_emails + page_size - 1) // page_size  # Ceiling division
 
             # Validate page number
             page = max(1, min(page, total_pages)) if total_pages > 0 else 1
@@ -121,11 +111,7 @@ class EmailTool:
 
         try:
             recipient = recipient.lower()
-            email_id = (
-                str(int(self._emails["email_id"].max()) + 1)
-                if not self._emails.empty
-                else "1"
-            )
+            email_id = str(int(self._emails["email_id"].max()) + 1) if not self._emails.empty else "1"
             sent_datetime = str(HARDCODED_CURRENT_TIME)
 
             # Create a new row with named columns instead of positional insertion
@@ -138,9 +124,7 @@ class EmailTool:
                 "body": body,
             }
 
-            self._emails = pd.concat(
-                [self._emails, pd.DataFrame([new_email])], ignore_index=True
-            )
+            self._emails = pd.concat([self._emails, pd.DataFrame([new_email])], ignore_index=True)
             return "Email sent successfully."
         except Exception as e:
             return f"Error sending email: {e}"
@@ -169,12 +153,8 @@ class EmailTool:
                 return "Email not found."
 
             recipient = recipient.lower()
-            email = self._emails[self._emails["email_id"] == email_id].to_dict(
-                orient="records"
-            )[0]
-            result = self.send_email(
-                recipient, f"FW: {email['subject']}", email["body"]
-            )
+            email = self._emails[self._emails["email_id"] == email_id].to_dict(orient="records")[0]
+            result = self.send_email(recipient, f"FW: {email['subject']}", email["body"])
 
             if "Error" in result or "Invalid" in result:
                 return result
@@ -190,9 +170,7 @@ class EmailTool:
             if email_id not in self._emails["email_id"].values:
                 return "Email not found."
 
-            email = self._emails[self._emails["email_id"] == email_id].to_dict(
-                orient="records"
-            )[0]
+            email = self._emails[self._emails["email_id"] == email_id].to_dict(orient="records")[0]
 
             # Handle reply differently based on whether it's an inbox or outbox email
             recipient = email["sender/recipient"]

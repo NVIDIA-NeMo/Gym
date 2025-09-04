@@ -12,24 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-
 from pathlib import Path
+from unittest.mock import MagicMock, mock_open
+
+from pytest import MonkeyPatch, raises
 
 import nemo_gym.global_config
 import nemo_gym.train_data_utils
-
 from nemo_gym.config_types import ResponsesAPIAgentServerInstanceConfig
-from nemo_gym.global_config import GlobalConfigDictParser, DictConfig
+from nemo_gym.global_config import DictConfig, GlobalConfigDictParser
 from nemo_gym.train_data_utils import (
+    AvgMinMax,
+    DatasetMetrics,
+    DatasetValidatorState,
     TrainDataProcessor,
     TrainDataProcessorConfig,
-    DatasetMetrics,
-    AvgMinMax,
-    DatasetValidatorState,
 )
-
-from unittest.mock import MagicMock, mock_open
-from pytest import MonkeyPatch, raises
 
 
 def load_multineedle_test_global_config_dict() -> DictConfig:
@@ -50,15 +48,11 @@ def load_multineedle_test_global_config_dict() -> DictConfig:
 
 
 class TestLoadAndValidateServerInstanceConfigs:
-    def test_load_and_validate_server_instance_configs_sanity(
-        self, monkeypatch: MonkeyPatch
-    ) -> None:
+    def test_load_and_validate_server_instance_configs_sanity(self, monkeypatch: MonkeyPatch) -> None:
         # Fix the port returned
         find_open_port_mock = MagicMock()
         find_open_port_mock.return_value = 12345
-        monkeypatch.setattr(
-            nemo_gym.global_config, "find_open_port", find_open_port_mock
-        )
+        monkeypatch.setattr(nemo_gym.global_config, "find_open_port", find_open_port_mock)
 
         config = TrainDataProcessorConfig(
             output_dirpath="",
@@ -66,11 +60,9 @@ class TestLoadAndValidateServerInstanceConfigs:
             should_download=False,
         )
         processor = TrainDataProcessor()
-        actual_agent_configs_with_data = (
-            processor.load_and_validate_server_instance_configs(
-                config=config,
-                global_config_dict=load_multineedle_test_global_config_dict(),
-            )
+        actual_agent_configs_with_data = processor.load_and_validate_server_instance_configs(
+            config=config,
+            global_config_dict=load_multineedle_test_global_config_dict(),
         )
 
         expected_agent_configs_with_data_dict = [
@@ -103,12 +95,9 @@ class TestLoadAndValidateServerInstanceConfigs:
             }
         ]
         actual_agent_configs_with_data_dict = [
-            c.model_dump(mode="json", warnings="none")
-            for c in actual_agent_configs_with_data
+            c.model_dump(mode="json", warnings="none") for c in actual_agent_configs_with_data
         ]
-        assert (
-            expected_agent_configs_with_data_dict == actual_agent_configs_with_data_dict
-        )
+        assert expected_agent_configs_with_data_dict == actual_agent_configs_with_data_dict
 
 
 class TestLoadDatasets:
@@ -152,9 +141,7 @@ class TestLoadDatasets:
                 ResponsesAPIAgentServerInstanceConfig(
                     name="multineedle_simple_agent",
                     server_type_config_dict=DictConfig(server_type_config_dict),
-                    responses_api_agents=server_type_config_dict[
-                        "responses_api_agents"
-                    ],
+                    responses_api_agents=server_type_config_dict["responses_api_agents"],
                 ),
             ],
         )
@@ -203,9 +190,7 @@ class TestLoadDatasets:
                     ResponsesAPIAgentServerInstanceConfig(
                         name="multineedle_simple_agent",
                         server_type_config_dict=DictConfig(server_type_config_dict),
-                        responses_api_agents=server_type_config_dict[
-                            "responses_api_agents"
-                        ],
+                        responses_api_agents=server_type_config_dict["responses_api_agents"],
                     ),
                 ],
             )
@@ -260,18 +245,14 @@ class TestLoadDatasets:
                     ResponsesAPIAgentServerInstanceConfig(
                         name="multineedle_simple_agent",
                         server_type_config_dict=DictConfig(server_type_config_dict),
-                        responses_api_agents=server_type_config_dict[
-                            "responses_api_agents"
-                        ],
+                        responses_api_agents=server_type_config_dict["responses_api_agents"],
                     ),
                 ],
             )
 
 
 class TestValidateSamplesAndAggregateMetrics:
-    def test_validate_samples_and_aggregate_metrics_sanity(
-        self, monkeypatch: MonkeyPatch
-    ) -> None:
+    def test_validate_samples_and_aggregate_metrics_sanity(self, monkeypatch: MonkeyPatch) -> None:
         mock_write_file = mock_open()
         write_filenames = []
 
@@ -314,33 +295,25 @@ class TestValidateSamplesAndAggregateMetrics:
                 }
             }
         }
-        actual_dataset_type_to_aggregate_metrics = (
-            processor.validate_samples_and_aggregate_metrics(
-                server_instance_configs=[
-                    ResponsesAPIAgentServerInstanceConfig(
-                        name="multineedle_simple_agent",
-                        server_type_config_dict=DictConfig(server_type_config_dict),
-                        responses_api_agents=server_type_config_dict[
-                            "responses_api_agents"
-                        ],
-                    ),
-                ],
-            )
+        actual_dataset_type_to_aggregate_metrics = processor.validate_samples_and_aggregate_metrics(
+            server_instance_configs=[
+                ResponsesAPIAgentServerInstanceConfig(
+                    name="multineedle_simple_agent",
+                    server_type_config_dict=DictConfig(server_type_config_dict),
+                    responses_api_agents=server_type_config_dict["responses_api_agents"],
+                ),
+            ],
         )
 
         expected_dataset_type_to_aggregate_metrics = {
             "example": DatasetMetrics(
                 is_aggregated=False,
                 number_of_examples=5,
-                number_of_tools=AvgMinMax(
-                    is_aggregated=False, total=5, average=10.0, min=2.0, max=2.0
-                ),
+                number_of_tools=AvgMinMax(is_aggregated=False, total=5, average=10.0, min=2.0, max=2.0),
                 json_dumped_number_of_words=AvgMinMax(
                     is_aggregated=False, total=5, average=7520.0, min=1499.0, max=1509.0
                 ),
-                number_of_turns=AvgMinMax(
-                    is_aggregated=False, total=5, average=5.0, min=1.0, max=1.0
-                ),
+                number_of_turns=AvgMinMax(is_aggregated=False, total=5, average=5.0, min=1.0, max=1.0),
                 temperature=AvgMinMax(
                     is_aggregated=False,
                     total=0,
@@ -350,18 +323,11 @@ class TestValidateSamplesAndAggregateMetrics:
                 ),
             )
         }
-        assert (
-            expected_dataset_type_to_aggregate_metrics
-            == actual_dataset_type_to_aggregate_metrics
-        )
+        assert expected_dataset_type_to_aggregate_metrics == actual_dataset_type_to_aggregate_metrics
 
-        assert write_filenames == [
-            Path("resources_servers/multineedle/data/example_metrics.json")
-        ]
+        assert write_filenames == [Path("resources_servers/multineedle/data/example_metrics.json")]
 
-    def test_validate_samples_and_aggregate_metrics_conflict_raises_ValueError(
-        self, monkeypatch: MonkeyPatch
-    ) -> None:
+    def test_validate_samples_and_aggregate_metrics_conflict_raises_ValueError(self, monkeypatch: MonkeyPatch) -> None:
         mock_write_file = mock_open()
         write_filenames = []
 
@@ -374,9 +340,7 @@ class TestValidateSamplesAndAggregateMetrics:
 
             if filename == "resources_servers/multineedle/data/example.jsonl":
                 return original_open(filename, mode)
-            elif filename == Path(
-                "resources_servers/multineedle/data/example_metrics.json"
-            ):
+            elif filename == Path("resources_servers/multineedle/data/example_metrics.json"):
                 with original_open(filename, mode) as f:
                     read_data = json.loads(f.read())
 
@@ -424,16 +388,12 @@ class TestValidateSamplesAndAggregateMetrics:
                     ResponsesAPIAgentServerInstanceConfig(
                         name="multineedle_simple_agent",
                         server_type_config_dict=DictConfig(server_type_config_dict),
-                        responses_api_agents=server_type_config_dict[
-                            "responses_api_agents"
-                        ],
+                        responses_api_agents=server_type_config_dict["responses_api_agents"],
                     ),
                 ],
             )
 
-        assert write_filenames == [
-            Path("resources_servers/multineedle/data/example_metrics_conflict.json")
-        ]
+        assert write_filenames == [Path("resources_servers/multineedle/data/example_metrics_conflict.json")]
 
     def test_validate_samples_and_aggregate_metrics_single_sample(self) -> None:
         processor = TrainDataProcessor()
@@ -472,9 +432,7 @@ class TestValidateSamplesAndAggregateMetrics:
                 min=float("inf"),
                 max=float("-inf"),
             ),
-            json_dumped_number_of_words=AvgMinMax(
-                is_aggregated=False, total=1, average=2.0, min=2.0, max=2.0
-            ),
+            json_dumped_number_of_words=AvgMinMax(is_aggregated=False, total=1, average=2.0, min=2.0, max=2.0),
             number_of_turns=AvgMinMax(
                 is_aggregated=False,
                 total=0,
@@ -551,18 +509,14 @@ class TestCollateSamples:
                 ResponsesAPIAgentServerInstanceConfig(
                     name="multineedle_simple_agent",
                     server_type_config_dict=DictConfig(server_type_config_dict),
-                    responses_api_agents=server_type_config_dict[
-                        "responses_api_agents"
-                    ],
+                    responses_api_agents=server_type_config_dict["responses_api_agents"],
                 ),
             ],
             dataset_type_to_aggregate_metrics={
                 "example": DatasetMetrics(
                     is_aggregated=False,
                     number_of_examples=5,
-                    number_of_tools=AvgMinMax(
-                        is_aggregated=False, total=5, average=10.0, min=2.0, max=2.0
-                    ),
+                    number_of_tools=AvgMinMax(is_aggregated=False, total=5, average=10.0, min=2.0, max=2.0),
                     json_dumped_number_of_words=AvgMinMax(
                         is_aggregated=False,
                         total=5,
@@ -570,9 +524,7 @@ class TestCollateSamples:
                         min=1499.0,
                         max=1509.0,
                     ),
-                    number_of_turns=AvgMinMax(
-                        is_aggregated=False, total=5, average=5.0, min=1.0, max=1.0
-                    ),
+                    number_of_turns=AvgMinMax(is_aggregated=False, total=5, average=5.0, min=1.0, max=1.0),
                     temperature=AvgMinMax(
                         is_aggregated=False,
                         total=0,
@@ -590,9 +542,7 @@ class TestCollateSamples:
             Path("example.jsonl"),
         ]
 
-    def test_collate_samples_metrics_conflict_raises_ValueError(
-        self, monkeypatch: MonkeyPatch
-    ) -> None:
+    def test_collate_samples_metrics_conflict_raises_ValueError(self, monkeypatch: MonkeyPatch) -> None:
         write_filenames_to_mock = dict()
 
         original_open = open
@@ -614,9 +564,7 @@ class TestCollateSamples:
 
         monkeypatch.setattr("builtins.open", custom_open)
 
-        monkeypatch.setattr(
-            nemo_gym.train_data_utils.Path, "exists", lambda *args, **kwargs: True
-        )
+        monkeypatch.setattr(nemo_gym.train_data_utils.Path, "exists", lambda *args, **kwargs: True)
 
         processor = TrainDataProcessor()
 
@@ -661,18 +609,14 @@ class TestCollateSamples:
                     ResponsesAPIAgentServerInstanceConfig(
                         name="multineedle_simple_agent",
                         server_type_config_dict=DictConfig(server_type_config_dict),
-                        responses_api_agents=server_type_config_dict[
-                            "responses_api_agents"
-                        ],
+                        responses_api_agents=server_type_config_dict["responses_api_agents"],
                     ),
                 ],
                 dataset_type_to_aggregate_metrics={
                     "example": DatasetMetrics(
                         is_aggregated=False,
                         number_of_examples=5,
-                        number_of_tools=AvgMinMax(
-                            is_aggregated=False, total=5, average=10.0, min=2.0, max=2.0
-                        ),
+                        number_of_tools=AvgMinMax(is_aggregated=False, total=5, average=10.0, min=2.0, max=2.0),
                         json_dumped_number_of_words=AvgMinMax(
                             is_aggregated=False,
                             total=5,
@@ -680,9 +624,7 @@ class TestCollateSamples:
                             min=1499.0,
                             max=1509.0,
                         ),
-                        number_of_turns=AvgMinMax(
-                            is_aggregated=False, total=5, average=5.0, min=1.0, max=1.0
-                        ),
+                        number_of_turns=AvgMinMax(is_aggregated=False, total=5, average=5.0, min=1.0, max=1.0),
                         temperature=AvgMinMax(
                             is_aggregated=False,
                             total=0,

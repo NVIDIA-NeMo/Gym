@@ -11,28 +11,28 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import io
-from contextlib import redirect_stdout, redirect_stderr
-from typing import Optional, Dict
-from pydantic import PrivateAttr
+import multiprocessing
 import re
 import signal
-import numpy as np
-import scipy
-import pandas as pd
-import asyncio
-import multiprocessing
 import time
 import uuid
-from pydantic import BaseModel
+from contextlib import redirect_stderr, redirect_stdout
+from typing import Dict, Optional
+
+import numpy as np
+import pandas as pd
+import scipy
 from fastapi import FastAPI
+from pydantic import BaseModel, PrivateAttr
 
 from nemo_gym.base_resources_server import (
-    SimpleResourcesServer,
     BaseResourcesServerConfig,
-    BaseVerifyRequest,
     BaseRunRequest,
+    BaseVerifyRequest,
     BaseVerifyResponse,
+    SimpleResourcesServer,
 )
 
 
@@ -89,9 +89,7 @@ def _session_worker(child_conn, max_execution_time: int):
         if msg["cmd"] == "exec":
             code = msg["code"]
             try:
-                out, err, res = _run_code_in_existing_env(
-                    code, exec_globals, exec_locals, max_execution_time
-                )
+                out, err, res = _run_code_in_existing_env(code, exec_globals, exec_locals, max_execution_time)
                 child_conn.send({"ok": True, "out": out, "err": err, "res": res})
             except Exception as e:
                 child_conn.send({"ok": False, "error": str(e)})
@@ -266,9 +264,7 @@ def _get_last_expr_value(code: str, globals_dict: dict, locals_dict: dict):
     last_line = lines[-1].strip()
 
     # Ignore lines that are obviously not bare expressions
-    if last_line.startswith(
-        ("print", "import", "from", "def", "class", "if", "for", "while", "try", "with")
-    ):
+    if last_line.startswith(("print", "import", "from", "def", "class", "if", "for", "while", "try", "with")):
         return None
 
     try:

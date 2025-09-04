@@ -12,31 +12,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import contextlib
-from io import StringIO
 import logging
+from io import StringIO
 from typing import Any, ClassVar, Optional
-
-from pydantic import BaseModel
 
 from fastapi import FastAPI
 from math_verify import grader
 from math_verify.errors import TimeoutException
 from math_verify.metric import math_metric
 from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
+from pydantic import BaseModel
 
 from nemo_gym.base_resources_server import (
-    SimpleResourcesServer,
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
-)
-from nemo_gym.openai_utils import (
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymEasyInputMessage,
+    SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.openai_utils import (
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
 
 
 class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
@@ -116,9 +115,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
 
         return app
 
-    async def verify(
-        self, body: LibraryJudgeMathVerifyRequest
-    ) -> LibraryJudgeMathVerifyResponse:
+    async def verify(self, body: LibraryJudgeMathVerifyRequest) -> LibraryJudgeMathVerifyResponse:
         assistant_responses = []
         for output_item in body.response.output:
             if output_item.type != "message":
@@ -136,9 +133,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
             extracted_answer,
             library_reward,
             judge_evaluations,
-        ) = await self._verify_answer(
-            body.question, body.expected_answer, combined_response
-        )
+        ) = await self._verify_answer(body.question, body.expected_answer, combined_response)
         return LibraryJudgeMathVerifyResponse(
             **body.model_dump(),
             reward=reward,
@@ -156,9 +151,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
         specified question in comparison with the specified expected answer.
         """
 
-        library_reward, extracted_answer = self._verify_answer_with_library(
-            expected_answer, generated_answer
-        )
+        library_reward, extracted_answer = self._verify_answer_with_library(expected_answer, generated_answer)
         if not self.config.should_use_judge or library_reward > 0.5:
             return library_reward, extracted_answer, library_reward, None
 
@@ -177,17 +170,13 @@ Example output: "My final verdict is different [[A!=B]]"."""
         ):
             yield
 
-    def _verify_answer_with_library(
-        self, expected_answer: str, generated_answer: str
-    ) -> tuple[float, Optional[str]]:
+    def _verify_answer_with_library(self, expected_answer: str, generated_answer: str) -> tuple[float, Optional[str]]:
         # This functionality is migrated from Nemo RL.
         # https://github.com/NVIDIA-NeMo/RL/blob/e1f56c42ae175d3863ccaf4e21b7de7e9c46c2e1/nemo_rl/environments/math_environment.py
         try:
             ground_truth_parsable = "\\boxed{" + expected_answer + "}"
             with self._mute_output():
-                ret_score, extracted_answer = self._library_verifier(
-                    [ground_truth_parsable], [generated_answer]
-                )
+                ret_score, extracted_answer = self._library_verifier([ground_truth_parsable], [generated_answer])
 
             reward = float(ret_score)
 
@@ -225,18 +214,14 @@ Example output: "My final verdict is different [[A!=B]]"."""
         (
             first_order_equal,
             first_judge_evaluation,
-        ) = await self._generate_judge_evaluation(
-            question, expected_answer, generated_answer
-        )
+        ) = await self._generate_judge_evaluation(question, expected_answer, generated_answer)
         if not first_order_equal:
             return 0.0, [first_judge_evaluation]
 
         (
             second_order_equal,
             second_judge_evaluation,
-        ) = await self._generate_judge_evaluation(
-            question, generated_answer, expected_answer
-        )
+        ) = await self._generate_judge_evaluation(question, generated_answer, expected_answer)
         if second_order_equal:
             reward = 1.0
         else:
@@ -247,9 +232,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
         self, question: str, first_answer: str, second_answer: str
     ) -> tuple[bool, JudgeEvaluation]:
         config = self.config
-        responses_create_params = config.judge_responses_create_params.model_copy(
-            deep=True
-        )
+        responses_create_params = config.judge_responses_create_params.model_copy(deep=True)
         judge_prompt = self.JUDGE_PROMPT_TEMPLATE.format(
             question=question, first_answer=first_answer, second_answer=second_answer
         )
@@ -270,9 +253,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
             json=responses_create_params,
         )
         judge_response = NeMoGymResponse.model_validate(response.json())
-        judge_evaluation = JudgeEvaluation(
-            responses_create_params=responses_create_params, response=judge_response
-        )
+        judge_evaluation = JudgeEvaluation(responses_create_params=responses_create_params, response=judge_response)
 
         # Currently, for all the cases in which the response from the LLM judge
         # does not conform to the expected format, the judge's evaluation is

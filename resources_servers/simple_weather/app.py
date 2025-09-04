@@ -11,15 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from fastapi import FastAPI
 from pydantic import BaseModel
 
-from fastapi import FastAPI
-
 from nemo_gym.base_resources_server import (
-    SimpleResourcesServer,
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    SimpleResourcesServer,
 )
 
 
@@ -47,9 +46,7 @@ class SimpleWeatherResourcesServer(SimpleResourcesServer):
         return app
 
     async def get_weather(self, body: GetWeatherRequest) -> GetWeatherResponse:
-        return GetWeatherResponse(
-            city=body.city, weather_description=f"The weather in {body.city} is cold."
-        )
+        return GetWeatherResponse(city=body.city, weather_description=f"The weather in {body.city} is cold.")
 
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
         return BaseVerifyResponse(**body.model_dump(), reward=1.0)

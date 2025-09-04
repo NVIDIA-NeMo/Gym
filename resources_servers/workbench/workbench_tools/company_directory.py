@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+
 import pandas as pd
 
 
@@ -21,9 +22,7 @@ class CompanyDirectoryTool:
 
     def reset_state(self):
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        data_path = os.path.join(
-            current_dir, "..", "csv_data", "raw", "email_addresses.csv"
-        )
+        data_path = os.path.join(current_dir, "..", "csv_data", "raw", "email_addresses.csv")
         self._emails = pd.read_csv(data_path, header=None, names=["email_address"])
 
     def find_email_address(self, name=""):
@@ -39,9 +38,7 @@ class CompanyDirectoryTool:
         if name == "":
             return "Name not provided."
         name = name.lower()
-        email_address = self._emails[
-            self._emails["email_address"].str.contains(name, case=False)
-        ]
+        email_address = self._emails[self._emails["email_address"].str.contains(name, case=False)]
         return email_address["email_address"].values.tolist()
 
 
