@@ -1,13 +1,33 @@
+# log and data files
+*.model
+*.pkl
+#*.ipynb
+output
+output_2048
+result
+*.pt
+tests/data/asr
+.DS_Store
+bert.pt.json
+work
+runs
+fastspeech_output
+.hydra
+.bash_history.local
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
+**.pyc
 
 # C extensions
 *.so
 
 # Distribution / packaging
+.idea
 .Python
+wandb
 build/
 develop-eggs/
 dist/
@@ -20,6 +40,7 @@ parts/
 sdist/
 var/
 wheels/
+pip-wheel-metadata/
 share/python-wheels/
 *.egg-info/
 .installed.cfg
@@ -69,6 +90,8 @@ instance/
 .scrapy
 
 # Sphinx documentation
+docs/_build
+docs/apidocs
 docs/_build/
 
 # PyBuilder
@@ -78,14 +101,16 @@ target/
 # Jupyter Notebook
 .ipynb_checkpoints
 
+# Override Jupyter in Github Language states for more accurate estimate of repo code.
+# Reference: https://github.com/github/linguist/blob/master/docs/overrides.md#generated-code
+*.ipynb linguist-generated
+
 # IPython
 profile_default/
 ipython_config.py
 
 # pyenv
-#   For a library or package, you might want to ignore these files since the code is
-#   intended to run in multiple environments; otherwise, check them in:
-# .python-version
+.python-version
 
 # pipenv
 #   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
@@ -131,6 +156,9 @@ ENV/
 env.bak/
 venv.bak/
 
+# VSCode project settings
+.vscode/
+
 # Spyder project settings
 .spyderproject
 .spyproject
@@ -140,6 +168,8 @@ venv.bak/
 
 # mkdocs documentation
 /site
+/docs/html
+/docs/docs_zh/zh
 
 # mypy
 .mypy_cache/
@@ -149,11 +179,17 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
+# Emacs backup files
+*~
+
 # pytype static type analyzer
 .pytype/
 
 # Cython debug symbols
 cython_debug/
+
+cifar-10-batches-py
+*.tar.gz
 
 # PyCharm
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
@@ -161,6 +197,31 @@ cython_debug/
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# outputs folder
+examples/*/outputs
+examples/*/NeMo_experiments
+examples/*/nemo_experiments
+examples/*/.hydra
+examples/*/wandb
+examples/*/data
+wandb
+dump.py
+
+docs/sources/source/test_build/
+
+# Checkpoints, config files and temporary files created in tutorials.
+examples/neural_graphs/*.chkpt
+examples/neural_graphs/*.yml
+
+.hydra/
+nemo_experiments/
+
+slurm*.out
+
+# Test data.
+tests/.data
+tests/data
 
 # Convenience files
 run.md
