@@ -16,6 +16,7 @@
 - [How To: Offline rollout collection or synthetic data generation](#how-to-offline-rollout-collection-or-synthetic-data-generation)
 - [How To: Prepare and validate data for PR submission or RL training](#how-to-prepare-and-validate-data-for-pr-submission-or-rl-training)
 - [How To: ng\_dump\_config - Dump a YAML config as exactly as NeMo Gym sees it](#how-to-ng_dump_config---dump-a-yaml-config-as-exactly-as-nemo-gym-sees-it)
+- [FAQ: VSCode and Git setup](#faq-vscode-and-git-setup)
 - [FAQ: SFT and RL](#faq-sft-and-rl)
 - [FAQ: Why NeMo Gym?](#faq-why-nemo-gym)
 
@@ -674,6 +675,23 @@ ng_run "+config_paths=[$config_paths]"
 
 # Dump the exact yaml config that NeMo gym sees, just by swapping ng_run -> ng_dump_config
 ng_dump_config "+config_paths=[$config_paths]"
+```
+
+# FAQ: VSCode and Git setup
+Here are some suggestions for easier development using the VSCode code editor.
+
+VSCode workspace settings at `.vscode/settings.json`
+```
+{
+    "git.enableCommitSigning": true,
+    "git.alwaysSignOff": true
+}
+```
+
+For developers that sign commits via SSH keys, this is configuration so that VSCode source control is able to sign commits properly!
+```bash
+git config gpg.format ssh 
+git config user.signingkey ~/.ssh/id_ed25519.pub
 ```
 
 
