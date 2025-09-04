@@ -49,5 +49,6 @@ jobs:
 
       - name: Test
         run: |
+          source .venv/bin/activate
           ng_dev_test
           ng_test_all +fail_on_total_and_test_mismatch=true
