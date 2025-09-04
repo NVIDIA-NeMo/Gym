@@ -483,7 +483,7 @@ def main():
     parser.add_argument(
         "--input_dataset",
         type=str,
-        default="Nexusflow/250808-MultiverseMath-max-breadth-3-max-depth-11-verl",
+        default="Nexusflow/250808-MultiverseMath-max-breadth-3-max-depth-11-verl",  # pragma: allowlist secret
         help="The name of the input dataset from Hugging Face Hub.",
     )
     args = parser.parse_args()
