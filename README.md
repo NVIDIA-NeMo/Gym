@@ -22,6 +22,12 @@
 
 # NeMo-Gym
 # Setup
+Clone NeMo-Gym. It's recommended to clone via SSH if you are a developer.
+```bash
+git clone git@github.com:NVIDIA-NeMo/Gym.git
+cd Gym
+```
+
 Install UV
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
