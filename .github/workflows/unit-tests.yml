@@ -28,12 +28,18 @@ jobs:
         with:
           submodules: 'recursive'
 
+      - name: Fail on draft PRs
+        if: github.event.pull_request.draft == true
+        run: |
+          echo "Failing on draft PR to enforce this check to run"
+          exit 1
+
       - name: Setup for test
         run: |
-          apt-get update
+          sudo apt-get update
           # Curl is required for setup_nvidia.sh to download uv
           # ca-certificates is there to support curl and mitigate `curl: (77) error setting certificate file: /etc/ssl/certs/ca-certificates.crt`
-          apt-get install -y --no-install-recommends git curl ca-certificates
+          sudo apt-get install -y --no-install-recommends git curl ca-certificates
           # The flow below should be used and synced with any Docker or container related flows. There is no script here to keep it 100% explicit.
           # This is how we test and this is how you should use/consume.
           curl -LsSf https://astral.sh/uv/install.sh | sh
