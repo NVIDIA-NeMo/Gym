@@ -256,7 +256,9 @@ CATEGORY = REF_ROW["category"]
 
 
 SEEN = []
-SEEN_DS_LIST = ["Nexusflow/250808-MultiverseMath-max-breadth-3-max-depth-11-verl"]
+SEEN_DS_LIST = [
+    "Nexusflow/250808-MultiverseMath-max-breadth-3-max-depth-11-verl"  # pragma: allowlist secret
+]
 for seen_ds_name in SEEN_DS_LIST:
     seen_ds = load_dataset(seen_ds_name, split="train")
     SEEN.extend([set(x) for x in seen_ds["trees"]])

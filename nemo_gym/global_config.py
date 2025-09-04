@@ -48,7 +48,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
 ]
 
 POLICY_BASE_URL_KEY_NAME = "policy_base_url"
-POLICY_API_KEY_KEY_NAME = "policy_api_key"
+POLICY_API_KEY_KEY_NAME = "policy_api_key"  # pragma: allowlist secret
 POLICY_MODEL_NAME_KEY_NAME = "policy_model_name"
 
 DEFAULT_HEAD_SERVER_PORT = 11000

@@ -28,7 +28,7 @@ class TestApp:
             host="0.0.0.0",
             port=8080,
             entrypoint="",
-            google_api_key="dummy_key",
+            google_api_key="dummy_key",  # pragma: allowlist secret
             google_cx="dummy_cx",
         )
         GoogleSearchResourcesServer(

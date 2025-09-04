@@ -31,7 +31,7 @@ class TestApp:
             host="0.0.0.0",
             port=8081,
             openai_base_url="https://api.openai.com/v1",
-            openai_api_key="dummy_key",
+            openai_api_key="dummy_key",  # pragma: allowlist secret
             openai_model="dummy_model",
             entrypoint="",
         )
@@ -48,7 +48,7 @@ class TestApp:
         client = TestClient(app)
 
         mock_chat_data = {
-            "id": "chatcmpl-BzRdCFjIEIp59xXLBNYjdPPrcpDaa",
+            "id": "chatcmpl-BzRdCFjIEIp59xXLBNYjdPPrcpDaa",  # pragma: allowlist secret
             "choices": [
                 {
                     "finish_reason": "stop",

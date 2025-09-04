@@ -674,7 +674,7 @@ class TestApp:
             host="0.0.0.0",
             port=8081,
             base_url="http://api.openai.com/v1",
-            api_key="dummy_key",
+            api_key="dummy_key",  # pragma: allowlist secret
             model="dummy_model",
             entrypoint="",
         )
