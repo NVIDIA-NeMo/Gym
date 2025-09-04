@@ -22,6 +22,12 @@
 
 # NeMo-Gym
 # Setup
+Clone NeMo-Gym. It's recommended to clone via SSH if you are a developer.
+```bash
+git clone git@github.com:NVIDIA-NeMo/Gym.git
+cd Gym
+```
+
 Install UV
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -39,18 +45,13 @@ Install NeMo Gym
 uv sync --extra dev
 ```
 
+If you are a developer, install pre-commit hooks
+```bash
+pre-commit install
+```
+
 
 ## Helpful development commands
-Lint
-```bash
-ruff check --fix
-```
-
-Format
-```bash
-ruff format
-```
-
 Run Nemo Gym tests
 ```bash
 ng_dev_test
