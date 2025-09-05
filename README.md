@@ -19,6 +19,7 @@
 - [FAQ: VSCode and Git setup](#faq-vscode-and-git-setup)
 - [FAQ: SFT and RL](#faq-sft-and-rl)
 - [FAQ: Why NeMo Gym?](#faq-why-nemo-gym)
+- [FAQ: Error: Found files with missing copyright](#faq-error-found-files-with-missing-copyright)
 
 # NeMo-Gym
 # Setup
@@ -767,3 +768,30 @@ Key principles
 | [AReal](https://github.com/inclusionAI/AReaL) |  |  |  |  |  |
 | [OpenPipe ART](https://github.com/OpenPipe/ART) |  |  |  |  |  |
 | [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF) |  |  |  |  |  |
+
+
+# FAQ: Error: Found files with missing copyright
+If you get an error like this on your PR:
+```
+Error: Found files with missing copyright:
+path= ./resources_servers/comp_coding/scripts/validate_dataset.py
+path= ./resources_servers/comp_coding/scripts/build_examples.py
+path= ./resources_servers/comp_coding/app.py
+```
+
+Please add the following copyright snippet to the top of the files listed:
+```python
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+```
