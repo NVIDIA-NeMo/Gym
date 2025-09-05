@@ -179,6 +179,8 @@ class VLLMModel(SimpleResponsesAPIModel):
 
 
 class VLLMConverterResponsesToChatCompletionsState(BaseModel):
+    return_token_information: bool
+
     messages: List[NeMoGymChatCompletionMessageParam] = Field(default_factory=list)
 
     # We are mapping from Response input items to chat completions messages, which is many to one.
@@ -233,7 +235,7 @@ class VLLMConverter(BaseModel):
         responses_create_params = responses_create_params.model_dump(exclude_unset=True)
 
         # Tracks messages including reasoning for each respective message type helper function
-        state = VLLMConverterResponsesToChatCompletionsState()
+        state = VLLMConverterResponsesToChatCompletionsState(return_token_information=self.return_token_information)
 
         # Input can be a string. Wrap in a ResponseInput-like
         response_input = responses_create_params["input"]
