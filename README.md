@@ -20,6 +20,7 @@
 - [FAQ: SFT and RL](#faq-sft-and-rl)
 - [FAQ: Why NeMo Gym?](#faq-why-nemo-gym)
 - [FAQ: Error: Found files with missing copyright](#faq-error-found-files-with-missing-copyright)
+- [FAQ: build-docs / Build docs CI failures](#faq-build-docs--build-docs-ci-failures)
 
 # NeMo-Gym
 # Setup
@@ -795,3 +796,18 @@ Please add the following copyright snippet to the top of the files listed:
 # See the License for the specific language governing permissions and
 # limitations under the License.
 ```
+
+
+# FAQ: build-docs / Build docs CI failures
+If you see some docs building related errors that are kind of cryptic regarding .rst files like
+```
+updating environment: [config changed ('toc_object_entries_show_parents')] 16 added, 0 changed, 0 removed
+reading sources... [100%] index
+/Users/bxyu/Documents/nemo-gym/nemo_gym/server_utils.py.rst:3: WARNING: Document headings start at H2, not H1 [myst.header]
+/Users/bxyu/Documents/nemo-gym/nemo_gym/server_utils.py.rst:3: WARNING: Document headings start at H2, not H1 [myst.header]
+/Users/bxyu/Documents/nemo-gym/README.md:: WARNING: image file not readable: resources/rl_verifiers_system_design.png [image.not_readable]
+looking for now-outdated files... none found
+pickling environment... done
+checking consistency... done
+```
+You may need to reformat some of your docstrings to Napoleon format docstrings https://sphinxcontrib-napoleon.readthedocs.io/en/latest/
