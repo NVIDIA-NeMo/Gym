@@ -44,18 +44,16 @@ from nemo_gym.global_config import (
 )
 
 
-"""
-We create a single global httpx client as recommended by https://www.python-httpx.org/async/
-```
-In order to get the most benefit from connection pooling, make sure you're not instantiating multiple client instances - for example by using async with inside a "hot loop". This can be achieved either by having a single scoped client that's passed throughout wherever it's needed, or by having a single global client instance.
-```
-
-In principle, we use no timeout since various api or model calls may take an indefinite amount of time. Right now, we have no timeout, even for connection errors which may be problematic. We may want to revisit more granular httpx.Timeout later on.
-
-Eventually, we may also want to parameterize the max connections. For now, we set the max connections to just some very large number.
-
-It's critical that this client is NOT used before uvicorn.run is called. Under the hood, this async client will start and use an event loop, and store a handle to that specific event loop. When uvicorn.run is called, it will replace the event loop policy with its own. So the handle that the async client has is now outdated.
-"""
+# We create a single global httpx client as recommended by https://www.python-httpx.org/async/
+# ```
+# In order to get the most benefit from connection pooling, make sure you're not instantiating multiple client instances - for example by using async with inside a "hot loop". This can be achieved either by having a single scoped client that's passed throughout wherever it's needed, or by having a single global client instance.
+# ```
+#
+# In principle, we use no timeout since various api or model calls may take an indefinite amount of time. Right now, we have no timeout, even for connection errors which may be problematic. We may want to revisit more granular httpx.Timeout later on.
+#
+# Eventually, we may also want to parameterize the max connections. For now, we set the max connections to just some very large number.
+#
+# It's critical that this client is NOT used before uvicorn.run is called. Under the hood, this async client will start and use an event loop, and store a handle to that specific event loop. When uvicorn.run is called, it will replace the event loop policy with its own. So the handle that the async client has is now outdated.
 GLOBAL_HTTPX_CLIENT = AsyncClient(
     limits=Limits(max_keepalive_connections=1500, max_connections=1500),
     transport=AsyncHTTPTransport(retries=3),
@@ -112,12 +110,11 @@ class ServerClient(BaseModel):
         """
         This function definition is directly copied from httpx._client.AsyncClient. We omit some kwargs since they are most likely not used. We omit the url arg and replace it with the `server_name` and `url_path` args below.
 
-        Parameters
-        ----------
-        server_name: str
-            The name of the server you are trying to call.
-        url_path: str
-            The URL path in the server you are trying to call e.g. "/v1/responses".
+        Args:
+            server_name: str
+                The name of the server you are trying to call.
+            url_path: str
+                The URL path in the server you are trying to call e.g. "/v1/responses".
 
         """
         server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
@@ -143,12 +140,11 @@ class ServerClient(BaseModel):
         """
         This function definition is directly copied from httpx._client.AsyncClient. We omit some kwargs since they are most likely not used. We omit the url arg and replace it with the `server_name` and `url_path` args below.
 
-        Parameters
-        ----------
-        server_name: str
-            The name of the server you are trying to call.
-        url_path: str
-            The URL path in the server you are trying to call e.g. "/v1/responses".
+        Args:
+            server_name: str
+                The name of the server you are trying to call.
+            url_path: str
+                The URL path in the server you are trying to call e.g. "/v1/responses".
 
         """
         server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)

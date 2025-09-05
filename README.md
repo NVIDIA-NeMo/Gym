@@ -20,6 +20,7 @@
 - [FAQ: SFT and RL](#faq-sft-and-rl)
 - [FAQ: Why NeMo Gym?](#faq-why-nemo-gym)
 - [FAQ: Error: Found files with missing copyright](#faq-error-found-files-with-missing-copyright)
+- [FAQ: build-docs / Build docs CI failures](#faq-build-docs--build-docs-ci-failures)
 
 # NeMo-Gym
 # Setup
@@ -43,7 +44,7 @@ source .venv/bin/activate
 
 Install NeMo Gym
 ```bash
-uv sync --extra dev
+uv sync --extra dev --group docs
 ```
 
 If you are a developer, install pre-commit hooks
@@ -87,10 +88,6 @@ In this example, we will run a simple agent that uses the GPT 4.1 model and has 
    1. Think "FastAPI server" or "verifier".
 3. Agents - found under `responses_api_agents`, NeMo Gym's agent abstraction contains an OpenAI Responses compatible interface. Agents are intended to abstract out any major system designs that sit on top of model and resource servers.
    1. Think “deep research agent”, “search agent”, “customer service agent”, “Claude code”, “math agent”, etc.
-
-The diagram below shows the rough mental model of these three core abstractions, as well as the positioning of NeMo Gym.
-
-![](resources/rl_verifiers_system_design.png)
 
 
 ## Configs
@@ -280,7 +277,7 @@ When you run NeMo Gym, a head server will spin up that contains the single sourc
 
 
 ## OpenAI Responses vs Chat Completions API
-Agents and verifiers work with responses in a standardized format based on the OpenAI Responses API schema. The verifier receives an object where the `output` field conforms to the Response object output [documented here]("https://platform.openai.com/docs/api-reference/responses/object#responses/object-output").
+Agents and verifiers work with responses in a standardized format based on the OpenAI Responses API schema. The verifier receives an object where the `output` field conforms to the Response object output [documented here](https://platform.openai.com/docs/api-reference/responses/object#responses/object-output).
 
 The `output` list may contain multiple item types, such as:
 - `ResponseOutputMessage` - The main user-facing message content returned by the model.
@@ -365,7 +362,7 @@ ng_init_resources_server +entrypoint=resources_servers/test_weather
 ```
 
 For the purposes of this example, we don't have any external dependencies, but if you want to add server-specific requirements, you would do so in the `requirements.txt` file. You can add requirements for external PyPI packages or Github repos.
-```txt
+```
 -e nemo-gym[dev] @ ../../
 {additional dependencies here}
 ```
@@ -462,6 +459,7 @@ If you need some dataset preprocessing or formatting scripts, please place them 
 You are required to have the following 3 files in your resources server data folder:
 1. example.jsonl - contains 5 example inputs to an agent server that uses your resources server. These examples need to be created on your own using whatever data processing script you want. It's highly suggested to store the data processing scripts in each folder if possible.
 2. example_metrics.json - the metrics for the examples above, as output by `ng_prepare_data` in the data validation flow above.
+3. example_rollouts.jsonl - rollouts through your resources server for the 5 example inputs in example.jsonl.
 
 
 ## TLDR final expected artifacts
@@ -795,3 +793,18 @@ Please add the following copyright snippet to the top of the files listed:
 # See the License for the specific language governing permissions and
 # limitations under the License.
 ```
+
+
+# FAQ: build-docs / Build docs CI failures
+If you see some docs building related errors that are kind of cryptic regarding .rst files like
+```
+updating environment: [config changed ('toc_object_entries_show_parents')] 16 added, 0 changed, 0 removed
+reading sources... [100%] index
+/Users/bxyu/Documents/nemo-gym/nemo_gym/server_utils.py.rst:3: WARNING: Document headings start at H2, not H1 [myst.header]
+/Users/bxyu/Documents/nemo-gym/nemo_gym/server_utils.py.rst:3: WARNING: Document headings start at H2, not H1 [myst.header]
+/Users/bxyu/Documents/nemo-gym/README.md:: WARNING: image file not readable: resources/rl_verifiers_system_design.png [image.not_readable]
+looking for now-outdated files... none found
+pickling environment... done
+checking consistency... done
+```
+You may need to reformat some of your docstrings to Napoleon format docstrings https://sphinxcontrib-napoleon.readthedocs.io/en/latest/
