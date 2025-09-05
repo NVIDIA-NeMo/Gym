@@ -459,6 +459,7 @@ If you need some dataset preprocessing or formatting scripts, please place them 
 You are required to have the following 3 files in your resources server data folder:
 1. example.jsonl - contains 5 example inputs to an agent server that uses your resources server. These examples need to be created on your own using whatever data processing script you want. It's highly suggested to store the data processing scripts in each folder if possible.
 2. example_metrics.json - the metrics for the examples above, as output by `ng_prepare_data` in the data validation flow above.
+3. example_rollouts.jsonl - rollouts through your resources server for the 5 example inputs in example.jsonl.
 
 
 ## TLDR final expected artifacts
