@@ -13,7 +13,7 @@
 # limitations under the License.
 import re
 from time import time
-from typing import ClassVar, List, Tuple
+from typing import ClassVar, List, Optional, Tuple
 from uuid import uuid4
 
 from openai import BaseModel as OpenAIBaseModel
@@ -25,6 +25,7 @@ from nemo_gym.base_responses_api_model import (
     SimpleResponsesAPIModel,
 )
 from nemo_gym.openai_utils import (
+    RESPONSES_TO_TRAIN,
     NeMoGymAsyncOpenAI,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionAssistantMessageForTrainingParam,
@@ -85,20 +86,9 @@ class VLLMModel(SimpleResponsesAPIModel):
         chat_completion_response = await self.chat_completions(chat_completion_create_params)
 
         choice = chat_completion_response.choices[0]
-        message = choice.message
 
         response_output = self._converter.postprocess_chat_response(choice)
         response_output_dicts = [item.model_dump() for item in response_output]
-
-        last_response_output_item = response_output_dicts[-1]
-        if self.config.return_token_information:
-            last_response_output_item.update(
-                dict(
-                    prompt_token_ids=message.prompt_token_ids,
-                    generation_token_ids=message.generation_token_ids,
-                    generation_log_probs=message.generation_log_probs,
-                )
-            )
 
         # Chat Completion -> Response
         return NeMoGymResponse(
@@ -190,11 +180,8 @@ class VLLMConverterResponsesToChatCompletionsState(BaseModel):
     content_buffer: str = ""  # Buffer for reasoning and chat
     tool_calls_buffer: List[NeMoGymChatCompletionMessageToolCallParam] = Field(default_factory=list)
 
-    token_information: TokenIDLogProbMixin = Field(
-        default_factory=lambda: TokenIDLogProbMixin(
-            prompt_token_ids=[], generation_token_ids=[], generation_log_probs=[]
-        )
-    )
+    # Will only be populated if return_token_information is True.
+    token_information: Optional[TokenIDLogProbMixin] = None
 
     def flush_assistant(self) -> None:
         if not (self.content_buffer or self.tool_calls_buffer):
@@ -211,7 +198,7 @@ class VLLMConverterResponsesToChatCompletionsState(BaseModel):
                 **self.token_information.model_dump(),
             )
         else:
-            message = NeMoGymChatCompletionAssistantMessageParam.model_validate(shared_params)
+            message = NeMoGymChatCompletionAssistantMessageParam(**shared_params)
 
         self.messages.append(message)
 
@@ -285,6 +272,13 @@ class VLLMConverter(BaseModel):
                     self._format_function_call_output(m, state)
                 case _:  # pragma: no cover
                     raise NotImplementedError(f"Unsupported message type: {m}")
+
+            if self.return_token_information and m.get("prompt_token_ids"):
+                state.token_information = TokenIDLogProbMixin(
+                    prompt_token_ids=m["prompt_token_ids"],
+                    generation_token_ids=m["generation_token_ids"],
+                    generation_log_probs=m["generation_log_probs"],
+                )
 
         state.flush_assistant()
 
@@ -468,6 +462,16 @@ class VLLMConverter(BaseModel):
                     status="completed",
                     id=tc["id"],
                 )
+            )
+
+        if self.return_token_information:
+            last_response_output_item = response_output[-1]
+            train_cls = RESPONSES_TO_TRAIN[last_response_output_item.__class__]
+            response_output[-1] = train_cls(
+                **last_response_output_item.model_dump(),
+                prompt_token_ids=raw_message["prompt_token_ids"],
+                generation_token_ids=raw_message["generation_token_ids"],
+                generation_log_probs=raw_message["generation_log_probs"],
             )
 
         return response_output
