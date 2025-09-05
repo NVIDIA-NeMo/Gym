@@ -88,12 +88,10 @@ Below is a reasoning template to guide your thinking process as you solve the pr
         for d in dataset:
             # convert into create params
             create_params = deepcopy(self.base_create_params)
-            create_params["input"].append(
-                {
-                    "role": "user",
-                    "content": d["problem"],
-                }
-            )
+            create_params["input"].append({
+                "role": "user",
+                "content": d["problem"],
+            })
 
             ground_truth = json.loads(d["solution"])  # json loads ground truths/solutions
 

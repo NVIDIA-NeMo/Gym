@@ -32,18 +32,16 @@ from nemo_gym.train_data_utils import (
 
 def load_multineedle_test_global_config_dict() -> DictConfig:
     return GlobalConfigDictParser().parse_no_environment(
-        initial_global_config_dict=DictConfig(
-            {
-                "config_paths": [
-                    "resources_servers/multineedle/configs/multineedle.yaml",
-                    "responses_api_models/openai_model/configs/openai_model.yaml",
-                ],
-                # For openai_model
-                "policy_base_url": "",
-                "policy_api_key": "",
-                "policy_model_name": "",
-            }
-        ),
+        initial_global_config_dict=DictConfig({
+            "config_paths": [
+                "resources_servers/multineedle/configs/multineedle.yaml",
+                "responses_api_models/openai_model/configs/openai_model.yaml",
+            ],
+            # For openai_model
+            "policy_base_url": "",
+            "policy_api_key": "",
+            "policy_model_name": "",
+        }),
     )
 
 

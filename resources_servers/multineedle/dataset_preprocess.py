@@ -267,14 +267,12 @@ For example, if the user query is "I'm very warm", the term you should focus on 
     parallel_tool_calls=False,
 )
 
-ds = ds.rename_columns(
-    {
-        "intended_label": "minefield_label",
-        "intended_label_value": "minefield_label_value",
-        "ground_truth_labels": "expected_synonyms",
-        "ground_truth_values": "expected_synonym_values",
-    }
-)
+ds = ds.rename_columns({
+    "intended_label": "minefield_label",
+    "intended_label_value": "minefield_label_value",
+    "ground_truth_labels": "expected_synonyms",
+    "ground_truth_values": "expected_synonym_values",
+})
 columns = ds.column_names
 ds = ds.add_column("id", list(range(len(ds))))
 
@@ -289,12 +287,10 @@ columns = [
 final_rows = []
 for e in ds:
     create_params = deepcopy(base_create_params)
-    create_params["input"].append(
-        {
-            "role": "user",
-            "content": e["query"],
-        }
-    )
+    create_params["input"].append({
+        "role": "user",
+        "content": e["query"],
+    })
     row = {"create_params": create_params, **e}
 
     row = {k: row[k] for k in columns}

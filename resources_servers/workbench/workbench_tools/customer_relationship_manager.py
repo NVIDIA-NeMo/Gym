@@ -46,19 +46,17 @@ class CustomerRelationshipManagerTool:
         page_size=5,
     ):
         customers = self._crm_data.copy()
-        if not any(
-            [
-                customer_name,
-                customer_email,
-                product_interest,
-                status,
-                assigned_to_email,
-                last_contact_date_min,
-                last_contact_date_max,
-                follow_up_by_min,
-                follow_up_by_max,
-            ]
-        ):
+        if not any([
+            customer_name,
+            customer_email,
+            product_interest,
+            status,
+            assigned_to_email,
+            last_contact_date_min,
+            last_contact_date_max,
+            follow_up_by_min,
+            follow_up_by_max,
+        ]):
             return "No search parameters provided. Please provide at least one parameter."
 
         if customer_name:
@@ -160,20 +158,18 @@ class CustomerRelationshipManagerTool:
             customer_email = customer_email.lower()
 
         new_id = str(int(self._crm_data["customer_id"].max()) + 1).zfill(8)
-        new_customer = pd.DataFrame(
-            {
-                "customer_id": [new_id],
-                "customer_name": [customer_name],
-                "customer_email": [customer_email],
-                "customer_phone": [customer_phone],
-                "last_contact_date": [last_contact_date],
-                "product_interest": [product_interest],
-                "status": [status],
-                "assigned_to_email": [assigned_to_email],
-                "notes": [notes],
-                "follow_up_by": [follow_up_by],
-            }
-        )
+        new_customer = pd.DataFrame({
+            "customer_id": [new_id],
+            "customer_name": [customer_name],
+            "customer_email": [customer_email],
+            "customer_phone": [customer_phone],
+            "last_contact_date": [last_contact_date],
+            "product_interest": [product_interest],
+            "status": [status],
+            "assigned_to_email": [assigned_to_email],
+            "notes": [notes],
+            "follow_up_by": [follow_up_by],
+        })
         self._crm_data = pd.concat([self._crm_data, new_customer], ignore_index=True)
         return new_id
 

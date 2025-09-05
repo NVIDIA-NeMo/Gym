@@ -91,16 +91,14 @@ class ProjectManagementTool:
             return "Board not valid. Please choose from: 'Back end', 'Front end', 'Design'."
 
         task_id = str(int(self._project_tasks["task_id"].max()) + 1).zfill(8)
-        new_task = pd.DataFrame(
-            {
-                "task_id": [task_id],
-                "task_name": [task_name],
-                "assigned_to_email": [assigned_to_email],
-                "list_name": [list_name],
-                "due_date": [due_date],
-                "board": [board],
-            }
-        )
+        new_task = pd.DataFrame({
+            "task_id": [task_id],
+            "task_name": [task_name],
+            "assigned_to_email": [assigned_to_email],
+            "list_name": [list_name],
+            "due_date": [due_date],
+            "board": [board],
+        })
         self._project_tasks = pd.concat([self._project_tasks, new_task], ignore_index=True)
         return task_id
 

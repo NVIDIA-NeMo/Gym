@@ -57,11 +57,12 @@ import ast
 import gzip
 import json
 import re
-from typing import Any, Dict, List, Optional, Iterable
 from itertools import islice
+from typing import Any, Dict, Iterable, List, Optional
 
 from datasets import load_dataset
 from tqdm import tqdm
+
 
 SYSTEM_PREFIX = (
     "You are an expert competitive programmer. You will be given a problem statement "
@@ -125,18 +126,12 @@ def _parse_unit_tests(raw: Any) -> Dict[str, List[str]]:
     }
 
 
-def make_row(
-    q: str, unit_tests: Dict[str, List[str]], problem_id: Optional[str] = None
-) -> dict:
+def make_row(q: str, unit_tests: Dict[str, List[str]], problem_id: Optional[str] = None) -> dict:
     q_norm = _normalize_scalar(q)
     return {
-        "responses_create_params": {
-            "input": [{"role": "user", "content": f"{SYSTEM_PREFIX}\n\n{q_norm}"}]
-        },
+        "responses_create_params": {"input": [{"role": "user", "content": f"{SYSTEM_PREFIX}\n\n{q_norm}"}]},
         "verifier_metadata": {
-            "problem_id": _normalize_scalar(problem_id)
-            if problem_id is not None
-            else None,
+            "problem_id": _normalize_scalar(problem_id) if problem_id is not None else None,
             "unit_tests": {
                 "inputs": unit_tests.get("inputs", []),
                 "outputs": unit_tests.get("outputs", []),
@@ -172,12 +167,8 @@ def main():
     ap.add_argument("--out", required=True, help="Output .jsonl or .jsonl.gz")
     ap.add_argument("--count", type=int, default=5000, help="Number of rows to write")
     ap.add_argument("--split", default="train", help="HF split name (default: train)")
-    ap.add_argument(
-        "--pretty-sample", default=None, help="Optional pretty JSON of first K rows"
-    )
-    ap.add_argument(
-        "--pretty-k", type=int, default=10, help="How many rows to pretty-print"
-    )
+    ap.add_argument("--pretty-sample", default=None, help="Optional pretty JSON of first K rows")
+    ap.add_argument("--pretty-k", type=int, default=10, help="How many rows to pretty-print")
     ap.add_argument("--ds-name", default="Nexusflow/comp_prog_filtered_no_function")
     args = ap.parse_args()
 
@@ -208,9 +199,7 @@ def main():
 
     print(f"wrote {total} rows to {args.out}")
     if args.pretty_sample:
-        print(
-            f"wrote pretty sample ({len(rows_for_pretty)} rows) to {args.pretty_sample}"
-        )
+        print(f"wrote pretty sample ({len(rows_for_pretty)} rows) to {args.pretty_sample}")
 
 
 if __name__ == "__main__":

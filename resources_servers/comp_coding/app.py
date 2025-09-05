@@ -1,18 +1,18 @@
 # resources_servers/comp_coding/app.py
+import io
 import re
 import sys
-import io
-from typing import Optional, List, Tuple, ClassVar, Pattern, Any
+from typing import Any, ClassVar, List, Optional, Pattern, Tuple
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from nemo_gym.base_resources_server import (
-    SimpleResourcesServer,
     BaseResourcesServerConfig,
-    BaseVerifyRequest,
     BaseRunRequest,
+    BaseVerifyRequest,
     BaseVerifyResponse,
+    SimpleResourcesServer,
 )
 
 
@@ -45,9 +45,7 @@ class CompCodingVerifyResponse(BaseVerifyResponse):
 
 
 # ------------ helpers ------------
-CODE_BLOCK_RE: ClassVar[Pattern[str]] = re.compile(
-    r"```(?:python)?\s*(.*?)```", re.DOTALL | re.IGNORECASE
-)
+CODE_BLOCK_RE: ClassVar[Pattern[str]] = re.compile(r"```(?:python)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 
 
 def _extract_code(text: str) -> Optional[str]:
@@ -72,9 +70,7 @@ def _run_code_against_tests(code: str, tests: UnitTests) -> Tuple[bool, str]:
     Assumes dataset pre-processing has already validated test shapes (non-empty,
     equal-length inputs/outputs).
     """
-    for i, (test_input, expected_output) in enumerate(
-        zip(tests.inputs, tests.outputs), start=1
-    ):
+    for i, (test_input, expected_output) in enumerate(zip(tests.inputs, tests.outputs), start=1):
         # capture originals
         orig_stdin, orig_stdout = sys.stdin, sys.stdout
         try:
@@ -143,11 +139,7 @@ def _extract_text_from_response(response_obj) -> Optional[str]:
         if not output_list:
             return None
         for msg in output_list:
-            content = (
-                msg.get("content")
-                if isinstance(msg, dict)
-                else getattr(msg, "content", None)
-            )
+            content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
             if not content:
                 continue
 
@@ -156,17 +148,9 @@ def _extract_text_from_response(response_obj) -> Optional[str]:
                 return content
 
             for block in content:
-                btype = (
-                    block.get("type")
-                    if isinstance(block, dict)
-                    else getattr(block, "type", None)
-                )
+                btype = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
                 if btype in ("output_text", "text"):
-                    text = (
-                        block.get("text")
-                        if isinstance(block, dict)
-                        else getattr(block, "text", None)
-                    )
+                    text = block.get("text") if isinstance(block, dict) else getattr(block, "text", None)
                     if isinstance(text, str) and text.strip():
                         return text
         return None
@@ -201,15 +185,11 @@ class CompCodingResourcesServer(SimpleResourcesServer):
         model_out = _extract_text_from_response(response_obj)
         if not model_out or not model_out.strip():
             # A response existed but had no usable text -> model failure
-            return CompCodingVerifyResponse(
-                **body.model_dump(), reward=0.0, reason="Empty model output"
-            )
+            return CompCodingVerifyResponse(**body.model_dump(), reward=0.0, reason="Empty model output")
 
         # 2) unit tests (must be present & valid BEFORE runtime; otherwise raise)
         if not body.verifier_metadata or "unit_tests" not in body.verifier_metadata:
-            raise HTTPException(
-                status_code=422, detail="Missing verifier_metadata.unit_tests"
-            )
+            raise HTTPException(status_code=422, detail="Missing verifier_metadata.unit_tests")
         try:
             tests = _parse_unit_tests(body.verifier_metadata["unit_tests"])
         except Exception as e:
@@ -219,9 +199,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
         # 3) extract code (code fence or raw)
         code = _extract_code(model_out)
         if not code:
-            return CompCodingVerifyResponse(
-                **body.model_dump(), reward=0.0, reason="Could not extract code"
-            )
+            return CompCodingVerifyResponse(**body.model_dump(), reward=0.0, reason="Could not extract code")
 
         # 4) run (no sandbox)
         ok, msg = _run_code_against_tests(code, tests)

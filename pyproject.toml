@@ -314,6 +314,7 @@ omit = []
 # Match black's line length
 line-length = 119
 target-version = "py312"
+preview = true
 
 cache-dir = "cache/.ruff_cache"
 # Exclude common directories that shouldn't be linted

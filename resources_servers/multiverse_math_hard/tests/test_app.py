@@ -218,67 +218,65 @@ class TestApp:
             ],
         )
 
-        response = NeMoGymResponse(
-            **{
-                "id": "resp_1",
-                "created_at": 1.0,
-                "model": "gpt-4.1-2025-04-14",
-                "object": "response",
-                "output": [
-                    {
-                        "arguments": '{"a":1,"b":3}',
-                        "call_id": "call_1",
-                        "name": "add",
-                        "type": "function_call",
-                        "id": "fc_1",
-                        "status": "completed",
-                    },
-                    {
-                        "type": "function_call_output",
-                        "call_id": "call_1",
-                        "output": '{"solution": 5.2}',
-                    },
-                    {
-                        "id": "msg_1",
-                        "content": [
-                            {
-                                "annotations": [],
-                                "text": "The sum of 1 and 3 is 5.2. \n\nIf you meant simple addition, the sum should normally be 4. Would you like to check a different operation or clarify your request?",
-                                "type": "output_text",
-                            }
-                        ],
-                        "role": "assistant",
-                        "status": "completed",
-                        "type": "message",
-                    },
-                ],
-                "parallel_tool_calls": True,
-                "temperature": 1.0,
-                "tool_choice": "auto",
-                "tools": [
-                    {
-                        "name": "add",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "a": {
-                                    "type": "number",
-                                    "description": "First number to add",
-                                },
-                                "b": {
-                                    "type": "number",
-                                    "description": "Second number to add",
-                                },
+        response = NeMoGymResponse(**{
+            "id": "resp_1",
+            "created_at": 1.0,
+            "model": "gpt-4.1-2025-04-14",
+            "object": "response",
+            "output": [
+                {
+                    "arguments": '{"a":1,"b":3}',
+                    "call_id": "call_1",
+                    "name": "add",
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "status": "completed",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": '{"solution": 5.2}',
+                },
+                {
+                    "id": "msg_1",
+                    "content": [
+                        {
+                            "annotations": [],
+                            "text": "The sum of 1 and 3 is 5.2. \n\nIf you meant simple addition, the sum should normally be 4. Would you like to check a different operation or clarify your request?",
+                            "type": "output_text",
+                        }
+                    ],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                },
+            ],
+            "parallel_tool_calls": True,
+            "temperature": 1.0,
+            "tool_choice": "auto",
+            "tools": [
+                {
+                    "name": "add",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "a": {
+                                "type": "number",
+                                "description": "First number to add",
                             },
-                            "required": ["a", "b"],
+                            "b": {
+                                "type": "number",
+                                "description": "Second number to add",
+                            },
                         },
-                        "strict": True,
-                        "type": "function",
-                        "description": "Add two numbers; a + b.",
-                    }
-                ],
-            }
-        )
+                        "required": ["a", "b"],
+                    },
+                    "strict": True,
+                    "type": "function",
+                    "description": "Add two numbers; a + b.",
+                }
+            ],
+        })
 
         verify_request = MultiVerseMathHardVerifyRequest(
             responses_create_params=responses_create_params,

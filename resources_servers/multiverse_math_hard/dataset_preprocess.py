@@ -232,12 +232,10 @@ class MultiverseMathHardSamples:
             ground_truth_calls = [eval(g.strip(), tool_functions) for g in d["ground_truth"].split(";")]
             # convert into create params
             create_params = deepcopy(base_create_params)
-            create_params["input"].append(
-                {
-                    "role": "user",
-                    "content": d["prompt"],
-                }
-            )
+            create_params["input"].append({
+                "role": "user",
+                "content": d["prompt"],
+            })
 
             processed_samples.append(
                 self.MMMSample(
