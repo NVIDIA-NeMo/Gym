@@ -42,7 +42,7 @@ source .venv/bin/activate
 
 Install NeMo Gym
 ```bash
-uv sync --extra dev
+uv sync --extra dev --group docs
 ```
 
 If you are a developer, install pre-commit hooks
