@@ -202,6 +202,10 @@ class VLLMConverterResponsesToChatCompletionsState(BaseModel):
 
 
 class VLLMConverter:
+    # =======================================================
+    # Reasoning handling. This may change across models and model families
+    # =======================================================
+
     THINK_TAG_PATTERN = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 
     @staticmethod
