@@ -279,7 +279,7 @@ When you run NeMo Gym, a head server will spin up that contains the single sourc
 
 
 ## OpenAI Responses vs Chat Completions API
-Agents and verifiers work with responses in a standardized format based on the OpenAI Responses API schema. The verifier receives an object where the `output` field conforms to the Response object output [documented here]("https://platform.openai.com/docs/api-reference/responses/object#responses/object-output").
+Agents and verifiers work with responses in a standardized format based on the OpenAI Responses API schema. The verifier receives an object where the `output` field conforms to the Response object output [documented here](https://platform.openai.com/docs/api-reference/responses/object#responses/object-output).
 
 The `output` list may contain multiple item types, such as:
 - `ResponseOutputMessage` - The main user-facing message content returned by the model.
@@ -364,7 +364,7 @@ ng_init_resources_server +entrypoint=resources_servers/test_weather
 ```
 
 For the purposes of this example, we don't have any external dependencies, but if you want to add server-specific requirements, you would do so in the `requirements.txt` file. You can add requirements for external PyPI packages or Github repos.
-```txt
+```
 -e nemo-gym[dev] @ ../../
 {additional dependencies here}
 ```
