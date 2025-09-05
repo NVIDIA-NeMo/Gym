@@ -110,12 +110,11 @@ class ServerClient(BaseModel):
         """
         This function definition is directly copied from httpx._client.AsyncClient. We omit some kwargs since they are most likely not used. We omit the url arg and replace it with the `server_name` and `url_path` args below.
 
-        Parameters
-        ----------
-        server_name: str
-            The name of the server you are trying to call.
-        url_path: str
-            The URL path in the server you are trying to call e.g. "/v1/responses".
+        Args:
+            server_name: str
+                The name of the server you are trying to call.
+            url_path: str
+                The URL path in the server you are trying to call e.g. "/v1/responses".
 
         """
         server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
@@ -141,12 +140,11 @@ class ServerClient(BaseModel):
         """
         This function definition is directly copied from httpx._client.AsyncClient. We omit some kwargs since they are most likely not used. We omit the url arg and replace it with the `server_name` and `url_path` args below.
 
-        Parameters
-        ----------
-        server_name: str
-            The name of the server you are trying to call.
-        url_path: str
-            The URL path in the server you are trying to call e.g. "/v1/responses".
+        Args:
+            server_name: str
+                The name of the server you are trying to call.
+            url_path: str
+                The URL path in the server you are trying to call e.g. "/v1/responses".
 
         """
         server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
