@@ -70,7 +70,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             base_url=self.config.base_url,
             api_key=self.config.api_key,
         )
-        self._converter = VLLMConverter(self.config.return_token_information)
+        self._converter = VLLMConverter(return_token_information=self.config.return_token_information)
         return super().model_post_init(context)
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
