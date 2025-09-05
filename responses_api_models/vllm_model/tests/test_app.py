@@ -21,6 +21,7 @@ from pytest import MonkeyPatch, mark
 from nemo_gym import PARENT_DIR
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
+    NeMoGymChatCompletionAssistantMessageForTrainingParam,
     NeMoGymChatCompletionAssistantMessageParam,
     NeMoGymChatCompletionContentPartTextParam,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -1856,7 +1857,7 @@ class TestVLLMConverter:
                 content="hello!",
                 role="user",
             ),
-            NeMoGymChatCompletionAssistantMessageParam(
+            NeMoGymChatCompletionAssistantMessageForTrainingParam(
                 role="assistant",
                 content="<think>I'm thinking</think>I'm chatting!",
                 tool_calls=[
@@ -1875,6 +1876,9 @@ class TestVLLMConverter:
                         type="function",
                     ),
                 ],
+                prompt_token_ids=[1, 2, 3],
+                generation_token_ids=[4, 5, 6],
+                generation_log_probs=[7.0, 8.0, 9.0],
             ),
         ]
         assert expected_messages == actual_messages
@@ -1899,5 +1903,5 @@ class TestVLLMConverter:
             )
         )
 
-        expected_output = test_data["expected_output"]
+        expected_output = test_data["expected_output_return_token_id_information"]
         assert expected_output == chat_completion_create_params.model_dump()
