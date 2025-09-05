@@ -89,10 +89,6 @@ In this example, we will run a simple agent that uses the GPT 4.1 model and has 
 3. Agents - found under `responses_api_agents`, NeMo Gym's agent abstraction contains an OpenAI Responses compatible interface. Agents are intended to abstract out any major system designs that sit on top of model and resource servers.
    1. Think “deep research agent”, “search agent”, “customer service agent”, “Claude code”, “math agent”, etc.
 
-The diagram below shows the rough mental model of these three core abstractions, as well as the positioning of NeMo Gym.
-
-![](resources/rl_verifiers_system_design.png)
-
 
 ## Configs
 NeMo Gym operates using YAML configuration files and command line arguments via Hydra and OmegaConf. The rough skeleton of a config is annotated and shown below, using the simple agent config as an example `responses_api_agents/simple_agent/configs/simple_agent.yaml`.
