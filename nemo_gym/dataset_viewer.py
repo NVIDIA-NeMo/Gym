@@ -1,33 +1,30 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-import json
-from typing import List
+from typing import List, Dict, Any
 
-from gradio import Blocks, Chatbot, ChatMessage, Dropdown
-from gradio.components.chatbot import MetadataDict
-from openai.types.responses.response_input_param import (
-    EasyInputMessageParam,
-    FunctionCallOutput,
-    ResponseFunctionToolCallParam,
-    ResponseInputItemParam,
-    ResponseReasoningItemParam,
-)
-from pydantic import BaseModel, ConfigDict
+import json
+
 from tqdm.auto import tqdm
 
-from nemo_gym.base_resources_server import BaseVerifyResponse
+from pydantic import BaseModel, ConfigDict
+
+from openai.types.responses.response_input_param import (
+    ResponseFunctionToolCallParam,
+    FunctionCallOutput,
+    ResponseReasoningItemParam,
+    EasyInputMessageParam,
+    ResponseInputItemParam,
+)
+
+from gradio import Chatbot, Blocks, ChatMessage, Dropdown, JSON
+from gradio.components.chatbot import MetadataDict
+
 from nemo_gym.server_utils import get_global_config_dict
+from nemo_gym.base_resources_server import BaseVerifyResponse
+
+from nemo_gym.train_data_utils import (
+    AvgMinMax,
+    compute_sample_metrics,
+    DatasetMetrics,
+)
 
 
 class DatasetViewerVerifyResponse(BaseVerifyResponse):
@@ -79,7 +76,9 @@ def format_reasoning(m: ResponseReasoningItemParam) -> List[ChatMessage]:
 
 
 def format_message(m: EasyInputMessageParam) -> List[ChatMessage]:
-    content = m["content"] if isinstance(m["content"], list) else [{"text": m["content"]}]
+    content = (
+        m["content"] if isinstance(m["content"], list) else [{"text": m["content"]}]
+    )
     match m["role"]:
         case "user":
             return [
@@ -131,7 +130,6 @@ def convert_single_message(m: ResponseInputItemParam) -> List[ChatMessage]:
 
 def rollout_to_messages(create_params: dict, response: dict) -> List[ChatMessage]:
     messages = []
-
     sampling_params = create_params.copy()
     sampling_params.pop("input")
     sampling_params.pop("tools", None)
@@ -169,7 +167,9 @@ def rollout_to_messages(create_params: dict, response: dict) -> List[ChatMessage
             step += 1
 
         for message in convert_single_message(m):
-            message.metadata["title"] = f"Turn {turn} Step {step} - {message.metadata['title']}"
+            message.metadata["title"] = (
+                f"Turn {turn} Step {step} - {message.metadata['title']}"
+            )
             messages.append(message)
 
     return messages
@@ -202,16 +202,66 @@ class JsonlDatasetViewerConfig(BaseModel):
     jsonl_fpath: str
 
 
-def build_jsonl_dataset_viewer(config: JsonlDatasetViewerConfig) -> Blocks:
-    with open(config.jsonl_fpath) as f:
-        data = list(
-            tqdm(
-                map(DatasetViewerVerifyResponse.model_validate_json, f),
-                desc="Loading data",
-            )
-        )
+def aggregate_other_metrics(data: List[DatasetViewerVerifyResponse]) -> Dict[str, Any]:
+    metric_values = {}
+    string_values = {}
+    for d in data:
+        d = d.model_dump() if hasattr(d, "model_dump") else d
+        for k, v in d.items():
+            if k in ("responses_create_params", "response"):
+                continue
+            if isinstance(v, bool):
+                v = int(v)
+            if isinstance(v, (int, float)):
+                metric_values.setdefault(k, []).append(v)
+            # get unique count for strings
+            elif isinstance(v, str):
+                string_values.setdefault(k, []).append(v)
 
-    choices = [(f"Sample {i + 1} - Responses ID {d.response.id}", i) for i, d in enumerate(data)]
+    result = {}
+    for k, v in metric_values.items():
+        if v:
+            obj = AvgMinMax(
+                total=len(v),
+                average=sum(v) / len(v),
+                min=min(v),
+                max=max(v),
+            )
+            result[k] = obj.model_dump(by_alias=True)
+
+    for k, v in string_values.items():
+        result[k] = {"unique_count": len(set(v)), "total_count": len(v)}
+
+    return result
+
+
+def get_aggregate_metrics(
+    data: List[DatasetViewerVerifyResponse], raw_lines: List[str]
+) -> Dict[str, Any]:
+    dataset_metrics = DatasetMetrics()
+    for line in raw_lines:
+        metrics, is_offending = compute_sample_metrics(line)
+        if not is_offending:
+            dataset_metrics.add(metrics)
+
+    aggregate_metrics = dataset_metrics.aggregate()
+    aggregate_metrics_dict = aggregate_metrics.model_dump(by_alias=True)
+    aggregate_metrics_dict.update(**aggregate_other_metrics(data))
+    return aggregate_metrics_dict
+
+
+def build_jsonl_dataset_viewer(config: JsonlDatasetViewerConfig) -> Blocks:
+    data = []
+    raw_lines = []
+    with open(config.jsonl_fpath) as f:
+        for line in tqdm(f, desc="Loading data"):
+            raw_lines.append(line)
+            data.append(DatasetViewerVerifyResponse.model_validate_json(line))
+
+    choices = [
+        (f"Sample {i + 1} - Responses ID {d.response.id}", i)
+        for i, d in enumerate(data)
+    ]
 
     def select_item(value: int):
         d = data[value]
@@ -225,6 +275,9 @@ def build_jsonl_dataset_viewer(config: JsonlDatasetViewerConfig) -> Blocks:
     }
     """
     with Blocks(analytics_enabled=False, css=CSS) as demo:
+        aggregate_dicts = get_aggregate_metrics(data, raw_lines)
+        JSON(value=aggregate_dicts, label="Aggregate Metrics", open=False)
+
         item_dropdown = Dropdown(choices=choices, value=0, label="Samples")
         chatbot = Chatbot(
             value=select_item(0),
@@ -233,7 +286,9 @@ def build_jsonl_dataset_viewer(config: JsonlDatasetViewerConfig) -> Blocks:
             layout="panel",
             label="Rollout",
         )
-        item_dropdown.select(fn=select_item, inputs=item_dropdown, outputs=chatbot, show_api=False)
+        item_dropdown.select(
+            fn=select_item, inputs=item_dropdown, outputs=chatbot, show_api=False
+        )
 
     return demo
 

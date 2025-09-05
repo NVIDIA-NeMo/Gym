@@ -1,44 +1,40 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-import json
+from typing import Dict, List, Literal, Self, Optional, Union, Tuple
+
 from abc import abstractmethod
+
 from collections import Counter, defaultdict
-from itertools import count, repeat
-from pathlib import Path
+
+from itertools import repeat, count
+
+import json
+
 from shutil import copyfileobj
-from typing import Dict, List, Literal, Optional, Self, Union
+
+from pathlib import Path
 
 from devtools import pprint
-from omegaconf import DictConfig
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
 from tqdm.auto import tqdm
 
-from nemo_gym.base_resources_server import BaseRunRequest
+from pydantic import BaseModel, Field, ConfigDict, ValidationError
+
+from omegaconf import DictConfig
+
 from nemo_gym.config_types import (
     AGENT_REF_KEY,
-    AgentServerRef,
+    ServerInstanceConfig,
     DatasetConfig,
     DatasetType,
     DownloadJsonlDatasetGitlabConfig,
-    ServerInstanceConfig,
+    AgentServerRef,
 )
-from nemo_gym.gitlab_utils import download_jsonl_dataset
 from nemo_gym.global_config import (
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
+from nemo_gym.gitlab_utils import download_jsonl_dataset
+from nemo_gym.base_resources_server import BaseRunRequest
 
 
 class TrainDataProcessorConfig(BaseModel):
@@ -101,13 +97,19 @@ class AvgMinMax(Accumulator):
 
 class DatasetMetrics(Accumulator):
     number_of_examples: int = Field(serialization_alias="Number of examples", default=0)
-    number_of_tools: AvgMinMax = Field(serialization_alias="Number of tools", default_factory=AvgMinMax)
+    number_of_tools: AvgMinMax = Field(
+        serialization_alias="Number of tools", default_factory=AvgMinMax
+    )
     json_dumped_number_of_words: AvgMinMax = Field(
         serialization_alias="Json-dumped number of words (proxy for token count)",
         default_factory=AvgMinMax,
     )
-    number_of_turns: AvgMinMax = Field(serialization_alias="Number of turns", default_factory=AvgMinMax)
-    temperature: AvgMinMax = Field(serialization_alias="Temperature", default_factory=AvgMinMax)
+    number_of_turns: AvgMinMax = Field(
+        serialization_alias="Number of turns", default_factory=AvgMinMax
+    )
+    temperature: AvgMinMax = Field(
+        serialization_alias="Temperature", default_factory=AvgMinMax
+    )
 
     # TODO: Number of unique create params, Number of unique user messages, other sampling params, etc
 
@@ -128,6 +130,72 @@ class DatasetMetrics(Accumulator):
         )
 
 
+def compute_sample_metrics(sample_dict_str: str) -> Tuple[DatasetMetrics, bool]:
+    try:
+        sample_dict = json.loads(sample_dict_str)
+    except json.JSONDecodeError:
+        return DatasetMetrics(), True
+
+    try:
+        sample = BaseRunRequest.model_validate(sample_dict)
+    except ValidationError:
+        return DatasetMetrics(), True
+
+    responses_create_params = sample.responses_create_params
+    responses_create_params = responses_create_params.model_dump(exclude_unset=True)
+    inputs = responses_create_params.get("input")
+
+    number_of_tools_metrics = AvgMinMax()
+    if responses_create_params.get("tools") is not None:
+        number_of_tools = len(responses_create_params["tools"])
+        number_of_tools_metrics = AvgMinMax(
+            total=1,
+            average=number_of_tools,
+            min=number_of_tools,
+            max=number_of_tools,
+        )
+
+    if isinstance(inputs, str):
+        inputs = [{"role": "user", "content": inputs}]
+    user_inputs = [i for i in inputs if i.get("role") == "user"] if inputs else []
+    number_of_turns_metrics = AvgMinMax()
+    if user_inputs:
+        number_of_turns = len(user_inputs)
+        number_of_turns_metrics = AvgMinMax(
+            total=1,
+            average=number_of_turns,
+            min=number_of_turns,
+            max=number_of_turns,
+        )
+
+    temperature_metrics = AvgMinMax()
+    if responses_create_params.get("temperature") is not None:
+        temperature = responses_create_params["temperature"]
+        temperature_metrics = AvgMinMax(
+            total=1,
+            average=temperature,
+            min=temperature,
+            max=temperature,
+        )
+
+    json_dumped_number_of_words = len(json.dumps(responses_create_params).split())
+    json_dumped_number_of_words_metrics = AvgMinMax(
+        total=1,
+        average=json_dumped_number_of_words,
+        min=json_dumped_number_of_words,
+        max=json_dumped_number_of_words,
+    )
+
+    metrics = DatasetMetrics(
+        number_of_examples=1,
+        number_of_tools=number_of_tools_metrics,
+        json_dumped_number_of_words=json_dumped_number_of_words_metrics,
+        number_of_turns=number_of_turns_metrics,
+        temperature=temperature_metrics,
+    )
+    return metrics, False
+
+
 class DatasetValidatorState(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -144,7 +212,9 @@ class TrainDataProcessor(BaseModel):
         config = TrainDataProcessorConfig.model_validate(global_config_dict)
 
         self._print_title("Load and validate server instance configs")
-        server_instance_configs = self.load_and_validate_server_instance_configs(config, global_config_dict)
+        server_instance_configs = self.load_and_validate_server_instance_configs(
+            config, global_config_dict
+        )
 
         self._print_title(
             f"Load datasets. Missing datasets {'**WILL**' if config.should_download else 'will **NOT**'} be downloaded."
@@ -152,10 +222,14 @@ class TrainDataProcessor(BaseModel):
         self.load_datasets(config, server_instance_configs)
 
         self._print_title("Validate samples and aggregate metrics")
-        dataset_type_to_aggregate_metrics = self.validate_samples_and_aggregate_metrics(server_instance_configs)
+        dataset_type_to_aggregate_metrics = self.validate_samples_and_aggregate_metrics(
+            server_instance_configs
+        )
 
         self._print_title("Collate samples and aggregate metrics")
-        self.collate_samples(config, server_instance_configs, dataset_type_to_aggregate_metrics)
+        self.collate_samples(
+            config, server_instance_configs, dataset_type_to_aggregate_metrics
+        )
 
         self._print_title("Finished!")
 
@@ -163,9 +237,9 @@ class TrainDataProcessor(BaseModel):
         print(f"""
 
 {"#" * 100}
-#
+# 
 # {title}
-#
+# 
 {"#" * 100}
 """)
 
@@ -173,13 +247,19 @@ class TrainDataProcessor(BaseModel):
         self, config: TrainDataProcessorConfig, global_config_dict: DictConfig
     ) -> List[ServerInstanceConfig]:
         parser = GlobalConfigDictParser()
-        server_instance_configs = parser.filter_for_server_instance_configs(global_config_dict)
+        server_instance_configs = parser.filter_for_server_instance_configs(
+            global_config_dict
+        )
 
         agent_configs: List[ServerInstanceConfig] = [
-            c for c in server_instance_configs if c.SERVER_TYPE == "responses_api_agents"
+            c
+            for c in server_instance_configs
+            if c.SERVER_TYPE == "responses_api_agents"
         ]
 
-        server_names_list_str = "\n- ".join([""] + [f"{c.name} ({c.SERVER_TYPE})" for c in server_instance_configs])
+        server_names_list_str = "\n- ".join(
+            [""] + [f"{c.name} ({c.SERVER_TYPE})" for c in server_instance_configs]
+        )
         print(
             f"Found {len(server_instance_configs)} server instance configs ({len(agent_configs)} agent configs):{server_names_list_str}\n\n"
         )
@@ -192,7 +272,9 @@ class TrainDataProcessor(BaseModel):
             else:
                 agent_configs_without_data.append(agent_config)
 
-        server_names_list_str = "\n- ".join([""] + [f"{c.name} ({c.SERVER_TYPE})" for c in agent_configs_without_data])
+        server_names_list_str = "\n- ".join(
+            [""] + [f"{c.name} ({c.SERVER_TYPE})" for c in agent_configs_without_data]
+        )
         print(
             f"Found {len(agent_configs_without_data)} agent server instance configs withOUT datasets:{server_names_list_str}\n\n"
         )
@@ -200,7 +282,9 @@ class TrainDataProcessor(BaseModel):
         server_names_list_str = ""
         for c in agent_configs_with_data:
             server_str = f"\n- {c.name}"
-            datasets_str = "\n  - ".join([""] + [f"{d.name} ({d.type})" for d in c.datasets])
+            datasets_str = "\n  - ".join(
+                [""] + [f"{d.name} ({d.type})" for d in c.datasets]
+            )
             server_names_list_str += f"{server_str}{datasets_str}"
         print(
             f"Found {len(agent_configs_with_data)} agent server instance configs WITH datasets:{server_names_list_str}\n\n"
@@ -210,7 +294,9 @@ class TrainDataProcessor(BaseModel):
         in_scope_dataset_types = config.in_scope_dataset_types
         agent_configs_with_in_scope_datasets: List[ServerInstanceConfig] = []
         for agent_config in agent_configs_with_data:
-            in_scope_datasets = [d for d in agent_config.datasets if d.type in in_scope_dataset_types]
+            in_scope_datasets = [
+                d for d in agent_config.datasets if d.type in in_scope_dataset_types
+            ]
             if not in_scope_datasets:
                 continue
 
@@ -221,9 +307,13 @@ class TrainDataProcessor(BaseModel):
         server_names_list_str = ""
         for c in agent_configs_with_in_scope_datasets:
             server_str = f"\n- {c.name}"
-            datasets_str = "\n  - ".join([""] + [f"{d.name} ({d.type})" for d in c.datasets])
+            datasets_str = "\n  - ".join(
+                [""] + [f"{d.name} ({d.type})" for d in c.datasets]
+            )
             server_names_list_str += f"{server_str}{datasets_str}"
-        print(f"In scope dataset types for `{config.mode}` mode: {in_scope_dataset_types}")
+        print(
+            f"In scope dataset types for `{config.mode}` mode: {in_scope_dataset_types}"
+        )
         print(
             f"Found {len(agent_configs_with_data)} agent server instance configs with in-scope datasets:{server_names_list_str}"
         )
@@ -248,18 +338,26 @@ class TrainDataProcessor(BaseModel):
 
         server_names_list_str = ""
         for server_name, datasets in local_datasets_found.items():
-            datasets_str = "\n  - ".join([""] + [f"{d.name} ({d.type})" for d in datasets])
+            datasets_str = "\n  - ".join(
+                [""] + [f"{d.name} ({d.type})" for d in datasets]
+            )
             server_names_list_str += f"\n- {server_name}{datasets_str}"
-        print(f"FOUND the following datasets at their local paths:{server_names_list_str}\n\n")
+        print(
+            f"FOUND the following datasets at their local paths:{server_names_list_str}\n\n"
+        )
 
         server_names_list_str = ""
         for server_name, datasets in local_datasets_not_found.items():
-            datasets_str = "\n  - ".join([""] + [f"{d.name} ({d.type})" for d in datasets])
+            datasets_str = "\n  - ".join(
+                [""] + [f"{d.name} ({d.type})" for d in datasets]
+            )
             server_names_list_str += f"\n- {server_name}{datasets_str}"
         print(f"MISSING the following datasets:{server_names_list_str}\n\n")
 
         if config.mode == "example_validation":
-            assert not local_datasets_not_found, "You must provide the above missing example jsonl files!"
+            assert not local_datasets_not_found, (
+                "You must provide the above missing example jsonl files!"
+            )
         if not config.should_download:
             assert not local_datasets_not_found, (
                 "Missing local datasets. You must provide local datasets since download is disabled. Run with `+should_download=true` to enable downloading."
@@ -273,7 +371,9 @@ class TrainDataProcessor(BaseModel):
                 download_config = DownloadJsonlDatasetGitlabConfig.model_validate(
                     d.gitlab_identifier.model_dump() | {"output_fpath": d.jsonl_fpath}
                 )
-                print(f"Downloading dataset `{d.name}` from `{server_name}` using {download_config}")
+                print(
+                    f"Downloading dataset `{d.name}` from `{server_name}` using {download_config}"
+                )
                 download_jsonl_dataset(download_config)
 
     ########################################
@@ -283,72 +383,13 @@ class TrainDataProcessor(BaseModel):
     def _validate_samples_and_aggregate_metrics_single_sample(
         self, state: DatasetValidatorState, sample_idx: int, sample_dict_str: str
     ) -> None:
-        try:
-            sample_dict = json.loads(sample_dict_str)
-        except json.JSONDecodeError:
+        metrics, is_offending = compute_sample_metrics(sample_dict_str)
+        if is_offending:
             state.offending_example_idxs.append(sample_idx)
             return
 
-        try:
-            sample = BaseRunRequest.model_validate(sample_dict)
-        except ValidationError:
-            state.offending_example_idxs.append(sample_idx)
-            return
-
+        sample_dict = json.loads(sample_dict_str)
         state.key_counts.update(sample_dict.keys())
-
-        responses_create_params = sample.responses_create_params
-        responses_create_params = responses_create_params.model_dump(exclude_unset=True)
-        inputs = responses_create_params["input"]
-
-        number_of_tools_metrics = AvgMinMax()
-        if responses_create_params.get("tools") is not None:
-            number_of_tools = len(responses_create_params["tools"])
-            number_of_tools_metrics = AvgMinMax(
-                total=1,
-                average=number_of_tools,
-                min=number_of_tools,
-                max=number_of_tools,
-            )
-
-        if isinstance(inputs, str):
-            inputs = [{"role": "user", "content": inputs}]
-        user_inputs = [i for i in inputs if i.get("role") == "user"]
-        number_of_turns_metrics = AvgMinMax()
-        if user_inputs:
-            number_of_turns = len(user_inputs)
-            number_of_turns_metrics = AvgMinMax(
-                total=1,
-                average=number_of_turns,
-                min=number_of_turns,
-                max=number_of_turns,
-            )
-
-        temperature_metrics = AvgMinMax()
-        if responses_create_params.get("temperature") is not None:
-            temperature = responses_create_params["temperature"]
-            temperature_metrics = AvgMinMax(
-                total=1,
-                average=temperature,
-                min=temperature,
-                max=temperature,
-            )
-
-        json_dumped_number_of_words = len(json.dumps(responses_create_params).split())
-        json_dumped_number_of_words_metrics = AvgMinMax(
-            total=1,
-            average=json_dumped_number_of_words,
-            min=json_dumped_number_of_words,
-            max=json_dumped_number_of_words,
-        )
-
-        metrics = DatasetMetrics(
-            number_of_examples=1,
-            number_of_tools=number_of_tools_metrics,
-            json_dumped_number_of_words=json_dumped_number_of_words_metrics,
-            number_of_turns=number_of_turns_metrics,
-            temperature=temperature_metrics,
-        )
         state.metrics.add(metrics)
 
     def _validate_samples_and_aggregate_metrics_single_dataset(
@@ -368,7 +409,9 @@ class TrainDataProcessor(BaseModel):
 
         return state
 
-    def _validate_aggregate_metrics(self, aggregate_metrics_dict: Dict, metrics_fpath: Path) -> Optional[Path]:
+    def _validate_aggregate_metrics(
+        self, aggregate_metrics_dict: Dict, metrics_fpath: Path
+    ) -> Optional[Path]:
         """
         Returns the conflicting metrics fpath if invalid. Else returns None
         """
@@ -376,7 +419,9 @@ class TrainDataProcessor(BaseModel):
             with open(metrics_fpath) as f:
                 previous_aggregate_metrics_dict = json.load(f)
             if aggregate_metrics_dict != previous_aggregate_metrics_dict:
-                conflicting_metrics_fpath = metrics_fpath.with_name(f"{metrics_fpath.stem}_conflict.json")
+                conflicting_metrics_fpath = metrics_fpath.with_name(
+                    f"{metrics_fpath.stem}_conflict.json"
+                )
                 with open(conflicting_metrics_fpath, "w") as f:
                     json.dump(aggregate_metrics_dict, f, indent=4)
 
@@ -386,7 +431,9 @@ class TrainDataProcessor(BaseModel):
         self, server_instance_configs: List[ServerInstanceConfig]
     ) -> Dict[str, DatasetMetrics]:
         conflicting_fpaths: List[str] = []
-        dataset_type_to_aggregate_metrics: Dict[str, DatasetMetrics] = defaultdict(DatasetMetrics)
+        dataset_type_to_aggregate_metrics: Dict[str, DatasetMetrics] = defaultdict(
+            DatasetMetrics
+        )
         for c in server_instance_configs:
             for d in c.datasets:
                 state = self._validate_samples_and_aggregate_metrics_single_dataset(d)
@@ -395,7 +442,9 @@ class TrainDataProcessor(BaseModel):
 
                 aggregate_metrics = state.metrics.aggregate()
 
-                aggregate_metrics_dict = aggregate_metrics.model_dump(mode="json", by_alias=True)
+                aggregate_metrics_dict = aggregate_metrics.model_dump(
+                    mode="json", by_alias=True
+                )
                 aggregate_metrics_dict = d.model_dump() | aggregate_metrics_dict
 
                 data_fpath = Path(d.jsonl_fpath)
@@ -416,7 +465,9 @@ class TrainDataProcessor(BaseModel):
 
         if conflicting_fpaths:
             conflicting_fpaths_str = "\n- ".join([""] + conflicting_fpaths)
-            raise ValueError(f"Found conflicting aggregate metrics that need to be corrected:{conflicting_fpaths_str}")
+            raise ValueError(
+                f"Found conflicting aggregate metrics that need to be corrected:{conflicting_fpaths_str}"
+            )
 
         return dict(dataset_type_to_aggregate_metrics)
 
@@ -440,7 +491,9 @@ class TrainDataProcessor(BaseModel):
                 with open(data_path) as source, open(prepare_path, "w") as target:
                     for line in tqdm(source, desc=f"Preparing data at {data_path}"):
                         d = json.loads(line)
-                        d[AGENT_REF_KEY] = AgentServerRef(type="responses_api_agents", name=c.name).model_dump()
+                        d[AGENT_REF_KEY] = AgentServerRef(
+                            type="responses_api_agents", name=c.name
+                        ).model_dump()
                         target.write(f"{json.dumps(d)}\n")
 
                 paths_to_collate.append(prepare_path)
@@ -462,7 +515,9 @@ class TrainDataProcessor(BaseModel):
             aggregate_metrics = dataset_type_to_aggregate_metrics[type]
             aggregate_metrics = aggregate_metrics.aggregate()
 
-            aggregate_metrics_dict = aggregate_metrics.model_dump(mode="json", by_alias=True)
+            aggregate_metrics_dict = aggregate_metrics.model_dump(
+                mode="json", by_alias=True
+            )
 
             parent = Path(config.output_dirpath)
             parent.mkdir(exist_ok=True)
@@ -495,9 +550,13 @@ class TrainDataProcessor(BaseModel):
 
         if conflicting_fpaths:
             conflicting_fpaths_str = "\n- ".join([""] + conflicting_fpaths)
-            raise ValueError(f"Found conflicting aggregate metrics that need to be corrected:{conflicting_fpaths_str}")
+            raise ValueError(
+                f"Found conflicting aggregate metrics that need to be corrected:{conflicting_fpaths_str}"
+            )
 
-        final_fpaths_str = "\n- ".join([""] + [f"{type}: {fpath}" for type, fpath in final_fpaths.items()])
+        final_fpaths_str = "\n- ".join(
+            [""] + [f"{type}: {fpath}" for type, fpath in final_fpaths.items()]
+        )
         print(f"View your final data!{final_fpaths_str}")
 
 
