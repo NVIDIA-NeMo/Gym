@@ -664,7 +664,7 @@ class TestApp:
             api_key="dummy_key",  # pragma: allowlist secret
             model="dummy_model",
             entrypoint="",
-            return_token_information=False,
+            return_token_id_information=False,
         )
         return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
 
@@ -1460,7 +1460,7 @@ class TestApp:
 
 class TestVLLMConverter:
     def setup_method(self, _):
-        self.converter = VLLMConverter(return_token_information=False)
+        self.converter = VLLMConverter(return_token_id_information=False)
 
     def test_responses_input_types_EasyInputMessageParam(self) -> None:
         """

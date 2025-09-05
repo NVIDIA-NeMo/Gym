@@ -57,7 +57,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     base_url: str
     api_key: str
     model: str
-    return_token_information: bool
+    return_token_id_information: bool
 
 
 # This needs to be OpenAI BaseModel since it is casted to below by the OpenAI client.
@@ -73,7 +73,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             base_url=self.config.base_url,
             api_key=self.config.api_key,
         )
-        self._converter = VLLMConverter(return_token_information=self.config.return_token_information)
+        self._converter = VLLMConverter(return_token_id_information=self.config.return_token_id_information)
         return super().model_post_init(context)
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
@@ -124,7 +124,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         body_dict.setdefault("model", self.config.model)
 
         create_params = body_dict
-        if self.config.return_token_information:
+        if self.config.return_token_id_information:
             create_params |= dict(
                 logprobs=True,
                 # The extra body below is VLLM specific to get the generation log probs associated with generation token IDs.
@@ -141,7 +141,7 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         chat_completion_dict = openai_response.model_dump()
 
-        if self.config.return_token_information:
+        if self.config.return_token_id_information:
             log_probs = openai_response.choices[0].logprobs.content
             generation_token_ids = []
             generation_log_probs = []
@@ -171,7 +171,7 @@ class VLLMModel(SimpleResponsesAPIModel):
 
 
 class VLLMConverterResponsesToChatCompletionsState(BaseModel):
-    return_token_information: bool
+    return_token_id_information: bool
 
     messages: List[NeMoGymChatCompletionMessageParam] = Field(default_factory=list)
 
@@ -180,7 +180,7 @@ class VLLMConverterResponsesToChatCompletionsState(BaseModel):
     content_buffer: str = ""  # Buffer for reasoning and chat
     tool_calls_buffer: List[NeMoGymChatCompletionMessageToolCallParam] = Field(default_factory=list)
 
-    # Will only be populated if return_token_information is True.
+    # Will only be populated if return_token_id_information is True.
     token_information: Optional[TokenIDLogProbMixin] = None
 
     def flush_assistant(self) -> None:
@@ -192,7 +192,7 @@ class VLLMConverterResponsesToChatCompletionsState(BaseModel):
             role="assistant",
             tool_calls=self.tool_calls_buffer,
         )
-        if self.return_token_information:
+        if self.return_token_id_information:
             message = NeMoGymChatCompletionAssistantMessageForTrainingParam(
                 **shared_params,
                 **self.token_information.model_dump(),
@@ -207,7 +207,7 @@ class VLLMConverterResponsesToChatCompletionsState(BaseModel):
 
 
 class VLLMConverter(BaseModel):
-    return_token_information: bool
+    return_token_id_information: bool
 
     # =======================================================
     # Reasoning handling. This may change across models and model families
@@ -238,7 +238,9 @@ class VLLMConverter(BaseModel):
         responses_create_params = responses_create_params.model_dump(exclude_unset=True)
 
         # Tracks messages including reasoning for each respective message type helper function
-        state = VLLMConverterResponsesToChatCompletionsState(return_token_information=self.return_token_information)
+        state = VLLMConverterResponsesToChatCompletionsState(
+            return_token_id_information=self.return_token_id_information
+        )
 
         # Input can be a string. Wrap in a ResponseInput-like
         response_input = responses_create_params["input"]
@@ -273,7 +275,7 @@ class VLLMConverter(BaseModel):
                 case _:  # pragma: no cover
                     raise NotImplementedError(f"Unsupported message type: {m}")
 
-            if self.return_token_information and m.get("prompt_token_ids"):
+            if self.return_token_id_information and m.get("prompt_token_ids"):
                 state.token_information = TokenIDLogProbMixin(
                     prompt_token_ids=m["prompt_token_ids"],
                     generation_token_ids=m["generation_token_ids"],
@@ -464,7 +466,7 @@ class VLLMConverter(BaseModel):
                 )
             )
 
-        if self.return_token_information:
+        if self.return_token_id_information:
             last_response_output_item = response_output[-1]
             train_cls = RESPONSES_TO_TRAIN[last_response_output_item.__class__]
             response_output[-1] = train_cls(
