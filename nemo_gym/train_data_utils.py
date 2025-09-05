@@ -229,9 +229,9 @@ class TrainDataProcessor(BaseModel):
         print(f"""
 
 {"#" * 100}
-# 
+#
 # {title}
-# 
+#
 {"#" * 100}
 """)
 
