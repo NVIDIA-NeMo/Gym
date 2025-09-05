@@ -1,0 +1,28 @@
+# SWE-bench wrapper configuration for OpenHands
+swe_agents:
+  responses_api_agents:
+    swe_agents:
+      entrypoint: app.py
+      
+      # Agent framework configuration
+      agent_framework: openhands
+      agent_config: eval/swe-bench/openhands/default
+      agent_max_turns: 100
+      
+      # Container configuration
+      container_formatter: "docker://swebench/sweb.eval.x86_64.{instance_id}"
+      container_folder_path: null
+      swebench_tests_timeout: 1800  # 30 minutes
+      
+      # Optional model server reference
+      model_server:
+        name: policy_model # openai_model
+        type: responses_api_models
+        
+      # Additional NeMo-Skills configuration
+      nemo_skills_config:
+        max_samples: -1
+        skip_filled: false
+        dry_run: false
+        max_concurrent_requests: 1  # SWE-bench is resource intensive
+
