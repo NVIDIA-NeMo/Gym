@@ -27,6 +27,7 @@ from nemo_gym.base_responses_api_model import (
 from nemo_gym.openai_utils import (
     NeMoGymAsyncOpenAI,
     NeMoGymChatCompletion,
+    NeMoGymChatCompletionAssistantMessageForTrainingParam,
     NeMoGymChatCompletionAssistantMessageParam,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionDeveloperMessageParam,
@@ -47,6 +48,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
+    TokenIDLogProbMixin,
 )
 
 
@@ -188,17 +190,31 @@ class VLLMConverterResponsesToChatCompletionsState(BaseModel):
     content_buffer: str = ""  # Buffer for reasoning and chat
     tool_calls_buffer: List[NeMoGymChatCompletionMessageToolCallParam] = Field(default_factory=list)
 
+    token_information: TokenIDLogProbMixin = Field(
+        default_factory=lambda: TokenIDLogProbMixin(
+            prompt_token_ids=[], generation_token_ids=[], generation_log_probs=[]
+        )
+    )
+
     def flush_assistant(self) -> None:
         if not (self.content_buffer or self.tool_calls_buffer):
             return
 
-        self.messages.append(
-            NeMoGymChatCompletionAssistantMessageParam(
-                content=self.content_buffer or None,
-                role="assistant",
-                tool_calls=self.tool_calls_buffer,
-            )
+        shared_params = dict(
+            content=self.content_buffer or None,
+            role="assistant",
+            tool_calls=self.tool_calls_buffer,
         )
+        if self.return_token_information:
+            message = NeMoGymChatCompletionAssistantMessageForTrainingParam(
+                **shared_params,
+                **self.token_information.model_dump(),
+            )
+        else:
+            message = NeMoGymChatCompletionAssistantMessageParam.model_validate(shared_params)
+
+        self.messages.append(message)
+
         self.content_buffer = ""
         self.tool_calls_buffer = []
 
