@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-from typing import Any
 from unittest.mock import mock_open, patch
 
 from pydantic import BaseModel
@@ -54,7 +53,6 @@ class TestDatasetViewer:
         class DummySampleWithStrings(DummySample):
             some_string: str
 
-        config = JsonlDatasetViewerConfig(jsonl_fpath="")
         samples = [
             DummySample(reward=1.0, accuracy=True, set_overlap=0.5),
             DummySample(reward=0.0, accuracy=False, set_overlap=0.0),
@@ -77,10 +75,6 @@ class TestDatasetViewer:
             def model_dump(self, by_alias=True):
                 return {}
 
-        class DummyDatasetMetrics:
-            def add(self, metrics: Any):
-                pass
-
             def aggregate(self):
                 return DummyAgg()
 
@@ -88,10 +82,8 @@ class TestDatasetViewer:
             "nemo_gym.train_data_utils.compute_sample_metrics",
             mock_compute_sample_metrics,
         )
-        monkeypatch.setattr("nemo_gym.train_data_utils.DatasetMetrics", DummyDatasetMetrics)
 
-        with patch("builtins.open", mock_open(read_data="{}\n")):
-            result_1 = get_aggregate_metrics(config, samples)
+        result_1 = get_aggregate_metrics(samples, "{}\n")
 
         assert "reward" in result_1
         assert "accuracy" in result_1
@@ -118,8 +110,8 @@ class TestDatasetViewer:
         assert accuracy_stats["Min"] == 0
         assert accuracy_stats["Max"] == 1
 
-        with patch("builtins.open", mock_open(read_data="{}\n")):
-            result_2 = get_aggregate_metrics(config, samples_with_strings)
+        # Check string counts
+        result_2 = get_aggregate_metrics(samples_with_strings, "{}\n")
 
         assert "some_string" in result_2
         assert result_2["some_string"]["unique_count"] == 3
