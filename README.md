@@ -459,6 +459,7 @@ If you need some dataset preprocessing or formatting scripts, please place them 
 You are required to have the following 3 files in your resources server data folder:
 1. example.jsonl - contains 5 example inputs to an agent server that uses your resources server. These examples need to be created on your own using whatever data processing script you want. It's highly suggested to store the data processing scripts in each folder if possible.
 2. example_metrics.json - the metrics for the examples above, as output by `ng_prepare_data` in the data validation flow above.
+3. example_rollouts.jsonl - rollouts through your resources server for the 5 example inputs in example.jsonl.
 
 
 ## TLDR final expected artifacts
@@ -688,6 +689,14 @@ VSCode workspace settings at `.vscode/settings.json`
 ```
 
 Set up your Github signing keys! https://docs.github.com/en/authentication/managing-commit-signature-verification/about-commit-signature-verification#ssh-commit-signature-verification
+
+Specifically, if you visit https://github.com/settings/keys while logged into your account, you should see the following:
+1. Under the "SSH keys" major section, there are 2 subsections
+   1. Authentication keys
+   2. Signing key
+
+More often than node, the SHA256 displayed by Github (SHA256:xxxx) should be the same for the two keys above since you probably want to just use the same SSH key for both purposes. If you do not see the following, please following the signing keys link above!
+
 
 For developers that sign commits via SSH keys, this is configuration so that VSCode source control is able to sign commits properly!
 ```bash
