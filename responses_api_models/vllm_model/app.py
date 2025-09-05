@@ -54,6 +54,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     base_url: str
     api_key: str
     model: str
+    return_token_information: bool
 
 
 # This needs to be OpenAI BaseModel since it is casted to below by the OpenAI client.
@@ -88,7 +89,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         response_output_dicts = [item.model_dump() for item in response_output]
 
         last_response_output_item = response_output_dicts[-1]
-        if hasattr(message, "prompt_token_ids"):
+        if self.config.return_token_information:
             last_response_output_item.update(
                 dict(
                     prompt_token_ids=message.prompt_token_ids,
@@ -130,44 +131,50 @@ class VLLMModel(SimpleResponsesAPIModel):
         body_dict = body.model_dump(exclude_unset=True)
         body_dict.setdefault("model", self.config.model)
 
-        openai_response = await self._client.chat.completions.create(
-            **body_dict,
-            logprobs=True,
-            # The extra body below is VLLM specific to get the generation log probs associated with generation token IDs.
-            extra_body={
-                "return_tokens_as_token_ids": True,
-            },
-        )
+        create_params = body_dict
+        if self.config.return_token_information:
+            create_params |= dict(
+                logprobs=True,
+                # The extra body below is VLLM specific to get the generation log probs associated with generation token IDs.
+                extra_body={
+                    "return_tokens_as_token_ids": True,
+                },
+            )
+
+        openai_response = await self._client.chat.completions.create(**create_params)
         assert not getattr(openai_response.choices[0].message, "reasoning_content", None), (
             "Please do not use a reasoning parser in vLLM! There is one source of truth for handling data (including reasoning), which is NeMo Gym!"
         )
         openai_response: NeMoGymChatCompletion
 
-        log_probs = openai_response.choices[0].logprobs.content
-        generation_token_ids = []
-        generation_log_probs = []
-        for log_prob in log_probs:
-            # Looks like `"token_id:151667"`
-            generation_token_ids.append(int(log_prob.token.removeprefix("token_id:")))
-            generation_log_probs.append(log_prob.logprob)
-
-        # The base url has /v1 at the end but vLLM's tokenize endpoint does not have v1, hence the ..
-        # I can't believe the path is resolved correctly LOL
-        tokenize_response = await self._client.post(
-            "../tokenize",
-            cast_to=VLLMTokenizeResponse,
-            body=body_dict,
-        )
-
         chat_completion_dict = openai_response.model_dump()
-        message_dict = chat_completion_dict["choices"][0]["message"]
-        message_dict.update(
-            dict(
-                prompt_token_ids=tokenize_response.tokens,
-                generation_token_ids=generation_token_ids,
-                generation_log_probs=generation_log_probs,
+
+        if self.config.return_token_information:
+            log_probs = openai_response.choices[0].logprobs.content
+            generation_token_ids = []
+            generation_log_probs = []
+            for log_prob in log_probs:
+                # Looks like `"token_id:151667"`
+                generation_token_ids.append(int(log_prob.token.removeprefix("token_id:")))
+                generation_log_probs.append(log_prob.logprob)
+
+            # The base url has /v1 at the end but vLLM's tokenize endpoint does not have v1, hence the ..
+            # I can't believe the path is resolved correctly LOL
+            tokenize_response = await self._client.post(
+                "../tokenize",
+                cast_to=VLLMTokenizeResponse,
+                body=body_dict,
             )
-        )
+
+            message_dict = chat_completion_dict["choices"][0]["message"]
+            message_dict.update(
+                dict(
+                    prompt_token_ids=tokenize_response.tokens,
+                    generation_token_ids=generation_token_ids,
+                    generation_log_probs=generation_log_probs,
+                )
+            )
+
         return NeMoGymChatCompletion(**chat_completion_dict)
 
 
