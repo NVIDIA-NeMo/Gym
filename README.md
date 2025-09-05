@@ -690,6 +690,14 @@ VSCode workspace settings at `.vscode/settings.json`
 
 Set up your Github signing keys! https://docs.github.com/en/authentication/managing-commit-signature-verification/about-commit-signature-verification#ssh-commit-signature-verification
 
+Specifically, if you visit https://github.com/settings/keys while logged into your account, you should see the following:
+1. Under the "SSH keys" major section, there are 2 subsections
+   1. Authentication keys
+   2. Signing key
+
+More often than node, the SHA256 displayed by Github (SHA256:xxxx) should be the same for the two keys above since you probably want to just use the same SSH key for both purposes. If you do not see the following, please following the signing keys link above!
+
+
 For developers that sign commits via SSH keys, this is configuration so that VSCode source control is able to sign commits properly!
 ```bash
 git config gpg.format ssh 
