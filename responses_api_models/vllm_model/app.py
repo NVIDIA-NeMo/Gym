@@ -13,7 +13,7 @@
 # limitations under the License.
 import re
 from time import time
-from typing import List, Tuple
+from typing import ClassVar, List, Tuple
 from uuid import uuid4
 
 from openai import BaseModel as OpenAIBaseModel
@@ -70,7 +70,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             base_url=self.config.base_url,
             api_key=self.config.api_key,
         )
-        self._converter = VLLMConverter()
+        self._converter = VLLMConverter(self.config.return_token_information)
         return super().model_post_init(context)
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
@@ -201,12 +201,14 @@ class VLLMConverterResponsesToChatCompletionsState(BaseModel):
         self.tool_calls_buffer = []
 
 
-class VLLMConverter:
+class VLLMConverter(BaseModel):
+    return_token_information: bool
+
     # =======================================================
     # Reasoning handling. This may change across models and model families
     # =======================================================
 
-    THINK_TAG_PATTERN = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+    THINK_TAG_PATTERN: ClassVar = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 
     @staticmethod
     def _wrap_reasoning_in_think_tags(texts: List[str]) -> str:

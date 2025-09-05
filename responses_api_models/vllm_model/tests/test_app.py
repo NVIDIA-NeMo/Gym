@@ -1460,7 +1460,7 @@ class TestApp:
 
 class TestVLLMConverter:
     def setup_method(self, _):
-        self.converter = VLLMConverter()
+        self.converter = VLLMConverter(return_token_information=False)
 
     def test_responses_input_types_EasyInputMessageParam(self) -> None:
         """
