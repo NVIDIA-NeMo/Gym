@@ -11,18 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from unittest.mock import patch, mock_open
-from pytest import MonkeyPatch
-from pydantic import BaseModel
-from typing import Any
-
 import json
+from typing import Any
+from unittest.mock import mock_open, patch
+
+from pydantic import BaseModel
+from pytest import MonkeyPatch
 
 from nemo_gym.dataset_viewer import (
     JsonlDatasetViewerConfig,
     build_jsonl_dataset_viewer,
     get_aggregate_metrics,
 )
+
 
 class TestDatasetViewer:
     def test_sanity(

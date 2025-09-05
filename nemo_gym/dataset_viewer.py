@@ -11,32 +11,27 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List, Dict, Any
-
 import json
+from typing import Any, Dict, List
 
+from gradio import JSON, Blocks, Chatbot, ChatMessage, Dropdown
+from gradio.components.chatbot import MetadataDict
+from openai.types.responses.response_input_param import (
+    EasyInputMessageParam,
+    FunctionCallOutput,
+    ResponseFunctionToolCallParam,
+    ResponseInputItemParam,
+    ResponseReasoningItemParam,
+)
+from pydantic import BaseModel, ConfigDict
 from tqdm.auto import tqdm
 
-from pydantic import BaseModel, ConfigDict
-
-from openai.types.responses.response_input_param import (
-    ResponseFunctionToolCallParam,
-    FunctionCallOutput,
-    ResponseReasoningItemParam,
-    EasyInputMessageParam,
-    ResponseInputItemParam,
-)
-
-from gradio import Chatbot, Blocks, ChatMessage, Dropdown, JSON
-from gradio.components.chatbot import MetadataDict
-
-from nemo_gym.server_utils import get_global_config_dict
 from nemo_gym.base_resources_server import BaseVerifyResponse
-
+from nemo_gym.server_utils import get_global_config_dict
 from nemo_gym.train_data_utils import (
     AvgMinMax,
-    compute_sample_metrics,
     DatasetMetrics,
+    compute_sample_metrics,
 )
 
 
@@ -89,9 +84,7 @@ def format_reasoning(m: ResponseReasoningItemParam) -> List[ChatMessage]:
 
 
 def format_message(m: EasyInputMessageParam) -> List[ChatMessage]:
-    content = (
-        m["content"] if isinstance(m["content"], list) else [{"text": m["content"]}]
-    )
+    content = m["content"] if isinstance(m["content"], list) else [{"text": m["content"]}]
     match m["role"]:
         case "user":
             return [
@@ -180,9 +173,7 @@ def rollout_to_messages(create_params: dict, response: dict) -> List[ChatMessage
             step += 1
 
         for message in convert_single_message(m):
-            message.metadata["title"] = (
-                f"Turn {turn} Step {step} - {message.metadata['title']}"
-            )
+            message.metadata["title"] = f"Turn {turn} Step {step} - {message.metadata['title']}"
             messages.append(message)
 
     return messages
@@ -248,9 +239,7 @@ def aggregate_other_metrics(data: List[DatasetViewerVerifyResponse]) -> Dict[str
     return result
 
 
-def get_aggregate_metrics(
-    data: List[DatasetViewerVerifyResponse], raw_lines: List[str]
-) -> Dict[str, Any]:
+def get_aggregate_metrics(data: List[DatasetViewerVerifyResponse], raw_lines: List[str]) -> Dict[str, Any]:
     dataset_metrics = DatasetMetrics()
     for line in raw_lines:
         metrics, is_offending = compute_sample_metrics(line)
@@ -271,10 +260,7 @@ def build_jsonl_dataset_viewer(config: JsonlDatasetViewerConfig) -> Blocks:
             raw_lines.append(line)
             data.append(DatasetViewerVerifyResponse.model_validate_json(line))
 
-    choices = [
-        (f"Sample {i + 1} - Responses ID {d.response.id}", i)
-        for i, d in enumerate(data)
-    ]
+    choices = [(f"Sample {i + 1} - Responses ID {d.response.id}", i) for i, d in enumerate(data)]
 
     def select_item(value: int):
         d = data[value]
@@ -299,9 +285,7 @@ def build_jsonl_dataset_viewer(config: JsonlDatasetViewerConfig) -> Blocks:
             layout="panel",
             label="Rollout",
         )
-        item_dropdown.select(
-            fn=select_item, inputs=item_dropdown, outputs=chatbot, show_api=False
-        )
+        item_dropdown.select(fn=select_item, inputs=item_dropdown, outputs=chatbot, show_api=False)
 
     return demo
 
