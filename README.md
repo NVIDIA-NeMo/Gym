@@ -450,7 +450,7 @@ source .venv/bin/activate
 pytest
 ```
 
-At some point, you will want to actually add data that can be used to query your server. Please follow the instructions for [How To: Prepare and validate data for PR submission or RL training](#how-to-prepare-and-validate-data-for-pr-submission-or-rl-training). 
+At some point, you will want to actually add data that can be used to query your server. Please follow the instructions for [How To: Prepare and validate data for PR submission or RL training](#how-to-prepare-and-validate-data-for-pr-submission-or-rl-training).
 
 
 If you need some dataset preprocessing or formatting scripts, please place them your resources server directory e.g. `resources_servers/simple_weather/my_preprocess_script.py`.
@@ -501,7 +501,7 @@ Gitlab uses MLFlow to interface with its model artifact registry. You will need:
    2. The URI will look something like `https://gitlab-master.nvidia.com/api/v4/projects/191584/ml/mlflow/`
 2. Your Gitlab token. Your Gitlab token must have the `api` and `read_api` scopes.
 
-Provide your MLFlow credentials in `env.yaml`. 
+Provide your MLFlow credentials in `env.yaml`.
 ```yaml
 mlflow_tracking_uri: {your NeMo Gym Gitlab URI}
 mlflow_tracking_token: {your Gitlab PAT}
@@ -700,7 +700,7 @@ More often than node, the SHA256 displayed by Github (SHA256:xxxx) should be the
 
 For developers that sign commits via SSH keys, this is configuration so that VSCode source control is able to sign commits properly!
 ```bash
-git config gpg.format ssh 
+git config gpg.format ssh
 git config user.signingkey ~/.ssh/id_ed25519.pub
 ```
 
@@ -724,35 +724,35 @@ Tying back to NeMo Gym, NeMo gym can be used to create synthetic data for SFT tr
 
 # FAQ: Why NeMo Gym?
 
-NeMo Gym is a large-scale collection of high-quality verifier environments for multi-verifier RL training.  
+NeMo Gym is a large-scale collection of high-quality verifier environments for multi-verifier RL training.
 To enable this, NeMo Gym provides infra support for the rollout server that runs 100+ verifiers in parallel.
 
 The document below details why we designed NeMo Gym the way we did. It also includes a direct comparative study that clearly differentiates NeMo Gym from other environment frameworks.
 
 \[Banghua\] As of Thu Aug 21:
 
-1. Gym is completely different from any of the alternatives above in terms of data **coverage, quantity and quality.** For example, for math only, gym contains 1M+ high-quality math verifiable dataset curated by our internal team, with great math verify \+ LLM-as-a-judge support. In contrast, SkyRL and verifiers above only have a small train subset of GSM8K and AIME. We also have close to 10k SWE development, which require both high quality data curation efforts and good infra support. In contrast, Aviary only focuses on scientific knowledge environment. **None of the existing frameworks support general multi-turn tool-use agent, with tools like search, code execution, and other synthetic tools.**  
-2. We will be a **superset** of all existing gym environments. We are already a super-set of Sky RL Lab Gym and verifiers. We have integrated all GEM environments. We’re working with Aviary to incorporate them as well.  
+1. Gym is completely different from any of the alternatives above in terms of data **coverage, quantity and quality.** For example, for math only, gym contains 1M+ high-quality math verifiable dataset curated by our internal team, with great math verify \+ LLM-as-a-judge support. In contrast, SkyRL and verifiers above only have a small train subset of GSM8K and AIME. We also have close to 10k SWE development, which require both high quality data curation efforts and good infra support. In contrast, Aviary only focuses on scientific knowledge environment. **None of the existing frameworks support general multi-turn tool-use agent, with tools like search, code execution, and other synthetic tools.**
+2. We will be a **superset** of all existing gym environments. We are already a super-set of Sky RL Lab Gym and verifiers. We have integrated all GEM environments. We’re working with Aviary to incorporate them as well.
 3. As is shown from Brian’s comparison below, we have much **better infra support for scaling**. And the plan is to use NeMo Gym for 500B+ model training for quality improvement. This will make nemo gym battle tested in frontier model training, while the other gyms are mostly for smaller-scale experiments.
 
 Key use case requirements to avoid training environment scale, complexity, and diversity limitations:
 
-1. Can I easily build my environment without worrying about a training framework?  
-2. Can I easily call my model using OpenAI Responses and not worry about reasoning parsing?  
-3. Can I easily use your environment framework to build an agent application product?  
-4. Can I easily use your environment framework to build a simple multi-agent system?  
-5. Can I easily run individual SWE-bench task Docker containers?  
-6. Can I easily add an agent built with any agent framework?  
-7. Can I easily add any environment framework?  
-8. Can I easily simultaneously use math-verify==0.7.0 and math-verify==0.8.0 in 2 different environments?  
+1. Can I easily build my environment without worrying about a training framework?
+2. Can I easily call my model using OpenAI Responses and not worry about reasoning parsing?
+3. Can I easily use your environment framework to build an agent application product?
+4. Can I easily use your environment framework to build a simple multi-agent system?
+5. Can I easily run individual SWE-bench task Docker containers?
+6. Can I easily add an agent built with any agent framework?
+7. Can I easily add any environment framework?
+8. Can I easily simultaneously use math-verify==0.7.0 and math-verify==0.8.0 in 2 different environments?
 9. Can I easily spin up multiple environments at once?
 
 Key principles
 
-1. \[Reqs 1, 2\] Decoupled from training framework  
-2. \[Reqs 2, 3, 4, 6, 7\] Standardized behind OpenAI Responses  
-3. \[Reqs 3, 4, 6\] Explicit Agent vs model abstraction  
-4. \[Reqs 3, 4, 5, 6, 7\] REST environment servers and container compatible  
+1. \[Reqs 1, 2\] Decoupled from training framework
+2. \[Reqs 2, 3, 4, 6, 7\] Standardized behind OpenAI Responses
+3. \[Reqs 3, 4, 6\] Explicit Agent vs model abstraction
+4. \[Reqs 3, 4, 5, 6, 7\] REST environment servers and container compatible
 5. \[Reqs 8, 9\] Separate Python env per server at runtime
 
 \[Brian note\] There are some rows yet to be filled in here.

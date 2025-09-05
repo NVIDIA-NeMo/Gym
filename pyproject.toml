@@ -64,10 +64,10 @@ dependencies = [
     # 1. Why this dependency is here in NeMo Gym
     # 2. When this dependency was last updated
     # 3. The license of the dependencies.
-    # 
+    #
     # If you are adding or removing dependencies, please do your due diligience to update this information. PRs to main that modify dependencies will not be accepted unless this information is provided.
     # The licenses of the below dependencies include: Apache 2.0, MIT, and BSD 3-Clause
-    # 
+    #
     # By design, most (if not all) dependencies are unfrozen here to be easier to consume. The core pieces we need are server infra like FastAPI, etc.
     ########################################
 
