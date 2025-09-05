@@ -664,6 +664,7 @@ class TestApp:
             api_key="dummy_key",  # pragma: allowlist secret
             model="dummy_model",
             entrypoint="",
+            return_token_information=False,
         )
         return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
 
