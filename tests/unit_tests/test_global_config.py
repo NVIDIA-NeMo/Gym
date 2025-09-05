@@ -172,11 +172,13 @@ class TestServerUtils:
         hydra_main_mock = MagicMock()
 
         def hydra_main_wrapper(fn):
-            config_dict = DictConfig({
-                "a": {"responses_api_models": {"c": {"entrypoint": "app.py"}}},
-                "b": {"c": {"d": {}}},
-                "c": 2,
-            })
+            config_dict = DictConfig(
+                {
+                    "a": {"responses_api_models": {"c": {"entrypoint": "app.py"}}},
+                    "b": {"c": {"d": {}}},
+                    "c": 2,
+                }
+            )
             return lambda: fn(config_dict)
 
         hydra_main_mock.return_value = hydra_main_wrapper
@@ -210,27 +212,29 @@ class TestServerUtils:
         hydra_main_mock = MagicMock()
 
         def hydra_main_wrapper(fn):
-            config_dict = DictConfig({
-                "agent_name": {
-                    "responses_api_agents": {
-                        "agent_type": {
-                            "entrypoint": "app.py",
-                            "d": {
-                                "type": "resources_servers",
-                                "name": "resources_name",
-                            },
-                            "e": 2,
+            config_dict = DictConfig(
+                {
+                    "agent_name": {
+                        "responses_api_agents": {
+                            "agent_type": {
+                                "entrypoint": "app.py",
+                                "d": {
+                                    "type": "resources_servers",
+                                    "name": "resources_name",
+                                },
+                                "e": 2,
+                            }
                         }
-                    }
-                },
-                "resources_name": {
-                    "resources_servers": {
-                        "c": {
-                            "entrypoint": "app.py",
+                    },
+                    "resources_name": {
+                        "resources_servers": {
+                            "c": {
+                                "entrypoint": "app.py",
+                            }
                         }
-                    }
-                },
-            })
+                    },
+                }
+            )
             return lambda: fn(config_dict)
 
         hydra_main_mock.return_value = hydra_main_wrapper
@@ -279,19 +283,21 @@ class TestServerUtils:
 
         # Test errors on missing
         def hydra_main_wrapper(fn):
-            config_dict = DictConfig({
-                "agent_name": {
-                    "responses_api_agents": {
-                        "agent_type": {
-                            "entrypoint": "app.py",
-                            "d": {
-                                "type": "resources_servers",
-                                "name": "resources_name",
-                            },
+            config_dict = DictConfig(
+                {
+                    "agent_name": {
+                        "responses_api_agents": {
+                            "agent_type": {
+                                "entrypoint": "app.py",
+                                "d": {
+                                    "type": "resources_servers",
+                                    "name": "resources_name",
+                                },
+                            }
                         }
-                    }
-                },
-            })
+                    },
+                }
+            )
             return lambda: fn(config_dict)
 
         hydra_main_mock.return_value = hydra_main_wrapper
@@ -321,26 +327,28 @@ class TestServerUtils:
 
         # Test errors on missing
         def hydra_main_wrapper(fn):
-            config_dict = DictConfig({
-                "agent_name": {
-                    "responses_api_agents": {
-                        "agent_type": {
-                            "entrypoint": "app.py",
-                            "d": {
-                                "type": "resources_servers",
-                                "name": "resources_name",
-                            },
+            config_dict = DictConfig(
+                {
+                    "agent_name": {
+                        "responses_api_agents": {
+                            "agent_type": {
+                                "entrypoint": "app.py",
+                                "d": {
+                                    "type": "resources_servers",
+                                    "name": "resources_name",
+                                },
+                            }
                         }
-                    }
-                },
-                "resources_name": {
-                    "responses_api_models": {
-                        "c": {
-                            "entrypoint": "app.py",
+                    },
+                    "resources_name": {
+                        "responses_api_models": {
+                            "c": {
+                                "entrypoint": "app.py",
+                            }
                         }
-                    }
-                },
-            })
+                    },
+                }
+            )
             return lambda: fn(config_dict)
 
         hydra_main_mock.return_value = hydra_main_wrapper
@@ -350,14 +358,16 @@ class TestServerUtils:
             get_global_config_dict()
 
     def test_get_first_server_config_dict(self) -> None:
-        global_config_dict = DictConfig({
-            "a": {
-                "b": {
-                    "c": {"my_key": "my_value"},
-                    "d": None,
+        global_config_dict = DictConfig(
+            {
+                "a": {
+                    "b": {
+                        "c": {"my_key": "my_value"},
+                        "d": None,
+                    },
+                    "e": None,
                 },
-                "e": None,
-            },
-            "f": None,
-        })
+                "f": None,
+            }
+        )
         assert {"my_key": "my_value"} == get_first_server_config_dict(global_config_dict, "a")

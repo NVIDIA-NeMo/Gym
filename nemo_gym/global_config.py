@@ -57,11 +57,13 @@ class GlobalConfigDictParserConfig(BaseModel):
     skip_load_from_cli: bool = False
     skip_load_from_dotenv: bool = False
 
-    NO_MODEL_GLOBAL_CONFIG_DICT: ClassVar[DictConfig] = DictConfig({
-        POLICY_BASE_URL_KEY_NAME: "",
-        POLICY_API_KEY_KEY_NAME: "",
-        POLICY_MODEL_NAME_KEY_NAME: "",
-    })
+    NO_MODEL_GLOBAL_CONFIG_DICT: ClassVar[DictConfig] = DictConfig(
+        {
+            POLICY_BASE_URL_KEY_NAME: "",
+            POLICY_API_KEY_KEY_NAME: "",
+            POLICY_MODEL_NAME_KEY_NAME: "",
+        }
+    )
 
 
 class GlobalConfigDictParser(BaseModel):

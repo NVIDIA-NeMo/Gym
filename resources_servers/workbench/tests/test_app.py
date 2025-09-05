@@ -143,11 +143,13 @@ class TestApp:
 
             resources_server = self.init_server(config)
 
-            mock_request = WorkbenchRequest(**{
-                "recipient": "aisha.chen@atlas.com",
-                "subject": "regarding something",
-                "body": "some body",
-            })
+            mock_request = WorkbenchRequest(
+                **{
+                    "recipient": "aisha.chen@atlas.com",
+                    "subject": "regarding something",
+                    "body": "some body",
+                }
+            )
 
             response = await resources_server.route_to_python_function(path="email_send_email", body=mock_request)
             assert response.output == "Email sent successfully."
@@ -286,12 +288,14 @@ class TestApp:
             mock_read_csv.return_value = mock_df
 
             resources_server = self.init_server(config)
-            mock_request = WorkbenchRequest(**{
-                "event_name": "some event name",
-                "participant_email": "some.email@example.com",
-                "event_start": "2023-08-01 09:00:00",
-                "duration": "90",
-            })
+            mock_request = WorkbenchRequest(
+                **{
+                    "event_name": "some event name",
+                    "participant_email": "some.email@example.com",
+                    "event_start": "2023-08-01 09:00:00",
+                    "duration": "90",
+                }
+            )
 
             response = await resources_server.route_to_python_function(path="calendar_create_event", body=mock_request)
 
@@ -417,12 +421,14 @@ class TestApp:
             mock_read_csv.return_value = mock_df
 
             resources_server = self.init_server(config)
-            mock_request = WorkbenchRequest(**{
-                "time_min": "2023-10-22",
-                "time_max": "2023-10-22",
-                "value_to_plot": "total_visits",
-                "plot_type": "bar",
-            })
+            mock_request = WorkbenchRequest(
+                **{
+                    "time_min": "2023-10-22",
+                    "time_max": "2023-10-22",
+                    "value_to_plot": "total_visits",
+                    "plot_type": "bar",
+                }
+            )
 
             response = await resources_server.route_to_python_function(path="analytics_create_plot", body=mock_request)
 
@@ -457,11 +463,13 @@ class TestApp:
             mock_read_csv.return_value = mock_df
 
             resources_server = self.init_server(config)
-            mock_request = WorkbenchRequest(**{
-                "time_min": "2023-10-22",
-                "time_max": "2023-10-22",
-                "traffic_source": "referral",
-            })
+            mock_request = WorkbenchRequest(
+                **{
+                    "time_min": "2023-10-22",
+                    "time_max": "2023-10-22",
+                    "traffic_source": "referral",
+                }
+            )
 
             response = await resources_server.route_to_python_function(
                 path="analytics_traffic_source_count", body=mock_request
@@ -577,13 +585,15 @@ class TestApp:
             mock_read_csv.return_value = mock_df
 
             resources_server = self.init_server(config)
-            mock_request = WorkbenchRequest(**{
-                "task_name": "",
-                "assigned_to_email": "leila.azizi@atlas.com",
-                "list_name": "Backlog",
-                "due_date": "2023-11-27",
-                "board": "Front end",
-            })
+            mock_request = WorkbenchRequest(
+                **{
+                    "task_name": "",
+                    "assigned_to_email": "leila.azizi@atlas.com",
+                    "list_name": "Backlog",
+                    "due_date": "2023-11-27",
+                    "board": "Front end",
+                }
+            )
 
             response = await resources_server.route_to_python_function(
                 path="project_management_search_tasks", body=mock_request
@@ -605,13 +615,15 @@ class TestApp:
             mock_read_csv.return_value = mock_df
 
             resources_server = self.init_server(config)
-            mock_request = WorkbenchRequest(**{
-                "task_name": "Add animation to carousel",
-                "assigned_to_email": "leila.azizi@atlas.com",
-                "list_name": "Backlog",
-                "due_date": "2023-11-27",
-                "board": "Front end",
-            })
+            mock_request = WorkbenchRequest(
+                **{
+                    "task_name": "Add animation to carousel",
+                    "assigned_to_email": "leila.azizi@atlas.com",
+                    "list_name": "Backlog",
+                    "due_date": "2023-11-27",
+                    "board": "Front end",
+                }
+            )
 
             response = await resources_server.route_to_python_function(
                 path="project_management_create_task", body=mock_request
@@ -680,16 +692,18 @@ class TestApp:
         ) as mock_read_csv:
             mock_read_csv.return_value = mock_df
             resources_server = self.init_server(config)
-            mock_request = WorkbenchRequest(**{
-                "customer_name": "Jaden White",
-                "customer_email": "jaden.white@protracefoods",
-                "product_interest": "Hardware",
-                "status": "Won",
-                "assigned_to_email": "raj.patel@atlas.com",
-                "last_contact_date_min": "2023-11-30 23:59:00",
-                "last_contact_date_max": "2023-11-30 23:59:00",
-                "follow_up_by_min": "2023-12-13 23:5",
-            })
+            mock_request = WorkbenchRequest(
+                **{
+                    "customer_name": "Jaden White",
+                    "customer_email": "jaden.white@protracefoods",
+                    "product_interest": "Hardware",
+                    "status": "Won",
+                    "assigned_to_email": "raj.patel@atlas.com",
+                    "last_contact_date_min": "2023-11-30 23:59:00",
+                    "last_contact_date_max": "2023-11-30 23:59:00",
+                    "follow_up_by_min": "2023-12-13 23:5",
+                }
+            )
 
             response = await resources_server.route_to_python_function(
                 path="customer_relationship_manager_search_customers", body=mock_request
@@ -727,11 +741,13 @@ class TestApp:
         ) as mock_read_csv:
             mock_read_csv.return_value = mock_df
             resources_server = self.init_server(config)
-            mock_request = WorkbenchRequest(**{
-                "customer_id": "00000189",
-                "field": "customer_name",
-                "new_value": "new customer",
-            })
+            mock_request = WorkbenchRequest(
+                **{
+                    "customer_id": "00000189",
+                    "field": "customer_name",
+                    "new_value": "new customer",
+                }
+            )
             response = await resources_server.route_to_python_function(
                 path="customer_relationship_manager_update_customer", body=mock_request
             )
@@ -747,15 +763,17 @@ class TestApp:
         ) as mock_read_csv:
             mock_read_csv.return_value = mock_df
             resources_server = self.init_server(config)
-            mock_request = WorkbenchRequest(**{
-                "customer_name": "Some customer",
-                "product_interest": "Hardware",
-                "status": "Won",
-                "assigned_to_email": "raj.patel@atlas.com",
-                "last_contact_date": "2023-11-30 23:59:00",
-                "follow_up_by": "2023-12-13 23:59:00",
-                "notes": "some notes",
-            })
+            mock_request = WorkbenchRequest(
+                **{
+                    "customer_name": "Some customer",
+                    "product_interest": "Hardware",
+                    "status": "Won",
+                    "assigned_to_email": "raj.patel@atlas.com",
+                    "last_contact_date": "2023-11-30 23:59:00",
+                    "follow_up_by": "2023-12-13 23:59:00",
+                    "notes": "some notes",
+                }
+            )
             response = await resources_server.route_to_python_function(
                 path="customer_relationship_manager_add_customer", body=mock_request
             )
@@ -853,55 +871,57 @@ class TestApp:
                 ],
             )
 
-            response = NeMoGymResponse(**{
-                "id": "resp_68b28c5cc7688195b56def0cfde4526a0527c59d17df88e4",
-                "created_at": 1756531804.0,
-                "error": None,
-                "incomplete_details": None,
-                "instructions": None,
-                "metadata": {},
-                "model": "gpt-4.1-2025-04-14",
-                "object": "response",
-                "output": [
-                    {
-                        "arguments": '{"email_id": "00000057", "body": "Thanks for the update - I will get back to you tomorrow."}',
-                        "call_id": "call_4HOX5l7EBfGNHFUYwdzMu989",
-                        "name": "email_reply_email",
-                        "type": "function_call",
-                        "id": "fc_68b2761bc78881909f6f5494de84736001454dbdc05b39d0",
-                        "status": "completed",
-                        "output": None,
-                        "content": None,
-                        "role": None,
-                    }
-                ],
-                "parallel_tool_calls": False,
-                "temperature": 1.0,
-                "tool_choice": "auto",
-                "tools": [
-                    {
-                        "name": "email_reply_email",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "email_id": {
-                                    "type": "string",
-                                    "description": "Unique ID of the email to be replied",
+            response = NeMoGymResponse(
+                **{
+                    "id": "resp_68b28c5cc7688195b56def0cfde4526a0527c59d17df88e4",
+                    "created_at": 1756531804.0,
+                    "error": None,
+                    "incomplete_details": None,
+                    "instructions": None,
+                    "metadata": {},
+                    "model": "gpt-4.1-2025-04-14",
+                    "object": "response",
+                    "output": [
+                        {
+                            "arguments": '{"email_id": "00000057", "body": "Thanks for the update - I will get back to you tomorrow."}',
+                            "call_id": "call_4HOX5l7EBfGNHFUYwdzMu989",
+                            "name": "email_reply_email",
+                            "type": "function_call",
+                            "id": "fc_68b2761bc78881909f6f5494de84736001454dbdc05b39d0",
+                            "status": "completed",
+                            "output": None,
+                            "content": None,
+                            "role": None,
+                        }
+                    ],
+                    "parallel_tool_calls": False,
+                    "temperature": 1.0,
+                    "tool_choice": "auto",
+                    "tools": [
+                        {
+                            "name": "email_reply_email",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "email_id": {
+                                        "type": "string",
+                                        "description": "Unique ID of the email to be replied",
+                                    },
+                                    "body": {
+                                        "type": "string",
+                                        "description": "Body content of the email",
+                                    },
                                 },
-                                "body": {
-                                    "type": "string",
-                                    "description": "Body content of the email",
-                                },
+                                "required": ["email_id", "body"],
+                                "additionalProperties": False,
                             },
-                            "required": ["email_id", "body"],
-                            "additionalProperties": False,
-                        },
-                        "strict": False,
-                        "type": "function",
-                        "description": "Replies to an email by its ID.",
-                    }
-                ],
-            })
+                            "strict": False,
+                            "type": "function",
+                            "description": "Replies to an email by its ID.",
+                        }
+                    ],
+                }
+            )
 
             verify_request = WorkbenchVerifyRequest(
                 responses_create_params=responses_create_params,

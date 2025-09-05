@@ -133,13 +133,15 @@ class CalendarTool:
         participant_email = participant_email.lower()
 
         event_id = str(int(self._calendar_events["event_id"].max()) + 1).zfill(8)
-        new_event = pd.DataFrame({
-            "event_id": [event_id],
-            "event_name": [event_name],
-            "participant_email": [participant_email],
-            "event_start": [event_start],
-            "duration": [duration],
-        })
+        new_event = pd.DataFrame(
+            {
+                "event_id": [event_id],
+                "event_name": [event_name],
+                "participant_email": [participant_email],
+                "event_start": [event_start],
+                "duration": [duration],
+            }
+        )
         self._calendar_events = pd.concat([self._calendar_events, new_event])
         return event_id
 
