@@ -16,11 +16,13 @@
 - [How To: Offline rollout collection or synthetic data generation](#how-to-offline-rollout-collection-or-synthetic-data-generation)
 - [How To: Prepare and validate data for PR submission or RL training](#how-to-prepare-and-validate-data-for-pr-submission-or-rl-training)
 - [How To: ng\_dump\_config - Dump a YAML config as exactly as NeMo Gym sees it](#how-to-ng_dump_config---dump-a-yaml-config-as-exactly-as-nemo-gym-sees-it)
+- [How To: Use NeMo Gym with a non-Responses compatible API endpoint like vLLM](#how-to-use-nemo-gym-with-a-non-responses-compatible-api-endpoint-like-vllm)
 - [FAQ: VSCode and Git setup](#faq-vscode-and-git-setup)
 - [FAQ: SFT and RL](#faq-sft-and-rl)
 - [FAQ: Why NeMo Gym?](#faq-why-nemo-gym)
 - [FAQ: Error: Found files with missing copyright](#faq-error-found-files-with-missing-copyright)
 - [FAQ: build-docs / Build docs CI failures](#faq-build-docs--build-docs-ci-failures)
+
 
 # NeMo-Gym
 # Setup
@@ -676,6 +678,46 @@ ng_run "+config_paths=[$config_paths]"
 # Dump the exact yaml config that NeMo gym sees, just by swapping ng_run -> ng_dump_config
 ng_dump_config "+config_paths=[$config_paths]"
 ```
+
+
+# How To: Use NeMo Gym with a non-Responses compatible API endpoint like vLLM
+As of Sep 05, 2025, not many models have been trained with middlewares or chat templates that are easily parseable to OpenAI Responses API schema, with the notable exception of OpenAI's own open source model GPT-OSS. Since Gym is first-party Responses API, **this makes Gym very difficult to use with basically any model**.
+
+As a result, we provide a Responses API to Chat Completions mapping middleware layer in the form of `responses_api_models/vllm_model`. VLLMModel assumes that you are pointing to a vLLM instance (since it relies on vLLM-specific endpoints like `/tokenize` and vLLM-specific arguments like `return_tokens_as_token_ids`).
+
+To use VLLMModel, just change the `responses_api_models/openai_model/configs/openai_model.yaml` in your config paths to `responses_api_models/vllm_model/configs/vllm_model.yaml`!
+```bash
+config_paths="resources_servers/multineedle/configs/multineedle.yaml,\
+responses_api_models/vllm_model/configs/vllm_model.yaml"
+ng_run "+config_paths=[$config_paths]"
+```
+
+Here is an e2e example of how to spin up a NeMo Gym compatible vLLM Chat Completions OpenAI server.
+- If you want to use tools, please find the appropriate vLLM arguments regarding the tool call parser to use. In this example, we use Qwen3-30B-A3B, which is suggested to use the `hermes` tool call parser.
+- **Important note**: Please do NOT use a reasoning parser argument to vLLM here. The Responses to Chat Completions middleware logic needs to parse to and from Responses Reasoning items and Chat Completion Message content. **Do NOT use things like `--reasoning-parser qwen3`**.
+```bash
+uv venv --python 3.12 --seed 
+source .venv/bin/activate
+# hf_transfer for faster model download. datasets for downloading data from HF
+uv pip install hf_transfer datasets vllm --torch-backend=auto
+
+# Qwen/Qwen3-30B-A3B, usable in Nemo RL!
+HF_HOME=.cache/ \
+HF_HUB_ENABLE_HF_TRANSFER=1 \
+    hf download Qwen/Qwen3-30B-A3B
+
+HF_HOME=.cache/ \
+HOME=. \
+vllm serve \
+    Qwen/Qwen3-30B-A3B \
+    --dtype auto \
+    --tensor-parallel-size 4 \
+    --gpu-memory-utilization 0.9 \
+    --enable-auto-tool-choice --tool-call-parser hermes \
+    --host 0.0.0.0 \
+    --port 10240
+```
+
 
 # FAQ: VSCode and Git setup
 Here are some suggestions for easier development using the VSCode code editor.
