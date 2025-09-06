@@ -58,7 +58,7 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
     install_cmd += " " + " ".join(head_server_deps)
 
     return f"""cd {dir_path} \\
-    && uv venv --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} \\
+    && uv venv --allow-existing --python python3.12 \\
     && source .venv/bin/activate \\
     && {install_cmd} \\
    """

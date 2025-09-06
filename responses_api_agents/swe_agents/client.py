@@ -23,7 +23,13 @@ async def main():
         server_name="swe_agents",
         url_path="/v1/responses",
         json=NeMoGymResponseCreateParamsNonStreaming(
-            input="""Modeling's `separability_matrix` does not compute separability correctly for nested CompoundModels
+            input=[],
+            metadata={
+                "instance_id": "astropy__astropy-12907",
+                "base_commit": "d16bfe05a744909de4b27f5875fe0d4ed41ce607",
+                "dataset_name": "princeton-nlp/SWE-bench_Verified",
+                "split": "test",
+                "problem_statement": """Modeling's `separability_matrix` does not compute separability correctly for nested CompoundModels
 Consider the following model:
 
 ```python
@@ -62,12 +68,7 @@ array([[ True, True, False, False],
 ```
 Suddenly the inputs and outputs are no longer separable?
 
-This feels like a bug to me, but I might be missing something?""",
-            metadata={
-                "instance_id": "astropy__astropy-12907",
-                "base_commit": "d16bfe05a744909de4b27f5875fe0d4ed41ce607",
-                "dataset_name": "princeton-nlp/SWE-bench_Verified",
-                "split": "test"
+This feels like a bug to me, but I might be missing something?"""
             },
             # Model and inference parameters
             model="Qwen3-30B-A3B-Instruct-2507", #"gpt-4.1-2025-04-14",
@@ -80,34 +81,6 @@ This feels like a bug to me, but I might be missing something?""",
     print("\nResponse:")
     print(json.dumps(result, indent=2))
     
-    # Extract key information
-    if "metadata" in result and "swebench_result" in result["metadata"]:
-        # Parse the JSON string
-        swebench_result = result["metadata"]["swebench_result"]
-        if isinstance(swebench_result, str):
-            swebench_result = json.loads(swebench_result)
-        metrics = swebench_result.get("swe-bench-metrics", {})
-        outputs = swebench_result.get("swe-bench-outputs", {})
-        print("\n" + "=" * 40)
-        print("EVALUATION RESULTS:")
-        print(f"✓ Issue Resolved: {metrics.get('resolved', False)}")
-        print(f"✓ Patch Generated: {metrics.get('patch_exists', False)}")
-        print(f"✓ Patch Applied: {metrics.get('patch_successfully_applied', False)}")
-        print("=" * 40)
-        
-        # Show patch if generated
-        if outputs.get("model_patch"):
-            print("\nGENERATED PATCH:")
-            print("-" * 40)
-            print(outputs["model_patch"])
-            print("-" * 40)
-        
-        # Show trajectory if available
-        if "trajectory" in swebench_result:
-            print("\nAGENT TRAJECTORY SUMMARY:")
-            print("-" * 40)
-            trajectory = swebench_result["trajectory"]
-            print(trajectory)
     
 
 if __name__ == "__main__":
