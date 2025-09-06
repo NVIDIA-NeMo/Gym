@@ -4,6 +4,7 @@
 - [Setup](#setup)
   - [Helpful development commands](#helpful-development-commands)
 - [How To: Run a simple agent](#how-to-run-a-simple-agent)
+  - [TL;DR](#tldr)
   - [Introduction](#introduction)
   - [Configs](#configs)
     - [Special policy model placeholders](#special-policy-model-placeholders)
@@ -80,6 +81,21 @@ ng_test_all
 # How To: Run a simple agent
 Reading time: 10 mins
 Date: Mon Aug 04, 2025
+
+## TL;DR
+After setup above:
+```bash
+echo "policy_base_url: https://api.openai.com/v1
+policy_api_key: {your OpenAI API key}
+policy_model_name: gpt-4.1-2025-04-14" > env.yaml
+
+config_paths="resources_servers/simple_weather/configs/simple_weather.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml"
+ng_run "+config_paths=[${config_paths}]"
+
+python responses_api_agents/simple_agent/client.py
+```
+
 
 ## Introduction
 In this example, we will run a simple agent that uses the GPT 4.1 model and has access to a very simple dummy get_weather tool. NeMo Gym has three core abstractions: models, resources, and agents.
