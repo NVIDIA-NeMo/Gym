@@ -11,9 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 from unittest.mock import mock_open, patch
 
-from nemo_gym.dataset_viewer import JsonlDatasetViewerConfig, build_jsonl_dataset_viewer
+from pydantic import BaseModel
+from pytest import MonkeyPatch
+
+from nemo_gym.dataset_viewer import (
+    JsonlDatasetViewerConfig,
+    build_jsonl_dataset_viewer,
+    get_aggregate_metrics,
+)
 
 
 class TestDatasetViewer:
@@ -31,3 +39,80 @@ class TestDatasetViewer:
         mock_content = r"""{"reward": 0.0, "accuracy": false, "set_overlap": 0.0, "original_term_minefield_hit": false, "order_instruction_following_failure": false, "id": 44, "expected_synonym_values": [489, 504], "expected_synonyms": ["Awake", "Alert"], "minefield_label": "Alive", "minefield_label_value": 497, "responses_create_params": {"input": [{"content": "# Instructions", "role": "system"}, {"content": "How does the human body's response to danger highlight the instinct for survival?", "role": "user"}]}, "response": {"id": "resp_689038d64ad081929f6f36d2f2554431063ce0bbdad9d001", "created_at": 1754282198.0, "error": null, "incomplete_details": null, "instructions": null, "metadata": {}, "model": "gpt-4.1-2025-04-14", "object": "response", "output": [{"content": [{"annotations": [], "text": "fake chat message", "type": "output_text"}], "role": "assistant", "type": "message", "id": "fc_689038d5d1cc8192b91bbef0069ff82f063ce0bbdad9d001", "status": "completed"}, {"summary": [{"type": "summary_text", "text": "fake reasoning"}], "type": "reasoning", "id": "fc_689038d5d1cc8192b91bbef0069ff82f063ce0bbdad9d001", "status": "completed"}, {"arguments": "{\"synonym\":\"Survival\"}", "call_id": "call_pyKbpFtdag6LL6euwpAJ8UEw", "name": "get_synonym_value", "type": "function_call", "id": "fc_689038d5d1cc8192b91bbef0069ff82f063ce0bbdad9d001", "status": "completed"}, {"call_id": "call_pyKbpFtdag6LL6euwpAJ8UEw", "output": "{\"synonym_value\": 860}", "type": "function_call_output"}, {"arguments": "{\"synonym_values\":[860]}", "call_id": "call_N4Kr3NJJohoTaxSL5DkkG4W6", "name": "extract_synonym_values", "type": "function_call", "id": "fc_689038d6c71c8192b7ab0de7cc655d98063ce0bbdad9d001", "status": "completed"}], "parallel_tool_calls": false, "temperature": 1.0, "tool_choice": "auto", "tools": [{"name": "get_synonym_value", "parameters": {"properties": {"synonym": {"type": "string", "title": "Synonym", "description": "The synonym to get the value for."}}, "type": "object", "required": ["synonym"], "additionalProperties": false}, "strict": true, "type": "function", "description": "Get the synonym value for a synonym.\nThis operation returns a value that conforms to the following JSON Schema: {\"properties\": {\"synonym_value\": {\"type\": \"integer\", \"title\": \"Synonym Value\", \"description\": \"The value for this synonym.\"}}, \"type\": \"object\", \"required\": [\"synonym_value\"]}\n"}, {"name": "extract_synonym_values", "parameters": {"properties": {"synonym_values": {"items": {"type": "integer"}, "type": "array", "title": "Synonym Values", "description": "The synonym values corresponding to the term for the user query."}}, "type": "object", "required": ["synonym_values"], "additionalProperties": false}, "strict": true, "type": "function", "description": "Extract the synonym values you retrieved for the term that is relevant to the user query.\nThis operation returns a value that conforms to the following JSON Schema: {\"properties\": {\"success\": {\"type\": \"boolean\", \"title\": \"Success\", \"description\": \"Success.\"}}, \"type\": \"object\", \"required\": [\"success\"]}\n"}], "top_p": 1.0, "background": false, "max_output_tokens": null, "max_tool_calls": null, "previous_response_id": null, "prompt": null, "reasoning": {"effort": null, "generate_summary": null, "summary": null}, "service_tier": "default", "status": "completed", "text": {"format": {"type": "text"}}, "top_logprobs": 0, "truncation": "disabled", "usage": {"input_tokens": 2864, "input_tokens_details": {"cached_tokens": 2798}, "output_tokens": 19, "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": 2883}, "user": null, "prompt_cache_key": null, "safety_identifier": null, "store": true}}"""
         with patch("builtins.open", mock_open(read_data=mock_content)):
             build_jsonl_dataset_viewer(config)
+
+    def test_get_aggregate_metrics(self, monkeypatch: MonkeyPatch):
+        class DummySample(BaseModel):
+            responses_create_params: dict = {}
+            response: dict = {}
+            reward: float = 1.0
+            accuracy: bool = True
+            set_overlap: float = 0.5
+            unrelated_list: list = []
+            unrelated_dict: dict = {}
+
+        class DummySampleWithStrings(DummySample):
+            some_string: str
+
+        samples = [
+            DummySample(reward=1.0, accuracy=True, set_overlap=0.5),
+            DummySample(reward=0.0, accuracy=False, set_overlap=0.0),
+            DummySample(reward=0.5, accuracy=True, set_overlap=1.0),
+        ]
+
+        samples_with_strings = [
+            DummySampleWithStrings(reward=1.0, accuracy=True, some_string="asdf"),
+            DummySampleWithStrings(reward=0.0, accuracy=False, some_string="asdf"),
+            DummySampleWithStrings(reward=0.5, accuracy=True, some_string="word1"),
+            DummySampleWithStrings(reward=0.5, accuracy=True, some_string="word1"),
+            DummySampleWithStrings(reward=0.5, accuracy=True, some_string="word2"),
+        ]
+
+        def mock_compute_sample_metrics(line: str):
+            metrics = json.loads(line)
+            return metrics, False
+
+        class DummyAgg:
+            def model_dump(self, by_alias=True):
+                return {}
+
+            def aggregate(self):
+                return DummyAgg()
+
+        monkeypatch.setattr(
+            "nemo_gym.train_data_utils.compute_sample_metrics",
+            mock_compute_sample_metrics,
+        )
+
+        result_1 = get_aggregate_metrics(samples, "{}\n")
+
+        assert "reward" in result_1
+        assert "accuracy" in result_1
+        assert "set_overlap" in result_1
+
+        assert "unrelated_str" not in result_1
+        assert "unrelated_list" not in result_1
+        assert "unrelated_dict" not in result_1
+
+        assert "responses_create_params" not in result_1
+        assert "response" not in result_1
+
+        # Check computed values
+        reward_stats = result_1["reward"]
+        assert reward_stats["Total # non-null values"] == 3
+        assert reward_stats["Average"] == (1.0 + 0.0 + 0.5) / 3
+        assert reward_stats["Min"] == 0.0
+        assert reward_stats["Max"] == 1.0
+
+        # Check computed values with bools converted to int
+        accuracy_stats = result_1["accuracy"]
+        assert accuracy_stats["Total # non-null values"] == 3
+        assert accuracy_stats["Average"] == (1 + 0 + 1) / 3
+        assert accuracy_stats["Min"] == 0
+        assert accuracy_stats["Max"] == 1
+
+        # Check string counts
+        result_2 = get_aggregate_metrics(samples_with_strings, "{}\n")
+
+        assert "some_string" in result_2
+        assert result_2["some_string"]["unique_count"] == 3
+        assert result_2["some_string"]["total_count"] == 5

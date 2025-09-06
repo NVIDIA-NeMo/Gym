@@ -17,7 +17,7 @@ from collections import Counter, defaultdict
 from itertools import count, repeat
 from pathlib import Path
 from shutil import copyfileobj
-from typing import Dict, List, Literal, Optional, Self, Union
+from typing import Dict, List, Literal, Optional, Self, Tuple, Union
 
 from devtools import pprint
 from omegaconf import DictConfig
@@ -126,6 +126,72 @@ class DatasetMetrics(Accumulator):
             number_of_turns=self.number_of_turns.aggregate(),
             temperature=self.temperature.aggregate(),
         )
+
+
+def compute_sample_metrics(sample_dict_str: str) -> Tuple[DatasetMetrics, bool]:
+    try:
+        sample_dict = json.loads(sample_dict_str)
+    except json.JSONDecodeError:
+        return DatasetMetrics(), True
+
+    try:
+        sample = BaseRunRequest.model_validate(sample_dict)
+    except ValidationError:
+        return DatasetMetrics(), True
+
+    responses_create_params = sample.responses_create_params
+    responses_create_params = responses_create_params.model_dump(exclude_unset=True)
+    inputs = responses_create_params.get("input")
+
+    number_of_tools_metrics = AvgMinMax()
+    if responses_create_params.get("tools") is not None:
+        number_of_tools = len(responses_create_params["tools"])
+        number_of_tools_metrics = AvgMinMax(
+            total=1,
+            average=number_of_tools,
+            min=number_of_tools,
+            max=number_of_tools,
+        )
+
+    if isinstance(inputs, str):
+        inputs = [{"role": "user", "content": inputs}]
+    user_inputs = [i for i in inputs if i.get("role") == "user"] if inputs else []
+    number_of_turns_metrics = AvgMinMax()
+    if user_inputs:
+        number_of_turns = len(user_inputs)
+        number_of_turns_metrics = AvgMinMax(
+            total=1,
+            average=number_of_turns,
+            min=number_of_turns,
+            max=number_of_turns,
+        )
+
+    temperature_metrics = AvgMinMax()
+    if responses_create_params.get("temperature") is not None:
+        temperature = responses_create_params["temperature"]
+        temperature_metrics = AvgMinMax(
+            total=1,
+            average=temperature,
+            min=temperature,
+            max=temperature,
+        )
+
+    json_dumped_number_of_words = len(json.dumps(responses_create_params).split())
+    json_dumped_number_of_words_metrics = AvgMinMax(
+        total=1,
+        average=json_dumped_number_of_words,
+        min=json_dumped_number_of_words,
+        max=json_dumped_number_of_words,
+    )
+
+    metrics = DatasetMetrics(
+        number_of_examples=1,
+        number_of_tools=number_of_tools_metrics,
+        json_dumped_number_of_words=json_dumped_number_of_words_metrics,
+        number_of_turns=number_of_turns_metrics,
+        temperature=temperature_metrics,
+    )
+    return metrics, False
 
 
 class DatasetValidatorState(BaseModel):
@@ -283,72 +349,13 @@ class TrainDataProcessor(BaseModel):
     def _validate_samples_and_aggregate_metrics_single_sample(
         self, state: DatasetValidatorState, sample_idx: int, sample_dict_str: str
     ) -> None:
-        try:
-            sample_dict = json.loads(sample_dict_str)
-        except json.JSONDecodeError:
+        metrics, is_offending = compute_sample_metrics(sample_dict_str)
+        if is_offending:
             state.offending_example_idxs.append(sample_idx)
             return
 
-        try:
-            sample = BaseRunRequest.model_validate(sample_dict)
-        except ValidationError:
-            state.offending_example_idxs.append(sample_idx)
-            return
-
+        sample_dict = json.loads(sample_dict_str)
         state.key_counts.update(sample_dict.keys())
-
-        responses_create_params = sample.responses_create_params
-        responses_create_params = responses_create_params.model_dump(exclude_unset=True)
-        inputs = responses_create_params["input"]
-
-        number_of_tools_metrics = AvgMinMax()
-        if responses_create_params.get("tools") is not None:
-            number_of_tools = len(responses_create_params["tools"])
-            number_of_tools_metrics = AvgMinMax(
-                total=1,
-                average=number_of_tools,
-                min=number_of_tools,
-                max=number_of_tools,
-            )
-
-        if isinstance(inputs, str):
-            inputs = [{"role": "user", "content": inputs}]
-        user_inputs = [i for i in inputs if i.get("role") == "user"]
-        number_of_turns_metrics = AvgMinMax()
-        if user_inputs:
-            number_of_turns = len(user_inputs)
-            number_of_turns_metrics = AvgMinMax(
-                total=1,
-                average=number_of_turns,
-                min=number_of_turns,
-                max=number_of_turns,
-            )
-
-        temperature_metrics = AvgMinMax()
-        if responses_create_params.get("temperature") is not None:
-            temperature = responses_create_params["temperature"]
-            temperature_metrics = AvgMinMax(
-                total=1,
-                average=temperature,
-                min=temperature,
-                max=temperature,
-            )
-
-        json_dumped_number_of_words = len(json.dumps(responses_create_params).split())
-        json_dumped_number_of_words_metrics = AvgMinMax(
-            total=1,
-            average=json_dumped_number_of_words,
-            min=json_dumped_number_of_words,
-            max=json_dumped_number_of_words,
-        )
-
-        metrics = DatasetMetrics(
-            number_of_examples=1,
-            number_of_tools=number_of_tools_metrics,
-            json_dumped_number_of_words=json_dumped_number_of_words_metrics,
-            number_of_turns=number_of_turns_metrics,
-            temperature=temperature_metrics,
-        )
         state.metrics.add(metrics)
 
     def _validate_samples_and_aggregate_metrics_single_dataset(
