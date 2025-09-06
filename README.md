@@ -21,6 +21,7 @@
 - [FAQ: Why NeMo Gym?](#faq-why-nemo-gym)
 - [FAQ: Error: Found files with missing copyright](#faq-error-found-files-with-missing-copyright)
 - [FAQ: build-docs / Build docs CI failures](#faq-build-docs--build-docs-ci-failures)
+- [FAQ: NeMo Gym and training frameworks](#faq-nemo-gym-and-training-frameworks)
 
 # NeMo-Gym
 # Setup
@@ -808,3 +809,10 @@ pickling environment... done
 checking consistency... done
 ```
 You may need to reformat some of your docstrings to Napoleon format docstrings https://sphinxcontrib-napoleon.readthedocs.io/en/latest/
+
+
+# FAQ: NeMo Gym and training frameworks
+One of the goals of NeMo Gym is to 
+
+
+**TODO**
