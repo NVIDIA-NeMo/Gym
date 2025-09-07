@@ -6,6 +6,7 @@ POST /get_initial_board   →  returns instructions + fresh game_state
 POST /make_move           →  submits a guess, returns feedback / reward
 POST /verify              →  simple echo, used by the evaluation harness
 """
+
 from __future__ import annotations
 
 import random
@@ -32,11 +33,12 @@ from nemo_gym.base_resources_server import (
 # Internal helpers (pure Wordle logic – no web stuff)
 # ---------------------------------------------------------------------------
 
+
 def _evaluate_guess(secret: str, guess: str) -> List[str]:
     """Return list of G / Y / X exactly like original env."""
     feedback = [None] * len(secret)
     secret_list = list(secret)
-    guess_list  = list(guess)
+    guess_list = list(guess)
 
     # pass 1 – greens
     for i in range(len(secret)):
@@ -55,7 +57,9 @@ def _evaluate_guess(secret: str, guess: str) -> List[str]:
     return feedback
 
 
-def _internal_reward(feedback: List[str], milestones: List[int]) -> Tuple[float, List[int]]:
+def _internal_reward(
+    feedback: List[str], milestones: List[int]
+) -> Tuple[float, List[int]]:
     """0.5 / word_length for every newly found green."""
     reward = 0.0
     for i, (f, m) in enumerate(zip(feedback, milestones)):
@@ -69,29 +73,30 @@ def _internal_reward(feedback: List[str], milestones: List[int]) -> Tuple[float,
 # Pydantic models (request / response)
 # ---------------------------------------------------------------------------
 
+
 class GetInitialBoardRequest(BaseModel):
     word_length: int | None = 5
-    max_turns:   int = 20
-    only_real:   bool = True
+    max_turns: int = 20
+    only_real: bool = True
 
 
 class GetInitialBoardResponse(BaseModel):
     instructions: str
-    board_text:   str
-    game_state:   Dict[str, Any]
+    board_text: str
+    game_state: Dict[str, Any]
 
 
 class MakeMoveRequest(BaseModel):
     game_state: Dict[str, Any]
-    guess:      str   # e.g. "CRANE"
+    guess: str  # e.g. "CRANE"
 
 
 class MakeMoveResponse(BaseModel):
-    success:     bool
-    message:     str
-    feedback:    List[str] | None = None
-    board_text:  str
-    game_state:  Dict[str, Any]
+    success: bool
+    message: str
+    feedback: List[str] | None = None
+    board_text: str
+    game_state: Dict[str, Any]
     is_complete: bool
     move_reward: float
 
@@ -101,19 +106,20 @@ class WordleRunRequest(BaseRunRequest, GetInitialBoardRequest):
 
 
 class WordleVerifyRequest(WordleRunRequest, BaseVerifyRequest):
-    reward:       float = 0.0
-    total_moves:  int   = 0
-    is_complete:  bool  = False
+    reward: float = 0.0
+    total_moves: int = 0
+    is_complete: bool = False
 
 
 class WordleVerifyResponse(BaseVerifyResponse):
-    total_moves:  int   = 0
-    is_complete:  bool  = False
+    total_moves: int = 0
+    is_complete: bool = False
 
 
 # ---------------------------------------------------------------------------
 # The server itself
 # ---------------------------------------------------------------------------
+
 
 class WordleResourcesServerConfig(BaseResourcesServerConfig):
     pass
@@ -134,12 +140,12 @@ class WordleResourcesServer(SimpleResourcesServer):
     def _instructions(word_len: int, max_turns: int) -> str:
         return (
             f"You are playing Wordle.\n"
-            f"Guess the secret {word_len}-letter word in ≤{max_turns} turns.\n"
+            f"Guess the secret {word_len}-letter word in <= {max_turns} turns.\n"
             "After each guess you will receive a feedback string of equal length\n"
             "made of characters:\n"
-            "  G – correct letter & position\n"
-            "  Y – letter is present but misplaced\n"
-            "  X – letter not in word\n\n"
+            "  G - correct letter & position\n"
+            "  Y - letter is present but misplaced\n"
+            "  X - letter not in word\n\n"
             "Use the make_move function to submit your guesses.\n"
         )
 
@@ -151,20 +157,26 @@ class WordleResourcesServer(SimpleResourcesServer):
         return "\n".join(f"{g}\n{''.join(fb)}" for g, fb in history)
 
     # ----------------------------------------------------------- /get_initial_board
-    async def get_initial_board(self, body: GetInitialBoardRequest) -> GetInitialBoardResponse:
+    async def get_initial_board(
+        self, body: GetInitialBoardRequest
+    ) -> GetInitialBoardResponse:
         nltk.download("words", quiet=True)
 
         word_len = body.word_length or random.randint(3, 6)
-        vocab    = [w for w in words.words("en-basic") if len(w) == word_len and w.isalpha() and w.islower()]
-        secret   = random.choice(vocab).upper()
+        vocab = [
+            w
+            for w in words.words("en-basic")
+            if len(w) == word_len and w.isalpha() and w.islower()
+        ]
+        secret = random.choice(vocab).upper()
 
         game_state = {
-            "secret":          secret,
-            "word_length":     word_len,
-            "max_turns":       body.max_turns,
-            "turn_count":      0,
-            "history":         [],            # list[(guess, feedback)]
-            "milestones":      [0] * word_len
+            "secret": secret,
+            "word_length": word_len,
+            "max_turns": body.max_turns,
+            "turn_count": 0,
+            "history": [],  # list[(guess, feedback)]
+            "milestones": [0] * word_len,
         }
 
         return GetInitialBoardResponse(
@@ -194,7 +206,7 @@ class WordleResourcesServer(SimpleResourcesServer):
                 board_text=self._render_board(gs["history"]),
                 game_state=gs,
                 is_complete=False,
-                move_reward=-0.1,
+                move_reward=0.0,  # Since we want to only have binary 0/1 rewards
             )
 
         # repeated guess?
@@ -205,7 +217,7 @@ class WordleResourcesServer(SimpleResourcesServer):
                 board_text=self._render_board(gs["history"]),
                 game_state=gs,
                 is_complete=False,
-                move_reward=-0.1,
+                move_reward=0.0,  # Since we want to only have binary 0/1 rewards
             )
 
         # evaluate
@@ -224,7 +236,8 @@ class WordleResourcesServer(SimpleResourcesServer):
         is_terminal = completed or failed_out
 
         msg = (
-            f"Correct! Secret word was {gs['secret']}." if completed
+            f"Correct! Secret word was {gs['secret']}."
+            if completed
             else f"Turn {gs['turn_count']}: feedback for '{guess_raw}' is {''.join(feedback)}"
         )
         return MakeMoveResponse(
@@ -234,7 +247,7 @@ class WordleResourcesServer(SimpleResourcesServer):
             board_text=self._render_board(gs["history"]),
             game_state=gs,
             is_complete=is_terminal,
-            move_reward=step_reward,
+            move_reward=1.0 if completed else 0.0,
         )
 
     # ----------------------------------------------------------- /verify

@@ -12,6 +12,4 @@ class TestApp:
             port=8080,
             entrypoint="",
         )
-        WordleResourcesServer(
-            config=config, server_client=MagicMock(spec=ServerClient)
-        )
+        WordleResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))

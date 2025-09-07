@@ -26,7 +26,7 @@ ng_run "+config_paths=[responses_api_agents/simple_game_agent/configs/simple_gam
 
 3. Run trajectory collection
 ```
-ng_collect_traj +agent_name=simple_game_agent +input_jsonl_fpath=data/simple_wordle.jsonl +output_jsonl_fpath=results/wordle_runs.jsonl
+ng_collect_traj +agent_name=simple_game_agent +input_jsonl_fpath=data/simple_wordle.jsonl +output_jsonl_fpath=results/wordle_runs_f1.jsonl
 ```
 
 ### Collected trajectory examples
