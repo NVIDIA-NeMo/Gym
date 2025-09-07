@@ -568,7 +568,7 @@ ng_download_dataset_from_gitlab \
 
 Run rollout collection.
 ```bash
-ng_collect_rollouts +agent_name=simple_agent \
+ng_collect_rollouts +agent_name=multineedle_simple_agent \
     +input_jsonl_fpath=data/multineedle_benchmark.jsonl \
     +output_jsonl_fpath=results/multineedle_rollout_collection.jsonl \
     +limit=null \
