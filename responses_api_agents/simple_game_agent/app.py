@@ -65,13 +65,14 @@ class SimpleGameAgent(SimpleResponsesAPIAgent):
         reward = 0.0
         is_complete = False
 
-        # NEW: Accumulate model outputs like simple_agent does
+        # NEW: will be written back into response["input"]
+        input_messages: list[dict] = []
+
+        # Model-side outputs only (function_call, function_call_output, assistant message)
         new_outputs = []
 
-        # Step 1: Get initial board from environment
-
+        # Get initial board
         game_params = self._current_game_params
-
         initial_board_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/get_initial_board",
@@ -80,34 +81,28 @@ class SimpleGameAgent(SimpleResponsesAPIAgent):
         board_data = initial_board_response.json()
         game_state = board_data.get("game_state")
 
-        tool_response = FunctionCallOutput(
-            type="function_call_output",
-            call_id="get_initial_board",  # any unique id is fine
-            output=json.dumps(
-                {
-                    "instructions": board_data["instructions"],
-                    "board_text": board_data["board_text"],
-                    "game_state": board_data["game_state"],
-                }
-            ),
-        )
-
-        new_outputs.append(tool_response)
-
-        # Add the board and instructions to conversation
+        # Add initial board to conversation (for the model) ...
         initial_message = {
             "role": "user",
             "content": f"{board_data['instructions']}\n\n{board_data['board_text']}",
         }
-
         conversation.append(initial_message)
 
-        print("Starting game loop")
+        # ... and also to input_messages (for the saved trajectory)
+        input_messages.append({
+            "role": "user",
+            "type": "message",
+            "content": initial_message["content"],
+        })
 
-        # Step 2: Game loop continues...
+        # Game loop
         while True:
             new_body = body.copy()
             new_body["input"] = conversation
+
+            #! This is so that the model only performs one move at a time. Without this them model can perform multiple moves and then our env would have to be made changed to handle that complexity. 
+            new_body["parallel_tool_calls"] = False
+            new_body["max_tool_calls"] = 1
 
             model_response = await self.server_client.post(
                 server_name=self.config.model_server.name,
@@ -116,28 +111,23 @@ class SimpleGameAgent(SimpleResponsesAPIAgent):
             )
             model_response = NeMoGymResponse.model_validate(model_response.json())
 
-            print("== MODEL RESPONSE ==")
-            print(model_response)
-            print("== MODEL RESPONSE ==")
-
-            # NEW: Accumulate model outputs like simple_agent does
             output = model_response.output
             new_outputs.extend((o.model_dump() for o in output))
 
             if output[-1].type != "function_call":
                 break
 
-            # Handle the function call exactly like simple_agent
+            # Handle tool call
             output_function_call = output[-1]
-            # Merge model-provided args with the current game-state
             function_args = json.loads(output_function_call.arguments)
-            function_args["game_state"] = game_state  # <-- always send it
+            function_args["game_state"] = game_state
             api_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
-                url_path=f"/{output_function_call.name}",  # "/make_move"
+                url_path=f"/{output_function_call.name}",
                 json=function_args,
             )
 
+            # Record tool result in outputs
             tool_response = FunctionCallOutput(
                 type="function_call_output",
                 call_id=output_function_call.call_id,
@@ -145,35 +135,36 @@ class SimpleGameAgent(SimpleResponsesAPIAgent):
             )
             new_outputs.append(tool_response)
 
-            # ---- handle environment reply ---------------------------------
+            # Env feedback → conversation + input_messages
             move_data = api_response.json()
             game_state = move_data.get("game_state", game_state)
             moves_made += 1
             reward += move_data.get("move_reward", 0.0)
 
-            # Compose feedback safely (no KeyError)
             msg = move_data.get("message", str(move_data))
             board_txt = move_data.get("board_text", "")
-            print(f"board_txt: {board_txt}")
-            env_feedback = {"role": "user", "content": f"{msg}\n\n{board_txt}"}
-            conversation.append(env_feedback)
+            env_text = f"{msg}\n\n{board_txt}"
 
-            # Check completion
-            if move_data.get("is_complete", False):
-                is_complete = True
+            conversation.append({"role": "user", "content": env_text})
+            # input_messages.append({
+            #     "role": "user",
+            #     "type": "message",
+            #     "content": env_text,
+            # })
+
+            if move_data.get("is_complete", False) or moves_made >= self.config.max_moves:
+                is_complete = move_data.get("is_complete", False)
                 break
 
-            if moves_made >= self.config.max_moves:
-                break
-
-        # Store metrics for verify step
+        # Metrics
         self._reward = reward
         self._total_moves = moves_made
         self._is_complete = is_complete
 
-        # NEW: Return accumulated outputs like simple_agent does
+        # FINAL: AIME-style
         final_response_dict = model_response.model_dump()
-        final_response_dict["output"] = new_outputs
+        final_response_dict["output"] = new_outputs            # assistant + tools only
+        final_response_dict["input"] = input_messages          # initial board + all env feedback, in order
         return final_response_dict
 
     async def run(

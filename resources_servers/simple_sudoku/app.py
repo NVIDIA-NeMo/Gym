@@ -301,9 +301,44 @@ class SudokuResourcesServer(SimpleResourcesServer):
 
         while len(cells) > ((scale**2) - clues):
             row, col = cells.pop()
+            removed = puzzle[row][col]
             puzzle[row][col] = 0
 
+            # Check for uniqueness; revert if not exactly one solution
+            grid_copy = copy.deepcopy(puzzle)
+            solutions: List[List[List[int]]] = []
+            self._count_solutions(grid_copy, solutions, scale, limit=2)
+            if len(solutions) != 1:
+                puzzle[row][col] = removed
+
         return puzzle
+
+    def _count_solutions(
+        self,
+        grid: List[List[int]],
+        solutions: List[List[List[int]]],
+        scale: int,
+        limit: int = 2,
+    ) -> int:
+        """Count solutions up to 'limit' using backtracking; stops early when limit reached."""
+        if len(solutions) >= limit:
+            return len(solutions)
+
+        empty = self._find_empty(grid, scale)
+        if not empty:
+            solutions.append(copy.deepcopy(grid))
+            return len(solutions)
+
+        row, col = empty
+        for num in range(1, scale + 1):
+            if self._is_safe(grid, row, col, num, scale):
+                grid[row][col] = num
+                self._count_solutions(grid, solutions, scale, limit)
+                if len(solutions) >= limit:
+                    grid[row][col] = 0
+                    return len(solutions)
+                grid[row][col] = 0
+        return len(solutions)
 
     def _is_puzzle_complete(self, board: List[List[int]]) -> bool:
         """Check if the puzzle is completely filled with no empty cells."""
