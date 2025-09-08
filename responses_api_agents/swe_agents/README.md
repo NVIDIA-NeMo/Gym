@@ -124,23 +124,103 @@ ng_viewer +jsonl_fpath=swebench-verified.openhands.qwen3-30b-coder.jsonl
 A successful run will show:
 ```json
 {
-  "id": "swebench-astropy__astropy-12907",
-  "output": [
-    {
-      "type": "text",
-      "text": "{\n  \"instance_id\": \"astropy__astropy-12907\",\n  \"swe-bench-metrics\": {\n    \"resolved\": true,\n    \"patch_exists\": true,\n    \"patch_successfully_applied\": true\n  },\n  \"swe-bench-outputs\": {\n    \"model_patch\": \"diff --git ...\\n...\"\n  }\n}"
-    }
-  ],
-  "metadata": {
-    "swebench_result": {
-      "instance_id": "astropy__astropy-12907",
-      "swe-bench-metrics": {
-        "resolved": true,
-        "patch_exists": true,
-        "patch_successfully_applied": true
+  "responses_create_params": {
+    "background": null,
+    "include": null,
+    "input": [
+      {
+        "content": "You are OpenHands agent, a helpful AI assistant...",
+        "role": "system",
+        "type": "message"
+      },
+      {
+        "content": "I've uploaded a python code repository...",
+        "role": "user", 
+        "type": "message"
       }
+    ],
+    "instructions": null,
+    "max_output_tokens": null,
+    "max_tool_calls": null,
+    "metadata": {
+      "instance_id": "astropy__astropy-12907",
+      "base_commit": "d16bfe05a744909de4b27f5875fe0d4ed41ce607",
+      "dataset_name": "princeton-nlp/SWE-bench_Verified",
+      "split": "test",
+      "problem_statement": "Modeling's `separability_matrix` does not compute separability correctly for nested CompoundModels\nConsider the following model:\n\n```python\nfrom astropy.modeling import models as m\nfrom astropy.modeling.separable import separability_matrix\n\ncm = m.Linear1D(10) & m.Linear1D(5)\n```\n\nIt's separability matrix as you might expect is a diagonal:\n\n```python\n>>> separability_matrix(cm)\narray([[ True, False],\n[False, True]])\n```\n\nIf I make the model more complex:\n```python\n>>> separability_matrix(m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5))\narray([[ True, True, False, False],\n[ True, True, False, False],\n[False, False, True, False],\n[False, False, False, True]])\n```\n\nThe output matrix is again, as expected, the outputs and inputs to the linear models are separable and independent of each other.\n\nIf however, I nest these compound models:\n```python\n>>> separability_matrix(m.Pix2Sky_TAN() & cm)\narray([[ True, True, False, False],\n[ True, True, False, False],\n[False, False, True, True],\n[False, False, True, True]])\n```\nSuddenly the inputs and outputs are no longer separable?\n\nThis feels like a bug to me, but I might be missing something?"
     },
-    "agent_framework": "swe_agent"
+    "model": "Qwen/Qwen/Qwen3-Coder-30B-A3B-Instruct",
+    "parallel_tool_calls": true,
+    "previous_response_id": null,
+    "prompt": null,
+    "reasoning": null,
+    "service_tier": null,
+    "store": null,
+    "temperature": 0.7,
+    "text": null,
+    "tool_choice": "auto",
+    "tools": [...]
+  },
+  "response": {
+    "id": "swebench-astropy__astropy-12907",
+    "created_at": 1757366053,
+    "error": null,
+    "incomplete_details": null,
+    "instructions": null,
+    "metadata": null,
+    "model": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+    "object": "response",
+    "output": [
+      {
+        "id": "msg-2",
+        "content": [
+          {
+            "annotations": [],
+            "text": "I'll help you implement the necessary changes...",
+            "type": "output_text",
+            "logprobs": null
+          }
+        ],
+        "role": "assistant",
+        "status": "completed",
+        "type": "message"
+      }
+    ],
+    "parallel_tool_calls": true,
+    "temperature": null,
+    "tool_choice": "auto",
+    "tools": [...],
+    "top_p": null,
+    "background": null,
+    "max_output_tokens": null,
+    "max_tool_calls": null,
+    "previous_response_id": null,
+    "prompt": null,
+    "reasoning": null,
+    "service_tier": null,
+    "status": null,
+    "text": null,
+    "top_logprobs": null,
+    "truncation": null,
+    "usage": null,
+    "user": null
+  },
+  "reward": 1.0,
+  "swebench_metrics": {
+    "patch_is_None": false,
+    "patch_exists": true,
+    "patch_successfully_applied": true,
+    "resolved": true,
+    },
+  "resolved": 1,
+  "patch_exists": 1,
+  "patch_successfully_applied": 1,
+  "metadata": {
+    "instance_id": "astropy__astropy-12907",
+    "agent_framework": "openhands",
+    "patch_exists": true,
+    "patch_successfully_applied": true,
+    "resolved": true
   }
 }
 ```
