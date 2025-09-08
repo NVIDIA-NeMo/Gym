@@ -21,10 +21,12 @@ from pytest import MonkeyPatch, mark
 from nemo_gym import PARENT_DIR
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
+    NeMoGymChatCompletionAssistantMessageForTrainingParam,
     NeMoGymChatCompletionAssistantMessageParam,
     NeMoGymChatCompletionContentPartTextParam,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionMessage,
+    NeMoGymChatCompletionMessageForTraining,
     NeMoGymChatCompletionMessageToolCall,
     NeMoGymChatCompletionMessageToolCallFunctionParam,
     NeMoGymChatCompletionMessageToolCallParam,
@@ -664,6 +666,7 @@ class TestApp:
             api_key="dummy_key",  # pragma: allowlist secret
             model="dummy_model",
             entrypoint="",
+            return_token_id_information=False,
         )
         return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
 
@@ -1459,7 +1462,7 @@ class TestApp:
 
 class TestVLLMConverter:
     def setup_method(self, _):
-        self.converter = VLLMConverter()
+        self.converter = VLLMConverter(return_token_id_information=False)
 
     def test_responses_input_types_EasyInputMessageParam(self) -> None:
         """
@@ -1795,4 +1798,110 @@ class TestVLLMConverter:
         )
 
         expected_output = test_data["expected_output"]
+        assert expected_output == chat_completion_create_params.model_dump()
+
+    def test_round_trip_chat_completions_return_token_id_information(self) -> None:
+        converter = VLLMConverter(return_token_id_information=True)
+
+        message = NeMoGymChatCompletionMessageForTraining(
+            content="<think>I'm thinking</think>I'm chatting!",
+            role="assistant",
+            tool_calls=[
+                NeMoGymChatCompletionMessageToolCall(
+                    id="tool call 1",
+                    function=NeMoGymFunction(name="get_weather", arguments='{"city_name": "new york"}'),
+                    type="function",
+                ),
+                NeMoGymChatCompletionMessageToolCall(
+                    id="tool call 2",
+                    function=NeMoGymFunction(name="get_weather", arguments='{"city_name": "boston"}'),
+                    type="function",
+                ),
+            ],
+            prompt_token_ids=[1, 2, 3],
+            generation_token_ids=[4, 5, 6],
+            generation_log_probs=[7.0, 8.0, 9.0],
+        )
+        actual_response_output_items = converter.postprocess_chat_response(
+            choice=NeMoGymChoice(
+                finish_reason="tool_calls",
+                index=0,
+                message=message,
+            )
+        )
+        assert len(actual_response_output_items) == 4
+
+        chat_completion_create_params = converter.responses_to_chat_completion_create_params(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[
+                    NeMoGymEasyInputMessage(
+                        content="system",
+                        role="system",
+                    ),
+                    NeMoGymEasyInputMessage(
+                        content="hello!",
+                        role="user",
+                    ),
+                    *actual_response_output_items,
+                ],
+            )
+        )
+        actual_messages = chat_completion_create_params.messages
+
+        expected_messages = [
+            NeMoGymChatCompletionSystemMessageParam(
+                content="system",
+                role="system",
+            ),
+            NeMoGymChatCompletionUserMessageParam(
+                content="hello!",
+                role="user",
+            ),
+            NeMoGymChatCompletionAssistantMessageForTrainingParam(
+                role="assistant",
+                content="<think>I'm thinking</think>I'm chatting!",
+                tool_calls=[
+                    NeMoGymChatCompletionMessageToolCallParam(
+                        id="tool call 1",
+                        function=NeMoGymChatCompletionMessageToolCallFunctionParam(
+                            name="get_weather", arguments='{"city_name": "new york"}'
+                        ),
+                        type="function",
+                    ),
+                    NeMoGymChatCompletionMessageToolCallParam(
+                        id="tool call 2",
+                        function=NeMoGymChatCompletionMessageToolCallFunctionParam(
+                            name="get_weather", arguments='{"city_name": "boston"}'
+                        ),
+                        type="function",
+                    ),
+                ],
+                prompt_token_ids=[1, 2, 3],
+                generation_token_ids=[4, 5, 6],
+                generation_log_probs=[7.0, 8.0, 9.0],
+            ),
+        ]
+        assert expected_messages == actual_messages
+
+        test_data_fpath = f"{PARENT_DIR}/responses_api_models/vllm_model/tests/round_trip_test_data.json"
+        with open(test_data_fpath) as f:
+            test_data = json.load(f)
+
+        chat_completion_create_params = converter.responses_to_chat_completion_create_params(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[
+                    NeMoGymEasyInputMessage(
+                        content="system",
+                        role="system",
+                    ),
+                    NeMoGymEasyInputMessage(
+                        content="hello!",
+                        role="user",
+                    ),
+                    *test_data["input"]["output"],
+                ],
+            )
+        )
+
+        expected_output = test_data["expected_output_return_token_id_information"]
         assert expected_output == chat_completion_create_params.model_dump()

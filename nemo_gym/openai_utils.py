@@ -197,6 +197,15 @@ class NeMoGymResponseReasoningItemForTraining(NeMoGymResponseReasoningItem, Toke
     pass
 
 
+RESPONSES_TO_TRAIN = {
+    NeMoGymEasyInputMessage: NeMoGymEasyInputMessageForTraining,
+    NeMoGymMessage: NeMoGymMessageForTraining,
+    NeMoGymResponseOutputMessage: NeMoGymResponseOutputMessageForTraining,
+    NeMoGymResponseFunctionToolCall: NeMoGymResponseFunctionToolCallForTraining,
+    NeMoGymResponseReasoningItem: NeMoGymResponseReasoningItemForTraining,
+}
+
+
 NeMoGymResponseInputItem = Union[
     NeMoGymEasyInputMessage,
     NeMoGymMessage,
