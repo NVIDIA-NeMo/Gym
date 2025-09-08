@@ -150,12 +150,19 @@ class VLLMModel(SimpleResponsesAPIModel):
                 generation_token_ids.append(int(log_prob.token.removeprefix("token_id:")))
                 generation_log_probs.append(log_prob.logprob)
 
+            # The tokenize endpoint doesn't accept any sampling parameters
+            # The only relevant params are model, messages, and tools.
+            tokenize_body_dict = dict()
+            for key in ("model", "messages", "tools"):
+                if key in body_dict:
+                    tokenize_body_dict[key] = body_dict[key]
+
             # The base url has /v1 at the end but vLLM's tokenize endpoint does not have v1, hence the ..
             # I can't believe the path is resolved correctly LOL
             tokenize_response = await self._client.post(
                 "../tokenize",
                 cast_to=VLLMTokenizeResponse,
-                body=body_dict,
+                body=tokenize_body_dict,
             )
 
             message_dict = chat_completion_dict["choices"][0]["message"]
