@@ -4,7 +4,7 @@ sci_llm_judge:
       entrypoint: app.py
       judge_model_server:
         type: responses_api_models
-        name: openai_model
+        name: ???
       judge_responses_create_params:
         input: []
       judge_prompt_template: |-
@@ -83,6 +83,7 @@ sci_llm_judge_simple_agent:
       datasets:
       - name: example
         type: example
-        jsonl_fpath: resources_servers/mcqa/data/example.jsonl
+        license: CC-BY-NC-3.0
+        jsonl_fpath: resources_servers/sci_llm_judge/data/example.jsonl
 
 
