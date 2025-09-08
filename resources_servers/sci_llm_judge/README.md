@@ -6,8 +6,6 @@ Uses an LLM as a judge to compare a model’s generated answer against the expec
 Prompt and labels are configurable via config.
 
 ### Key config fields
-- `judge_model_server`: a `ModelServerRef` pointing to a responses-api-compatible model server (e.g., `openai_model`).
-- `judge_responses_create_params`: base Responses create params; this server injects the judge system and user prompt each call.
 - `judge_system_message`: optional system message. If omitted, no system message is added.
 - `judge_prompt_template` (required): user prompt template. Placeholders: `{question}`, `{expected_answer}`, `{generated_answer}`.
 - `judge_equal_label` / `judge_not_equal_label`: labels the judge must output. Defaults to `[[A=B]]` and `[[A!=B]]`.
@@ -37,9 +35,9 @@ sci_llm_judge_simple_agent:
         type: responses_api_models
         name: openai_model
       datasets:
-      - name: example
+      - name: sciq_validation
         type: example
-        jsonl_fpath: resources_servers/mcqa/data/example.jsonl
+        jsonl_fpath: resources_servers/sci_llm_judge/data/sciq_validation.jsonl
 ```
 
 ### Usage
@@ -64,6 +62,7 @@ Then query via any agent; verification happens with `/verify` on this server whe
 - If the judge output doesn’t include either label, it defaults to not-equal.
 
 ## Licensing
-Code: Apache 2.0
+Code: Apache 2.0   
+Data: CC-BY-NC-3.0 (Examples from https://huggingface.co/datasets/allenai/sciq)
 
 
