@@ -159,12 +159,15 @@ Example output: "My final verdict is different [[A!=B]]"."""
                 "top_p": 1.0,
             }
             print(f"DEBUG: LibraryJudgeMathResourcesServer.model_post_init: /v1/responses test request = {test_request}", flush=True)
-            test_response = asyncio.run(self.server_client.post(
-                server_name="math_judge",
-                url_path="/v1/responses",
-                json=test_request,
-            ))
-            print(f"DEBUG: LibraryJudgeMathResourcesServer.model_post_init: /v1/responses test response = {test_response}", flush=True)
+            try:
+                test_response = asyncio.run(self.server_client.post(
+                    server_name="math_judge",
+                    url_path="/v1/responses",
+                    json=test_request,
+                ))
+                print(f"DEBUG: LibraryJudgeMathResourcesServer.model_post_init: /v1/responses test response = {test_response}", flush=True)
+            except Exception as e:
+                print(f"DEBUG: LibraryJudgeMathResourcesServer.model_post_init: /v1/responses test exception = {e}", flush=True)
 
             test_request = {
                 "model": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
@@ -174,12 +177,15 @@ Example output: "My final verdict is different [[A!=B]]"."""
                 "top_p": 1.0,
             }
             print(f"DEBUG: LibraryJudgeMathResourcesServer.model_post_init: /v1/responses test request 2 = {test_request}", flush=True)
-            test_response = asyncio.run(self.server_client.post(
-                server_name="math_judge",
-                url_path="/v1/responses",
-                json=test_request,
-            ))
-            print(f"DEBUG: LibraryJudgeMathResourcesServer.model_post_init: /v1/responses test response 2 = {test_response}", flush=True)
+            try:
+                test_response = asyncio.run(self.server_client.post(
+                    server_name="math_judge",
+                    url_path="/v1/responses",
+                    json=test_request,
+                ))
+                print(f"DEBUG: LibraryJudgeMathResourcesServer.model_post_init: /v1/responses test response 2 = {test_response}", flush=True)
+            except Exception as e:
+                print(f"DEBUG: LibraryJudgeMathResourcesServer.model_post_init: /v1/responses test exception = {e}", flush=True)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
