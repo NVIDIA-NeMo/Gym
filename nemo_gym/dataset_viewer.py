@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-from typing import List
+from typing import Any, Dict, List
 
-from gradio import Blocks, Chatbot, ChatMessage, Dropdown
+from gradio import JSON, Blocks, Chatbot, ChatMessage, Dropdown
 from gradio.components.chatbot import MetadataDict
 from openai.types.responses.response_input_param import (
     EasyInputMessageParam,
@@ -28,6 +28,11 @@ from tqdm.auto import tqdm
 
 from nemo_gym.base_resources_server import BaseVerifyResponse
 from nemo_gym.server_utils import get_global_config_dict
+from nemo_gym.train_data_utils import (
+    AvgMinMax,
+    DatasetMetrics,
+    compute_sample_metrics,
+)
 
 
 class DatasetViewerVerifyResponse(BaseVerifyResponse):
@@ -131,7 +136,6 @@ def convert_single_message(m: ResponseInputItemParam) -> List[ChatMessage]:
 
 def rollout_to_messages(create_params: dict, response: dict) -> List[ChatMessage]:
     messages = []
-
     sampling_params = create_params.copy()
     sampling_params.pop("input")
     sampling_params.pop("tools", None)
@@ -202,14 +206,59 @@ class JsonlDatasetViewerConfig(BaseModel):
     jsonl_fpath: str
 
 
-def build_jsonl_dataset_viewer(config: JsonlDatasetViewerConfig) -> Blocks:
-    with open(config.jsonl_fpath) as f:
-        data = list(
-            tqdm(
-                map(DatasetViewerVerifyResponse.model_validate_json, f),
-                desc="Loading data",
+def aggregate_other_metrics(data: List[DatasetViewerVerifyResponse]) -> Dict[str, Any]:
+    metric_values = {}
+    string_values = {}
+    for d in data:
+        d = d.model_dump() if hasattr(d, "model_dump") else d
+        for k, v in d.items():
+            if k in ("responses_create_params", "response"):
+                continue
+            if isinstance(v, bool):
+                v = int(v)
+            if isinstance(v, (int, float)):
+                metric_values.setdefault(k, []).append(v)
+            # get unique count for strings
+            elif isinstance(v, str):
+                string_values.setdefault(k, []).append(v)
+
+    result = {}
+    for k, v in metric_values.items():
+        if v:
+            obj = AvgMinMax(
+                total=len(v),
+                average=sum(v) / len(v),
+                min=min(v),
+                max=max(v),
             )
-        )
+            result[k] = obj.model_dump(by_alias=True)
+
+    for k, v in string_values.items():
+        result[k] = {"unique_count": len(set(v)), "total_count": len(v)}
+
+    return result
+
+
+def get_aggregate_metrics(data: List[DatasetViewerVerifyResponse], raw_lines: List[str]) -> Dict[str, Any]:
+    dataset_metrics = DatasetMetrics()
+    for line in raw_lines:
+        metrics, is_offending = compute_sample_metrics(line)
+        if not is_offending:
+            dataset_metrics.add(metrics)
+
+    aggregate_metrics = dataset_metrics.aggregate()
+    aggregate_metrics_dict = aggregate_metrics.model_dump(by_alias=True)
+    aggregate_metrics_dict.update(**aggregate_other_metrics(data))
+    return aggregate_metrics_dict
+
+
+def build_jsonl_dataset_viewer(config: JsonlDatasetViewerConfig) -> Blocks:
+    data = []
+    raw_lines = []
+    with open(config.jsonl_fpath) as f:
+        for line in tqdm(f, desc="Loading data"):
+            raw_lines.append(line)
+            data.append(DatasetViewerVerifyResponse.model_validate_json(line))
 
     choices = [(f"Sample {i + 1} - Responses ID {d.response.id}", i) for i, d in enumerate(data)]
 
@@ -225,6 +274,9 @@ def build_jsonl_dataset_viewer(config: JsonlDatasetViewerConfig) -> Blocks:
     }
     """
     with Blocks(analytics_enabled=False, css=CSS) as demo:
+        aggregate_dicts = get_aggregate_metrics(data, raw_lines)
+        JSON(value=aggregate_dicts, label="Aggregate Metrics", open=False)
+
         item_dropdown = Dropdown(choices=choices, value=0, label="Samples")
         chatbot = Chatbot(
             value=select_item(0),

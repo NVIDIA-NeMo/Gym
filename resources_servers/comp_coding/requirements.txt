@@ -1,0 +1,2 @@
+-e nemo-gym @ ../../
+datasets>=2.20.0

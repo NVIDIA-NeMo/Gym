@@ -4,6 +4,7 @@
 - [Setup](#setup)
   - [Helpful development commands](#helpful-development-commands)
 - [How To: Run a simple agent](#how-to-run-a-simple-agent)
+  - [TL;DR](#tldr)
   - [Introduction](#introduction)
   - [Configs](#configs)
     - [Special policy model placeholders](#special-policy-model-placeholders)
@@ -16,11 +17,14 @@
 - [How To: Offline rollout collection or synthetic data generation](#how-to-offline-rollout-collection-or-synthetic-data-generation)
 - [How To: Prepare and validate data for PR submission or RL training](#how-to-prepare-and-validate-data-for-pr-submission-or-rl-training)
 - [How To: ng\_dump\_config - Dump a YAML config as exactly as NeMo Gym sees it](#how-to-ng_dump_config---dump-a-yaml-config-as-exactly-as-nemo-gym-sees-it)
+- [How To: Use NeMo Gym with a non-Responses compatible API endpoint like vLLM](#how-to-use-nemo-gym-with-a-non-responses-compatible-api-endpoint-like-vllm)
 - [FAQ: VSCode and Git setup](#faq-vscode-and-git-setup)
 - [FAQ: SFT and RL](#faq-sft-and-rl)
 - [FAQ: Why NeMo Gym?](#faq-why-nemo-gym)
 - [FAQ: Error: Found files with missing copyright](#faq-error-found-files-with-missing-copyright)
 - [FAQ: build-docs / Build docs CI failures](#faq-build-docs--build-docs-ci-failures)
+- [FAQ: NeMo Gym, training frameworks, and token IDs](#faq-nemo-gym-training-frameworks-and-token-ids)
+
 
 # NeMo-Gym
 # Setup
@@ -78,6 +82,21 @@ ng_test_all
 # How To: Run a simple agent
 Reading time: 10 mins
 Date: Mon Aug 04, 2025
+
+## TL;DR
+After setup above:
+```bash
+echo "policy_base_url: https://api.openai.com/v1
+policy_api_key: {your OpenAI API key}
+policy_model_name: gpt-4.1-2025-04-14" > env.yaml
+
+config_paths="resources_servers/simple_weather/configs/simple_weather.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml"
+ng_run "+config_paths=[${config_paths}]"
+
+python responses_api_agents/simple_agent/client.py
+```
+
 
 ## Introduction
 In this example, we will run a simple agent that uses the GPT 4.1 model and has access to a very simple dummy get_weather tool. NeMo Gym has three core abstractions: models, resources, and agents.
@@ -450,7 +469,7 @@ source .venv/bin/activate
 pytest
 ```
 
-At some point, you will want to actually add data that can be used to query your server. Please follow the instructions for [How To: Prepare and validate data for PR submission or RL training](#how-to-prepare-and-validate-data-for-pr-submission-or-rl-training). 
+At some point, you will want to actually add data that can be used to query your server. Please follow the instructions for [How To: Prepare and validate data for PR submission or RL training](#how-to-prepare-and-validate-data-for-pr-submission-or-rl-training).
 
 
 If you need some dataset preprocessing or formatting scripts, please place them your resources server directory e.g. `resources_servers/simple_weather/my_preprocess_script.py`.
@@ -459,6 +478,7 @@ If you need some dataset preprocessing or formatting scripts, please place them 
 You are required to have the following 3 files in your resources server data folder:
 1. example.jsonl - contains 5 example inputs to an agent server that uses your resources server. These examples need to be created on your own using whatever data processing script you want. It's highly suggested to store the data processing scripts in each folder if possible.
 2. example_metrics.json - the metrics for the examples above, as output by `ng_prepare_data` in the data validation flow above.
+3. example_rollouts.jsonl - rollouts through your resources server for the 5 example inputs in example.jsonl.
 
 
 ## TLDR final expected artifacts
@@ -500,7 +520,7 @@ Gitlab uses MLFlow to interface with its model artifact registry. You will need:
    2. The URI will look something like `https://gitlab-master.nvidia.com/api/v4/projects/191584/ml/mlflow/`
 2. Your Gitlab token. Your Gitlab token must have the `api` and `read_api` scopes.
 
-Provide your MLFlow credentials in `env.yaml`. 
+Provide your MLFlow credentials in `env.yaml`.
 ```yaml
 mlflow_tracking_uri: {your NeMo Gym Gitlab URI}
 mlflow_tracking_token: {your Gitlab PAT}
@@ -549,7 +569,7 @@ ng_download_dataset_from_gitlab \
 
 Run rollout collection.
 ```bash
-ng_collect_rollouts +agent_name=simple_agent \
+ng_collect_rollouts +agent_name=multineedle_simple_agent \
     +input_jsonl_fpath=data/multineedle_benchmark.jsonl \
     +output_jsonl_fpath=results/multineedle_rollout_collection.jsonl \
     +limit=null \
@@ -676,6 +696,46 @@ ng_run "+config_paths=[$config_paths]"
 ng_dump_config "+config_paths=[$config_paths]"
 ```
 
+
+# How To: Use NeMo Gym with a non-Responses compatible API endpoint like vLLM
+As of Sep 05, 2025, not many models have been trained with middlewares or chat templates that are easily parseable to OpenAI Responses API schema, with the notable exception of OpenAI's own open source model GPT-OSS. Since Gym is first-party Responses API, this makes Gym very difficult to use with basically any model.
+
+As a result, we provide a Responses API to Chat Completions mapping middleware layer in the form of `responses_api_models/vllm_model`. VLLMModel assumes that you are pointing to a vLLM instance (since it relies on vLLM-specific endpoints like `/tokenize` and vLLM-specific arguments like `return_tokens_as_token_ids`).
+
+**To use VLLMModel, just change the `responses_api_models/openai_model/configs/openai_model.yaml` in your config paths to `responses_api_models/vllm_model/configs/vllm_model.yaml`!**
+```bash
+config_paths="resources_servers/multineedle/configs/multineedle.yaml,\
+responses_api_models/vllm_model/configs/vllm_model.yaml"
+ng_run "+config_paths=[$config_paths]"
+```
+
+Here is an e2e example of how to spin up a NeMo Gym compatible vLLM Chat Completions OpenAI server.
+- If you want to use tools, please find the appropriate vLLM arguments regarding the tool call parser to use. In this example, we use Qwen3-30B-A3B, which is suggested to use the `hermes` tool call parser.
+- **Important note**: Please do NOT use a reasoning parser argument to vLLM here. The Responses to Chat Completions middleware logic needs to parse to and from Responses Reasoning items and Chat Completion Message content. **Do NOT use things like `--reasoning-parser qwen3`**.
+```bash
+uv venv --python 3.12 --seed 
+source .venv/bin/activate
+# hf_transfer for faster model download. datasets for downloading data from HF
+uv pip install hf_transfer datasets vllm --torch-backend=auto
+
+# Qwen/Qwen3-30B-A3B, usable in Nemo RL!
+HF_HOME=.cache/ \
+HF_HUB_ENABLE_HF_TRANSFER=1 \
+    hf download Qwen/Qwen3-30B-A3B
+
+HF_HOME=.cache/ \
+HOME=. \
+vllm serve \
+    Qwen/Qwen3-30B-A3B \
+    --dtype auto \
+    --tensor-parallel-size 4 \
+    --gpu-memory-utilization 0.9 \
+    --enable-auto-tool-choice --tool-call-parser hermes \
+    --host 0.0.0.0 \
+    --port 10240
+```
+
+
 # FAQ: VSCode and Git setup
 Here are some suggestions for easier development using the VSCode code editor.
 
@@ -689,9 +749,17 @@ VSCode workspace settings at `.vscode/settings.json`
 
 Set up your Github signing keys! https://docs.github.com/en/authentication/managing-commit-signature-verification/about-commit-signature-verification#ssh-commit-signature-verification
 
+Specifically, if you visit https://github.com/settings/keys while logged into your account, you should see the following:
+1. Under the "SSH keys" major section, there are 2 subsections
+   1. Authentication keys
+   2. Signing key
+
+More often than node, the SHA256 displayed by Github (SHA256:xxxx) should be the same for the two keys above since you probably want to just use the same SSH key for both purposes. If you do not see the following, please following the signing keys link above!
+
+
 For developers that sign commits via SSH keys, this is configuration so that VSCode source control is able to sign commits properly!
 ```bash
-git config gpg.format ssh 
+git config gpg.format ssh
 git config user.signingkey ~/.ssh/id_ed25519.pub
 ```
 
@@ -715,35 +783,35 @@ Tying back to NeMo Gym, NeMo gym can be used to create synthetic data for SFT tr
 
 # FAQ: Why NeMo Gym?
 
-NeMo Gym is a large-scale collection of high-quality verifier environments for multi-verifier RL training.  
+NeMo Gym is a large-scale collection of high-quality verifier environments for multi-verifier RL training.
 To enable this, NeMo Gym provides infra support for the rollout server that runs 100+ verifiers in parallel.
 
 The document below details why we designed NeMo Gym the way we did. It also includes a direct comparative study that clearly differentiates NeMo Gym from other environment frameworks.
 
 \[Banghua\] As of Thu Aug 21:
 
-1. Gym is completely different from any of the alternatives above in terms of data **coverage, quantity and quality.** For example, for math only, gym contains 1M+ high-quality math verifiable dataset curated by our internal team, with great math verify \+ LLM-as-a-judge support. In contrast, SkyRL and verifiers above only have a small train subset of GSM8K and AIME. We also have close to 10k SWE development, which require both high quality data curation efforts and good infra support. In contrast, Aviary only focuses on scientific knowledge environment. **None of the existing frameworks support general multi-turn tool-use agent, with tools like search, code execution, and other synthetic tools.**  
-2. We will be a **superset** of all existing gym environments. We are already a super-set of Sky RL Lab Gym and verifiers. We have integrated all GEM environments. We’re working with Aviary to incorporate them as well.  
+1. Gym is completely different from any of the alternatives above in terms of data **coverage, quantity and quality.** For example, for math only, gym contains 1M+ high-quality math verifiable dataset curated by our internal team, with great math verify \+ LLM-as-a-judge support. In contrast, SkyRL and verifiers above only have a small train subset of GSM8K and AIME. We also have close to 10k SWE development, which require both high quality data curation efforts and good infra support. In contrast, Aviary only focuses on scientific knowledge environment. **None of the existing frameworks support general multi-turn tool-use agent, with tools like search, code execution, and other synthetic tools.**
+2. We will be a **superset** of all existing gym environments. We are already a super-set of Sky RL Lab Gym and verifiers. We have integrated all GEM environments. We’re working with Aviary to incorporate them as well.
 3. As is shown from Brian’s comparison below, we have much **better infra support for scaling**. And the plan is to use NeMo Gym for 500B+ model training for quality improvement. This will make nemo gym battle tested in frontier model training, while the other gyms are mostly for smaller-scale experiments.
 
 Key use case requirements to avoid training environment scale, complexity, and diversity limitations:
 
-1. Can I easily build my environment without worrying about a training framework?  
-2. Can I easily call my model using OpenAI Responses and not worry about reasoning parsing?  
-3. Can I easily use your environment framework to build an agent application product?  
-4. Can I easily use your environment framework to build a simple multi-agent system?  
-5. Can I easily run individual SWE-bench task Docker containers?  
-6. Can I easily add an agent built with any agent framework?  
-7. Can I easily add any environment framework?  
-8. Can I easily simultaneously use math-verify==0.7.0 and math-verify==0.8.0 in 2 different environments?  
+1. Can I easily build my environment without worrying about a training framework?
+2. Can I easily call my model using OpenAI Responses and not worry about reasoning parsing?
+3. Can I easily use your environment framework to build an agent application product?
+4. Can I easily use your environment framework to build a simple multi-agent system?
+5. Can I easily run individual SWE-bench task Docker containers?
+6. Can I easily add an agent built with any agent framework?
+7. Can I easily add any environment framework?
+8. Can I easily simultaneously use math-verify==0.7.0 and math-verify==0.8.0 in 2 different environments?
 9. Can I easily spin up multiple environments at once?
 
 Key principles
 
-1. \[Reqs 1, 2\] Decoupled from training framework  
-2. \[Reqs 2, 3, 4, 6, 7\] Standardized behind OpenAI Responses  
-3. \[Reqs 3, 4, 6\] Explicit Agent vs model abstraction  
-4. \[Reqs 3, 4, 5, 6, 7\] REST environment servers and container compatible  
+1. \[Reqs 1, 2\] Decoupled from training framework
+2. \[Reqs 2, 3, 4, 6, 7\] Standardized behind OpenAI Responses
+3. \[Reqs 3, 4, 6\] Explicit Agent vs model abstraction
+4. \[Reqs 3, 4, 5, 6, 7\] REST environment servers and container compatible
 5. \[Reqs 8, 9\] Separate Python env per server at runtime
 
 \[Brian note\] There are some rows yet to be filled in here.
@@ -807,3 +875,15 @@ pickling environment... done
 checking consistency... done
 ```
 You may need to reformat some of your docstrings to Napoleon format docstrings https://sphinxcontrib-napoleon.readthedocs.io/en/latest/
+
+
+# FAQ: NeMo Gym, training frameworks, and token IDs
+One of the goals of NeMo Gym is to act as a rollout tool for LLM post-training, either as synthetic data generation for SFT or as training environments for RL.
+
+RL training frameworks don't typically operate in OpenAI schema; they operate in tokens IDs. It is especially critical to always have the correct token IDs during training so that we stay on-policy and to make sure that what we think the model sees is what the model actually sees. However, when providing this OpenAI schema compatible interface to training environment developers, we lose track of the token IDs in Gym.
+
+For example, say we are training a Qwen 3 family model. During rollouts, the model may sample from the entire token distribution. The token IDs are then decoded into text and subsequently converted to OpenAI schema and returned to the training environment developer. At some point for multi-step and multi-turn scenarios, the training environment developer will call the model again with the previously output OpenAI schema. This re-tokenization causes problems since a single string may map to multiple possible sequences of token IDs. So if the model generations token ID sequence 1 and the re-tokenization outputs token ID sequence 2, suddenly things may become off policy when the Gym result is consumed by the RL training framework.
+
+So, the OpenAI compatible model server in a training framework needs to be able to handle this discrepancy. In order to do that, Gym needs a handle on the ground truth token IDs and it needs to provide that information back to the training frameworks' OpenAI compatible server.
+
+TODO @bxyu-nvidia: expand on this later.

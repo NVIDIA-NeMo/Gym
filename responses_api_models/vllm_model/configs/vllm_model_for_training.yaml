@@ -1,8 +1,8 @@
-vllm_model:
+openai_model:
   responses_api_models:
     vllm_model:
       entrypoint: app.py
       base_url: ${policy_base_url}
       api_key: ${policy_api_key}
       model: ${policy_model_name}
-      return_token_id_information: false
+      return_token_id_information: true

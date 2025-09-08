@@ -1,0 +1,27 @@
+{
+    "Number of examples": 5000,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5000,
+        "Average": 336.1798,
+        "Min": 46.0,
+        "Max": 1274.0
+    },
+    "Number of turns": {
+        "Total # non-null values": 5000,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0
+    }
+}
