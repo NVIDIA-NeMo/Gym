@@ -108,7 +108,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 )
                 new_outputs.append(tool_response)
 
-            # Check if max turns is not None and if we have exhausted it.
+            # Check if max steps is not None and if we have exhausted it.
             if self.config.max_steps and step >= self.config.max_steps:
                 break
 
