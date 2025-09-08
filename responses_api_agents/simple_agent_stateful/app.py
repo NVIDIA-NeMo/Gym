@@ -33,6 +33,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseOutputMessage,
 )
 
 
@@ -55,6 +56,7 @@ class SimpleAgentStatefulVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
 
+# TODO we should find a way to merge this with the regular simple agent.
 class SimpleAgentStateful(SimpleResponsesAPIAgent):
     config: SimpleAgentStatefulConfig
 
@@ -87,7 +89,10 @@ class SimpleAgentStateful(SimpleResponsesAPIAgent):
             new_outputs.extend(output)
 
             all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
-            if not all_fn_calls:
+            all_output_messages: List[NeMoGymResponseOutputMessage] = [
+                o for o in output if o.type == "message" and o.role == "assistant"
+            ]
+            if not all_fn_calls and all_output_messages:
                 break
 
             for output_function_call in all_fn_calls:
