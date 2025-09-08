@@ -11,13 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import json
-import pytest
-from pathlib import Path
-from unittest.mock import patch
-
 # Add parent directory to path for imports
 import sys
+from pathlib import Path
+
+import pytest
+
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app import SWEBenchWrapperConfig
@@ -35,7 +35,7 @@ def test_configuration():
         agent_max_turns=50,
         container_formatter="docker://custom/{instance_id}",
         swebench_tests_timeout=900,
-        nemo_skills_config={"custom": "value"}
+        nemo_skills_config={"custom": "value"},
     )
     assert config.agent_framework == "swe_agent"
     assert config.agent_config == "custom/config"
@@ -50,12 +50,13 @@ if __name__ == "__main__":
     # Run tests if pytest is available
     try:
         import pytest
+
         pytest.main([__file__, "-v"])
     except ImportError:
         # Run basic tests manually
         print("Running tests manually (pytest not installed)...")
-        
+
         test_configuration()
         print("✓ test_configuration")
-        
+
         print("\nBasic tests passed!")
