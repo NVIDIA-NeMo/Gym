@@ -30,5 +30,3 @@ for example in ds:
 os.makedirs("data", exist_ok=True)
 with open("data/sciq_validation.jsonl", "w") as f:
     f.writelines(rows)
-
-

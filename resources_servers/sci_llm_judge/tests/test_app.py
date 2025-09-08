@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-from pytest import approx, fixture
 from omegaconf import OmegaConf
+from pytest import approx, fixture
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
