@@ -22,13 +22,13 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputMessage,
 )
-from openai.types.responses.function_tool import FunctionTool
 
 # Import utility functions from local utils module
 from responses_api_agents.swe_agents.utils import (
     extract_problem_info,
     extract_input_messages_from_trajectory,
     convert_trajectory_to_output_items,
+    convert_tools_to_function_format,
     get_model_endpoint,
     run_swebench_evaluation,
     ensure_nemo_run_symlink,
@@ -164,23 +164,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             trajectory = result.get("trajectory", [])
             
             # Convert tools from ChatCompletion format to Response FunctionTool format
-            tools = []
             raw_tools = result.get("tools", [])
-            if raw_tools:
-                for tool in raw_tools:
-                    # Tools from SWE-agent are in ChatCompletion format with nested structure
-                    # Convert to Response FunctionTool format which is flat
-                    if tool.get("type") == "function" and "function" in tool:
-                        func_def = tool["function"]
-                        # Create FunctionTool object with flat structure
-                        function_tool = FunctionTool(
-                            type="function",
-                            name=func_def.get("name", ""),
-                            description=func_def.get("description"),
-                            parameters=func_def.get("parameters"),
-                            strict=func_def.get("strict")  # May be None
-                        )
-                        tools.append(function_tool)
+            tools = convert_tools_to_function_format(raw_tools) if raw_tools else []
             
             # Convert trajectory to NeMoGym output items
             if trajectory:
