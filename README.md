@@ -23,7 +23,7 @@
 - [FAQ: Why NeMo Gym?](#faq-why-nemo-gym)
 - [FAQ: Error: Found files with missing copyright](#faq-error-found-files-with-missing-copyright)
 - [FAQ: build-docs / Build docs CI failures](#faq-build-docs--build-docs-ci-failures)
-- [FAQ: NeMo Gym and training frameworks](#faq-nemo-gym-and-training-frameworks)
+- [FAQ: NeMo Gym, training frameworks, and token IDs](#faq-nemo-gym-training-frameworks-and-token-ids)
 
 
 # NeMo-Gym
@@ -877,7 +877,7 @@ checking consistency... done
 You may need to reformat some of your docstrings to Napoleon format docstrings https://sphinxcontrib-napoleon.readthedocs.io/en/latest/
 
 
-# FAQ: NeMo Gym and training frameworks
+# FAQ: NeMo Gym, training frameworks, and token IDs
 One of the goals of NeMo Gym is to act as a rollout tool for LLM post-training, either as synthetic data generation for SFT or as training environments for RL.
 
 RL training frameworks don't typically operate in OpenAI schema; they operate in tokens IDs. It is especially critical to always have the correct token IDs during training so that we stay on-policy and to make sure that what we think the model sees is what the model actually sees. However, when providing this OpenAI schema compatible interface to training environment developers, we lose track of the token IDs in Gym.
