@@ -117,27 +117,29 @@ Example output: "My final verdict is different [[A!=B]]"."""
         print(f"DEBUG: LibraryJudgeMathResourcesServer.model_post_init: global cfg  = {global_cfg}", flush=True)
         print(f"DEBUG: LibraryJudgeMathResourcesServer.model_post_init: dynamic cfg = {dynamic_cfg}", flush=True)
 
-        print(f"DEBUG: LibraryJudgeMathResourcesServer.model_post_init: judge init: ...", flush=True)
-        judge_model_name = None
-        judge_base_url = None
-        judge_client = None
-        self._judge_model_name = None
-        self._judge_client = None
-        for _, judge in dynamic_cfg.get("judges", dict()).items():
-            # TODO(peter): select judge by provided "capability".
-            judge_model_name = judge["model_name"]
-            judge_base_url = judge["generation_base_url"]
-            judge_client = OpenAI(
-                base_url=judge_base_url,
-                api_key="dummy_key",
-            )
-            # judge_models = judge_client.models.list()
-            self._judge_model_name = judge_model_name
-            self._judge_client = judge_client
-            print(f"DEBUG: LibraryJudgeMathResourcesServer.model_post_init: judge init: ok", flush=True)
-            break
+        if False:
+            print(f"DEBUG: LibraryJudgeMathResourcesServer.model_post_init: judge init: ...", flush=True)
+            judge_model_name = None
+            judge_base_url = None
+            judge_client = None
+            self._judge_model_name = None
+            self._judge_client = None
+            for _, judge in dynamic_cfg.get("judges", dict()).items():
+                # TODO(peter): select judge by provided "capability".
+                judge_model_name = judge["model_name"]
+                judge_base_url = judge["generation_base_url"]
+                judge_client = OpenAI(
+                    base_url=judge_base_url,
+                    api_key="dummy_key",
+                )
+                # judge_models = judge_client.models.list()
+                self._judge_model_name = judge_model_name
+                self._judge_client = judge_client
+                print(f"DEBUG: LibraryJudgeMathResourcesServer.model_post_init: judge init: ok", flush=True)
+                break
 
-        if self._judge_client is not None:
+        if False:
+        # if self._judge_client is not None:
             test_request = {
                 "model": judge_model_name,
                 "messages": [{"role": "user", "content": "hi"}],

@@ -69,12 +69,13 @@ class VLLMModel(SimpleResponsesAPIModel):
     config: VLLMModelConfig
 
     def model_post_init(self, context):
-        port = self.config.port
-        base_url = self.config.base_url
-        print(f"DEBUG: VLLMModel.model_post_init: port = {port} ctx = {context} base_url = {repr(base_url)}", flush=True)
-        if not base_url.endswith("/v1"):
-            base_url = f"{base_url}/v1"
-            print(f"DEBUG: VLLMModel.model_post_init: port = {port} ctx = {context} base_url = {repr(base_url)} (with /v1)", flush=True)
+        if False:
+            port = self.config.port
+            base_url = self.config.base_url
+            print(f"DEBUG: VLLMModel.model_post_init: port = {port} ctx = {context} base_url = {repr(base_url)}", flush=True)
+            if not base_url.endswith("/v1"):
+                base_url = f"{base_url}/v1"
+                print(f"DEBUG: VLLMModel.model_post_init: port = {port} ctx = {context} base_url = {repr(base_url)} (with /v1)", flush=True)
         self._client = NeMoGymAsyncOpenAI(
             base_url=self.config.base_url,
             api_key=self.config.api_key,
