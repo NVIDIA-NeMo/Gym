@@ -69,6 +69,7 @@ class VLLMModel(SimpleResponsesAPIModel):
     config: VLLMModelConfig
 
     def model_post_init(self, context):
+        print(f"DEBUG: VLLMModel.model_post_init: base_url = {self.config.base_url}", flush=True)
         self._client = NeMoGymAsyncOpenAI(
             base_url=self.config.base_url,
             api_key=self.config.api_key,
@@ -77,8 +78,11 @@ class VLLMModel(SimpleResponsesAPIModel):
         return super().model_post_init(context)
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        print(f"DEBUG: VLLMModel.responses: body = {body}", flush=True)
+
         # Response Create Params -> Chat Completion Create Params
         chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(body)
+        print(f"DEBUG: VLLMModel.responses: chat completion payload = {chat_completion_create_params}", flush=True)
         if not body.model:
             body.model = self.config.model
 
