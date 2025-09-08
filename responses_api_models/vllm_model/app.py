@@ -150,6 +150,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 generation_token_ids.append(int(log_prob.token.removeprefix("token_id:")))
                 generation_log_probs.append(log_prob.logprob)
 
+            # The tokenize endpoint doesn't accept any sampling parameters
+            # The only relevant params are model, messages, and tools.
             tokenize_body_dict = dict()
             for key in ("model", "messages", "tools"):
                 if key in body_dict:
