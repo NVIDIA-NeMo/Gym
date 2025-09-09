@@ -121,7 +121,16 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             url_path="/verify",
             json=verify_request.model_dump(),
         )
-        return SimpleAgentVerifyResponse.model_validate(verify_response.json())
+        try:
+            verify_response_body = verify_response.json()
+        except Exception as e:
+            print(f"DEBUG: SimpleAgent.run: except = {e} type(response) = {type(verify_response).__name__} response = {verify_response}", flush=True)
+            try:
+                print(f"DEBUG: SimpleAgent.run:   model dump = {verify_response.model_dump()}", flush=True)
+            except Exception as e2:
+                print(f"DEBUG: SimpleAgent.run:   no model dump: {e2}", flush=True)
+            raise e
+        return SimpleAgentVerifyResponse.model_validate(verify_response_body)
 
 
 if __name__ == "__main__":
