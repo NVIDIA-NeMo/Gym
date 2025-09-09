@@ -36,7 +36,7 @@ from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
 
 from nemo_gym.config_types import (
-    BaseRunServerConfig,
+    BaseRunServerInstanceConfig,
     BaseServerConfig,
 )
 from nemo_gym.global_config import (
@@ -184,16 +184,18 @@ class BaseServer(BaseModel):
     All instances of BaseServer are queryable using ServerClient.
     """
 
-    config: BaseRunServerConfig
+    config: BaseRunServerInstanceConfig
 
     @classmethod
-    def load_config_from_global_config(cls) -> "BaseRunServerConfig":
+    def load_config_from_global_config(cls) -> "BaseRunServerInstanceConfig":
         config_path_str = getenv(NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME)
         global_config_dict = get_global_config_dict()
         server_config_dict = get_first_server_config_dict(global_config_dict, config_path_str)
 
-        server_config_cls: Type[BaseRunServerConfig] = cls.model_fields["config"].annotation
-        server_config = server_config_cls.model_validate(server_config_dict)
+        server_config_cls: Type[BaseRunServerInstanceConfig] = cls.model_fields["config"].annotation
+        server_config = server_config_cls.model_validate(
+            OmegaConf.to_container(server_config_dict, resolve=True) | {"name": config_path_str}
+        )
 
         return server_config
 
