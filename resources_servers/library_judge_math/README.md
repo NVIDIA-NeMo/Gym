@@ -16,7 +16,7 @@ The following are example commands for running this resource server, along with 
 config_paths="responses_api_models/openai_model/configs/openai_model.yaml, \
 resources_servers/library_judge_math/configs/library_judge_math.yaml"
 ng_run "+config_paths=[$config_paths]" \
-    +library_judge_math.resources_servers.library_judge_math.judge_model_server.name=openai_model
+    +library_judge_math.resources_servers.library_judge_math.judge_model_server.name=policy_model
 ```
 
 To download the OpenMathReasoning dataset, the following command can be run:
