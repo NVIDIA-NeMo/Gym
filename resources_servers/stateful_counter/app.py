@@ -48,7 +48,7 @@ class StatefulCounterResourcesServer(SimpleResourcesServer):
         app = super().setup_webserver()
 
         app.post("/increment_counter")(self.increment_counter)
-        app.get("/get_counter_value")(self.get_counter_value)
+        app.post("/get_counter_value")(self.get_counter_value)
 
         return app
 
@@ -65,7 +65,7 @@ class StatefulCounterResourcesServer(SimpleResourcesServer):
     async def get_counter_value(self, request: Request) -> GetCounterValueResponse:
         session_id = request.session["session_id"]
         counter = self.session_id_to_counter.setdefault(session_id, 0)
-        return counter
+        return GetCounterValueResponse(count=counter)
 
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
         return BaseVerifyResponse(**body.model_dump(), reward=1.0)
