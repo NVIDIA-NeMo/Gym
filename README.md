@@ -23,6 +23,7 @@
 - [FAQ: Error: Found files with missing copyright](#faq-error-found-files-with-missing-copyright)
 - [FAQ: build-docs / Build docs CI failures](#faq-build-docs--build-docs-ci-failures)
 - [FAQ: NeMo Gym, training frameworks, and token IDs](#faq-nemo-gym-training-frameworks-and-token-ids)
+- [FAQ: NeMo Gym what CI/CD do I need to pass?](#faq-nemo-gym-what-cicd-do-i-need-to-pass)
 
 
 # NeMo-Gym
@@ -833,3 +834,20 @@ For example, say we are training a Qwen 3 family model. During rollouts, the mod
 So, the OpenAI compatible model server in a training framework needs to be able to handle this discrepancy. In order to do that, Gym needs a handle on the ground truth token IDs and it needs to provide that information back to the training frameworks' OpenAI compatible server.
 
 TODO @bxyu-nvidia: expand on this later.
+
+
+# FAQ: NeMo Gym what CI/CD do I need to pass?
+
+NeMo Gym has an E2E suite of CI/CD in the form of Github actions workflows. Some of these are critical to PR merge and some of the mare not.
+
+For the majority of PRs, there are 5 checks that need to pass:
+1. DCO
+2. Code linting / Lint check (pull_request)
+3. Copyright check / copyright-check / main (pull_request)
+4. Secrets detector / secrets-detector / secrets-detector (pull_request)
+5. Unit tests / Test (pull_request)
+
+Examples of PR checks that most PRs do not need to wait for to pass:
+1. CICD NeMo / cicd-container-build / build / main (push)
+2. CICD NeMo / Nemo_CICD_Test (push)
+...
