@@ -129,7 +129,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
         response = await self.server_client.post(
-            server_config_dict=self.config.model_dump(),
+            server_name=self.config.name,
             url_path="/v1/responses",
             json=body.responses_create_params,
             cookies=request.cookies,
