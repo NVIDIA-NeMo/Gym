@@ -18,7 +18,7 @@ library_judge_math_simple_agent:
         name: library_judge_math
       model_server:
         type: responses_api_models
-        name: openai_model
+        name: policy_model
       datasets:
       - name: train
         type: train

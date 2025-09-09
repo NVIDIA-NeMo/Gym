@@ -130,7 +130,7 @@ simple_agent:
         name: ???
       model_server:
         type: responses_api_models
-        name: openai_model
+        name: policy_model
 ```
 
 This is how this YAML config translates to the simple agent config as defined in Python in `responses_api_agents/simple_agent/app.py`.
@@ -146,21 +146,21 @@ You can define your server configs to require or accept any arbitrary structures
 
 If your config contains a server reference that doesn't exist, NeMo Gym will let you know e.g.:
 ```bash
-AssertionError: Could not find type='responses_api_models' name='simple_model_server' in the list of available servers: [AgentServerRef(type='responses_api_agents', name='simple_agent'), ModelServerRef(type='responses_api_models', name='openai_model'), ResourcesServerRef(type='resources_servers', name='simple_weather')]
+AssertionError: Could not find type='responses_api_models' name='simple_model_server' in the list of available servers: [AgentServerRef(type='responses_api_agents', name='simple_agent'), ModelServerRef(type='responses_api_models', name='policy_model'), ResourcesServerRef(type='resources_servers', name='simple_weather')]
 ```
 
 If your config is missing an argument or argument value, NeMo Gym will let you know e.g.:
 ```bash
-omegaconf.errors.MissingMandatoryValue: Missing mandatory value: openai_model.responses_api_models.openai_model.openai_api_key
-    full_key: openai_model.responses_api_models.openai_model.openai_api_key
+omegaconf.errors.MissingMandatoryValue: Missing mandatory value: policy_model.responses_api_models.openai_model.openai_api_key
+    full_key: policy_model.responses_api_models.openai_model.openai_api_key
     object_type=dict
 ```
 
 
 ### Special policy model placeholders
-There is one set of special NeMo Gym variables relating to the target agent model. These are the `policy_base_url`, `policy_api_key`, `policy_model_name` variables. When you go to train a model, these are the information that will be used to query the model server endpoint you are trying to train. By default, every agent will refer to this shared `openai_model` model server.
+There is one set of special NeMo Gym variables relating to the agent policy model. These are the `policy_base_url`, `policy_api_key`, `policy_model_name` variables. When you go to train a model, these are the information that will be used to query the model server endpoint you are trying to train. By default, every agent will refer to this shared `policy_model` model server.
 ```yaml
-openai_model:
+policy_model:
   responses_api_models:
     openai_model:
       entrypoint: app.py
@@ -599,7 +599,7 @@ multineedle_simple_agent:
         name: multineedle_resources_server
       model_server:
         type: responses_api_models
-        name: openai_model
+        name: policy_model
       datasets:
       - name: train
         type: train

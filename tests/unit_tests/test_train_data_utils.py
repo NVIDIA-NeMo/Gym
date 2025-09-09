@@ -38,7 +38,7 @@ def load_multineedle_test_global_config_dict() -> DictConfig:
                     "resources_servers/multineedle/configs/multineedle.yaml",
                     "responses_api_models/openai_model/configs/openai_model.yaml",
                 ],
-                # For openai_model
+                # For policy_model
                 "policy_base_url": "",
                 "policy_api_key": "",
                 "policy_model_name": "",
@@ -88,7 +88,7 @@ class TestLoadAndValidateServerInstanceConfigs:
                         },
                         "model_server": {
                             "type": "responses_api_models",
-                            "name": "openai_model",
+                            "name": "policy_model",
                         },
                     }
                 },
@@ -130,7 +130,7 @@ class TestLoadDatasets:
                     },
                     "model_server": {
                         "type": "responses_api_models",
-                        "name": "openai_model",
+                        "name": "policy_model",
                     },
                 }
             }
@@ -175,7 +175,7 @@ class TestLoadDatasets:
                     },
                     "model_server": {
                         "type": "responses_api_models",
-                        "name": "openai_model",
+                        "name": "policy_model",
                     },
                 }
             }
@@ -230,7 +230,7 @@ class TestLoadDatasets:
                     },
                     "model_server": {
                         "type": "responses_api_models",
-                        "name": "openai_model",
+                        "name": "policy_model",
                     },
                 }
             }
@@ -290,7 +290,7 @@ class TestValidateSamplesAndAggregateMetrics:
                     },
                     "model_server": {
                         "type": "responses_api_models",
-                        "name": "openai_model",
+                        "name": "policy_model",
                     },
                 }
             }
@@ -374,7 +374,7 @@ class TestValidateSamplesAndAggregateMetrics:
                     },
                     "model_server": {
                         "type": "responses_api_models",
-                        "name": "openai_model",
+                        "name": "policy_model",
                     },
                 }
             }
@@ -498,7 +498,7 @@ class TestCollateSamples:
                     },
                     "model_server": {
                         "type": "responses_api_models",
-                        "name": "openai_model",
+                        "name": "policy_model",
                     },
                 }
             }
@@ -594,7 +594,7 @@ class TestCollateSamples:
                     },
                     "model_server": {
                         "type": "responses_api_models",
-                        "name": "openai_model",
+                        "name": "policy_model",
                     },
                 }
             }
