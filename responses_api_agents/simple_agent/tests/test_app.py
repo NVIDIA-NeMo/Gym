@@ -104,6 +104,7 @@ class TestApp:
             json=NeMoGymResponseCreateParamsNonStreaming(
                 input=[NeMoGymEasyInputMessage(content="hello", role="user", type="message")]
             ),
+            cookies=None,
         )
 
         actual_responses_dict = res_no_model.json()
