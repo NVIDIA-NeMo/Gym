@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from typing import Dict
+
 from fastapi import FastAPI, Request
 from pydantic import BaseModel
 
@@ -41,6 +43,13 @@ class GetCounterValueResponse(BaseModel):
 class StatefulCounterResourcesServer(SimpleResourcesServer):
     config: StatefulCounterResourcesServerConfig
 
+    def model_post_init(self, context):
+        res = super().model_post_init(context)
+
+        self.session_id_to_counter: Dict[str, int] = dict()
+
+        return res
+
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
 
@@ -50,10 +59,19 @@ class StatefulCounterResourcesServer(SimpleResourcesServer):
         return app
 
     async def increment_counter(self, body: IncrementCounterRequest, request: Request) -> IncrementCounterResponse:
-        pass
+        session_id = request.session["session_id"]
+        counter = self.session_id_to_counter.setdefault(session_id, 0)
+
+        counter += body.count
+
+        self.session_id_to_counter[session_id] = counter
+
+        return IncrementCounterResponse(success=True)
 
     async def get_counter_value(self, request: Request) -> GetCounterValueResponse:
-        pass
+        session_id = request.session["session_id"]
+        counter = self.session_id_to_counter.setdefault(session_id, 0)
+        return counter
 
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
         return BaseVerifyResponse(**body.model_dump(), reward=1.0)
