@@ -20,7 +20,7 @@ from typing import Any, Optional, Type
 import requests
 import uvicorn
 from fastapi import FastAPI
-from httpx import AsyncClient, AsyncHTTPTransport, Limits, Response
+from httpx import AsyncClient, AsyncHTTPTransport, Cookies, Limits, Response
 from httpx._types import (
     CookieTypes,
     HeaderTypes,
@@ -45,6 +45,18 @@ from nemo_gym.global_config import (
 )
 
 
+class NeMoGymStatelessCookies(Cookies):
+    def extract_cookies(self, response):
+        pass
+
+
+class NeMoGymGlobalAsyncClient(AsyncClient):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+
+        self._cookies = NeMoGymStatelessCookies(self._cookies)
+
+
 # We create a single global httpx client as recommended by https://www.python-httpx.org/async/
 # ```
 # In order to get the most benefit from connection pooling, make sure you're not instantiating multiple client instances - for example by using async with inside a "hot loop". This can be achieved either by having a single scoped client that's passed throughout wherever it's needed, or by having a single global client instance.
@@ -55,7 +67,7 @@ from nemo_gym.global_config import (
 # Eventually, we may also want to parameterize the max connections. For now, we set the max connections to just some very large number.
 #
 # It's critical that this client is NOT used before uvicorn.run is called. Under the hood, this async client will start and use an event loop, and store a handle to that specific event loop. When uvicorn.run is called, it will replace the event loop policy with its own. So the handle that the async client has is now outdated.
-GLOBAL_HTTPX_CLIENT = AsyncClient(
+GLOBAL_HTTPX_CLIENT = NeMoGymGlobalAsyncClient(
     limits=Limits(max_keepalive_connections=1500, max_connections=1500),
     transport=AsyncHTTPTransport(retries=3),
     timeout=None,
