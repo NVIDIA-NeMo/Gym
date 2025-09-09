@@ -16,10 +16,11 @@ from abc import abstractmethod
 from os import getenv
 from threading import Thread
 from typing import Any, Optional, Type
+from uuid import uuid4
 
 import requests
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from httpx import AsyncClient, AsyncHTTPTransport, Cookies, Limits, Response
 from httpx._types import (
     CookieTypes,
@@ -32,6 +33,7 @@ from httpx._types import (
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, ConfigDict
 from requests.exceptions import ConnectionError
+from starlette.middleware.sessions import SessionMiddleware
 
 from nemo_gym.config_types import (
     BaseRunServerConfig,
@@ -202,6 +204,29 @@ class SimpleServer(BaseServer):
     @abstractmethod
     def setup_webserver(self) -> FastAPI:
         pass
+
+    def get_session_middleware_secret_key(self) -> str:
+        # This method is here to override in case we want to ever use an actual session middleware secret key.
+        # e.g. for an actual product.
+        return self.__class__.__name__
+
+    def setup_session_middleware(self, app: FastAPI) -> None:
+        # The multiple middleware execution order described in https://fastapi.tiangolo.com/tutorial/middleware/#multiple-middleware-execution-order
+        # Says that if you register middlewares A and then B,
+        # - at request time: They execute B first then A
+        # - at response time: They return to A first and then B
+        # So for adding session IDs, that middleware must run after SessionMiddleware, so it must be registered before it.
+
+        @app.middleware("http")
+        async def add_session_id(request: Request, call_next):  # pragma: no cover
+            # If session_id not present, assign one
+            if "session_id" not in request.session:
+                request.session["session_id"] = str(uuid4())
+
+            response: Response = await call_next(request)
+            return response
+
+        app.add_middleware(SessionMiddleware, secret_key=self.get_session_middleware_secret_key())
 
     @classmethod
     def run_webserver(cls) -> None:  # pragma: no cover
