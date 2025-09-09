@@ -11,8 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from pydantic import BaseModel
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -26,16 +26,34 @@ class StatefulCounterResourcesServerConfig(BaseResourcesServerConfig):
     pass
 
 
+class IncrementCounterRequest(BaseModel):
+    count: int
+
+
+class IncrementCounterResponse(BaseModel):
+    success: bool
+
+
+class GetCounterValueResponse(BaseModel):
+    count: int
+
+
 class StatefulCounterResourcesServer(SimpleResourcesServer):
     config: StatefulCounterResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
 
-        # Additional server routes go here! e.g.:
-        # app.post("/get_weather")(self.get_weather)
+        app.post("/increment_counter")(self.increment_counter)
+        app.get("/get_counter_value")(self.get_counter_value)
 
         return app
+
+    async def increment_counter(self, body: IncrementCounterRequest, request: Request) -> IncrementCounterResponse:
+        pass
+
+    async def get_counter_value(self, request: Request) -> GetCounterValueResponse:
+        pass
 
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
         return BaseVerifyResponse(**body.model_dump(), reward=1.0)
