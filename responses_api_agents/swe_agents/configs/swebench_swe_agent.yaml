@@ -26,3 +26,31 @@ swe_agents:
         skip_filled: false
         dry_run: false
         max_concurrent_requests: 1  # SWE-bench is resource intensive
+      
+      # Dataset configurations
+      datasets:
+        # Training dataset
+        - name: train
+          type: train
+          jsonl_fpath: responses_api_agents/swe_agents/data/swegym_for_sweagent_and_openhands.jsonl
+          gitlab_identifier:
+            dataset_name: swegym_for_sweagent_and_openhands
+            version: 0.0.1
+            artifact_fpath: swegym_for_sweagent_and_openhands.jsonl
+          license: MIT
+        
+        # Validation dataset  
+        - name: validation
+          type: validation
+          jsonl_fpath: responses_api_agents/swe_agents/data/swebench_verified_for_sweagent_and_openhands.jsonl
+          gitlab_identifier:
+            dataset_name: swebench_verified_for_sweagent_and_openhands
+            version: 0.0.1
+            artifact_fpath: swebench_verified_for_sweagent_and_openhands.jsonl
+          license: TBD
+        
+        # Example dataset for quick testing
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/swe_agents/data/example.jsonl
+  
