@@ -1,8 +1,5 @@
-import json
-import uuid
 from typing import Dict, Optional
 from pydantic import BaseModel, PrivateAttr
-
 from fastapi import FastAPI, Request
 
 from nemo_gym.base_resources_server import (
@@ -61,9 +58,7 @@ class AviaryHotpotqaVerifyResponse(BaseVerifyResponse):
 class AviaryHotpotqaResourcesServer(SimpleResourcesServer):
     config: AviaryHotpotqaResourcesServerConfig
     
-    model_config = {'extra': 'allow', 'arbitrary_types_allowed': True}
-    
-    _sessions: Dict[str, dict] = PrivateAttr(default_factory=dict)
+    _sessions: Dict[str, dict] = PrivateAttr(default_factory=dict) # cant serialize aviary env tools, i think, but dont think this is needed... 
     
     def __init__(self, **data):
         super().__init__(**data)
@@ -87,6 +82,18 @@ class AviaryHotpotqaResourcesServer(SimpleResourcesServer):
             "reward": 0.0
         }
 
+    async def _init_env(self, session_id: str, question: Optional[str], ground_truth: Optional[str]) -> None:
+        """Init env and session if doesn't exist yet (first tool call)"""
+        if session_id not in self._sessions:
+            if not question or not ground_truth:
+                raise ValueError("Question or ground truth not found in tool payload")
+            
+            env_config = self._create_env_config(question, ground_truth)
+            env = HotPotQAEnv(**env_config)
+            await env.reset()
+            
+            self._sessions[session_id] = self._create_session(env, env_config)
+
     def _extract_message_content(self, msgs) -> str:
         if msgs and len(msgs) > 0:
             return msgs[0].content
@@ -105,18 +112,7 @@ class AviaryHotpotqaResourcesServer(SimpleResourcesServer):
     async def search(self, body: SearchRequest, request: Request) -> SearchResponse:
         session_id = request.session[SESSION_ID_KEY]
         
-        if session_id not in self._sessions:
-            if not body.question or not body.ground_truth:
-                raise ValueError("Question or ground truth not found in tool payload: " + str(body))
-            
-            question = body.question
-            ground_truth = body.ground_truth
-            
-            env_config = self._create_env_config(question, ground_truth)
-            env = HotPotQAEnv(**env_config)
-            await env.reset()
-            
-            self._sessions[session_id] = self._create_session(env, env_config)
+        await self._init_env(session_id, body.question, body.ground_truth)
         
         try:
             session = self._sessions[session_id]
@@ -170,20 +166,7 @@ class AviaryHotpotqaResourcesServer(SimpleResourcesServer):
         print(f"DEBUG SUBMIT: body.question={body.question}")
         print(f"DEBUG SUBMIT: body.ground_truth={body.ground_truth}")
         
-        if session_id not in self._sessions:
-            if not body.question or not body.ground_truth:
-                raise ValueError("Question or ground truth not found in tool payload: " + str(body))
-            
-            question = body.question
-            ground_truth = body.ground_truth
-            
-            print(f"DEBUG SUBMIT: Creating new session with question={question}, ground_truth={ground_truth}")
-            
-            env_config = self._create_env_config(question, ground_truth)
-            env = HotPotQAEnv(**env_config)
-            await env.reset()
-            
-            self._sessions[session_id] = self._create_session(env, env_config)
+        await self._init_env(session_id, body.question, body.ground_truth)
         
         try:
             session = self._sessions[session_id]
@@ -226,18 +209,16 @@ class AviaryHotpotqaResourcesServer(SimpleResourcesServer):
             
         print(f"DEBUG VERIFY: session_id={session_id}")
         print(f"DEBUG VERIFY: session exists={session_id in self._sessions}")
+        
         if session_id and session_id in self._sessions:
             session = self._sessions[session_id]
             env_config = session.get("env_config", {})
+            
             print(f"DEBUG VERIFY: question={env_config.get('question')}")
             print(f"DEBUG VERIFY: correct_answer={env_config.get('correct_answer')}")
             print(f"DEBUG VERIFY: reward={reward}")
-            
-        # Don't delete sessions in verify - rollout collection needs them
-        # if session_id and session_id in self._sessions:
-        #     session = self._sessions[session_id]
-        #     if session.get("last_done", False):
-        #         del self._sessions[session_id]
+        
+        # should cleanup? but ran into errors initially    
         
         return BaseVerifyResponse(**body.model_dump(), reward=reward)
 

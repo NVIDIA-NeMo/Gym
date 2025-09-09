@@ -1,3 +1,0 @@
--e nemo-gym[dev] @ ../../
-fhaviary[hotpotqa]
-pyarrow<16.0.0
