@@ -121,7 +121,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 break
 
         # Propogate any extra cookies necessary for downstream verification
-        for k, v in resources_server_cookies.items():
+        for k, v in (*resources_server_cookies.items(), *model_server_cookies.items()):
             response.set_cookie(k, v)
 
         model_response.output = new_outputs
