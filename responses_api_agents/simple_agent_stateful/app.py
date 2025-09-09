@@ -34,6 +34,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
 )
+from nemo_gym.server_utils import SESSION_ID_KEY
 
 
 class SimpleAgentStatefulConfig(BaseResponsesAPIAgentConfig):
@@ -93,7 +94,7 @@ class SimpleAgentStateful(SimpleResponsesAPIAgent):
             for output_function_call in all_fn_calls:
                 function_args = json.loads(output_function_call.arguments)
                 if session_id:  # Add session_id to subsequent calls
-                    function_args["session_id"] = session_id
+                    function_args[SESSION_ID_KEY] = session_id
                 api_response = await self.server_client.post(
                     server_name=self.config.resources_server.name,
                     url_path=f"/{output_function_call.name}",
@@ -103,8 +104,8 @@ class SimpleAgentStateful(SimpleResponsesAPIAgent):
                 # Extract session_id from first response for reuse
                 if session_id is None:
                     response_data = api_response.json()
-                    if "session_id" in response_data:
-                        session_id = response_data["session_id"]
+                    if SESSION_ID_KEY in response_data:
+                        session_id = response_data[SESSION_ID_KEY]
 
                 # --- create a compliant FunctionCallOutput --------------------------
                 response_data = api_response.json()

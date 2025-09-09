@@ -179,6 +179,9 @@ class ServerClient(BaseModel):
         )
 
 
+SESSION_ID_KEY = "session_id"
+
+
 class BaseServer(BaseModel):
     """
     All instances of BaseServer are queryable using ServerClient.
@@ -222,8 +225,8 @@ class SimpleServer(BaseServer):
         @app.middleware("http")
         async def add_session_id(request: Request, call_next):  # pragma: no cover
             # If session_id not present, assign one
-            if "session_id" not in request.session:
-                request.session["session_id"] = str(uuid4())
+            if SESSION_ID_KEY not in request.session:
+                request.session[SESSION_ID_KEY] = str(uuid4())
 
             response: Response = await call_next(request)
             return response

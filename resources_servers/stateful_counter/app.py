@@ -22,6 +22,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.server_utils import SESSION_ID_KEY
 
 
 class StatefulCounterResourcesServerConfig(BaseResourcesServerConfig):
@@ -61,7 +62,7 @@ class StatefulCounterResourcesServer(SimpleResourcesServer):
         return app
 
     async def increment_counter(self, body: IncrementCounterRequest, request: Request) -> IncrementCounterResponse:
-        session_id = request.session["session_id"]
+        session_id = request.session[SESSION_ID_KEY]
         counter = self.session_id_to_counter.setdefault(session_id, 0)
 
         counter += body.count
@@ -71,12 +72,12 @@ class StatefulCounterResourcesServer(SimpleResourcesServer):
         return IncrementCounterResponse(success=True)
 
     async def get_counter_value(self, request: Request) -> GetCounterValueResponse:
-        session_id = request.session["session_id"]
+        session_id = request.session[SESSION_ID_KEY]
         counter = self.session_id_to_counter.setdefault(session_id, 0)
         return GetCounterValueResponse(count=counter)
 
     async def verify(self, request: Request, body: StatefulCounterVerifyRequest) -> BaseVerifyResponse:
-        session_id = request.session["session_id"]
+        session_id = request.session[SESSION_ID_KEY]
 
         reward = 0.0
         if session_id in self.session_id_to_counter:
