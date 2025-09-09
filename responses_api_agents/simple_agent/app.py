@@ -64,8 +64,6 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         request: Request,
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
-        question: str = None,
-        ground_truth: str = None,
     ) -> NeMoGymResponse:
         body = body.model_copy(deep=True)
 
@@ -108,11 +106,13 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
             for output_function_call in all_fn_calls:
                 tool_payload = json.loads(output_function_call.arguments)
-                # Add question and ground_truth to every tool call so we can init env with it if its not initialized yet
-                if question:
-                    tool_payload["question"] = question
-                if ground_truth:
-                    tool_payload["ground_truth"] = ground_truth
+                
+                if body.metadata is None:
+                    body.metadata = {}
+                
+                # for initializing environment on first tool call
+                tool_payload["question"] = body.metadata.get("question")
+                tool_payload["ground_truth"] = body.metadata.get("ground_truth")
                 
                 api_response = await self.server_client.post(
                     server_name=self.config.resources_server.name,
@@ -141,29 +141,33 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         return model_response
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
-        # Extract question and ground_truth 
         question = None
         for msg in body.responses_create_params.input:
-            if msg.role == "user" and "Question:" in str(msg.content):
-                question = str(msg.content).split("Question: ", 1)[1]
+            if msg.role == "user":
+                question = msg.content.split("Question: ", 1)[1]
                 break
         
-        ground_truth = getattr(body, 'ground_truth', None)
+        # Initialize metadata if it's None
+        if body.responses_create_params.metadata is None:
+            body.responses_create_params.metadata = {}
         
-        # Create FastAPI Response object for cookie handling
-        from fastapi import Response as FastAPIResponse
-        fastapi_response = FastAPIResponse()
-        
-        # Call responses method directly (not via HTTP)
-        response = await self.responses(request, fastapi_response, body.responses_create_params, question, ground_truth)
+        body.responses_create_params.metadata["question"] = question
+        body.responses_create_params.metadata["ground_truth"] = body.ground_truth
 
-        verify_request = SimpleAgentVerifyRequest.model_validate(body.model_dump() | {"response": response})
+        response = await self.server_client.post(
+            server_name=self.config.name,
+            url_path="/v1/responses",
+            json=body.responses_create_params,
+            cookies=request.cookies,
+        )
+
+        verify_request = SimpleAgentVerifyRequest.model_validate(body.model_dump() | {"response": response.json()})
 
         verify_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/verify",
             json=verify_request.model_dump(),
-            cookies=request.cookies,
+            cookies=response.cookies,
         )
         return SimpleAgentVerifyResponse.model_validate(verify_response.json())
 
