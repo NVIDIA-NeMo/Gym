@@ -21,12 +21,12 @@ server_client = ServerClient.load_from_global_config()
 
 async def main():
     task_1 = await server_client.post(
-        server_name="openai_model",
+        server_name="policy_model",
         url_path="/v1/responses",
         json={"input": "hello"},
     )
     task_2 = await server_client.post(
-        server_name="openai_model",
+        server_name="policy_model",
         url_path="/v1/chat/completions",
         json={
             "messages": [{"role": "user", "content": "hello"}],
