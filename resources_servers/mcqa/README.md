@@ -92,7 +92,7 @@ responses_api_models/openai_model/configs/openai_model.yaml,\
 resources_servers/mcqa/configs/mcqa.yaml"
 
 # This dataset already contains the instruction to add response inside \boxed{}
-ng_download_dataset_to_gitlab \
+ng_download_dataset_from_gitlab \
     +dataset_name=syn_gpqa_v1.1 \
     +version=1.1.2 \
     +artifact_fpath=filtered_decontaminated.jsonl \
@@ -101,7 +101,7 @@ ng_download_dataset_to_gitlab \
 ng_run "+config_paths=[$config_paths]" \
     +simple_agent.responses_api_agents.simple_agent.resources_server.name=mcqa
 
-ng_collect_traj \
+ng_collect_rollouts \
     +agent_name=simple_agent \
     +input_jsonl_fpath=data/MCQA_filtered_decontaminated.jsonl \
     +output_jsonl_fpath=data/MCQA_filtered_decontaminated_samples_rollouts.jsonl +limit=5

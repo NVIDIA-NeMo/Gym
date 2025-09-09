@@ -34,13 +34,14 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseOutputMessage,
 )
 
 
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
-    max_turns: int = None
+    max_steps: int = None
 
 
 class SimpleAgentRunRequest(BaseRunRequest):
@@ -70,12 +71,12 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
         new_outputs = []
-        turn = 0
+        step = 0
         model_server_cookies = None  # update the cookies on every model response
         resources_server_cookies = request.cookies  # update the cookies on every resources server response
 
         while True:
-            turn += 1
+            step += 1
             new_body = body.model_copy(update={"input": body.input + new_outputs})
 
             model_response = await self.server_client.post(
@@ -97,7 +98,10 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             new_outputs.extend(output)
 
             all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
-            if not all_fn_calls:
+            all_output_messages: List[NeMoGymResponseOutputMessage] = [
+                o for o in output if o.type == "message" and o.role == "assistant"
+            ]
+            if not all_fn_calls and all_output_messages:
                 break
 
             for output_function_call in all_fn_calls:
@@ -116,8 +120,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 )
                 new_outputs.append(tool_response)
 
-            # Check if max turns is not None and if we have exhausted it.
-            if self.config.max_turns and turn >= self.config.max_turns:
+            # Check if max steps is not None and if we have exhausted it.
+            if self.config.max_steps and step >= self.config.max_steps:
                 break
 
         # Propogate any extra cookies necessary for downstream verification
