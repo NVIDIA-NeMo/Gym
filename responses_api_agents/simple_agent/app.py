@@ -110,7 +110,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 if body.metadata is None:
                     body.metadata = {}
                 
-                # for initializing environment on first tool call
+                # for initializing environment from first tool call - should we do this some other way?
                 tool_payload["question"] = body.metadata.get("question")
                 tool_payload["ground_truth"] = body.metadata.get("ground_truth")
                 
@@ -147,7 +147,6 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 question = msg.content.split("Question: ", 1)[1]
                 break
         
-        # Initialize metadata if it's None
         if body.responses_create_params.metadata is None:
             body.responses_create_params.metadata = {}
         
