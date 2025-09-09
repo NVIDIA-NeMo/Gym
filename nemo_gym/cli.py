@@ -106,9 +106,9 @@ class RunHelper:  # pragma: no cover
                 "host": head_server_host,
                 "port": head_server_port,
             }
-            initial_global_config["policy_model_name"] = self.cfg["model_name"]
-            initial_global_config["policy_api_key"] = "dummy_key"  # No key necessary for training.
-            initial_global_config["policy_base_url"] = self.nemo_rl_openai_base_url
+            initial_global_config["policy_model_name"] = policy_model_name
+            initial_global_config["policy_base_url"] = policy_base_url
+            initial_global_config["policy_api_key"] = policy_api_key
             return initial_global_config
 
         print(f"DEBUG: RunHelper: using dynamic config...", flush=True)
