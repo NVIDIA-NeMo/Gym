@@ -14,6 +14,7 @@
 import json
 from typing import List
 
+from fastapi import Request, Response
 from pydantic import ConfigDict, ValidationError
 
 from nemo_gym.base_resources_server import (
@@ -57,7 +58,12 @@ class SimpleAgentVerifyResponse(BaseVerifyResponse):
 class SimpleAgent(SimpleResponsesAPIAgent):
     config: SimpleAgentConfig
 
-    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+    async def responses(
+        self,
+        request: Request,
+        response: Response,
+        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
+    ) -> NeMoGymResponse:
         body = body.model_copy(deep=True)
 
         if isinstance(body.input, str):
@@ -65,7 +71,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
         new_outputs = []
         turn = 0
-        resources_server_cookies = None  # update the cookies on every response
+        model_server_cookies = None  # update the cookies on every model response
+        resources_server_cookies = request.cookies  # update the cookies on every resources server response
 
         while True:
             turn += 1
@@ -75,8 +82,10 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 server_name=self.config.model_server.name,
                 url_path="/v1/responses",
                 json=new_body,
+                cookies=model_server_cookies,
             )
             model_response_json = model_response.json()
+            model_server_cookies = model_response.cookies
             try:
                 model_response = NeMoGymResponse.model_validate(model_response_json)
             except ValidationError as e:
@@ -111,18 +120,28 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             if self.config.max_turns and turn >= self.config.max_turns:
                 break
 
+        # Propogate any extra cookies necessary for downstream verification
+        for k, v in resources_server_cookies.items():
+            response.set_cookie(k, v)
+
         model_response.output = new_outputs
         return model_response
 
-    async def run(self, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
-        response = await self.responses(body.responses_create_params)
+    async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
+        response = await self.server_client.post(
+            server_config_dict=self.config.model_dump(),
+            url_path="/v1/responses",
+            json=body.responses_create_params,
+            cookies=request.cookies,
+        )
 
-        verify_request = SimpleAgentVerifyRequest.model_validate(body.model_dump() | {"response": response})
+        verify_request = SimpleAgentVerifyRequest.model_validate(body.model_dump() | {"response": response.json()})
 
         verify_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/verify",
             json=verify_request.model_dump(),
+            cookies=response.cookies,
         )
         return SimpleAgentVerifyResponse.model_validate(verify_response.json())
 

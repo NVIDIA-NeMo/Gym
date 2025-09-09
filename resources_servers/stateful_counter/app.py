@@ -40,6 +40,14 @@ class GetCounterValueResponse(BaseModel):
     count: int
 
 
+class StatefulCounterVerifyRequest(BaseVerifyRequest):
+    expected_count: int
+
+
+class BaseVerifyResponse(BaseVerifyRequest):
+    reward: float
+
+
 class StatefulCounterResourcesServer(SimpleResourcesServer):
     config: StatefulCounterResourcesServerConfig
     session_id_to_counter: Dict[str, int] = Field(default_factory=dict)
@@ -67,8 +75,15 @@ class StatefulCounterResourcesServer(SimpleResourcesServer):
         counter = self.session_id_to_counter.setdefault(session_id, 0)
         return GetCounterValueResponse(count=counter)
 
-    async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
-        return BaseVerifyResponse(**body.model_dump(), reward=1.0)
+    async def verify(self, request: Request, body: StatefulCounterVerifyRequest) -> BaseVerifyResponse:
+        session_id = request.session["session_id"]
+
+        reward = 0.0
+        if session_id in self.session_id_to_counter:
+            counter = self.session_id_to_counter[session_id]
+            reward = float(body.expected_count == counter)
+
+        return BaseVerifyResponse(**body.model_dump(), reward=reward)
 
 
 if __name__ == "__main__":

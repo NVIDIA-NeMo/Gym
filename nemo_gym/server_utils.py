@@ -15,7 +15,7 @@ import json
 from abc import abstractmethod
 from os import getenv
 from threading import Thread
-from typing import Any, Optional, Type
+from typing import Any, Dict, Optional, Type
 from uuid import uuid4
 
 import requests
@@ -114,10 +114,23 @@ class ServerClient(BaseModel):
 
         return cls(head_server_config=head_server_config, global_config_dict=global_config_dict)
 
+    def _resolve_server_base_url(
+        self,
+        server_name: Optional[str] = None,
+        server_config_dict: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        assert server_name or server_config_dict, "You must provide one of server name or server config dict!"
+
+        if not server_config_dict:
+            server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
+
+        return f"http://{server_config_dict['host']}:{server_config_dict['port']}"
+
     async def get(
         self,
-        server_name: str,
         url_path: str,
+        server_name: Optional[str] = None,
+        server_config_dict: Optional[Dict[str, Any]] = None,
         params: QueryParamTypes | None = None,
         headers: HeaderTypes | None = None,
         cookies: CookieTypes | None = None,
@@ -133,9 +146,9 @@ class ServerClient(BaseModel):
                 The URL path in the server you are trying to call e.g. "/v1/responses".
 
         """
-        server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
+        server_base_url = self._resolve_server_base_url(server_name=server_name, server_config_dict=server_config_dict)
         return await GLOBAL_HTTPX_CLIENT.get(
-            f"http://{server_config_dict.host}:{server_config_dict.port}{url_path}",
+            f"{server_base_url}{url_path}",
             params=params,
             headers=headers,
             cookies=cookies,
@@ -144,8 +157,9 @@ class ServerClient(BaseModel):
 
     async def post(
         self,
-        server_name: str,
         url_path: str,
+        server_name: Optional[str] = None,
+        server_config_dict: Optional[Dict[str, Any]] = None,
         content: RequestContent | None = None,
         data: RequestData | None = None,
         files: RequestFiles | None = None,
@@ -165,9 +179,9 @@ class ServerClient(BaseModel):
                 The URL path in the server you are trying to call e.g. "/v1/responses".
 
         """
-        server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
+        server_base_url = self._resolve_server_base_url(server_name=server_name, server_config_dict=server_config_dict)
         return await GLOBAL_HTTPX_CLIENT.post(
-            f"http://{server_config_dict.host}:{server_config_dict.port}{url_path}",
+            f"{server_base_url}{url_path}",
             content=content,
             data=data,
             files=files,
@@ -222,6 +236,7 @@ class SimpleServer(BaseServer):
             # If session_id not present, assign one
             if "session_id" not in request.session:
                 request.session["session_id"] = str(uuid4())
+                print("added session id", request.session["session_id"])
 
             response: Response = await call_next(request)
             return response

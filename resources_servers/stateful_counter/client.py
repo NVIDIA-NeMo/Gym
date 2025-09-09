@@ -21,43 +21,46 @@ from nemo_gym.server_utils import ServerClient
 server_client = ServerClient.load_from_global_config()
 task = server_client.post(
     server_name="stateful_counter_simple_agent",
-    url_path="/v1/responses",
-    json=NeMoGymResponseCreateParamsNonStreaming(
-        input=[
-            {"role": "user", "content": "add 4 then add 3 then get the count"},
-        ],
-        tools=[
-            {
-                "type": "function",
-                "name": "increment_counter",
-                "description": "",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "count": {
-                            "type": "integer",
-                            "description": "",
+    url_path="/run",
+    json={
+        "responses_create_params": NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {"role": "user", "content": "add 4 then add 3 then get the count"},
+            ],
+            tools=[
+                {
+                    "type": "function",
+                    "name": "increment_counter",
+                    "description": "",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "count": {
+                                "type": "integer",
+                                "description": "",
+                            },
                         },
+                        "required": ["count"],
+                        "additionalProperties": False,
                     },
-                    "required": ["count"],
-                    "additionalProperties": False,
+                    "strict": True,
                 },
-                "strict": True,
-            },
-            {
-                "type": "function",
-                "name": "get_counter_value",
-                "description": "",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
-                    "additionalProperties": False,
+                {
+                    "type": "function",
+                    "name": "get_counter_value",
+                    "description": "",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                        "additionalProperties": False,
+                    },
+                    "strict": True,
                 },
-                "strict": True,
-            },
-        ],
-    ),
+            ],
+        ).model_dump(exclude_unset=True),
+        "expected_count": 7,
+    },
 )
 result = run(task)
-print(json.dumps(result.json()["output"], indent=4))
+print(json.dumps(result.json(), indent=4))
