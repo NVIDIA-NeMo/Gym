@@ -170,6 +170,9 @@ class RunHelper:  # pragma: no cover
         print("Waiting for head server to spin up")
         asyncio.run(wait_for_head_server())
 
+        print("Waiting for servers to spin up")
+        asyncio.run(self.wait_for_spinup())
+
     def display_server_instance_info(self) -> None:
         if not self._server_instance_display_configs:
             print("No server instances to display.")
@@ -196,30 +199,37 @@ class RunHelper:  # pragma: no cover
             if process.poll() is not None:
                 raise RuntimeError(f"Process `{process_name}` finished unexpectedly!")
 
+    async def wait_for_spinup(self) -> None:
+        sleep_interval = 3
+
+        # Until we spin up or error out.
+        while True:
+            self.poll()
+            statuses = await self.check_http_server_statuses()
+
+            num_spun_up = statuses.count("success")
+            if len(statuses) != num_spun_up:
+                print(
+                    f"""{num_spun_up} / {len(statuses)} servers ready ({statuses.count("timeout")} timed out, {statuses.count("connection_error")} connection errored, {statuses.count("unknown_error")} had unknown errors).
+Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
+                )
+            else:
+                print(f"All {num_spun_up} / {len(statuses)} servers ready! Polling every 60s")
+                self.display_server_instance_info()
+                return
+
+            await asyncio.sleep(sleep_interval)
+
     def run_forever(self) -> None:
         async def sleep():
-            all_spun_up = False
-            sleep_interval = 3
-
             # Indefinitely
             while True:
                 self.poll()
+
                 statuses = await self.check_http_server_statuses()
+                assert statuses.count("success") == len(statuses), "Found non-success statuses"
 
-                if not all_spun_up:
-                    num_spun_up = statuses.count("success")
-                    if len(statuses) != num_spun_up:
-                        print(
-                            f"""{num_spun_up} / {len(statuses)} servers ready ({statuses.count("timeout")} timed out, {statuses.count("connection_error")} connection errored, {statuses.count("unknown_error")} had unknown errors).
-Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
-                        )
-                    else:
-                        all_spun_up = True
-                        sleep_interval = 60  # Check every 60s after spinup.
-                        print(f"All {num_spun_up} / {len(statuses)} servers ready! Polling every {sleep_interval}s")
-                        self.display_server_instance_info()
-
-                await asyncio.sleep(sleep_interval)
+                await asyncio.sleep(60)
 
         try:
             asyncio.run(sleep())
@@ -234,6 +244,9 @@ Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
             print("NeMo Gym finished!")
 
     async def check_http_server_statuses(self) -> List[ServerStatus]:
+        print(
+            "Checking for HTTP server statuses (you should see some HTTP requests to `/` that may 404. This is expected.)"
+        )
         tasks = []
         for server_instance_display_config in self._server_instance_display_configs:
             name = server_instance_display_config.config_path
