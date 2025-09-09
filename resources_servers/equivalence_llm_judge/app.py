@@ -116,14 +116,14 @@ def _extract_expected_answer(req: LLMJudgeRunRequest) -> Optional[str]:
 
 
 def _extract_question_text(params: NeMoGymResponseCreateParamsNonStreaming) -> str:
-    # Best-effort extraction of user content as question/context.
-    parts: list[str] = []
+    # Return only the last user message's text content.
+    last_text: Optional[str] = None
     for m in params.input or []:
         if getattr(m, "role", None) == "user":
             c = getattr(m, "content", None)
             if isinstance(c, str):
-                parts.append(c)
-    return "\n".join(parts).strip()
+                last_text = c
+    return (last_text or "").strip()
 
 
 class LLMJudgeResourcesServer(SimpleResourcesServer):

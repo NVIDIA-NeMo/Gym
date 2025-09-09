@@ -1,4 +1,4 @@
-# Scientific Knowledge LLM-as-judge Resources Server
+# Equivalence LLM-as-judge Resources Server
 
 ### Overview
 Uses an LLM as a judge to compare a model’s generated answer against the expected answer.
@@ -19,42 +19,45 @@ Accepts the same outer request structure as other resources servers:
 
 ### Example config
 ```yaml
-sci_llm_judge:
+equivalence_llm_judge:
   resources_servers:
-    sci_llm_judge:
+    equivalence_llm_judge:
       entrypoint: app.py
 
-sci_llm_judge_simple_agent:
+equivalence_llm_judge_simple_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py
       resources_server:
         type: resources_servers
-        name: sci_llm_judge
+        name: equivalence_llm_judge
       model_server:
         type: responses_api_models
         name: openai_model
       datasets:
       - name: sciq_validation
         type: example
-        jsonl_fpath: resources_servers/sci_llm_judge/data/sciq_validation.jsonl
+        jsonl_fpath: resources_servers/equivalence_llm_judge/data/sciq_validation.jsonl
 ```
 
 ### Usage
 Spin up with a judge model and prompt:
 ```bash
-config_paths="resources_servers/sci_llm_judge/configs/sci_llm_judge.yaml,\
+config_paths="resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml"
 
 ng_run "+config_paths=[$config_paths]" \
-  +sci_llm_judge.resources_servers.sci_llm_judge.judge_model_server.name=openai_model \
-  +sci_llm_judge.resources_servers.sci_llm_judge.judge_responses_create_params.max_output_tokens=256 \
-  +sci_llm_judge.resources_servers.sci_llm_judge.judge_system_message="You are a careful arbiter." \
-  +sci_llm_judge.resources_servers.sci_llm_judge.judge_prompt_template="""
+  +equivalence_llm_judge.resources_servers.equivalence_llm_judge.judge_model_server.name=openai_model \
+  +equivalence_llm_judge.resources_servers.equivalence_llm_judge.judge_responses_create_params.max_output_tokens=256 \
+  +equivalence_llm_judge.resources_servers.equivalence_llm_judge.judge_system_message="You are a careful arbiter." \
+  +equivalence_llm_judge.resources_servers.equivalence_llm_judge.judge_prompt_template="""
 <|Problem|>\n{question}\n\n<|Gold|>\n{expected_answer}\n\n<|Prediction|>\n{generated_answer}\n"""
 ```
 
 Then query via any agent; verification happens with `/verify` on this server when evaluating rollouts.
+
+For our tests we used Gemma3-27B-it.  
+You should always check the license of your chosen judge model to make sure your use case comply with it.
 
 ### Notes
 - By default (`check_twice_swap=false`), the server performs a single judge pass. If the verdict is equal, reward is 1 and one evaluation is returned; if not equal, reward is 0 and one evaluation is returned.

@@ -1,7 +1,7 @@
 {
     "name": "example",
     "type": "example",
-    "jsonl_fpath": "resources_servers/sci_llm_judge/data/example.jsonl",
+    "jsonl_fpath": "resources_servers/equivalence_llm_judge/data/example.jsonl",
     "gitlab_identifier": null,
     "license": "TBD",
     "Number of examples": 5,
