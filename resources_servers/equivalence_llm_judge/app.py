@@ -61,6 +61,8 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     # If true, perform a second judge pass swapping expected and generated answers
     # to reduce potential positional bias. Default is false for speed.
     check_twice_swap: bool = False
+    # Reward to assign if the second (swap) pass fails. Defaults to 0.0; can be set to -1.0.
+    reward_if_swap_fails: float = 0.0
 
 
 class LLMJudgeRunRequest(BaseRunRequest):
@@ -164,7 +166,9 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         second_equal, second_eval = await self._generate_judge_evaluation(
             question=question, expected_answer=generated, generated_answer=expected
         )
-        reward = 1.0 if second_equal else 0.0
+        # If they are both equal, we give a reward of 1.0; otherwise use configured fallback.
+        # User has to expect this on the training side to discard the data points if negative.
+        reward = 1.0 if second_equal else self.config.reward_if_swap_fails
         payload = body.model_dump()
         payload.pop("expected_answer", None)
         return LLMJudgeVerifyResponse(

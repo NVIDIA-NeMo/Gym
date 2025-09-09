@@ -189,3 +189,39 @@ class TestApp:
         )
         res = await rs.verify(req)
         assert res.reward == approx(0.0)
+
+    async def test_swap_fails_uses_configured_reward(self, config: LLMJudgeResourcesServerConfig) -> None:
+        server_mock = MagicMock(spec=ServerClient)
+        cfg = config.model_copy(deep=True)
+        cfg.check_twice_swap = True
+        cfg.reward_if_swap_fails = -1.0
+        rs = LLMJudgeResourcesServer(config=cfg, server_client=server_mock)
+
+        post_mock = MagicMock()
+        post_mock.json = MagicMock()
+        server_mock.post = AsyncMock(return_value=post_mock)
+        # First pass equal, second pass not equal -> use configured -1.0
+        post_mock.json.side_effect = [
+            self._create_response("first", self._msg("[[A=B]]")),
+            self._create_response("second", self._msg("[[A!=B]]")),
+        ]
+
+        model_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Q?"}])
+        model_response = NeMoGymResponse(
+            id="resp",
+            created_at=0.0,
+            model="m",
+            object="response",
+            output=[self._msg("A")],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        )
+        req = LLMJudgeVerifyRequest(
+            responses_create_params=deepcopy(model_create_params),
+            response=model_response.model_copy(deep=True),
+            expected_answer="B",
+        )
+        res = await rs.verify(req)
+        assert res.reward == approx(-1.0)
+        assert len(res.judge_evaluations) == 2

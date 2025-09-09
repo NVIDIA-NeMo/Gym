@@ -10,6 +10,7 @@ Prompt and labels are configurable via config.
 - `judge_prompt_template` (required): user prompt template. Placeholders: `{question}`, `{expected_answer}`, `{generated_answer}`.
 - `judge_equal_label` / `judge_not_equal_label`: labels the judge must output. Defaults to `[[A=B]]` and `[[A!=B]]`.
 - `check_twice_swap` (bool, default false): if true, after an initial equal verdict, performs a second judge call swapping expected and generated answers to reduce bias.
+- `reward_if_swap_fails` (float, default 0.0): reward to assign if the second (swap) pass disagrees (i.e., fails). You may set this to -1.0 or other value to catch it on the training side..
 
 ### Input schema
 Accepts the same outer request structure as other resources servers:
@@ -61,7 +62,7 @@ You should always check the license of your chosen judge model to make sure your
 
 ### Notes
 - By default (`check_twice_swap=false`), the server performs a single judge pass. If the verdict is equal, reward is 1 and one evaluation is returned; if not equal, reward is 0 and one evaluation is returned.
-- If `check_twice_swap=true` and the first pass is equal, a second pass is performed with expected and generated answers swapped. Reward is 1 only if the second pass is also equal; in this case, two evaluations are returned.
+- If `check_twice_swap=true` and the first pass is equal, a second pass is performed with expected and generated answers swapped. Reward is 1 only if the second pass is also equal; otherwise `reward_if_swap_fails` is used (default 0.0). In the double-check case, two evaluations are returned.
 - If the judge output doesn’t include either label, it defaults to not-equal.
 
 ## Licensing

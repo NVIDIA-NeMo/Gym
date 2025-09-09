@@ -68,7 +68,9 @@ equivalence_llm_judge:
       judge_system_message: null
       judge_equal_label: "[[A=B]]"
       judge_not_equal_label: "[[A!=B]]"
-      check_twice_swap: false
+      check_twice_swap: true
+      # Reward when the second (swap) pass fails; default 0.0, can be -1.0
+      reward_if_swap_fails: 0.0
 
 equivalence_llm_judge_simple_agent:
   responses_api_agents:
