@@ -20,11 +20,12 @@ from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 
 
 queries = [
-    ("add 1 then add 2 then get the count", 3),
-    ("add 3 then add 4 then get the count", 7),
-    ("add 5 then add 6 then get the count", 11),
-    ("add 7 then add 8 then get the count", 15),
-    ("add 9 then add 10 then get the count", 19),
+    # user query, initial count, expected count.
+    ("add 1 then add 2 then get the count", 3, 6),
+    ("add 4 then add 5 then get the count", 6, 15),
+    ("add 7 then add 8 then get the count", 9, 24),
+    ("add 10 then add 11 then get the count", 12, 33),
+    ("add 13 then add 14 then get the count", 15, 42),
 ]
 
 base_dict = {
@@ -68,9 +69,10 @@ base_dict = {
 }
 
 examples = []
-for query, expected_count in queries:
+for query, initial_count, expected_count in queries:
     example = deepcopy(base_dict)
     example["responses_create_params"]["input"][0]["content"] = query
+    example["initial_count"] = initial_count
     example["expected_count"] = expected_count
 
     examples.append(json.dumps(example) + "\n")

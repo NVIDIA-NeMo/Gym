@@ -132,12 +132,23 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         return model_response
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
+        cookies = request.cookies
+
+        seed_session_response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/seed_session",
+            json=body.model_dump(),
+            cookies=cookies,
+        )
+        cookies = seed_session_response.cookies
+
         response = await self.server_client.post(
             server_name=self.config.name,
             url_path="/v1/responses",
             json=body.responses_create_params,
-            cookies=request.cookies,
+            cookies=cookies,
         )
+        cookies = response.cookies
 
         verify_request = SimpleAgentVerifyRequest.model_validate(body.model_dump() | {"response": response.json()})
 
@@ -145,7 +156,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             server_name=self.config.resources_server.name,
             url_path="/verify",
             json=verify_request.model_dump(),
-            cookies=response.cookies,
+            cookies=cookies,
         )
         return SimpleAgentVerifyResponse.model_validate(verify_response.json())
 

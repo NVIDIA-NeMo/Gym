@@ -18,6 +18,8 @@ from pydantic import BaseModel, Field
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
+    BaseSeedSessionRequest,
+    BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
@@ -49,6 +51,10 @@ class BaseVerifyResponse(BaseVerifyRequest):
     reward: float
 
 
+class StatefulCounterSeedSessionRequest(BaseSeedSessionRequest):
+    initial_count: int
+
+
 class StatefulCounterResourcesServer(SimpleResourcesServer):
     config: StatefulCounterResourcesServerConfig
     session_id_to_counter: Dict[str, int] = Field(default_factory=dict)
@@ -61,7 +67,12 @@ class StatefulCounterResourcesServer(SimpleResourcesServer):
 
         return app
 
-    async def increment_counter(self, body: IncrementCounterRequest, request: Request) -> IncrementCounterResponse:
+    async def seed_session(self, request: Request, body: StatefulCounterSeedSessionRequest) -> BaseSeedSessionResponse:
+        session_id = request.session[SESSION_ID_KEY]
+        self.session_id_to_counter.setdefault(session_id, body.initial_count)
+        return BaseSeedSessionResponse()
+
+    async def increment_counter(self, request: Request, body: IncrementCounterRequest) -> IncrementCounterResponse:
         session_id = request.session[SESSION_ID_KEY]
         counter = self.session_id_to_counter.setdefault(session_id, 0)
 

@@ -43,6 +43,14 @@ class BaseVerifyResponse(BaseVerifyRequest):
     reward: float
 
 
+class BaseSeedSessionRequest(BaseModel):
+    pass
+
+
+class BaseSeedSessionResponse(BaseModel):
+    pass
+
+
 class SimpleResourcesServer(BaseResourcesServer, SimpleServer):
     config: BaseResourcesServerConfig
 
@@ -51,9 +59,13 @@ class SimpleResourcesServer(BaseResourcesServer, SimpleServer):
 
         self.setup_session_middleware(app)
 
+        app.post("/seed_session")(self.seed_session)
         app.post("/verify")(self.verify)
 
         return app
+
+    async def seed_session(self, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
+        return BaseSeedSessionResponse()
 
     @abstractmethod
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
