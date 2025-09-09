@@ -63,7 +63,7 @@ class SimpleResourcesServer(BaseResourcesServer, SimpleServer):
         # So for adding session IDs, that middleware must run after SessionMiddleware, so it must be registered before it.
 
         @app.middleware("http")
-        async def add_session_id(request: Request, call_next):
+        async def add_session_id(request: Request, call_next):  # pragma: no cover
             # If session_id not present, assign one
             if "session_id" not in request.session:
                 request.session["session_id"] = str(uuid4())
