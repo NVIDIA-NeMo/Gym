@@ -1,6 +1,6 @@
 # Quick Start: Running SWE Agents
 
-This guide shows how to run the SWE agents that use OpenAI GPT-4 (or any other model) to solve real-world GitHub issues.
+This guide shows how to run the SWE agents that use OpenAI GPT-4.1 (or any other model) to solve real-world GitHub issues.
 
 ## Prerequisites
 
@@ -106,7 +106,10 @@ For multiple problems, use rollout collection:
 # Collect rollouts
 ng_collect_rollouts +agent_name=swe_agents \
     +input_jsonl_fpath=swebench-verified-converted.jsonl \
-    +output_jsonl_fpath=swebench-verified.openhands.qwen3-30b-coder.jsonl
+    +output_jsonl_fpath=swebench-verified.openhands.qwen3-30b-coder.jsonl \
+    +model=Qwen/Qwen3-Coder-30B-A3B-Instruct \
+    +temperature=0.7 \
+    +top_p=0.8
 ```
 By default, the concurrency of ng_collect_rollouts is 100. You may want to adjust it based on your hardware configuration accordingly. 
 
