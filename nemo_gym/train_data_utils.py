@@ -17,7 +17,7 @@ from collections import Counter, defaultdict
 from itertools import count, repeat
 from pathlib import Path
 from shutil import copyfileobj
-from typing import Dict, List, Literal, Optional, Self, Tuple, Union
+from typing import Dict, List, Literal, Optional, Self, Tuple, Union, Any
 
 from devtools import pprint
 from omegaconf import DictConfig
@@ -108,6 +108,7 @@ class DatasetMetrics(Accumulator):
     )
     number_of_turns: AvgMinMax = Field(serialization_alias="Number of turns", default_factory=AvgMinMax)
     temperature: AvgMinMax = Field(serialization_alias="Temperature", default_factory=AvgMinMax)
+    other_fields: Dict[str, Any] = Field(default_factory=dict)
 
     # TODO: Number of unique create params, Number of unique user messages, other sampling params, etc
 
@@ -118,6 +119,9 @@ class DatasetMetrics(Accumulator):
         self.number_of_turns.add(other.number_of_turns)
         self.temperature.add(other.temperature)
 
+        for k, v in other.other_fields.items():
+            self.other_fields[k] = v
+
     def _aggregate(self: Self) -> Self:
         return DatasetMetrics(
             number_of_examples=self.number_of_examples,
@@ -125,7 +129,44 @@ class DatasetMetrics(Accumulator):
             json_dumped_number_of_words=self.json_dumped_number_of_words.aggregate(),
             number_of_turns=self.number_of_turns.aggregate(),
             temperature=self.temperature.aggregate(),
+            other_fields=self.other_fields
         )
+
+    def add_extra_field(self: Self, name: str, value: Any):
+        self.other_fields[name] = value
+
+
+def aggregate_other_metrics(data: List[Union[Any]]) -> Dict[str, Any]:
+    metric_values = {}
+    string_values = {}
+    for d in data:
+        d = d.model_dump() if hasattr(d, "model_dump") else d
+        for k, v in d.items():
+            if k in ("responses_create_params", "response"):
+                continue
+            if isinstance(v, bool):
+                v = int(v)
+            if isinstance(v, (int, float)):
+                metric_values.setdefault(k, []).append(v)
+            # get unique count for strings
+            elif isinstance(v, str):
+                string_values.setdefault(k, []).append(v)
+
+    result = {}
+    for k, v in metric_values.items():
+        if v:
+            obj = AvgMinMax(
+                total=len(v),
+                average=sum(v) / len(v),
+                min=min(v),
+                max=max(v),
+            )
+            result[k] = obj.model_dump(by_alias=True)
+
+    for k, v in string_values.items():
+        result[k] = {"unique_count": len(set(v)), "total_count": len(v)}
+
+    return result
 
 
 def compute_sample_metrics(sample_dict_str: str) -> Tuple[DatasetMetrics, bool]:
@@ -362,16 +403,20 @@ class TrainDataProcessor(BaseModel):
         self, dataset_config: DatasetConfig
     ) -> DatasetValidatorState:
         state = DatasetValidatorState()
+        data = []
 
         map_fn = self._validate_samples_and_aggregate_metrics_single_sample
         with open(dataset_config.jsonl_fpath) as f:
-            # Don't load everything into memory at once. Throw things away immediately.
-            any(
-                tqdm(
-                    map(map_fn, repeat(state), count(), f),
-                    desc=f"Process {dataset_config.jsonl_fpath}",
-                )
-            )
+            for idx, line in enumerate(tqdm(f, desc=f"Process {dataset_config.jsonl_fpath}")):
+                # Don't load everything into memory at once. Throw things away immediately.
+                map_fn(state, idx, line)
+                data.append(json.loads(line))
+
+        other_metrics = aggregate_other_metrics(data)
+        for k, v in other_metrics.items():
+            state.metrics.add_extra_field(k, v)
+
+        state.metrics.aggregate()
 
         return state
 
