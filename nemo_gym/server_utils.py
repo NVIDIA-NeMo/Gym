@@ -222,7 +222,6 @@ class SimpleServer(BaseServer):
             # If session_id not present, assign one
             if "session_id" not in request.session:
                 request.session["session_id"] = str(uuid4())
-                print("added session id", request.session["session_id"])
 
             response: Response = await call_next(request)
             return response
