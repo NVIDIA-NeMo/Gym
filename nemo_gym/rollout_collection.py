@@ -32,6 +32,9 @@ class RolloutCollectionConfig(BaseModel):
     limit: Optional[int] = None
     num_repeats: Optional[int] = None
     num_samples_in_parallel: Optional[int] = None
+    model: Optional[str] = None
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
 
 
 async def _collect_rollouts(config: RolloutCollectionConfig):  # pragma: no cover
@@ -48,6 +51,18 @@ async def _collect_rollouts(config: RolloutCollectionConfig):  # pragma: no cove
         previous_length = len(rows)
         rows = list(chain.from_iterable(repeat(row, config.num_repeats) for row in rows))
         print(f"Repeating rows (in a pattern of abc to aabbcc) from {previous_length} to {len(rows)}!")
+
+    # Overwrite model, temperature, and top_p if provided
+    overrides = {
+        k: v
+        for k, v in {"model": config.model, "temperature": config.temperature, "top_p": config.top_p}.items()
+        if v is not None
+    }
+    if overrides:
+        print(f"Overriding parameters: {overrides}")
+        for row in rows:
+            if "responses_create_params" in row:
+                row["responses_create_params"].update(overrides)
 
     server_client = ServerClient.load_from_global_config()
 

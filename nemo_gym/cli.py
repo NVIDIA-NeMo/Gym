@@ -40,7 +40,7 @@ from nemo_gym.server_utils import HeadServer
 
 def _setup_env_command(dir_path: Path) -> str:  # pragma: no cover
     return f"""cd {dir_path} \\
-    && uv venv --allow-existing \\
+    && uv venv --allow-existing --python python3.12 \\
     && source .venv/bin/activate \\
     && uv pip install -r requirements.txt \\
    """

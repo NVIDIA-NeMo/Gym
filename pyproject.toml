@@ -172,6 +172,18 @@ dev = [
     # License: Apache 2.0 https://github.com/jamielennox/requests-mock/blob/9742d02a8cad17276dbeba7b300b6d27ae1b6fb1/LICENSE
     "requests-mock",
 ]
+nemo-skills = [
+    # NeMo-Skills: Required for SWE-bench wrapper agent and other code evaluation capabilities
+    # Updated: Dec 2024
+    # License: Apache 2.0 https://github.com/NVIDIA/NeMo-Skills/blob/main/LICENSE
+    "nemo-skills @ git+https://github.com/NVIDIA/NeMo-Skills.git@jiaqiz/fix-swe",
+    
+    # Compatibility constraints for nemo-skills dependencies
+    # pyarrow 21.0.0 removed PyExtensionType which older datasets versions depend on
+    # We need datasets >= 2.18.0 for compatibility with pyarrow >= 17.0.0
+    "datasets>=2.18.0",
+    "pyarrow>=17.0.0,<22.0.0",
+]
 
 [build-system]
 requires = ["setuptools>=61", "setuptools-scm"]
