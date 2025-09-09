@@ -113,7 +113,7 @@ class BaseRunServerConfig(BaseServerConfig):
 
 
 class BaseRunServerInstanceConfig(BaseRunServerConfig):
-    name: str
+    name: str  # This name is unique at runtime.
 
 
 ########################################

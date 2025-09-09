@@ -207,10 +207,10 @@ class SimpleServer(BaseServer):
     def setup_webserver(self) -> FastAPI:
         pass
 
-    def get_session_middleware_secret_key(self) -> str:
+    def get_session_middleware_key(self) -> str:
         # This method is here to override in case we want to ever use an actual session middleware secret key.
         # e.g. for an actual product.
-        return self.__class__.__name__
+        return f"{self.__class__.__name__}___{self.config.name}"
 
     def setup_session_middleware(self, app: FastAPI) -> None:
         # The multiple middleware execution order described in https://fastapi.tiangolo.com/tutorial/middleware/#multiple-middleware-execution-order
@@ -228,7 +228,8 @@ class SimpleServer(BaseServer):
             response: Response = await call_next(request)
             return response
 
-        app.add_middleware(SessionMiddleware, secret_key=self.get_session_middleware_secret_key())
+        session_middleware_key = self.get_session_middleware_key()
+        app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
 
     @classmethod
     def run_webserver(cls) -> None:  # pragma: no cover
