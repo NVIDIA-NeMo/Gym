@@ -14,6 +14,7 @@
 import asyncio
 import json
 import shlex
+from copy import deepcopy
 from glob import glob
 from os import environ, makedirs
 from os.path import exists
@@ -35,11 +36,7 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
-from nemo_gym.server_utils import (
-    DYNAMIC_KEY_NAME,
-    HEAD_SERVER_KEY_NAME,
-    HeadServer,
-)
+from nemo_gym.server_utils import HeadServer
 
 
 def _setup_env_command(dir_path: Path) -> str:  # pragma: no cover
@@ -102,10 +99,10 @@ class RunHelper:  # pragma: no cover
         policy_base_url: Optional[str] = None,
         policy_api_key: Optional[str] = None,
     ) -> dict:
-        dynamic_cfg = initial_global_config.get(DYNAMIC_KEY_NAME, None)
+        dynamic_cfg = initial_global_config.get("dynamic", None)
         if not dynamic_cfg:
             print(f"DEBUG: RunHelper: warning: no dynamic config, using provided defaults...", flush=True)
-            initial_global_config[HEAD_SERVER_KEY_NAME] = {
+            initial_global_config["head_server"] = {
                 "host": head_server_host,
                 "port": head_server_port,
             }
@@ -113,15 +110,48 @@ class RunHelper:  # pragma: no cover
             initial_global_config["policy_api_key"] = "dummy_key"  # No key necessary for training.
             initial_global_config["policy_base_url"] = self.nemo_rl_openai_base_url
             return initial_global_config
+
         print(f"DEBUG: RunHelper: using dynamic config...", flush=True)
-        initial_global_config[HEAD_SERVER_KEY_NAME] = {
+
+        # Special top-level config keys (head server, policy).
+        initial_global_config["head_server"] = {
             "host": dynamic_cfg["head_server"]["host"],
             "port": dynamic_cfg["head_server"]["port"],
         }
         initial_global_config["policy_model_name"] = dynamic_cfg["policy"]["model_name"]
         initial_global_config["policy_api_key"] = "dummy_key"
         initial_global_config["policy_base_url"] = dynamic_cfg["policy"]["generation_base_url"]
-        # TODO(peter): rest of dynamic config.
+
+        def _merge_dict_inplace(target: dict, source: dict):
+            for src_key, src_value in source.items():
+                if (
+                    src_key in target and
+                    isinstance(target[src_key], dict) and
+                    isinstance(src_value, dict)
+                ):
+                    _merge_dict_inplace(target[src_key], src_value)
+                else:
+                    target[src_key] = deepcopy(src_value)
+
+        # Merge all other top-level config keys.
+        for key, sub_cfg in dynamic_cfg.items():
+            if key == "head_server":
+                continue
+            elif key in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS:
+                raise ValueError(
+                    f"found reserved top-level key {repr(key)} in 'dynamic' config section"
+                )
+            elif key not in initial_global_config:
+                print(f"RunHelper: warning: dynamic top-level key {repr(key)} is not present in the global config, skipping...", flush=True)
+                continue
+            elif initial_global_config[key] is None:
+                initial_global_config[key] = {}
+            elif not isinstance(initial_global_config[key], dict):
+                raise ValueError(
+                    f"expected top-level key {repr(key)} to be a dict, got {type(initial_global_config[key]).__name__}"
+                )
+            _merge_dict_inplace(initial_global_config[key], sub_cfg)
+
         return initial_global_config
 
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
