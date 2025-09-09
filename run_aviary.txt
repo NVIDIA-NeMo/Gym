@@ -1,0 +1,15 @@
+run aviary wrapper 
+
+config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
+resources_servers/aviary_wrapper/configs/aviary_wrapper.yaml"
+ng_run "+config_paths=[$config_paths]" \
+    +simple_agent.responses_api_agents.simple_agent.resources_server.name=aviary_wrapper
+
+ng_collect_rollouts +agent_name=aviary_wrapper_simple_agent \
+    +input_jsonl_fpath=resources_servers/aviary_wrapper/data/hotpotqa_20_examples.jsonl \
+    +output_jsonl_fpath=resources_servers/aviary_wrapper/data/hotpotqa_20_rollouts.jsonl \
+    +limit=null \
+    +num_repeats=null \
+    +num_samples_in_parallel=null
+
+ng_viewer 

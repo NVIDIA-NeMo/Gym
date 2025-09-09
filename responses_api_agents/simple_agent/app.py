@@ -64,6 +64,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         request: Request,
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
+        question: str = None,
+        ground_truth: str = None,
     ) -> NeMoGymResponse:
         body = body.model_copy(deep=True)
 
@@ -105,10 +107,17 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 break
 
             for output_function_call in all_fn_calls:
+                tool_payload = json.loads(output_function_call.arguments)
+                # Add question and ground_truth to every tool call so we can init env with it if its not initialized yet
+                if question:
+                    tool_payload["question"] = question
+                if ground_truth:
+                    tool_payload["ground_truth"] = ground_truth
+                
                 api_response = await self.server_client.post(
                     server_name=self.config.resources_server.name,
                     url_path=f"/{output_function_call.name}",
-                    json=json.loads(output_function_call.arguments),
+                    json=tool_payload,
                     cookies=resources_server_cookies,
                 )
                 resources_server_cookies = api_response.cookies
@@ -132,20 +141,29 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         return model_response
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
-        response = await self.server_client.post(
-            server_name=self.config.name,
-            url_path="/v1/responses",
-            json=body.responses_create_params,
-            cookies=request.cookies,
-        )
+        # Extract question and ground_truth 
+        question = None
+        for msg in body.responses_create_params.input:
+            if msg.role == "user" and "Question:" in str(msg.content):
+                question = str(msg.content).split("Question: ", 1)[1]
+                break
+        
+        ground_truth = getattr(body, 'ground_truth', None)
+        
+        # Create FastAPI Response object for cookie handling
+        from fastapi import Response as FastAPIResponse
+        fastapi_response = FastAPIResponse()
+        
+        # Call responses method directly (not via HTTP)
+        response = await self.responses(request, fastapi_response, body.responses_create_params, question, ground_truth)
 
-        verify_request = SimpleAgentVerifyRequest.model_validate(body.model_dump() | {"response": response.json()})
+        verify_request = SimpleAgentVerifyRequest.model_validate(body.model_dump() | {"response": response})
 
         verify_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/verify",
             json=verify_request.model_dump(),
-            cookies=response.cookies,
+            cookies=request.cookies,
         )
         return SimpleAgentVerifyResponse.model_validate(verify_response.json())
 
