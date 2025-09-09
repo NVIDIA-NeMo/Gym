@@ -58,7 +58,7 @@ class AviaryHotpotqaVerifyResponse(BaseVerifyResponse):
 class AviaryHotpotqaResourcesServer(SimpleResourcesServer):
     config: AviaryHotpotqaResourcesServerConfig
     
-    _sessions: Dict[str, dict] = PrivateAttr(default_factory=dict) # cant serialize aviary env tools, i think, but dont think this is needed... 
+    _sessions: Dict[str, dict] = PrivateAttr(default_factory=dict) # cant serialize aviary env tools, i think, but dont think this is needed... Field might be sufficient since its stateful so no serialization 
     
     def __init__(self, **data):
         super().__init__(**data)
@@ -124,7 +124,6 @@ class AviaryHotpotqaResourcesServer(SimpleResourcesServer):
             
             session["turn_count"] += 1
             session["reward"] = float(reward)
-            session["last_reward"] = float(reward)
             session["last_done"] = done
             result = self._extract_message_content(msgs)
             
@@ -149,7 +148,6 @@ class AviaryHotpotqaResourcesServer(SimpleResourcesServer):
             
             session["turn_count"] += 1
             session["reward"] = float(reward)
-            session["last_reward"] = float(reward)
             session["last_done"] = done
             result = self._extract_message_content(msgs)
             
@@ -179,7 +177,6 @@ class AviaryHotpotqaResourcesServer(SimpleResourcesServer):
             print(f"DEBUG SUBMIT: reward={reward}")
             
             session["reward"] = float(reward)
-            session["last_reward"] = float(reward)
             session["last_done"] = done
             result = self._extract_message_content(msgs)
             
