@@ -41,7 +41,9 @@ class TestApp:
         # Load judge template from YAML so tests mirror runtime config
         yaml_path = Path(__file__).resolve().parents[1] / "configs" / "equivalence_llm_judge.yaml"
         yaml_cfg = OmegaConf.load(str(yaml_path))
-        judge_template: str = yaml_cfg.equivalence_llm_judge.resources_servers.equivalence_llm_judge.judge_prompt_template
+        judge_template: str = (
+            yaml_cfg.equivalence_llm_judge.resources_servers.equivalence_llm_judge.judge_prompt_template
+        )
 
         cfg = LLMJudgeResourcesServerConfig(
             host="0.0.0.0",
