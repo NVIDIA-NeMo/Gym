@@ -118,9 +118,9 @@ class RunHelper:  # pragma: no cover
             "host": dynamic_cfg["head_server"]["host"],
             "port": dynamic_cfg["head_server"]["port"],
         }
-        initial_global_config["policy_model_name"] = dynamic_cfg["policy"]["model_name"]
+        initial_global_config["policy_model_name"] = dynamic_cfg["policy_model"]["model_name"]
+        initial_global_config["policy_base_url"] = dynamic_cfg["policy_model"]["base_url"]
         initial_global_config["policy_api_key"] = "dummy_key"
-        initial_global_config["policy_base_url"] = dynamic_cfg["policy"]["generation_base_url"]
 
         def _merge_dict_inplace(target: dict, source: dict):
             for src_key, src_value in source.items():
@@ -135,7 +135,7 @@ class RunHelper:  # pragma: no cover
 
         # Merge all other top-level config keys.
         for key, sub_cfg in dynamic_cfg.items():
-            if key == "head_server":
+            if key in ("head_server", "policy_model", ):
                 continue
             elif key in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS:
                 raise ValueError(
