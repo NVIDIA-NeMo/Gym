@@ -333,14 +333,27 @@ Example output: "My final verdict is different [[A!=B]]"."""
         ]
 
         judge_name = config.judge_model_server.name
-        print(f"DEBUG: LibraryJudgeMathResourcesServer._generate_judge_evaluation: judge name = {repr(judge_name)} payload = {responses_create_params}", flush=True)
+        # print(f"DEBUG: LibraryJudgeMathResourcesServer._generate_judge_evaluation: judge name = {repr(judge_name)} payload = {responses_create_params}", flush=True)
         response = await self.server_client.post(
             server_name=judge_name,
             url_path="/v1/responses",
             json=responses_create_params,
         )
+        try:
+            response = await self.server_client.post(
+                server_name=judge_name,
+                url_path="/v1/responses",
+                json=responses_create_params,
+            )
+        except Exception as e:
+            print(f"DEBUG: LibraryJudgeMathResourcesServer._generate_judge_evaluation: except = {e} server = {repr(judge_name)} responses create params = {responses_create_params}", flush=True)
+            judge_evaluation = JudgeEvaluation(
+                responses_create_params=responses_create_params,
+                response={},
+            )
+            return False, judge_evaluation
         response_body = response.json()
-        print(f"DEBUG: LibraryJudgeMathResourcesServer._generate_judge_evaluation: response = {response} payload = {response_body}", flush=True)
+        # print(f"DEBUG: LibraryJudgeMathResourcesServer._generate_judge_evaluation: response = {response} payload = {response_body}", flush=True)
         judge_response = NeMoGymResponse.model_validate(response_body)
         judge_evaluation = JudgeEvaluation(responses_create_params=responses_create_params, response=judge_response)
 
