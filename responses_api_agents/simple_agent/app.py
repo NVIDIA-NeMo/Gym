@@ -65,6 +65,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
         new_outputs = []
         turn = 0
+        resources_server_cookies = None  # update the cookies on every response
 
         while True:
             turn += 1
@@ -95,7 +96,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     server_name=self.config.resources_server.name,
                     url_path=f"/{output_function_call.name}",
                     json=json.loads(output_function_call.arguments),
+                    cookies=resources_server_cookies,
                 )
+                resources_server_cookies = api_response.cookies
 
                 tool_response = NeMoGymFunctionCallOutput(
                     type="function_call_output",

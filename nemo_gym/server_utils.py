@@ -22,6 +22,7 @@ import uvicorn
 from fastapi import FastAPI
 from httpx import AsyncClient, AsyncHTTPTransport, Limits, Response
 from httpx._types import (
+    CookieTypes,
     HeaderTypes,
     QueryParamTypes,
     RequestContent,
@@ -105,6 +106,7 @@ class ServerClient(BaseModel):
         url_path: str,
         params: QueryParamTypes | None = None,
         headers: HeaderTypes | None = None,
+        cookies: CookieTypes | None = None,
         **kwargs,
     ) -> Response:
         """
@@ -122,6 +124,7 @@ class ServerClient(BaseModel):
             f"http://{server_config_dict.host}:{server_config_dict.port}{url_path}",
             params=params,
             headers=headers,
+            cookies=cookies,
             **kwargs,
         )
 
@@ -135,6 +138,7 @@ class ServerClient(BaseModel):
         json: Any | BaseModel | None = None,
         params: QueryParamTypes | None = None,
         headers: HeaderTypes | None = None,
+        cookies: CookieTypes | None = None,
         **kwargs,
     ) -> Response:
         """
@@ -156,6 +160,7 @@ class ServerClient(BaseModel):
             json=json.model_dump(exclude_unset=True) if isinstance(json, BaseModel) else json,
             params=params,
             headers=headers,
+            cookies=cookies,
             **kwargs,
         )
 

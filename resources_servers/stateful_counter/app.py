@@ -14,7 +14,7 @@
 from typing import Dict
 
 from fastapi import FastAPI, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -42,13 +42,7 @@ class GetCounterValueResponse(BaseModel):
 
 class StatefulCounterResourcesServer(SimpleResourcesServer):
     config: StatefulCounterResourcesServerConfig
-
-    def model_post_init(self, context):
-        res = super().model_post_init(context)
-
-        self.session_id_to_counter: Dict[str, int] = dict()
-
-        return res
+    session_id_to_counter: Dict[str, int] = Field(default_factory=dict)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
