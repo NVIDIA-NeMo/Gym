@@ -71,6 +71,7 @@ class OfflineSearchResourcesServer(SimpleResourcesServer):
         expected_answer = body.expected_answer
         response_text = _extract_last_assistant_text(body)
         parsed_option = box_parser(response_text)
+        print(f"#################### Parsed option: {parsed_option}")
         if parsed_option == expected_answer:
             reward = 1.0
         else:
@@ -93,6 +94,7 @@ TODOs:
     - [done] run ng_prepare_data
     - [done] run example_rollouts. 
     - check on git commit.
-- Get reward profiling numbers
+- [ongoing] Get reward profiling numbers
+    - convert the input promtps into a messages format and then launch ng_collect to get the reward profiling numbers
 I think this should maybe take an hour to run and create?
 '''

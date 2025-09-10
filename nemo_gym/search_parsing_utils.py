@@ -15,13 +15,14 @@ def box_parser(output_str: str) -> Optional[str]:
         output_str = str(output_str)
 
     if output_str is None:
-        return None
+        return "N/A"
     try:
         match = re.search(r"\\boxed\{(.*?)\}", output_str)
-        parsed_option = match.group(1) if match else None
+        parsed_option = match.group(1) if match else "N/A"
+        print(output_str[-100:])
         return parsed_option
     except Exception as e:
         print(f"Regex error: {e}")
-        return None
+        return "N/A"
 
 

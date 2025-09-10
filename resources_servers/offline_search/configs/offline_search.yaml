@@ -11,7 +11,7 @@ offline_search_simple_agent:
         name: offline_search_resources_server
       model_server:
         type: responses_api_models
-        name: vllm_model
+        name: openai_model
       datasets:
       - name: train
         type: train

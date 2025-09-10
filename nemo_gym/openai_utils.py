@@ -77,14 +77,14 @@ from nemo_gym.server_utils import GLOBAL_HTTPX_CLIENT
 
 class TokenIDLogProbMixin(BaseModel):
     prompt_token_ids: List[int]
-    generation_token_ids: List[int]
-    generation_log_probs: List[float]
+    # generation_token_ids: List[int]
+    # generation_log_probs: List[float]
 
 
 class TokenIDLogProbTypedDictMixin(TypedDict):
     prompt_token_ids: List[int]
-    generation_token_ids: List[int]
-    generation_log_probs: List[float]
+    # generation_token_ids: List[int]
+    # generation_log_probs: List[float]
 
 
 ########################################
