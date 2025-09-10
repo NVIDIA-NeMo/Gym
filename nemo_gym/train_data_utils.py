@@ -14,7 +14,6 @@
 import json
 from abc import abstractmethod
 from collections import Counter, defaultdict
-from itertools import count, repeat
 from pathlib import Path
 from shutil import copyfileobj
 from typing import Dict, List, Literal, Optional, Self, Tuple, Union, Any
@@ -23,7 +22,7 @@ from devtools import pprint
 from omegaconf import DictConfig
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from tqdm.auto import tqdm
-
+from math import sqrt
 from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.config_types import (
     AGENT_REF_KEY,
@@ -83,19 +82,44 @@ class AvgMinMax(Accumulator):
     average: float = Field(serialization_alias="Average", default=0)
     min: float = Field(serialization_alias="Min", default=float("inf"))
     max: float = Field(serialization_alias="Max", default=float("-inf"))
+    median: float = Field(serialization_alias="Median", default=0)
+    stddev: float = Field(serialization_alias="Standard deviation", default=0)
+    values: List[Union[int, float]] = Field(default_factory=list, exclude=True)
 
     def _add(self: Self, other: Self) -> None:
         self.total += other.total
         self.average += other.average
         self.min = min(self.min, other.min)
         self.max = max(self.max, other.max)
+        self.values.extend(other.values)
 
-    def _aggregate(self) -> Self:
+    def _aggregate(self: Self) -> Self:
+        n = len(self.values)
+        mean = sum(self.values) / n if n > 0 else 0
+
+        # Median
+        vals_sorted = sorted(self.values)
+        if n == 0:
+            med = 0
+        elif n % 2 == 1:
+            med = vals_sorted[n // 2]
+        else:
+            med = (vals_sorted[n // 2 - 1] + vals_sorted[n // 2]) / 2
+
+        # Standard deviation
+        if n > 1:
+            variance = sum((x - mean) ** 2 for x in self.values) / (n - 1)
+            stddev = sqrt(variance)
+        else:
+            stddev = 0
+
         return AvgMinMax(
             total=self.total,
-            average=self.average / max(self.total, 1),
+            average=mean,
             min=self.min if self.total > 0 else 0,
             max=self.max if self.total > 0 else 0,
+            median=med,
+            stddev=stddev,
         )
 
 
@@ -151,17 +175,23 @@ def aggregate_other_metrics(data: List[Union[Any]]) -> Dict[str, Any]:
             # get unique count for strings
             elif isinstance(v, str):
                 string_values.setdefault(k, []).append(v)
+            elif isinstance(v, list):
+                for x in v:
+                    if isinstance(x, (int, float)):
+                        metric_values.setdefault(k, []).append(x)
+                    elif isinstance(x, str):
+                        string_values.setdefault(k, []).append(x)
 
     result = {}
     for k, v in metric_values.items():
         if v:
-            obj = AvgMinMax(
+            other_metrics = AvgMinMax(
                 total=len(v),
-                average=sum(v) / len(v),
                 min=min(v),
                 max=max(v),
-            )
-            result[k] = obj.model_dump(by_alias=True)
+                values=v
+            ).aggregate()
+            result[k] = other_metrics.model_dump(by_alias=True)
 
     for k, v in string_values.items():
         result[k] = {"unique_count": len(set(v)), "total_count": len(v)}
@@ -189,9 +219,9 @@ def compute_sample_metrics(sample_dict_str: str) -> Tuple[DatasetMetrics, bool]:
         number_of_tools = len(responses_create_params["tools"])
         number_of_tools_metrics = AvgMinMax(
             total=1,
-            average=number_of_tools,
             min=number_of_tools,
             max=number_of_tools,
+            values=[number_of_tools]
         )
 
     if isinstance(inputs, str):
@@ -202,9 +232,9 @@ def compute_sample_metrics(sample_dict_str: str) -> Tuple[DatasetMetrics, bool]:
         number_of_turns = len(user_inputs)
         number_of_turns_metrics = AvgMinMax(
             total=1,
-            average=number_of_turns,
             min=number_of_turns,
             max=number_of_turns,
+            values=[number_of_turns],
         )
 
     temperature_metrics = AvgMinMax()
@@ -212,17 +242,17 @@ def compute_sample_metrics(sample_dict_str: str) -> Tuple[DatasetMetrics, bool]:
         temperature = responses_create_params["temperature"]
         temperature_metrics = AvgMinMax(
             total=1,
-            average=temperature,
             min=temperature,
             max=temperature,
+            values=temperature,
         )
 
     json_dumped_number_of_words = len(json.dumps(responses_create_params).split())
     json_dumped_number_of_words_metrics = AvgMinMax(
         total=1,
-        average=json_dumped_number_of_words,
         min=json_dumped_number_of_words,
         max=json_dumped_number_of_words,
+        values=[json_dumped_number_of_words],
     )
 
     metrics = DatasetMetrics(
@@ -415,8 +445,6 @@ class TrainDataProcessor(BaseModel):
         other_metrics = aggregate_other_metrics(data)
         for k, v in other_metrics.items():
             state.metrics.add_extra_field(k, v)
-
-        state.metrics.aggregate()
 
         return state
 
