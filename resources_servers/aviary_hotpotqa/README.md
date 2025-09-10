@@ -16,12 +16,14 @@ ng_collect_rollouts +agent_name=aviary_hotpotqa_simple_agent \
 
 # Description
 
-Data links: ?
+HotPotQA resource server using Aviary framework for multi-hop question answering tasks.
+
+Data links: https://huggingface.co/datasets/hotpotqa/hotpot_qa
 
 # Licensing information
-Code: ?
-Data: ?
+Code: Apache 2.0
+Data: Apache 2.0
 
 Dependencies
 - nemo_gym: Apache 2.0
-?
+- aviary: Apache 2.0
