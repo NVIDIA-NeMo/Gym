@@ -87,7 +87,14 @@ class DatasetConfig(BaseModel):
     jsonl_fpath: str
 
     gitlab_identifier: Optional[JsonlDatasetGitlabIdentifer] = None
-    license: Optional[Union[Literal["Apache 2.0"], Literal["TBD"]]] = None
+    license: Optional[
+        Union[
+            Literal["Apache 2.0"],
+            Literal["Creative Commons Attribution 4.0 International"],
+            Literal["Creative Commons Attribution-ShareAlike 4.0 International"],
+            Literal["TBD"],
+        ]
+    ] = None
 
     @model_validator(mode="after")
     def check_train_validation_sets(self) -> "DatasetConfig":
