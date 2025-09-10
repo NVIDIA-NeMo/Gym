@@ -13,11 +13,11 @@
 # limitations under the License.
 from typing import Dict
 
+from aviary.core import ToolCall, ToolRequestMessage
+from aviary.envs.hotpotqa.env import HotPotQAEnv
 from fastapi import FastAPI, Request, Response
 from pydantic import BaseModel, ConfigDict, PrivateAttr
 
-from aviary.core import ToolCall, ToolRequestMessage
-from aviary.envs.hotpotqa.env import HotPotQAEnv
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseRunRequest,
