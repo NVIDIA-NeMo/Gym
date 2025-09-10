@@ -18,7 +18,8 @@
 - [How To: Prepare and validate data for PR submission or RL training](#how-to-prepare-and-validate-data-for-pr-submission-or-rl-training)
 - [How To: ng\_dump\_config - Dump a YAML config as exactly as NeMo Gym sees it](#how-to-ng_dump_config---dump-a-yaml-config-as-exactly-as-nemo-gym-sees-it)
 - [How To: Use NeMo Gym with a non-Responses compatible API endpoint like vLLM](#how-to-use-nemo-gym-with-a-non-responses-compatible-api-endpoint-like-vllm)
-- [FAQ: VSCode and Git setup](#faq-vscode-and-git-setup)
+- [How To: Multi-verifier usage](#how-to-multi-verifier-usage)
+- [FAQ: DCO and commit signing VSCode and Git setup](#faq-dco-and-commit-signing-vscode-and-git-setup)
 - [FAQ: SFT and RL](#faq-sft-and-rl)
 - [FAQ: Error: Found files with missing copyright](#faq-error-found-files-with-missing-copyright)
 - [FAQ: build-docs / Build docs CI failures](#faq-build-docs--build-docs-ci-failures)
@@ -736,7 +737,35 @@ vllm serve \
 ```
 
 
-# FAQ: VSCode and Git setup
+# How To: Multi-verifier usage
+Gym is explicitly designed to support multi-verifier training.
+
+Let's say you want to use both math and search verifiers. Normally how you spin up the servers individually is:
+For math:
+```bash
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/library_judge_math/configs/bytedtsinghua_dapo17k.yaml"
+ng_run "+config_paths=[${config_paths}]"
+```
+For search:
+```bash
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/google_search/configs/google_search.yaml"
+ng_run "+config_paths=[$config_paths]"
+```
+
+If you want to use them both you would just add the yamls together like:
+```bash
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/library_judge_math/configs/bytedtsinghua_dapo17k.yaml,\
+resources_servers/google_search/configs/google_search.yaml"
+ng_run "+config_paths=[$config_paths]"
+```
+
+The same process goes for data preparation and downstream training framework Gym configuration, you would just add additional server configs.
+
+
+# FAQ: DCO and commit signing VSCode and Git setup
 Here are some suggestions for easier development using the VSCode code editor.
 
 VSCode workspace settings at `.vscode/settings.json`
