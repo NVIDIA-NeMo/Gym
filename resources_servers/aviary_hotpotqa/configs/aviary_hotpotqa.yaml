@@ -3,8 +3,6 @@ aviary_hotpotqa_resources_server:
     aviary_hotpotqa:
       entrypoint: app.py
       max_steps: 10
-      correct_reward: 1.0
-      incorrect_reward: 0.0
 aviary_hotpotqa_simple_agent:
   responses_api_agents:
     simple_agent:
