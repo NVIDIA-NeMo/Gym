@@ -30,8 +30,8 @@ from nemo_gym.base_resources_server import BaseVerifyResponse
 from nemo_gym.server_utils import get_global_config_dict
 from nemo_gym.train_data_utils import (
     DatasetMetrics,
-    compute_sample_metrics,
     aggregate_other_metrics,
+    compute_sample_metrics,
 )
 
 
@@ -206,16 +206,20 @@ class JsonlDatasetViewerConfig(BaseModel):
     jsonl_fpath: str
 
 
-def get_aggregate_metrics(data: List[DatasetViewerVerifyResponse], raw_lines: List[str]) -> Dict[str, Any]:
+def get_aggregate_metrics(raw_lines: List[str]) -> Dict[str, Any]:
     dataset_metrics = DatasetMetrics()
+    line_dicts = []
     for line in raw_lines:
         metrics, is_offending = compute_sample_metrics(line)
+        line_dicts.append(json.loads(line))
         if not is_offending:
             dataset_metrics.add(metrics)
 
+    other_metrics = aggregate_other_metrics(line_dicts)
+    dataset_metrics.other_fields = other_metrics
+
     aggregate_metrics = dataset_metrics.aggregate()
-    aggregate_metrics_dict = aggregate_metrics.model_dump(by_alias=True, exclude={"extra_fields"})
-    aggregate_metrics_dict.update(**aggregate_other_metrics(data))
+    aggregate_metrics_dict = aggregate_metrics.model_dump(by_alias=True)
     return aggregate_metrics_dict
 
 
@@ -241,7 +245,7 @@ def build_jsonl_dataset_viewer(config: JsonlDatasetViewerConfig) -> Blocks:
     }
     """
     with Blocks(analytics_enabled=False, css=CSS) as demo:
-        aggregate_dicts = get_aggregate_metrics(data, raw_lines)
+        aggregate_dicts = get_aggregate_metrics(raw_lines)
         JSON(value=aggregate_dicts, label="Aggregate Metrics", open=False)
 
         item_dropdown = Dropdown(choices=choices, value=0, label="Samples")

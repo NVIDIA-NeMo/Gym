@@ -14,15 +14,16 @@
 import json
 from abc import abstractmethod
 from collections import Counter, defaultdict
+from math import sqrt
 from pathlib import Path
 from shutil import copyfileobj
-from typing import Dict, List, Literal, Optional, Self, Tuple, Union, Any
+from typing import Any, Dict, List, Literal, Optional, Self, Tuple, Union
 
 from devtools import pprint
 from omegaconf import DictConfig
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from tqdm.auto import tqdm
-from math import sqrt
+
 from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.config_types import (
     AGENT_REF_KEY,
@@ -132,7 +133,7 @@ class DatasetMetrics(Accumulator):
     )
     number_of_turns: AvgMinMax = Field(serialization_alias="Number of turns", default_factory=AvgMinMax)
     temperature: AvgMinMax = Field(serialization_alias="Temperature", default_factory=AvgMinMax)
-    other_fields: Dict[str, Any] = Field(default_factory=dict)
+    other_fields: Dict[str, Any] = Field(serialization_alias="Other Fields", default_factory=dict)
 
     # TODO: Number of unique create params, Number of unique user messages, other sampling params, etc
 
@@ -153,18 +154,14 @@ class DatasetMetrics(Accumulator):
             json_dumped_number_of_words=self.json_dumped_number_of_words.aggregate(),
             number_of_turns=self.number_of_turns.aggregate(),
             temperature=self.temperature.aggregate(),
-            other_fields=self.other_fields
+            other_fields=self.other_fields,
         )
 
-    def add_extra_field(self: Self, name: str, value: Any):
-        self.other_fields[name] = value
 
-
-def aggregate_other_metrics(data: List[Union[Any]]) -> Dict[str, Any]:
+def aggregate_other_metrics(data: List[Dict[str, Any]]) -> Dict[str, Any]:
     metric_values = {}
     string_values = {}
     for d in data:
-        d = d.model_dump() if hasattr(d, "model_dump") else d
         for k, v in d.items():
             if k in ("responses_create_params", "response"):
                 continue
@@ -185,12 +182,7 @@ def aggregate_other_metrics(data: List[Union[Any]]) -> Dict[str, Any]:
     result = {}
     for k, v in metric_values.items():
         if v:
-            other_metrics = AvgMinMax(
-                total=len(v),
-                min=min(v),
-                max=max(v),
-                values=v
-            ).aggregate()
+            other_metrics = AvgMinMax(total=len(v), min=min(v), max=max(v), values=v).aggregate()
             result[k] = other_metrics.model_dump(by_alias=True)
 
     for k, v in string_values.items():
@@ -218,10 +210,7 @@ def compute_sample_metrics(sample_dict_str: str) -> Tuple[DatasetMetrics, bool]:
     if responses_create_params.get("tools") is not None:
         number_of_tools = len(responses_create_params["tools"])
         number_of_tools_metrics = AvgMinMax(
-            total=1,
-            min=number_of_tools,
-            max=number_of_tools,
-            values=[number_of_tools]
+            total=1, min=number_of_tools, max=number_of_tools, values=[number_of_tools]
         )
 
     if isinstance(inputs, str):
@@ -444,7 +433,7 @@ class TrainDataProcessor(BaseModel):
 
         other_metrics = aggregate_other_metrics(data)
         for k, v in other_metrics.items():
-            state.metrics.add_extra_field(k, v)
+            state.metrics.other_fields[k] = v
 
         return state
 
