@@ -1,0 +1,4 @@
+simple_minesweeper:
+  resources_servers:
+    simple_minesweeper:
+      entrypoint: app.py
