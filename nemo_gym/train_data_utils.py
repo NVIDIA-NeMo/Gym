@@ -173,11 +173,11 @@ def aggregate_other_metrics(data: List[Dict[str, Any]]) -> Dict[str, Any]:
             elif isinstance(v, str):
                 string_values.setdefault(k, []).append(v)
             elif isinstance(v, list):
-                for x in v:
-                    if isinstance(x, (int, float)):
-                        metric_values.setdefault(k, []).append(x)
-                    elif isinstance(x, str):
-                        string_values.setdefault(k, []).append(x)
+                for item in v:
+                    if isinstance(item, (int, float)):
+                        metric_values.setdefault(k, []).append(item)
+                    elif isinstance(item, str):
+                        string_values.setdefault(k, []).append(item)
 
     result = {}
     for k, v in metric_values.items():
@@ -427,7 +427,6 @@ class TrainDataProcessor(BaseModel):
         map_fn = self._validate_samples_and_aggregate_metrics_single_sample
         with open(dataset_config.jsonl_fpath) as f:
             for idx, line in enumerate(tqdm(f, desc=f"Process {dataset_config.jsonl_fpath}")):
-                # Don't load everything into memory at once. Throw things away immediately.
                 map_fn(state, idx, line)
                 data.append(json.loads(line))
 
