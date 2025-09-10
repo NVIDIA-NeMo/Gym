@@ -116,7 +116,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 tool_response = NeMoGymFunctionCallOutput(
                     type="function_call_output",
                     call_id=output_function_call.call_id,
-                    output=json.dumps(api_response.json()),
+                    output=api_response.content.decode(),
                 )
                 new_outputs.append(tool_response)
 

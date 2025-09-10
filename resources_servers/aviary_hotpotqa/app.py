@@ -1,6 +1,6 @@
 from typing import Dict
 from pydantic import BaseModel, PrivateAttr, ConfigDict
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 
 from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
@@ -58,15 +58,6 @@ class SearchRequest(BaseModel):
     """
     entity: str
 
-class SearchResponse(BaseModel):
-    """
-    Based on aviary.tools.base.ToolResponseMessage:
-    - result: Equivalent to ToolResponseMessage.content
-    
-    See: https://github.com/Future-House/aviary/blob/main/src/aviary/tools/base.py#L150
-    """
-    result: str
-
 class LookupRequest(BaseModel):
     """
     Maps to aviary's lookup tool parameters:
@@ -76,15 +67,6 @@ class LookupRequest(BaseModel):
     """
     keyword: str
 
-class LookupResponse(BaseModel):
-    """
-    Based on aviary.tools.base.ToolResponseMessage:
-    - result: Equivalent to ToolResponseMessage.content
-    
-    See: https://github.com/Future-House/aviary/blob/main/src/aviary/tools/base.py#L150
-    """
-    result: str
-
 class SubmitAnswerRequest(BaseModel):
     """
     Maps to aviary's submit_answer tool parameters:
@@ -93,20 +75,6 @@ class SubmitAnswerRequest(BaseModel):
     See: https://github.com/Future-House/aviary/blob/main/packages/hotpotqa/src/aviary/envs/hotpotqa/env.py#L385
     """
     answer: str
-
-class SubmitAnswerResponse(BaseModel):
-    """
-    Based on:
-    - aviary.tools.base.ToolResponseMessage (result -> content)
-    - aviary.envs.hotpotqa.env.HotPotQAEnvState (reward, done)
-    
-    See: 
-    - https://github.com/Future-House/aviary/blob/main/src/aviary/tools/base.py#L150
-    - https://github.com/Future-House/aviary/blob/main/packages/hotpotqa/src/aviary/envs/hotpotqa/env.py#L61d
-    """
-    result: str
-    reward: float
-    done: bool
 
 class AviaryHotpotqaRunRequest(BaseRunRequest):
     pass
@@ -183,7 +151,7 @@ class AviaryHotpotqaResourcesServer(SimpleResourcesServer):
 
         return app
 
-    async def search(self, body: SearchRequest, request: Request) -> SearchResponse:
+    async def search(self, body: SearchRequest, request: Request) -> Response:
         session_id = request.session[SESSION_ID_KEY]
         
         session = self._sessions[session_id]
@@ -197,12 +165,12 @@ class AviaryHotpotqaResourcesServer(SimpleResourcesServer):
             session.turn_count += 1
             result = self._extract_message_content(msgs)
             
-            return SearchResponse(result=result)
+            return Response(content=result)
             
         except Exception as e:
-            return SearchResponse(result=f"Error during search: {str(e)}")
+            return Response(content=f"Error during search: {str(e)}")
     
-    async def lookup(self, body: LookupRequest, request: Request) -> LookupResponse:
+    async def lookup(self, body: LookupRequest, request: Request) -> Response:
         session_id = request.session[SESSION_ID_KEY]
         
         session = self._sessions[session_id]
@@ -216,12 +184,12 @@ class AviaryHotpotqaResourcesServer(SimpleResourcesServer):
             session.turn_count += 1
             result = self._extract_message_content(msgs)
             
-            return LookupResponse(result=result)
+            return Response(content=result)
             
         except Exception as e:
-            return LookupResponse(result=f"Error during lookup: {str(e)}")
+            return Response(content=f"Error during lookup: {str(e)}")
     
-    async def submit_answer(self, body: SubmitAnswerRequest, request: Request) -> SubmitAnswerResponse:
+    async def submit_answer(self, body: SubmitAnswerRequest, request: Request) -> Response:
         session_id = request.session[SESSION_ID_KEY]
         
         print(f"DEBUG SUBMIT: session_id={session_id}")
@@ -244,18 +212,10 @@ class AviaryHotpotqaResourcesServer(SimpleResourcesServer):
             
             result = self._extract_message_content(msgs)
             
-            return SubmitAnswerResponse(
-                result=result,
-                reward=session.reward,
-                done=session.done,
-            )
+            return Response(content=result)
             
         except Exception as e:
-            return SubmitAnswerResponse(
-                result=f"Error submitting answer: {str(e)}",
-                reward=0.0,
-                done=True,
-            )
+            return Response(content=f"Error submitting answer: {str(e)}")
 
     async def verify(self, request: Request, body: BaseVerifyRequest) -> BaseVerifyResponse:
         """returns reward from the session state"""
