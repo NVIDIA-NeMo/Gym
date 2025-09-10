@@ -1,5 +1,5 @@
-from typing import Dict, Optional
-from pydantic import BaseModel, PrivateAttr, Field, ConfigDict
+from typing import Dict
+from pydantic import BaseModel, PrivateAttr, ConfigDict
 from fastapi import FastAPI, Request
 
 from nemo_gym.base_resources_server import (
@@ -8,11 +8,13 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    BaseSeedSessionResponse,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
 
 from aviary.envs.hotpotqa.env import HotPotQAEnv
 from aviary.core import ToolCall, ToolRequestMessage
+from responses_api_agents.simple_agent.app import SimpleAgentRunRequest
 
 class AviarySession(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -40,6 +42,13 @@ class AviarySession(BaseModel):
 class AviaryHotpotqaResourcesServerConfig(BaseResourcesServerConfig):
     max_steps: int = 10
 
+
+class AviaryHotpotqaSeedSessionRequest(SimpleAgentRunRequest):
+    pass
+
+class AviaryHotpotqaSeedSessionResponse(BaseSeedSessionResponse):
+    pass
+
 class SearchRequest(BaseModel):
     """
     Maps to aviary's search tool parameters:
@@ -48,8 +57,6 @@ class SearchRequest(BaseModel):
     See: https://github.com/Future-House/aviary/blob/main/packages/hotpotqa/src/aviary/envs/hotpotqa/env.py#L401
     """
     entity: str
-    question: Optional[str] = None
-    ground_truth: Optional[str] = None
 
 class SearchResponse(BaseModel):
     """
@@ -86,8 +93,6 @@ class SubmitAnswerRequest(BaseModel):
     See: https://github.com/Future-House/aviary/blob/main/packages/hotpotqa/src/aviary/envs/hotpotqa/env.py#L385
     """
     answer: str
-    question: Optional[str] = None
-    ground_truth: Optional[str] = None
 
 class SubmitAnswerResponse(BaseModel):
     """
@@ -136,17 +141,33 @@ class AviaryHotpotqaResourcesServer(SimpleResourcesServer):
             turn_count=0
         )
 
-    async def _init_env(self, session_id: str, question: Optional[str], ground_truth: Optional[str]) -> None:
-        """Init env and session if doesn't exist yet (first tool call)"""
+    async def seed_session(self, request: Request, body: AviaryHotpotqaSeedSessionRequest) -> AviaryHotpotqaSeedSessionResponse:
+        """init env and session"""
+        session_id = request.session[SESSION_ID_KEY]
+        
         if session_id not in self._sessions:
+            question = None
+            for msg in body.responses_create_params.input:
+                if msg.role == "user":
+                    content = msg.content
+                    if "Question: " in content:
+                        question = content.split("Question: ", 1)[1]
+                    else:
+                        question = content
+                    break
+            
+            ground_truth = body.ground_truth
+            
             if not question or not ground_truth:
-                raise ValueError("Question or ground truth not found in tool payload")
+                raise ValueError(f"Missing required fields: question={question}, ground_truth={ground_truth}")
             
             env_config = self._create_env_config(question, ground_truth)
             env = HotPotQAEnv(**env_config)
             await env.reset()
             
             self._sessions[session_id] = self._create_session(env, env_config)
+            
+        return AviaryHotpotqaSeedSessionResponse()
 
     def _extract_message_content(self, msgs) -> str:
         if msgs and len(msgs) > 0:
@@ -162,11 +183,9 @@ class AviaryHotpotqaResourcesServer(SimpleResourcesServer):
 
         return app
 
-
     async def search(self, body: SearchRequest, request: Request) -> SearchResponse:
         session_id = request.session[SESSION_ID_KEY]
         
-        await self._init_env(session_id, body.question, body.ground_truth)
         session = self._sessions[session_id]
         env = session.env
         
@@ -185,9 +204,6 @@ class AviaryHotpotqaResourcesServer(SimpleResourcesServer):
     
     async def lookup(self, body: LookupRequest, request: Request) -> LookupResponse:
         session_id = request.session[SESSION_ID_KEY]
-        
-        if session_id not in self._sessions:
-            return LookupResponse(result="No active search session. Please search first.")
         
         session = self._sessions[session_id]
         env = session.env
@@ -210,11 +226,13 @@ class AviaryHotpotqaResourcesServer(SimpleResourcesServer):
         
         print(f"DEBUG SUBMIT: session_id={session_id}")
         print(f"DEBUG SUBMIT: body.answer={body.answer}")
-        print(f"DEBUG SUBMIT: body.question={body.question}")
-        print(f"DEBUG SUBMIT: body.ground_truth={body.ground_truth}")
         
-        await self._init_env(session_id, body.question, body.ground_truth)
         session = self._sessions[session_id]
+        
+        env_config = session.env_config
+        print(f"DEBUG SUBMIT: question={env_config.get('question')}")
+        print(f"DEBUG SUBMIT: ground_truth={env_config.get('correct_answer')}")
+        
         env = session.env
         
         try:

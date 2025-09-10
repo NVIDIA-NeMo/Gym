@@ -105,19 +105,10 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 break
 
             for output_function_call in all_fn_calls:
-                tool_payload = json.loads(output_function_call.arguments)
-                
-                if body.metadata is None:
-                    body.metadata = {}
-                
-                # for initializing environment from first tool call - should we do this some other way?
-                tool_payload["question"] = body.metadata.get("question")
-                tool_payload["ground_truth"] = body.metadata.get("ground_truth")
-                
                 api_response = await self.server_client.post(
                     server_name=self.config.resources_server.name,
                     url_path=f"/{output_function_call.name}",
-                    json=tool_payload,
+                    json=json.loads(output_function_call.arguments),
                     cookies=resources_server_cookies,
                 )
                 resources_server_cookies = api_response.cookies
@@ -141,24 +132,23 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         return model_response
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
-        question = None
-        for msg in body.responses_create_params.input:
-            if msg.role == "user":
-                question = msg.content.split("Question: ", 1)[1]
-                break
-        
-        if body.responses_create_params.metadata is None:
-            body.responses_create_params.metadata = {}
-        
-        body.responses_create_params.metadata["question"] = question
-        body.responses_create_params.metadata["ground_truth"] = body.ground_truth
+        cookies = request.cookies
+
+        seed_session_response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/seed_session",
+            json=body.model_dump(),
+            cookies=cookies,
+        )
+        cookies = seed_session_response.cookies
 
         response = await self.server_client.post(
             server_name=self.config.name,
             url_path="/v1/responses",
             json=body.responses_create_params,
-            cookies=request.cookies,
+            cookies=cookies,
         )
+        cookies = response.cookies
 
         verify_request = SimpleAgentVerifyRequest.model_validate(body.model_dump() | {"response": response.json()})
 
@@ -166,7 +156,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             server_name=self.config.resources_server.name,
             url_path="/verify",
             json=verify_request.model_dump(),
-            cookies=response.cookies,
+            cookies=cookies,
         )
         return SimpleAgentVerifyResponse.model_validate(verify_response.json())
 
