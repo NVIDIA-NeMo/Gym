@@ -5,8 +5,11 @@ The problems in the OpenMathReasoning dataset are taken from the
 [OpenMathReasoning dataset](https://huggingface.co/datasets/nvidia/OpenMathReasoning)
 on Hugging Face.
 
+The problems in the Math Stack Overflow dataset come from Stack Overflow.
+
 Data links:
 - OpenMathReasoning: https://gitlab-master.nvidia.com/bxyu/nemo-gym/-/ml/models/37#/
+- Math Stack Overflow: https://gitlab-master.nvidia.com/bxyu/nemo-gym/-/ml/models/68#/
 
 # Example usage
 
@@ -30,7 +33,8 @@ ng_download_dataset_from_gitlab \
 
 Then, rollouts can be collected using a command such as the following:
 ```bash
-ng_collect_rollouts +agent_name=simple_agent \
+ng_collect_rollouts \
+    +agent_name=library_judge_math_simple_agent \
     +input_jsonl_fpath=data/open_math_reasoning_problems.jsonl \
     +output_jsonl_fpath=results/example_open_math_reasoning_verify_responses.jsonl \
     +limit=5
@@ -40,6 +44,7 @@ ng_collect_rollouts +agent_name=simple_agent \
 Code: Apache 2.0<br>
 Data:
 - OpenMathReasoning: Creative Commons Attribution 4.0 International
+- Math Stack Overflow: Creative Commons Attribution-ShareAlike 4.0 International
 
 Dependencies
 - nemo_gym: Apache 2.0

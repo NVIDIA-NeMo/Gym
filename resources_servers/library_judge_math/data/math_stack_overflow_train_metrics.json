@@ -1,14 +1,14 @@
 {
     "name": "train",
     "type": "train",
-    "jsonl_fpath": "resources_servers/library_judge_math/data/train.jsonl",
+    "jsonl_fpath": "resources_servers/library_judge_math/data/math_stack_overflow_train.jsonl",
     "gitlab_identifier": {
-        "dataset_name": "math_open_math_reasoning",
+        "dataset_name": "math_stack_overflow",
         "version": "0.0.1",
-        "artifact_fpath": "open_math_reasoning_problems.jsonl"
+        "artifact_fpath": "math_stack_overflow_problems.jsonl"
     },
-    "license": "Creative Commons Attribution 4.0 International",
-    "Number of examples": 112867,
+    "license": "Creative Commons Attribution-ShareAlike 4.0 International",
+    "Number of examples": 436307,
     "Number of tools": {
         "Total # non-null values": 0,
         "Average": 0.0,
@@ -16,13 +16,13 @@
         "Max": 0.0
     },
     "Json-dumped number of words (proxy for token count)": {
-        "Total # non-null values": 112867,
-        "Average": 61.097176322574356,
+        "Total # non-null values": 436307,
+        "Average": 59.46089336178425,
         "Min": 28.0,
-        "Max": 458.0
+        "Max": 1194.0
     },
     "Number of turns": {
-        "Total # non-null values": 112867,
+        "Total # non-null values": 436307,
         "Average": 1.0,
         "Min": 1.0,
         "Max": 1.0
