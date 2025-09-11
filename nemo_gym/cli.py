@@ -21,6 +21,7 @@ from os.path import exists
 from pathlib import Path
 from subprocess import Popen
 from threading import Thread
+from time import sleep
 from typing import Dict, List, Optional
 
 from devtools import pprint
@@ -36,7 +37,7 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
-from nemo_gym.server_utils import HeadServer
+from nemo_gym.server_utils import HEAD_SERVER_KEY_NAME, HeadServer, ServerClient, ServerStatus
 
 
 def _setup_env_command(dir_path: Path) -> str:  # pragma: no cover
@@ -72,7 +73,7 @@ class TestConfig(RunConfig):
         return super().model_post_init(context)
 
 
-class ServerInstance(BaseModel):
+class ServerInstanceDisplayConfig(BaseModel):
     process_name: str
     server_type: str
     name: str
@@ -88,7 +89,8 @@ class ServerInstance(BaseModel):
 class RunHelper:  # pragma: no cover
     _head_server_thread: Thread
     _processes: Dict[str, Popen]
-    _server_instances: List[ServerInstance]
+    _server_instance_display_configs: List[ServerInstanceDisplayConfig]
+    _server_client: ServerClient
 
     def parse_from_dynamic_or_defaults(
         self,
@@ -165,8 +167,8 @@ class RunHelper:  # pragma: no cover
 
         top_level_paths = [k for k in global_config_dict.keys() if k not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS]
 
-        processes: Dict[str, Popen] = dict()
-        server_instances: List[ServerInstance] = []
+        self._processes: Dict[str, Popen] = dict()
+        self._server_instance_display_configs: List[ServerInstanceDisplayConfig] = []
 
         # TODO there is a better way to resolve this that uses nemo_gym/global_config.py::ServerInstanceConfig
         for top_level_path in top_level_paths:
@@ -198,13 +200,13 @@ class RunHelper:  # pragma: no cover
     python {str(entrypoint_fpath)}"""
 
             process = _run_command(command, dir_path)
-            processes[top_level_path] = process
+            self._processes[top_level_path] = process
 
             host = server_config_dict.get("host")
             port = server_config_dict.get("port")
 
-            server_instances.append(
-                ServerInstance(
+            self._server_instance_display_configs.append(
+                ServerInstanceDisplayConfig(
                     process_name=top_level_path,
                     server_type=first_key,
                     name=second_key,
@@ -218,14 +220,25 @@ class RunHelper:  # pragma: no cover
                 )
             )
 
-        self._processes = processes
-        self._server_instances = server_instances
+        self._server_client = ServerClient(
+            head_server_config=ServerClient.load_head_server_config(),
+            global_config_dict=global_config_dict,
+        )
 
-        # TODO: Server block summaries may get cut off/interleaved by other process output(s)
-        self.display_server_instance_info()
+        print("Waiting for head server to spin up")
+        while True:
+            status = self._server_client.poll_for_status(HEAD_SERVER_KEY_NAME)
+            if status == "success":
+                break
+
+            print(f"Head server is not up yet (status `{status}`). Sleeping 3s")
+            sleep(3)
+
+        print("Waiting for servers to spin up")
+        self.wait_for_spinup()
 
     def display_server_instance_info(self) -> None:
-        if not getattr(self, "_server_instances", None):
+        if not self._server_instance_display_configs:
             print("No server instances to display.")
             return
 
@@ -237,7 +250,7 @@ class RunHelper:  # pragma: no cover
 {"#" * 100}
 """)
 
-        for i, inst in enumerate(self._server_instances, 1):
+        for i, inst in enumerate(self._server_instance_display_configs, 1):
             print(f"[{i}] {inst.process_name} ({inst.server_type}/{inst.name})")
             pprint(inst.model_dump())
         print(f"{'#' * 100}\n")
@@ -250,12 +263,37 @@ class RunHelper:  # pragma: no cover
             if process.poll() is not None:
                 raise RuntimeError(f"Process `{process_name}` finished unexpectedly!")
 
+    def wait_for_spinup(self) -> None:
+        sleep_interval = 3
+
+        # Until we spin up or error out.
+        while True:
+            self.poll()
+            statuses = self.check_http_server_statuses()
+
+            num_spun_up = statuses.count("success")
+            if len(statuses) != num_spun_up:
+                print(
+                    f"""{num_spun_up} / {len(statuses)} servers ready ({statuses.count("timeout")} timed out, {statuses.count("connection_error")} connection errored, {statuses.count("unknown_error")} had unknown errors).
+Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
+                )
+            else:
+                print(f"All {num_spun_up} / {len(statuses)} servers ready! Polling every 60s")
+                self.display_server_instance_info()
+                return
+
+            sleep(sleep_interval)
+
     def run_forever(self) -> None:
         async def sleep():
             # Indefinitely
             while True:
                 self.poll()
-                await asyncio.sleep(60)  # Check every 60s.
+
+                statuses = self.check_http_server_statuses()
+                assert statuses.count("success") == len(statuses), "Found non-success statuses"
+
+                await asyncio.sleep(60)
 
         try:
             asyncio.run(sleep())
@@ -268,6 +306,18 @@ class RunHelper:  # pragma: no cover
                 process.wait()
 
             print("NeMo Gym finished!")
+
+    def check_http_server_statuses(self) -> List[ServerStatus]:
+        print(
+            "Checking for HTTP server statuses (you should see some HTTP requests to `/` that may 404. This is expected.)"
+        )
+        statuses = []
+        for server_instance_display_config in self._server_instance_display_configs:
+            name = server_instance_display_config.config_path
+            status = self._server_client.poll_for_status(name)
+            statuses.append(status)
+
+        return statuses
 
 
 def run(

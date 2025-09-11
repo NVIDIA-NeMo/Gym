@@ -260,7 +260,7 @@ class TrainDataProcessor(BaseModel):
 
         server_names_list_str = "\n- ".join([""] + [f"{c.name} ({c.SERVER_TYPE})" for c in agent_configs_without_data])
         print(
-            f"Found {len(agent_configs_without_data)} agent server instance configs withOUT datasets:{server_names_list_str}\n\n"
+            f"Found {len(agent_configs_without_data)} agent server instance configs WITHOUT datasets:{server_names_list_str}\n\n"
         )
 
         server_names_list_str = ""

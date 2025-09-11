@@ -15,7 +15,7 @@ import json
 from abc import abstractmethod
 from os import getenv
 from threading import Thread
-from typing import Any, Optional, Type
+from typing import Any, Literal, Optional, Type, Union
 
 import requests
 import uvicorn
@@ -65,6 +65,8 @@ GLOBAL_HTTPX_CLIENT = AsyncClient(
 
 DEFAULT_HEAD_SERVER_PORT = 11000
 
+ServerStatus = Union[Literal["success"], Literal["connection_error"], Literal["timeout"], Literal["unknown_error"]]
+
 
 class ServerClient(BaseModel):
     head_server_config: BaseServerConfig
@@ -107,6 +109,9 @@ class ServerClient(BaseModel):
 
         return cls(head_server_config=head_server_config, global_config_dict=global_config_dict)
 
+    def _build_server_base_url(self, server_config_dict: OmegaConf) -> str:
+        return f"http://{server_config_dict.host}:{server_config_dict.port}"
+
     async def get(
         self,
         server_name: str,
@@ -127,7 +132,7 @@ class ServerClient(BaseModel):
         """
         server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
         return await GLOBAL_HTTPX_CLIENT.get(
-            f"http://{server_config_dict.host}:{server_config_dict.port}{url_path}",
+            f"{self._build_server_base_url(server_config_dict)}{url_path}",
             params=params,
             headers=headers,
             **kwargs,
@@ -157,7 +162,7 @@ class ServerClient(BaseModel):
         """
         server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
         return await GLOBAL_HTTPX_CLIENT.post(
-            f"http://{server_config_dict.host}:{server_config_dict.port}{url_path}",
+            f"{self._build_server_base_url(server_config_dict)}{url_path}",
             content=content,
             data=data,
             files=files,
@@ -166,6 +171,23 @@ class ServerClient(BaseModel):
             headers=headers,
             **kwargs,
         )
+
+    def poll_for_status(self, server_name: str) -> ServerStatus:  # pragma: no cover
+        if server_name == HEAD_SERVER_KEY_NAME:
+            server_config_dict = self.global_config_dict[HEAD_SERVER_KEY_NAME]
+        else:
+            server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
+
+        try:
+            requests.get(self._build_server_base_url(server_config_dict), timeout=5)
+            # We don't check the status code since there may not be a route at /
+            return "success"
+        except requests.exceptions.ConnectionError:
+            return "connection_error"
+        except requests.exceptions.Timeout:
+            return "timeout"
+        except Exception:
+            return "unknown_error"
 
 
 class BaseServer(BaseModel):

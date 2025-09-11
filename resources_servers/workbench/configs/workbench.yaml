@@ -24,4 +24,4 @@ workbench_simple_agent:
         - name: example
           type: example
           jsonl_fpath: resources_servers/workbench/data/example.jsonl
-      max_turns: 6
+      max_steps: 6

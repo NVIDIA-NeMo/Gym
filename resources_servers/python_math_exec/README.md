@@ -119,7 +119,7 @@ ng_run "+config_paths=[responses_api_agents/simple_agent_stateful/configs/simple
 
 Collect trajectories
 ```
-ng_collect_traj +agent_name=simple_agent_stateful +input_jsonl_fpath=data/open_math_reasoning_problems_tool.jsonl +output_jsonl_fpath=results/open_math_reasoning_problems_tool_output_new.jsonl +limit=1
+ng_collect_rollouts +agent_name=simple_agent_stateful +input_jsonl_fpath=data/open_math_reasoning_problems_tool.jsonl +output_jsonl_fpath=results/open_math_reasoning_problems_tool_output_new.jsonl +limit=1
 ```
 
 
