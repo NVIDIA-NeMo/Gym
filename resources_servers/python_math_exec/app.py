@@ -17,7 +17,6 @@ import multiprocessing
 import re
 import signal
 import time
-import uuid
 from contextlib import redirect_stderr, redirect_stdout
 from typing import Dict, Optional
 
