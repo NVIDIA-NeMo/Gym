@@ -20,8 +20,8 @@ The judge prompt is fully configurable via server config.
 # limitations under the License.
 from __future__ import annotations
 
-from typing import Any, Optional
 import re
+from typing import Any, Optional
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -128,9 +128,7 @@ def _extract_last_assistant_text(body: BaseVerifyRequest, extract_regex: Optiona
                     return text
                 if extract_regex:
                     try:
-                        matches = list(
-                            re.finditer(extract_regex, text, flags=re.MULTILINE | re.DOTALL)
-                        )
+                        matches = list(re.finditer(extract_regex, text, flags=re.MULTILINE | re.DOTALL))
                     except re.error:
                         matches = []
                     if matches:
@@ -149,9 +147,7 @@ def _extract_last_assistant_text(body: BaseVerifyRequest, extract_regex: Optiona
                     return text
                 if extract_regex:
                     try:
-                        matches = list(
-                            re.finditer(extract_regex, text, flags=re.MULTILINE | re.DOTALL)
-                        )
+                        matches = list(re.finditer(extract_regex, text, flags=re.MULTILINE | re.DOTALL))
                     except re.error:
                         matches = []
                     if matches:
@@ -201,9 +197,7 @@ def _extract_question_text(
     # Optionally apply a regex to extract a portion of the question text.
     if question_extract_regex:
         try:
-            matches = list(
-                re.finditer(question_extract_regex, text, flags=re.MULTILINE | re.DOTALL)
-            )
+            matches = list(re.finditer(question_extract_regex, text, flags=re.MULTILINE | re.DOTALL))
         except re.error:
             matches = []
         if matches:
@@ -230,9 +224,7 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
 
     async def verify(self, body: LLMJudgeVerifyRequest) -> LLMJudgeVerifyResponse:
         expected = _extract_expected_answer(body) or ""
-        question = _extract_question_text(
-            body.responses_create_params, self.config.question_extract_regex
-        )
+        question = _extract_question_text(body.responses_create_params, self.config.question_extract_regex)
         generated = _extract_last_assistant_text(body, self.config.response_extract_regex)
 
         # Run judge twice to mitigate positional or presentation bias by swapping orders.
