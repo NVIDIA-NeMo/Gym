@@ -18,12 +18,13 @@
 - [How To: Prepare and validate data for PR submission or RL training](#how-to-prepare-and-validate-data-for-pr-submission-or-rl-training)
 - [How To: ng\_dump\_config - Dump a YAML config as exactly as NeMo Gym sees it](#how-to-ng_dump_config---dump-a-yaml-config-as-exactly-as-nemo-gym-sees-it)
 - [How To: Use NeMo Gym with a non-Responses compatible API endpoint like vLLM](#how-to-use-nemo-gym-with-a-non-responses-compatible-api-endpoint-like-vllm)
-- [FAQ: VSCode and Git setup](#faq-vscode-and-git-setup)
+- [How To: Multi-verifier usage](#how-to-multi-verifier-usage)
+- [FAQ: DCO and commit signing VSCode and Git setup](#faq-dco-and-commit-signing-vscode-and-git-setup)
 - [FAQ: SFT and RL](#faq-sft-and-rl)
-- [FAQ: Why NeMo Gym?](#faq-why-nemo-gym)
 - [FAQ: Error: Found files with missing copyright](#faq-error-found-files-with-missing-copyright)
 - [FAQ: build-docs / Build docs CI failures](#faq-build-docs--build-docs-ci-failures)
 - [FAQ: NeMo Gym, training frameworks, and token IDs](#faq-nemo-gym-training-frameworks-and-token-ids)
+- [FAQ: NeMo Gym what CI/CD do I need to pass?](#faq-nemo-gym-what-cicd-do-i-need-to-pass)
 
 
 # NeMo-Gym
@@ -130,7 +131,7 @@ simple_agent:
         name: ???
       model_server:
         type: responses_api_models
-        name: openai_model
+        name: policy_model
 ```
 
 This is how this YAML config translates to the simple agent config as defined in Python in `responses_api_agents/simple_agent/app.py`.
@@ -146,21 +147,21 @@ You can define your server configs to require or accept any arbitrary structures
 
 If your config contains a server reference that doesn't exist, NeMo Gym will let you know e.g.:
 ```bash
-AssertionError: Could not find type='responses_api_models' name='simple_model_server' in the list of available servers: [AgentServerRef(type='responses_api_agents', name='simple_agent'), ModelServerRef(type='responses_api_models', name='openai_model'), ResourcesServerRef(type='resources_servers', name='simple_weather')]
+AssertionError: Could not find type='responses_api_models' name='simple_model_server' in the list of available servers: [AgentServerRef(type='responses_api_agents', name='simple_agent'), ModelServerRef(type='responses_api_models', name='policy_model'), ResourcesServerRef(type='resources_servers', name='simple_weather')]
 ```
 
 If your config is missing an argument or argument value, NeMo Gym will let you know e.g.:
 ```bash
-omegaconf.errors.MissingMandatoryValue: Missing mandatory value: openai_model.responses_api_models.openai_model.openai_api_key
-    full_key: openai_model.responses_api_models.openai_model.openai_api_key
+omegaconf.errors.MissingMandatoryValue: Missing mandatory value: policy_model.responses_api_models.openai_model.openai_api_key
+    full_key: policy_model.responses_api_models.openai_model.openai_api_key
     object_type=dict
 ```
 
 
 ### Special policy model placeholders
-There is one set of special NeMo Gym variables relating to the target agent model. These are the `policy_base_url`, `policy_api_key`, `policy_model_name` variables. When you go to train a model, these are the information that will be used to query the model server endpoint you are trying to train. By default, every agent will refer to this shared `openai_model` model server.
+There is one set of special NeMo Gym variables relating to the agent policy model. These are the `policy_base_url`, `policy_api_key`, `policy_model_name` variables. When you go to train a model, these are the information that will be used to query the model server endpoint you are trying to train. By default, every agent will refer to this shared `policy_model` model server.
 ```yaml
-openai_model:
+policy_model:
   responses_api_models:
     openai_model:
       entrypoint: app.py
@@ -577,6 +578,12 @@ ng_collect_rollouts +agent_name=multineedle_simple_agent \
     +num_samples_in_parallel=null
 ```
 
+The supported parameters include:
+- `limit`: Limits how many examples from the input JSONL file to process
+- `num_repeats`: Repeats each input example multiple times to collect multiple rollouts per example
+- `num_samples_in_parallel`: Controls how many rollout collection requests run concurrently
+
+
 View the rollouts just collected!
 ```
 ng_viewer +jsonl_fpath=results/multineedle_rollout_collection.jsonl
@@ -599,7 +606,7 @@ multineedle_simple_agent:
         name: multineedle_resources_server
       model_server:
         type: responses_api_models
-        name: openai_model
+        name: policy_model
       datasets:
       - name: train
         type: train
@@ -736,7 +743,35 @@ vllm serve \
 ```
 
 
-# FAQ: VSCode and Git setup
+# How To: Multi-verifier usage
+Gym is explicitly designed to support multi-verifier training.
+
+Let's say you want to use both math and search verifiers. Normally how you spin up the servers individually is:
+For math:
+```bash
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/library_judge_math/configs/bytedtsinghua_dapo17k.yaml"
+ng_run "+config_paths=[${config_paths}]"
+```
+For search:
+```bash
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/google_search/configs/google_search.yaml"
+ng_run "+config_paths=[$config_paths]"
+```
+
+If you want to use them both you would just add the yamls together like:
+```bash
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/library_judge_math/configs/bytedtsinghua_dapo17k.yaml,\
+resources_servers/google_search/configs/google_search.yaml"
+ng_run "+config_paths=[$config_paths]"
+```
+
+The same process goes for data preparation and downstream training framework Gym configuration, you would just add additional server configs.
+
+
+# FAQ: DCO and commit signing VSCode and Git setup
 Here are some suggestions for easier development using the VSCode code editor.
 
 VSCode workspace settings at `.vscode/settings.json`
@@ -780,59 +815,6 @@ One way I like to think about these things is:
 - You can also do SFT on RL data via synthetic data generation, where you run your inputs into some strong teacher model, score the responses, and use the scores to pick your SFT gold label.
 
 Tying back to NeMo Gym, NeMo gym can be used to create synthetic data for SFT training by running strong teacher models on the different environments. Critically, it will also be used as the source of data during RL training.
-
-# FAQ: Why NeMo Gym?
-
-NeMo Gym is a large-scale collection of high-quality verifier environments for multi-verifier RL training.
-To enable this, NeMo Gym provides infra support for the rollout server that runs 100+ verifiers in parallel.
-
-The document below details why we designed NeMo Gym the way we did. It also includes a direct comparative study that clearly differentiates NeMo Gym from other environment frameworks.
-
-\[Banghua\] As of Thu Aug 21:
-
-1. Gym is completely different from any of the alternatives above in terms of data **coverage, quantity and quality.** For example, for math only, gym contains 1M+ high-quality math verifiable dataset curated by our internal team, with great math verify \+ LLM-as-a-judge support. In contrast, SkyRL and verifiers above only have a small train subset of GSM8K and AIME. We also have close to 10k SWE development, which require both high quality data curation efforts and good infra support. In contrast, Aviary only focuses on scientific knowledge environment. **None of the existing frameworks support general multi-turn tool-use agent, with tools like search, code execution, and other synthetic tools.**
-2. We will be a **superset** of all existing gym environments. We are already a super-set of Sky RL Lab Gym and verifiers. We have integrated all GEM environments. We’re working with Aviary to incorporate them as well.
-3. As is shown from Brian’s comparison below, we have much **better infra support for scaling**. And the plan is to use NeMo Gym for 500B+ model training for quality improvement. This will make nemo gym battle tested in frontier model training, while the other gyms are mostly for smaller-scale experiments.
-
-Key use case requirements to avoid training environment scale, complexity, and diversity limitations:
-
-1. Can I easily build my environment without worrying about a training framework?
-2. Can I easily call my model using OpenAI Responses and not worry about reasoning parsing?
-3. Can I easily use your environment framework to build an agent application product?
-4. Can I easily use your environment framework to build a simple multi-agent system?
-5. Can I easily run individual SWE-bench task Docker containers?
-6. Can I easily add an agent built with any agent framework?
-7. Can I easily add any environment framework?
-8. Can I easily simultaneously use math-verify==0.7.0 and math-verify==0.8.0 in 2 different environments?
-9. Can I easily spin up multiple environments at once?
-
-Key principles
-
-1. \[Reqs 1, 2\] Decoupled from training framework
-2. \[Reqs 2, 3, 4, 6, 7\] Standardized behind OpenAI Responses
-3. \[Reqs 3, 4, 6\] Explicit Agent vs model abstraction
-4. \[Reqs 3, 4, 5, 6, 7\] REST environment servers and container compatible
-5. \[Reqs 8, 9\] Separate Python env per server at runtime
-
-\[Brian note\] There are some rows yet to be filled in here.
-
-| Environment framework | Decoupled from training framework | Standardized behind OpenAI Responses | Explicit Agent vs model abstraction | REST environment servers and container compatible | Separate Python env per server at runtime |
-| :---- | :---- | :---- | :---- | :---- | :---- |
-| NeMo Gym | ✅ | ✅ | ✅ | ✅ | ✅ |
-| [NeMo RL](https://github.com/NVIDIA-NeMo/RL) | ❌Environment abstraction only has a step function and is fully orchestrated by training framework ([link](https://github.com/NVIDIA-NeMo/RL/blob/bc24887c72a6e1b2699a228bc87c588546dfe6b7/nemo_rl/environments/interfaces.py#L52)) | ❌Uses OpenAI Chat Completions message-like interface ([link](https://github.com/NVIDIA-NeMo/RL/blob/bc24887c72a6e1b2699a228bc87c588546dfe6b7/nemo_rl/data/llm_message_utils.py#L56)) | ❌Only has policy abstraction | ❌Environments are used via a step function ([link](https://github.com/NVIDIA-NeMo/RL/blob/bc24887c72a6e1b2699a228bc87c588546dfe6b7/nemo_rl/environments/interfaces.py#L52)) | ✅Each environment worker can be run with a separate Python executable ([link](https://github.com/NVIDIA-NeMo/RL/blob/bc24887c72a6e1b2699a228bc87c588546dfe6b7/nemo_rl/environments/math_environment.py#L238)) |
-| [SkyRL Lab Gym](https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-gym) | ❌Environment abstraction only has a step function and is fully orchestrated by training framework ([link](https://github.com/NovaSky-AI/SkyRL/blob/825f2e82e289d6011d80957c48132618fed3d460/skyrl-gym/skyrl_gym/core.py#L35)) | ❌Environment is passed a raw string LLM response ([link](https://github.com/NovaSky-AI/SkyRL/blob/825f2e82e289d6011d80957c48132618fed3d460/skyrl-gym/skyrl_gym/core.py#L40)) | ❌Environment is passed a raw string LLM response ([link](https://github.com/NovaSky-AI/SkyRL/blob/825f2e82e289d6011d80957c48132618fed3d460/skyrl-gym/skyrl_gym/core.py#L40)) | ❌Environments are used via a step function ([link](https://github.com/NovaSky-AI/SkyRL/blob/825f2e82e289d6011d80957c48132618fed3d460/skyrl-gym/skyrl_gym/core.py#L35)) | ❌All the tools are in one folder and share dependencies ([link](https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-gym/skyrl_gym/tools%20)) |
-| [Axon RL GEM](https://github.com/axon-rl/gem) | ❌Environment abstraction only has a step function and is fully orchestrated by training framework ([link](https://github.com/axon-rl/gem/blob/3bc7695fd60e7196d5c64f5ed6fbc9edf5fff65a/gem/core.py#L29)) | ❌Environment is passed a raw string LLM response ([link](https://github.com/axon-rl/gem/blob/3bc7695fd60e7196d5c64f5ed6fbc9edf5fff65a/gem/envs/code_env.py#L81)) | ❌Environment is passed a raw string LLM response ([link](https://github.com/axon-rl/gem/blob/3bc7695fd60e7196d5c64f5ed6fbc9edf5fff65a/gem/envs/code_env.py#L81)) | ❌Environment abstraction only has a step function and is fully orchestrated by training framework ([link](https://github.com/axon-rl/gem/blob/3bc7695fd60e7196d5c64f5ed6fbc9edf5fff65a/gem/core.py#L29)) | ❌All the [envs](https://github.com/axon-rl/gem/tree/main/gem/envs) and [tools](https://github.com/axon-rl/gem/tree/main/gem/tools) use the same dependencies |
-| [willccbb Verifiers](https://github.com/willccbb/verifiers) | ❌Environment abstraction requires a train or validation dataset ([link](https://github.com/willccbb/verifiers/blob/828125a3ade0216e7d0a51a9b362d264f6ab68e0/verifiers/envs/environment.py#L159)) | ❌Uses OpenAI Chat Completions ([link](https://github.com/willccbb/verifiers/blob/828125a3ade0216e7d0a51a9b362d264f6ab68e0/verifiers/types.py#L31)) | ✅Environments are provided an OpenAI client ([link](https://github.com/willccbb/verifiers/blob/9f197f7ececcc1367bde504e881dc4d938a019e1/verifiers/envs/environment.py#L239)) | ❌Environments are directly imported during training ([link](https://github.com/willccbb/verifiers/blob/9f197f7ececcc1367bde504e881dc4d938a019e1/README.md?plain=1#L77)) | ❌Even though each verifier has a separate pyproject.toml ([link](https://github.com/willccbb/verifiers/blob/828125a3ade0216e7d0a51a9b362d264f6ab68e0/environments/vf_aime2024/pyproject.toml#L7)), they are still imported at the same time at runtime ([link](https://github.com/willccbb/verifiers/blob/9f197f7ececcc1367bde504e881dc4d938a019e1/README.md?plain=1#L77)) |
-| [Future House Aviary](https://github.com/Future-House/aviary) | ✅ | ❌OpenAI Chat Completions-like interface ([link](https://github.com/Future-House/aviary/blob/70d9c1fcf756425591504c3bd8f618b41ce8b8ee/src/aviary/tools/base.py#L125)) | ❌Environments are used via a step function ([link](https://github.com/Future-House/aviary/blob/70d9c1fcf756425591504c3bd8f618b41ce8b8ee/src/aviary/env.py#L107)) | ❌Environments are used via a step function ([link](https://github.com/Future-House/aviary/blob/70d9c1fcf756425591504c3bd8f618b41ce8b8ee/src/aviary/env.py#L107)) | ❌Even though each verifier has a separate pyproject.toml ([link](https://github.com/Future-House/aviary/blob/70d9c1fcf756425591504c3bd8f618b41ce8b8ee/packages/gsm8k/pyproject.toml)), they are still imported at the same time at runtime ([link](https://github.com/Future-House/aviary/blob/70d9c1fcf756425591504c3bd8f618b41ce8b8ee/README.md?plain=1#L180)) |
-| [OpenThought Reasoning Gym](https://github.com/open-thought/reasoning-gym) | ✅Just a data generator | ❌Environment is passed a raw string LLM response ([link](https://github.com/open-thought/reasoning-gym/blob/02b7fac86358f7ef6239608b0b738a5a03ecfe9e/reasoning_gym/algebra/complex_arithmetic.py#L168)) | ❌Environment is passed a raw string LLM response ([link](https://github.com/open-thought/reasoning-gym/blob/02b7fac86358f7ef6239608b0b738a5a03ecfe9e/reasoning_gym/algebra/complex_arithmetic.py#L168)) | ❌Environments are directly imported ([link](https://github.com/open-thought/reasoning-gym/blob/02b7fac86358f7ef6239608b0b738a5a03ecfe9e/README.md?plain=1#L49)) | ❌All the datasets are in one folder and share dependencies ([link](https://github.com/open-thought/reasoning-gym/tree/02b7fac86358f7ef6239608b0b738a5a03ecfe9e/reasoning_gym)) |
-| [NousResearch Atropos](https://github.com/NousResearch/atropos) |  |  |  | ✅Has servers and container compatible ([link](https://github.com/NousResearch/atropos/blob/ee8094d697428f378445840308cb788d02af7120/environments/code_execution_server/coding_server.py#L42)) | ❌All environments share the same Python env ([link](https://github.com/NousResearch/atropos/blob/ee8094d697428f378445840308cb788d02af7120/README.md?plain=1#L159)) |
-| [VerL](https://github.com/volcengine/verl) |  |  |  |  |  |
-| [RAGEN](https://github.com/RAGEN-AI/RAGEN) |  |  |  |  |  |
-| [rLLM](https://github.com/rllm-org/rllm/tree/main) |  |  |  |  |  |
-| [LlamaGym](https://github.com/KhoomeiK/LlamaGym) |  |  |  |  |  |
-| [AReal](https://github.com/inclusionAI/AReaL) |  |  |  |  |  |
-| [OpenPipe ART](https://github.com/OpenPipe/ART) |  |  |  |  |  |
-| [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF) |  |  |  |  |  |
 
 
 # FAQ: Error: Found files with missing copyright
@@ -887,3 +869,20 @@ For example, say we are training a Qwen 3 family model. During rollouts, the mod
 So, the OpenAI compatible model server in a training framework needs to be able to handle this discrepancy. In order to do that, Gym needs a handle on the ground truth token IDs and it needs to provide that information back to the training frameworks' OpenAI compatible server.
 
 TODO @bxyu-nvidia: expand on this later.
+
+
+# FAQ: NeMo Gym what CI/CD do I need to pass?
+
+NeMo Gym has an E2E suite of CI/CD in the form of Github actions workflows. Some of these are critical to PR merge and some of the mare not.
+
+For the majority of PRs, there are 5 checks that need to pass:
+1. DCO
+2. Code linting / Lint check (pull_request)
+3. Copyright check / copyright-check / main (pull_request)
+4. Secrets detector / secrets-detector / secrets-detector (pull_request)
+5. Unit tests / Test (pull_request)
+
+Examples of PR checks that most PRs do not need to wait for to pass:
+1. CICD NeMo / cicd-container-build / build / main (push)
+2. CICD NeMo / Nemo_CICD_Test (push)
+...

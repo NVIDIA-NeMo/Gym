@@ -21,7 +21,7 @@ from nemo_gym.server_utils import ServerClient
 
 class TestApp:
     def test_sanity(self) -> None:
-        config = MCQAResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="")
+        config = MCQAResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
         MCQAResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
     async def test_verify_correct(self) -> None:
@@ -52,7 +52,7 @@ class TestApp:
         )
 
         server = MCQAResourcesServer(
-            config=MCQAResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint=""),
+            config=MCQAResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
             server_client=MagicMock(spec=ServerClient),
         )
 

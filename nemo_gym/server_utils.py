@@ -15,13 +15,15 @@ import json
 from abc import abstractmethod
 from os import getenv
 from threading import Thread
-from typing import Any, Optional, Type
+from typing import Any, Literal, Optional, Type, Union
+from uuid import uuid4
 
 import requests
 import uvicorn
-from fastapi import FastAPI
-from httpx import AsyncClient, AsyncHTTPTransport, Limits, Response
+from fastapi import FastAPI, Request, Response
+from httpx import AsyncClient, AsyncHTTPTransport, Cookies, Limits, Response
 from httpx._types import (
+    CookieTypes,
     HeaderTypes,
     QueryParamTypes,
     RequestContent,
@@ -31,9 +33,10 @@ from httpx._types import (
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, ConfigDict
 from requests.exceptions import ConnectionError
+from starlette.middleware.sessions import SessionMiddleware
 
 from nemo_gym.config_types import (
-    BaseRunServerConfig,
+    BaseRunServerInstanceConfig,
     BaseServerConfig,
 )
 from nemo_gym.global_config import (
@@ -42,6 +45,18 @@ from nemo_gym.global_config import (
     get_first_server_config_dict,
     get_global_config_dict,
 )
+
+
+class NeMoGymStatelessCookies(Cookies):
+    def extract_cookies(self, response):
+        pass
+
+
+class NeMoGymGlobalAsyncClient(AsyncClient):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+
+        self._cookies = NeMoGymStatelessCookies(self._cookies)
 
 
 # We create a single global httpx client as recommended by https://www.python-httpx.org/async/
@@ -54,7 +69,7 @@ from nemo_gym.global_config import (
 # Eventually, we may also want to parameterize the max connections. For now, we set the max connections to just some very large number.
 #
 # It's critical that this client is NOT used before uvicorn.run is called. Under the hood, this async client will start and use an event loop, and store a handle to that specific event loop. When uvicorn.run is called, it will replace the event loop policy with its own. So the handle that the async client has is now outdated.
-GLOBAL_HTTPX_CLIENT = AsyncClient(
+GLOBAL_HTTPX_CLIENT = NeMoGymGlobalAsyncClient(
     limits=Limits(max_keepalive_connections=1500, max_connections=1500),
     transport=AsyncHTTPTransport(retries=3),
     timeout=None,
@@ -62,6 +77,8 @@ GLOBAL_HTTPX_CLIENT = AsyncClient(
 
 
 DEFAULT_HEAD_SERVER_PORT = 11000
+
+ServerStatus = Union[Literal["success"], Literal["connection_error"], Literal["timeout"], Literal["unknown_error"]]
 
 
 class ServerClient(BaseModel):
@@ -99,12 +116,16 @@ class ServerClient(BaseModel):
 
         return cls(head_server_config=head_server_config, global_config_dict=global_config_dict)
 
+    def _build_server_base_url(self, server_config_dict: OmegaConf) -> str:
+        return f"http://{server_config_dict.host}:{server_config_dict.port}"
+
     async def get(
         self,
         server_name: str,
         url_path: str,
         params: QueryParamTypes | None = None,
         headers: HeaderTypes | None = None,
+        cookies: CookieTypes | None = None,
         **kwargs,
     ) -> Response:
         """
@@ -119,9 +140,10 @@ class ServerClient(BaseModel):
         """
         server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
         return await GLOBAL_HTTPX_CLIENT.get(
-            f"http://{server_config_dict.host}:{server_config_dict.port}{url_path}",
+            f"{self._build_server_base_url(server_config_dict)}{url_path}",
             params=params,
             headers=headers,
+            cookies=cookies,
             **kwargs,
         )
 
@@ -135,6 +157,7 @@ class ServerClient(BaseModel):
         json: Any | BaseModel | None = None,
         params: QueryParamTypes | None = None,
         headers: HeaderTypes | None = None,
+        cookies: CookieTypes | None = None,
         **kwargs,
     ) -> Response:
         """
@@ -149,15 +172,36 @@ class ServerClient(BaseModel):
         """
         server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
         return await GLOBAL_HTTPX_CLIENT.post(
-            f"http://{server_config_dict.host}:{server_config_dict.port}{url_path}",
+            f"{self._build_server_base_url(server_config_dict)}{url_path}",
             content=content,
             data=data,
             files=files,
             json=json.model_dump(exclude_unset=True) if isinstance(json, BaseModel) else json,
             params=params,
             headers=headers,
+            cookies=cookies,
             **kwargs,
         )
+
+    def poll_for_status(self, server_name: str) -> ServerStatus:  # pragma: no cover
+        if server_name == HEAD_SERVER_KEY_NAME:
+            server_config_dict = self.global_config_dict[HEAD_SERVER_KEY_NAME]
+        else:
+            server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
+
+        try:
+            requests.get(self._build_server_base_url(server_config_dict), timeout=5)
+            # We don't check the status code since there may not be a route at /
+            return "success"
+        except requests.exceptions.ConnectionError:
+            return "connection_error"
+        except requests.exceptions.Timeout:
+            return "timeout"
+        except Exception:
+            return "unknown_error"
+
+
+SESSION_ID_KEY = "session_id"
 
 
 class BaseServer(BaseModel):
@@ -165,16 +209,18 @@ class BaseServer(BaseModel):
     All instances of BaseServer are queryable using ServerClient.
     """
 
-    config: BaseRunServerConfig
+    config: BaseRunServerInstanceConfig
 
     @classmethod
-    def load_config_from_global_config(cls) -> "BaseRunServerConfig":
+    def load_config_from_global_config(cls) -> "BaseRunServerInstanceConfig":
         config_path_str = getenv(NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME)
         global_config_dict = get_global_config_dict()
         server_config_dict = get_first_server_config_dict(global_config_dict, config_path_str)
 
-        server_config_cls: Type[BaseRunServerConfig] = cls.model_fields["config"].annotation
-        server_config = server_config_cls.model_validate(server_config_dict)
+        server_config_cls: Type[BaseRunServerInstanceConfig] = cls.model_fields["config"].annotation
+        server_config = server_config_cls.model_validate(
+            OmegaConf.to_container(server_config_dict, resolve=True) | {"name": config_path_str}
+        )
 
         return server_config
 
@@ -185,6 +231,30 @@ class SimpleServer(BaseServer):
     @abstractmethod
     def setup_webserver(self) -> FastAPI:
         pass
+
+    def get_session_middleware_key(self) -> str:
+        # This method is here to override in case we want to ever use an actual session middleware secret key.
+        # e.g. for an actual product.
+        return f"{self.__class__.__name__}___{self.config.name}"
+
+    def setup_session_middleware(self, app: FastAPI) -> None:
+        # The multiple middleware execution order described in https://fastapi.tiangolo.com/tutorial/middleware/#multiple-middleware-execution-order
+        # Says that if you register middlewares A and then B,
+        # - at request time: They execute B first then A
+        # - at response time: They return to A first and then B
+        # So for adding session IDs, that middleware must run after SessionMiddleware, so it must be registered before it.
+
+        @app.middleware("http")
+        async def add_session_id(request: Request, call_next):  # pragma: no cover
+            # If session_id not present, assign one
+            if SESSION_ID_KEY not in request.session:
+                request.session[SESSION_ID_KEY] = str(uuid4())
+
+            response: Response = await call_next(request)
+            return response
+
+        session_middleware_key = self.get_session_middleware_key()
+        app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
 
     @classmethod
     def run_webserver(cls) -> None:  # pragma: no cover

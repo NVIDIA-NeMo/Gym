@@ -28,11 +28,11 @@ from nemo_gym.server_utils import ServerClient
 
 class TestBaseResponsesAPIModel:
     def test_BaseResponsesAPIModel(self) -> None:
-        config = BaseResponsesAPIModelConfig(host="", port=0, openai_api_key="123", entrypoint="")
+        config = BaseResponsesAPIModelConfig(host="", port=0, openai_api_key="123", entrypoint="", name="")
         BaseResponsesAPIModel(config=config)
 
     def test_SimpleResponsesAPIModel(self) -> None:
-        config = BaseResponsesAPIModelConfig(host="", port=0, openai_api_key="123", entrypoint="")
+        config = BaseResponsesAPIModelConfig(host="", port=0, openai_api_key="123", entrypoint="", name="")
 
         class TestSimpleResponsesAPIModel(SimpleResponsesAPIModel):
             async def chat_completions(

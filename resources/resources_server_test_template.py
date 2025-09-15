@@ -24,6 +24,7 @@ class TestApp:
             host="0.0.0.0",
             port=8080,
             entrypoint="",
+            name="",
         )
         MultiNeedleResourcesServer(
             config=config, server_client=MagicMock(spec=ServerClient)
