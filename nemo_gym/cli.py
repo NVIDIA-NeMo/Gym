@@ -562,7 +562,7 @@ def init_resources_server():  # pragma: no cover
         name: {server_type_name}_resources_server
       model_server:
         type: responses_api_models
-        name: openai_model
+        name: policy_model
       datasets:
       - name: train
         type: train

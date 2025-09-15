@@ -37,6 +37,7 @@ class TestApp:
             host="0.0.0.0",
             port=8080,
             entrypoint="",
+            name="",
             resources_server=ResourcesServerRef(
                 type="resources_servers",
                 name="",
@@ -53,6 +54,7 @@ class TestApp:
             host="0.0.0.0",
             port=8080,
             entrypoint="",
+            name="",
             model_server=ModelServerRef(
                 type="responses_api_models",
                 name="my server name",
@@ -104,6 +106,7 @@ class TestApp:
             json=NeMoGymResponseCreateParamsNonStreaming(
                 input=[NeMoGymEasyInputMessage(content="hello", role="user", type="message")]
             ),
+            cookies=None,
         )
 
         actual_responses_dict = res_no_model.json()
@@ -158,6 +161,7 @@ class TestApp:
             host="0.0.0.0",
             port=8080,
             entrypoint="",
+            name="",
             model_server=ModelServerRef(
                 type="responses_api_models",
                 name="my server name",
@@ -234,6 +238,7 @@ class TestApp:
                 json=NeMoGymResponseCreateParamsNonStreaming(
                     input=[NeMoGymEasyInputMessage(content="hello", role="user", type="message")]
                 ),
+                cookies=None,
             ),
             call().json(),
             call(
@@ -251,8 +256,12 @@ class TestApp:
                         ),
                     ]
                 ),
+                cookies=dotjson_mock.cookies,
             ),
             call().json(),
+            call().cookies.items(),
+            call().cookies.items().__iter__(),
+            call().cookies.items().__len__(),
         ]
         server.server_client.post.assert_has_calls(expected_calls)
 

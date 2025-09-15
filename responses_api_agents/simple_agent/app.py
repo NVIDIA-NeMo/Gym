@@ -14,6 +14,7 @@
 import json
 from typing import List
 
+from fastapi import Request, Response
 from pydantic import ConfigDict, ValidationError
 
 from nemo_gym.base_resources_server import (
@@ -58,7 +59,12 @@ class SimpleAgentVerifyResponse(BaseVerifyResponse):
 class SimpleAgent(SimpleResponsesAPIAgent):
     config: SimpleAgentConfig
 
-    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+    async def responses(
+        self,
+        request: Request,
+        response: Response,
+        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
+    ) -> NeMoGymResponse:
         body = body.model_copy(deep=True)
 
         if isinstance(body.input, str):
@@ -66,6 +72,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
         new_outputs = []
         step = 0
+        model_server_cookies = None  # update the cookies on every model response
+        resources_server_cookies = request.cookies  # update the cookies on every resources server response
 
         while True:
             step += 1
@@ -75,8 +83,10 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 server_name=self.config.model_server.name,
                 url_path="/v1/responses",
                 json=new_body,
+                cookies=model_server_cookies,
             )
             model_response_json = model_response.json()
+            model_server_cookies = model_response.cookies
             try:
                 model_response = NeMoGymResponse.model_validate(model_response_json)
             except ValidationError as e:
@@ -99,12 +109,14 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     server_name=self.config.resources_server.name,
                     url_path=f"/{output_function_call.name}",
                     json=json.loads(output_function_call.arguments),
+                    cookies=resources_server_cookies,
                 )
+                resources_server_cookies = api_response.cookies
 
                 tool_response = NeMoGymFunctionCallOutput(
                     type="function_call_output",
                     call_id=output_function_call.call_id,
-                    output=json.dumps(api_response.json()),
+                    output=api_response.content.decode(),
                 )
                 new_outputs.append(tool_response)
 
@@ -112,18 +124,39 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             if self.config.max_steps and step >= self.config.max_steps:
                 break
 
+        # Propogate any extra cookies necessary for downstream verification
+        for k, v in (*resources_server_cookies.items(), *model_server_cookies.items()):
+            response.set_cookie(k, v)
+
         model_response.output = new_outputs
         return model_response
 
-    async def run(self, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
-        response = await self.responses(body.responses_create_params)
+    async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
+        cookies = request.cookies
 
-        verify_request = SimpleAgentVerifyRequest.model_validate(body.model_dump() | {"response": response})
+        seed_session_response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/seed_session",
+            json=body.model_dump(),
+            cookies=cookies,
+        )
+        cookies = seed_session_response.cookies
+
+        response = await self.server_client.post(
+            server_name=self.config.name,
+            url_path="/v1/responses",
+            json=body.responses_create_params,
+            cookies=cookies,
+        )
+        cookies = response.cookies
+
+        verify_request = SimpleAgentVerifyRequest.model_validate(body.model_dump() | {"response": response.json()})
 
         verify_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/verify",
             json=verify_request.model_dump(),
+            cookies=cookies,
         )
         try:
             verify_response_body = verify_response.json()

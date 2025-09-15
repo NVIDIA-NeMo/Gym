@@ -8,7 +8,7 @@ library_judge_math:
       judge_responses_create_params: {
         input: []
       }
-      should_use_judge: false
+      should_use_judge: true
 library_judge_math_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -22,17 +22,17 @@ library_judge_math_simple_agent:
       datasets:
       - name: train
         type: train
-        jsonl_fpath: resources_servers/library_judge_math/data/dapo17k_bytedtsinghua_train.jsonl
+        jsonl_fpath: resources_servers/library_judge_math/data/math_stack_overflow_train.jsonl
         gitlab_identifier:
-          dataset_name: bytedtsinghua_dapo17k
+          dataset_name: math_stack_overflow
           version: 0.0.1
-          artifact_fpath: dapo17k_bytedtsinghua_train.jsonl
-        license: Apache 2.0
+          artifact_fpath: math_stack_overflow_problems.jsonl
+        license: Creative Commons Attribution-ShareAlike 4.0 International
       - name: validation
         type: validation
-        jsonl_fpath: resources_servers/library_judge_math/data/aime24_bytedtsinghua_validation.jsonl
+        jsonl_fpath: resources_servers/library_judge_math/data/aime24_validation.jsonl
         gitlab_identifier:
-          dataset_name: bytedtsinghua_dapo17k
+          dataset_name: aime24
           version: 0.0.1
-          artifact_fpath: aime24_bytedtsinghua_validation.jsonl
+          artifact_fpath: aime24.jsonl
         license: Apache 2.0

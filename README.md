@@ -18,7 +18,8 @@
 - [How To: Prepare and validate data for PR submission or RL training](#how-to-prepare-and-validate-data-for-pr-submission-or-rl-training)
 - [How To: ng\_dump\_config - Dump a YAML config as exactly as NeMo Gym sees it](#how-to-ng_dump_config---dump-a-yaml-config-as-exactly-as-nemo-gym-sees-it)
 - [How To: Use NeMo Gym with a non-Responses compatible API endpoint like vLLM](#how-to-use-nemo-gym-with-a-non-responses-compatible-api-endpoint-like-vllm)
-- [FAQ: VSCode and Git setup](#faq-vscode-and-git-setup)
+- [How To: Multi-verifier usage](#how-to-multi-verifier-usage)
+- [FAQ: DCO and commit signing VSCode and Git setup](#faq-dco-and-commit-signing-vscode-and-git-setup)
 - [FAQ: SFT and RL](#faq-sft-and-rl)
 - [FAQ: Error: Found files with missing copyright](#faq-error-found-files-with-missing-copyright)
 - [FAQ: build-docs / Build docs CI failures](#faq-build-docs--build-docs-ci-failures)
@@ -130,7 +131,7 @@ simple_agent:
         name: ???
       model_server:
         type: responses_api_models
-        name: openai_model
+        name: policy_model
 ```
 
 This is how this YAML config translates to the simple agent config as defined in Python in `responses_api_agents/simple_agent/app.py`.
@@ -146,21 +147,21 @@ You can define your server configs to require or accept any arbitrary structures
 
 If your config contains a server reference that doesn't exist, NeMo Gym will let you know e.g.:
 ```bash
-AssertionError: Could not find type='responses_api_models' name='simple_model_server' in the list of available servers: [AgentServerRef(type='responses_api_agents', name='simple_agent'), ModelServerRef(type='responses_api_models', name='openai_model'), ResourcesServerRef(type='resources_servers', name='simple_weather')]
+AssertionError: Could not find type='responses_api_models' name='simple_model_server' in the list of available servers: [AgentServerRef(type='responses_api_agents', name='simple_agent'), ModelServerRef(type='responses_api_models', name='policy_model'), ResourcesServerRef(type='resources_servers', name='simple_weather')]
 ```
 
 If your config is missing an argument or argument value, NeMo Gym will let you know e.g.:
 ```bash
-omegaconf.errors.MissingMandatoryValue: Missing mandatory value: openai_model.responses_api_models.openai_model.openai_api_key
-    full_key: openai_model.responses_api_models.openai_model.openai_api_key
+omegaconf.errors.MissingMandatoryValue: Missing mandatory value: policy_model.responses_api_models.openai_model.openai_api_key
+    full_key: policy_model.responses_api_models.openai_model.openai_api_key
     object_type=dict
 ```
 
 
 ### Special policy model placeholders
-There is one set of special NeMo Gym variables relating to the target agent model. These are the `policy_base_url`, `policy_api_key`, `policy_model_name` variables. When you go to train a model, these are the information that will be used to query the model server endpoint you are trying to train. By default, every agent will refer to this shared `openai_model` model server.
+There is one set of special NeMo Gym variables relating to the agent policy model. These are the `policy_base_url`, `policy_api_key`, `policy_model_name` variables. When you go to train a model, these are the information that will be used to query the model server endpoint you are trying to train. By default, every agent will refer to this shared `policy_model` model server.
 ```yaml
-openai_model:
+policy_model:
   responses_api_models:
     openai_model:
       entrypoint: app.py
@@ -577,6 +578,12 @@ ng_collect_rollouts +agent_name=multineedle_simple_agent \
     +num_samples_in_parallel=null
 ```
 
+The supported parameters include:
+- `limit`: Limits how many examples from the input JSONL file to process
+- `num_repeats`: Repeats each input example multiple times to collect multiple rollouts per example
+- `num_samples_in_parallel`: Controls how many rollout collection requests run concurrently
+
+
 View the rollouts just collected!
 ```
 ng_viewer +jsonl_fpath=results/multineedle_rollout_collection.jsonl
@@ -599,7 +606,7 @@ multineedle_simple_agent:
         name: multineedle_resources_server
       model_server:
         type: responses_api_models
-        name: openai_model
+        name: policy_model
       datasets:
       - name: train
         type: train
@@ -736,7 +743,35 @@ vllm serve \
 ```
 
 
-# FAQ: VSCode and Git setup
+# How To: Multi-verifier usage
+Gym is explicitly designed to support multi-verifier training.
+
+Let's say you want to use both math and search verifiers. Normally how you spin up the servers individually is:
+For math:
+```bash
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/library_judge_math/configs/bytedtsinghua_dapo17k.yaml"
+ng_run "+config_paths=[${config_paths}]"
+```
+For search:
+```bash
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/google_search/configs/google_search.yaml"
+ng_run "+config_paths=[$config_paths]"
+```
+
+If you want to use them both you would just add the yamls together like:
+```bash
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/library_judge_math/configs/bytedtsinghua_dapo17k.yaml,\
+resources_servers/google_search/configs/google_search.yaml"
+ng_run "+config_paths=[$config_paths]"
+```
+
+The same process goes for data preparation and downstream training framework Gym configuration, you would just add additional server configs.
+
+
+# FAQ: DCO and commit signing VSCode and Git setup
 Here are some suggestions for easier development using the VSCode code editor.
 
 VSCode workspace settings at `.vscode/settings.json`
