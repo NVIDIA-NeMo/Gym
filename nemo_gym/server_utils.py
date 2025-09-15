@@ -42,8 +42,8 @@ from nemo_gym.config_types import (
 from nemo_gym.global_config import (
     HEAD_SERVER_KEY_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
-    GlobalConfigDictParserConfig,
     GlobalConfigDictParser,
+    GlobalConfigDictParserConfig,
     get_first_server_config_dict,
     get_global_config_dict,
 )
