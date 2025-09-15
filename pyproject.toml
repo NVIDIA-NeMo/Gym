@@ -226,7 +226,7 @@ ng_dump_config = "nemo_gym.cli:dump_config"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["resources_servers", "responses_api_agents", "responses_api_models", "nemo_gym"]
+include = ["resources_servers", "responses_api_agents", "responses_api_models", "nemo_gym", "penguin"]
 
 ################################################
 # Testing

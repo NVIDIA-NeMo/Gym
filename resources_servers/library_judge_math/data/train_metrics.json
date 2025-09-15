@@ -7,7 +7,7 @@
         "version": "0.0.1",
         "artifact_fpath": "open_math_reasoning_problems.jsonl"
     },
-    "license": "Apache 2.0",
+    "license": "Creative Commons Attribution 4.0 International",
     "Number of examples": 112867,
     "Number of tools": {
         "Total # non-null values": 0,

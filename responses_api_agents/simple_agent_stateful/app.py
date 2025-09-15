@@ -33,7 +33,9 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseOutputMessage,
 )
+from nemo_gym.server_utils import SESSION_ID_KEY
 
 
 class SimpleAgentStatefulConfig(BaseResponsesAPIAgentConfig):
@@ -55,6 +57,7 @@ class SimpleAgentStatefulVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
 
+# TODO we should find a way to merge this with the regular simple agent.
 class SimpleAgentStateful(SimpleResponsesAPIAgent):
     config: SimpleAgentStatefulConfig
 
@@ -87,13 +90,16 @@ class SimpleAgentStateful(SimpleResponsesAPIAgent):
             new_outputs.extend(output)
 
             all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
-            if not all_fn_calls:
+            all_output_messages: List[NeMoGymResponseOutputMessage] = [
+                o for o in output if o.type == "message" and o.role == "assistant"
+            ]
+            if not all_fn_calls and all_output_messages:
                 break
 
             for output_function_call in all_fn_calls:
                 function_args = json.loads(output_function_call.arguments)
                 if session_id:  # Add session_id to subsequent calls
-                    function_args["session_id"] = session_id
+                    function_args[SESSION_ID_KEY] = session_id
                 api_response = await self.server_client.post(
                     server_name=self.config.resources_server.name,
                     url_path=f"/{output_function_call.name}",
@@ -103,8 +109,8 @@ class SimpleAgentStateful(SimpleResponsesAPIAgent):
                 # Extract session_id from first response for reuse
                 if session_id is None:
                     response_data = api_response.json()
-                    if "session_id" in response_data:
-                        session_id = response_data["session_id"]
+                    if SESSION_ID_KEY in response_data:
+                        session_id = response_data[SESSION_ID_KEY]
 
                 # --- create a compliant FunctionCallOutput --------------------------
                 response_data = api_response.json()

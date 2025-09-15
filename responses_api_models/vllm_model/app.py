@@ -13,7 +13,7 @@
 # limitations under the License.
 import re
 from time import time
-from typing import List, Tuple
+from typing import ClassVar, List, Optional, Tuple
 from uuid import uuid4
 
 from openai import BaseModel as OpenAIBaseModel
@@ -25,8 +25,10 @@ from nemo_gym.base_responses_api_model import (
     SimpleResponsesAPIModel,
 )
 from nemo_gym.openai_utils import (
+    RESPONSES_TO_TRAIN,
     NeMoGymAsyncOpenAI,
     NeMoGymChatCompletion,
+    NeMoGymChatCompletionAssistantMessageForTrainingParam,
     NeMoGymChatCompletionAssistantMessageParam,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionDeveloperMessageParam,
@@ -47,6 +49,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
+    TokenIDLogProbMixin,
 )
 
 
@@ -54,6 +57,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     base_url: str
     api_key: str
     model: str
+    return_token_id_information: bool
 
 
 # This needs to be OpenAI BaseModel since it is casted to below by the OpenAI client.
@@ -69,7 +73,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             base_url=self.config.base_url,
             api_key=self.config.api_key,
         )
-        self._converter = VLLMConverter()
+        self._converter = VLLMConverter(return_token_id_information=self.config.return_token_id_information)
         return super().model_post_init(context)
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
@@ -82,20 +86,9 @@ class VLLMModel(SimpleResponsesAPIModel):
         chat_completion_response = await self.chat_completions(chat_completion_create_params)
 
         choice = chat_completion_response.choices[0]
-        message = choice.message
 
         response_output = self._converter.postprocess_chat_response(choice)
         response_output_dicts = [item.model_dump() for item in response_output]
-
-        last_response_output_item = response_output_dicts[-1]
-        if hasattr(message, "prompt_token_ids"):
-            last_response_output_item.update(
-                dict(
-                    prompt_token_ids=message.prompt_token_ids,
-                    generation_token_ids=message.generation_token_ids,
-                    generation_log_probs=message.generation_log_probs,
-                )
-            )
 
         # Chat Completion -> Response
         return NeMoGymResponse(
@@ -130,48 +123,63 @@ class VLLMModel(SimpleResponsesAPIModel):
         body_dict = body.model_dump(exclude_unset=True)
         body_dict.setdefault("model", self.config.model)
 
-        openai_response = await self._client.chat.completions.create(
-            **body_dict,
-            logprobs=True,
-            # The extra body below is VLLM specific to get the generation log probs associated with generation token IDs.
-            extra_body={
-                "return_tokens_as_token_ids": True,
-            },
-        )
+        create_params = body_dict
+        if self.config.return_token_id_information:
+            create_params |= dict(
+                logprobs=True,
+                # The extra body below is VLLM specific to get the generation log probs associated with generation token IDs.
+                extra_body={
+                    "return_tokens_as_token_ids": True,
+                },
+            )
+
+        openai_response = await self._client.chat.completions.create(**create_params)
         assert not getattr(openai_response.choices[0].message, "reasoning_content", None), (
             "Please do not use a reasoning parser in vLLM! There is one source of truth for handling data (including reasoning), which is NeMo Gym!"
         )
         openai_response: NeMoGymChatCompletion
 
-        log_probs = openai_response.choices[0].logprobs.content
-        generation_token_ids = []
-        generation_log_probs = []
-        for log_prob in log_probs:
-            # Looks like `"token_id:151667"`
-            generation_token_ids.append(int(log_prob.token.removeprefix("token_id:")))
-            generation_log_probs.append(log_prob.logprob)
-
-        # The base url has /v1 at the end but vLLM's tokenize endpoint does not have v1, hence the ..
-        # I can't believe the path is resolved correctly LOL
-        tokenize_response = await self._client.post(
-            "../tokenize",
-            cast_to=VLLMTokenizeResponse,
-            body=body_dict,
-        )
-
         chat_completion_dict = openai_response.model_dump()
-        message_dict = chat_completion_dict["choices"][0]["message"]
-        message_dict.update(
-            dict(
-                prompt_token_ids=tokenize_response.tokens,
-                generation_token_ids=generation_token_ids,
-                generation_log_probs=generation_log_probs,
+
+        if self.config.return_token_id_information:
+            log_probs = openai_response.choices[0].logprobs.content
+            generation_token_ids = []
+            generation_log_probs = []
+            for log_prob in log_probs:
+                # Looks like `"token_id:151667"`
+                generation_token_ids.append(int(log_prob.token.removeprefix("token_id:")))
+                generation_log_probs.append(log_prob.logprob)
+
+            # The tokenize endpoint doesn't accept any sampling parameters
+            # The only relevant params are model, messages, and tools.
+            tokenize_body_dict = dict()
+            for key in ("model", "messages", "tools"):
+                if key in body_dict:
+                    tokenize_body_dict[key] = body_dict[key]
+
+            # The base url has /v1 at the end but vLLM's tokenize endpoint does not have v1, hence the ..
+            # I can't believe the path is resolved correctly LOL
+            tokenize_response = await self._client.post(
+                "../tokenize",
+                cast_to=VLLMTokenizeResponse,
+                body=tokenize_body_dict,
             )
-        )
+
+            message_dict = chat_completion_dict["choices"][0]["message"]
+            message_dict.update(
+                dict(
+                    prompt_token_ids=tokenize_response.tokens,
+                    generation_token_ids=generation_token_ids,
+                    generation_log_probs=generation_log_probs,
+                )
+            )
+
         return NeMoGymChatCompletion(**chat_completion_dict)
 
 
 class VLLMConverterResponsesToChatCompletionsState(BaseModel):
+    return_token_id_information: bool
+
     messages: List[NeMoGymChatCompletionMessageParam] = Field(default_factory=list)
 
     # We are mapping from Response input items to chat completions messages, which is many to one.
@@ -179,23 +187,40 @@ class VLLMConverterResponsesToChatCompletionsState(BaseModel):
     content_buffer: str = ""  # Buffer for reasoning and chat
     tool_calls_buffer: List[NeMoGymChatCompletionMessageToolCallParam] = Field(default_factory=list)
 
+    # Will only be populated if return_token_id_information is True.
+    token_information: Optional[TokenIDLogProbMixin] = None
+
     def flush_assistant(self) -> None:
         if not (self.content_buffer or self.tool_calls_buffer):
             return
 
-        self.messages.append(
-            NeMoGymChatCompletionAssistantMessageParam(
-                content=self.content_buffer or None,
-                role="assistant",
-                tool_calls=self.tool_calls_buffer,
-            )
+        shared_params = dict(
+            content=self.content_buffer or None,
+            role="assistant",
+            tool_calls=self.tool_calls_buffer,
         )
+        if self.return_token_id_information:
+            message = NeMoGymChatCompletionAssistantMessageForTrainingParam(
+                **shared_params,
+                **self.token_information.model_dump(),
+            )
+        else:
+            message = NeMoGymChatCompletionAssistantMessageParam(**shared_params)
+
+        self.messages.append(message)
+
         self.content_buffer = ""
         self.tool_calls_buffer = []
 
 
-class VLLMConverter:
-    THINK_TAG_PATTERN = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+class VLLMConverter(BaseModel):
+    return_token_id_information: bool
+
+    # =======================================================
+    # Reasoning handling. This may change across models and model families
+    # =======================================================
+
+    THINK_TAG_PATTERN: ClassVar = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 
     @staticmethod
     def _wrap_reasoning_in_think_tags(texts: List[str]) -> str:
@@ -220,7 +245,9 @@ class VLLMConverter:
         responses_create_params = responses_create_params.model_dump(exclude_unset=True)
 
         # Tracks messages including reasoning for each respective message type helper function
-        state = VLLMConverterResponsesToChatCompletionsState()
+        state = VLLMConverterResponsesToChatCompletionsState(
+            return_token_id_information=self.return_token_id_information
+        )
 
         # Input can be a string. Wrap in a ResponseInput-like
         response_input = responses_create_params["input"]
@@ -254,6 +281,13 @@ class VLLMConverter:
                     self._format_function_call_output(m, state)
                 case _:  # pragma: no cover
                     raise NotImplementedError(f"Unsupported message type: {m}")
+
+            if self.return_token_id_information and m.get("prompt_token_ids"):
+                state.token_information = TokenIDLogProbMixin(
+                    prompt_token_ids=m["prompt_token_ids"],
+                    generation_token_ids=m["generation_token_ids"],
+                    generation_log_probs=m["generation_log_probs"],
+                )
 
         state.flush_assistant()
 
@@ -437,6 +471,16 @@ class VLLMConverter:
                     status="completed",
                     id=tc["id"],
                 )
+            )
+
+        if self.return_token_id_information:
+            last_response_output_item = response_output[-1]
+            train_cls = RESPONSES_TO_TRAIN[last_response_output_item.__class__]
+            response_output[-1] = train_cls(
+                **last_response_output_item.model_dump(),
+                prompt_token_ids=raw_message["prompt_token_ids"],
+                generation_token_ids=raw_message["generation_token_ids"],
+                generation_log_probs=raw_message["generation_log_probs"],
             )
 
         return response_output

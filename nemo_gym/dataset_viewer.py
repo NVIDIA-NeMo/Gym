@@ -51,7 +51,7 @@ def format_function_call_output(m: FunctionCallOutput) -> List[ChatMessage]:
         ChatMessage(
             content=content,
             role="assistant",
-            metadata=MetadataDict(title="Function call output", status="done"),
+            metadata=MetadataDict(title=f"Function call output (tool call ID `{m['call_id']}`)", status="done"),
         )
     ]
 
@@ -67,7 +67,7 @@ def format_function_call(m: ResponseFunctionToolCallParam) -> List[ChatMessage]:
         ChatMessage(
             content=content,
             role="assistant",
-            metadata=MetadataDict(title=f"Function call - `{name}`", status="done"),
+            metadata=MetadataDict(title=f"Function call - `{name}` (tool call ID `{m['call_id']}`)", status="done"),
         )
     ]
 

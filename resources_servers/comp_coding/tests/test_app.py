@@ -29,7 +29,7 @@ from nemo_gym.server_utils import ServerClient
 
 class TestApp:
     def test_sanity(self) -> None:
-        cfg = CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="")
+        cfg = CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
         CompCodingResourcesServer(config=cfg, server_client=MagicMock(spec=ServerClient))
 
     async def test_verify_pass_via_response(self) -> None:
@@ -60,7 +60,7 @@ class TestApp:
         )
 
         server = CompCodingResourcesServer(
-            config=CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint=""),
+            config=CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
             server_client=MagicMock(spec=ServerClient),
         )
 
@@ -105,7 +105,7 @@ class TestApp:
         )
 
         server = CompCodingResourcesServer(
-            config=CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint=""),
+            config=CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
             server_client=MagicMock(spec=ServerClient),
         )
 
@@ -121,7 +121,7 @@ class TestApp:
     async def test_verify_missing_response_validation_error(self) -> None:
         """Omitting `response` should fail request validation (schema requires it)."""
         _ = CompCodingResourcesServer(
-            config=CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint=""),
+            config=CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
             server_client=MagicMock(spec=ServerClient),
         )
 
@@ -160,7 +160,7 @@ class TestApp:
         )
 
         server = CompCodingResourcesServer(
-            config=CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint=""),
+            config=CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
             server_client=MagicMock(spec=ServerClient),
         )
 
@@ -178,7 +178,7 @@ class TestApp:
     async def test_verify_syntax_error(self) -> None:
         """Code has a syntax error -> should report ERROR and reward 0.0"""
         server = CompCodingResourcesServer(
-            config=CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint=""),
+            config=CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
             server_client=MagicMock(spec=ServerClient),
         )
 
@@ -218,7 +218,7 @@ class TestApp:
 
     async def test_verify_runtime_error(self) -> None:
         server = CompCodingResourcesServer(
-            config=CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint=""),
+            config=CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
             server_client=MagicMock(spec=ServerClient),
         )
 
