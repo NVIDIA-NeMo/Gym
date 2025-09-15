@@ -14,7 +14,7 @@
 import json
 
 from nemo_gym.openai_utils import (
-    NeMoGymEasyInputMessageParam,
+    NeMoGymEasyInputMessage,
     NeMoGymResponseCreateParamsNonStreaming,
 )
 
@@ -57,9 +57,7 @@ base_response_create_params = NeMoGymResponseCreateParamsNonStreaming(
 example_strs = []
 for query in queries:
     example = base_response_create_params.model_copy(
-        update={
-            "input": base_response_create_params.input + [NeMoGymEasyInputMessageParam(role="user", content=query)]
-        }
+        update={"input": base_response_create_params.input + [NeMoGymEasyInputMessage(role="user", content=query)]}
     )
     example_strs.append(json.dumps({"responses_create_params": example.model_dump(exclude_unset=True)}) + "\n")
 
