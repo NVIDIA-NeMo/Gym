@@ -578,6 +578,12 @@ ng_collect_rollouts +agent_name=multineedle_simple_agent \
     +num_samples_in_parallel=null
 ```
 
+The supported parameters include:
+- `limit`: Limits how many examples from the input JSONL file to process
+- `num_repeats`: Repeats each input example multiple times to collect multiple rollouts per example
+- `num_samples_in_parallel`: Controls how many rollout collection requests run concurrently
+
+
 View the rollouts just collected!
 ```
 ng_viewer +jsonl_fpath=results/multineedle_rollout_collection.jsonl
