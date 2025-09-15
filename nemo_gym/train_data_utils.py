@@ -233,7 +233,7 @@ def compute_sample_metrics(sample_dict_str: str) -> Tuple[DatasetMetrics, bool]:
             total=1,
             min=temperature,
             max=temperature,
-            values=temperature,
+            values=[temperature],
         )
 
     json_dumped_number_of_words = len(json.dumps(responses_create_params).split())
