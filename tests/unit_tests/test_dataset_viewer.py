@@ -14,7 +14,6 @@
 import json
 from unittest.mock import mock_open, patch
 
-from pydantic import BaseModel
 from pytest import MonkeyPatch
 
 from nemo_gym.dataset_viewer import (
@@ -41,53 +40,35 @@ class TestDatasetViewer:
             build_jsonl_dataset_viewer(config)
 
     def test_get_aggregate_metrics(self, monkeypatch: MonkeyPatch):
-        class DummySample(BaseModel):
-            responses_create_params: dict = {}
-            response: dict = {}
-            reward: float = 1.0
-            accuracy: bool = True
-            set_overlap: float = 0.5
-            unrelated_list: list = []
-            unrelated_dict: dict = {}
-
-        class DummySampleWithStrings(DummySample):
-            some_string: str
-
         samples = [
-            DummySample(reward=1.0, accuracy=True, set_overlap=0.5),
-            DummySample(reward=0.0, accuracy=False, set_overlap=0.0),
-            DummySample(reward=0.5, accuracy=True, set_overlap=1.0),
+            '{"reward": 1.0, "accuracy": true, "set_overlap": 0.5}',
+            '{"reward": 0.0, "accuracy": false, "set_overlap": 0.0}',
+            '{"reward": 0.5, "accuracy": true, "set_overlap": 1.0}',
         ]
 
         samples_with_strings = [
-            DummySampleWithStrings(reward=1.0, accuracy=True, some_string="asdf"),
-            DummySampleWithStrings(reward=0.0, accuracy=False, some_string="asdf"),
-            DummySampleWithStrings(reward=0.5, accuracy=True, some_string="word1"),
-            DummySampleWithStrings(reward=0.5, accuracy=True, some_string="word1"),
-            DummySampleWithStrings(reward=0.5, accuracy=True, some_string="word2"),
+            '{"reward": 1.0, "accuracy": true, "some_string": "asdf"}',
+            '{"reward": 0.0, "accuracy": false, "some_string": "asdf"}',
+            '{"reward": 0.5, "accuracy": true, "some_string": "word1"}',
+            '{"reward": 0.5, "accuracy": true, "some_string": "word1"}',
+            '{"reward": 0.5, "accuracy": true, "some_string": "word2"}',
         ]
 
         def mock_compute_sample_metrics(line: str):
             metrics = json.loads(line)
             return metrics, False
 
-        class DummyAgg:
-            def model_dump(self, by_alias=True):
-                return {}
-
-            def aggregate(self):
-                return DummyAgg()
-
         monkeypatch.setattr(
             "nemo_gym.train_data_utils.compute_sample_metrics",
             mock_compute_sample_metrics,
         )
 
-        result_1 = get_aggregate_metrics(samples, "{}\n")
+        result_1 = get_aggregate_metrics(samples)
 
-        assert "reward" in result_1
-        assert "accuracy" in result_1
-        assert "set_overlap" in result_1
+        other_fields_1 = result_1["Other Fields"]
+        assert "reward" in other_fields_1
+        assert "accuracy" in other_fields_1
+        assert "set_overlap" in other_fields_1
 
         assert "unrelated_str" not in result_1
         assert "unrelated_list" not in result_1
@@ -97,22 +78,23 @@ class TestDatasetViewer:
         assert "response" not in result_1
 
         # Check computed values
-        reward_stats = result_1["reward"]
+        reward_stats = other_fields_1["reward"]
         assert reward_stats["Total # non-null values"] == 3
         assert reward_stats["Average"] == (1.0 + 0.0 + 0.5) / 3
         assert reward_stats["Min"] == 0.0
         assert reward_stats["Max"] == 1.0
 
         # Check computed values with bools converted to int
-        accuracy_stats = result_1["accuracy"]
+        accuracy_stats = other_fields_1["accuracy"]
         assert accuracy_stats["Total # non-null values"] == 3
         assert accuracy_stats["Average"] == (1 + 0 + 1) / 3
         assert accuracy_stats["Min"] == 0
         assert accuracy_stats["Max"] == 1
 
         # Check string counts
-        result_2 = get_aggregate_metrics(samples_with_strings, "{}\n")
+        result_2 = get_aggregate_metrics(samples_with_strings)
 
-        assert "some_string" in result_2
-        assert result_2["some_string"]["unique_count"] == 3
-        assert result_2["some_string"]["total_count"] == 5
+        other_fields_2 = result_2["Other Fields"]
+        assert "some_string" in other_fields_2
+        assert other_fields_2["some_string"]["unique_count"] == 3
+        assert other_fields_2["some_string"]["total_count"] == 5
