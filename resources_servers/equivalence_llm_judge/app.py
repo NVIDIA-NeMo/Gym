@@ -21,6 +21,7 @@ The judge prompt is fully configurable via server config.
 from __future__ import annotations
 
 from typing import Any, Optional
+import re
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -58,6 +59,14 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     judge_prompt_template: str
     judge_equal_label: str = "[[A=B]]"
     judge_not_equal_label: str = "[[A!=B]]"
+    # Optional regex to extract the question from the last user message.
+    # If provided and a match is found, the first non-empty capture group is used;
+    # otherwise the full match is used.
+    question_extract_regex: Optional[str] = None
+    # Optional regex to extract the generated response from the last assistant message.
+    # The last match is used. If capture groups exist, the first non-empty group is
+    # returned; otherwise, the entire last match is used.
+    response_extract_regex: Optional[str] = None
     # If true, perform a second judge pass swapping expected and generated answers
     # to reduce potential positional bias. Default is false for speed.
     check_twice_swap: bool = False
@@ -94,19 +103,69 @@ class LLMJudgeVerifyResponse(BaseVerifyResponse):
     judge_evaluations: list[JudgeEvaluation]
 
 
-def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
-    texts: list[str] = []
-    for o in body.response.output:
+def _extract_last_assistant_text(body: BaseVerifyRequest, extract_regex: Optional[str]) -> str:
+    """Extract the last assistant message text from the response.
+
+    - If the assistant message has multiple text blocks, they are joined with newlines.
+    - If ``extract_regex`` is provided, the last regex match is used; if capture
+      groups exist, the first non-empty group is returned, otherwise the full match.
+    - Returns an empty string when no assistant text is available.
+    """
+    # Return only the last assistant message's text content.
+    for o in reversed(body.response.output):
         if getattr(o, "type", None) == "message" and getattr(o, "role", None) == "assistant":
             content = getattr(o, "content", None)
             if isinstance(content, list):
+                # Some providers split a single assistant message into multiple text blocks.
+                # Join all text blocks to reconstruct the full message text.
+                texts: list[str] = []
                 for c in content:
                     t = getattr(c, "text", None)
                     if isinstance(t, str):
                         texts.append(t)
+                text = "\n".join(texts).strip()
+                if not text:
+                    return text
+                if extract_regex:
+                    try:
+                        matches = list(
+                            re.finditer(extract_regex, text, flags=re.MULTILINE | re.DOTALL)
+                        )
+                    except re.error:
+                        matches = []
+                    if matches:
+                        m = matches[-1]
+                        groups = m.groups()
+                        if groups:
+                            for idx in range(1, len(groups) + 1):
+                                gv = m.group(idx)
+                                if isinstance(gv, str) and gv.strip() != "":
+                                    return gv.strip()
+                        return m.group(0).strip()
+                return text
             elif isinstance(content, str):
-                texts.append(content)
-    return "\n".join(texts).strip()
+                text = content.strip()
+                if not text:
+                    return text
+                if extract_regex:
+                    try:
+                        matches = list(
+                            re.finditer(extract_regex, text, flags=re.MULTILINE | re.DOTALL)
+                        )
+                    except re.error:
+                        matches = []
+                    if matches:
+                        m = matches[-1]
+                        groups = m.groups()
+                        if groups:
+                            for idx in range(1, len(groups) + 1):
+                                gv = m.group(idx)
+                                if isinstance(gv, str) and gv.strip() != "":
+                                    return gv.strip()
+                        return m.group(0).strip()
+                return text
+            break
+    return ""
 
 
 def _extract_expected_answer(req: LLMJudgeRunRequest) -> Optional[str]:
@@ -117,7 +176,18 @@ def _extract_expected_answer(req: LLMJudgeRunRequest) -> Optional[str]:
     return str(exp) if exp is not None else None
 
 
-def _extract_question_text(params: NeMoGymResponseCreateParamsNonStreaming) -> str:
+def _extract_question_text(
+    params: NeMoGymResponseCreateParamsNonStreaming,
+    question_extract_regex: Optional[str],
+) -> str:
+    """Extract the question text from the last user message in ``params``.
+
+    - Returns the raw last user message text by default.
+    - If ``question_extract_regex`` is provided, the last regex match is used; if
+      capture groups exist, the first non-empty group is returned, otherwise the
+      full match.
+    - Returns an empty string if no user text is available.
+    """
     # Return only the last user message's text content.
     last_text: Optional[str] = None
     for m in params.input or []:
@@ -125,7 +195,28 @@ def _extract_question_text(params: NeMoGymResponseCreateParamsNonStreaming) -> s
             c = getattr(m, "content", None)
             if isinstance(c, str):
                 last_text = c
-    return (last_text or "").strip()
+    text = (last_text or "").strip()
+    if not text:
+        return text
+    # Optionally apply a regex to extract a portion of the question text.
+    if question_extract_regex:
+        try:
+            matches = list(
+                re.finditer(question_extract_regex, text, flags=re.MULTILINE | re.DOTALL)
+            )
+        except re.error:
+            matches = []
+        if matches:
+            m = matches[-1]  # Use the last match
+            # Prefer first non-empty capturing group, else the entire match.
+            groups = m.groups()
+            if groups:
+                for idx in range(1, len(groups) + 1):
+                    gv = m.group(idx)
+                    if isinstance(gv, str) and gv.strip() != "":
+                        return gv.strip()
+            return m.group(0).strip()
+    return text
 
 
 class LLMJudgeResourcesServer(SimpleResourcesServer):
@@ -139,8 +230,10 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
 
     async def verify(self, body: LLMJudgeVerifyRequest) -> LLMJudgeVerifyResponse:
         expected = _extract_expected_answer(body) or ""
-        question = _extract_question_text(body.responses_create_params)
-        generated = _extract_last_assistant_text(body)
+        question = _extract_question_text(
+            body.responses_create_params, self.config.question_extract_regex
+        )
+        generated = _extract_last_assistant_text(body, self.config.response_extract_regex)
 
         # Run judge twice to mitigate positional or presentation bias by swapping orders.
         first_equal, first_eval = await self._generate_judge_evaluation(

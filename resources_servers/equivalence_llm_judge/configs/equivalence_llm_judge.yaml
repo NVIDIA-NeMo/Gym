@@ -71,6 +71,16 @@ equivalence_llm_judge:
       check_twice_swap: true
       # Reward when the second (swap) pass fails; default 0.0, can be -1.0
       reward_if_swap_fails: 0.0
+      # Optional regex to extract question from the last user message. The LAST
+      # match is used. If capture groups exist, the first non-empty group is
+      # returned; otherwise, the entire last match is used.
+      # Example: "^Question:\\s*(.*)$"
+      question_extract_regex: null
+      # Optional regex to extract the generated response from the last assistant message.
+      # The LAST match is used. If capture groups exist, the first non-empty
+      # group is returned; otherwise, the entire last match is used.
+      # Example: "^Answer:\\s*(.*)$"
+      response_extract_regex: null
 
 equivalence_llm_judge_simple_agent:
   responses_api_agents:
