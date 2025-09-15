@@ -69,9 +69,11 @@ class NeMoGymGlobalAsyncClient(AsyncClient):
 # Eventually, we may also want to parameterize the max connections. For now, we set the max connections to just some very large number.
 #
 # It's critical that this client is NOT used before uvicorn.run is called. Under the hood, this async client will start and use an event loop, and store a handle to that specific event loop. When uvicorn.run is called, it will replace the event loop policy with its own. So the handle that the async client has is now outdated.
+_MAX_CONNECTIONS = getenv("NEMO_GYM_HTTPX_MAX_CONNECTIONS", 1500)
+_MAX_RETRIES = getenv("NEMO_GYM_HTTPX_MAX_RETRIES", 3)
 GLOBAL_HTTPX_CLIENT = NeMoGymGlobalAsyncClient(
-    limits=Limits(max_keepalive_connections=1500, max_connections=1500),
-    transport=AsyncHTTPTransport(retries=3),
+    limits=Limits(max_keepalive_connections=_MAX_CONNECTIONS, max_connections=_MAX_CONNECTIONS),
+    transport=AsyncHTTPTransport(retries=_MAX_RETRIES),
     timeout=None,
 )
 
