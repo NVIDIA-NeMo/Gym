@@ -349,34 +349,32 @@ class TestValidateSamplesAndAggregateMetrics:
                     stddev=0,
                     values=[],
                 ),
-                other_fields={
-                    "id": {
-                        "Total # non-null values": 5,
-                        "Average": 2.0,
-                        "Min": 0.0,
-                        "Max": 4.0,
-                        "Median": 2.0,
-                        "Standard deviation": 1.5811388300841898,
-                    },
-                    "expected_synonym_values": {
-                        "Total # non-null values": 10,
-                        "Average": 559.0,
-                        "Min": 407.0,
-                        "Max": 711.0,
-                        "Median": 559.0,
-                        "Standard deviation": 160.22206811519789,
-                    },
-                    "minefield_label_value": {
-                        "Total # non-null values": 5,
-                        "Average": 299.0,
-                        "Min": 299.0,
-                        "Max": 299.0,
-                        "Median": 299.0,
-                        "Standard deviation": 0.0,
-                    },
-                    "expected_synonyms": {"unique_count": 2, "total_count": 10},
-                    "minefield_label": {"unique_count": 1, "total_count": 5},
+                id={
+                    "Total # non-null values": 5,
+                    "Average": 2.0,
+                    "Min": 0.0,
+                    "Max": 4.0,
+                    "Median": 2.0,
+                    "Standard deviation": 1.5811388300841898,
                 },
+                expected_synonym_values={
+                    "Total # non-null values": 10,
+                    "Average": 559.0,
+                    "Min": 407.0,
+                    "Max": 711.0,
+                    "Median": 559.0,
+                    "Standard deviation": 160.22206811519789,
+                },
+                minefield_label_value={
+                    "Total # non-null values": 5,
+                    "Average": 299.0,
+                    "Min": 299.0,
+                    "Max": 299.0,
+                    "Median": 299.0,
+                    "Standard deviation": 0.0,
+                },
+                expected_synonyms={"unique_count": 2, "total_count": 10},
+                minefield_label={"unique_count": 1, "total_count": 5},
             )
         }
         assert expected_dataset_type_to_aggregate_metrics == actual_dataset_type_to_aggregate_metrics
@@ -514,7 +512,6 @@ class TestValidateSamplesAndAggregateMetrics:
                 stddev=0,
                 values=[],
             ),
-            other_fields={},
         )
         assert expected_metrics == state.metrics
 

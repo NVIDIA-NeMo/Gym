@@ -133,7 +133,9 @@ class DatasetMetrics(Accumulator):
     )
     number_of_turns: AvgMinMax = Field(serialization_alias="Number of turns", default_factory=AvgMinMax)
     temperature: AvgMinMax = Field(serialization_alias="Temperature", default_factory=AvgMinMax)
-    other_fields: Dict[str, Any] = Field(serialization_alias="Other Fields", default_factory=dict)
+
+    # Allow any arbitrary fields
+    model_config = ConfigDict(extra="allow")
 
     # TODO: Number of unique create params, Number of unique user messages, other sampling params, etc
 
@@ -144,17 +146,29 @@ class DatasetMetrics(Accumulator):
         self.number_of_turns.add(other.number_of_turns)
         self.temperature.add(other.temperature)
 
-        for k, v in other.other_fields.items():
-            self.other_fields[k] = v
+        # Merge extra fields safely
+        if other.model_extra:
+            known_fields = set(DatasetMetrics.model_fields.keys())
+            existing_extras = set((self.model_extra or {}).keys())
+            for k, v in other.model_extra.items():
+                if k in known_fields or k in existing_extras:
+                    continue
+                setattr(self, k, v)
 
     def _aggregate(self: Self) -> Self:
+        extras = {}
+        if self.model_extra:
+            for k, v in self.model_extra.items():
+                if k in DatasetMetrics.model_fields.keys():
+                    continue
+                extras[k] = v
         return DatasetMetrics(
             number_of_examples=self.number_of_examples,
             number_of_tools=self.number_of_tools.aggregate(),
             json_dumped_number_of_words=self.json_dumped_number_of_words.aggregate(),
             number_of_turns=self.number_of_turns.aggregate(),
             temperature=self.temperature.aggregate(),
-            other_fields=self.other_fields,
+            **extras,
         )
 
 
@@ -432,7 +446,7 @@ class TrainDataProcessor(BaseModel):
 
         other_metrics = aggregate_other_metrics(data)
         for k, v in other_metrics.items():
-            state.metrics.other_fields[k] = v
+            setattr(state.metrics, k, v)
 
         return state
 

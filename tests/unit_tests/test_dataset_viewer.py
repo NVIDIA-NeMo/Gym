@@ -65,10 +65,9 @@ class TestDatasetViewer:
 
         result_1 = get_aggregate_metrics(samples)
 
-        other_fields_1 = result_1["Other Fields"]
-        assert "reward" in other_fields_1
-        assert "accuracy" in other_fields_1
-        assert "set_overlap" in other_fields_1
+        assert "reward" in result_1
+        assert "accuracy" in result_1
+        assert "set_overlap" in result_1
 
         assert "unrelated_str" not in result_1
         assert "unrelated_list" not in result_1
@@ -78,14 +77,14 @@ class TestDatasetViewer:
         assert "response" not in result_1
 
         # Check computed values
-        reward_stats = other_fields_1["reward"]
+        reward_stats = result_1["reward"]
         assert reward_stats["Total # non-null values"] == 3
         assert reward_stats["Average"] == (1.0 + 0.0 + 0.5) / 3
         assert reward_stats["Min"] == 0.0
         assert reward_stats["Max"] == 1.0
 
         # Check computed values with bools converted to int
-        accuracy_stats = other_fields_1["accuracy"]
+        accuracy_stats = result_1["accuracy"]
         assert accuracy_stats["Total # non-null values"] == 3
         assert accuracy_stats["Average"] == (1 + 0 + 1) / 3
         assert accuracy_stats["Min"] == 0
@@ -94,7 +93,6 @@ class TestDatasetViewer:
         # Check string counts
         result_2 = get_aggregate_metrics(samples_with_strings)
 
-        other_fields_2 = result_2["Other Fields"]
-        assert "some_string" in other_fields_2
-        assert other_fields_2["some_string"]["unique_count"] == 3
-        assert other_fields_2["some_string"]["total_count"] == 5
+        assert "some_string" in result_2
+        assert result_2["some_string"]["unique_count"] == 3
+        assert result_2["some_string"]["total_count"] == 5

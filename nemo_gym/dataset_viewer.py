@@ -216,7 +216,8 @@ def get_aggregate_metrics(raw_lines: List[str]) -> Dict[str, Any]:
             dataset_metrics.add(metrics)
 
     other_metrics = aggregate_other_metrics(line_dicts)
-    dataset_metrics.other_fields = other_metrics
+    for k, v in other_metrics.items():
+        setattr(dataset_metrics, k, v)
 
     aggregate_metrics = dataset_metrics.aggregate()
     aggregate_metrics_dict = aggregate_metrics.model_dump(by_alias=True)
