@@ -5,6 +5,7 @@
 #SBATCH --time=04:00:00
 #SBATCH --cpus-per-task=96
 #SBATCH --gpus-per-node=1
+#SBATCH --mem=1000G
 #SBATCH --output=mini_swe_traj_collection-%j.out
 #SBATCH --error=mini_swe_traj_collection-%j.err
 
