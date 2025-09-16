@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
-import asyncio
 import json
 from asyncio import Semaphore
 from os import environ, getenv, makedirs
