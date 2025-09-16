@@ -1,0 +1,221 @@
+import json
+from pathlib import Path
+from pydantic import ConfigDict
+from typing import Literal, Any, Optional
+import yaml
+from uuid import uuid4
+import asyncio
+from asyncio import Semaphore
+from os import getenv, environ, makedirs
+from fastapi import FastAPI, Body
+
+from minisweagent.config import builtin_config_dir, get_config_path
+from minisweagent.run.extra.swegym_runner import _main as run_swegym
+
+from nemo_gym.base_resources_server import (
+    BaseVerifyRequest,
+    BaseRunRequest,
+    BaseVerifyResponse,
+)
+from nemo_gym.base_responses_api_agent import (
+    SimpleResponsesAPIAgent,
+    BaseResponsesAPIAgentConfig,
+)
+from nemo_gym.server_utils import (
+    get_first_server_config_dict,
+    ServerClient,
+)
+
+from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+
+from nemo_gym.openai_utils import (
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponse,
+)
+
+from responses_api_agents.mini_swe_agent.utils import MiniSWEAgentUtils
+
+
+class MiniSWEAgentConfig(BaseResponsesAPIAgentConfig):
+    model_server: ModelServerRef
+    resources_server: ResourcesServerRef
+    env: Literal["docker", "singularity"]
+    concurrency: int
+    cache_dir_template: Optional[str] = None
+    run_golden: bool = False
+    step_timeout: int = 600
+    eval_timeout: int = 1800
+    skip_if_exists: bool = False
+
+
+class MiniSWEAgentRunRequest(BaseRunRequest):
+    model_config = ConfigDict(extra="allow")
+
+
+class MiniSWEAgentVerifyRequest(BaseVerifyRequest):
+    model_config = ConfigDict(extra="allow")
+
+
+class MiniSWEAgentVerifyResponse(BaseVerifyResponse):
+    model_config = ConfigDict(extra="allow")
+
+
+class MiniSWEAgent(SimpleResponsesAPIAgent):
+    config: MiniSWEAgentConfig
+    sem: Semaphore = None
+    traj_postfix: str = "traj.json"
+    eval_report: str = "report.json"
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def model_post_init(self, __context: Any) -> None:
+        self.sem = Semaphore(self.config.concurrency)
+
+    def setup_webserver(self) -> FastAPI:
+        app = FastAPI()
+        app.post("/v1/responses")(self.responses)
+        app.post("/run")(self.run)
+        return app
+
+    async def responses(
+        self, body: NeMoGymResponseCreateParamsNonStreaming = Body()
+    ) -> NeMoGymResponse:
+        raise NotImplementedError
+
+    async def run(self, body: MiniSWEAgentRunRequest) -> MiniSWEAgentVerifyResponse:
+        async with self.sem:
+            model_server_name = self.config.model_server.name
+            global_config_dict = (
+                ServerClient.load_from_global_config().global_config_dict
+            )
+
+            model_server_config = get_first_server_config_dict(
+                global_config_dict,
+                model_server_name,
+            )
+
+            policy_model_name = global_config_dict["policy_model_name"]
+
+            ##### mini-swe-agent params #####
+            subset = body.subset
+            split = body.split
+            workers = 1
+            cache_dir_template = self.config.cache_dir_template
+            run_golden = self.config.run_golden
+            base_url = (
+                f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
+            )
+            model_name = f"hosted_vllm/{policy_model_name}"
+            mini_swe_config_path = builtin_config_dir / "extra" / "swebench.yaml"
+            config = yaml.safe_load(get_config_path(mini_swe_config_path).read_text())
+            step_timeout = self.config.step_timeout
+            eval_timeout = self.config.eval_timeout
+
+            default_model_kwargs = config["model"]["model_kwargs"]
+            temperature = (
+                body.responses_create_params.temperature
+                or default_model_kwargs["temperature"]
+            )
+
+            top_p = body.responses_create_params.top_p or default_model_kwargs["top_p"]
+
+            # TODO: support this in the future
+            reseponses_create_params_dict = body.responses_create_params.model_dump()
+            reseponses_create_params_dict.pop("input")
+
+            env = self.config.env
+            output_file_dir = f"{Path.cwd()}/results/{subset}/{policy_model_name}"
+
+            instance_id = body.instance_id
+
+            if self.config.skip_if_exists:
+                if Path(f"{output_file_dir}/{instance_id}/{instance_id}.json").exists():
+                    with open(
+                        f"{output_file_dir}/{instance_id}/{instance_id}.json", "r"
+                    ) as f:
+                        print(f"Skipping {instance_id} because it already exists")
+                        verify_response = (
+                            MiniSWEAgentVerifyResponse.model_validate_json(f.read())
+                        )
+                    return verify_response
+
+            env_vars = environ.copy()
+            if env == "singularity":
+                slurm_job_id = getenv("SLURM_JOB_ID", str(uuid4()))
+                env_vars.update(
+                    {
+                        "SINGULARITY_CACHEDIR": f"/tmp/singularity_cache_${slurm_job_id}_$$",
+                        "APPTAINER_CACHEDIR": f"/tmp/apptainer_cache_${slurm_job_id}_$$",
+                        "SINGULARITY_TMPDIR": f"/tmp/singularity_tmp_${slurm_job_id}_$$",
+                        "APPTAINER_TMPDIR": f"/tmp/apptainer_tmp_${slurm_job_id}_$$",
+                    }
+                )
+                for var in [
+                    "SINGULARITY_CACHEDIR",
+                    "APPTAINER_CACHEDIR",
+                    "SINGULARITY_TMPDIR",
+                    "APPTAINER_TMPDIR",
+                ]:
+                    makedirs(env_vars[var], exist_ok=True)
+
+            try:
+                result = await asyncio.to_thread(
+                    run_swegym,
+                    subset=subset,
+                    split=split,
+                    workers=workers,
+                    output=output_file_dir,
+                    model=model_name,
+                    api_key="API_KEY",
+                    base_url=base_url,
+                    cache_dir_template=cache_dir_template,
+                    env=env,
+                    run_golden=run_golden,
+                    instance_id=instance_id,
+                    responses_create_params=json.dumps(reseponses_create_params_dict),
+                    step_timeout=step_timeout,
+                    eval_timeout=eval_timeout,
+                )
+                result = result[instance_id]
+                messages = result["messages"]
+                reward = (
+                    1.0
+                    if MiniSWEAgentUtils.is_resolved(instance_id, result["eval_report"])
+                    else 0.0
+                )
+            except Exception as e:
+                print(f"Error running swegym: {e}")
+                result = None
+                messages = []
+                reward = 0.0
+
+            # The first two messages are the system and user message generated by the harness
+            # TODO(sugam): what if the user only provides the system/user message
+            body.responses_create_params.input = messages[:2]
+
+            response = MiniSWEAgentUtils.get_default_response_object()
+            response["model"] = policy_model_name
+            response["temperature"] = temperature
+            response["top_p"] = top_p
+
+            # Wrap output messages in responses format
+            response["output"] = MiniSWEAgentUtils.chat_cmp_to_responses(messages[2:])
+
+            verify_response = MiniSWEAgentVerifyResponse(
+                responses_create_params=body.responses_create_params,
+                reward=reward,
+                response=response,
+                instance_id=instance_id,
+                metadata=result.get("eval_report", {}) if result else {},
+            )
+
+            output_path = Path(f"{output_file_dir}/{instance_id}")
+            output_path.mkdir(parents=True, exist_ok=True)
+
+            with open(f"{output_file_dir}/{instance_id}/{instance_id}.json", "w") as f:
+                json.dump(verify_response.model_dump(), f)
+
+            return verify_response
+
+
+if __name__ == "__main__":
+    MiniSWEAgent.run_webserver()

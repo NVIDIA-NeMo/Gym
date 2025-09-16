@@ -1,81 +1,74 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from typing import (
     Dict,
     List,
+    Union,
+    Required,
     Literal,
     Optional,
-    Required,
     TypeAlias,
-    Union,
+    NotRequired,
 )
 
+from typing_extensions import TypedDict
+
+from pydantic import BaseModel, ConfigDict, Field
+
 from openai import AsyncOpenAI
-from openai.types.chat import (
-    ChatCompletion,
-    ChatCompletionAssistantMessageParam,
-    ChatCompletionContentPartTextParam,
-    ChatCompletionDeveloperMessageParam,
-    ChatCompletionMessage,
-    ChatCompletionMessageToolCall,
-    ChatCompletionMessageToolCallParam,
-    ChatCompletionSystemMessageParam,
-    ChatCompletionToolMessageParam,
-    ChatCompletionToolParam,
-    ChatCompletionUserMessageParam,
-)
-from openai.types.chat.chat_completion import Choice
-from openai.types.chat.chat_completion_assistant_message_param import (
-    ContentArrayOfContentPart,
-)
-from openai.types.chat.completion_create_params import (
-    ChatCompletionAudioParam,
-    ChatCompletionPredictionContentParam,
-    ChatCompletionStreamOptionsParam,
-    ChatCompletionToolChoiceOptionParam,
-    ReasoningEffort,
-    ResponseFormat,
-    WebSearchOptions,
-)
 from openai.types.responses import (
-    FunctionToolParam,
-    Response,
     ResponseInputTextParam,
+    FunctionToolParam,
 )
+from openai.types.responses.response_output_text_param import Annotation, Logprob
 from openai.types.responses.response_create_params import (
-    Metadata,
-    Reasoning,
+    ToolParam,
     ResponseIncludable,
-    ResponsePromptParam,
+    Metadata,
     ResponsesModel,
+    ResponsePromptParam,
+    Reasoning,
     ResponseTextConfigParam,
     ToolChoice,
-    ToolParam,
 )
 from openai.types.responses.response_input_param import (
     ResponseInputMessageContentListParam,
 )
-from openai.types.responses.response_output_text_param import Annotation, Logprob
 from openai.types.responses.response_reasoning_item import (
     Summary,
 )
 from openai.types.shared.chat_model import ChatModel
-from openai.types.shared_params import FunctionDefinition
-from pydantic import BaseModel, ConfigDict, Field
-from typing_extensions import TypedDict
+from openai.types.chat.completion_create_params import (
+    ChatCompletionAudioParam,
+    ChatCompletionPredictionContentParam,
+    ReasoningEffort,
+    ResponseFormat,
+    ChatCompletionStreamOptionsParam,
+    ChatCompletionToolChoiceOptionParam,
+    WebSearchOptions,
+)
+from openai.types.chat import (
+    ChatCompletion,
+    ChatCompletionToolParam,
+    ChatCompletionMessage,
+    ChatCompletionUserMessageParam,
+    ChatCompletionSystemMessageParam,
+    ChatCompletionDeveloperMessageParam,
+    ChatCompletionAssistantMessageParam,
+    ChatCompletionMessageToolCallParam,
+    ChatCompletionMessageToolCall,
+    ChatCompletionContentPartTextParam,
+    ChatCompletionToolMessageParam,
+)
+from openai.types.chat.chat_completion_assistant_message_param import (
+    ContentArrayOfContentPart,
+)
+from openai.types.chat.chat_completion import Choice
+from openai.types.responses import (
+    Response,
+)
 
-from nemo_gym.server_utils import get_global_httpx_client
+from openai.types.shared_params import FunctionDefinition
+
+from nemo_gym.server_utils import GLOBAL_HTTPX_CLIENT
 
 
 ########################################
@@ -126,7 +119,9 @@ class NeMoGymResponseOutputRefusal(BaseModel):
     type: Literal["refusal"] = "refusal"
 
 
-NeMoGymContent: TypeAlias = Union[NeMoGymResponseOutputText, NeMoGymResponseOutputRefusal]
+NeMoGymContent: TypeAlias = Union[
+    NeMoGymResponseOutputText, NeMoGymResponseOutputRefusal
+]
 
 
 class NeMoGymResponseOutputMessage(BaseModel):
@@ -185,25 +180,22 @@ class NeMoGymMessageForTraining(NeMoGymMessage, TokenIDLogProbMixin):
     pass
 
 
-class NeMoGymResponseOutputMessageForTraining(NeMoGymResponseOutputMessage, TokenIDLogProbMixin):
+class NeMoGymResponseOutputMessageForTraining(
+    NeMoGymResponseOutputMessage, TokenIDLogProbMixin
+):
     pass
 
 
-class NeMoGymResponseFunctionToolCallForTraining(NeMoGymResponseFunctionToolCall, TokenIDLogProbMixin):
+class NeMoGymResponseFunctionToolCallForTraining(
+    NeMoGymResponseFunctionToolCall, TokenIDLogProbMixin
+):
     pass
 
 
-class NeMoGymResponseReasoningItemForTraining(NeMoGymResponseReasoningItem, TokenIDLogProbMixin):
+class NeMoGymResponseReasoningItemForTraining(
+    NeMoGymResponseReasoningItem, TokenIDLogProbMixin
+):
     pass
-
-
-RESPONSES_TO_TRAIN = {
-    NeMoGymEasyInputMessage: NeMoGymEasyInputMessageForTraining,
-    NeMoGymMessage: NeMoGymMessageForTraining,
-    NeMoGymResponseOutputMessage: NeMoGymResponseOutputMessageForTraining,
-    NeMoGymResponseFunctionToolCall: NeMoGymResponseFunctionToolCallForTraining,
-    NeMoGymResponseReasoningItem: NeMoGymResponseReasoningItemForTraining,
-}
 
 
 NeMoGymResponseInputItem = Union[
@@ -244,7 +236,9 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
     previous_response_id: Optional[str] = None
     prompt: Optional[ResponsePromptParam] = None
     reasoning: Optional[Reasoning] = None
-    service_tier: Optional[Literal["auto", "default", "flex", "scale", "priority"]] = None
+    service_tier: Optional[Literal["auto", "default", "flex", "scale", "priority"]] = (
+        None
+    )
     store: Optional[bool] = None
     temperature: Optional[float] = None
     text: Optional[ResponseTextConfigParam] = None
@@ -288,12 +282,16 @@ class NeMoGymChatCompletionMessage(ChatCompletionMessage):
     tool_calls: Optional[List[NeMoGymChatCompletionMessageToolCall]] = None
 
 
-class NeMoGymChatCompletionMessageForTraining(NeMoGymChatCompletionMessage, TokenIDLogProbMixin):
+class NeMoGymChatCompletionMessageForTraining(
+    NeMoGymChatCompletionMessage, TokenIDLogProbMixin
+):
     pass
 
 
 class NeMoGymChoice(Choice):
-    message: Union[NeMoGymChatCompletionMessage, NeMoGymChatCompletionMessageForTraining]
+    message: Union[
+        NeMoGymChatCompletionMessage, NeMoGymChatCompletionMessageForTraining
+    ]
 
 
 class NeMoGymChatCompletion(ChatCompletion):
@@ -344,7 +342,8 @@ class NeMoGymChatCompletionMessageToolCallParam(ChatCompletionMessageToolCallPar
 class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageParam):
     # Override the iterable which is annoying to work with.
     content: Union[str, List[ContentArrayOfContentPart], None]
-    tool_calls: List[NeMoGymChatCompletionMessageToolCallParam]
+    # Note: the original ChatCompletionAssistantMessageParam doesn't have it as not required
+    tool_calls: NotRequired[List[NeMoGymChatCompletionMessageToolCallParam]]
 
 
 class NeMoGymChatCompletionAssistantMessageForTrainingParam(
@@ -393,7 +392,9 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     reasoning_effort: Optional[ReasoningEffort] = None
     response_format: Optional[ResponseFormat] = None
     seed: Optional[int] = None
-    service_tier: Optional[Literal["auto", "default", "flex", "scale", "priority"]] = None
+    service_tier: Optional[Literal["auto", "default", "flex", "scale", "priority"]] = (
+        None
+    )
     stop: Union[Optional[str], List[str], None] = None
     store: Optional[bool] = None
     stream_options: Optional[ChatCompletionStreamOptionsParam] = None
@@ -420,7 +421,7 @@ class NeMoGymAsyncOpenAI(AsyncOpenAI):
     def __init__(self, **kwargs) -> None:
         # TODO: this setup is take from https://github.com/NVIDIA/NeMo-Skills/blob/80dc78ac758c4cac81c83a43a729e7ca1280857b/nemo_skills/inference/model/base.py#L318
         # However, there may still be a lingering issue regarding saturating at 100 max connections
-        kwargs["http_client"] = get_global_httpx_client()
+        kwargs["http_client"] = GLOBAL_HTTPX_CLIENT
         kwargs["timeout"] = None  # Enforce no timeout
 
         super().__init__(**kwargs)
