@@ -124,6 +124,11 @@ class AvgMinMax(Accumulator):
         )
 
 
+class StringMetrics(BaseModel):
+    unique_count: int
+    total_count: int
+
+
 class DatasetMetrics(Accumulator):
     number_of_examples: int = Field(serialization_alias="Number of examples", default=0)
     number_of_tools: AvgMinMax = Field(serialization_alias="Number of tools", default_factory=AvgMinMax)
@@ -148,10 +153,8 @@ class DatasetMetrics(Accumulator):
 
         # Merge extra fields safely
         if other.model_extra:
-            known_fields = set(DatasetMetrics.model_fields.keys())
-            existing_extras = set((self.model_extra or {}).keys())
             for k, v in other.model_extra.items():
-                if k in known_fields or k in existing_extras:
+                if k in DatasetMetrics.model_fields.keys():
                     continue
                 setattr(self, k, v)
 
@@ -172,7 +175,7 @@ class DatasetMetrics(Accumulator):
         )
 
 
-def aggregate_other_metrics(data: List[Dict[str, Any]]) -> Dict[str, Any]:
+def aggregate_other_metrics(data: List[Dict[str, Any]]) -> Dict[str, Union[AvgMinMax, StringMetrics]]:
     metric_values = {}
     string_values = {}
     for d in data:
@@ -196,11 +199,10 @@ def aggregate_other_metrics(data: List[Dict[str, Any]]) -> Dict[str, Any]:
     result = {}
     for k, v in metric_values.items():
         if v:
-            other_metrics = AvgMinMax(total=len(v), min=min(v), max=max(v), values=v).aggregate()
-            result[k] = other_metrics.model_dump(by_alias=True)
+            result[k] = AvgMinMax(total=len(v), min=min(v), max=max(v), values=v).aggregate()
 
     for k, v in string_values.items():
-        result[k] = {"unique_count": len(set(v)), "total_count": len(v)}
+        result[k] = StringMetrics(unique_count=len(set(v)), total_count=len(v))
 
     return result
 
