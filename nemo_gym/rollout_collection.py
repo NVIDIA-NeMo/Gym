@@ -1,19 +1,13 @@
+import asyncio
+import json
+from asyncio import Semaphore
+from collections import Counter
+from contextlib import nullcontext
+from itertools import chain, repeat
 from typing import Optional
 
-import json
-
-from collections import Counter
-
-from itertools import chain, repeat
-
-from contextlib import nullcontext
-
-import asyncio
-from asyncio import Semaphore
-
-from tqdm.asyncio import tqdm
-
 from pydantic import BaseModel
+from tqdm.asyncio import tqdm
 
 from nemo_gym.server_utils import ServerClient, get_global_config_dict
 
@@ -39,12 +33,8 @@ async def _collect_rollouts(config: RolloutCollectionConfig):  # pragma: no cove
 
     if config.num_repeats:
         previous_length = len(rows)
-        rows = list(
-            chain.from_iterable(repeat(row, config.num_repeats) for row in rows)
-        )
-        print(
-            f"Repeating rows (in a pattern of abc to aabbcc) from {previous_length} to {len(rows)}!"
-        )
+        rows = list(chain.from_iterable(repeat(row, config.num_repeats) for row in rows))
+        print(f"Repeating rows (in a pattern of abc to aabbcc) from {previous_length} to {len(rows)}!")
 
     server_client = ServerClient.load_from_global_config()
 
@@ -54,9 +44,7 @@ async def _collect_rollouts(config: RolloutCollectionConfig):  # pragma: no cove
 
     async def _post_coroutine(row: dict):
         async with semaphore:
-            return await server_client.post(
-                server_name=config.agent_name, url_path="/run", json=row
-            )
+            return await server_client.post(server_name=config.agent_name, url_path="/run", json=row)
 
     tasks = list(map(_post_coroutine, rows))
 
@@ -67,9 +55,7 @@ async def _collect_rollouts(config: RolloutCollectionConfig):  # pragma: no cove
             result = await future
             result = result.json()
             f.write(json.dumps(result) + "\n")
-            metrics += Counter(
-                {k: v for k, v in result.items() if isinstance(v, (int, float))}
-            )
+            metrics += Counter({k: v for k, v in result.items() if isinstance(v, (int, float))})
 
     avg_metrics = {k: v / len(tasks) for k, v in metrics.items()}
     avg_metrics.setdefault("reward", 0.0)

@@ -1,38 +1,35 @@
-import json
-from pathlib import Path
-from pydantic import ConfigDict
-from typing import Literal, Any, Optional
-import yaml
-from uuid import uuid4
 import asyncio
+import json
 from asyncio import Semaphore
-from os import getenv, environ, makedirs
-from fastapi import FastAPI, Body
+from os import environ, getenv, makedirs
+from pathlib import Path
+from typing import Any, Literal, Optional
+from uuid import uuid4
 
+import yaml
+from fastapi import Body, FastAPI
 from minisweagent.config import builtin_config_dir, get_config_path
 from minisweagent.run.extra.swegym_runner import _main as run_swegym
+from pydantic import ConfigDict
 
 from nemo_gym.base_resources_server import (
-    BaseVerifyRequest,
     BaseRunRequest,
+    BaseVerifyRequest,
     BaseVerifyResponse,
 )
 from nemo_gym.base_responses_api_agent import (
-    SimpleResponsesAPIAgent,
     BaseResponsesAPIAgentConfig,
+    SimpleResponsesAPIAgent,
+)
+from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.openai_utils import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import (
-    get_first_server_config_dict,
     ServerClient,
+    get_first_server_config_dict,
 )
-
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-
-from nemo_gym.openai_utils import (
-    NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponse,
-)
-
 from responses_api_agents.mini_swe_agent.utils import MiniSWEAgentUtils
 
 
@@ -76,17 +73,13 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
         app.post("/run")(self.run)
         return app
 
-    async def responses(
-        self, body: NeMoGymResponseCreateParamsNonStreaming = Body()
-    ) -> NeMoGymResponse:
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         raise NotImplementedError
 
     async def run(self, body: MiniSWEAgentRunRequest) -> MiniSWEAgentVerifyResponse:
         async with self.sem:
             model_server_name = self.config.model_server.name
-            global_config_dict = (
-                ServerClient.load_from_global_config().global_config_dict
-            )
+            global_config_dict = ServerClient.load_from_global_config().global_config_dict
 
             model_server_config = get_first_server_config_dict(
                 global_config_dict,
@@ -101,9 +94,8 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             workers = 1
             cache_dir_template = self.config.cache_dir_template
             run_golden = self.config.run_golden
-            base_url = (
-                f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
-            )
+            base_url = f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
+            dummy_key = "dummy_key"
             model_name = f"hosted_vllm/{policy_model_name}"
             mini_swe_config_path = builtin_config_dir / "extra" / "swebench.yaml"
             config = yaml.safe_load(get_config_path(mini_swe_config_path).read_text())
@@ -111,10 +103,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             eval_timeout = self.config.eval_timeout
 
             default_model_kwargs = config["model"]["model_kwargs"]
-            temperature = (
-                body.responses_create_params.temperature
-                or default_model_kwargs["temperature"]
-            )
+            temperature = body.responses_create_params.temperature or default_model_kwargs["temperature"]
 
             top_p = body.responses_create_params.top_p or default_model_kwargs["top_p"]
 
@@ -129,13 +118,9 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
 
             if self.config.skip_if_exists:
                 if Path(f"{output_file_dir}/{instance_id}/{instance_id}.json").exists():
-                    with open(
-                        f"{output_file_dir}/{instance_id}/{instance_id}.json", "r"
-                    ) as f:
+                    with open(f"{output_file_dir}/{instance_id}/{instance_id}.json", "r") as f:
                         print(f"Skipping {instance_id} because it already exists")
-                        verify_response = (
-                            MiniSWEAgentVerifyResponse.model_validate_json(f.read())
-                        )
+                        verify_response = MiniSWEAgentVerifyResponse.model_validate_json(f.read())
                     return verify_response
 
             env_vars = environ.copy()
@@ -165,7 +150,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                     workers=workers,
                     output=output_file_dir,
                     model=model_name,
-                    api_key="API_KEY",
+                    api_key=dummy_key,
                     base_url=base_url,
                     cache_dir_template=cache_dir_template,
                     env=env,
@@ -177,11 +162,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 )
                 result = result[instance_id]
                 messages = result["messages"]
-                reward = (
-                    1.0
-                    if MiniSWEAgentUtils.is_resolved(instance_id, result["eval_report"])
-                    else 0.0
-                )
+                reward = 1.0 if MiniSWEAgentUtils.is_resolved(instance_id, result["eval_report"]) else 0.0
             except Exception as e:
                 print(f"Error running swegym: {e}")
                 result = None

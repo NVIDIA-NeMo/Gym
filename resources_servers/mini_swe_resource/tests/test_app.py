@@ -1,11 +1,10 @@
-from nemo_gym.server_utils import ServerClient
+from unittest.mock import MagicMock
 
+from nemo_gym.server_utils import ServerClient
 from resources_servers.mini_swe_resource.app import (
     MiniSweResourceResourcesServer,
     MiniSweResourceResourcesServerConfig,
 )
-
-from unittest.mock import MagicMock
 
 
 class TestApp:
@@ -15,6 +14,4 @@ class TestApp:
             port=8080,
             entrypoint="",
         )
-        MiniSweResourceResourcesServer(
-            config=config, server_client=MagicMock(spec=ServerClient)
-        )
+        MiniSweResourceResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))

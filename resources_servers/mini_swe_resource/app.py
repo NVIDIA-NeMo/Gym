@@ -1,10 +1,10 @@
 from fastapi import FastAPI
 
 from nemo_gym.base_resources_server import (
-    SimpleResourcesServer,
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    SimpleResourcesServer,
 )
 
 

@@ -1,11 +1,12 @@
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List
 from uuid import uuid4
-import time
 
 from openai.types.responses.response_input_text_param import ResponseInputTextParam
 from openai.types.responses.response_output_message import ResponseOutputMessage
 from openai.types.responses.response_output_text import ResponseOutputText
+
 from nemo_gym.openai_utils import NeMoGymMessage
 
 
@@ -109,12 +110,7 @@ class MiniSWEAgentUtils:
             p2p_success = len(p2p.get("success", []))
             p2p_failure = len(p2p.get("failure", []))
 
-            if (
-                f2f_success == 0
-                and f2f_failure == 0
-                and p2p_success == 0
-                and p2p_failure == 0
-            ):
+            if f2f_success == 0 and f2f_failure == 0 and p2p_success == 0 and p2p_failure == 0:
                 return False
             return resolved
         except Exception as e:

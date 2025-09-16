@@ -1,72 +1,67 @@
 from typing import (
     Dict,
     List,
-    Union,
-    Required,
     Literal,
-    Optional,
-    TypeAlias,
     NotRequired,
+    Optional,
+    Required,
+    TypeAlias,
+    Union,
 )
-
-from typing_extensions import TypedDict
-
-from pydantic import BaseModel, ConfigDict, Field
 
 from openai import AsyncOpenAI
-from openai.types.responses import (
-    ResponseInputTextParam,
-    FunctionToolParam,
+from openai.types.chat import (
+    ChatCompletion,
+    ChatCompletionAssistantMessageParam,
+    ChatCompletionContentPartTextParam,
+    ChatCompletionDeveloperMessageParam,
+    ChatCompletionMessage,
+    ChatCompletionMessageToolCall,
+    ChatCompletionMessageToolCallParam,
+    ChatCompletionSystemMessageParam,
+    ChatCompletionToolMessageParam,
+    ChatCompletionToolParam,
+    ChatCompletionUserMessageParam,
 )
-from openai.types.responses.response_output_text_param import Annotation, Logprob
+from openai.types.chat.chat_completion import Choice
+from openai.types.chat.chat_completion_assistant_message_param import (
+    ContentArrayOfContentPart,
+)
+from openai.types.chat.completion_create_params import (
+    ChatCompletionAudioParam,
+    ChatCompletionPredictionContentParam,
+    ChatCompletionStreamOptionsParam,
+    ChatCompletionToolChoiceOptionParam,
+    ReasoningEffort,
+    ResponseFormat,
+    WebSearchOptions,
+)
+from openai.types.responses import (
+    FunctionToolParam,
+    Response,
+    ResponseInputTextParam,
+)
 from openai.types.responses.response_create_params import (
-    ToolParam,
-    ResponseIncludable,
     Metadata,
-    ResponsesModel,
-    ResponsePromptParam,
     Reasoning,
+    ResponseIncludable,
+    ResponsePromptParam,
+    ResponsesModel,
     ResponseTextConfigParam,
     ToolChoice,
+    ToolParam,
 )
 from openai.types.responses.response_input_param import (
     ResponseInputMessageContentListParam,
 )
+from openai.types.responses.response_output_text_param import Annotation, Logprob
 from openai.types.responses.response_reasoning_item import (
     Summary,
 )
 from openai.types.shared.chat_model import ChatModel
-from openai.types.chat.completion_create_params import (
-    ChatCompletionAudioParam,
-    ChatCompletionPredictionContentParam,
-    ReasoningEffort,
-    ResponseFormat,
-    ChatCompletionStreamOptionsParam,
-    ChatCompletionToolChoiceOptionParam,
-    WebSearchOptions,
-)
-from openai.types.chat import (
-    ChatCompletion,
-    ChatCompletionToolParam,
-    ChatCompletionMessage,
-    ChatCompletionUserMessageParam,
-    ChatCompletionSystemMessageParam,
-    ChatCompletionDeveloperMessageParam,
-    ChatCompletionAssistantMessageParam,
-    ChatCompletionMessageToolCallParam,
-    ChatCompletionMessageToolCall,
-    ChatCompletionContentPartTextParam,
-    ChatCompletionToolMessageParam,
-)
-from openai.types.chat.chat_completion_assistant_message_param import (
-    ContentArrayOfContentPart,
-)
-from openai.types.chat.chat_completion import Choice
-from openai.types.responses import (
-    Response,
-)
-
 from openai.types.shared_params import FunctionDefinition
+from pydantic import BaseModel, ConfigDict, Field
+from typing_extensions import TypedDict
 
 from nemo_gym.server_utils import GLOBAL_HTTPX_CLIENT
 
@@ -119,9 +114,7 @@ class NeMoGymResponseOutputRefusal(BaseModel):
     type: Literal["refusal"] = "refusal"
 
 
-NeMoGymContent: TypeAlias = Union[
-    NeMoGymResponseOutputText, NeMoGymResponseOutputRefusal
-]
+NeMoGymContent: TypeAlias = Union[NeMoGymResponseOutputText, NeMoGymResponseOutputRefusal]
 
 
 class NeMoGymResponseOutputMessage(BaseModel):
@@ -180,21 +173,15 @@ class NeMoGymMessageForTraining(NeMoGymMessage, TokenIDLogProbMixin):
     pass
 
 
-class NeMoGymResponseOutputMessageForTraining(
-    NeMoGymResponseOutputMessage, TokenIDLogProbMixin
-):
+class NeMoGymResponseOutputMessageForTraining(NeMoGymResponseOutputMessage, TokenIDLogProbMixin):
     pass
 
 
-class NeMoGymResponseFunctionToolCallForTraining(
-    NeMoGymResponseFunctionToolCall, TokenIDLogProbMixin
-):
+class NeMoGymResponseFunctionToolCallForTraining(NeMoGymResponseFunctionToolCall, TokenIDLogProbMixin):
     pass
 
 
-class NeMoGymResponseReasoningItemForTraining(
-    NeMoGymResponseReasoningItem, TokenIDLogProbMixin
-):
+class NeMoGymResponseReasoningItemForTraining(NeMoGymResponseReasoningItem, TokenIDLogProbMixin):
     pass
 
 
@@ -236,9 +223,7 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
     previous_response_id: Optional[str] = None
     prompt: Optional[ResponsePromptParam] = None
     reasoning: Optional[Reasoning] = None
-    service_tier: Optional[Literal["auto", "default", "flex", "scale", "priority"]] = (
-        None
-    )
+    service_tier: Optional[Literal["auto", "default", "flex", "scale", "priority"]] = None
     store: Optional[bool] = None
     temperature: Optional[float] = None
     text: Optional[ResponseTextConfigParam] = None
@@ -282,16 +267,12 @@ class NeMoGymChatCompletionMessage(ChatCompletionMessage):
     tool_calls: Optional[List[NeMoGymChatCompletionMessageToolCall]] = None
 
 
-class NeMoGymChatCompletionMessageForTraining(
-    NeMoGymChatCompletionMessage, TokenIDLogProbMixin
-):
+class NeMoGymChatCompletionMessageForTraining(NeMoGymChatCompletionMessage, TokenIDLogProbMixin):
     pass
 
 
 class NeMoGymChoice(Choice):
-    message: Union[
-        NeMoGymChatCompletionMessage, NeMoGymChatCompletionMessageForTraining
-    ]
+    message: Union[NeMoGymChatCompletionMessage, NeMoGymChatCompletionMessageForTraining]
 
 
 class NeMoGymChatCompletion(ChatCompletion):
@@ -392,9 +373,7 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     reasoning_effort: Optional[ReasoningEffort] = None
     response_format: Optional[ResponseFormat] = None
     seed: Optional[int] = None
-    service_tier: Optional[Literal["auto", "default", "flex", "scale", "priority"]] = (
-        None
-    )
+    service_tier: Optional[Literal["auto", "default", "flex", "scale", "priority"]] = None
     stop: Union[Optional[str], List[str], None] = None
     store: Optional[bool] = None
     stream_options: Optional[ChatCompletionStreamOptionsParam] = None

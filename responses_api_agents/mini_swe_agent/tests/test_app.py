@@ -1,23 +1,21 @@
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from typing import Any, Dict, Optional
+from unittest.mock import MagicMock, patch
 
+import pytest
+from fastapi.testclient import TestClient
+
+from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.openai_utils import (
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.server_utils import ServerClient
 from responses_api_agents.mini_swe_agent.app import (
     MiniSWEAgent,
     MiniSWEAgentConfig,
     MiniSWEAgentRunRequest,
     MiniSWEAgentVerifyResponse,
 )
-
-from nemo_gym.openai_utils import (
-    NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymChatCompletionCreateParamsNonStreaming,
-)
-
-from fastapi.testclient import TestClient
-
-from unittest.mock import MagicMock, patch
-import pytest
-from typing import Dict, Any, Optional
 
 
 DEFAULT_RUN_SWEGYM_RESULT = {
@@ -95,9 +93,7 @@ def create_test_config(
     )
 
 
-def setup_server_client_mocks(
-    mock_load_from_global_config, mock_get_first_server_config_dict
-):
+def setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict):
     mock_server_client_instance = MagicMock()
     mock_server_client_instance.global_config_dict = {"policy_model_name": "test_model"}
     mock_load_from_global_config.return_value = mock_server_client_instance
@@ -108,9 +104,7 @@ def setup_server_client_mocks(
     }
 
 
-def setup_config_path_mock(
-    mock_get_config_path, config_yaml: str = DEFAULT_CONFIG_YAML
-):
+def setup_config_path_mock(mock_get_config_path, config_yaml: str = DEFAULT_CONFIG_YAML):
     mock_config_path = MagicMock()
     mock_config_path.read_text.return_value = config_yaml
     mock_get_config_path.return_value = mock_config_path
@@ -204,9 +198,7 @@ class TestApp:
         config = create_test_config(model_name="", cache_dir_template="/")
         MiniSWEAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
-    @patch(
-        "responses_api_agents.mini_swe_agent.app.ServerClient.load_from_global_config"
-    )
+    @patch("responses_api_agents.mini_swe_agent.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.mini_swe_agent.app.get_first_server_config_dict")
     @patch("responses_api_agents.mini_swe_agent.app.get_config_path")
     @patch("asyncio.to_thread")
@@ -223,9 +215,7 @@ class TestApp:
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
-        setup_server_client_mocks(
-            mock_load_from_global_config, mock_get_first_server_config_dict
-        )
+        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
         setup_config_path_mock(mock_get_config_path)
         setup_run_swegym_mock(mock_to_thread)
 
@@ -237,9 +227,7 @@ class TestApp:
 
         assert_run_swegym_called(mock_to_thread)
 
-    @patch(
-        "responses_api_agents.mini_swe_agent.app.ServerClient.load_from_global_config"
-    )
+    @patch("responses_api_agents.mini_swe_agent.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.mini_swe_agent.app.get_first_server_config_dict")
     @patch("responses_api_agents.mini_swe_agent.app.get_config_path")
     @patch("asyncio.to_thread")
@@ -256,17 +244,13 @@ class TestApp:
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
-        setup_server_client_mocks(
-            mock_load_from_global_config, mock_get_first_server_config_dict
-        )
+        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
         setup_config_path_mock(mock_get_config_path)
 
         # Mock run_swegym to raise an exception
         mock_to_thread.side_effect = Exception("run_swegym failed")
 
-        run_request = create_run_request(
-            instance_id="test_instance_456", temperature=0.3, top_p=0.95
-        )
+        run_request = create_run_request(instance_id="test_instance_456", temperature=0.3, top_p=0.95)
 
         response = await server.run(run_request)
 
@@ -280,9 +264,7 @@ class TestApp:
 
         assert_run_swegym_called(mock_to_thread, instance_id="test_instance_456")
 
-    @patch(
-        "responses_api_agents.mini_swe_agent.app.ServerClient.load_from_global_config"
-    )
+    @patch("responses_api_agents.mini_swe_agent.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.mini_swe_agent.app.get_first_server_config_dict")
     @patch("responses_api_agents.mini_swe_agent.app.get_config_path")
     @patch("asyncio.to_thread")
@@ -297,16 +279,12 @@ class TestApp:
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
-        setup_server_client_mocks(
-            mock_load_from_global_config, mock_get_first_server_config_dict
-        )
+        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
         setup_config_path_mock(mock_get_config_path)
 
         mock_to_thread.side_effect = FileNotFoundError("run_swegym not found")
 
-        run_request = create_run_request(
-            instance_id="test_instance_789", temperature=0.2, top_p=1.0
-        )
+        run_request = create_run_request(instance_id="test_instance_789", temperature=0.2, top_p=1.0)
 
         response = await server.run(run_request)
 
@@ -325,9 +303,7 @@ class TestApp:
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
-        request_body = NeMoGymResponseCreateParamsNonStreaming(
-            temperature=0.7, top_p=0.9, input=[]
-        )
+        request_body = NeMoGymResponseCreateParamsNonStreaming(temperature=0.7, top_p=0.9, input=[])
 
         with pytest.raises(NotImplementedError):
             await server.responses(request_body)
@@ -340,9 +316,7 @@ class TestApp:
         app = server.setup_webserver()
         client = TestClient(app, raise_server_exceptions=False)
 
-        response = client.post(
-            "/v1/responses", json={"temperature": 0.7, "top_p": 0.9, "input": []}
-        )
+        response = client.post("/v1/responses", json={"temperature": 0.7, "top_p": 0.9, "input": []})
         assert response.status_code == 500
 
         run_response = client.post("/run", json={})
