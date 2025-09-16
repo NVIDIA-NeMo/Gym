@@ -11,7 +11,7 @@ mini_swe_main_agent:
         name: mini_swe_resource_resources_server
       model_server:
         type: responses_api_models
-        name: openai_model
+        name: policy_model
       datasets:
       - name: train
         type: train
