@@ -1,3 +1,16 @@
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 from typing import (
     Dict,
     List,
@@ -63,7 +76,7 @@ from openai.types.shared_params import FunctionDefinition
 from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import TypedDict
 
-from nemo_gym.server_utils import GLOBAL_HTTPX_CLIENT
+from nemo_gym.server_utils import get_global_httpx_client
 
 
 ########################################
@@ -183,6 +196,15 @@ class NeMoGymResponseFunctionToolCallForTraining(NeMoGymResponseFunctionToolCall
 
 class NeMoGymResponseReasoningItemForTraining(NeMoGymResponseReasoningItem, TokenIDLogProbMixin):
     pass
+
+
+RESPONSES_TO_TRAIN = {
+    NeMoGymEasyInputMessage: NeMoGymEasyInputMessageForTraining,
+    NeMoGymMessage: NeMoGymMessageForTraining,
+    NeMoGymResponseOutputMessage: NeMoGymResponseOutputMessageForTraining,
+    NeMoGymResponseFunctionToolCall: NeMoGymResponseFunctionToolCallForTraining,
+    NeMoGymResponseReasoningItem: NeMoGymResponseReasoningItemForTraining,
+}
 
 
 NeMoGymResponseInputItem = Union[
@@ -400,7 +422,7 @@ class NeMoGymAsyncOpenAI(AsyncOpenAI):
     def __init__(self, **kwargs) -> None:
         # TODO: this setup is take from https://github.com/NVIDIA/NeMo-Skills/blob/80dc78ac758c4cac81c83a43a729e7ca1280857b/nemo_skills/inference/model/base.py#L318
         # However, there may still be a lingering issue regarding saturating at 100 max connections
-        kwargs["http_client"] = GLOBAL_HTTPX_CLIENT
+        kwargs["http_client"] = get_global_httpx_client()
         kwargs["timeout"] = None  # Enforce no timeout
 
         super().__init__(**kwargs)
