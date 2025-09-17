@@ -108,7 +108,7 @@ class MiniSWEAgentUtils:
         }
 
     @staticmethod
-    def is_resolved(self, instance_id: str, eval_report: dict[str, Any]) -> float:
+    def is_resolved(instance_id: str, eval_report: dict[str, Any]) -> float:
         try:
             eval_report = eval_report["eval_report"][instance_id]
             resolved = eval_report["resolved"]

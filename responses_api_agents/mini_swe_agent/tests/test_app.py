@@ -83,12 +83,11 @@ def create_test_config(
     host: str = "0.0.0.0",
     port: int = 8080,
     model_name: str = "test_model",
-    subset: str = "gym",
-    split: str = "train",
     env: str = "singularity",
     cache_dir_template: str = "/tmp/cache/gym.sif",
 ) -> MiniSWEAgentConfig:
     return MiniSWEAgentConfig(
+        name="mini_swe_agent",
         host=host,
         port=port,
         entrypoint="",
