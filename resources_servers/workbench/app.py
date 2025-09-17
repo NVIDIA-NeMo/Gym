@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
-from typing import Dict
+from typing import Dict, Any
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, ConfigDict
+from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -43,6 +43,17 @@ from resources_servers.workbench.workbench_tools.project_management import (
     ProjectManagementTool,
 )
 
+from nemo_gym.base_resources_server import (
+    BaseResourcesServerConfig,
+    BaseSeedSessionRequest,
+    BaseSeedSessionResponse,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
+)
+
+from nemo_gym.server_utils import SESSION_ID_KEY
+from resources_servers.workbench.utils import get_tools
 
 REASONING_TAG = os.getenv("REASONING_TAG", "think")
 
@@ -72,126 +83,48 @@ class WorkbenchVerifyResponse(BaseVerifyResponse):
 
 class WorkbenchResourcesServer(SimpleResourcesServer):
     config: WorkbenchResourcesServerConfig
+    print('init tool env empty')
+    session_id_to_tool_env: Dict[str, Any] = Field(default_factory=dict)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
-        app.post("/{path}")(self.route_to_python_function)
-
+        app.post("/{path}")(self.handle_tool_request)
         return app
+    
+    async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
+        session_id = request.session[SESSION_ID_KEY]
+        toolkits = [
+        "email",
+        "calendar",
+        "analytics",
+        "project_management",
+        "customer_relationship_manager",
+        ]
+        print('init tool env')
+        self.session_id_to_tool_env[session_id] = get_tools(toolkits)
+        return BaseSeedSessionResponse()
 
-    async def route_to_python_function(self, path: str, body: WorkbenchRequest) -> WorkbenchResponse:
-        tool_name_to_class_to_function_mapping = {
-            "company_directory_find_email_address": {
-                "class": CompanyDirectoryTool,
-                "function": "find_email_address",
-            },
-            "email_get_email_information_by_id": {
-                "class": EmailTool,
-                "function": "get_email_information_by_id",
-            },
-            "email_search_emails": {"class": EmailTool, "function": "search_emails"},
-            "email_send_email": {"class": EmailTool, "function": "send_email"},
-            "email_delete_email": {"class": EmailTool, "function": "delete_email"},
-            "email_forward_email": {"class": EmailTool, "function": "forward_email"},
-            "email_reply_email": {"class": EmailTool, "function": "reply_email"},
-            "calendar_get_event_information_by_id": {
-                "class": CalendarTool,
-                "function": "get_event_information_by_id",
-            },
-            "calendar_search_events": {
-                "class": CalendarTool,
-                "function": "search_events",
-            },
-            "calendar_create_event": {
-                "class": CalendarTool,
-                "function": "create_event",
-            },
-            "calendar_delete_event": {
-                "class": CalendarTool,
-                "function": "delete_event",
-            },
-            "calendar_update_event": {
-                "class": CalendarTool,
-                "function": "update_event",
-            },
-            "analytics_engaged_users_count": {
-                "class": AnalyticsTool,
-                "function": "engaged_users_count",
-            },
-            "analytics_get_visitor_information_by_id": {
-                "class": AnalyticsTool,
-                "function": "get_visitor_information_by_id",
-            },
-            "analytics_create_plot": {
-                "class": AnalyticsTool,
-                "function": "create_plot",
-            },
-            "analytics_traffic_source_count": {
-                "class": AnalyticsTool,
-                "function": "traffic_source_count",
-            },
-            "analytics_total_visits_count": {
-                "class": AnalyticsTool,
-                "function": "total_visits_count",
-            },
-            "analytics_get_average_session_duration": {
-                "class": AnalyticsTool,
-                "function": "get_average_session_duration",
-            },
-            "project_management_get_task_information_by_id": {
-                "class": ProjectManagementTool,
-                "function": "get_task_information_by_id",
-            },
-            "project_management_search_tasks": {
-                "class": ProjectManagementTool,
-                "function": "search_tasks",
-            },
-            "project_management_create_task": {
-                "class": ProjectManagementTool,
-                "function": "create_task",
-            },
-            "project_management_delete_task": {
-                "class": ProjectManagementTool,
-                "function": "delete_task",
-            },
-            "project_management_update_task": {
-                "class": ProjectManagementTool,
-                "function": "update_task",
-            },
-            "customer_relationship_manager_search_customers": {
-                "class": CustomerRelationshipManagerTool,
-                "function": "search_customers",
-            },
-            "customer_relationship_manager_update_customer": {
-                "class": CustomerRelationshipManagerTool,
-                "function": "update_customer",
-            },
-            "customer_relationship_manager_add_customer": {
-                "class": CustomerRelationshipManagerTool,
-                "function": "add_customer",
-            },
-            "customer_relationship_manager_delete_customer": {
-                "class": CustomerRelationshipManagerTool,
-                "function": "delete_customer",
-            },
-        }
+    async def handle_tool_request(self, path: str, body: WorkbenchRequest, request: Request) -> WorkbenchResponse:
+        return await self.route_to_python_function(path, body, request)
 
-        class_function_mapping = tool_name_to_class_to_function_mapping.get(path)
-        if not class_function_mapping:
-            raise HTTPException(status_code=404, detail="Class not found")
-
-        class_object = class_function_mapping["class"]()
-
-        method_name = class_function_mapping["function"]  # string, e.g. "search_emails"
-
-        fn = getattr(class_object, method_name, None)  # bound method on the instance
-        if fn is None or not callable(fn):
-            raise HTTPException(status_code=404, detail=f"Method {method_name} not found")
-
+    async def route_to_python_function(self, path: str, body: WorkbenchRequest, request: Request) -> WorkbenchResponse:
+        session_id = request.session[SESSION_ID_KEY]
+        
+        # Check if session exists
+        if session_id not in self.session_id_to_tool_env:
+            raise HTTPException(status_code=400, detail="Session not initialized. Please call seed_session first.")
+        
+        tool_env = self.session_id_to_tool_env[session_id]
         args = {key: value for key, value in body.model_dump(exclude_unset=True).items() if value is not None}
 
+        # Check if function exists in tool_env
+        if path not in tool_env["functions"]:
+            raise HTTPException(status_code=404, detail=f"Function {path} not found")
+        
         try:
-            result = fn(**args)  # sync tool method
+            function = tool_env["functions"][path]
+            result = function(**args)
+            print(result)
             return WorkbenchResponse(output=result)
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
