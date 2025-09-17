@@ -831,7 +831,7 @@ class TestApp:
         # Verify input_messages made it to the model
         assert mock_method.await_args is not None
         called_args, _ = mock_method.await_args
-        sent_tools = called_args[0].tools
+        sent_tools = called_args[1].tools
 
         def _standardize(messages: list) -> list:
             return [
@@ -842,7 +842,7 @@ class TestApp:
                 for i in messages
             ]
 
-        assert _standardize([m.model_dump() for m in input_messages]) == _standardize(called_args[0].messages)
+        assert _standardize([m.model_dump() for m in input_messages]) == _standardize(called_args[1].messages)
 
         actual_sent_tools = [t["function"] for t in sent_tools]
         expected_sent_tools = [
@@ -1000,7 +1000,7 @@ class TestApp:
         # Verify input_messages made it to the model
         assert mock_method.await_args is not None
         called_args, _ = mock_method.await_args
-        sent_messages = called_args[0].messages
+        sent_messages = called_args[1].messages
 
         expected_sent_messages = [
             {"content": [{"text": "Hello", "type": "text"}], "role": "user"},
@@ -1255,8 +1255,8 @@ class TestApp:
         # Verify input_messages made it to the model
         assert mock_method.await_args is not None
         called_args, _ = mock_method.await_args
-        sent_messages = called_args[0].messages
-        sent_tools = called_args[0].tools
+        sent_messages = called_args[1].messages
+        sent_tools = called_args[1].tools
 
         expected_sent_messages = [
             {
@@ -1434,7 +1434,7 @@ class TestApp:
 
         # Returning this dummy response allows us to call /responses vs.
         # server._converter.responses_to_chat_completion_create_params() directly
-        async def _mock_and_capture(self, create_params):
+        async def _mock_and_capture(self, request, create_params):
             captured_params["value"] = create_params
             return NeMoGymChatCompletion(
                 id="chtcmpl-123",
