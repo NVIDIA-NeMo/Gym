@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import re
-from random import randint
 from time import time
 from typing import ClassVar, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
@@ -143,7 +142,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         session_id = request.session[SESSION_ID_KEY]
         if session_id not in self._session_id_to_client:
             # There is probably a better way to select the endpoint for this request. But this will do for now.
-            client = self._clients[randint(0, len(self._clients) - 1)]
+            client_idx = len(self._session_id_to_client) % len(self._clients)
+            client = self._clients[client_idx]
             self._session_id_to_client[session_id] = client
         client = self._session_id_to_client[session_id]
 
