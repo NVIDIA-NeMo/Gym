@@ -16,7 +16,6 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock, call
 
 from fastapi.testclient import TestClient
-from pytest import MonkeyPatch
 
 from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
@@ -27,24 +26,7 @@ from responses_api_agents.aviary_agent.app import AviaryAgent, AviaryAgentConfig
 
 
 class TestApp:
-    def test_sanity(self) -> None:
-        config = AviaryAgentConfig(
-            host="0.0.0.0",
-            port=8080,
-            entrypoint="",
-            name="",
-            resources_server=ResourcesServerRef(
-                type="resources_servers",
-                name="",
-            ),
-            model_server=ModelServerRef(
-                type="responses_api_models",
-                name="",
-            ),
-        )
-        AviaryAgent(config=config, server_client=MagicMock(spec=ServerClient))
-
-    async def test_responses(self, monkeypatch: MonkeyPatch) -> None:
+    def test_lifecycle(self) -> None:
         config = AviaryAgentConfig(
             host="0.0.0.0",
             port=8080,
@@ -89,9 +71,10 @@ class TestApp:
             "reward": 0.0,
             "done": False,
         }
+        mock_close_data = {"message": "Success", "success": True}
 
         dotjson_mock = MagicMock()
-        dotjson_mock.json.side_effect = [mock_seed_session_data, mock_response_data, mock_step_data]
+        dotjson_mock.json.side_effect = [mock_seed_session_data, mock_response_data, mock_step_data, mock_close_data]
         server.server_client.post = AsyncMock(return_value=dotjson_mock)
 
         # No model provided should use the one from the config
@@ -134,6 +117,11 @@ class TestApp:
                         ],
                         "env_id": mock_seed_session_data["env_id"],
                     },
+                ),
+                call(
+                    server_name="my resources name",
+                    url_path="/close",
+                    json={"env_id": mock_seed_session_data["env_id"]},
                 ),
             ],
             any_order=True,

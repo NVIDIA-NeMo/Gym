@@ -122,6 +122,12 @@ class AviaryAgent(SimpleResponsesAPIAgent):
             if done:
                 break
 
+        await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/close",
+            json={"env_id": env_id},
+        )
+
         assert model_response is not None
 
         # This includes the observation messages from reset, which SimpleAgentStateful does not include.

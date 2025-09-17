@@ -87,6 +87,7 @@ class AviaryResourcesServer(SimpleResourcesServer, Generic[TEnv, TDataset], ABC)
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         app.post("/step")(self.step)
+        app.post("/close")(self.close)
         return app
 
     async def seed_session(self, request: Request, body: AviarySeedSessionRequest) -> AviarySeedSessionResponse:
