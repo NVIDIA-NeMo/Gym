@@ -110,7 +110,11 @@ class NeMoGymResponseReasoningItem(BaseModel):
     summary: List[NeMoGymSummary]
     type: Literal["reasoning"] = "reasoning"
     encrypted_content: Optional[str] = None
-    status: Literal["in_progress", "completed", "incomplete"] = "completed"
+
+    # As of Wed Sep 17, 2025, the OpenAI API with GPT-5 returns None for this status rather than a valid value here.
+    # On subsequent calls to the OpenAI endpoints within a rollout, the status parameter is not accepted i.e. the OpenAI API returns a bad request when the status parameter is populated.
+    # It's not clear whether or not this is intended. We comment out this status parameter here as a quick stop-gap to fix this issue in Gym re-queries.
+    # status: Optional[Literal["in_progress", "completed", "incomplete"]] = None
 
 
 class NeMoGymResponseOutputText(BaseModel):
