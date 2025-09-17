@@ -28,8 +28,7 @@ from tqdm import tqdm
 from aviary.core import EvalAnswerMode, Message, Messages, TaskDataset, Tool, eval_answer
 from aviary.envs.notebook import NBEnvironment
 from aviary.envs.notebook.utils import NBLanguage
-
-from .app import AviaryResourcesServer
+from resources_servers.aviary.app import AviaryResourcesServer
 
 
 logger = logging.getLogger(__name__)
