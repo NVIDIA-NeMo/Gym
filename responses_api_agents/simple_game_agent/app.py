@@ -1,25 +1,23 @@
 import json
 
+from openai.types.responses.response_input_param import FunctionCallOutput
 from pydantic import ConfigDict
 
-from openai.types.responses.response_input_param import FunctionCallOutput
-
 from nemo_gym.base_resources_server import (
-    BaseVerifyRequest,
     BaseRunRequest,
+    BaseVerifyRequest,
     BaseVerifyResponse,
 )
 from nemo_gym.base_responses_api_agent import (
-    SimpleResponsesAPIAgent,
     BaseResponsesAPIAgentConfig,
     Body,
+    SimpleResponsesAPIAgent,
 )
-from nemo_gym.server_utils import ResourcesServerRef, ModelServerRef
-
 from nemo_gym.openai_utils import (
-    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.server_utils import ModelServerRef, ResourcesServerRef
 
 
 class SimpleGameAgentConfig(BaseResponsesAPIAgentConfig):
@@ -154,10 +152,7 @@ class SimpleGameAgent(SimpleResponsesAPIAgent):
             #     "content": env_text,
             # })
 
-            if (
-                move_data.get("is_complete", False)
-                or moves_made >= self.config.max_moves
-            ):
+            if move_data.get("is_complete", False) or moves_made >= self.config.max_moves:
                 is_complete = move_data.get("is_complete", False)
                 break
 
@@ -169,25 +164,17 @@ class SimpleGameAgent(SimpleResponsesAPIAgent):
         # FINAL: AIME-style
         final_response_dict = model_response.model_dump()
         final_response_dict["output"] = new_outputs  # assistant + tools only
-        final_response_dict["input"] = (
-            input_messages  # initial board + all env feedback, in order
-        )
+        final_response_dict["input"] = input_messages  # initial board + all env feedback, in order
         return final_response_dict
 
-    async def run(
-        self, body: SimpleGameAgentRunRequest
-    ) -> SimpleGameAgentVerifyResponse:
+    async def run(self, body: SimpleGameAgentRunRequest) -> SimpleGameAgentVerifyResponse:
         """Run a complete game session."""
 
         # Prepare the conversation
         conversation_body = body.responses_create_params
 
         # Extract game parameters
-        game_params = {
-            k: v
-            for k, v in body.model_dump().items()
-            if k not in ["responses_create_params"]
-        }
+        game_params = {k: v for k, v in body.model_dump().items() if k not in ["responses_create_params"]}
 
         # Store in class attribute instead of trying to setattr on the TypedDict
         self._current_game_params = game_params

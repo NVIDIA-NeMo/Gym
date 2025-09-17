@@ -1,16 +1,16 @@
 import copy
 import random
 from typing import List, Optional, Tuple
-from pydantic import BaseModel
 
 from fastapi import FastAPI
+from pydantic import BaseModel
 
 from nemo_gym.base_resources_server import (
-    SimpleResourcesServer,
     BaseResourcesServerConfig,
-    BaseVerifyRequest,
     BaseRunRequest,
+    BaseVerifyRequest,
     BaseVerifyResponse,
+    SimpleResourcesServer,
 )
 
 
@@ -72,9 +72,7 @@ class SudokuResourcesServer(SimpleResourcesServer):
 
         return app
 
-    async def get_initial_board(
-        self, body: GetInitialBoardRequest
-    ) -> GetInitialBoardResponse:
+    async def get_initial_board(self, body: GetInitialBoardRequest) -> GetInitialBoardResponse:
         # Generate initial sudoku puzzle
         full_grid, puzzle_grid = self._generate_board(body.clues, body.scale)
 
@@ -90,9 +88,7 @@ class SudokuResourcesServer(SimpleResourcesServer):
         board_text = self._render_board(puzzle_grid, body.scale)
         instructions = self._get_instructions(body.scale)
 
-        return GetInitialBoardResponse(
-            board_text=board_text, instructions=instructions, game_state=game_state
-        )
+        return GetInitialBoardResponse(board_text=board_text, instructions=instructions, game_state=game_state)
 
     async def make_move(self, body: MakeMoveRequest) -> MakeMoveResponse:
         game_state = body.game_state
@@ -207,12 +203,7 @@ class SudokuResourcesServer(SimpleResourcesServer):
     def _render_board(self, board: List[List[int]], scale: int) -> str:
         """Render the board as a formatted string with row and column indices."""
         sub_scale = int(scale**0.5)
-        header = "   " + " ".join(
-            [
-                f"C{j + 1}" + ("  " if (j + 1) % sub_scale == 0 else "")
-                for j in range(scale)
-            ]
-        )
+        header = "   " + " ".join([f"C{j + 1}" + ("  " if (j + 1) % sub_scale == 0 else "") for j in range(scale)])
 
         lines = [header]
         for i, row in enumerate(board):
@@ -228,9 +219,7 @@ class SudokuResourcesServer(SimpleResourcesServer):
 
         return "\n".join(lines)
 
-    def _generate_board(
-        self, clues: int, scale: int
-    ) -> Tuple[List[List[int]], List[List[int]]]:
+    def _generate_board(self, clues: int, scale: int) -> Tuple[List[List[int]], List[List[int]]]:
         """Generate a complete sudoku grid and a puzzle with given clues."""
         full_grid = self._generate_full_grid(scale)
         puzzle_grid = self._remove_cells(full_grid, clues, scale)
@@ -260,9 +249,7 @@ class SudokuResourcesServer(SimpleResourcesServer):
                 grid[row][col] = 0
         return False
 
-    def _find_empty(
-        self, grid: List[List[int]], scale: int
-    ) -> Optional[Tuple[int, int]]:
+    def _find_empty(self, grid: List[List[int]], scale: int) -> Optional[Tuple[int, int]]:
         """Find an empty cell in the grid."""
         for i in range(scale):
             for j in range(scale):
@@ -270,9 +257,7 @@ class SudokuResourcesServer(SimpleResourcesServer):
                     return (i, j)
         return None
 
-    def _is_safe(
-        self, grid: List[List[int]], row: int, col: int, num: int, scale: int
-    ) -> bool:
+    def _is_safe(self, grid: List[List[int]], row: int, col: int, num: int, scale: int) -> bool:
         """Check if it's safe to place a number in the given cell."""
         # Check row
         if num in grid[row]:
@@ -291,9 +276,7 @@ class SudokuResourcesServer(SimpleResourcesServer):
                     return False
         return True
 
-    def _remove_cells(
-        self, grid: List[List[int]], clues: int, scale: int
-    ) -> List[List[int]]:
+    def _remove_cells(self, grid: List[List[int]], clues: int, scale: int) -> List[List[int]]:
         """Remove cells from full grid to create puzzle, maintaining unique solution."""
         puzzle = copy.deepcopy(grid)
         cells = [(i, j) for i in range(scale) for j in range(scale)]

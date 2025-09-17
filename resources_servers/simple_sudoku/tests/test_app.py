@@ -1,8 +1,8 @@
-from nemo_gym.server_utils import ServerClient
+from unittest.mock import MagicMock
 
 from app import SudokuResourcesServer, SudokuResourcesServerConfig
 
-from unittest.mock import MagicMock
+from nemo_gym.server_utils import ServerClient
 
 
 class TestApp:
