@@ -1504,6 +1504,8 @@ class TestApp:
             input=input_messages,
         )
 
+        assert len(server._clients) == 2
+
         mock_chat_completion_1 = mock_chat_completion.model_copy(deep=True)
         mock_chat_completion_1.choices[0].message.content = "1"
         mock_method_1 = AsyncMock(return_value=mock_chat_completion_1)
@@ -1513,7 +1515,7 @@ class TestApp:
             mock_method_1,
         )
         mock_chat_completion_2 = mock_chat_completion.model_copy(deep=True)
-        mock_chat_completion_1.choices[0].message.content = "2"
+        mock_chat_completion_2.choices[0].message.content = "2"
         mock_method_2 = AsyncMock(return_value=mock_chat_completion_2)
         monkeypatch.setattr(
             server._clients[1].chat.completions,
@@ -1522,34 +1524,34 @@ class TestApp:
         )
 
         # Test first query by client 1 goes to underlying client 1
-        client_1 = ServerClient(app)
+        client_1 = TestClient(app)
         response_1_1 = client_1.post(
             "/v1/responses",
             json=request_body.model_dump(exclude_unset=True, mode="json"),
         )
         assert response_1_1.status_code == 200
         data = response_1_1.json()
-        assert data["choices"][0]["message"]["content"] == "1"
+        assert data["output"][0]["content"][0]["text"] == "1"
 
         # Test first query by client 2 goes to underlying client 2 (round robin)
-        client_2 = ServerClient(app)
+        client_2 = TestClient(app)
         response_2_1 = client_2.post(
             "/v1/responses",
             json=request_body.model_dump(exclude_unset=True, mode="json"),
         )
         assert response_2_1.status_code == 200
         data = response_2_1.json()
-        assert data["choices"][0]["message"]["content"] == "2"
+        assert data["output"][0]["content"][0]["text"] == "2"
 
         # Test first query by client 3 goes to underlying client 1 = 3 % 2 (round robin)
-        client_3 = ServerClient(app)
+        client_3 = TestClient(app)
         response_3_1 = client_3.post(
             "/v1/responses",
             json=request_body.model_dump(exclude_unset=True, mode="json"),
         )
         assert response_3_1.status_code == 200
         data = response_3_1.json()
-        assert data["choices"][0]["message"]["content"] == "1"
+        assert data["output"][0]["content"][0]["text"] == "1"
 
         # Test second query by client 1 goes to the same underlying client 1 (not round robin since we've called it before)
         # Here, we assume that TestClient will extract and propogate the response cookies
@@ -1559,7 +1561,7 @@ class TestApp:
         )
         assert response_1_2.status_code == 200
         data = response_1_2.json()
-        assert data["choices"][0]["message"]["content"] == "1"
+        assert data["output"][0]["content"][0]["text"] == "1"
 
         # Test second query by client 3 goes to the same underlying client 1 (not round robin since we've called it before)
         # We do this out of order as 1 -> 3 -> 2 instead of 1 -> 2 -> 3 to test any ordering effects.
@@ -1569,7 +1571,7 @@ class TestApp:
         )
         assert response_3_2.status_code == 200
         data = response_3_2.json()
-        assert data["choices"][0]["message"]["content"] == "1"
+        assert data["output"][0]["content"][0]["text"] == "1"
 
         # Test second query by client 2 goes to the same underlying client 2
         response_2_2 = client_2.post(
@@ -1578,7 +1580,7 @@ class TestApp:
         )
         assert response_2_2.status_code == 200
         data = response_2_2.json()
-        assert data["choices"][0]["message"]["content"] == "2"
+        assert data["output"][0]["content"][0]["text"] == "2"
 
 
 class TestVLLMConverter:
