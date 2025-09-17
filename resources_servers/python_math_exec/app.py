@@ -50,7 +50,6 @@ class ExecutePythonResponse(BaseModel):
     stderr: str
     error_message: Optional[str] = None
     result: Optional[str] = None
-    session_id: str  # keep for debugging/visibility
 
 
 def _session_worker(child_conn, max_execution_time: int):
@@ -196,7 +195,6 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
                 stdout=stdout,
                 stderr=stderr,
                 result=result,
-                session_id=sid,
             )
         except Exception as e:
             return ExecutePythonResponse(
@@ -204,7 +202,6 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
                 stdout="",
                 stderr="",
                 error_message=str(e),
-                session_id=request.session.get(SESSION_ID_KEY, ""),
             )
 
     async def end_session(self, request: Request) -> ExecutePythonResponse:
@@ -212,7 +209,7 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
         if sid in self._sessions:
             self._sessions[sid].close()
             del self._sessions[sid]
-        return ExecutePythonResponse(success=True, stdout="", stderr="", session_id=sid)
+        return ExecutePythonResponse(success=True, stdout="", stderr="")
 
     async def verify(self, body: PythonMathVerifyRequest) -> PythonMathVerifyResponse:
         expected = body.expected_result
