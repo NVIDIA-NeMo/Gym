@@ -1,0 +1,32 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/equivalence_llm_judge/data/example.jsonl",
+    "gitlab_identifier": null,
+    "license": "TBD",
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 34.6,
+        "Min": 29.0,
+        "Max": 44.0
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0
+    }
+}

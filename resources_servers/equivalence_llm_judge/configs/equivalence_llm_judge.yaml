@@ -1,0 +1,101 @@
+equivalence_llm_judge:
+  resources_servers:
+    equivalence_llm_judge:
+      entrypoint: app.py
+      judge_model_server:
+        type: responses_api_models
+        name: openai_model
+      judge_responses_create_params:
+        input: []
+      judge_prompt_template: |-
+        ===== System role =====
+        You are a meticulous STEM grader. Compare a candidate answer to a GOLD reference for a scientific question and decide strict equivalence.
+
+        Grading priorities (in order):
+        1) Factual equivalence to GOLD (accept algebraically/formally equivalent formulations).
+        2) Completeness on required parts — the candidate must include the same core parts/subclaims as the GOLD.
+
+        Rules:
+        - Treat GOLD as authoritative for what counts as correct.
+        - If GOLD is a range or set, the candidate is equivalent only if it lies within that range or is a member of that set.
+        - For formulas/derivations, accept mathematically identical transformations (e.g., symbol reordering, factoring, equivalent identities).
+        - Multi-part: all essential parts must match for “equivalent”; otherwise they are not equivalent.
+        - Be concise. Do NOT reveal or rewrite the GOLD.
+
+        Show your reason why they are equivalent or not equivalent first and then provide the output.
+
+        Output (at the end after double newlines):
+        - If equivalent: [[A=B]] they are equivalent
+        - If not equivalent: [[A!=B]] they are not equivalent
+
+        ===== Example 1 (equivalent) =====
+        QUESTION:
+        State Avogadro’s constant (include units).
+
+        GOLD:
+        6.022 × 10^23 mol^-1
+
+        CANDIDATE:
+        6.022e23 per mole.
+
+        The candidate gives the same magnitude in scientific notation and the same “per mole” unit; no extra or missing qualifiers.
+
+        [[A=B]] they are equivalent
+
+        ===== Example 2 (not equivalent) =====
+        QUESTION:
+        State the first law of thermodynamics for a closed system and identify what each symbol represents.
+
+        GOLD:
+        ΔU = Q − W ; ΔU is change in internal energy, Q is heat added to the system, W is work done by the system.
+
+        CANDIDATE:
+        ΔU = Q + W ; ΔU is change in internal energy, Q is heat added to the system, W is work done by the system.
+
+        The candidate uses the opposite sign convention for work relative to the required relationship; one core part is incorrect, so the overall statement does not match.
+
+        [[A!=B]] they are not equivalent
+        
+        ===== Inputs =====
+        QUESTION:
+        {question}
+
+        GOLD:
+        {expected_answer}
+
+        CANDIDATE:
+        {generated_answer}
+      judge_system_message: null
+      judge_equal_label: "[[A=B]]"
+      judge_not_equal_label: "[[A!=B]]"
+      check_twice_swap: true
+      # Reward when the second (swap) pass fails; default 0.0, can be -1.0
+      reward_if_swap_fails: 0.0
+      # Optional regex to extract question from the last user message. The LAST
+      # match is used. If capture groups exist, the first non-empty group is
+      # returned; otherwise, the entire last match is used.
+      # Example: "^Question:\\s*(.*)$"
+      question_extract_regex: null
+      # Optional regex to extract the generated response from the last assistant message.
+      # The LAST match is used. If capture groups exist, the first non-empty
+      # group is returned; otherwise, the entire last match is used.
+      # Example: "^Answer:\\s*(.*)$"
+      response_extract_regex: null
+
+equivalence_llm_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: equivalence_llm_judge
+      model_server:
+        type: responses_api_models
+        name: openai_model
+      datasets:
+      - name: example
+        type: example
+        license: "TBD"
+        jsonl_fpath: resources_servers/equivalence_llm_judge/data/example.jsonl
+
+

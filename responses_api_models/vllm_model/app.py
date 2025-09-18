@@ -13,9 +13,10 @@
 # limitations under the License.
 import re
 from time import time
-from typing import ClassVar, List, Optional, Tuple
+from typing import ClassVar, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
+from fastapi import Request
 from openai import BaseModel as OpenAIBaseModel
 from pydantic import BaseModel, Field
 
@@ -51,13 +52,19 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
     TokenIDLogProbMixin,
 )
+from nemo_gym.server_utils import SESSION_ID_KEY
 
 
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
-    base_url: str
+    base_url: Union[str, List[str]]
     api_key: str
     model: str
     return_token_id_information: bool
+
+    def model_post_init(self, context):
+        if isinstance(self.base_url, str):
+            self.base_url = [self.base_url]
+        return super().model_post_init(context)
 
 
 # This needs to be OpenAI BaseModel since it is casted to below by the OpenAI client.
@@ -69,16 +76,24 @@ class VLLMModel(SimpleResponsesAPIModel):
     config: VLLMModelConfig
 
     def model_post_init(self, context):
-        self._client = NeMoGymAsyncOpenAI(
-            base_url=self.config.base_url,
-            api_key=self.config.api_key,
-        )
+        self._clients: List[NeMoGymAsyncOpenAI] = [
+            NeMoGymAsyncOpenAI(
+                base_url=base_url,
+                api_key=self.config.api_key,
+            )
+            for base_url in self.config.base_url
+        ]
+
+        self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
+
         self._converter = VLLMConverter(return_token_id_information=self.config.return_token_id_information)
+
         return super().model_post_init(context)
 
-    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+    async def responses(
+        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
+    ) -> NeMoGymResponse:
         # print(f"DEBUG: VLLMModel.responses: body = {body}", flush=True)
-
         # Response Create Params -> Chat Completion Create Params
         chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(body)
         # print(f"DEBUG: VLLMModel.responses: chat completion payload = {chat_completion_create_params}", flush=True)
@@ -86,7 +101,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             body.model = self.config.model
 
         # Chat Completion Create Params -> Chat Completion
-        chat_completion_response = await self.chat_completions(chat_completion_create_params)
+        chat_completion_response = await self.chat_completions(request, chat_completion_create_params)
 
         choice = chat_completion_response.choices[0]
 
@@ -121,10 +136,18 @@ class VLLMModel(SimpleResponsesAPIModel):
         )
 
     async def chat_completions(
-        self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
+        self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
         body_dict = body.model_dump(exclude_unset=True)
         body_dict.setdefault("model", self.config.model)
+
+        session_id = request.session[SESSION_ID_KEY]
+        if session_id not in self._session_id_to_client:
+            # There is probably a better way to select the endpoint for this request. But this will do for now.
+            client_idx = len(self._session_id_to_client) % len(self._clients)
+            client = self._clients[client_idx]
+            self._session_id_to_client[session_id] = client
+        client = self._session_id_to_client[session_id]
 
         create_params = body_dict
         if self.config.return_token_id_information:
@@ -136,7 +159,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 },
             )
 
-        openai_response = await self._client.chat.completions.create(**create_params)
+        openai_response = await client.chat.completions.create(**create_params)
         assert not getattr(openai_response.choices[0].message, "reasoning_content", None), (
             "Please do not use a reasoning parser in vLLM! There is one source of truth for handling data (including reasoning), which is NeMo Gym!"
         )
@@ -162,7 +185,7 @@ class VLLMModel(SimpleResponsesAPIModel):
 
             # The base url has /v1 at the end but vLLM's tokenize endpoint does not have v1, hence the ..
             # I can't believe the path is resolved correctly LOL
-            tokenize_response = await self._client.post(
+            tokenize_response = await client.post(
                 "../tokenize",
                 cast_to=VLLMTokenizeResponse,
                 body=tokenize_body_dict,
