@@ -14,6 +14,7 @@
 import json
 from unittest.mock import mock_open, patch
 
+from pydantic import BaseModel
 from pytest import MonkeyPatch
 
 from nemo_gym.dataset_viewer import (
@@ -40,18 +41,30 @@ class TestDatasetViewer:
             build_jsonl_dataset_viewer(config)
 
     def test_get_aggregate_metrics(self, monkeypatch: MonkeyPatch):
+        class DummySample(BaseModel):
+            responses_create_params: dict = {}
+            response: dict = {}
+            reward: float = 1.0
+            accuracy: bool = True
+            set_overlap: float = 0.5
+            unrelated_list: list = []
+            unrelated_dict: dict = {}
+
+        class DummySampleWithStrings(DummySample):
+            some_string: str
+
         samples = [
-            '{"reward": 1.0, "accuracy": true, "set_overlap": 0.5}',
-            '{"reward": 0.0, "accuracy": false, "set_overlap": 0.0}',
-            '{"reward": 0.5, "accuracy": true, "set_overlap": 1.0}',
+            DummySample(reward=1.0, accuracy=True, set_overlap=0.5),
+            DummySample(reward=0.0, accuracy=False, set_overlap=0.0),
+            DummySample(reward=0.5, accuracy=True, set_overlap=1.0),
         ]
 
         samples_with_strings = [
-            '{"reward": 1.0, "accuracy": true, "some_string": "asdf"}',
-            '{"reward": 0.0, "accuracy": false, "some_string": "asdf"}',
-            '{"reward": 0.5, "accuracy": true, "some_string": "word1"}',
-            '{"reward": 0.5, "accuracy": true, "some_string": "word1"}',
-            '{"reward": 0.5, "accuracy": true, "some_string": "word2"}',
+            DummySampleWithStrings(reward=1.0, accuracy=True, some_string="asdf"),
+            DummySampleWithStrings(reward=0.0, accuracy=False, some_string="asdf"),
+            DummySampleWithStrings(reward=0.5, accuracy=True, some_string="word1"),
+            DummySampleWithStrings(reward=0.5, accuracy=True, some_string="word1"),
+            DummySampleWithStrings(reward=0.5, accuracy=True, some_string="word2"),
         ]
 
         def mock_compute_sample_metrics(line: str):
