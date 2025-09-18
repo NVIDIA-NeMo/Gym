@@ -13,6 +13,7 @@
 # limitations under the License.
 import os
 from typing import Dict, Any
+from fastapi.responses import JSONResponse
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -86,7 +87,7 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
     print('init tool env empty')
     session_id_to_tool_env: Dict[str, Any] = Field(default_factory=dict)
 
-    def setup_webserver(self) -> FastAPI:
+    def setup_webserver(self) -> JSONResponse:
         app = super().setup_webserver()
         app.post("/{path}")(self.handle_tool_request)
         return app
@@ -104,10 +105,10 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
         self.session_id_to_tool_env[session_id] = get_tools(toolkits)
         return BaseSeedSessionResponse()
 
-    async def handle_tool_request(self, path: str, body: WorkbenchRequest, request: Request) -> WorkbenchResponse:
+    async def handle_tool_request(self, path: str, body: WorkbenchRequest, request: Request) -> JSONResponse:
         return await self.route_to_python_function(path, body, request)
 
-    async def route_to_python_function(self, path: str, body: WorkbenchRequest, request: Request) -> WorkbenchResponse:
+    async def route_to_python_function(self, path: str, body: WorkbenchRequest, request: Request) -> JSONResponse:
         session_id = request.session[SESSION_ID_KEY]
         
         # Check if session exists
@@ -125,13 +126,127 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
             function = tool_env["functions"][path]
             result = function(**args)
             print(result)
-            return WorkbenchResponse(output=result)
+            # return WorkbenchResponse(output=result)
+            
+            return JSONResponse(content=result)
         except Exception as e:
+            print(e)
             raise HTTPException(status_code=500, detail=str(e))
 
     async def verify(self, body: WorkbenchVerifyRequest) -> WorkbenchVerifyResponse:
         ground_truth = body.ground_truth
         response = body.response.output
+
+        from devtools import pprint
+        pprint(response)
+#         response =  [
+#     {
+#       "arguments": "{\"name\":\"carlos\"}",
+#       "call_id": "call_BjosIz55T1NHLH0LZjhB9nBa",
+#       "name": "company_directory_find_email_address",
+#       "type": "function_call",
+#       "id": "call_BjosIz55T1NHLH0LZjhB9nBa",
+#       "status": "completed",
+#       "output": None,
+#       "content": None,
+#       "role": None
+#     },
+#     {
+#       "arguments": None,
+#       "call_id": "call_BjosIz55T1NHLH0LZjhB9nBa",
+#       "name": None,
+#       "type": "function_call_output",
+#       "id": None,
+#       "status": None,
+#       "output": "{\"output\":[\"carlos.rodriguez@atlas.com\"]}",
+#       "content": None,
+#       "role": None
+#     },
+#     {
+#       "arguments": "{\"name\":\"yuki\"}",
+#       "call_id": "call_Mgjf6NVNefSbSvccY5epZUZc",
+#       "name": "company_directory_find_email_address",
+#       "type": "function_call",
+#       "id": "call_Mgjf6NVNefSbSvccY5epZUZc",
+#       "status": "completed",
+#       "output": None,
+#       "content": None,
+#       "role": None
+#     },
+#     {
+#       "arguments": None,
+#       "call_id": "call_Mgjf6NVNefSbSvccY5epZUZc",
+#       "name": None,
+#       "type": "function_call_output",
+#       "id": None,
+#       "status": None,
+#       "output": "{\"output\":[\"yuki.tanaka@atlas.com\"]}",
+#       "content": None,
+#       "role": None
+#     },
+#     {
+#       "arguments": "{\"assigned_to_email\":\"carlos.rodriguez@atlas.com\",\"list_name\":\"Backlog\"}",
+#       "call_id": "call_zRQquualhyNQnodv4zDDDvkq",
+#       "name": "project_management_search_tasks",
+#       "type": "function_call",
+#       "id": "call_zRQquualhyNQnodv4zDDDvkq",
+#       "status": "completed",
+#       "output": None,
+#       "content": None,
+#       "role": None
+#     },
+#     {
+#       "arguments": None,
+#       "call_id": "call_zRQquualhyNQnodv4zDDDvkq",
+#       "name": None,
+#       "type": "function_call_output",
+#       "id": None,
+#       "status": None,
+#       "output": "{\"output\":[{\"task_id\":\"00000039\",\"task_name\":\"Fix bug in data storage module\",\"assigned_to_email\":\"carlos.rodriguez@atlas.com\",\"list_name\":\"Backlog\",\"due_date\":\"2023-11-30\",\"board\":\"Back end\"},{\"task_id\":\"00000014\",\"task_name\":\"Implement login system API\",\"assigned_to_email\":\"carlos.rodriguez@atlas.com\",\"list_name\":\"Backlog\",\"due_date\":\"2023-12-01\",\"board\":\"Back end\"},{\"task_id\":\"00000077\",\"task_name\":\"Implement report generation API\",\"assigned_to_email\":\"carlos.rodriguez@atlas.com\",\"list_name\":\"Backlog\",\"due_date\":\"2023-12-01\",\"board\":\"Back end\"},{\"task_id\":\"00000089\",\"task_name\":\"Add authentication for cloud storage\",\"assigned_to_email\":\"carlos.rodriguez@atlas.com\",\"list_name\":\"Backlog\",\"due_date\":\"2023-12-02\",\"board\":\"Back end\"},{\"task_id\":\"00000081\",\"task_name\":\"Optimize database query for search functionality\",\"assigned_to_email\":\"carlos.rodriguez@atlas.com\",\"list_name\":\"Backlog\",\"due_date\":\"2023-12-03\",\"board\":\"Back end\"},{\"task_id\":\"00000083\",\"task_name\":\"Fix bug in user management module\",\"assigned_to_email\":\"carlos.rodriguez@atlas.com\",\"list_name\":\"Backlog\",\"due_date\":\"2023-12-04\",\"board\":\"Back end\"},{\"task_id\":\"00000032\",\"task_name\":\"Implement search functionality API\",\"assigned_to_email\":\"carlos.rodriguez@atlas.com\",\"list_name\":\"Backlog\",\"due_date\":\"2023-12-04\",\"board\":\"Back end\"},{\"task_id\":\"00000024\",\"task_name\":\"Update Flask to latest version\",\"assigned_to_email\":\"carlos.rodriguez@atlas.com\",\"list_name\":\"Backlog\",\"due_date\":\"2023-12-04\",\"board\":\"Back end\"},{\"task_id\":\"00000099\",\"task_name\":\"Fix bug in content delivery module\",\"assigned_to_email\":\"carlos.rodriguez@atlas.com\",\"list_name\":\"Backlog\",\"due_date\":\"2023-12-04\",\"board\":\"Back end\"},{\"task_id\":\"00000021\",\"task_name\":\"Update react to latest version\",\"assigned_to_email\":\"carlos.rodriguez@atlas.com\",\"list_name\":\"Backlog\",\"due_date\":\"2023-12-06\",\"board\":\"Back end\"},{\"task_id\":\"00000063\",\"task_name\":\"Optimize database query for report generation\",\"assigned_to_email\":\"carlos.rodriguez@atlas.com\",\"list_name\":\"Backlog\",\"due_date\":\"2023-12-08\",\"board\":\"Back end\"},{\"task_id\":\"00000082\",\"task_name\":\"Optimize database query for data export\",\"assigned_to_email\":\"carlos.rodriguez@atlas.com\",\"list_name\":\"Backlog\",\"due_date\":\"2023-12-08\",\"board\":\"Back end\"},{\"task_id\":\"00000023\",\"task_name\":\"Update Node.js to latest version\",\"assigned_to_email\":\"carlos.rodriguez@atlas.com\",\"list_name\":\"Backlog\",\"due_date\":\"2023-12-10\",\"board\":\"Back end\"},{\"task_id\":\"00000046\",\"task_name\":\"Fix bug in user authentication module\",\"assigned_to_email\":\"carlos.rodriguez@atlas.com\",\"list_name\":\"Backlog\",\"due_date\":\"2023-12-12\",\"board\":\"Back end\"},{\"task_id\":\"00000084\",\"task_name\":\"Add authentication for file upload\",\"assigned_to_email\":\"carlos.rodriguez@atlas.com\",\"list_name\":\"Backlog\",\"due_date\":\"2023-12-13\",\"board\":\"Back end\"}]}",
+#       "content": None,
+#       "role": None
+#     },
+#     {
+#       "arguments": "{\"task_id\":\"00000039\",\"field\":\"assigned_to_email\",\"new_value\":\"yuki.tanaka@atlas.com\"}",
+#       "call_id": "call_7m2TNJY0RVt9plpjcXQugak1",
+#       "name": "project_management_update_task",
+#       "type": "function_call",
+#       "id": "call_7m2TNJY0RVt9plpjcXQugak1",
+#       "status": "completed",
+#       "output": None,
+#       "content": None,
+#       "role": None
+#     },
+#     {
+#       "arguments": None,
+#       "call_id": "call_7m2TNJY0RVt9plpjcXQugak1",
+#       "name": None,
+#       "type": "function_call_output",
+#       "id": None,
+#       "status": None,
+#       "output": "{\"output\":\"Task updated successfully.\"}",
+#       "content": None,
+#       "role": None
+#     },
+#     {
+#       "arguments": None,
+#       "call_id": None,
+#       "name": None,
+#       "type": "message",
+#       "id": "msg_0b4702f2181b4661aacd188d1581d36a",
+#       "status": "completed",
+#       "output": None,
+#       "content": [
+#         {
+#           "annotations": [],
+#           "text": "Here are Carlos's overdue tasks that he hasn't started (tasks in \"Backlog\" with due dates before today):\n\n- Fix bug in data storage module (Due 2023-11-30)\n\nI am reassigning these overdue tasks from Carlos to Yuki now.\n\nWould you like to reassign any more tasks or take further action?",
+#           "type": "output_text",
+#           "logprobs": None
+#         }
+#       ],
+#       "role": "assistant"
+#     }
+#   ]
         total_score = 0.0
 
         # Convert list of ResponseFunctionToolCall objects into list of dictionaries
@@ -146,7 +261,14 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
                 predicted_chat_content.append(message.model_dump())
 
         # Use a single reward for correctness
+#         ground_truth = [
+#   {
+#     "name": "project_management_update_task",
+#     "arguments": "{\"task_id\": \"00000039\", \"field\": \"assigned_to_email\", \"new_value\": \"yuki.tanaka@atlas.com\"}"
+#   }
+# ]
         total_score += is_correct(predicted_function_calls, ground_truth, None) * 1.0
+        print("total_score: ", total_score, '\n\n')
         return WorkbenchVerifyResponse(**body.model_dump(), reward=total_score)
 
 
