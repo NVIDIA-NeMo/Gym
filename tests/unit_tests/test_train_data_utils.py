@@ -318,7 +318,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     max=2.0,
                     median=0,
                     stddev=0,
-                    values=[2, 2, 2, 2, 2],
                 ),
                 json_dumped_number_of_words=AvgMinMax(
                     is_aggregated=False,
@@ -328,7 +327,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     max=1509.0,
                     median=0,
                     stddev=0,
-                    values=[1506, 1499, 1509, 1501, 1505],
                 ),
                 number_of_turns=AvgMinMax(
                     is_aggregated=False,
@@ -338,7 +336,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     max=1.0,
                     median=0,
                     stddev=0,
-                    values=[1, 1, 1, 1, 1],
                 ),
                 temperature=AvgMinMax(
                     is_aggregated=False,
@@ -348,7 +345,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     max=float("-inf"),
                     median=0,
                     stddev=0,
-                    values=[],
                 ),
                 id=AvgMinMax(
                     is_aggregated=True,
@@ -358,7 +354,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     max=4.0,
                     median=2.0,
                     stddev=1.5811388300841898,
-                    values=[],
                 ),
                 expected_synonym_values=AvgMinMax(
                     is_aggregated=True,
@@ -368,7 +363,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     max=711.0,
                     median=559.0,
                     stddev=160.22206811519789,
-                    values=[],
                 ),
                 minefield_label_value=AvgMinMax(
                     is_aggregated=True,
@@ -378,13 +372,15 @@ class TestValidateSamplesAndAggregateMetrics:
                     max=299.0,
                     median=299.0,
                     stddev=0.0,
-                    values=[],
                 ),
                 expected_synonyms=StringMetrics(unique_count=2, total_count=10),
                 minefield_label=StringMetrics(unique_count=1, total_count=5),
             )
         }
-        assert expected_dataset_type_to_aggregate_metrics == actual_dataset_type_to_aggregate_metrics
+        assert (
+            expected_dataset_type_to_aggregate_metrics.get("example").model_dump()
+            == actual_dataset_type_to_aggregate_metrics.get("example").model_dump()
+        )
 
         assert write_filenames == [Path("resources_servers/multineedle/data/example_metrics.json")]
 
@@ -494,10 +490,15 @@ class TestValidateSamplesAndAggregateMetrics:
                 max=float("-inf"),
                 median=0,
                 stddev=0,
-                values=[],
             ),
             json_dumped_number_of_words=AvgMinMax(
-                is_aggregated=False, total=1, average=0, min=2.0, max=2.0, median=0, stddev=0, values=[2]
+                is_aggregated=False,
+                total=1,
+                average=0,
+                min=2.0,
+                max=2.0,
+                median=0,
+                stddev=0,
             ),
             number_of_turns=AvgMinMax(
                 is_aggregated=False,
@@ -507,7 +508,6 @@ class TestValidateSamplesAndAggregateMetrics:
                 max=float("-inf"),
                 median=0,
                 stddev=0,
-                values=[],
             ),
             temperature=AvgMinMax(
                 is_aggregated=False,
@@ -517,10 +517,9 @@ class TestValidateSamplesAndAggregateMetrics:
                 max=float("-inf"),
                 median=0,
                 stddev=0,
-                values=[],
             ),
         )
-        assert expected_metrics == state.metrics
+        assert expected_metrics.model_dump() == state.metrics.model_dump()
 
 
 class TestCollateSamples:

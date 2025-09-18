@@ -144,7 +144,7 @@ class AvgMinMax(Accumulator):
         n = self.total
         mean = self.mean if n > 0 else 0.0
         stddev = sqrt(self.M2 / (n - 1)) if n > 1 else 0.0
-        med = float(self.tdigest.percentile(50)) if n > 0 else 0.0
+        med = float(self.tdigest.percentile(50)) if n > 0 and self.tdigest.n > 0 else 0.0
 
         return AvgMinMax(
             total=self.total,
