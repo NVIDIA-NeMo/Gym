@@ -9,24 +9,32 @@
         "Total # non-null values": 5,
         "Average": 1.0,
         "Min": 1.0,
-        "Max": 1.0
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 5,
         "Average": 53.0,
         "Min": 51.0,
-        "Max": 57.0
+        "Max": 57.0,
+        "Median": 52.5,
+        "Standard deviation": 2.4494897427831783
     },
     "Number of turns": {
         "Total # non-null values": 5,
         "Average": 1.0,
         "Min": 1.0,
-        "Max": 1.0
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
     },
     "Temperature": {
         "Total # non-null values": 0,
         "Average": 0.0,
         "Min": 0.0,
-        "Max": 0.0
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
     }
 }
