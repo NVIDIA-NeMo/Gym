@@ -285,7 +285,6 @@ class TestApp:
                             "type": "summary_text",
                         }
                     ],
-                    "status": "completed",
                     "type": "reasoning",
                 },
                 {
