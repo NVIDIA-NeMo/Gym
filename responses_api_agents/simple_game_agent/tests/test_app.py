@@ -11,32 +11,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 from unittest.mock import MagicMock
 
-from app import (
-    ModelServerRef,
-    ResourcesServerRef,
-    SimpleAgentStateful,
-    SimpleAgentStatefulConfig,
-)
+from app import TextGameAgent, TextGameAgentConfig
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import ModelServerRef, ResourcesServerRef, ServerClient
 
 
 class TestApp:
     def test_sanity(self) -> None:
-        config = SimpleAgentStatefulConfig(
+        config = TextGameAgentConfig(
             host="0.0.0.0",
             port=8080,
             entrypoint="",
-            name="",
-            resources_server=ResourcesServerRef(
-                type="resources_servers",
-                name="",
-            ),
-            model_server=ModelServerRef(
-                type="responses_api_models",
-                name="",
-            ),
+            resources_server=ResourcesServerRef(type="resources_servers", name="simple_sudoku"),
+            model_server=ModelServerRef(type="responses_api_models", name="openai_model"),
+            max_moves=50,
         )
-        SimpleAgentStateful(config=config, server_client=MagicMock(spec=ServerClient))
+        TextGameAgent(config=config, server_client=MagicMock(spec=ServerClient))

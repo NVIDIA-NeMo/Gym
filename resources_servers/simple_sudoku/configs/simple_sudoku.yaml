@@ -1,0 +1,4 @@
+simple_sudoku:
+  resources_servers:
+    simple_sudoku:
+      entrypoint: app.py

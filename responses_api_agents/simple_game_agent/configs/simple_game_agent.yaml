@@ -1,10 +1,11 @@
-simple_agent_stateful:
+simple_game_agent:
   responses_api_agents:
-    simple_agent_stateful:
+    simple_game_agent:
       entrypoint: app.py
       resources_server:
         type: resources_servers
-        name: ???
+        name: simple_sudoku
       model_server:
         type: responses_api_models
-        name: policy_model
+        name: openai_model
+      max_moves: 50
