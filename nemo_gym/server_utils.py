@@ -15,7 +15,7 @@ import json
 from abc import abstractmethod
 from os import getenv
 from threading import Thread
-from typing import Any, Literal, Optional, Type, Union
+from typing import Any, Literal, Optional, Tuple, Type, Union
 from uuid import uuid4
 
 import requests
@@ -318,7 +318,7 @@ class HeadServer(BaseServer):
         return app
 
     @classmethod
-    def run_webserver(cls) -> Thread:  # pragma: no cover
+    def run_webserver(cls) -> Tuple[uvicorn.Server, Thread]:  # pragma: no cover
         config = ServerClient.load_head_server_config()
         server = cls(config=config)
 
@@ -334,7 +334,7 @@ class HeadServer(BaseServer):
         thread = Thread(target=server.run, daemon=True)
         thread.start()
 
-        return thread
+        return server, thread
 
     async def global_config_dict_yaml(self) -> str:
         return OmegaConf.to_yaml(get_global_config_dict())
