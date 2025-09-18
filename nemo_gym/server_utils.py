@@ -15,7 +15,7 @@ import json
 from abc import abstractmethod
 from os import getenv
 from threading import Thread
-from typing import Any, Literal, Optional, Type, Union
+from typing import Any, Literal, Optional, Tuple, Type, Union
 from uuid import uuid4
 
 import requests
@@ -42,6 +42,8 @@ from nemo_gym.config_types import (
 from nemo_gym.global_config import (
     HEAD_SERVER_KEY_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
+    GlobalConfigDictParser,
+    GlobalConfigDictParserConfig,
     get_first_server_config_dict,
     get_global_config_dict,
 )
@@ -69,11 +71,36 @@ class NeMoGymGlobalAsyncClient(AsyncClient):
 # Eventually, we may also want to parameterize the max connections. For now, we set the max connections to just some very large number.
 #
 # It's critical that this client is NOT used before uvicorn.run is called. Under the hood, this async client will start and use an event loop, and store a handle to that specific event loop. When uvicorn.run is called, it will replace the event loop policy with its own. So the handle that the async client has is now outdated.
-GLOBAL_HTTPX_CLIENT = NeMoGymGlobalAsyncClient(
-    limits=Limits(max_keepalive_connections=1500, max_connections=1500),
-    transport=AsyncHTTPTransport(retries=3),
-    timeout=None,
-)
+_GLOBAL_HTTPX_CLIENT = None
+
+
+class GlobalHTTPXAsyncClientConfig(BaseModel):
+    global_httpx_max_connections: int = 1500
+    global_httpx_max_retries: int = 3
+
+
+def get_global_httpx_client(
+    global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
+    global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,
+) -> NeMoGymGlobalAsyncClient:
+    global _GLOBAL_HTTPX_CLIENT
+    if _GLOBAL_HTTPX_CLIENT is not None:
+        return _GLOBAL_HTTPX_CLIENT
+    global_config_dict = get_global_config_dict(
+        global_config_dict_parser_config=global_config_dict_parser_config,
+        global_config_dict_parser_cls=global_config_dict_parser_cls,
+    )
+    cfg = GlobalHTTPXAsyncClientConfig.model_validate(global_config_dict)
+    client = NeMoGymGlobalAsyncClient(
+        limits=Limits(
+            max_keepalive_connections=cfg.global_httpx_max_connections,
+            max_connections=cfg.global_httpx_max_connections,
+        ),
+        transport=AsyncHTTPTransport(retries=cfg.global_httpx_max_retries),
+        timeout=None,
+    )
+    _GLOBAL_HTTPX_CLIENT = client
+    return client
 
 
 DEFAULT_HEAD_SERVER_PORT = 11000
@@ -139,7 +166,7 @@ class ServerClient(BaseModel):
 
         """
         server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
-        return await GLOBAL_HTTPX_CLIENT.get(
+        return await get_global_httpx_client().get(
             f"{self._build_server_base_url(server_config_dict)}{url_path}",
             params=params,
             headers=headers,
@@ -171,7 +198,7 @@ class ServerClient(BaseModel):
 
         """
         server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
-        return await GLOBAL_HTTPX_CLIENT.post(
+        return await get_global_httpx_client().post(
             f"{self._build_server_base_url(server_config_dict)}{url_path}",
             content=content,
             data=data,
@@ -291,7 +318,7 @@ class HeadServer(BaseServer):
         return app
 
     @classmethod
-    def run_webserver(cls) -> Thread:  # pragma: no cover
+    def run_webserver(cls) -> Tuple[uvicorn.Server, Thread]:  # pragma: no cover
         config = ServerClient.load_head_server_config()
         server = cls(config=config)
 
@@ -307,7 +334,7 @@ class HeadServer(BaseServer):
         thread = Thread(target=server.run, daemon=True)
         thread.start()
 
-        return thread
+        return server, thread
 
     async def global_config_dict_yaml(self) -> str:
         return OmegaConf.to_yaml(get_global_config_dict())
