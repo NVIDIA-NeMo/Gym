@@ -73,9 +73,11 @@ class BixBenchEnv(NBEnvironment):
         return obs, tools
 
     async def submit_solution(self, solution: str) -> str:
-        """Submit your solution to the given task.
+        """Submit your solution (in plain text) to the given task.
 
-        Note that this tool may only be called once and ends the episode.
+        The solution should be based on the analysis you have conducted
+        in the notebook. Note that this tool may only be called once
+        and ends the episode.
 
         Args:
             solution: Your solution to the problem
