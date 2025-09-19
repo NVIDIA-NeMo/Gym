@@ -353,7 +353,7 @@ class TestValidateSamplesAndAggregateMetrics:
                     min=0.0,
                     max=4.0,
                     median=2.0,
-                    stddev=1.5811388300841898,
+                    stddev=1.58,
                 ),
                 expected_synonym_values=AvgMinMax(
                     is_aggregated=True,
@@ -362,7 +362,7 @@ class TestValidateSamplesAndAggregateMetrics:
                     min=407.0,
                     max=711.0,
                     median=559.0,
-                    stddev=160.22206811519789,
+                    stddev=160.22,
                 ),
                 minefield_label_value=AvgMinMax(
                     is_aggregated=True,
