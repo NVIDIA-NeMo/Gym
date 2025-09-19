@@ -22,7 +22,7 @@ from nemo_gym.server_utils import ServerClient
 
 class TestBaseResourcesServer:
     def test_sanity(self) -> None:
-        config = BaseResourcesServerConfig(host="", port=0, entrypoint="")
+        config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="")
 
         class TestSimpleResourcesServer(SimpleResourcesServer):
             async def verify(self, body):

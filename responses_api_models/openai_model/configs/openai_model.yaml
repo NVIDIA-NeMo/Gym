@@ -1,4 +1,4 @@
-openai_model:
+policy_model:
   responses_api_models:
     openai_model:
       entrypoint: app.py

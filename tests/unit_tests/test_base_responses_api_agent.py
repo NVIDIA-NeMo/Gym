@@ -23,11 +23,11 @@ from nemo_gym.server_utils import ServerClient
 
 class TestBaseResponsesAPIAgent:
     def test_BaseResponsesAPIAgent(self) -> None:
-        config = BaseResponsesAPIAgentConfig(host="", port=0, entrypoint="")
+        config = BaseResponsesAPIAgentConfig(host="", port=0, entrypoint="", name="")
         BaseResponsesAPIAgent(config=config)
 
     def test_SimpleResponsesAPIAgent(self) -> None:
-        config = BaseResponsesAPIAgentConfig(host="", port=0, entrypoint="")
+        config = BaseResponsesAPIAgentConfig(host="", port=0, entrypoint="", name="")
 
         class TestSimpleResponsesAPIAgent(SimpleResponsesAPIAgent):
             async def responses(self, body=...):

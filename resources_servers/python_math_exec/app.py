@@ -17,14 +17,13 @@ import multiprocessing
 import re
 import signal
 import time
-import uuid
 from contextlib import redirect_stderr, redirect_stdout
 from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
 import scipy
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from pydantic import BaseModel, PrivateAttr
 
 from nemo_gym.base_resources_server import (
@@ -34,6 +33,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.server_utils import SESSION_ID_KEY
 
 
 class PythonExecutorResourcesServerConfig(BaseResourcesServerConfig):
@@ -41,7 +41,6 @@ class PythonExecutorResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class ExecutePythonRequest(BaseModel):
-    session_id: Optional[str] = None
     code: str
 
 
@@ -51,8 +50,6 @@ class ExecutePythonResponse(BaseModel):
     stderr: str
     error_message: Optional[str] = None
     result: Optional[str] = None
-    # NEW: always echo the session back so the client can reuse it
-    session_id: str
 
 
 def _session_worker(child_conn, max_execution_time: int):
@@ -180,17 +177,16 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
         super().__init__(*args, **kwargs)
         # _sessions dict already initialised by default_factory
 
-    async def execute_python(self, body: ExecutePythonRequest) -> ExecutePythonResponse:
+    async def execute_python(self, request: Request, body: ExecutePythonRequest) -> ExecutePythonResponse:
         loop = asyncio.get_running_loop()
         try:
-            # ---- single unambiguous path ----
-            sid = body.session_id or str(uuid.uuid4())
+            sid = request.session[SESSION_ID_KEY]
             if sid not in self._sessions:
                 self._sessions[sid] = _SessionHandle(self.config.max_execution_time)
             handle = self._sessions[sid]
 
             stdout, stderr, result = await loop.run_in_executor(
-                None,  # use the default ThreadPool
+                None,
                 handle.exec,
                 body.code,
             )
@@ -199,7 +195,6 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
                 stdout=stdout,
                 stderr=stderr,
                 result=result,
-                session_id=sid,
             )
         except Exception as e:
             return ExecutePythonResponse(
@@ -207,19 +202,14 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
                 stdout="",
                 stderr="",
                 error_message=str(e),
-                session_id=body.session_id or "",
             )
 
-    async def end_session(self, body: ExecutePythonRequest) -> ExecutePythonResponse:
-        """
-        Explicitly close and remove a session’s worker process.
-        Client only needs to supply the session_id.
-        """
-        sid = body.session_id
-        if sid and sid in self._sessions:
+    async def end_session(self, request: Request) -> ExecutePythonResponse:
+        sid = request.session[SESSION_ID_KEY]
+        if sid in self._sessions:
             self._sessions[sid].close()
             del self._sessions[sid]
-        return ExecutePythonResponse(success=True, stdout="", stderr="", session_id=sid)
+        return ExecutePythonResponse(success=True, stdout="", stderr="")
 
     async def verify(self, body: PythonMathVerifyRequest) -> PythonMathVerifyResponse:
         expected = body.expected_result

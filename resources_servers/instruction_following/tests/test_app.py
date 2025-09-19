@@ -26,7 +26,7 @@ from resources_servers.instruction_following.app import (
 class TestApp:
     def _create_server(self):
         """Helper to create server instance."""
-        config = InstructionFollowingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="")
+        config = InstructionFollowingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
         return InstructionFollowingResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
     def _create_real_request(self, instruction_ids, prompt, kwargs, response_content, request_id=1):
@@ -84,6 +84,7 @@ class TestApp:
             host="0.0.0.0",
             port=8080,
             entrypoint="",
+            name="",
         )
         InstructionFollowingResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 

@@ -21,10 +21,10 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import BaseRunServerConfig, BaseServer, SimpleServer
+from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 
 
-class BaseResponsesAPIModelConfig(BaseRunServerConfig):
+class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
     pass
 
 
@@ -35,6 +35,8 @@ class BaseResponsesAPIModel(BaseServer):
 class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
+
+        self.setup_session_middleware(app)
 
         app.post("/v1/chat/completions")(self.chat_completions)
 

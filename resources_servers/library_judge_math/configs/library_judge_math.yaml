@@ -18,7 +18,7 @@ library_judge_math_simple_agent:
         name: library_judge_math
       model_server:
         type: responses_api_models
-        name: openai_model
+        name: policy_model
       datasets:
       - name: train
         type: train
@@ -27,7 +27,7 @@ library_judge_math_simple_agent:
           dataset_name: math_open_math_reasoning
           version: 0.0.1
           artifact_fpath: open_math_reasoning_problems.jsonl
-        license: Apache 2.0
+        license: Creative Commons Attribution 4.0 International
       - name: validation
         type: validation
         jsonl_fpath: resources_servers/library_judge_math/data/aime24_validation.jsonl

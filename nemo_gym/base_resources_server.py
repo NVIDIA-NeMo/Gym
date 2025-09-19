@@ -20,10 +20,10 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import BaseRunServerConfig, BaseServer, SimpleServer
+from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 
 
-class BaseResourcesServerConfig(BaseRunServerConfig):
+class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
     pass
 
 
@@ -43,15 +43,29 @@ class BaseVerifyResponse(BaseVerifyRequest):
     reward: float
 
 
+class BaseSeedSessionRequest(BaseModel):
+    pass
+
+
+class BaseSeedSessionResponse(BaseModel):
+    pass
+
+
 class SimpleResourcesServer(BaseResourcesServer, SimpleServer):
     config: BaseResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
+        self.setup_session_middleware(app)
+
+        app.post("/seed_session")(self.seed_session)
         app.post("/verify")(self.verify)
 
         return app
+
+    async def seed_session(self, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
+        return BaseSeedSessionResponse()
 
     @abstractmethod
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:

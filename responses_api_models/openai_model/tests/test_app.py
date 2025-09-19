@@ -33,6 +33,7 @@ class TestApp:
             openai_api_key="dummy_key",  # pragma: allowlist secret
             openai_model="dummy_model",
             entrypoint="",
+            name="",
         )
         return SimpleModelServer(config=config, server_client=MagicMock(spec=ServerClient))
 

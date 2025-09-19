@@ -108,7 +108,7 @@ class TestServerUtils:
 
         httpx_client_mock = AsyncMock()
         httpx_client_mock.return_value = "my mock response"
-        monkeypatch.setattr(nemo_gym.server_utils.GLOBAL_HTTPX_CLIENT, "get", httpx_client_mock)
+        monkeypatch.setattr(nemo_gym.server_utils.get_global_httpx_client(), "get", httpx_client_mock)
 
         actual_response = await server_client.get(
             server_name="my_server",
@@ -118,7 +118,7 @@ class TestServerUtils:
 
         httpx_client_mock = AsyncMock()
         httpx_client_mock.return_value = "my mock response"
-        monkeypatch.setattr(nemo_gym.server_utils.GLOBAL_HTTPX_CLIENT, "post", httpx_client_mock)
+        monkeypatch.setattr(nemo_gym.server_utils.get_global_httpx_client(), "post", httpx_client_mock)
 
         actual_response = await server_client.post(
             server_name="my_server",

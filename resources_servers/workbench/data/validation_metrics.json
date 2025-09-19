@@ -1,0 +1,36 @@
+{
+    "name": "validation",
+    "type": "validation",
+    "jsonl_fpath": "resources_servers/workbench/data/validation.jsonl",
+    "gitlab_identifier": {
+        "dataset_name": "workbench",
+        "version": "0.0.1",
+        "artifact_fpath": "validation.jsonl"
+    },
+    "license": "Apache 2.0",
+    "Number of examples": 545,
+    "Number of tools": {
+        "Total # non-null values": 545,
+        "Average": 27.0,
+        "Min": 27.0,
+        "Max": 27.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 545,
+        "Average": 1726.9779816513762,
+        "Min": 1715.0,
+        "Max": 1748.0
+    },
+    "Number of turns": {
+        "Total # non-null values": 545,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0
+    },
+    "Temperature": {
+        "Total # non-null values": 545,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0
+    }
+}

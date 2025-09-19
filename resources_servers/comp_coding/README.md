@@ -2,7 +2,7 @@
 
 ### Overview
 Verifies competitive programming solutions by executing submitted code against unit tests. The server consumes agent trajectories and returns a reward based on whether the assistant's code produces the correct outputs for given test inputs.
-Data source: [Filtered competitive programming dataset](https://huggingface.co/datasets/Nexusflow/comp_prog_filtered_no_function); split=`train`
+Model registry link: https://gitlab-master.nvidia.com/bxyu/nemo-gym/-/ml/models/53#/ 
 
 ### Input schema
 - `responses_create_params`: OpenAI Responses create params

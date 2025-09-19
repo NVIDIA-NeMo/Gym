@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+# Run as `python resources_servers/workbench/dataset_preprocess.py --split test``
 import argparse
 import json
 from copy import deepcopy
@@ -135,7 +137,7 @@ def main():
         print("No samples were generated. Exiting.")
         return
 
-    output_filename = f"/nemo-gym/resources_servers/workbench/data/{args.split}.jsonl"
+    output_filename = f"resources_servers/workbench/data/{args.split}.jsonl"
 
     with open(output_filename, "w") as f:
         for i, sample in enumerate(processed_samples):
