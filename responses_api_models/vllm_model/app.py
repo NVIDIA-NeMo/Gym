@@ -255,7 +255,7 @@ class VLLMConverter(BaseModel):
         # Extract reasoning content from between <think></think> tags.
         matches = cls.THINK_TAG_PATTERN.findall(content)
         # Remove reasoning from main content
-        cleaned = cls.THINK_TAG_PATTERN.sub("", content).strip()
+        cleaned = cls.THINK_TAG_PATTERN.sub("", content)
         return matches, cleaned
 
     # =======================================================
@@ -371,7 +371,7 @@ class VLLMConverter(BaseModel):
                 # Handle reasoning
                 final_content = ""
                 if isinstance(m["content"], list):
-                    content_str = " ".join([part.get("text", "") for part in m["content"]])
+                    content_str = "".join([part.get("text", "") for part in m["content"]])
                     final_content += content_str
                 elif isinstance(m["content"], str):
                     final_content += m["content"]
@@ -459,8 +459,7 @@ class VLLMConverter(BaseModel):
                 id=f"rs_{uuid4().hex}",
                 type="reasoning",
                 summary=[
-                    NeMoGymSummary(text=reasoning_text.strip(), type="summary_text")
-                    for reasoning_text in reasoning_matches
+                    NeMoGymSummary(text=reasoning_text, type="summary_text") for reasoning_text in reasoning_matches
                 ],
                 status="completed",
             )
