@@ -126,4 +126,7 @@ class MultiVerseMathHardResourcesServer(SimpleResourcesServer):
 
 
 if __name__ == "__main__":
-    MultiVerseMathHardResourcesServer.run_webserver()
+    server, app = MultiVerseMathHardResourcesServer.create_server()
+    server.run_webserver()
+elif __name__ == "app":  # for multiprocessing
+    _, app = MultiVerseMathHardResourcesServer.create_server()

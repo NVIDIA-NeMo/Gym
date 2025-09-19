@@ -263,7 +263,8 @@ def _get_last_expr_value(code: str, globals_dict: dict, locals_dict: dict):
         return None
 
 
-# -----------
-
 if __name__ == "__main__":
-    PythonExecutorResourcesServer.run_webserver()
+    server, app = PythonExecutorResourcesServer.create_server()
+    server.run_webserver()
+elif __name__ == "app":  # for multiprocessing
+    _, app = PythonExecutorResourcesServer.create_server()

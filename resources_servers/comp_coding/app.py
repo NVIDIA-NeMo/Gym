@@ -225,4 +225,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
 
 
 if __name__ == "__main__":
-    CompCodingResourcesServer.run_webserver()
+    server, app = CompCodingResourcesServer.create_server()
+    server.run_webserver()
+elif __name__ == "app":  # for multiprocessing
+    _, app = CompCodingResourcesServer.create_server()

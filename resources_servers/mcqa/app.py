@@ -228,4 +228,7 @@ def _get_allowed_letters_from_options(
 
 
 if __name__ == "__main__":
-    MCQAResourcesServer.run_webserver()
+    server, app = MCQAResourcesServer.create_server()
+    server.run_webserver()
+elif __name__ == "app":  # for multiprocessing
+    _, app = MCQAResourcesServer.create_server()

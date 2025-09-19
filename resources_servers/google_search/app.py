@@ -144,4 +144,7 @@ class GoogleSearchResourcesServer(SimpleResourcesServer):
 
 
 if __name__ == "__main__":
-    GoogleSearchResourcesServer.run_webserver()
+    server, app = GoogleSearchResourcesServer.create_server()
+    server.run_webserver()
+elif __name__ == "app":  # for multiprocessing
+    _, app = GoogleSearchResourcesServer.create_server()

@@ -53,4 +53,7 @@ class SimpleWeatherResourcesServer(SimpleResourcesServer):
 
 
 if __name__ == "__main__":
-    SimpleWeatherResourcesServer.run_webserver()
+    server, app = SimpleWeatherResourcesServer.create_server()
+    server.run_webserver()
+elif __name__ == "app":  # for multiprocessing
+    _, app = SimpleWeatherResourcesServer.create_server()

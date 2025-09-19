@@ -287,4 +287,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
 
 
 if __name__ == "__main__":
-    LibraryJudgeMathResourcesServer.run_webserver()
+    server, app = LibraryJudgeMathResourcesServer.create_server()
+    server.run_webserver()
+elif __name__ == "app":  # for multiprocessing
+    _, app = LibraryJudgeMathResourcesServer.create_server()

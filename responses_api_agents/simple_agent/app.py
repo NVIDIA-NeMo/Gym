@@ -162,4 +162,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
 
 if __name__ == "__main__":
-    SimpleAgent.run_webserver()
+    server, app = SimpleAgent.create_server()
+    server.run_webserver()
+elif __name__ == "app":  # for multiprocessing
+    _, app = SimpleAgent.create_server()

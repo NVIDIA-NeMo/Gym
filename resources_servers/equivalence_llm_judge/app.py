@@ -318,4 +318,7 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
 
 
 if __name__ == "__main__":
-    LLMJudgeResourcesServer.run_webserver()
+    server, app = LLMJudgeResourcesServer.create_server()
+    server.run_webserver()
+elif __name__ == "app":  # for multiprocessing
+    _, app = LLMJudgeResourcesServer.create_server()

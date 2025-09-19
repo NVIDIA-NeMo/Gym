@@ -125,4 +125,7 @@ class InstructionFollowingResourcesServer(SimpleResourcesServer):
 
 
 if __name__ == "__main__":
-    InstructionFollowingResourcesServer.run_webserver()
+    server, app = InstructionFollowingResourcesServer.create_server()
+    server.run_webserver()
+elif __name__ == "app":  # for multiprocessing
+    _, app = InstructionFollowingResourcesServer.create_server()

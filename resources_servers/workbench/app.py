@@ -218,4 +218,7 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
 
 
 if __name__ == "__main__":
-    WorkbenchResourcesServer.run_webserver()
+    server, app = WorkbenchResourcesServer.create_server()
+    server.run_webserver()
+elif __name__ == "app":  # for multiprocessing
+    _, app = WorkbenchResourcesServer.create_server()

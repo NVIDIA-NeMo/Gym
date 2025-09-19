@@ -106,4 +106,7 @@ class MultiNeedleResourcesServer(SimpleResourcesServer):
 
 
 if __name__ == "__main__":
-    MultiNeedleResourcesServer.run_webserver()
+    server, app = MultiNeedleResourcesServer.create_server()
+    server.run_webserver()
+elif __name__ == "app":  # for multiprocessing
+    _, app = MultiNeedleResourcesServer.create_server()
