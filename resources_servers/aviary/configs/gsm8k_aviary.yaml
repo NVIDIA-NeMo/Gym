@@ -23,7 +23,7 @@ gsm8k_aviary_agent:
         license: Apache 2.0
       - name: validation
         type: validation
-        jsonl_fpath: resources_servers/aviary/data/gsm8k_train.jsonl
+        jsonl_fpath: resources_servers/aviary/data/gsm8k_validation.jsonl
         gitlab_identifier:
           dataset_name: PLACEHOLDER 
           version: 0.0.1
@@ -31,4 +31,4 @@ gsm8k_aviary_agent:
         license: Apache 2.0
       - name: example
         type: example
-        jsonl_fpath: resources_servers/aviary/data/gsm8k_train.jsonl
+        jsonl_fpath: resources_servers/aviary/data/gsm8k_example.jsonl
