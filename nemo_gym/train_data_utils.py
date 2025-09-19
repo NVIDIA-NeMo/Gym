@@ -15,13 +15,15 @@ import json
 from abc import abstractmethod
 from collections import Counter, defaultdict
 from itertools import count, repeat
+from math import sqrt
 from pathlib import Path
 from shutil import copyfileobj
-from typing import Dict, List, Literal, Optional, Self, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Self, Tuple, Union
 
 from devtools import pprint
 from omegaconf import DictConfig
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from tdigest import TDigest
 from tqdm.auto import tqdm
 
 from nemo_gym.base_resources_server import BaseRunRequest
@@ -79,27 +81,90 @@ class Accumulator(BaseModel):
 
 
 class AvgMinMax(Accumulator):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
     total: int = Field(serialization_alias="Total # non-null values", default=0)
     average: float = Field(serialization_alias="Average", default=0)
     min: float = Field(serialization_alias="Min", default=float("inf"))
     max: float = Field(serialization_alias="Max", default=float("-inf"))
+    median: float = Field(serialization_alias="Median", default=0)
+    stddev: float = Field(serialization_alias="Standard deviation", default=0)
+    # Internal state
+    mean: float = Field(default=0, exclude=True)  # running value (before final average)
+    M2: float = Field(default=0, exclude=True)  # sum of squared differences (for variance)
+    tdigest: TDigest = Field(default_factory=TDigest, exclude=True)
+    """
+    T-Digest is used to estimate the Median without storing and sorting all values. The Median is essentially an approximation using the 50th percentile, which is very close to the true Median.
+    """
+
+    def observe(self, x: float) -> None:
+        if x < self.min:
+            self.min = x
+        if x > self.max:
+            self.max = x
+
+        # Update running mean and variance
+        self.total += 1
+        delta = x - self.mean
+        self.mean += delta / self.total
+        self.M2 += delta * (x - self.mean)
+
+        # Update quantile estimator (for median)
+        self.tdigest.update(x)
 
     def _add(self: Self, other: Self) -> None:
-        self.total += other.total
-        self.average += other.average
-        self.min = min(self.min, other.min)
-        self.max = max(self.max, other.max)
+        # Merge accumulators
+        if other.total == 0:
+            return
+        if self.total == 0:
+            self.total = other.total
+            self.mean = other.mean
+            self.M2 = other.M2
+            self.min = other.min
+            self.max = other.max
+            self.tdigest = TDigest()
+            self.tdigest = self.tdigest + other.tdigest
+            return
 
-    def _aggregate(self) -> Self:
+        # Merge mean and variance
+        n1, n2 = self.total, other.total
+        delta = other.mean - self.mean
+        n = n1 + n2
+        self.mean = self.mean + delta * (n2 / n)
+        self.M2 = self.M2 + other.M2 + (delta * delta) * (n1 * n2 / n)
+        self.total = n
+
+        if other.min < self.min:
+            self.min = other.min
+        if other.max > self.max:
+            self.max = other.max
+
+        # Merge t-digests for quantiles/median
+        self.tdigest = self.tdigest + other.tdigest
+
+    def _aggregate(self: Self) -> Self:
+        n = self.total
+        mean = self.mean if n > 0 else 0.0
+        stddev = sqrt(self.M2 / (n - 1)) if n > 1 else 0.0
+        med = float(self.tdigest.percentile(50)) if n > 0 and self.tdigest.n > 0 else 0.0
+
         return AvgMinMax(
             total=self.total,
-            average=self.average / max(self.total, 1),
-            min=self.min if self.total > 0 else 0,
-            max=self.max if self.total > 0 else 0,
+            average=mean,
+            min=self.min if n > 0 else 0.0,
+            max=self.max if n > 0 else 0.0,
+            median=med,
+            stddev=stddev,
         )
 
 
+class StringMetrics(BaseModel):
+    unique_count: int
+    total_count: int
+
+
 class DatasetMetrics(Accumulator):
+    model_config = ConfigDict(extra="allow")  # Allow any arbitrary fields
+
     number_of_examples: int = Field(serialization_alias="Number of examples", default=0)
     number_of_tools: AvgMinMax = Field(serialization_alias="Number of tools", default_factory=AvgMinMax)
     json_dumped_number_of_words: AvgMinMax = Field(
@@ -118,14 +183,58 @@ class DatasetMetrics(Accumulator):
         self.number_of_turns.add(other.number_of_turns)
         self.temperature.add(other.temperature)
 
+        # Merge extra fields safely
+        if other.model_extra:
+            for k, v in other.model_extra.items():
+                if k in DatasetMetrics.model_fields.keys():
+                    continue
+                setattr(self, k, v)
+
     def _aggregate(self: Self) -> Self:
+        extras = {}
+        if self.model_extra:
+            for k, v in self.model_extra.items():
+                if k in DatasetMetrics.model_fields.keys():
+                    continue
+                extras[k] = v
         return DatasetMetrics(
             number_of_examples=self.number_of_examples,
             number_of_tools=self.number_of_tools.aggregate(),
             json_dumped_number_of_words=self.json_dumped_number_of_words.aggregate(),
             number_of_turns=self.number_of_turns.aggregate(),
             temperature=self.temperature.aggregate(),
+            **extras,
         )
+
+
+def aggregate_other_metrics(metrics: Dict[str, Any], sample: Dict[str, Any]) -> None:
+    """Combines misc items (those other than response/response create params) into current metrics"""
+    for k, v in sample.items():
+        if k in ("responses_create_params", "response"):
+            continue
+
+        values = v if isinstance(v, list) else [v]
+
+        for item in values:
+            if isinstance(item, bool):
+                item = int(item)
+            if isinstance(item, (int, float)):
+                if k not in metrics:
+                    metrics[k] = AvgMinMax()
+                metrics[k].observe(item)
+            elif isinstance(item, str):
+                if k not in metrics:
+                    metrics[k] = Counter()
+                metrics[k][item] += 1
+
+
+def postprocess_other_metrics(metrics: DatasetMetrics, other_metrics: Dict[str, Any]) -> None:
+    """Aggregates metrics and merges current metrics (containing only AvgMinMax) with StringMetrics"""
+    for k, v in other_metrics.items():
+        if isinstance(v, AvgMinMax):
+            setattr(metrics, k, v.aggregate())
+        elif isinstance(v, Counter):
+            setattr(metrics, k, StringMetrics(unique_count=len(v), total_count=sum(v.values())))
 
 
 def compute_sample_metrics(sample_dict_str: str) -> Tuple[DatasetMetrics, bool]:
@@ -146,12 +255,7 @@ def compute_sample_metrics(sample_dict_str: str) -> Tuple[DatasetMetrics, bool]:
     number_of_tools_metrics = AvgMinMax()
     if responses_create_params.get("tools") is not None:
         number_of_tools = len(responses_create_params["tools"])
-        number_of_tools_metrics = AvgMinMax(
-            total=1,
-            average=number_of_tools,
-            min=number_of_tools,
-            max=number_of_tools,
-        )
+        number_of_tools_metrics.observe(number_of_tools)
 
     if isinstance(inputs, str):
         inputs = [{"role": "user", "content": inputs}]
@@ -159,30 +263,16 @@ def compute_sample_metrics(sample_dict_str: str) -> Tuple[DatasetMetrics, bool]:
     number_of_turns_metrics = AvgMinMax()
     if user_inputs:
         number_of_turns = len(user_inputs)
-        number_of_turns_metrics = AvgMinMax(
-            total=1,
-            average=number_of_turns,
-            min=number_of_turns,
-            max=number_of_turns,
-        )
+        number_of_turns_metrics.observe(number_of_turns)
 
     temperature_metrics = AvgMinMax()
     if responses_create_params.get("temperature") is not None:
         temperature = responses_create_params["temperature"]
-        temperature_metrics = AvgMinMax(
-            total=1,
-            average=temperature,
-            min=temperature,
-            max=temperature,
-        )
+        temperature_metrics.observe(temperature)
 
+    json_dumped_number_of_words_metrics = AvgMinMax()
     json_dumped_number_of_words = len(json.dumps(responses_create_params).split())
-    json_dumped_number_of_words_metrics = AvgMinMax(
-        total=1,
-        average=json_dumped_number_of_words,
-        min=json_dumped_number_of_words,
-        max=json_dumped_number_of_words,
-    )
+    json_dumped_number_of_words_metrics.observe(json_dumped_number_of_words)
 
     metrics = DatasetMetrics(
         number_of_examples=1,
@@ -200,6 +290,7 @@ class DatasetValidatorState(BaseModel):
     metrics: DatasetMetrics = Field(default_factory=DatasetMetrics)
     key_counts: Counter = Field(default_factory=Counter)
     offending_example_idxs: List[int] = Field(default_factory=list)
+    other_metrics: Dict[str, Any] = Field(default_factory=dict)
 
 
 class TrainDataProcessor(BaseModel):
@@ -358,6 +449,8 @@ class TrainDataProcessor(BaseModel):
         state.key_counts.update(sample_dict.keys())
         state.metrics.add(metrics)
 
+        aggregate_other_metrics(state.other_metrics, sample_dict)
+
     def _validate_samples_and_aggregate_metrics_single_dataset(
         self, dataset_config: DatasetConfig
     ) -> DatasetValidatorState:
@@ -372,6 +465,8 @@ class TrainDataProcessor(BaseModel):
                     desc=f"Process {dataset_config.jsonl_fpath}",
                 )
             )
+
+        postprocess_other_metrics(state.metrics, state.other_metrics)
 
         return state
 

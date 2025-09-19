@@ -25,6 +25,7 @@ from nemo_gym.train_data_utils import (
     AvgMinMax,
     DatasetMetrics,
     DatasetValidatorState,
+    StringMetrics,
     TrainDataProcessor,
     TrainDataProcessorConfig,
 )
@@ -309,21 +310,77 @@ class TestValidateSamplesAndAggregateMetrics:
             "example": DatasetMetrics(
                 is_aggregated=False,
                 number_of_examples=5,
-                number_of_tools=AvgMinMax(is_aggregated=False, total=5, average=10.0, min=2.0, max=2.0),
-                json_dumped_number_of_words=AvgMinMax(
-                    is_aggregated=False, total=5, average=7520.0, min=1499.0, max=1509.0
+                number_of_tools=AvgMinMax(
+                    is_aggregated=False,
+                    total=5,
+                    average=0,
+                    min=2.0,
+                    max=2.0,
+                    median=0,
+                    stddev=0,
                 ),
-                number_of_turns=AvgMinMax(is_aggregated=False, total=5, average=5.0, min=1.0, max=1.0),
+                json_dumped_number_of_words=AvgMinMax(
+                    is_aggregated=False,
+                    total=5,
+                    average=0,
+                    min=1499.0,
+                    max=1509.0,
+                    median=0,
+                    stddev=0,
+                ),
+                number_of_turns=AvgMinMax(
+                    is_aggregated=False,
+                    total=5,
+                    average=0,
+                    min=1.0,
+                    max=1.0,
+                    median=0,
+                    stddev=0,
+                ),
                 temperature=AvgMinMax(
                     is_aggregated=False,
                     total=0,
                     average=0,
                     min=float("inf"),
                     max=float("-inf"),
+                    median=0,
+                    stddev=0,
                 ),
+                id=AvgMinMax(
+                    is_aggregated=True,
+                    total=5,
+                    average=2.0,
+                    min=0.0,
+                    max=4.0,
+                    median=2.0,
+                    stddev=1.5811388300841898,
+                ),
+                expected_synonym_values=AvgMinMax(
+                    is_aggregated=True,
+                    total=10,
+                    average=559.0,
+                    min=407.0,
+                    max=711.0,
+                    median=559.0,
+                    stddev=160.22206811519789,
+                ),
+                minefield_label_value=AvgMinMax(
+                    is_aggregated=True,
+                    total=5,
+                    average=299.0,
+                    min=299.0,
+                    max=299.0,
+                    median=299.0,
+                    stddev=0.0,
+                ),
+                expected_synonyms=StringMetrics(unique_count=2, total_count=10),
+                minefield_label=StringMetrics(unique_count=1, total_count=5),
             )
         }
-        assert expected_dataset_type_to_aggregate_metrics == actual_dataset_type_to_aggregate_metrics
+        assert (
+            expected_dataset_type_to_aggregate_metrics.get("example").model_dump()
+            == actual_dataset_type_to_aggregate_metrics.get("example").model_dump()
+        )
 
         assert write_filenames == [Path("resources_servers/multineedle/data/example_metrics.json")]
 
@@ -431,14 +488,26 @@ class TestValidateSamplesAndAggregateMetrics:
                 average=0,
                 min=float("inf"),
                 max=float("-inf"),
+                median=0,
+                stddev=0,
             ),
-            json_dumped_number_of_words=AvgMinMax(is_aggregated=False, total=1, average=2.0, min=2.0, max=2.0),
+            json_dumped_number_of_words=AvgMinMax(
+                is_aggregated=False,
+                total=1,
+                average=0,
+                min=2.0,
+                max=2.0,
+                median=0,
+                stddev=0,
+            ),
             number_of_turns=AvgMinMax(
                 is_aggregated=False,
                 total=0,
                 average=0,
                 min=float("inf"),
                 max=float("-inf"),
+                median=0,
+                stddev=0,
             ),
             temperature=AvgMinMax(
                 is_aggregated=False,
@@ -446,9 +515,11 @@ class TestValidateSamplesAndAggregateMetrics:
                 average=0,
                 min=float("inf"),
                 max=float("-inf"),
+                median=0,
+                stddev=0,
             ),
         )
-        assert expected_metrics == state.metrics
+        assert expected_metrics.model_dump() == state.metrics.model_dump()
 
 
 class TestCollateSamples:

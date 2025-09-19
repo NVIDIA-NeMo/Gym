@@ -121,6 +121,11 @@ dependencies = [
     # Updated Tue Aug 05, 2025 with mlflow==3.2.0
     # License: Apache 2.0 https://github.com/mlflow/mlflow/blob/1510ed1bc92d3a4258973005d64f64a43136e251/LICENSE.txt
     "mlflow",
+
+    # Tdigest: Data structure for percentiles and quantiles, specifically calculating metrics such as median in a memory-efficient way.
+    # Updated Wed Sep 17, 2025 with tdigest==0.5.2.2
+    # License: MIT https://github.com/CamDavidsonPilon/tdigest/blob/e35cfd708962ae5e9d1c5d2b15a99af7b2e2f323/LICENSE.txt
+    "tdigest>=0.5.2.2",
 ]
 
 [dependency-groups]

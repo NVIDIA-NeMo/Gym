@@ -9,24 +9,44 @@
         "Total # non-null values": 5,
         "Average": 2.0,
         "Min": 2.0,
-        "Max": 2.0
+        "Max": 2.0,
+        "Median": 2.0,
+        "Standard deviation": 0.0
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 5,
         "Average": 285.2,
         "Min": 230.0,
-        "Max": 333.0
+        "Max": 333.0,
+        "Median": 293.0,
+        "Standard deviation": 40.44996909763962
     },
     "Number of turns": {
         "Total # non-null values": 5,
         "Average": 1.0,
         "Min": 1.0,
-        "Max": 1.0
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
     },
     "Temperature": {
         "Total # non-null values": 5,
         "Average": 0.6,
         "Min": 0.6,
-        "Max": 0.6
+        "Max": 0.6,
+        "Median": 0.6,
+        "Standard deviation": 0.0
+    },
+    "task_difficulty_qwen3_32b_avg_8": {
+        "Total # non-null values": 5,
+        "Average": 0.4,
+        "Min": 0.25,
+        "Max": 0.5,
+        "Median": 0.40625,
+        "Standard deviation": 0.10458250331675945
+    },
+    "expected_answer": {
+        "unique_count": 3,
+        "total_count": 5
     }
 }

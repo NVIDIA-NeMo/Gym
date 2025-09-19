@@ -9,24 +9,48 @@
         "Total # non-null values": 5,
         "Average": 2.0,
         "Min": 2.0,
-        "Max": 2.0
+        "Max": 2.0,
+        "Median": 2.0,
+        "Standard deviation": 0.0
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 5,
         "Average": 52.0,
         "Min": 52.0,
-        "Max": 52.0
+        "Max": 52.0,
+        "Median": 52.0,
+        "Standard deviation": 0.0
     },
     "Number of turns": {
         "Total # non-null values": 5,
         "Average": 1.0,
         "Min": 1.0,
-        "Max": 1.0
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
     },
     "Temperature": {
         "Total # non-null values": 0,
         "Average": 0.0,
         "Min": 0.0,
-        "Max": 0.0
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "expected_count": {
+        "Total # non-null values": 5,
+        "Average": 24.0,
+        "Min": 6.0,
+        "Max": 42.0,
+        "Median": 24.0,
+        "Standard deviation": 14.230249470757707
+    },
+    "initial_count": {
+        "Total # non-null values": 5,
+        "Average": 9.0,
+        "Min": 3.0,
+        "Max": 15.0,
+        "Median": 9.0,
+        "Standard deviation": 4.743416490252569
     }
 }
