@@ -49,3 +49,8 @@ repos:
         files: '.*\/[^\/]*_[^\/]*\.md$'
         exclude: '^\.github/'
         types: [file]
+      - id: update-readme-table
+        name: Update README Table
+        entry: python scripts/update_readme.py
+        language: system
+        files: ^README\.md$
