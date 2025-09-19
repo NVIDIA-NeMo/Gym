@@ -22,6 +22,7 @@ from nemo_gym.server_utils import ServerClient
 class TestApp:
     def test_sanity(self) -> None:
         config = SudokuResourcesServerConfig(
+            name="test_sudoku_server",
             host="0.0.0.0",
             port=8080,
             entrypoint="",
