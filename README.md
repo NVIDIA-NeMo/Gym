@@ -26,6 +26,7 @@
 - [FAQ: NeMo Gym, training frameworks, and token IDs](#faq-nemo-gym-training-frameworks-and-token-ids)
 - [FAQ: NeMo Gym what CI/CD do I need to pass?](#faq-nemo-gym-what-cicd-do-i-need-to-pass)
 - [FAQ: Why aiohttp backend and not httpx/httpcore for async http?](#faq-why-aiohttp-backend-and-not-httpxhttpcore-for-async-http)
+- [Table: Resource Server Organization](#table-resource-server-organization)
 
 
 # NeMo-Gym
@@ -927,3 +928,22 @@ Here are some Github issues related to this problem. They didn't help too much, 
 - https://github.com/encode/httpx/issues/3215#issuecomment-2220795088
 
 If you are using AsyncOpenAI client with a parallelism > 32, you may also want to check if this kind of inefficiency also affects your setup.
+
+
+# Table: Resource Server Organization
+<!-- START_RESOURCE_TABLE -->
+|Server Type Name|Domain|Path|
+|----|----|---|
+|Comp Coding|?|`resources_servers/comp_coding`|
+|Equivalence Llm Judge|?|`resources_servers/equivalence_llm_judge`|
+|Google Search|?|`resources_servers/google_search`|
+|Instruction Following|?|`resources_servers/instruction_following`|
+|Library Judge Math|?|`resources_servers/library_judge_math`|
+|Mcqa|?|`resources_servers/mcqa`|
+|Multineedle|?|`resources_servers/multineedle`|
+|Multiverse Math Hard|?|`resources_servers/multiverse_math_hard`|
+|Python Math Exec|?|`resources_servers/python_math_exec`|
+|Simple Weather|?|`resources_servers/simple_weather`|
+|Stateful Counter|?|`resources_servers/stateful_counter`|
+|Workbench|?|`resources_servers/workbench`|
+<!-- END_RESOURCE_TABLE -->
