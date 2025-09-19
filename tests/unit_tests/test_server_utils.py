@@ -107,10 +107,11 @@ class TestServerUtils:
         )
 
         httpx_client_mock = MagicMock()
-        httpx_client_get_mock = AsyncMock()
-        httpx_client_get_mock.return_value = "my mock response"
-        httpx_client_mock.return_value.get = httpx_client_get_mock
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_httpx_client", httpx_client_get_mock)
+        httpx_client_get_post_mock = AsyncMock()
+        httpx_client_get_post_mock.return_value = "my mock response"
+        httpx_client_mock.return_value.get = httpx_client_get_post_mock
+        httpx_client_mock.return_value.post = httpx_client_get_post_mock
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_httpx_client", httpx_client_mock)
 
         actual_response = await server_client.get(
             server_name="my_server",
