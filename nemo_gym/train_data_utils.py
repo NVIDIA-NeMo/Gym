@@ -142,19 +142,28 @@ class AvgMinMax(Accumulator):
         self.tdigest = self.tdigest + other.tdigest
 
     def _aggregate(self: Self) -> Self:
+        def round_metric(x: float) -> float:
+            if x >= 1 or x <= -1:
+                return round(x, 2)
+            return round(x, 3)
+
         n = self.total
         mean = self.mean if n > 0 else 0.0
         stddev = sqrt(self.M2 / (n - 1)) if n > 1 else 0.0
         med = float(self.tdigest.percentile(50)) if n > 0 and self.tdigest.n > 0 else 0.0
 
-        return AvgMinMax(
-            total=self.total,
-            average=mean,
-            min=self.min if n > 0 else 0.0,
-            max=self.max if n > 0 else 0.0,
-            median=med,
-            stddev=stddev,
-        )
+        params = {
+            "total": self.total,
+            "average": mean,
+            "min": self.min if n > 0 else 0.0,
+            "max": self.max if n > 0 else 0.0,
+            "median": med,
+            "stddev": stddev,
+        }
+
+        final_params = {k: round_metric(v) if isinstance(v, float) else v for k, v in params.items()}
+
+        return AvgMinMax(**final_params)
 
 
 class StringMetrics(BaseModel):
