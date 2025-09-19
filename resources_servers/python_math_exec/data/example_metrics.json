@@ -19,7 +19,7 @@
         "Min": 190.0,
         "Max": 265.0,
         "Median": 208.0,
-        "Standard deviation": 30.405591591021544
+        "Standard deviation": 30.41
     },
     "Number of turns": {
         "Total # non-null values": 5,
@@ -43,7 +43,7 @@
         "Min": 0.0,
         "Max": 4.0,
         "Median": 2.0,
-        "Standard deviation": 1.5811388300841898
+        "Standard deviation": 1.58
     },
     "expected_result": {
         "unique_count": 5,
