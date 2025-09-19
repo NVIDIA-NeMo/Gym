@@ -75,8 +75,8 @@ _GLOBAL_HTTPX_CLIENT = None
 
 
 class GlobalHTTPXAsyncClientConfig(BaseModel):
-    global_httpx_max_connections: int = 1500
-    global_httpx_max_retries: int = 3
+    global_httpx_max_connections: Optional[int] = None
+    global_httpx_max_retries: int = 0
 
 
 def get_global_httpx_client(
