@@ -14,6 +14,7 @@
 import json
 from abc import abstractmethod
 from os import getenv
+from pathlib import Path
 from threading import Thread
 from typing import Any, Literal, Optional, Tuple, Type, Union
 from uuid import uuid4
@@ -284,7 +285,7 @@ class SimpleServer(BaseServer):
         app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
 
     @classmethod
-    def run_webserver(cls) -> None:  # pragma: no cover
+    def create_server(cls) -> "Tuple[SimpleServer, FastAPI]":  # pragma: no cover
         server_config = cls.load_config_from_global_config()
         server_client = ServerClient(
             head_server_config=ServerClient.load_head_server_config(),
@@ -292,18 +293,24 @@ class SimpleServer(BaseServer):
         )
         server = cls(config=server_config, server_client=server_client)
 
-        app = server.setup_webserver()
+        return server, server.setup_webserver()
+
+    def run_webserver(self) -> None:  # pragma: no cover
+        entrypoint_path = Path(self.config.entrypoint)
+        module_path_without_suffix = entrypoint_path.with_suffix("")
+        module_name = str(module_path_without_suffix).replace("/", ".").replace("\\", ".")
 
         uvicorn.run(
-            app,
-            host=server.config.host,
-            port=server.config.port,
+            f"{module_name}:app",
+            host=self.config.host,
+            port=self.config.port,
             # TODO eventually we want to make this FastAPI server served across multiple processes or workers.
             # Right now this will always use one process.
             # workers=server.config.num_fastapi_workers,
             # We don't have any explicit lifespan logic, so instead of defaulting to "auto"
             # We just turn lifespan off
             lifespan="off",
+            workers=2,
         )
 
 
