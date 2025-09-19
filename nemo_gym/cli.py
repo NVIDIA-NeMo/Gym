@@ -15,7 +15,7 @@ import asyncio
 import json
 import shlex
 from glob import glob
-from os import environ, makedirs
+from os import makedirs
 from os.path import exists
 from pathlib import Path
 from subprocess import Popen
@@ -30,6 +30,7 @@ from pydantic import BaseModel
 from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.cli_utils import _run_command, _setup_env_command
 from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
@@ -38,21 +39,6 @@ from nemo_gym.global_config import (
     get_global_config_dict,
 )
 from nemo_gym.server_utils import HEAD_SERVER_KEY_NAME, HeadServer, ServerClient, ServerStatus
-
-
-def _setup_env_command(dir_path: Path) -> str:  # pragma: no cover
-    return f"""cd {dir_path} \\
-    && uv venv --allow-existing \\
-    && source .venv/bin/activate \\
-    && uv pip install -r requirements.txt \\
-   """
-
-
-def _run_command(command: str, working_directory: Path) -> Popen:  # pragma: no cover
-    custom_env = environ.copy()
-    custom_env["PYTHONPATH"] = f"{working_directory.absolute()}:{custom_env.get('PYTHONPATH', '')}"
-    print(f"Executing command:\n{command}\n")
-    return Popen(command, executable="/bin/bash", shell=True, env=custom_env)
 
 
 class RunConfig(BaseModel):
