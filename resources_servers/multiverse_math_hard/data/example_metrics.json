@@ -19,7 +19,7 @@
         "Min": 402.0,
         "Max": 429.0,
         "Median": 408.0,
-        "Standard deviation": 10.784247771634329
+        "Standard deviation": 10.78
     },
     "Number of turns": {
         "Total # non-null values": 5,
@@ -43,7 +43,11 @@
         "Min": 0.0,
         "Max": 4.0,
         "Median": 2.0,
-        "Standard deviation": 1.5811388300841898
+        "Standard deviation": 1.58
+    },
+    "ground_truth": {
+        "unique_count": 5,
+        "total_count": 5
     },
     "depth": {
         "Total # non-null values": 5,
@@ -51,7 +55,7 @@
         "Min": 1.0,
         "Max": 4.0,
         "Median": 2.0,
-        "Standard deviation": 1.51657508881031
+        "Standard deviation": 1.52
     },
     "breadth": {
         "Total # non-null values": 5,
@@ -59,10 +63,6 @@
         "Min": 1.0,
         "Max": 5.0,
         "Median": 3.25,
-        "Standard deviation": 1.8708286933869707
-    },
-    "ground_truth": {
-        "unique_count": 5,
-        "total_count": 5
+        "Standard deviation": 1.87
     }
 }

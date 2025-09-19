@@ -19,7 +19,7 @@
         "Min": 230.0,
         "Max": 333.0,
         "Median": 293.0,
-        "Standard deviation": 40.44996909763962
+        "Standard deviation": 40.45
     },
     "Number of turns": {
         "Total # non-null values": 5,
@@ -37,16 +37,16 @@
         "Median": 0.6,
         "Standard deviation": 0.0
     },
+    "expected_answer": {
+        "unique_count": 3,
+        "total_count": 5
+    },
     "task_difficulty_qwen3_32b_avg_8": {
         "Total # non-null values": 5,
         "Average": 0.4,
         "Min": 0.25,
         "Max": 0.5,
-        "Median": 0.40625,
-        "Standard deviation": 0.10458250331675945
-    },
-    "expected_answer": {
-        "unique_count": 3,
-        "total_count": 5
+        "Median": 0.406,
+        "Standard deviation": 0.105
     }
 }
