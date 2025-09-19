@@ -81,8 +81,8 @@ _GLOBAL_HTTPX_CLIENTS: Dict[str, NeMoGymGlobalAsyncClient] = dict()
 
 
 class GlobalHTTPXAsyncClientConfig(BaseModel):
-    global_httpx_max_connections: int = 1500
-    global_httpx_max_retries: int = 3
+    global_httpx_max_connections: Optional[int] = None
+    global_httpx_max_retries: int = 0
 
 
 def get_global_httpx_client(
@@ -98,12 +98,13 @@ def get_global_httpx_client(
         global_config_dict_parser_cls=global_config_dict_parser_cls,
     )
     cfg = GlobalHTTPXAsyncClientConfig.model_validate(global_config_dict)
+    limits = Limits(
+        max_keepalive_connections=cfg.global_httpx_max_connections,
+        max_connections=cfg.global_httpx_max_connections,
+    )
     client = NeMoGymGlobalAsyncClient(
-        limits=Limits(
-            max_keepalive_connections=cfg.global_httpx_max_connections,
-            max_connections=cfg.global_httpx_max_connections,
-        ),
-        transport=AsyncHTTPTransport(retries=cfg.global_httpx_max_retries),
+        limits=limits,
+        transport=AsyncHTTPTransport(retries=cfg.global_httpx_max_retries, limits=limits),
         timeout=None,
     )
 
