@@ -216,7 +216,7 @@ class TestLoadDatasets:
                         {
                             "name": "train",
                             "type": "train",
-                            "jsonl_fpath": "resources_servers/multineedle/data/train.jsonl",
+                            "jsonl_fpath": "some/nonexiststent/path",
                             "gitlab_identifier": {
                                 "dataset_name": "multineedle",
                                 "version": "0.0.1",
