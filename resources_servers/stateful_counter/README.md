@@ -1,9 +1,11 @@
 # Description
 
+Data links: ?
 
 # Licensing information
-Code: Apache 2.0
-Data: N/A
+Code: ?
+Data: ?
 
 Dependencies
 - nemo_gym: Apache 2.0
+?

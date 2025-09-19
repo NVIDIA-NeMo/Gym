@@ -75,7 +75,7 @@ from openai.types.shared_params import FunctionDefinition
 from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import TypedDict
 
-from nemo_gym.server_utils import GLOBAL_HTTPX_CLIENT
+from nemo_gym.server_utils import get_global_httpx_client
 
 
 ########################################
@@ -110,7 +110,11 @@ class NeMoGymResponseReasoningItem(BaseModel):
     summary: List[NeMoGymSummary]
     type: Literal["reasoning"] = "reasoning"
     encrypted_content: Optional[str] = None
-    status: Literal["in_progress", "completed", "incomplete"] = "completed"
+
+    # As of Wed Sep 17, 2025, the OpenAI API with GPT-5 returns None for this status rather than a valid value here.
+    # On subsequent calls to the OpenAI endpoints within a rollout, the status parameter is not accepted i.e. the OpenAI API returns a bad request when the status parameter is populated.
+    # It's not clear whether or not this is intended. We comment out this status parameter here as a quick stop-gap to fix this issue in Gym re-queries.
+    # status: Optional[Literal["in_progress", "completed", "incomplete"]] = None
 
 
 class NeMoGymResponseOutputText(BaseModel):
@@ -195,6 +199,15 @@ class NeMoGymResponseFunctionToolCallForTraining(NeMoGymResponseFunctionToolCall
 
 class NeMoGymResponseReasoningItemForTraining(NeMoGymResponseReasoningItem, TokenIDLogProbMixin):
     pass
+
+
+RESPONSES_TO_TRAIN = {
+    NeMoGymEasyInputMessage: NeMoGymEasyInputMessageForTraining,
+    NeMoGymMessage: NeMoGymMessageForTraining,
+    NeMoGymResponseOutputMessage: NeMoGymResponseOutputMessageForTraining,
+    NeMoGymResponseFunctionToolCall: NeMoGymResponseFunctionToolCallForTraining,
+    NeMoGymResponseReasoningItem: NeMoGymResponseReasoningItemForTraining,
+}
 
 
 NeMoGymResponseInputItem = Union[
@@ -411,7 +424,7 @@ class NeMoGymAsyncOpenAI(AsyncOpenAI):
     def __init__(self, **kwargs) -> None:
         # TODO: this setup is take from https://github.com/NVIDIA/NeMo-Skills/blob/80dc78ac758c4cac81c83a43a729e7ca1280857b/nemo_skills/inference/model/base.py#L318
         # However, there may still be a lingering issue regarding saturating at 100 max connections
-        kwargs["http_client"] = GLOBAL_HTTPX_CLIENT
+        kwargs["http_client"] = get_global_httpx_client()
         kwargs["timeout"] = None  # Enforce no timeout
 
         super().__init__(**kwargs)

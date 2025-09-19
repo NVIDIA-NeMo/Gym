@@ -11,7 +11,7 @@ workbench_simple_agent:
         name: workbench
       model_server:
         type: responses_api_models
-        name: openai_model
+        name: policy_model
       datasets:
         - name: train
           type: train
@@ -21,7 +21,15 @@ workbench_simple_agent:
             version: 0.0.1
             artifact_fpath: train.jsonl
           license: Apache 2.0
+        - name: validation
+          type: validation
+          jsonl_fpath: resources_servers/workbench/data/validation.jsonl
+          gitlab_identifier:
+            dataset_name: workbench
+            version: 0.0.1
+            artifact_fpath: validation.jsonl
+          license: Apache 2.0
         - name: example
           type: example
           jsonl_fpath: resources_servers/workbench/data/example.jsonl
-      max_turns: 6
+      max_steps: 6

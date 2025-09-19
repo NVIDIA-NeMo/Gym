@@ -45,6 +45,7 @@ class TestApp:
             host="0.0.0.0",
             port=8080,
             entrypoint="",
+            name="",
             judge_model_server=ModelServerRef(
                 type="responses_api_models",
                 name="math_judge",
