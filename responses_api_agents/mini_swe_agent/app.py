@@ -115,14 +115,12 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
 
             mini_swe_config_path = builtin_config_dir / "extra" / "swebench.yaml"
             config = yaml.safe_load(get_config_path(mini_swe_config_path).read_text())
-           
 
             default_model_kwargs = config["model"]["model_kwargs"]
             temperature = body.responses_create_params.temperature or default_model_kwargs["temperature"]
             top_p = body.responses_create_params.top_p or default_model_kwargs["top_p"]
 
             output_file_dir = f"{Path.cwd()}/results/{subset}/{policy_model_name}"
-
 
             if self.config.skip_if_exists:
                 if Path(f"{output_file_dir}/{instance_id}/{instance_id}.json").exists():

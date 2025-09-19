@@ -17,8 +17,6 @@ from typing import Any, Dict, List
 from uuid import uuid4
 
 from openai.types.responses.response_input_text_param import ResponseInputTextParam
-from openai.types.responses.response_output_message import ResponseOutputMessage
-from openai.types.responses.response_output_text import ResponseOutputText
 
 from nemo_gym.openai_utils import NeMoGymMessage, NeMoGymResponseOutputMessageForTraining, NeMoGymResponseOutputText
 
