@@ -27,11 +27,11 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import ModelServerRef, ResourcesServerRef
 
 
 class SimpleGameAgentConfig(BaseResponsesAPIAgentConfig):
@@ -70,8 +70,10 @@ class SimpleGameAgent(SimpleResponsesAPIAgent):
 
         if game_params is None:
             game_params = {}
-
-        conversation = body["input"].copy()
+        body = body.model_copy(deep=True)
+        if isinstance(body.input, str):
+            body.input = [{"role": "user", "content": body.input}]
+        conversation = list(body.input or [])
         moves_made = 0
         game_state = None
         reward = 0.0
@@ -111,12 +113,11 @@ class SimpleGameAgent(SimpleResponsesAPIAgent):
 
         # Game loop
         while True:
-            new_body = body.copy()
-            new_body["input"] = conversation
-
-            #! This is so that the model only performs one move at a time. Without this them model can perform multiple moves and then our env would have to be made changed to handle that complexity.
-            new_body["parallel_tool_calls"] = False
-            new_body["max_tool_calls"] = 1
+            new_body = body.model_copy(deep=True)
+            new_body.input = conversation
+            # One move at a time
+            new_body.parallel_tool_calls = False
+            new_body.max_tool_calls = 1
 
             model_response = await self.server_client.post(
                 server_name=self.config.model_server.name,

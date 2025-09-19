@@ -7,5 +7,5 @@ simple_game_agent:
         name: simple_sudoku
       model_server:
         type: responses_api_models
-        name: openai_model
+        name: policy_model
       max_moves: 50

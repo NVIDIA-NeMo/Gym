@@ -10,7 +10,7 @@ This is a resource server for sudoku text based game. The correctness is checked
 1. Download reference dataset
 
 ```
-ng_download_dataset_to_gitlab \
+ng_download_dataset_from_gitlab \
     +dataset_name=simple_sudoku \
     +version=0.0.2 \
     +artifact_fpath=simple_sudoku.jsonl \
@@ -34,7 +34,7 @@ ng_run "+config_paths=[responses_api_agents/simple_game_agent/configs/simple_gam
 3. Start trajectory collection
 
 ```
-ng_collect_traj +agent_name=simple_game_agent +input_jsonl_fpath=data/sudoku_batch.jsonl +output_jsonl_fpath=results/sudoku_output_NEWLOGIC.jsonl
+ng_collect_rollouts +agent_name=simple_game_agent +input_jsonl_fpath=data/sudoku_batch.jsonl +output_jsonl_fpath=results/sudoku_output_NEWLOGIC.jsonl
 ```
 
 ---

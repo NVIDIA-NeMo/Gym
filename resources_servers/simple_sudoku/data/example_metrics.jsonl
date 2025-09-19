@@ -1,0 +1,51 @@
+{
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 49.0,
+        "Min": 49.0,
+        "Max": 49.0,
+        "Median": 49.0,
+        "Standard deviation": 0.0
+    },
+    "Number of turns": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "clues": {
+        "Total # non-null values": 5,
+        "Average": 8.0,
+        "Min": 8.0,
+        "Max": 8.0,
+        "Median": 8.0,
+        "Standard deviation": 0.0
+    },
+    "scale": {
+        "Total # non-null values": 5,
+        "Average": 4.0,
+        "Min": 4.0,
+        "Max": 4.0,
+        "Median": 4.0,
+        "Standard deviation": 0.0
+    }
+}
