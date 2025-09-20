@@ -21,7 +21,7 @@ from uuid import uuid4
 import requests
 import uvicorn
 from fastapi import FastAPI, Request, Response
-from httpx import AsyncClient, AsyncHTTPTransport, Cookies, Limits, Response
+from httpx import AsyncClient, Cookies, Limits, Response
 from httpx._types import (
     CookieTypes,
     HeaderTypes,
@@ -30,6 +30,7 @@ from httpx._types import (
     RequestData,
     RequestFiles,
 )
+from httpx_aiohttp import AiohttpTransport
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, ConfigDict
 from requests.exceptions import ConnectionError
@@ -65,12 +66,6 @@ class NeMoGymGlobalAsyncClient(AsyncClient):
 # ```
 # In order to get the most benefit from connection pooling, make sure you're not instantiating multiple client instances - for example by using async with inside a "hot loop". This can be achieved either by having a single scoped client that's passed throughout wherever it's needed, or by having a single global client instance.
 # ```
-# In plain language:
-# - Let's say we have 10 distinct endpoints we want to call 5 times each.
-# - A connection pool as defined by the httpx client is for a single distinct endpoint. All requests to that endpoint should use the same httpx client.
-# - So the optimal configuration here is to have 10 total httpx clients, one for each distinct endpoint.
-# - Additionally, since the connections are pooled, if we had a single global client for all 10 distinct endpoints, we may run into deadlock situations,
-#   where requests to two different endpoints are waiting for each other to resolve.
 #
 # In principle, we use no timeout since various api or model calls may take an indefinite amount of time. Right now, we have no timeout, even for connection errors which may be problematic. We may want to revisit more granular httpx.Timeout later on.
 #
@@ -81,7 +76,7 @@ _GLOBAL_HTTPX_CLIENTS: Dict[str, NeMoGymGlobalAsyncClient] = dict()
 
 
 class GlobalHTTPXAsyncClientConfig(BaseModel):
-    global_httpx_max_connections: Optional[int] = None
+    global_httpx_max_connections: int = 1500
     global_httpx_max_retries: int = 0
 
 
@@ -104,7 +99,7 @@ def get_global_httpx_client(
     )
     client = NeMoGymGlobalAsyncClient(
         limits=limits,
-        transport=AsyncHTTPTransport(retries=cfg.global_httpx_max_retries, limits=limits),
+        transport=AiohttpTransport(retries=cfg.global_httpx_max_retries, limits=limits),
         timeout=None,
     )
 
