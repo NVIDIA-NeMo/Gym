@@ -50,7 +50,7 @@ repos:
         exclude: '^\.github/'
         types: [file]
       - id: update-readme-table
-        name: Update README Table
-        entry: python scripts/update_readme.py
+        name: "Update resource server list in README"
+        entry: python scripts/update_resource_servers.py
         language: system
         files: ^README\.md$
