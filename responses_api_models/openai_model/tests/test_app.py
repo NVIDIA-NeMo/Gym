@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, PropertyMock
 
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
@@ -70,8 +70,9 @@ class TestApp:
             return NeMoGymChatCompletion(**mock_chat_data)
 
         mock_chat = AsyncMock(side_effect=mock_create_chat)
-
-        monkeypatch.setattr(server._client.chat.completions, "create", mock_chat)
+        mock_client = PropertyMock()
+        mock_client.return_value.chat.completions.create = mock_chat
+        monkeypatch.setattr(type(server), "client", mock_client)
 
         chat_no_model = client.post(
             "/v1/chat/completions",
@@ -133,8 +134,9 @@ class TestApp:
             return NeMoGymResponse(**mock_response_data)
 
         mock_response = AsyncMock(side_effect=mock_create_responses)
-
-        monkeypatch.setattr(server._client.responses, "create", mock_response)
+        mock_client = PropertyMock()
+        mock_client.return_value.responses.create = mock_response
+        monkeypatch.setattr(type(server), "client", mock_client)
 
         # No model provided should use the one from the config
         res_no_model = client.post("/v1/responses", json={"input": "hello"})

@@ -76,19 +76,26 @@ class VLLMModel(SimpleResponsesAPIModel):
     config: VLLMModelConfig
 
     def model_post_init(self, context):
-        self._clients: List[NeMoGymAsyncOpenAI] = [
-            NeMoGymAsyncOpenAI(
-                base_url=base_url,
-                api_key=self.config.api_key,
-            )
-            for base_url in self.config.base_url
-        ]
+        self._clients: Union[None, List[NeMoGymAsyncOpenAI]] = None
 
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
 
         self._converter = VLLMConverter(return_token_id_information=self.config.return_token_id_information)
 
         return super().model_post_init(context)
+
+    @property
+    def clients(self) -> List[NeMoGymAsyncOpenAI]:
+        if self._clients is None:
+            self._clients: List[NeMoGymAsyncOpenAI] = [
+                NeMoGymAsyncOpenAI(
+                    base_url=base_url,
+                    api_key=self.config.api_key,
+                )
+                for base_url in self.config.base_url
+            ]
+
+        return self._clients
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
@@ -142,8 +149,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         session_id = request.session[SESSION_ID_KEY]
         if session_id not in self._session_id_to_client:
             # There is probably a better way to select the endpoint for this request. But this will do for now.
-            client_idx = len(self._session_id_to_client) % len(self._clients)
-            client = self._clients[client_idx]
+            client_idx = len(self._session_id_to_client) % len(self.clients)
+            client = self.clients[client_idx]
             self._session_id_to_client[session_id] = client
         client = self._session_id_to_client[session_id]
 

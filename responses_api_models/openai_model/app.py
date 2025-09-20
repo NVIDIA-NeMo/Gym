@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from typing import Union
+
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
     Body,
@@ -35,16 +37,25 @@ class SimpleModelServer(SimpleResponsesAPIModel):
     config: SimpleModelServerConfig
 
     def model_post_init(self, context):
-        self._client = NeMoGymAsyncOpenAI(
-            base_url=self.config.openai_base_url,
-            api_key=self.config.openai_api_key,
-        )
+        self._client: Union[None, NeMoGymAsyncOpenAI] = None
+
         return super().model_post_init(context)
+
+    @property
+    def client(self) -> NeMoGymAsyncOpenAI:
+        # We do lazy init here since NeMoGymAsyncOpenAI requires a running event loop.
+        if self._client is None:
+            self._client = NeMoGymAsyncOpenAI(
+                base_url=self.config.openai_base_url,
+                api_key=self.config.openai_api_key,
+            )
+
+        return self._client
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         body_dict = body.model_dump(exclude_unset=True)
         body_dict.setdefault("model", self.config.openai_model)
-        openai_response = await self._client.responses.create(**body_dict)
+        openai_response = await self.client.responses.create(**body_dict)
         return NeMoGymResponse(**openai_response.model_dump())
 
     async def chat_completions(
@@ -52,7 +63,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
     ) -> NeMoGymChatCompletion:
         body_dict = body.model_dump(exclude_unset=True)
         body_dict.setdefault("model", self.config.openai_model)
-        openai_response = await self._client.chat.completions.create(**body_dict)
+        openai_response = await self.client.chat.completions.create(**body_dict)
         return NeMoGymChatCompletion(**openai_response.model_dump())
 
 
