@@ -13,7 +13,6 @@
 # limitations under the License.
 import json
 from abc import abstractmethod
-from asyncio import _get_running_loop, get_event_loop
 from os import getenv
 from threading import Thread
 from typing import Any, Literal, Optional, Tuple, Type, Union
@@ -21,7 +20,6 @@ from uuid import uuid4
 
 import requests
 import uvicorn
-import uvloop
 from aiohttp import ClientSession, ClientTimeout, TCPConnector
 from fastapi import FastAPI, Request, Response
 from httpx import AsyncClient, Cookies, Limits, Response
@@ -83,14 +81,9 @@ def get_global_httpx_client(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
     global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,
 ) -> NeMoGymGlobalAsyncClient:
+    global _GLOBAL_HTTPX_CLIENT
     if _GLOBAL_HTTPX_CLIENT is not None:
         return _GLOBAL_HTTPX_CLIENT
-
-    # Initialize the event loop which is used in aiohttp.ClientSession below
-    loop = _get_running_loop()
-    if loop is None:
-        uvloop.install()
-        loop = get_event_loop()
 
     global_config_dict = get_global_config_dict(
         global_config_dict_parser_config=global_config_dict_parser_config,
@@ -109,7 +102,6 @@ def get_global_httpx_client(
             ssl=None,
             local_addr=None,
         ),
-        loop=loop,
         timeout=ClientTimeout(
             total=None,
             connect=None,
@@ -129,7 +121,6 @@ def get_global_httpx_client(
         timeout=None,
     )
 
-    global _GLOBAL_HTTPX_CLIENT
     _GLOBAL_HTTPX_CLIENT = client
 
     return client
@@ -199,7 +190,7 @@ class ServerClient(BaseModel):
         """
         server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
         base_url = self._build_server_base_url(server_config_dict)
-        return await get_global_httpx_client(base_url).get(
+        return await get_global_httpx_client().get(
             f"{base_url}{url_path}",
             params=params,
             headers=headers,
@@ -232,7 +223,7 @@ class ServerClient(BaseModel):
         """
         server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
         base_url = self._build_server_base_url(server_config_dict)
-        return await get_global_httpx_client(base_url).post(
+        return await get_global_httpx_client().post(
             f"{base_url}{url_path}",
             content=content,
             data=data,
@@ -335,8 +326,6 @@ class SimpleServer(BaseServer):
             # We don't have any explicit lifespan logic, so instead of defaulting to "auto"
             # We just turn lifespan off
             lifespan="off",
-            # We set loop none here since a server instance requires a server_client, which will init
-            loop="none",
         )
 
 
