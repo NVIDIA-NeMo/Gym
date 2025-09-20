@@ -13,13 +13,16 @@
 # limitations under the License.
 import json
 from abc import abstractmethod
+from asyncio import _get_running_loop, get_event_loop
 from os import getenv
 from threading import Thread
-from typing import Any, Dict, Literal, Optional, Tuple, Type, Union
+from typing import Any, Literal, Optional, Tuple, Type, Union
 from uuid import uuid4
 
 import requests
 import uvicorn
+import uvloop
+from aiohttp import ClientSession, ClientTimeout, TCPConnector
 from fastapi import FastAPI, Request, Response
 from httpx import AsyncClient, Cookies, Limits, Response
 from httpx._types import (
@@ -67,12 +70,8 @@ class NeMoGymGlobalAsyncClient(AsyncClient):
 # In order to get the most benefit from connection pooling, make sure you're not instantiating multiple client instances - for example by using async with inside a "hot loop". This can be achieved either by having a single scoped client that's passed throughout wherever it's needed, or by having a single global client instance.
 # ```
 #
-# In principle, we use no timeout since various api or model calls may take an indefinite amount of time. Right now, we have no timeout, even for connection errors which may be problematic. We may want to revisit more granular httpx.Timeout later on.
-#
-# Eventually, we may also want to parameterize the max connections. For now, we set the max connections to just some very large number.
-#
-# It's critical that this client is NOT used before uvicorn.run is called. Under the hood, this async client will start and use an event loop, and store a handle to that specific event loop. When uvicorn.run is called, it will replace the event loop policy with its own. So the handle that the async client has is now outdated.
-_GLOBAL_HTTPX_CLIENTS: Dict[str, NeMoGymGlobalAsyncClient] = dict()
+# We use no timeout since various api or model calls may take an indefinite amount of time.
+_GLOBAL_HTTPX_CLIENT: Optional[NeMoGymGlobalAsyncClient] = None
 
 
 class GlobalHTTPXAsyncClientConfig(BaseModel):
@@ -81,29 +80,57 @@ class GlobalHTTPXAsyncClientConfig(BaseModel):
 
 
 def get_global_httpx_client(
-    base_url: str,
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
     global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,
 ) -> NeMoGymGlobalAsyncClient:
-    if base_url in _GLOBAL_HTTPX_CLIENTS:
-        return _GLOBAL_HTTPX_CLIENTS[base_url]
+    if _GLOBAL_HTTPX_CLIENT is not None:
+        return _GLOBAL_HTTPX_CLIENT
+
+    # Initialize the event loop which is used in aiohttp.ClientSession below
+    loop = _get_running_loop()
+    if loop is None:
+        uvloop.install()
+        loop = get_event_loop()
 
     global_config_dict = get_global_config_dict(
         global_config_dict_parser_config=global_config_dict_parser_config,
         global_config_dict_parser_cls=global_config_dict_parser_cls,
     )
     cfg = GlobalHTTPXAsyncClientConfig.model_validate(global_config_dict)
+
     limits = Limits(
         max_keepalive_connections=cfg.global_httpx_max_connections,
         max_connections=cfg.global_httpx_max_connections,
     )
+    client_session = ClientSession(
+        connector=TCPConnector(
+            limit=limits.max_connections,
+            keepalive_timeout=limits.keepalive_expiry,
+            ssl=None,
+            local_addr=None,
+        ),
+        loop=loop,
+        timeout=ClientTimeout(
+            total=None,
+            connect=None,
+            sock_connect=None,
+            sock_read=None,
+        ),
+    )
+    transport = AiohttpTransport(
+        retries=cfg.global_httpx_max_retries,
+        limits=limits,
+        client=client_session,
+    )
+
     client = NeMoGymGlobalAsyncClient(
         limits=limits,
-        transport=AiohttpTransport(retries=cfg.global_httpx_max_retries, limits=limits),
+        transport=transport,
         timeout=None,
     )
 
-    _GLOBAL_HTTPX_CLIENTS[base_url] = client
+    global _GLOBAL_HTTPX_CLIENT
+    _GLOBAL_HTTPX_CLIENT = client
 
     return client
 
@@ -305,12 +332,11 @@ class SimpleServer(BaseServer):
             app,
             host=server.config.host,
             port=server.config.port,
-            # TODO eventually we want to make this FastAPI server served across multiple processes or workers.
-            # Right now this will always use one process.
-            # workers=server.config.num_fastapi_workers,
             # We don't have any explicit lifespan logic, so instead of defaulting to "auto"
             # We just turn lifespan off
             lifespan="off",
+            # We set loop none here since a server instance requires a server_client, which will init
+            loop="none",
         )
 
 
