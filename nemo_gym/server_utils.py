@@ -20,7 +20,7 @@ from uuid import uuid4
 
 import requests
 import uvicorn
-from aiohttp import ClientSession, ClientTimeout, TCPConnector
+from aiohttp import ClientSession, TCPConnector
 from fastapi import FastAPI, Request, Response
 from httpx import AsyncClient, Cookies, Limits, Response
 from httpx._types import (
@@ -99,15 +99,8 @@ def get_global_httpx_client(
         connector=TCPConnector(
             limit=limits.max_connections,
             keepalive_timeout=limits.keepalive_expiry,
-            ssl=None,
-            local_addr=None,
         ),
-        timeout=ClientTimeout(
-            total=None,
-            connect=None,
-            sock_connect=None,
-            sock_read=None,
-        ),
+        timeout=None,
     )
     transport = AiohttpTransport(
         retries=cfg.global_httpx_max_retries,
