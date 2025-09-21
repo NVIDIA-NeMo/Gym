@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import logging
 from typing import List
 
+import httpx
 from pydantic import ConfigDict, Field, ValidationError
 
 from nemo_gym.base_resources_server import BaseRunRequest
@@ -33,6 +35,9 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class AviaryAgentConfig(BaseResponsesAPIAgentConfig):
@@ -81,11 +86,17 @@ class AviaryAgent(SimpleResponsesAPIAgent):
             steps += 1
 
             # Sample action from model
-            raw_model_response = await self.server_client.post(
-                server_name=self.config.model_server.name,
-                url_path="/v1/responses",
-                json=agent_state,
-            )
+            try:
+                raw_model_response = await self.server_client.post(
+                    server_name=self.config.model_server.name,
+                    url_path="/v1/responses",
+                    json=agent_state,
+                )
+            except httpx.HTTPError as e:
+                logger.warning(f"Error calling /v1/responses: {e}")
+                # for now, we break. default reward of 0 will be returned when /verify is called
+                break
+
             model_response_json = raw_model_response.json()
             try:
                 model_response = NeMoGymResponse.model_validate(model_response_json)
