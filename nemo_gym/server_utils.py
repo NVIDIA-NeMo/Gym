@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import atexit
 import json
 from abc import abstractmethod
 from os import getenv
@@ -74,6 +75,16 @@ def get_global_aiohttp_client(
     _GLOBAL_AIOHTTP_CLIENT = client_session
 
     return _GLOBAL_AIOHTTP_CLIENT
+
+
+def global_aiohttp_client_exit():
+    if _GLOBAL_AIOHTTP_CLIENT is None:
+        return
+
+    asyncio.run(_GLOBAL_AIOHTTP_CLIENT.close())
+
+
+atexit.register(global_aiohttp_client_exit)
 
 
 DEFAULT_HEAD_SERVER_PORT = 11000
