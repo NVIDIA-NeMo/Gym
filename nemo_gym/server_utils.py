@@ -67,6 +67,10 @@ def get_global_aiohttp_client(
     )
     cfg = GlobalAIOHTTPAsyncClientConfig.model_validate(global_config_dict)
 
+    return set_global_aiohttp_client(cfg)
+
+
+def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSession:
     client_session = ClientSession(
         connector=TCPConnector(
             limit=cfg.global_aiohttp_connector_limit,
@@ -76,6 +80,7 @@ def get_global_aiohttp_client(
         cookie_jar=DummyCookieJar(),
     )
 
+    global _GLOBAL_AIOHTTP_CLIENT
     _GLOBAL_AIOHTTP_CLIENT = client_session
 
     return _GLOBAL_AIOHTTP_CLIENT
