@@ -76,26 +76,19 @@ class VLLMModel(SimpleResponsesAPIModel):
     config: VLLMModelConfig
 
     def model_post_init(self, context):
-        self._clients: Union[None, List[NeMoGymAsyncOpenAI]] = None
+        self._clients = [
+            NeMoGymAsyncOpenAI(
+                base_url=base_url,
+                api_key=self.config.api_key,
+            )
+            for base_url in self.config.base_url
+        ]
 
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
 
         self._converter = VLLMConverter(return_token_id_information=self.config.return_token_id_information)
 
         return super().model_post_init(context)
-
-    @property
-    def clients(self) -> List[NeMoGymAsyncOpenAI]:
-        if self._clients is None:
-            self._clients: List[NeMoGymAsyncOpenAI] = [
-                NeMoGymAsyncOpenAI(
-                    base_url=base_url,
-                    api_key=self.config.api_key,
-                )
-                for base_url in self.config.base_url
-            ]
-
-        return self._clients
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
@@ -166,31 +159,29 @@ class VLLMModel(SimpleResponsesAPIModel):
                 },
             )
 
-        openai_response = await client.chat.completions.create(**create_params)
-        assert not getattr(openai_response.choices[0].message, "reasoning_content", None), (
+        chat_completion_dict = await client.create_chat_completions(**create_params)
+        choice_dict = chat_completion_dict["choices"][0]
+        assert "reasoning_content" not in choice_dict["message"], (
             "Please do not use a reasoning parser in vLLM! There is one source of truth for handling data (including reasoning), which is NeMo Gym!"
         )
-        openai_response: NeMoGymChatCompletion
-
-        chat_completion_dict = openai_response.model_dump()
 
         if self.config.return_token_id_information:
-            log_probs = openai_response.choices[0].logprobs.content
-            generation_log_probs = [log_prob.logprob for log_prob in log_probs]
+            log_probs = choice_dict["logprobs"]["content"]
+            generation_log_probs = [log_prob["logprob"] for log_prob in log_probs]
 
-            message_dict = chat_completion_dict["choices"][0]["message"]
+            message_dict = choice_dict["message"]
             message_dict.update(
                 dict(
                     prompt_token_ids=chat_completion_dict["prompt_token_ids"],
-                    generation_token_ids=openai_response.choices[0].token_ids,
+                    generation_token_ids=choice_dict["token_ids"],
                     generation_log_probs=generation_log_probs,
                 )
             )
 
             # Clean the duplicated information
             chat_completion_dict.pop("prompt_token_ids")
-            chat_completion_dict["choices"][0].pop("token_ids")
-            chat_completion_dict["choices"][0].pop("logprobs")
+            choice_dict.pop("token_ids")
+            choice_dict.pop("logprobs")
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 

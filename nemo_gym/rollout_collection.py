@@ -61,7 +61,7 @@ async def _collect_rollouts(config: RolloutCollectionConfig):  # pragma: no cove
         async def _post_coroutine(i: int, row: dict) -> None:
             async with semaphore:
                 response = await server_client.post(server_name=config.agent_name, url_path="/run", json=row)
-                result = response.json()
+                result = await response.json()
                 f.write(json.dumps(result) + "\n")
                 metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
 

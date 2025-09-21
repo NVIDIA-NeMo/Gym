@@ -164,7 +164,7 @@ Sleeping 0.5s and retrying...
                 The URL path in the server you are trying to call e.g. "/v1/responses".
 
         """
-        return self.request(
+        return await self.request(
             server_name=server_name,
             url_path=url_path,
             method="GET",
@@ -185,7 +185,7 @@ Sleeping 0.5s and retrying...
                 The URL path in the server you are trying to call e.g. "/v1/responses".
 
         """
-        return self.request(
+        return await self.request(
             server_name=server_name,
             url_path=url_path,
             method="POST",

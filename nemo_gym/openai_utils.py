@@ -74,6 +74,8 @@ from openai.types.shared_params import FunctionDefinition
 from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import TypedDict
 
+from nemo_gym.server_utils import get_global_aiohttp_client
+
 
 ########################################
 # Training-specific
@@ -410,3 +412,33 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     # Disallow deprecated args
     # function_call: FunctionCall
     # functions: Iterable[Function]
+
+
+########################################
+# Clients
+########################################
+
+
+class NeMoGymAsyncOpenAI(BaseModel):
+    """This is just a stub class that wraps around aiohttp"""
+
+    base_url: str
+    api_key: str
+
+    async def create_chat_completions(self, **kwargs):
+        client = get_global_aiohttp_client()
+        response = await client.post(
+            url=f"{self.base_url}/chat/completions",
+            json=kwargs,
+            headers={"Authorization": f"Bearer {self.api_key}"},
+        )
+        return await response.json()
+
+    async def create_responses(self, **kwargs):
+        client = get_global_aiohttp_client()
+        response = await client.post(
+            url=f"{self.base_url}/responses",
+            json=kwargs,
+            headers={"Authorization": f"Bearer {self.api_key}"},
+        )
+        return await response.json()
