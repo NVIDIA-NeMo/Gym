@@ -11,14 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from unittest.mock import AsyncMock, MagicMock, PropertyMock
+from unittest.mock import AsyncMock, MagicMock
 
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-from nemo_gym.openai_utils import NeMoGymChatCompletion, NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 from responses_api_models.openai_model.app import (
+    NeMoGymAsyncOpenAI,
     SimpleModelServer,
     SimpleModelServerConfig,
 )
@@ -67,12 +67,10 @@ class TestApp:
         async def mock_create_chat(**kwargs):
             nonlocal called_args_chat
             called_args_chat = kwargs
-            return NeMoGymChatCompletion(**mock_chat_data)
+            return mock_chat_data
 
-        mock_chat = AsyncMock(side_effect=mock_create_chat)
-        mock_client = PropertyMock()
-        mock_client.return_value.chat.completions.create = mock_chat
-        monkeypatch.setattr(type(server), "client", mock_client)
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(side_effect=mock_create_chat)
 
         chat_no_model = client.post(
             "/v1/chat/completions",
@@ -91,7 +89,7 @@ class TestApp:
         assert chat_with_model.status_code == 200
         assert called_args_chat.get("model") == "override_model"
 
-        mock_chat.assert_any_await(
+        server._client.create_chat_completion.assert_any_await(
             messages=[{"role": "user", "content": "hi"}],
             model="override_model",
         )
@@ -128,15 +126,13 @@ class TestApp:
 
         called_args_response = {}
 
-        async def mock_create_responses(**kwargs):
+        async def mock_create_response(**kwargs):
             nonlocal called_args_response
             called_args_response = kwargs
-            return NeMoGymResponse(**mock_response_data)
+            return mock_response_data
 
-        mock_response = AsyncMock(side_effect=mock_create_responses)
-        mock_client = PropertyMock()
-        mock_client.return_value.responses.create = mock_response
-        monkeypatch.setattr(type(server), "client", mock_client)
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(side_effect=mock_create_response)
 
         # No model provided should use the one from the config
         res_no_model = client.post("/v1/responses", json={"input": "hello"})
@@ -148,4 +144,4 @@ class TestApp:
         assert res_with_model.status_code == 200
         assert called_args_response.get("model") == "override_model"
 
-        mock_response.assert_any_await(input="hello", model="override_model")
+        server._client.create_response.assert_any_await(input="hello", model="override_model")
