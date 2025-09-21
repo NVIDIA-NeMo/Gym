@@ -85,12 +85,14 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 json=new_body,
                 cookies=model_server_cookies,
             )
-            model_response_json_str = (await model_response.aread()).decode()
+            model_response_json = model_response.json()
             model_server_cookies = model_response.cookies
             try:
-                model_response = NeMoGymResponse.model_validate_json(model_response_json_str)
+                model_response = NeMoGymResponse.model_validate(model_response_json)
             except ValidationError as e:
-                raise RuntimeError(f"Received an invalid response from model server: {model_response_json_str}") from e
+                raise RuntimeError(
+                    f"Received an invalid response from model server: {json.dumps(model_response_json)}"
+                ) from e
 
             output = model_response.output
             new_outputs.extend(output)
