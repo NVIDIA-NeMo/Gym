@@ -130,6 +130,11 @@ class ServerClient(BaseModel):
         server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
         base_url = self._build_server_base_url(server_config_dict)
 
+        if "json" in kwargs:
+            json_obj = kwargs["json"]
+            if isinstance(json_obj, BaseModel):
+                kwargs["json"] = json_obj.model_dump(exclude_unset=True)
+
         num_tries = 1
         while True:
             try:

@@ -151,17 +151,16 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.return_token_id_information:
             create_params |= dict(
                 logprobs=True,
-                extra_body={
-                    # For prompt and generatino token IDs
-                    "return_token_ids": True,
-                    # For prompt token IDs
-                    "prompt_logprobs": 0,
-                },
+                # Typically passed via OpenAI client extra_body.
+                # For prompt and generation token IDs
+                return_token_ids=True,
+                # For prompt token IDs
+                prompt_logprobs=0,
             )
 
         chat_completion_dict = await client.create_chat_completion(**create_params)
         choice_dict = chat_completion_dict["choices"][0]
-        assert "reasoning_content" not in choice_dict["message"], (
+        assert not choice_dict["message"].get("reasoning_content"), (
             "Please do not use a reasoning parser in vLLM! There is one source of truth for handling data (including reasoning), which is NeMo Gym!"
         )
 
@@ -183,6 +182,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             choice_dict.pop("token_ids")
             choice_dict.pop("logprobs")
 
+        print(chat_completion_dict)
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 
 
