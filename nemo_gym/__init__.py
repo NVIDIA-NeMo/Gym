@@ -28,10 +28,6 @@ environ["UV_CACHE_DIR"] = join(CACHE_DIR, "uv")
 # Turn off Gradio analytics
 environ["GRADIO_ANALYTICS_ENABLED"] = "False"
 
-# Quiet httpx INFO logs 200s
-logger = logging.getLogger("httpx")
-logger.setLevel(logging.WARNING)
-
 from nemo_gym.package_info import (
     __contact_emails__,
     __contact_names__,

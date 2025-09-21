@@ -16,23 +16,14 @@ import json
 from abc import abstractmethod
 from os import getenv
 from threading import Thread
-from typing import Any, ClassVar, Dict, Literal, Optional, Tuple, Type, Union
+from typing import ClassVar, Literal, Optional, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
 import requests
 import uvicorn
-from aiohttp import ClientSession, ClientTimeout, TCPConnector
+from aiohttp import ClientResponse, ClientSession, ClientTimeout, DummyCookieJar, TCPConnector
+from aiohttp.client import _RequestOptions
 from fastapi import FastAPI, Request, Response
-from httpx import AsyncClient, Cookies, Limits, Response
-from httpx._types import (
-    CookieTypes,
-    HeaderTypes,
-    QueryParamTypes,
-    RequestContent,
-    RequestData,
-    RequestFiles,
-)
-from httpx_aiohttp import AiohttpTransport
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, ConfigDict
 from requests.exceptions import ConnectionError
@@ -52,83 +43,37 @@ from nemo_gym.global_config import (
 )
 
 
-class NeMoGymStatelessCookies(Cookies):
-    def extract_cookies(self, response):
-        pass
+_GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
 
 
-class NeMoGymGlobalAsyncClient(AsyncClient):
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-
-        self._cookies = NeMoGymStatelessCookies(self._cookies)
+class GlobalAIOHTTPAsyncClientConfig(BaseModel):
+    global_aiohttp_max_connections: int = 1000
 
 
-# We create a single global httpx client as recommended by https://www.python-httpx.org/async/
-# ```
-# In order to get the most benefit from connection pooling, make sure you're not instantiating multiple client instances - for example by using async with inside a "hot loop". This can be achieved either by having a single scoped client that's passed throughout wherever it's needed, or by having a single global client instance.
-# ```
-# In plain language:
-# - Let's say we have 10 distinct endpoints we want to call 5 times each.
-# - A connection pool as defined by the httpx client is for a single distinct endpoint. All requests to that endpoint should use the same httpx client.
-# - So the optimal configuration here is to have 10 total httpx clients, one for each distinct endpoint.
-# - Additionally, since the connections are pooled, if we had a single global client for all 10 distinct endpoints, we may run into deadlock situations,
-#   where requests to two different endpoints are waiting for each other to resolve.
-#
-# We use no timeout since various api or model calls may take an indefinite amount of time.
-_GLOBAL_HTTPX_CLIENTS: Dict[str, NeMoGymGlobalAsyncClient] = dict()
-
-
-class GlobalHTTPXAsyncClientConfig(BaseModel):
-    # These are OpenAI defaults.
-    global_httpx_max_connections: int = 1000
-    global_httpx_max_keepalive_connections: int = 100
-
-    # Since we use AiohttpTransport, we don't support retries like with the default httpx transport.
-    # global_httpx_max_retries: int = 0
-
-
-def get_global_httpx_client(
-    base_url: str,
+def get_global_aiohttp_client(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
     global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,
-) -> NeMoGymGlobalAsyncClient:
-    """THE NETWORKING PERFORMANCE OF GYM IS VERY SENSITIVE TO THE CONFIGURATION IN THIS FUNCTION. PLEASE DO NOT TOUCH IT."""
-    if base_url in _GLOBAL_HTTPX_CLIENTS:
-        return _GLOBAL_HTTPX_CLIENTS[base_url]
+) -> ClientSession:
+    global _GLOBAL_AIOHTTP_CLIENT
+
+    if _GLOBAL_AIOHTTP_CLIENT is not None:
+        return _GLOBAL_AIOHTTP_CLIENT
 
     global_config_dict = get_global_config_dict(
         global_config_dict_parser_config=global_config_dict_parser_config,
         global_config_dict_parser_cls=global_config_dict_parser_cls,
     )
-    cfg = GlobalHTTPXAsyncClientConfig.model_validate(global_config_dict)
+    cfg = GlobalAIOHTTPAsyncClientConfig.model_validate(global_config_dict)
 
-    limits = Limits(
-        max_connections=cfg.global_httpx_max_connections,
-        max_keepalive_connections=cfg.global_httpx_max_keepalive_connections,
-    )
     client_session = ClientSession(
-        connector=TCPConnector(
-            limit=limits.max_connections,
-            keepalive_timeout=limits.keepalive_expiry,
-        ),
+        connector=TCPConnector(limit=cfg.global_aiohttp_max_connections),
         timeout=ClientTimeout(connect=5.0),
-    )
-    transport = AiohttpTransport(
-        retries=0,  # This value doesn't actually matter since AiohttpTransport won't retry anyways.
-        limits=limits,
-        client=client_session,
+        cookie_jar=DummyCookieJar(),
     )
 
-    client = NeMoGymGlobalAsyncClient(
-        limits=limits,
-        transport=transport,
-        timeout=None,  # No timeouts
-    )
+    _GLOBAL_AIOHTTP_CLIENT = client_session
 
-    _GLOBAL_HTTPX_CLIENTS[base_url] = client
-
-    return client
+    return _GLOBAL_AIOHTTP_CLIENT
 
 
 DEFAULT_HEAD_SERVER_PORT = 11000
@@ -177,36 +122,20 @@ class ServerClient(BaseModel):
     def _build_server_base_url(self, server_config_dict: OmegaConf) -> str:
         return f"http://{server_config_dict.host}:{server_config_dict.port}"
 
-    async def get(
-        self,
-        server_name: str,
-        url_path: str,
-        params: QueryParamTypes | None = None,
-        headers: HeaderTypes | None = None,
-        cookies: CookieTypes | None = None,
-        **kwargs,
-    ) -> Response:
-        """
-        This function definition is directly copied from httpx._client.AsyncClient. We omit some kwargs since they are most likely not used. We omit the url arg and replace it with the `server_name` and `url_path` args below.
+    async def request(
+        self, server_name: str, url_path: str, method: str, **kwargs: Unpack[_RequestOptions]
+    ) -> ClientResponse:
+        client = get_global_aiohttp_client()
 
-        Args:
-            server_name: str
-                The name of the server you are trying to call.
-            url_path: str
-                The URL path in the server you are trying to call e.g. "/v1/responses".
-
-        """
         server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
         base_url = self._build_server_base_url(server_config_dict)
 
         num_tries = 1
         while True:
             try:
-                return await get_global_httpx_client(base_url).get(
-                    f"{base_url}{url_path}",
-                    params=params,
-                    headers=headers,
-                    cookies=cookies,
+                return await client.request(
+                    method=method,
+                    url=f"{base_url}{url_path}",
                     **kwargs,
                 )
             except Exception as e:
@@ -220,23 +149,35 @@ Sleeping 0.5s and retrying...
 
                 num_tries += 1
                 await asyncio.sleep(0.5)
+
+    async def get(
+        self,
+        server_name: str,
+        url_path: str,
+        **kwargs: Unpack[_RequestOptions],
+    ) -> ClientResponse:
+        """
+        Args:
+            server_name: str
+                The name of the server you are trying to call.
+            url_path: str
+                The URL path in the server you are trying to call e.g. "/v1/responses".
+
+        """
+        return self.request(
+            server_name=server_name,
+            url_path=url_path,
+            method="GET",
+            **kwargs,
+        )
 
     async def post(
         self,
         server_name: str,
         url_path: str,
-        content: RequestContent | None = None,
-        data: RequestData | None = None,
-        files: RequestFiles | None = None,
-        json: Any | BaseModel | None = None,
-        params: QueryParamTypes | None = None,
-        headers: HeaderTypes | None = None,
-        cookies: CookieTypes | None = None,
-        **kwargs,
-    ) -> Response:
+        **kwargs: Unpack[_RequestOptions],
+    ) -> ClientResponse:
         """
-        This function definition is directly copied from httpx._client.AsyncClient. We omit some kwargs since they are most likely not used. We omit the url arg and replace it with the `server_name` and `url_path` args below.
-
         Args:
             server_name: str
                 The name of the server you are trying to call.
@@ -244,34 +185,12 @@ Sleeping 0.5s and retrying...
                 The URL path in the server you are trying to call e.g. "/v1/responses".
 
         """
-        server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
-        base_url = self._build_server_base_url(server_config_dict)
-
-        num_tries = 1
-        while True:
-            try:
-                return await get_global_httpx_client(base_url).post(
-                    f"{base_url}{url_path}",
-                    content=content,
-                    data=data,
-                    files=files,
-                    json=json.model_dump(exclude_unset=True) if isinstance(json, BaseModel) else json,
-                    params=params,
-                    headers=headers,
-                    cookies=cookies,
-                    **kwargs,
-                )
-            except Exception as e:
-                print(
-                    f"""Hit an exception while making a request (try {num_tries}): {e}
-Sleeping 0.5s and retrying...
-"""
-                )
-                if num_tries >= self.MAX_NUM_TRIES:
-                    raise e
-
-                num_tries += 1
-                await asyncio.sleep(0.5)
+        return self.request(
+            server_name=server_name,
+            url_path=url_path,
+            method="POST",
+            **kwargs,
+        )
 
     def poll_for_status(self, server_name: str) -> ServerStatus:  # pragma: no cover
         if server_name == HEAD_SERVER_KEY_NAME:

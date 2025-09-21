@@ -126,11 +126,6 @@ dependencies = [
     # Updated Wed Sep 17, 2025 with tdigest==0.5.2.2
     # License: MIT https://github.com/CamDavidsonPilon/tdigest/blob/e35cfd708962ae5e9d1c5d2b15a99af7b2e2f323/LICENSE.txt
     "tdigest>=0.5.2.2",
-
-    # httpx-aiohttp: a much faster transport backend as recommended here https://github.com/openai/openai-python/issues/1596#issuecomment-2709021063
-    # Updated Fri Sep 19, 2025 with httpx-aiohttp==0.1.8
-    # License: BSD 3-Clause https://github.com/karpetrosyan/httpx-aiohttp/blob/e11f0da1580fe73737719e0274a2c8cd6c77a28a/LICENSE
-    "httpx-aiohttp",
 ]
 
 [dependency-groups]
