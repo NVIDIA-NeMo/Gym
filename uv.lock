@@ -1103,19 +1103,6 @@ wheels = [
 ]
 
 [[package]]
-name = "httpx-aiohttp"
-version = "0.1.8"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "aiohttp" },
-    { name = "httpx" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/37/19/ae2d2bf1f57fdd23c8ad83675599fb5c407fa13bc20e90f00cffa4dea3aa/httpx_aiohttp-0.1.8.tar.gz", hash = "sha256:756c5e74cdb568c3248ba63fe82bfe8bbe64b928728720f7eaac64b3cf46f308", size = 25401, upload-time = "2025-07-04T10:40:32.329Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/54/7a/514c484b88cc4ebbcd2e27e92b86019c0c5bb920582f5fbb10b7e6c78574/httpx_aiohttp-0.1.8-py3-none-any.whl", hash = "sha256:b7bd958d1331f3759a38a0ba22ad29832cb63ca69498c17735228055bf78fa7e", size = 6180, upload-time = "2025-07-04T10:40:31.522Z" },
-]
-
-[[package]]
 name = "huggingface-hub"
 version = "0.34.4"
 source = { registry = "https://pypi.org/simple" }
@@ -1681,10 +1668,10 @@ wheels = [
 name = "nemo-gym"
 source = { editable = "." }
 dependencies = [
+    { name = "aiohttp" },
     { name = "devtools" },
     { name = "fastapi" },
     { name = "gradio" },
-    { name = "httpx-aiohttp" },
     { name = "hydra-core" },
     { name = "mlflow" },
     { name = "omegaconf" },
@@ -1722,11 +1709,11 @@ docs = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp" },
     { name = "coverage", extras = ["toml"], marker = "extra == 'dev'" },
     { name = "devtools" },
     { name = "fastapi" },
     { name = "gradio" },
-    { name = "httpx-aiohttp" },
     { name = "hydra-core" },
     { name = "mlflow" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8.0" },
