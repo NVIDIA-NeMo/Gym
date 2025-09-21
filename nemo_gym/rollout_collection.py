@@ -55,20 +55,20 @@ async def _collect_rollouts(config: RolloutCollectionConfig):  # pragma: no cove
     if config.num_samples_in_parallel:
         semaphore = Semaphore(config.num_samples_in_parallel)
 
-    async def _post_coroutine(row: dict):
-        async with semaphore:
-            return await server_client.post(server_name=config.agent_name, url_path="/run", json=row)
-
-    tasks = list(map(_post_coroutine, rows))
-
     metrics = Counter()
-    pbar = tqdm.as_completed(tasks, desc="Collecting rollouts")
     with open(config.output_jsonl_fpath, "a") as f:
-        for future in pbar:
-            result = await future
-            result = result.json()
-            f.write(json.dumps(result) + "\n")
-            metrics += Counter({k: v for k, v in result.items() if isinstance(v, (int, float))})
+
+        async def _post_coroutine(i: int, row: dict) -> None:
+            async with semaphore:
+                response = await server_client.post(
+                    server_name=config.agent_name, url_path="/run", json=row, headers={"i": str(i)}
+                )
+                result = response.json()
+                f.write(json.dumps(result) + "\n")
+                metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
+
+        tasks = list(map(_post_coroutine, range(len(rows)), rows))
+        await tqdm.gather(*tasks, desc="Collecting rollouts")
 
     avg_metrics = {k: v / len(tasks) for k, v in metrics.items()}
     print(json.dumps(avg_metrics, indent=4))
