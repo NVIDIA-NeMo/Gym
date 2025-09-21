@@ -159,7 +159,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 },
             )
 
-        chat_completion_dict = await client.create_chat_completions(**create_params)
+        chat_completion_dict = await client.create_chat_completion(**create_params)
         choice_dict = chat_completion_dict["choices"][0]
         assert "reasoning_content" not in choice_dict["message"], (
             "Please do not use a reasoning parser in vLLM! There is one source of truth for handling data (including reasoning), which is NeMo Gym!"

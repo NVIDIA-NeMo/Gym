@@ -425,7 +425,7 @@ class NeMoGymAsyncOpenAI(BaseModel):
     base_url: str
     api_key: str
 
-    async def create_chat_completions(self, **kwargs):
+    async def create_chat_completion(self, **kwargs):
         client = get_global_aiohttp_client()
         response = await client.post(
             url=f"{self.base_url}/chat/completions",
@@ -434,7 +434,7 @@ class NeMoGymAsyncOpenAI(BaseModel):
         )
         return await response.json()
 
-    async def create_responses(self, **kwargs):
+    async def create_response(self, **kwargs):
         client = get_global_aiohttp_client()
         response = await client.post(
             url=f"{self.base_url}/responses",
