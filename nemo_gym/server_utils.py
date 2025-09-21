@@ -79,8 +79,11 @@ _GLOBAL_HTTPX_CLIENTS: Dict[str, NeMoGymGlobalAsyncClient] = dict()
 
 
 class GlobalHTTPXAsyncClientConfig(BaseModel):
-    global_httpx_max_connections: int = 1500
-    global_httpx_max_retries: int = 0
+    global_httpx_max_connections: int = 100
+    global_httpx_max_keepalive_connections: int = 20
+
+    # Since we use AiohttpTransport, we don't support retries like with the default httpx transport.
+    # global_httpx_max_retries: int = 0
 
 
 def get_global_httpx_client(
@@ -98,8 +101,8 @@ def get_global_httpx_client(
     cfg = GlobalHTTPXAsyncClientConfig.model_validate(global_config_dict)
 
     limits = Limits(
-        max_keepalive_connections=cfg.global_httpx_max_connections,
         max_connections=cfg.global_httpx_max_connections,
+        max_keepalive_connections=cfg.global_httpx_max_keepalive_connections,
     )
     client_session = ClientSession(
         connector=TCPConnector(
@@ -109,7 +112,7 @@ def get_global_httpx_client(
         timeout=None,
     )
     transport = AiohttpTransport(
-        retries=cfg.global_httpx_max_retries,
+        retries=0,  # This value doesn't actually matter since AiohttpTransport won't retry anyways.
         limits=limits,
         client=client_session,
     )
