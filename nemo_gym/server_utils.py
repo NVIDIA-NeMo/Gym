@@ -22,7 +22,7 @@ from uuid import uuid4
 
 import requests
 import uvicorn
-from aiohttp import ClientResponse, ClientSession, ClientTimeout, DummyCookieJar, TCPConnector
+from aiohttp import ClientResponse, ClientSession, ClientTimeout, DummyCookieJar, ServerDisconnectedError, TCPConnector
 from aiohttp.client import _RequestOptions
 from fastapi import FastAPI, Request, Response
 from omegaconf import DictConfig, OmegaConf
@@ -101,6 +101,8 @@ async def request(method: str, url: str, **kwargs: Unpack[_RequestOptions]) -> C
     while True:
         try:
             return await client.request(method=method, url=url, **kwargs)
+        except ServerDisconnectedError:
+            await asyncio.sleep(0.5)
         except Exception as e:
             print(
                 f"""Hit an exception while making a request (try {num_tries}): {e}
