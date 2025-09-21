@@ -442,3 +442,13 @@ class NeMoGymAsyncOpenAI(BaseModel):
             headers={"Authorization": f"Bearer {self.api_key}"},
         )
         return await response.json()
+
+    async def create_tokenize(self, **kwargs):
+        base_url = self.base_url.removesuffix("/v1")
+        response = await request(
+            method="POST",
+            url=f"{base_url}/tokenize",
+            json=kwargs,
+            headers={"Authorization": f"Bearer {self.api_key}"},
+        )
+        return await response.json()
