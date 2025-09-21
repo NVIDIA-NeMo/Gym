@@ -17,7 +17,7 @@ import json
 from abc import abstractmethod
 from os import getenv
 from threading import Thread
-from typing import ClassVar, Literal, Optional, Tuple, Type, Union, Unpack
+from typing import Literal, Optional, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
 import requests
@@ -48,7 +48,8 @@ _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
 
 
 class GlobalAIOHTTPAsyncClientConfig(BaseModel):
-    global_aiohttp_max_connections: int = 1000
+    global_aiohttp_connector_limit: int = 1000
+    global_aiohttp_connector_limit_per_host: int = 100
 
 
 def get_global_aiohttp_client(
@@ -67,8 +68,11 @@ def get_global_aiohttp_client(
     cfg = GlobalAIOHTTPAsyncClientConfig.model_validate(global_config_dict)
 
     client_session = ClientSession(
-        connector=TCPConnector(limit=cfg.global_aiohttp_max_connections),
-        timeout=ClientTimeout(connect=5.0),
+        connector=TCPConnector(
+            limit=cfg.global_aiohttp_connector_limit,
+            limit_per_host=cfg.global_aiohttp_connector_limit_per_host,
+        ),
+        timeout=ClientTimeout(),
         cookie_jar=DummyCookieJar(),
     )
 
@@ -87,6 +91,29 @@ def global_aiohttp_client_exit():
 atexit.register(global_aiohttp_client_exit)
 
 
+# This is not intended to be changed. If you want to increase this, we should probably figure out how to improve server-side robustness.
+MAX_NUM_TRIES = 3
+
+
+async def request(method: str, url: str, **kwargs: Unpack[_RequestOptions]) -> ClientResponse:
+    client = get_global_aiohttp_client()
+    num_tries = 1
+    while True:
+        try:
+            return await client.request(method=method, url=url, **kwargs)
+        except Exception as e:
+            print(
+                f"""Hit an exception while making a request (try {num_tries}): {e}
+Sleeping 0.5s and retrying...
+"""
+            )
+            if num_tries >= MAX_NUM_TRIES:
+                raise e
+
+            num_tries += 1
+            await asyncio.sleep(0.5)
+
+
 DEFAULT_HEAD_SERVER_PORT = 11000
 
 ServerStatus = Union[Literal["success"], Literal["connection_error"], Literal["timeout"], Literal["unknown_error"]]
@@ -98,9 +125,6 @@ class ServerClient(BaseModel):
     global_config_dict: DictConfig
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    # This is not intended to be changed. If you want to increase this, we should probably figure out how to improve server-side robustness.
-    MAX_NUM_TRIES: ClassVar[int] = 3
 
     @classmethod
     def load_head_server_config(cls) -> BaseServerConfig:
@@ -136,8 +160,6 @@ class ServerClient(BaseModel):
     async def request(
         self, server_name: str, url_path: str, method: str, **kwargs: Unpack[_RequestOptions]
     ) -> ClientResponse:
-        client = get_global_aiohttp_client()
-
         server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
         base_url = self._build_server_base_url(server_config_dict)
 
@@ -146,25 +168,7 @@ class ServerClient(BaseModel):
             if isinstance(json_obj, BaseModel):
                 kwargs["json"] = json_obj.model_dump(exclude_unset=True)
 
-        num_tries = 1
-        while True:
-            try:
-                return await client.request(
-                    method=method,
-                    url=f"{base_url}{url_path}",
-                    **kwargs,
-                )
-            except Exception as e:
-                print(
-                    f"""Hit an exception while making a request (try {num_tries}): {e}
-Sleeping 0.5s and retrying...
-"""
-                )
-                if num_tries >= self.MAX_NUM_TRIES:
-                    raise e
-
-                num_tries += 1
-                await asyncio.sleep(0.5)
+        return await request(method=method, url=f"{base_url}{url_path}", **kwargs)
 
     async def get(
         self,
