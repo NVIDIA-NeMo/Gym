@@ -22,6 +22,7 @@ from typing import Dict, List, Optional
 from pydantic import BaseModel
 from tqdm.asyncio import tqdm
 
+from nemo_gym.config_types import BaseServerConfig
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
@@ -78,8 +79,10 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
 
         print(json.dumps(avg_metrics, indent=4))
 
-    async def run_examples(self, examples: List[Dict]) -> List[Dict]:
-        server_client = self.setup_server_client()
+    async def run_examples(
+        self, examples: List[Dict], head_server_config: Optional[BaseServerConfig] = None
+    ) -> List[Dict]:
+        server_client = self.setup_server_client(head_server_config)
 
         async def _post_subroutine(row: Dict) -> Dict:
             res = await server_client.post(server_name=row.pop("agent_ref")["name"], url_path="/run", json=row)
@@ -87,8 +90,8 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
 
         return await tqdm.gather(*map(_post_subroutine, examples), desc="Collecting rollouts")
 
-    def setup_server_client(self) -> ServerClient:
-        server_client = ServerClient.load_from_global_config()
+    def setup_server_client(self, head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:
+        server_client = ServerClient.load_from_global_config(head_server_config)
 
         # We set this rollout global aiohttp client to use the same max connections as the underlying head server global config.
         if not is_global_aiohttp_client_setup():
