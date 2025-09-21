@@ -71,6 +71,8 @@ def get_global_aiohttp_client(
 
 
 def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSession:
+    global_aiohttp_client_exit()
+
     client_session = ClientSession(
         connector=TCPConnector(
             limit=cfg.global_aiohttp_connector_limit,
