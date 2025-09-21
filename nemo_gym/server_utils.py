@@ -80,6 +80,7 @@ _GLOBAL_HTTPX_CLIENTS: Dict[str, NeMoGymGlobalAsyncClient] = dict()
 
 
 class GlobalHTTPXAsyncClientConfig(BaseModel):
+    # These are httpx defaults.
     global_httpx_max_connections: int = 100
     global_httpx_max_keepalive_connections: int = 20
 
