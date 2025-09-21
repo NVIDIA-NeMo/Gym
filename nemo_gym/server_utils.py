@@ -91,6 +91,7 @@ def get_global_httpx_client(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
     global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,
 ) -> NeMoGymGlobalAsyncClient:
+    """THE NETWORKING PERFORMANCE OF GYM IS VERY SENSITIVE TO THE CONFIGURATION IN THIS FUNCTION. PLEASE DO NOT TOUCH IT."""
     if base_url in _GLOBAL_HTTPX_CLIENTS:
         return _GLOBAL_HTTPX_CLIENTS[base_url]
 
@@ -103,6 +104,7 @@ def get_global_httpx_client(
     limits = Limits(
         max_connections=cfg.global_httpx_max_connections,
         max_keepalive_connections=cfg.global_httpx_max_keepalive_connections,
+        keepalive_expiry=1_000_000,  # 1M seconds, some ridiculously big number to prevent client-side timeouts.
     )
     client_session = ClientSession(
         connector=TCPConnector(
