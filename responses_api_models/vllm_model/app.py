@@ -182,7 +182,6 @@ class VLLMModel(SimpleResponsesAPIModel):
             choice_dict.pop("token_ids")
             choice_dict.pop("logprobs")
 
-        print(chat_completion_dict)
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 
 
