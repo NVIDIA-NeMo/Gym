@@ -71,7 +71,9 @@ def get_global_aiohttp_client(
 
 
 def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSession:
-    global_aiohttp_client_exit()
+    assert not is_global_aiohttp_client_setup(), (
+        "There is already a global aiohttp client setup. Please refactor your code or call `global_aiohttp_client_exit` if you want to explicitly re-make the client!"
+    )
 
     client_session = ClientSession(
         connector=TCPConnector(
@@ -88,11 +90,18 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
     return _GLOBAL_AIOHTTP_CLIENT
 
 
+def is_global_aiohttp_client_setup() -> bool:
+    return _GLOBAL_AIOHTTP_CLIENT is not None
+
+
 def global_aiohttp_client_exit():
-    if _GLOBAL_AIOHTTP_CLIENT is None:
+    if not is_global_aiohttp_client_setup():
         return
 
+    global _GLOBAL_AIOHTTP_CLIENT
     asyncio.run(_GLOBAL_AIOHTTP_CLIENT.close())
+
+    _GLOBAL_AIOHTTP_CLIENT = None
 
 
 atexit.register(global_aiohttp_client_exit)

@@ -223,6 +223,7 @@ Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
             sleep(sleep_interval)
 
     def shutdown(self) -> None:
+        # TODO there is possibly a better way to handle the server shutdowns.
         for process_name, process in self._processes.items():
             print(f"Killing `{process_name}`")
             process.kill()
