@@ -197,10 +197,10 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
 
             # Clean the duplicated information
+            choice_dict.pop("logprobs")
             # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
             # chat_completion_dict.pop("prompt_token_ids")
-            choice_dict.pop("token_ids")
-            choice_dict.pop("logprobs")
+            # choice_dict.pop("token_ids")
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 
