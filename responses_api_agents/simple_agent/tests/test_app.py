@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from unittest.mock import MagicMock, call
+from unittest.mock import AsyncMock, MagicMock, call
 
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
@@ -93,8 +93,9 @@ class TestApp:
             "tools": [],
         }
 
-        dotjson_mock = MagicMock()
+        dotjson_mock = AsyncMock()
         dotjson_mock.json.return_value = mock_response_data
+        dotjson_mock.cookies = MagicMock()
         server.server_client.post.return_value = dotjson_mock
 
         # No model provided should use the one from the config
@@ -223,8 +224,9 @@ class TestApp:
             "tools": [],
         }
 
-        dotjson_mock = MagicMock()
+        dotjson_mock = AsyncMock()
         dotjson_mock.json.side_effect = [mock_response_reasoning_data, mock_response_chat_data]
+        dotjson_mock.cookies = MagicMock()
         server.server_client.post.return_value = dotjson_mock
 
         # No model provided should use the one from the config
