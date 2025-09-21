@@ -13,7 +13,6 @@
 # limitations under the License.
 import asyncio
 import json
-import resource
 from abc import abstractmethod
 from os import getenv
 from threading import Thread
@@ -316,25 +315,6 @@ class BaseServer(BaseModel):
         return server_config
 
 
-# From https://github.com/vllm-project/vllm/blob/86647d1cd0f3c82c7d678324db7e925654ac5665/vllm/utils/__init__.py#L2810
-def set_ulimit(target_soft_limit=65535):
-    resource_type = resource.RLIMIT_NOFILE
-    current_soft, current_hard = resource.getrlimit(resource_type)
-
-    if current_soft < target_soft_limit:
-        try:
-            resource.setrlimit(resource_type, (target_soft_limit, current_hard))
-        except ValueError as e:
-            print(
-                "Found ulimit of %s and failed to automatically increase "
-                "with error %s. This can cause fd limit errors like "
-                "`OSError: [Errno 24] Too many open files`. Consider "
-                "increasing with ulimit -n",
-                current_soft,
-                e,
-            )
-
-
 class SimpleServer(BaseServer):
     server_client: ServerClient
 
@@ -376,8 +356,6 @@ class SimpleServer(BaseServer):
         server = cls(config=server_config, server_client=server_client)
 
         app = server.setup_webserver()
-
-        set_ulimit()
 
         uvicorn.run(
             app,
