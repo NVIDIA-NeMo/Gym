@@ -142,8 +142,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         session_id = request.session[SESSION_ID_KEY]
         if session_id not in self._session_id_to_client:
             # There is probably a better way to select the endpoint for this request. But this will do for now.
-            client_idx = len(self._session_id_to_client) % len(self.clients)
-            client = self.clients[client_idx]
+            client_idx = len(self._session_id_to_client) % len(self._clients)
+            client = self._clients[client_idx]
             self._session_id_to_client[session_id] = client
         client = self._session_id_to_client[session_id]
 
