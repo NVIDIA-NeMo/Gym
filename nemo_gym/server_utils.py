@@ -112,7 +112,7 @@ def get_global_httpx_client(
             limit=limits.max_connections,
             keepalive_timeout=limits.keepalive_expiry,
         ),
-        timeout=None,
+        timeout=None,  # No timeouts
     )
     transport = AiohttpTransport(
         retries=0,  # This value doesn't actually matter since AiohttpTransport won't retry anyways.
@@ -123,7 +123,7 @@ def get_global_httpx_client(
     client = NeMoGymGlobalAsyncClient(
         limits=limits,
         transport=transport,
-        timeout=None,
+        timeout=None,  # No timeouts
     )
 
     _GLOBAL_HTTPX_CLIENTS[base_url] = client
