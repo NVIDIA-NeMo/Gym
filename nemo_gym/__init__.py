@@ -1,4 +1,3 @@
-import logging
 import sys
 from os import environ
 from os.path import abspath, dirname, join
