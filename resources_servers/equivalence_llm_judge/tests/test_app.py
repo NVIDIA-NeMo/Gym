@@ -85,7 +85,7 @@ class TestApp:
 
         # First: judge says equal; Second: judge says equal => reward 1
         post_mock = MagicMock()
-        post_mock.json = MagicMock()
+        post_mock.json = AsyncMock()
         server_mock.post = AsyncMock(return_value=post_mock)
 
         # Only the first call is used when check_twice_swap is False
@@ -121,7 +121,7 @@ class TestApp:
         rs_twice = LLMJudgeResourcesServer(config=config_twice, server_client=server_mock)
 
         post_mock2 = MagicMock()
-        post_mock2.json = MagicMock()
+        post_mock2.json = AsyncMock()
         server_mock.post = AsyncMock(return_value=post_mock2)
         post_mock2.json.side_effect = [
             self._create_response("first", self._msg("[[A=B]]")),
@@ -141,7 +141,7 @@ class TestApp:
         rs = LLMJudgeResourcesServer(config=config, server_client=server_mock)
 
         post_mock = MagicMock()
-        post_mock.json = MagicMock(return_value=self._create_response("f", self._msg("[[A!=B]]")))
+        post_mock.json = AsyncMock(return_value=self._create_response("f", self._msg("[[A!=B]]")))
         server_mock.post = AsyncMock(return_value=post_mock)
 
         model_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Q: 1+1?"}])
@@ -170,7 +170,7 @@ class TestApp:
         rs = LLMJudgeResourcesServer(config=config, server_client=server_mock)
 
         post_mock = MagicMock()
-        post_mock.json = MagicMock(return_value=self._create_response("f", self._msg("no label present")))
+        post_mock.json = AsyncMock(return_value=self._create_response("f", self._msg("no label present")))
         server_mock.post = AsyncMock(return_value=post_mock)
 
         req = LLMJudgeVerifyRequest(
@@ -198,7 +198,7 @@ class TestApp:
         rs = LLMJudgeResourcesServer(config=cfg, server_client=server_mock)
 
         post_mock = MagicMock()
-        post_mock.json = MagicMock()
+        post_mock.json = AsyncMock()
         server_mock.post = AsyncMock(return_value=post_mock)
         # First pass equal, second pass not equal -> use configured -1.0
         post_mock.json.side_effect = [
