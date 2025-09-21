@@ -11,11 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
 from abc import abstractmethod
 from os import getenv
 from threading import Thread
-from typing import Any, Dict, Literal, Optional, Tuple, Type, Union
+from typing import Any, ClassVar, Dict, Literal, Optional, Tuple, Type, Union
 from uuid import uuid4
 
 import requests
@@ -104,7 +105,7 @@ def get_global_httpx_client(
     limits = Limits(
         max_connections=cfg.global_httpx_max_connections,
         max_keepalive_connections=cfg.global_httpx_max_keepalive_connections,
-        keepalive_expiry=1_000_000,  # 1M seconds, some ridiculously big number to prevent client-side timeouts.
+        keepalive_expiry=1_000_000,  # 1M seconds, some ridiculously big number to prevent client-side connection pool timeouts.
     )
     client_session = ClientSession(
         connector=TCPConnector(
@@ -141,6 +142,9 @@ class ServerClient(BaseModel):
     global_config_dict: DictConfig
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    # This is not intended to be changed. If you want to increase this, we should probably figure out how to improve server-side robustness.
+    MAX_NUM_TRIES: ClassVar[int] = 3
 
     @classmethod
     def load_head_server_config(cls) -> BaseServerConfig:
@@ -194,13 +198,28 @@ class ServerClient(BaseModel):
         """
         server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
         base_url = self._build_server_base_url(server_config_dict)
-        return await get_global_httpx_client(base_url).get(
-            f"{base_url}{url_path}",
-            params=params,
-            headers=headers,
-            cookies=cookies,
-            **kwargs,
-        )
+
+        num_tries = 1
+        while True:
+            try:
+                return await get_global_httpx_client(base_url).get(
+                    f"{base_url}{url_path}",
+                    params=params,
+                    headers=headers,
+                    cookies=cookies,
+                    **kwargs,
+                )
+            except Exception as e:
+                print(
+                    f"""Hit an exception while making a request (try {num_tries}): {e}
+Sleeping 0.5s and retrying...
+"""
+                )
+                if num_tries >= self.MAX_NUM_TRIES:
+                    raise e
+
+                num_tries += 1
+                await asyncio.sleep(0.5)
 
     async def post(
         self,
@@ -227,17 +246,32 @@ class ServerClient(BaseModel):
         """
         server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
         base_url = self._build_server_base_url(server_config_dict)
-        return await get_global_httpx_client(base_url).post(
-            f"{base_url}{url_path}",
-            content=content,
-            data=data,
-            files=files,
-            json=json.model_dump(exclude_unset=True) if isinstance(json, BaseModel) else json,
-            params=params,
-            headers=headers,
-            cookies=cookies,
-            **kwargs,
-        )
+
+        num_tries = 1
+        while True:
+            try:
+                return await get_global_httpx_client(base_url).post(
+                    f"{base_url}{url_path}",
+                    content=content,
+                    data=data,
+                    files=files,
+                    json=json.model_dump(exclude_unset=True) if isinstance(json, BaseModel) else json,
+                    params=params,
+                    headers=headers,
+                    cookies=cookies,
+                    **kwargs,
+                )
+            except Exception as e:
+                print(
+                    f"""Hit an exception while making a request (try {num_tries}): {e}
+Sleeping 0.5s and retrying...
+"""
+                )
+                if num_tries >= self.MAX_NUM_TRIES:
+                    raise e
+
+                num_tries += 1
+                await asyncio.sleep(0.5)
 
     def poll_for_status(self, server_name: str) -> ServerStatus:  # pragma: no cover
         if server_name == HEAD_SERVER_KEY_NAME:
