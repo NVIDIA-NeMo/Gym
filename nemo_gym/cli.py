@@ -243,10 +243,6 @@ Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
             # Indefinitely
             while True:
                 self.poll()
-
-                statuses = self.check_http_server_statuses()
-                assert statuses.count("success") == len(statuses), "Found non-success statuses"
-
                 await asyncio.sleep(60)
 
         try:
