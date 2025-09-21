@@ -15,6 +15,8 @@ import asyncio
 import atexit
 import json
 from abc import abstractmethod
+from logging import Filter as LoggingFilter
+from logging import LogRecord, getLogger
 from os import getenv
 from threading import Thread
 from typing import Literal, Optional, Tuple, Type, Union, Unpack
@@ -313,6 +315,18 @@ class SimpleServer(BaseServer):
         server = cls(config=server_config, server_client=server_client)
 
         app = server.setup_webserver()
+
+        class No200Filter(LoggingFilter):
+            def filter(self, record: LogRecord) -> bool:
+                msg = record.getMessage()
+                return not msg.strip().endswith("200")
+
+        uvicorn_logger = getLogger("uvicorn.access")
+        uvicorn_logger.addFilter(No200Filter())
+
+        print(
+            "Adding a uvicorn logging filter so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
+        )
 
         uvicorn.run(
             app,
