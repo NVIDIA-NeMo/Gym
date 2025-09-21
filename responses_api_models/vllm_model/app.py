@@ -158,9 +158,11 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.return_token_id_information:
             create_params |= dict(
                 logprobs=True,
-                # The extra body below is VLLM specific to get the generation log probs associated with generation token IDs.
                 extra_body={
-                    "return_tokens_as_token_ids": True,
+                    # For prompt and generatino token IDs
+                    "return_token_ids": True,
+                    # For prompt token IDs
+                    "prompt_logprobs": 0,
                 },
             )
 
@@ -174,36 +176,21 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         if self.config.return_token_id_information:
             log_probs = openai_response.choices[0].logprobs.content
-            generation_token_ids = []
-            generation_log_probs = []
-            for log_prob in log_probs:
-                # Looks like `"token_id:151667"`
-                generation_token_ids.append(int(log_prob.token.removeprefix("token_id:")))
-                generation_log_probs.append(log_prob.logprob)
-
-            # The tokenize endpoint doesn't accept any sampling parameters
-            # The only relevant params are model, messages, and tools.
-            tokenize_body_dict = dict()
-            for key in ("model", "messages", "tools"):
-                if key in body_dict:
-                    tokenize_body_dict[key] = body_dict[key]
-
-            # The base url has /v1 at the end but vLLM's tokenize endpoint does not have v1, hence the ..
-            # I can't believe the path is resolved correctly LOL
-            tokenize_response = await client.post(
-                "../tokenize",
-                cast_to=VLLMTokenizeResponse,
-                body=tokenize_body_dict,
-            )
+            generation_log_probs = [log_prob.logprob for log_prob in log_probs]
 
             message_dict = chat_completion_dict["choices"][0]["message"]
             message_dict.update(
                 dict(
-                    prompt_token_ids=tokenize_response.tokens,
-                    generation_token_ids=generation_token_ids,
+                    prompt_token_ids=chat_completion_dict["prompt_token_ids"],
+                    generation_token_ids=openai_response.choices[0].token_ids,
                     generation_log_probs=generation_log_probs,
                 )
             )
+
+            # Clean the duplicated information
+            chat_completion_dict.pop("prompt_token_ids")
+            chat_completion_dict["choices"][0].pop("token_ids")
+            chat_completion_dict["choices"][0].pop("logprobs")
 
         return NeMoGymChatCompletion(**chat_completion_dict)
 
