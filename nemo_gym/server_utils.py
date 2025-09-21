@@ -22,7 +22,7 @@ from uuid import uuid4
 
 import requests
 import uvicorn
-from aiohttp import ClientSession, TCPConnector
+from aiohttp import ClientSession, ClientTimeout, TCPConnector
 from fastapi import FastAPI, Request, Response
 from httpx import AsyncClient, Cookies, Limits, Response
 from httpx._types import (
@@ -81,9 +81,9 @@ _GLOBAL_HTTPX_CLIENTS: Dict[str, NeMoGymGlobalAsyncClient] = dict()
 
 
 class GlobalHTTPXAsyncClientConfig(BaseModel):
-    # These are httpx defaults.
-    global_httpx_max_connections: int = 100
-    global_httpx_max_keepalive_connections: int = 20
+    # These are OpenAI defaults.
+    global_httpx_max_connections: int = 1000
+    global_httpx_max_keepalive_connections: int = 100
 
     # Since we use AiohttpTransport, we don't support retries like with the default httpx transport.
     # global_httpx_max_retries: int = 0
@@ -107,14 +107,13 @@ def get_global_httpx_client(
     limits = Limits(
         max_connections=cfg.global_httpx_max_connections,
         max_keepalive_connections=cfg.global_httpx_max_keepalive_connections,
-        keepalive_expiry=1_000_000,  # 1M seconds, some ridiculously big number to prevent client-side connection pool timeouts.
     )
     client_session = ClientSession(
         connector=TCPConnector(
             limit=limits.max_connections,
             keepalive_timeout=limits.keepalive_expiry,
         ),
-        timeout=None,  # No timeouts
+        timeout=ClientTimeout(connect=5.0),
     )
     transport = AiohttpTransport(
         retries=0,  # This value doesn't actually matter since AiohttpTransport won't retry anyways.
