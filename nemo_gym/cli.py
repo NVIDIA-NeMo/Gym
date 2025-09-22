@@ -27,6 +27,8 @@ import uvicorn
 from devtools import pprint
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel
+from pyinstrument.renderers import HTMLRenderer
+from pyinstrument.session import Session
 from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR
@@ -37,7 +39,13 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
-from nemo_gym.server_utils import HEAD_SERVER_KEY_NAME, HeadServer, ServerClient, ServerStatus
+from nemo_gym.server_utils import (
+    HEAD_SERVER_KEY_NAME,
+    HeadServer,
+    ProfilingMiddlewareInputConfig,
+    ServerClient,
+    ServerStatus,
+)
 
 
 def _setup_env_command(dir_path: Path) -> str:  # pragma: no cover
@@ -585,3 +593,29 @@ Dependencies
 def dump_config():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     print(OmegaConf.to_yaml(global_config_dict, resolve=True))
+
+
+def view_profile():  # pragma: no cover
+    global_config_dict = get_global_config_dict()
+    cfg = ProfilingMiddlewareInputConfig.model_validate(global_config_dict)
+
+    assert cfg.profiling_middleware_results_dirpath, (
+        "You must provide a profiling results dirpath via `+profiling_middleware_results_dirpath=...`!"
+    )
+
+    dir_path = Path(cfg.profiling_middleware_results_dirpath)
+    # Here we use `*/*.json` since that is the structure of output in nemo_gym.server_utils::SimpleServer::setup_profiling_middleware
+    search_path = str(dir_path / "*/*.json")
+    session_paths = glob(search_path)
+    assert session_paths, f"Didn't find any profiling data that matched the following path {search_path}"
+
+    sessions: List[Session] = []
+    for path in glob(search_path):
+        sessions.append(Session.load(path))
+
+    base = sessions[0]
+    for s in sessions[1:]:
+        base = Session.combine(base, s)
+
+    html_renderer = HTMLRenderer()
+    html_renderer.open_in_browser(base)

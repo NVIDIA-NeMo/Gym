@@ -277,10 +277,13 @@ class BaseServer(BaseModel):
         return server_config
 
 
-class ProfilingMiddlewareConfig(BaseModel):
-    profiling_middleware_enabled: bool = False
+class ProfilingMiddlewareInputConfig(BaseModel):
     # Relative to the Gym root dir.
     profiling_middleware_results_dirpath: Optional[str] = None
+
+
+class ProfilingMiddlewareConfig(ProfilingMiddlewareInputConfig):
+    profiling_middleware_enabled: bool = False
 
 
 class SimpleServer(BaseServer):

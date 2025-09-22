@@ -241,6 +241,10 @@ ng_prepare_data = "nemo_gym.train_data_utils:prepare_data"
 nemo_gym_dump_config = "nemo_gym.cli:dump_config"
 ng_dump_config = "nemo_gym.cli:dump_config"
 
+# Profiling
+nemo_gym_view_profile = "nemo_gym.cli:view_profile"
+ng_view_profile = "nemo_gym.cli:view_profile"
+
 
 [tool.setuptools.packages.find]
 where = ["."]
