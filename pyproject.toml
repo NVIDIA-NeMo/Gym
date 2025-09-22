@@ -187,6 +187,9 @@ dev = [
 requires = ["setuptools>=61", "setuptools-scm"]
 build-backend = "setuptools.build_meta"
 
+[tool.uv]
+managed = true
+
 [tool.setuptools.dynamic]
 version = {attr = "nemo_gym.__version__"}
 readme = {file = "README.md", content-type = "text/markdown"}
