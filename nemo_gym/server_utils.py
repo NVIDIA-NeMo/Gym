@@ -288,6 +288,11 @@ class ProfilingMiddlewareConfig(ProfilingMiddlewareInputConfig):
     profiling_middleware_clear_previous_logs: bool = False
 
 
+class UvicornLoggingConfig(BaseModel):
+    # Default to False for regular use cases.
+    uvicorn_logging_show_200_ok: bool = False
+
+
 class SimpleServer(BaseServer):
     server_client: ServerClient
 
@@ -363,13 +368,16 @@ class SimpleServer(BaseServer):
         if profiling_middleware_config.profiling_middleware_enabled:
             server.setup_profiling_middleware(app, profiling_middleware_config)
 
-        class No200Filter(LoggingFilter):
-            def filter(self, record: LogRecord) -> bool:
-                msg = record.getMessage()
-                return not msg.strip().endswith("200")
+        uvicorn_logging_cfg = UvicornLoggingConfig.model_validate(global_config_dict)
+        if not uvicorn_logging_cfg.uvicorn_logging_show_200_ok:
 
-        uvicorn_logger = getLogger("uvicorn.access")
-        uvicorn_logger.addFilter(No200Filter())
+            class No200Filter(LoggingFilter):
+                def filter(self, record: LogRecord) -> bool:
+                    msg = record.getMessage()
+                    return not msg.strip().endswith("200")
+
+            uvicorn_logger = getLogger("uvicorn.access")
+            uvicorn_logger.addFilter(No200Filter())
 
         print(
             "Adding a uvicorn logging filter so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
