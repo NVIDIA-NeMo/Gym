@@ -43,14 +43,14 @@ class RolloutCollectionConfig(BaseModel):
 
 class RolloutCollectionHelper(BaseModel):  # pragma: no cover
     async def run_from_config(self, config: RolloutCollectionConfig):
-        with open(config.input_jsonl_fpath) as input_dataset:
-            rows = list(map(json.loads, input_dataset))
-        print(f"Found {len(rows)} rows!")
-
+        range_iterator = repeat(0)
         if config.limit:
-            previous_length = len(rows)
-            rows = rows[: config.limit]
-            print(f"Limiting rows from {previous_length} to {len(rows)}!")
+            range_iterator = range(config.limit)
+            print(f"Limiting the number of rows to {config.limit}!")
+
+        with open(config.input_jsonl_fpath) as input_dataset:
+            rows = [row for _, row in zip(range_iterator, map(json.loads, input_dataset))]
+        print(f"Found {len(rows)} rows!")
 
         if config.num_repeats:
             previous_length = len(rows)
