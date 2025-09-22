@@ -13,7 +13,7 @@
 # limitations under the License.
 import json
 import logging
-from typing import List
+from typing import List, cast
 
 from pydantic import ConfigDict, Field, ValidationError
 
@@ -32,6 +32,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseInput,
     NeMoGymResponseOutputMessage,
 )
 
@@ -77,6 +78,7 @@ class AviaryAgent(SimpleResponsesAPIAgent):
 
         env_id = seed_session_response.env_id
         model_response: NeMoGymResponse | None = None
+        agent_state_history: list[NeMoGymResponseInput] = []
 
         steps = 0
         while True:
@@ -93,8 +95,8 @@ class AviaryAgent(SimpleResponsesAPIAgent):
                 )
                 model_response_json = raw_model_response.json()
             except json.JSONDecodeError as e:
-                # for now, we break. default reward of 0 will be returned when /verify is called
-                # JSONDecodeError will be thrown if there's an underlying openai error
+                # JSONDecodeError will be thrown if there's an underlying openai error.
+                # for now, we break. Default reward of 0 will be returned when /verify is called.
                 logger.warning(f"Error calling /v1/responses: {e!r}. Response: {raw_model_response.text!r}")
                 break
 
@@ -132,6 +134,8 @@ class AviaryAgent(SimpleResponsesAPIAgent):
                 done = env_response.done
 
             agent_state = agent_state.model_copy(update={"input": agent_state.input + model_output + obs})
+            agent_state_history.append(cast(NeMoGymResponseInput, agent_state.input))
+
             if done:
                 break
 
@@ -143,10 +147,9 @@ class AviaryAgent(SimpleResponsesAPIAgent):
 
         assert model_response is not None
 
-        # This includes the observation messages from reset, which SimpleAgentStateful does not include.
-        # TODO: understand if that's a problem
         output = AviaryNeMoGymResponse.model_validate(
-            model_response.model_dump() | {"output": agent_state.input, "env_id": env_id}
+            model_response.model_dump()
+            | {"output": agent_state_history, "env_id": env_id, "group_id": str(req.task_idx)}
         )
         return output
 
