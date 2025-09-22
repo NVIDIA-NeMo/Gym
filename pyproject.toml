@@ -131,6 +131,11 @@ dependencies = [
     # Updated Sun Sep 21, 2025 with aiohttp==3.12.15
     # License: Apache 2.0 https://github.com/aio-libs/aiohttp/blob/9a2f146a12e3525b43e96723ef41584bf9cf784e/LICENSE.txt
     "aiohttp",
+
+    # pyinstrument: profiling tool
+    # Updated Mon Sep 22, 2025 with pyinstrument==5.1.1
+    # License: BSD 3-Clause https://github.com/joerick/pyinstrument/blob/3e1594a28871d5d244957aaab9ac41b3bdce302b/LICENSE
+    "pyinstrument",
 ]
 
 [dependency-groups]
