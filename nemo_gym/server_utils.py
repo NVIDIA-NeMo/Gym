@@ -328,6 +328,7 @@ class SimpleServer(BaseServer):
         base_profile_dir = Path(PARENT_DIR) / profiling_middleware_config.profiling_middleware_results_dirpath
         server_profile_dir = base_profile_dir / self.get_session_middleware_key()
         if profiling_middleware_config.profiling_middleware_clear_previous_logs and server_profile_dir.exists():
+            print(f"Clearing previous profiling results at {server_profile_dir}")
             rmtree(server_profile_dir)
 
         server_profile_dir.mkdir(parents=True, exist_ok=True)
