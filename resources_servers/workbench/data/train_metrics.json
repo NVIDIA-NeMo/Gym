@@ -17,9 +17,9 @@
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 1255,
-        "Average": 1726.9545816733068,
-        "Min": 1715.0,
-        "Max": 1749.0
+        "Average": 1724.9545816733068,
+        "Min": 1713.0,
+        "Max": 1747.0
     },
     "Number of turns": {
         "Total # non-null values": 1255,
