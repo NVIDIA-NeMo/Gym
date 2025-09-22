@@ -617,5 +617,6 @@ def view_profile():  # pragma: no cover
         else:
             base_session = new_session
 
+    print("Rendering profile html. This may take a few moments...")
     html_renderer = HTMLRenderer()
     html_renderer.open_in_browser(base_session)
