@@ -609,13 +609,13 @@ def view_profile():  # pragma: no cover
     session_paths = glob(search_path)
     assert session_paths, f"Didn't find any profiling data that matched the following path {search_path}"
 
-    sessions: List[Session] = []
-    for path in glob(search_path):
-        sessions.append(Session.load(path))
-
-    base = sessions[0]
-    for s in sessions[1:]:
-        base = Session.combine(base, s)
+    base_session: Optional[Session] = None
+    for path in tqdm(session_paths, desc="Loading and combining profiling sessions"):
+        new_session = Session.load(path)
+        if base_session:
+            base_session = Session.combine(base_session, new_session)
+        else:
+            base_session = new_session
 
     html_renderer = HTMLRenderer()
-    html_renderer.open_in_browser(base)
+    html_renderer.open_in_browser(base_session)
