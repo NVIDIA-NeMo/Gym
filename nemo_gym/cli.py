@@ -223,6 +223,7 @@ Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
             sleep(sleep_interval)
 
     def shutdown(self) -> None:
+        # TODO there is possibly a better way to handle the server shutdowns.
         for process_name, process in self._processes.items():
             print(f"Killing `{process_name}`")
             process.kill()
@@ -243,10 +244,6 @@ Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
             # Indefinitely
             while True:
                 self.poll()
-
-                statuses = self.check_http_server_statuses()
-                assert statuses.count("success") == len(statuses), "Found non-success statuses"
-
                 await asyncio.sleep(60)
 
         try:
