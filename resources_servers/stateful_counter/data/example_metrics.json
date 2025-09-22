@@ -43,7 +43,7 @@
         "Min": 6.0,
         "Max": 42.0,
         "Median": 24.0,
-        "Standard deviation": 14.230249470757707
+        "Standard deviation": 14.23
     },
     "initial_count": {
         "Total # non-null values": 5,
@@ -51,6 +51,6 @@
         "Min": 3.0,
         "Max": 15.0,
         "Median": 9.0,
-        "Standard deviation": 4.743416490252569
+        "Standard deviation": 4.74
     }
 }
