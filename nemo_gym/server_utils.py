@@ -19,6 +19,7 @@ from logging import Filter as LoggingFilter
 from logging import LogRecord, getLogger
 from os import getenv
 from pathlib import Path
+from shutil import rmtree
 from threading import Thread
 from typing import Literal, Optional, Tuple, Type, Union, Unpack
 from uuid import uuid4
@@ -284,6 +285,7 @@ class ProfilingMiddlewareInputConfig(BaseModel):
 
 class ProfilingMiddlewareConfig(ProfilingMiddlewareInputConfig):
     profiling_middleware_enabled: bool = False
+    profiling_middleware_clear_previous_logs: bool = False
 
 
 class SimpleServer(BaseServer):
@@ -320,6 +322,9 @@ class SimpleServer(BaseServer):
     def setup_profiling_middleware(self, app: FastAPI, profiling_middleware_config: ProfilingMiddlewareConfig) -> None:
         base_profile_dir = Path(PARENT_DIR) / profiling_middleware_config.profiling_middleware_results_dirpath
         server_profile_dir = base_profile_dir / self.get_session_middleware_key()
+        if profiling_middleware_config.profiling_middleware_clear_previous_logs and server_profile_dir.exists():
+            rmtree(server_profile_dir)
+
         server_profile_dir.mkdir(parents=True, exist_ok=True)
 
         print(f"Enabled profiling. Results will be output to {server_profile_dir}")
