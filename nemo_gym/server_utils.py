@@ -379,9 +379,9 @@ class SimpleServer(BaseServer):
             uvicorn_logger = getLogger("uvicorn.access")
             uvicorn_logger.addFilter(No200Filter())
 
-        print(
-            "Adding a uvicorn logging filter so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
-        )
+            print(
+                "Adding a uvicorn logging filter so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
+            )
 
         uvicorn.run(
             app,
