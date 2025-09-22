@@ -127,7 +127,7 @@ async def request(method: str, url: str, **kwargs: Unpack[_RequestOptions]) -> C
             await asyncio.sleep(0.5)
         except Exception as e:
             print(
-                f"""Hit an exception while making a request (try {num_tries}): {e}
+                f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}
 Sleeping 0.5s and retrying...
 """
             )
