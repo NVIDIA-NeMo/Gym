@@ -18,6 +18,7 @@ from abc import abstractmethod
 from logging import Filter as LoggingFilter
 from logging import LogRecord, getLogger
 from os import getenv
+from pathlib import Path
 from threading import Thread
 from typing import Literal, Optional, Tuple, Type, Union, Unpack
 from uuid import uuid4
@@ -29,9 +30,11 @@ from aiohttp.client import _RequestOptions
 from fastapi import FastAPI, Request, Response
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, ConfigDict
+from pyinstrument import Profiler
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.config_types import (
     BaseRunServerInstanceConfig,
     BaseServerConfig,
@@ -274,6 +277,12 @@ class BaseServer(BaseModel):
         return server_config
 
 
+class ProfilingMiddlewareConfig(BaseModel):
+    profiling_middleware_enabled: bool = False
+    # Relative to the Gym root dir.
+    profiling_middleware_results_dirpath: Optional[str] = None
+
+
 class SimpleServer(BaseServer):
     server_client: ServerClient
 
@@ -305,16 +314,46 @@ class SimpleServer(BaseServer):
         session_middleware_key = self.get_session_middleware_key()
         app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
 
+    def setup_profiling_middleware(self, app: FastAPI, profiling_middleware_config: ProfilingMiddlewareConfig) -> None:
+        base_profile_dir = Path(PARENT_DIR) / profiling_middleware_config.profiling_middleware_results_dirpath
+        server_profile_dir = base_profile_dir / self.get_session_middleware_key()
+        server_profile_dir.mkdir(parents=True, exist_ok=True)
+
+        print(f"Enabled profiling. Results will be output to {server_profile_dir}")
+
+        @app.middleware("http")
+        async def profile_request(request: Request, call_next):
+            profiler = Profiler()
+            profiler.start()
+
+            result = await call_next(request)
+
+            profiler.stop()
+
+            json_output_fpath = (server_profile_dir / str(uuid4())).with_suffix(".json")
+            to_dump = profiler.last_session.to_json()
+            if to_dump:
+                with open(json_output_fpath, "w") as f:
+                    json.dump(to_dump, f, separators=(",", ":"))
+
+            return result
+
     @classmethod
     def run_webserver(cls) -> None:  # pragma: no cover
+        global_config_dict = get_global_config_dict()
+
         server_config = cls.load_config_from_global_config()
         server_client = ServerClient(
             head_server_config=ServerClient.load_head_server_config(),
-            global_config_dict=get_global_config_dict(),
+            global_config_dict=global_config_dict,
         )
         server = cls(config=server_config, server_client=server_client)
 
         app = server.setup_webserver()
+
+        profiling_middleware_config = ProfilingMiddlewareConfig.model_validate(global_config_dict)
+        if profiling_middleware_config.profiling_middleware_enabled:
+            server.setup_profiling_middleware(app, profiling_middleware_config)
 
         class No200Filter(LoggingFilter):
             def filter(self, record: LogRecord) -> bool:
