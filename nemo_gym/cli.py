@@ -618,4 +618,4 @@ def view_profile():  # pragma: no cover
             base_session = new_session
 
     html_renderer = HTMLRenderer()
-    html_renderer.open_in_browser(base_session)
+    html_renderer.open_in_browser(base_session, output_filename=dir_path / "aggregate_render.html")
