@@ -16,7 +16,9 @@ srun --container-image=/lustre/fsw/portfolios/llmservice/users/sdevare/repos/con
         --container-workdir=/nemo-gym \
         /bin/bash -c "
         cd /lustre/fsw/portfolios/llmservice/users/sdevare/repos/nemo-gym/
-        apt-get update && apt-get install -y git
+
+        apt-get update && apt-get install -y git build-essential gcc
+        
         export SINGULARITY_CACHEDIR=/tmp/singularity_cache_${SLURM_JOB_ID}_$$
         export APPTAINER_CACHEDIR=/tmp/apptainer_cache_${SLURM_JOB_ID}_$$
         export SINGULARITY_TMPDIR=/tmp/singularity_tmp_${SLURM_JOB_ID}_$$
