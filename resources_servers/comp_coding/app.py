@@ -201,49 +201,48 @@ class CompCodingResourcesServer(SimpleResourcesServer):
         return app
 
     # ------------ verifier ------------
-    def verify(self, body: CompCodingVerifyRequest) -> CompCodingVerifyResponse:
+    async def verify(self, body: CompCodingVerifyRequest) -> CompCodingVerifyResponse:
         try:
             # Enforce a single source of truth for model output: the Responses API object
             response_obj = getattr(body, "response", None)
             if not response_obj:
-                print("hit in no response obj")
                 # Treat absence of a response as an input/contract error
                 return HTTPException(status_code=422, detail="Missing response")
 
             model_out = _extract_text_from_response(response_obj)
-            print("-" * 40, "\nmodel_out\n", flush=True)
             if not model_out or not model_out.strip():
                 # A response existed but had no usable text -> model failure
                 return CompCodingVerifyResponse(**body.model_dump(), reward=0.0, reason="Empty model output")
 
             # 2) unit tests (must be present & valid BEFORE runtime; otherwise raise)
             if not body.verifier_metadata or "unit_tests" not in body.verifier_metadata:
-                print("hit in verifier_metadata")
                 return HTTPException(status_code=422, detail="Missing verifier_metadata.unit_tests")
             try:
                 tests = _parse_unit_tests(body.verifier_metadata["unit_tests"])
             except Exception as e:
-                print("hit in _parse_unit_tests exception", repr(e))
                 # Treat bad inputs as an input error, not a model failure.
                 return HTTPException(status_code=422, detail=f"Invalid unit_tests: {e}")
 
             # 3) extract code (code fence or raw)
             code = _extract_code(model_out)
-            print("-" * 40, "\ncode\n", flush=True)
             if not code:
                 return CompCodingVerifyResponse(**body.model_dump(), reward=0.0, reason="Could not extract code")
 
             # 4) run (no sandbox)
             ok, msg = _run_code_against_tests(code, tests)
-            print("-" * 40, "\nok msg\n", ok, msg, flush=True)
 
             return CompCodingVerifyResponse(
                 **body.model_dump(),
                 reward=1.0 if ok else 0.0,
                 reason=msg,  # always include the reason message
             )
-        except Exception as e:
-            print("hit some other exception", repr(e))
+        except:
+            import traceback
+
+            traceback.print_exc()
+
+            print("hit some other exception")
+            return CompCodingVerifyResponse(**body.model_dump(), reward=0.0, reason="")
 
 
 if __name__ == "__main__":
