@@ -496,6 +496,10 @@ class VLLMConverter(BaseModel):
                 )
             )
 
+        if not response_output:
+            print("COULD NOT CONSTRUCT RESPONSE OUTPUT", flush=True)
+            print(raw_message, flush=True)
+
         if self.return_token_id_information:
             last_response_output_item = response_output[-1]
             train_cls = RESPONSES_TO_TRAIN[last_response_output_item.__class__]

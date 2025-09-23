@@ -44,6 +44,11 @@ class AviaryAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
 
+    # Doesn't cause an issue if not set, but if it is, then
+    # we can avoid sending requests that are guaranteed to
+    # exceed the limit. If not set, vLLM will reject the request.
+    max_total_sequence_length: int | None = None
+
 
 class AviaryAgentRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
@@ -88,6 +93,8 @@ class AviaryAgent(SimpleResponsesAPIAgent):
 
             # Sample action from model
             try:
+                # TODO: don't send this request if token count already exceeds configured limit
+                # Instead, break the loop at the bottom.
                 raw_model_response = await self.server_client.post(
                     server_name=self.config.model_server.name,
                     url_path="/v1/responses",
@@ -135,6 +142,19 @@ class AviaryAgent(SimpleResponsesAPIAgent):
 
             agent_state = agent_state.model_copy(update={"input": agent_state.input + model_output + obs})
             agent_state_history.append(cast(NeMoGymResponseInput, agent_state.input))
+
+            # NOTE: this doesn't count the tool response tokens. Would need to call the tokenizer to properly count
+            if model_output and self.config.max_total_sequence_length is not None:
+                # We just need one message that contains token IDs
+                total_len: int | None = None
+                for o in model_output:
+                    if hasattr(o, "prompt_token_ids"):
+                        total_len = len(o.prompt_token_ids) + len(o.generation_token_ids)
+                        break
+                else:
+                    logger.warning("No message with token IDs found in model output.")
+                if total_len is not None and total_len > self.config.max_total_sequence_length:
+                    break
 
             if done:
                 break
