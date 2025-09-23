@@ -332,18 +332,7 @@ class SimpleServer(BaseServer):
 
         main_app_lifespan = app.router.lifespan_context
 
-        @asynccontextmanager
-        async def lifespan_wrapper(app):
-            yappi.set_clock_type("WALL")
-            yappi.start()
-            print(f"🔍 Enabled profiling for {self.config.name}")
-
-            async with main_app_lifespan(app) as maybe_state:
-                yield maybe_state
-
-            print(f"🛑 Stopping profiler for {self.config.name}. Check {server_profile_path} for the metrics!")
-            yappi.stop()
-
+        def _dump_yappi_stats() -> str:
             buffer = StringIO()
             yappi.get_func_stats().print_all(
                 out=buffer,
@@ -357,16 +346,37 @@ class SimpleServer(BaseServer):
             )
 
             buffer.seek(0)
-            with open(server_profile_path, "w") as f:
-                past_header = False
-                for line in buffer:
-                    if not past_header or self.config.entrypoint in line:
-                        f.write(line)
+            res = ""
+            past_header = False
+            for line in buffer:
+                if not past_header or self.config.entrypoint in line:
+                    res += line
 
-                    if line.startswith("name"):
-                        past_header = True
+                if line.startswith("name"):
+                    past_header = True
+
+            return res
+
+        @asynccontextmanager
+        async def lifespan_wrapper(app):
+            yappi.set_clock_type("WALL")
+            yappi.start()
+            print(f"🔍 Enabled profiling for {self.config.name}")
+
+            async with main_app_lifespan(app) as maybe_state:
+                yield maybe_state
+
+            print(f"🛑 Stopping profiler for {self.config.name}. Check {server_profile_path} for the metrics!")
+            yappi.stop()
+
+            with open(server_profile_path, "w") as f:
+                f.write(_dump_yappi_stats())
 
         app.router.lifespan_context = lifespan_wrapper
+
+        @app.get("/stats")
+        def stats():
+            return Response(_dump_yappi_stats())
 
     @classmethod
     def run_webserver(cls) -> None:  # pragma: no cover
