@@ -3,3 +3,5 @@ fhaviary[gsm8k,notebook,llm]>=0.24.1
 tqdm
 datasets
 huggingface-hub
+-e aviary-internal @ /home/sid/dev/aviary-internal/aviary_internal
+-e kestrel @ /home/sid/dev/aviary-internal/envs/kestrel
