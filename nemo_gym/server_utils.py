@@ -339,12 +339,12 @@ class SimpleServer(BaseServer):
         async def lifespan_wrapper(app):
             yappi.set_clock_type("WALL")
             yappi.start()
-            print("🔍 Enabled profiling")
+            print(f"🔍 Enabled profiling for {self.config.name}")
 
             async with main_app_lifespan(app) as maybe_state:
                 yield maybe_state
 
-            print("🛑 Stopping profiler...")
+            print(f"🛑 Stopping profiler for {self.config.name}. Check {server_profile_path} for the metrics!")
             yappi.stop()
 
             with open(server_profile_path, "w") as f:
