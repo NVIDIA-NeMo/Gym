@@ -15,7 +15,7 @@
 import io
 import re
 import sys
-from typing import Any, ClassVar, List, Optional, Pattern, Tuple
+from typing import Any, List, Optional, Pattern, Tuple
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -58,7 +58,7 @@ class CompCodingVerifyResponse(BaseVerifyResponse):
 
 
 # ------------ helpers ------------
-CODE_BLOCK_RE: ClassVar[Pattern[str]] = re.compile(r"```(?:python)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+CODE_BLOCK_RE: Pattern[str] = re.compile(r"```(?:python)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 
 
 def _extract_code(text: str) -> Optional[str]:
