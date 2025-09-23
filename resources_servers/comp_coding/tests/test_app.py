@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -20,6 +20,7 @@ from app import (
     CompCodingResourcesServer,
     CompCodingResourcesServerConfig,
     CompCodingVerifyRequest,
+    _extract_code,
 )
 from pydantic import ValidationError
 
@@ -248,3 +249,10 @@ class TestApp:
 
         res = await server.verify(verify_req)
         assert res.reward == 0.0 and "ERROR" in res.reason
+
+    async def test_hanging_model_out(self) -> None:
+        with open(Path(__file__).with_name("test_hanging_response_model_out.txt")) as f:
+            model_out = f.read()
+
+        code = _extract_code(model_out)
+        print(code)
