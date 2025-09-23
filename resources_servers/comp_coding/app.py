@@ -209,7 +209,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             raise HTTPException(status_code=422, detail="Missing response")
 
         model_out = _extract_text_from_response(response_obj)
-        print("-" * 40, "\nmodel_out\n", model_out)
+        print("-" * 40, "\nmodel_out\n", model_out, flush=True)
         if not model_out or not model_out.strip():
             # A response existed but had no usable text -> model failure
             return CompCodingVerifyResponse(**body.model_dump(), reward=0.0, reason="Empty model output")
@@ -225,13 +225,13 @@ class CompCodingResourcesServer(SimpleResourcesServer):
 
         # 3) extract code (code fence or raw)
         code = _extract_code(model_out)
-        print("-" * 40, "\ncode\n", code)
+        print("-" * 40, "\ncode\n", code, flush=True)
         if not code:
             return CompCodingVerifyResponse(**body.model_dump(), reward=0.0, reason="Could not extract code")
 
         # 4) run (no sandbox)
         ok, msg = _run_code_against_tests(code, tests)
-        print("-" * 40, "\nok msg\n", ok, msg)
+        print("-" * 40, "\nok msg\n", ok, msg, flush=True)
 
         return CompCodingVerifyResponse(
             **body.model_dump(),
