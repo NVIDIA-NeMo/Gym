@@ -253,6 +253,9 @@ class TestApp:
     async def test_hanging_model_out(self) -> None:
         with open(Path(__file__).with_name("test_hanging_response_model_out.txt")) as f:
             model_out = f.read()
+        with open(Path(__file__).with_name("test_hanging_response_code.txt")) as f:
+            expected_code = f.read()
 
-        code = _extract_code(model_out)
-        print(code)
+        actual_code = _extract_code(model_out)
+        print(actual_code)
+        assert expected_code == actual_code

@@ -65,12 +65,25 @@ def _extract_code(text: str) -> Optional[str]:
     # We allow two kinds of responses:
     # 1. Code inside a fenced block (```python ... ``` or ``` ... ```)
     # 2. Raw code returned without any fences
+    if not text or "```" not in text:
+        return text
+
+    last_backtick = text.rfind("```")
+    second_last_backtick = text.rfind("```", None, last_backtick)
+    first_newline = text.find("\n", second_last_backtick, last_backtick)
+    return text[first_newline + 1 : last_backtick]
+
+    """
+    Previous code:
+    ```python
     if not text:
         return None
     m = CODE_BLOCK_RE.search(text)
     if m:
         return m.group(1).strip()
     return text.strip()
+    ```
+    """
 
 
 def _parse_unit_tests(ut_dict: dict) -> UnitTests:
