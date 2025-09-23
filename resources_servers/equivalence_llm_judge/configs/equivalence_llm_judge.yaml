@@ -4,7 +4,7 @@ equivalence_llm_judge:
       entrypoint: app.py
       judge_model_server:
         type: responses_api_models
-        name: openai_model
+        name: policy_model
       judge_responses_create_params:
         input: []
       judge_prompt_template: |-
@@ -91,7 +91,7 @@ equivalence_llm_judge_simple_agent:
         name: equivalence_llm_judge
       model_server:
         type: responses_api_models
-        name: openai_model
+        name: policy_model
       datasets:
       - name: example
         type: example
