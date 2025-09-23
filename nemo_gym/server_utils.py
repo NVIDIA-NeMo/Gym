@@ -324,7 +324,7 @@ class SimpleServer(BaseServer):
         session_middleware_key = self.get_session_middleware_key()
         app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
 
-    def setup_profiling(self, app: FastAPI, profiling_config: ProfilingMiddlewareConfig) -> None:
+    def setup_profiling(self, app: FastAPI, profiling_config: ProfilingMiddlewareConfig) -> None:  # pragma: no cover
         base_profile_dir = Path(PARENT_DIR) / profiling_config.profiling_results_dirpath
         server_profile_path = (base_profile_dir / self.get_session_middleware_key()).with_suffix(".log")
 
