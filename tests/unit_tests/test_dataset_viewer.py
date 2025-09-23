@@ -71,19 +71,12 @@ class TestDatasetViewer:
             metrics = json.loads(line)
             return metrics, False
 
-        class DummyAgg:
-            def model_dump(self, by_alias=True):
-                return {}
-
-            def aggregate(self):
-                return DummyAgg()
-
         monkeypatch.setattr(
             "nemo_gym.train_data_utils.compute_sample_metrics",
             mock_compute_sample_metrics,
         )
 
-        result_1 = get_aggregate_metrics(samples, "{}\n")
+        result_1 = get_aggregate_metrics(samples)
 
         assert "reward" in result_1
         assert "accuracy" in result_1
@@ -99,19 +92,19 @@ class TestDatasetViewer:
         # Check computed values
         reward_stats = result_1["reward"]
         assert reward_stats["Total # non-null values"] == 3
-        assert reward_stats["Average"] == (1.0 + 0.0 + 0.5) / 3
+        assert reward_stats["Average"] == round(((1.0 + 0.0 + 0.5) / 3), 3)
         assert reward_stats["Min"] == 0.0
         assert reward_stats["Max"] == 1.0
 
         # Check computed values with bools converted to int
         accuracy_stats = result_1["accuracy"]
         assert accuracy_stats["Total # non-null values"] == 3
-        assert accuracy_stats["Average"] == (1 + 0 + 1) / 3
+        assert accuracy_stats["Average"] == round(((1 + 0 + 1) / 3), 3)
         assert accuracy_stats["Min"] == 0
         assert accuracy_stats["Max"] == 1
 
         # Check string counts
-        result_2 = get_aggregate_metrics(samples_with_strings, "{}\n")
+        result_2 = get_aggregate_metrics(samples_with_strings)
 
         assert "some_string" in result_2
         assert result_2["some_string"]["unique_count"] == 3

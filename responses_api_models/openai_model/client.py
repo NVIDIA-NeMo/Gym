@@ -32,8 +32,8 @@ async def main():
             "messages": [{"role": "user", "content": "hello"}],
         },
     )
-    print(task_1.json())
-    print(task_2.json())
+    print(await task_1.json())
+    print(await task_2.json())
 
 
 if __name__ == "__main__":

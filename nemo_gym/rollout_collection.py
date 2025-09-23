@@ -17,12 +17,19 @@ from asyncio import Semaphore
 from collections import Counter
 from contextlib import nullcontext
 from itertools import chain, repeat
-from typing import Optional
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel
 from tqdm.asyncio import tqdm
 
-from nemo_gym.server_utils import ServerClient, get_global_config_dict
+from nemo_gym.config_types import BaseServerConfig
+from nemo_gym.server_utils import (
+    GlobalAIOHTTPAsyncClientConfig,
+    ServerClient,
+    get_global_config_dict,
+    is_global_aiohttp_client_setup,
+    set_global_aiohttp_client,
+)
 
 
 class RolloutCollectionConfig(BaseModel):
@@ -34,46 +41,69 @@ class RolloutCollectionConfig(BaseModel):
     num_samples_in_parallel: Optional[int] = None
 
 
-async def _collect_rollouts(config: RolloutCollectionConfig):  # pragma: no cover
-    with open(config.input_jsonl_fpath) as input_dataset:
-        rows = list(map(json.loads, input_dataset))
-    print(f"Found {len(rows)} rows!")
+class RolloutCollectionHelper(BaseModel):  # pragma: no cover
+    async def run_from_config(self, config: RolloutCollectionConfig):
+        with open(config.input_jsonl_fpath) as input_dataset:
+            rows = list(map(json.loads, input_dataset))
+        print(f"Found {len(rows)} rows!")
 
-    if config.limit:
-        previous_length = len(rows)
-        rows = rows[: config.limit]
-        print(f"Limiting rows from {previous_length} to {len(rows)}!")
+        if config.limit:
+            previous_length = len(rows)
+            rows = rows[: config.limit]
+            print(f"Limiting rows from {previous_length} to {len(rows)}!")
 
-    if config.num_repeats:
-        previous_length = len(rows)
-        rows = list(chain.from_iterable(repeat(row, config.num_repeats) for row in rows))
-        print(f"Repeating rows (in a pattern of abc to aabbcc) from {previous_length} to {len(rows)}!")
+        if config.num_repeats:
+            previous_length = len(rows)
+            rows = list(chain.from_iterable(repeat(row, config.num_repeats) for row in rows))
+            print(f"Repeating rows (in a pattern of abc to aabbcc) from {previous_length} to {len(rows)}!")
 
-    server_client = ServerClient.load_from_global_config()
+        semaphore = nullcontext()
+        if config.num_samples_in_parallel:
+            semaphore = Semaphore(config.num_samples_in_parallel)
 
-    semaphore = nullcontext()
-    if config.num_samples_in_parallel:
-        semaphore = Semaphore(config.num_samples_in_parallel)
+        server_client = self.setup_server_client()
 
-    async def _post_coroutine(row: dict):
-        async with semaphore:
-            return await server_client.post(server_name=config.agent_name, url_path="/run", json=row)
+        metrics = Counter()
+        with open(config.output_jsonl_fpath, "a") as f:
 
-    tasks = list(map(_post_coroutine, rows))
+            async def _post_coroutine(row: dict) -> None:
+                async with semaphore:
+                    response = await server_client.post(server_name=config.agent_name, url_path="/run", json=row)
+                    result = await response.json()
+                    f.write(json.dumps(result) + "\n")
+                    metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
 
-    metrics = Counter()
-    pbar = tqdm.as_completed(tasks, desc="Collecting rollouts")
-    with open(config.output_jsonl_fpath, "a") as f:
-        for future in pbar:
-            result = await future
-            result = result.json()
-            f.write(json.dumps(result) + "\n")
-            metrics += Counter({k: v for k, v in result.items() if isinstance(v, (int, float))})
+            await tqdm.gather(*map(_post_coroutine, rows), desc="Collecting rollouts")
 
-    avg_metrics = {k: v / len(tasks) for k, v in metrics.items()}
-    print(json.dumps(avg_metrics, indent=4))
+        avg_metrics = {k: v / len(rows) for k, v in metrics.items()}
+
+        print(json.dumps(avg_metrics, indent=4))
+
+    async def run_examples(
+        self, examples: List[Dict], head_server_config: Optional[BaseServerConfig] = None
+    ) -> List[Dict]:
+        server_client = self.setup_server_client(head_server_config)
+
+        async def _post_subroutine(row: Dict) -> Dict:
+            res = await server_client.post(server_name=row.pop("agent_ref")["name"], url_path="/run", json=row)
+            return await res.json()
+
+        return await tqdm.gather(*map(_post_subroutine, examples), desc="Collecting rollouts")
+
+    def setup_server_client(self, head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:
+        server_client = ServerClient.load_from_global_config(head_server_config)
+
+        # We set this rollout global aiohttp client to use the same max connections as the underlying head server global config.
+        if not is_global_aiohttp_client_setup():
+            set_global_aiohttp_client(
+                cfg=GlobalAIOHTTPAsyncClientConfig.model_validate(server_client.global_config_dict)
+            )
+
+        return server_client
 
 
 def collect_rollouts():  # pragma: no cover
     config = RolloutCollectionConfig.model_validate(get_global_config_dict())
-    asyncio.run(_collect_rollouts(config))
+    rch = RolloutCollectionHelper()
+
+    asyncio.run(rch.run_from_config(config))

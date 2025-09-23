@@ -13,10 +13,10 @@
 # limitations under the License.
 import re
 from time import time
-from typing import ClassVar, List, Optional, Tuple
+from typing import ClassVar, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
-from openai import BaseModel as OpenAIBaseModel
+from fastapi import Request
 from pydantic import BaseModel, Field
 
 from nemo_gym.base_responses_api_model import (
@@ -51,39 +51,49 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
     TokenIDLogProbMixin,
 )
+from nemo_gym.server_utils import SESSION_ID_KEY
 
 
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
-    base_url: str
+    base_url: Union[str, List[str]]
     api_key: str
     model: str
     return_token_id_information: bool
 
-
-# This needs to be OpenAI BaseModel since it is casted to below by the OpenAI client.
-class VLLMTokenizeResponse(OpenAIBaseModel):
-    tokens: List[int]
+    def model_post_init(self, context):
+        if isinstance(self.base_url, str):
+            self.base_url = [self.base_url]
+        return super().model_post_init(context)
 
 
 class VLLMModel(SimpleResponsesAPIModel):
     config: VLLMModelConfig
 
     def model_post_init(self, context):
-        self._client = NeMoGymAsyncOpenAI(
-            base_url=self.config.base_url,
-            api_key=self.config.api_key,
-        )
+        self._clients = [
+            NeMoGymAsyncOpenAI(
+                base_url=base_url,
+                api_key=self.config.api_key,
+            )
+            for base_url in self.config.base_url
+        ]
+
+        self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
+
         self._converter = VLLMConverter(return_token_id_information=self.config.return_token_id_information)
+
         return super().model_post_init(context)
 
-    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+    async def responses(
+        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
+    ) -> NeMoGymResponse:
         # Response Create Params -> Chat Completion Create Params
         chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(body)
         if not body.model:
             body.model = self.config.model
 
         # Chat Completion Create Params -> Chat Completion
-        chat_completion_response = await self.chat_completions(chat_completion_create_params)
+        chat_completion_response = await self.chat_completions(request, chat_completion_create_params)
 
         choice = chat_completion_response.choices[0]
 
@@ -118,37 +128,47 @@ class VLLMModel(SimpleResponsesAPIModel):
         )
 
     async def chat_completions(
-        self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
+        self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
         body_dict = body.model_dump(exclude_unset=True)
         body_dict.setdefault("model", self.config.model)
+
+        session_id = request.session[SESSION_ID_KEY]
+        if session_id not in self._session_id_to_client:
+            # There is probably a better way to select the endpoint for this request. But this will do for now.
+            client_idx = len(self._session_id_to_client) % len(self._clients)
+            client = self._clients[client_idx]
+            self._session_id_to_client[session_id] = client
+        client = self._session_id_to_client[session_id]
 
         create_params = body_dict
         if self.config.return_token_id_information:
             create_params |= dict(
                 logprobs=True,
-                # The extra body below is VLLM specific to get the generation log probs associated with generation token IDs.
-                extra_body={
-                    "return_tokens_as_token_ids": True,
-                },
+                # Typically passed via OpenAI client extra_body.
+                return_tokens_as_token_ids=True,
+                # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
+                # For prompt and generation token IDs
+                # return_token_ids=True,
+                # For prompt token IDs
+                # prompt_logprobs=0,
             )
 
-        openai_response = await self._client.chat.completions.create(**create_params)
-        assert not getattr(openai_response.choices[0].message, "reasoning_content", None), (
+        chat_completion_dict = await client.create_chat_completion(**create_params)
+        choice_dict = chat_completion_dict["choices"][0]
+        assert not choice_dict["message"].get("reasoning_content"), (
             "Please do not use a reasoning parser in vLLM! There is one source of truth for handling data (including reasoning), which is NeMo Gym!"
         )
-        openai_response: NeMoGymChatCompletion
-
-        chat_completion_dict = openai_response.model_dump()
 
         if self.config.return_token_id_information:
-            log_probs = openai_response.choices[0].logprobs.content
-            generation_token_ids = []
-            generation_log_probs = []
-            for log_prob in log_probs:
-                # Looks like `"token_id:151667"`
-                generation_token_ids.append(int(log_prob.token.removeprefix("token_id:")))
-                generation_log_probs.append(log_prob.logprob)
+            log_probs = choice_dict["logprobs"]["content"]
+            generation_log_probs = [log_prob["logprob"] for log_prob in log_probs]
+
+            """
+            START TODO remove this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
+            """
+            # Looks like `"token_id:151667"`
+            generation_token_ids = [log_prob["token"].removeprefix("token_id:") for log_prob in log_probs]
 
             # The tokenize endpoint doesn't accept any sampling parameters
             # The only relevant params are model, messages, and tools.
@@ -159,22 +179,30 @@ class VLLMModel(SimpleResponsesAPIModel):
 
             # The base url has /v1 at the end but vLLM's tokenize endpoint does not have v1, hence the ..
             # I can't believe the path is resolved correctly LOL
-            tokenize_response = await self._client.post(
-                "../tokenize",
-                cast_to=VLLMTokenizeResponse,
-                body=tokenize_body_dict,
-            )
+            tokenize_response = await client.create_tokenize(**tokenize_body_dict)
+            """
+            END
+            """
 
-            message_dict = chat_completion_dict["choices"][0]["message"]
+            message_dict = choice_dict["message"]
             message_dict.update(
                 dict(
-                    prompt_token_ids=tokenize_response.tokens,
+                    # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
+                    # prompt_token_ids=chat_completion_dict["prompt_token_ids"],
+                    prompt_token_ids=tokenize_response["tokens"],
+                    # generation_token_ids=choice_dict["token_ids"],
                     generation_token_ids=generation_token_ids,
                     generation_log_probs=generation_log_probs,
                 )
             )
 
-        return NeMoGymChatCompletion(**chat_completion_dict)
+            # Clean the duplicated information
+            choice_dict.pop("logprobs")
+            # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
+            # chat_completion_dict.pop("prompt_token_ids")
+            # choice_dict.pop("token_ids")
+
+        return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 
 
 class VLLMConverterResponsesToChatCompletionsState(BaseModel):
@@ -231,7 +259,7 @@ class VLLMConverter(BaseModel):
         # Extract reasoning content from between <think></think> tags.
         matches = cls.THINK_TAG_PATTERN.findall(content)
         # Remove reasoning from main content
-        cleaned = cls.THINK_TAG_PATTERN.sub("", content).strip()
+        cleaned = cls.THINK_TAG_PATTERN.sub("", content)
         return matches, cleaned
 
     # =======================================================
@@ -347,7 +375,7 @@ class VLLMConverter(BaseModel):
                 # Handle reasoning
                 final_content = ""
                 if isinstance(m["content"], list):
-                    content_str = " ".join([part.get("text", "") for part in m["content"]])
+                    content_str = "".join([part.get("text", "") for part in m["content"]])
                     final_content += content_str
                 elif isinstance(m["content"], str):
                     final_content += m["content"]
@@ -435,8 +463,7 @@ class VLLMConverter(BaseModel):
                 id=f"rs_{uuid4().hex}",
                 type="reasoning",
                 summary=[
-                    NeMoGymSummary(text=reasoning_text.strip(), type="summary_text")
-                    for reasoning_text in reasoning_matches
+                    NeMoGymSummary(text=reasoning_text, type="summary_text") for reasoning_text in reasoning_matches
                 ],
                 status="completed",
             )

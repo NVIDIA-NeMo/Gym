@@ -116,7 +116,7 @@ class TestApp:
     async def test_verify(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
         server_mock = MagicMock(spec=ServerClient)
         resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=server_mock)
-        response_mock = MagicMock()
+        response_mock = AsyncMock()
         post_mock = MagicMock()
         post_mock.json = response_mock
         server_mock.post = AsyncMock(return_value=post_mock)
@@ -213,7 +213,7 @@ class TestApp:
     async def test_verify_answer(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
         server_mock = MagicMock(spec=ServerClient)
         resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=server_mock)
-        response_mock = MagicMock()
+        response_mock = AsyncMock()
         post_mock = MagicMock()
         post_mock.json = response_mock
         server_mock.post = AsyncMock(return_value=post_mock)
@@ -345,7 +345,7 @@ class TestApp:
     async def test_verify_answer_with_judge(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
         server_mock = MagicMock(spec=ServerClient)
         resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=server_mock)
-        response_mock = MagicMock()
+        response_mock = AsyncMock()
         post_mock = MagicMock()
         post_mock.json = response_mock
         server_mock.post = AsyncMock(return_value=post_mock)
@@ -486,7 +486,7 @@ class TestApp:
         judge_config.judge_responses_create_params.max_output_tokens = 1024
         server_mock = MagicMock(spec=ServerClient)
         resources_server = LibraryJudgeMathResourcesServer(config=judge_config, server_client=server_mock)
-        response_mock = MagicMock()
+        response_mock = AsyncMock()
         post_mock = MagicMock()
         post_mock.json = response_mock
         server_mock.post = AsyncMock(return_value=post_mock)

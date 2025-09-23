@@ -14,8 +14,9 @@
 from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
+from httpx import Cookies
 
-from nemo_gym.server_utils import NeMoGymStatelessCookies, ServerClient
+from nemo_gym.server_utils import ServerClient
 from resources_servers.stateful_counter.app import StatefulCounterResourcesServer, StatefulCounterResourcesServerConfig
 
 
@@ -32,8 +33,11 @@ class TestApp:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        # This is the same override as in NeMoGymGlobalAsyncClient
-        client._cookies = NeMoGymStatelessCookies(client._cookies)
+        class StatelessCookies(Cookies):
+            def extract_cookies(self, response):
+                pass
+
+        client._cookies = StatelessCookies(client._cookies)
 
         # Check that we are at 0
         response = client.post("/get_counter_value")

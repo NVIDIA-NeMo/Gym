@@ -90,10 +90,10 @@ async def main():
             ],
         },
     )
-    print(task_1a.json())
-    print(task_1b.json())
-    print(task_2a.json())
-    print(task_2b.json())
+    print(await task_1a.json())
+    print(await task_1b.json())
+    print(await task_2a.json())
+    print(await task_2b.json())
 
 
 if __name__ == "__main__":
