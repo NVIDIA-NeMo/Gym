@@ -24,24 +24,6 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from resources_servers.workbench.utils import is_correct
-from resources_servers.workbench.workbench_tools.analytics import (
-    AnalyticsTool,
-)
-from resources_servers.workbench.workbench_tools.calendar import (
-    CalendarTool,
-)
-from resources_servers.workbench.workbench_tools.company_directory import (
-    CompanyDirectoryTool,
-)
-from resources_servers.workbench.workbench_tools.customer_relationship_manager import (
-    CustomerRelationshipManagerTool,
-)
-from resources_servers.workbench.workbench_tools.email import (
-    EmailTool,
-)
-from resources_servers.workbench.workbench_tools.project_management import (
-    ProjectManagementTool,
-)
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
