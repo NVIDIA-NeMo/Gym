@@ -933,18 +933,21 @@ If you are using AsyncOpenAI client with a parallelism > 32, you may also want t
 
 # Table: Resource Server Organization
 <!-- START_RESOURCE_TABLE -->
-| Server Type Name      | Domain | Path                                      |
-| --------------------- | ------ | ----------------------------------------- |
-| Comp Coding           | ?      | `resources_servers/comp_coding`           |
-| Equivalence Llm Judge | ?      | `resources_servers/equivalence_llm_judge` |
-| Google Search         | ?      | `resources_servers/google_search`         |
-| Instruction Following | ?      | `resources_servers/instruction_following` |
-| Library Judge Math    | ?      | `resources_servers/library_judge_math`    |
-| Mcqa                  | ?      | `resources_servers/mcqa`                  |
-| Multineedle           | ?      | `resources_servers/multineedle`           |
-| Multiverse Math Hard  | ?      | `resources_servers/multiverse_math_hard`  |
-| Python Math Exec      | ?      | `resources_servers/python_math_exec`      |
-| Simple Weather        | ?      | `resources_servers/simple_weather`        |
-| Stateful Counter      | ?      | `resources_servers/stateful_counter`      |
-| Workbench             | ?      | `resources_servers/workbench`             |
+| Domain | License | Server Type Name      | Path                                      |
+| ------ | ------- | --------------------- | ----------------------------------------- |
+| ?      | ?       | Comp Coding           | `resources_servers/comp_coding`           |
+| ?      | ?       | Equivalence Llm Judge | `resources_servers/equivalence_llm_judge` |
+| ?      | ?       | Google Search         | `resources_servers/google_search`         |
+| ?      | ?       | Instruction Following | `resources_servers/instruction_following` |
+| ?      | ?       | Library Judge Math    | `resources_servers/library_judge_math`    |
+| ?      | ?       | Library Judge Math    | `resources_servers/library_judge_math`    |
+| ?      | ?       | Library Judge Math    | `resources_servers/library_judge_math`    |
+| ?      | ?       | Library Judge Math    | `resources_servers/library_judge_math`    |
+| ?      | ?       | Mcqa                  | `resources_servers/mcqa`                  |
+| ?      | ?       | Multineedle           | `resources_servers/multineedle`           |
+| ?      | ?       | Multiverse Math Hard  | `resources_servers/multiverse_math_hard`  |
+| ?      | ?       | Python Math Exec      | `resources_servers/python_math_exec`      |
+| ?      | ?       | Simple Weather        | `resources_servers/simple_weather`        |
+| ?      | ?       | Stateful Counter      | `resources_servers/stateful_counter`      |
+| ?      | ?       | Workbench             | `resources_servers/workbench`             |
 <!-- END_RESOURCE_TABLE -->

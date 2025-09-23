@@ -16,24 +16,70 @@ import re
 import sys
 from pathlib import Path
 
+import yaml
+
 
 README_PATH = Path("README.md")
 
 TARGET_FOLDER = Path("resources_servers")
 
 
+def extract_domain_and_license(yaml_path: Path) -> list[tuple[str, str]]:
+    """
+    {name}_resources_server:
+        resources_servers:
+            {name}:
+                entrypoint: app.py
+                license: Test License <--
+                domain: Test Domain   <--
+    """
+    with yaml_path.open() as f:
+        data = yaml.safe_load(f)
+
+    results = []
+
+    def visit(data, level=1):
+        if level == 4:  # domain and license
+            domain = data.get("domain")
+            license = data.get("license")
+            if domain is not None or license is not None:
+                results.append((domain, license))
+        else:
+            for k, v in data.items():
+                if level == 2 and k != "resources_servers":
+                    continue
+                visit(v, level + 1)
+
+    visit(data)
+    return results
+
+
 def generate_table() -> str:
     """Outputs a grid with table data"""
-    col_names = ["Server Type Name", "Domain", "Path"]
+    col_names = ["Domain", "License", "Server Type Name", "Path"]
 
     rows = []
     for subdir in sorted(TARGET_FOLDER.iterdir()):
         path = f"`{TARGET_FOLDER.name}/{subdir.name}`"
         server_name = subdir.name.replace("_", " ").title()
-        domain = "?"  # TODO: find out where domain lives
-        rows.append([server_name, domain, path])
 
-    table = [col_names, ["-" for col in col_names]] + rows
+        configs_folder = subdir / "configs"
+        if configs_folder.exists() and configs_folder.is_dir():
+            yaml_files = sorted(configs_folder.glob("*.yaml"))
+            if yaml_files:
+                for yaml_file in yaml_files:
+                    extraction = extract_domain_and_license(yaml_file)
+                    if extraction:
+                        for domain, license in extraction:
+                            rows.append([domain, license, server_name, path])
+                    else:
+                        rows.append(["?", "?", server_name, path])
+            else:
+                rows.append(["?", "?", server_name, path])
+        else:
+            rows.append(["?", "?", server_name, path])
+
+    table = [col_names, ["-" for _ in col_names]] + rows
     return format_table(table)
 
 

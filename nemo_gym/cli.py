@@ -84,6 +84,8 @@ class ServerInstanceDisplayConfig(BaseModel):
     pid: Optional[int] = None
     config_path: str
     url: Optional[str] = None
+    license: Optional[str] = None
+    domain: Optional[str] = None
 
 
 class RunHelper:  # pragma: no cover
@@ -123,6 +125,19 @@ class RunHelper:  # pragma: no cover
             if not isinstance(server_config_dict, DictConfig):
                 continue
 
+            # Enforce domain and license for resources_server
+            if first_key == "resources_servers":
+                missing_fields = []
+                for field in ("domain", "license"):
+                    if field not in server_config_dict or server_config_dict[field] in (None, ""):
+                        missing_fields.append(field)
+                if missing_fields:
+                    raise ValueError(
+                        f"Config error in `{top_level_path}` > `{first_key}` > `{second_key}`: "
+                        f"Missing required field(s): {', '.join(missing_fields)}. "
+                        "Please add them to your YAML config."
+                    )
+
             if "entrypoint" not in server_config_dict:
                 continue
 
@@ -143,6 +158,9 @@ class RunHelper:  # pragma: no cover
             host = server_config_dict.get("host")
             port = server_config_dict.get("port")
 
+            license = server_config_dict.get("license")
+            domain = server_config_dict.get("domain")
+
             self._server_instance_display_configs.append(
                 ServerInstanceDisplayConfig(
                     process_name=top_level_path,
@@ -155,6 +173,9 @@ class RunHelper:  # pragma: no cover
                     url=f"http://{host}:{port}" if host and port else None,
                     pid=process.pid,
                     config_path=top_level_path,
+                    # TODO: hide Nones for agent + model servers
+                    license=license,
+                    domain=domain,
                 )
             )
 
