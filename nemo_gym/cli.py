@@ -23,6 +23,7 @@ from threading import Thread
 from time import sleep
 from typing import Dict, List, Optional
 
+import uvicorn
 from devtools import pprint
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel
@@ -36,7 +37,12 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
-from nemo_gym.server_utils import HEAD_SERVER_KEY_NAME, HeadServer, ServerClient, ServerStatus
+from nemo_gym.server_utils import (
+    HEAD_SERVER_KEY_NAME,
+    HeadServer,
+    ServerClient,
+    ServerStatus,
+)
 
 
 def _setup_env_command(dir_path: Path) -> str:  # pragma: no cover
@@ -86,7 +92,9 @@ class ServerInstanceDisplayConfig(BaseModel):
 
 
 class RunHelper:  # pragma: no cover
+    _head_server: uvicorn.Server
     _head_server_thread: Thread
+
     _processes: Dict[str, Popen]
     _server_instance_display_configs: List[ServerInstanceDisplayConfig]
     _server_client: ServerClient
@@ -98,7 +106,7 @@ class RunHelper:  # pragma: no cover
         escaped_config_dict_yaml_str = shlex.quote(OmegaConf.to_yaml(global_config_dict))
 
         # We always run the head server in this `run` command.
-        self._head_server_thread = HeadServer.run_webserver()
+        self._head_server, self._head_server_thread = HeadServer.run_webserver()
 
         top_level_paths = [k for k in global_config_dict.keys() if k not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS]
 
@@ -219,15 +227,28 @@ Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
 
             sleep(sleep_interval)
 
+    def shutdown(self) -> None:
+        # TODO there is possibly a better way to handle the server shutdowns.
+        for process_name, process in self._processes.items():
+            print(f"Killing `{process_name}`")
+            process.kill()
+            process.wait()
+
+        self._processes = dict()
+
+        self._head_server.should_exit = True
+        self._head_server_thread.join()
+
+        self._head_server = None
+        self._head_server_thread = None
+
+        print("NeMo Gym finished!")
+
     def run_forever(self) -> None:
         async def sleep():
             # Indefinitely
             while True:
                 self.poll()
-
-                statuses = self.check_http_server_statuses()
-                assert statuses.count("success") == len(statuses), "Found non-success statuses"
-
                 await asyncio.sleep(60)
 
         try:
@@ -235,12 +256,7 @@ Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
         except KeyboardInterrupt:
             pass
         finally:
-            for process_name, process in self._processes.items():
-                print(f"Killing `{process_name}`")
-                process.kill()
-                process.wait()
-
-            print("NeMo Gym finished!")
+            self.shutdown()
 
     def check_http_server_statuses(self) -> List[ServerStatus]:
         print(

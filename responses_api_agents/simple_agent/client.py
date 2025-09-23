@@ -52,4 +52,4 @@ task = server_client.post(
     ),
 )
 result = run(task)
-print(json.dumps(result.json()["output"], indent=4))
+print(json.dumps(run(result.json())["output"], indent=4))

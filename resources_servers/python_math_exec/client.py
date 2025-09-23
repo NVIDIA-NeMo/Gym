@@ -30,4 +30,4 @@ print(np.sum(a))
     },
 )
 result = run(task)
-print(json.dumps(result.json(), indent=4))
+print(json.dumps(run(result.json()), indent=4))

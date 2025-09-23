@@ -11,30 +11,32 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
+import atexit
 import json
 from abc import abstractmethod
+from contextlib import asynccontextmanager
+from io import StringIO
+from logging import Filter as LoggingFilter
+from logging import LogRecord, getLogger
 from os import getenv
+from pathlib import Path
 from threading import Thread
-from typing import Any, Literal, Optional, Type, Union
+from typing import Literal, Optional, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
 import requests
 import uvicorn
+import yappi
+from aiohttp import ClientResponse, ClientSession, ClientTimeout, DummyCookieJar, ServerDisconnectedError, TCPConnector
+from aiohttp.client import _RequestOptions
 from fastapi import FastAPI, Request, Response
-from httpx import AsyncClient, AsyncHTTPTransport, Cookies, Limits, Response
-from httpx._types import (
-    CookieTypes,
-    HeaderTypes,
-    QueryParamTypes,
-    RequestContent,
-    RequestData,
-    RequestFiles,
-)
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, ConfigDict
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.config_types import (
     BaseRunServerInstanceConfig,
     BaseServerConfig,
@@ -49,58 +51,92 @@ from nemo_gym.global_config import (
 )
 
 
-class NeMoGymStatelessCookies(Cookies):
-    def extract_cookies(self, response):
-        pass
+_GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
 
 
-class NeMoGymGlobalAsyncClient(AsyncClient):
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-
-        self._cookies = NeMoGymStatelessCookies(self._cookies)
+class GlobalAIOHTTPAsyncClientConfig(BaseModel):
+    global_aiohttp_connector_limit: int = 100 * 1024
+    global_aiohttp_connector_limit_per_host: int = 1024
 
 
-# We create a single global httpx client as recommended by https://www.python-httpx.org/async/
-# ```
-# In order to get the most benefit from connection pooling, make sure you're not instantiating multiple client instances - for example by using async with inside a "hot loop". This can be achieved either by having a single scoped client that's passed throughout wherever it's needed, or by having a single global client instance.
-# ```
-#
-# In principle, we use no timeout since various api or model calls may take an indefinite amount of time. Right now, we have no timeout, even for connection errors which may be problematic. We may want to revisit more granular httpx.Timeout later on.
-#
-# Eventually, we may also want to parameterize the max connections. For now, we set the max connections to just some very large number.
-#
-# It's critical that this client is NOT used before uvicorn.run is called. Under the hood, this async client will start and use an event loop, and store a handle to that specific event loop. When uvicorn.run is called, it will replace the event loop policy with its own. So the handle that the async client has is now outdated.
-_GLOBAL_HTTPX_CLIENT = None
-
-
-class GlobalHTTPXAsyncClientConfig(BaseModel):
-    global_httpx_max_connections: int = 1500
-    global_httpx_max_retries: int = 3
-
-
-def get_global_httpx_client(
+def get_global_aiohttp_client(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
     global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,
-) -> NeMoGymGlobalAsyncClient:
-    global _GLOBAL_HTTPX_CLIENT
-    if _GLOBAL_HTTPX_CLIENT is not None:
-        return _GLOBAL_HTTPX_CLIENT
+) -> ClientSession:
+    global _GLOBAL_AIOHTTP_CLIENT
+
+    if _GLOBAL_AIOHTTP_CLIENT is not None:
+        return _GLOBAL_AIOHTTP_CLIENT
+
     global_config_dict = get_global_config_dict(
         global_config_dict_parser_config=global_config_dict_parser_config,
         global_config_dict_parser_cls=global_config_dict_parser_cls,
     )
-    cfg = GlobalHTTPXAsyncClientConfig.model_validate(global_config_dict)
-    client = NeMoGymGlobalAsyncClient(
-        limits=Limits(
-            max_keepalive_connections=cfg.global_httpx_max_connections,
-            max_connections=cfg.global_httpx_max_connections,
-        ),
-        transport=AsyncHTTPTransport(retries=cfg.global_httpx_max_retries),
-        timeout=None,
+    cfg = GlobalAIOHTTPAsyncClientConfig.model_validate(global_config_dict)
+
+    return set_global_aiohttp_client(cfg)
+
+
+def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSession:
+    assert not is_global_aiohttp_client_setup(), (
+        "There is already a global aiohttp client setup. Please refactor your code or call `global_aiohttp_client_exit` if you want to explicitly re-make the client!"
     )
-    _GLOBAL_HTTPX_CLIENT = client
-    return client
+
+    client_session = ClientSession(
+        connector=TCPConnector(
+            limit=cfg.global_aiohttp_connector_limit,
+            limit_per_host=cfg.global_aiohttp_connector_limit_per_host,
+        ),
+        timeout=ClientTimeout(),
+        cookie_jar=DummyCookieJar(),
+    )
+
+    global _GLOBAL_AIOHTTP_CLIENT
+    _GLOBAL_AIOHTTP_CLIENT = client_session
+
+    return _GLOBAL_AIOHTTP_CLIENT
+
+
+def is_global_aiohttp_client_setup() -> bool:
+    return _GLOBAL_AIOHTTP_CLIENT is not None
+
+
+def global_aiohttp_client_exit():
+    if not is_global_aiohttp_client_setup():
+        return
+
+    global _GLOBAL_AIOHTTP_CLIENT
+    asyncio.run(_GLOBAL_AIOHTTP_CLIENT.close())
+
+    _GLOBAL_AIOHTTP_CLIENT = None
+
+
+atexit.register(global_aiohttp_client_exit)
+
+
+# This is not intended to be changed. If you want to increase this, we should probably figure out how to improve server-side robustness.
+MAX_NUM_TRIES = 3
+
+
+async def request(method: str, url: str, **kwargs: Unpack[_RequestOptions]) -> ClientResponse:
+    client = get_global_aiohttp_client()
+    num_tries = 1
+    while True:
+        try:
+            return await client.request(method=method, url=url, **kwargs)
+        except ServerDisconnectedError:
+            await asyncio.sleep(0.5)
+        except Exception as e:
+            print(
+                f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}
+Sleeping 0.5s and retrying...
+"""
+            )
+            if num_tries >= MAX_NUM_TRIES:
+                raise e
+
+            num_tries += 1
+            await asyncio.sleep(0.5)
 
 
 DEFAULT_HEAD_SERVER_PORT = 11000
@@ -146,18 +182,26 @@ class ServerClient(BaseModel):
     def _build_server_base_url(self, server_config_dict: OmegaConf) -> str:
         return f"http://{server_config_dict.host}:{server_config_dict.port}"
 
+    async def request(
+        self, server_name: str, url_path: str, method: str, **kwargs: Unpack[_RequestOptions]
+    ) -> ClientResponse:
+        server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
+        base_url = self._build_server_base_url(server_config_dict)
+
+        if "json" in kwargs:
+            json_obj = kwargs["json"]
+            if isinstance(json_obj, BaseModel):
+                kwargs["json"] = json_obj.model_dump(exclude_unset=True)
+
+        return await request(method=method, url=f"{base_url}{url_path}", **kwargs)
+
     async def get(
         self,
         server_name: str,
         url_path: str,
-        params: QueryParamTypes | None = None,
-        headers: HeaderTypes | None = None,
-        cookies: CookieTypes | None = None,
-        **kwargs,
-    ) -> Response:
+        **kwargs: Unpack[_RequestOptions],
+    ) -> ClientResponse:
         """
-        This function definition is directly copied from httpx._client.AsyncClient. We omit some kwargs since they are most likely not used. We omit the url arg and replace it with the `server_name` and `url_path` args below.
-
         Args:
             server_name: str
                 The name of the server you are trying to call.
@@ -165,12 +209,10 @@ class ServerClient(BaseModel):
                 The URL path in the server you are trying to call e.g. "/v1/responses".
 
         """
-        server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
-        return await get_global_httpx_client().get(
-            f"{self._build_server_base_url(server_config_dict)}{url_path}",
-            params=params,
-            headers=headers,
-            cookies=cookies,
+        return await self.request(
+            server_name=server_name,
+            url_path=url_path,
+            method="GET",
             **kwargs,
         )
 
@@ -178,18 +220,9 @@ class ServerClient(BaseModel):
         self,
         server_name: str,
         url_path: str,
-        content: RequestContent | None = None,
-        data: RequestData | None = None,
-        files: RequestFiles | None = None,
-        json: Any | BaseModel | None = None,
-        params: QueryParamTypes | None = None,
-        headers: HeaderTypes | None = None,
-        cookies: CookieTypes | None = None,
-        **kwargs,
-    ) -> Response:
+        **kwargs: Unpack[_RequestOptions],
+    ) -> ClientResponse:
         """
-        This function definition is directly copied from httpx._client.AsyncClient. We omit some kwargs since they are most likely not used. We omit the url arg and replace it with the `server_name` and `url_path` args below.
-
         Args:
             server_name: str
                 The name of the server you are trying to call.
@@ -197,16 +230,10 @@ class ServerClient(BaseModel):
                 The URL path in the server you are trying to call e.g. "/v1/responses".
 
         """
-        server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
-        return await get_global_httpx_client().post(
-            f"{self._build_server_base_url(server_config_dict)}{url_path}",
-            content=content,
-            data=data,
-            files=files,
-            json=json.model_dump(exclude_unset=True) if isinstance(json, BaseModel) else json,
-            params=params,
-            headers=headers,
-            cookies=cookies,
+        return await self.request(
+            server_name=server_name,
+            url_path=url_path,
+            method="POST",
             **kwargs,
         )
 
@@ -252,6 +279,20 @@ class BaseServer(BaseModel):
         return server_config
 
 
+class ProfilingMiddlewareInputConfig(BaseModel):
+    # Relative to the Gym root dir.
+    profiling_results_dirpath: Optional[str] = None
+
+
+class ProfilingMiddlewareConfig(ProfilingMiddlewareInputConfig):
+    profiling_enabled: bool = False
+
+
+class UvicornLoggingConfig(BaseModel):
+    # Default to False for regular use cases.
+    uvicorn_logging_show_200_ok: bool = False
+
+
 class SimpleServer(BaseServer):
     server_client: ServerClient
 
@@ -283,27 +324,86 @@ class SimpleServer(BaseServer):
         session_middleware_key = self.get_session_middleware_key()
         app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
 
+    def setup_profiling(self, app: FastAPI, profiling_config: ProfilingMiddlewareConfig) -> None:  # pragma: no cover
+        base_profile_dir = Path(PARENT_DIR) / profiling_config.profiling_results_dirpath
+        server_profile_path = (base_profile_dir / self.get_session_middleware_key()).with_suffix(".log")
+
+        base_profile_dir.mkdir(parents=True, exist_ok=True)
+
+        main_app_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan_wrapper(app):
+            yappi.set_clock_type("WALL")
+            yappi.start()
+            print(f"🔍 Enabled profiling for {self.config.name}")
+
+            async with main_app_lifespan(app) as maybe_state:
+                yield maybe_state
+
+            print(f"🛑 Stopping profiler for {self.config.name}. Check {server_profile_path} for the metrics!")
+            yappi.stop()
+
+            buffer = StringIO()
+            yappi.get_func_stats().print_all(
+                out=buffer,
+                columns={
+                    0: ("name", 200),
+                    1: ("ncall", 10),
+                    2: ("tsub", 8),
+                    3: ("ttot", 8),
+                    4: ("tavg", 8),
+                },
+            )
+
+            buffer.seek(0)
+            with open(server_profile_path, "w") as f:
+                past_header = False
+                for line in buffer:
+                    if not past_header or self.config.entrypoint in line:
+                        f.write(line)
+
+                    if line.startswith("name"):
+                        past_header = True
+
+        app.router.lifespan_context = lifespan_wrapper
+
     @classmethod
     def run_webserver(cls) -> None:  # pragma: no cover
+        global_config_dict = get_global_config_dict()
+
         server_config = cls.load_config_from_global_config()
         server_client = ServerClient(
             head_server_config=ServerClient.load_head_server_config(),
-            global_config_dict=get_global_config_dict(),
+            global_config_dict=global_config_dict,
         )
         server = cls(config=server_config, server_client=server_client)
 
         app = server.setup_webserver()
 
+        profiling_config = ProfilingMiddlewareConfig.model_validate(global_config_dict)
+        if profiling_config.profiling_enabled:
+            server.setup_profiling(app, profiling_config)
+
+        uvicorn_logging_cfg = UvicornLoggingConfig.model_validate(global_config_dict)
+        if not uvicorn_logging_cfg.uvicorn_logging_show_200_ok:
+
+            class No200Filter(LoggingFilter):
+                def filter(self, record: LogRecord) -> bool:
+                    msg = record.getMessage()
+                    return not msg.strip().endswith("200")
+
+            uvicorn_logger = getLogger("uvicorn.access")
+            uvicorn_logger.addFilter(No200Filter())
+
+            print(
+                "Adding a uvicorn logging filter so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
+            )
+
         uvicorn.run(
             app,
             host=server.config.host,
             port=server.config.port,
-            # TODO eventually we want to make this FastAPI server served across multiple processes or workers.
-            # Right now this will always use one process.
-            # workers=server.config.num_fastapi_workers,
-            # We don't have any explicit lifespan logic, so instead of defaulting to "auto"
-            # We just turn lifespan off
-            lifespan="off",
         )
 
 
@@ -318,7 +418,7 @@ class HeadServer(BaseServer):
         return app
 
     @classmethod
-    def run_webserver(cls) -> Thread:  # pragma: no cover
+    def run_webserver(cls) -> Tuple[uvicorn.Server, Thread]:  # pragma: no cover
         config = ServerClient.load_head_server_config()
         server = cls(config=config)
 
@@ -334,7 +434,7 @@ class HeadServer(BaseServer):
         thread = Thread(target=server.run, daemon=True)
         thread.start()
 
-        return thread
+        return server, thread
 
     async def global_config_dict_yaml(self) -> str:
         return OmegaConf.to_yaml(get_global_config_dict())

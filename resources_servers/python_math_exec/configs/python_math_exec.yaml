@@ -5,7 +5,7 @@ python_math_exec:
       max_execution_time: 10
 python_math_exec_simple_agent:
   responses_api_agents:
-    simple_agent_stateful:
+    simple_agent:
       entrypoint: app.py
       resources_server:
         type: resources_servers
