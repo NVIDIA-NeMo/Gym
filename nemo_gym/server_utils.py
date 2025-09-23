@@ -26,12 +26,12 @@ from uuid import uuid4
 
 import requests
 import uvicorn
+import yappi
 from aiohttp import ClientResponse, ClientSession, ClientTimeout, DummyCookieJar, ServerDisconnectedError, TCPConnector
 from aiohttp.client import _RequestOptions
 from fastapi import FastAPI, Request, Response
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, ConfigDict
-from pyinstrument import Profiler
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -326,7 +326,7 @@ class SimpleServer(BaseServer):
 
     def setup_profiling(self, app: FastAPI, profiling_config: ProfilingMiddlewareConfig) -> None:
         base_profile_dir = Path(PARENT_DIR) / profiling_config.profiling_results_dirpath
-        server_profile_path = (base_profile_dir / self.get_session_middleware_key()).with_suffix(".json")
+        server_profile_path = (base_profile_dir / self.get_session_middleware_key()).with_suffix(".log")
         if profiling_config.profiling_clear_previous_logs:
             print(f"Clearing previous profiling results at {server_profile_path}")
             server_profile_path.unlink(missing_ok=True)
@@ -337,22 +337,27 @@ class SimpleServer(BaseServer):
 
         @asynccontextmanager
         async def lifespan_wrapper(app):
-            profiler = Profiler()
-            profiler.start()
-            print(f"🔍 Enabled profiling. Results will be output to {server_profile_path}")
+            yappi.set_clock_type("WALL")
+            yappi.start()
+            print("🔍 Enabled profiling")
 
             async with main_app_lifespan(app) as maybe_state:
                 yield maybe_state
 
             print("🛑 Stopping profiler...")
-            profiler.stop()
-
-            to_dump = profiler.last_session.to_json()
-            if not to_dump:
-                return
+            yappi.stop()
 
             with open(server_profile_path, "w") as f:
-                json.dump(to_dump, f, separators=(",", ":"))
+                yappi.get_func_stats().print_all(
+                    out=f,
+                    columns={
+                        0: ("name", 100),
+                        1: ("ncall", 5),
+                        2: ("tsub", 8),
+                        3: ("ttot", 8),
+                        4: ("tavg", 8),
+                    },
+                )
 
         app.router.lifespan_context = lifespan_wrapper
 
