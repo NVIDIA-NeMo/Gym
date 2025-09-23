@@ -19,6 +19,7 @@
 - [How To: ng\_dump\_config - Dump a YAML config as exactly as NeMo Gym sees it](#how-to-ng_dump_config---dump-a-yaml-config-as-exactly-as-nemo-gym-sees-it)
 - [How To: Use NeMo Gym with a non-Responses compatible API endpoint like vLLM](#how-to-use-nemo-gym-with-a-non-responses-compatible-api-endpoint-like-vllm)
 - [How To: Multi-verifier usage](#how-to-multi-verifier-usage)
+- [How To: Profile your resources server](#how-to-profile-your-resources-server)
 - [FAQ: DCO and commit signing VSCode and Git setup](#faq-dco-and-commit-signing-vscode-and-git-setup)
 - [FAQ: SFT and RL](#faq-sft-and-rl)
 - [FAQ: Error: Found files with missing copyright](#faq-error-found-files-with-missing-copyright)
@@ -770,6 +771,53 @@ ng_run "+config_paths=[$config_paths]"
 ```
 
 The same process goes for data preparation and downstream training framework Gym configuration, you would just add additional server configs.
+
+
+# How To: Profile your resources server
+For large scale verifier training, it's critical that your resources server is as efficient as possible. It may be slammed with 16k concurrent requests or more. Gym provides easy tools to profile and understand the efficiency of your servers.
+
+In one terminal, start your agent, model, and resources servers, with profiling enabled.
+- `profiling_enabled` (bool): whether profiling is enabled or not. By default this is disabled since it incurs some slight overhead we don't want at runtime.
+- `profiling_results_dirpath` (str): The directory to save all server profiling results in. Previous logs for the same will be overwritten in the same directory.
+```bash
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/library_judge_math/configs/bytedtsinghua_dapo17k.yaml"
+ng_run "+config_paths=[${config_paths}]" \
+    +profiling_enabled=true \
+    +profiling_results_dirpath=results/profiling/library_judge_math
+```
+
+In another terminal, run some large number of rollouts against your servers. Use the `limit` and `num_repeats` flags to adjust the number of samples you want to run.
+```bash
+ng_collect_rollouts +agent_name=library_judge_math_simple_agent \
+    +input_jsonl_fpath=resources_servers/library_judge_math/data/dapo17k_bytedtsinghua_train.jsonl \
+    +output_jsonl_fpath=temp/library_judge_math_rollouts.jsonl \
+    +limit=1024 \
+    +num_repeats 1
+```
+
+After `ng_collect_rollouts` finishes, ctrl+c to quit your servers. You should see some output in the terminal like this:
+```bash
+```
+
+The log file content for a server will look something like the following:
+```
+name                                                                                                                      ncall       tsub      ttot      tavg      
+.../nemo-gym/resources_servers/library_judge_math/app.py:118 LibraryJudgeMathResourcesServer.verify                       1024        0.009755  17.98387  0.017562
+.../nemo-gym/resources_servers/library_judge_math/app.py:145 LibraryJudgeMathResourcesServer._verify_answer               1024        0.002933  17.87998  0.017461
+.../nemo-gym/resources_servers/library_judge_math/app.py:173 LibraryJudgeMathResourcesServer._verify_answer_with_library  1024        0.007851  17.87704  0.017458
+.../nemo-gym/resources_servers/library_judge_math/app.py:191 <genexpr>                                                    2339        0.001695  0.029082  0.000012
+.../nemo-gym/resources_servers/library_judge_math/app.py:163 _mute_output                                                 2048        0.007473  0.016538  0.000008
+```
+
+- `ncall`: number of calls (how many times the function/subroutine was invoked).
+  - The `LibraryJudgeMathResourcesServer.verify` function was invoked 1024 times.
+- `tsub`: time spent inside the subroutine itself, excluding calls to other functions (sometimes called "self time").
+  - The `LibraryJudgeMathResourcesServer.verify` function __itself__ accounted for only 0.009755s of time.
+- `ttot`: total time spent in the subroutine, including all the functions it called.
+  - The `LibraryJudgeMathResourcesServer.verify` function and all functions it called including `_verify_answer`, etc accounted for a total of 17.98387s.
+- `tavg`: average time per call (often ttot / ncall).
+  - The `LibraryJudgeMathResourcesServer.verify` function took 0.017562s per call on average.
 
 
 # FAQ: DCO and commit signing VSCode and Git setup
