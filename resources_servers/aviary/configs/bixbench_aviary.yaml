@@ -1,7 +1,7 @@
 bixbench_aviary_resources_server:
   resources_servers:
     aviary:
-      entrypoint: notebook_app.py
+      entrypoint: bixbench_app.py
 bixbench_aviary_agent:
   responses_api_agents:
     aviary_agent:

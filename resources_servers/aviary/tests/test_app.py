@@ -22,7 +22,7 @@ from nemo_gym.openai_utils import NeMoGymResponseFunctionToolCall
 from nemo_gym.server_utils import ServerClient
 from resources_servers.aviary.app import AviaryResourcesServerConfig
 from resources_servers.aviary.gsm8k_app import GSM8kResourcesServer
-from resources_servers.aviary.notebook_app import NotebookResourcesServer
+from resources_servers.aviary.notebook_app import BixBenchResourcesServer
 
 
 class TestGSM8kApp:
@@ -72,7 +72,7 @@ class TestNotebookApp:
             port=8080,
             entrypoint="",
         )
-        server = NotebookResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        server = BixBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
         # Start an environment
         # NOTE: this spins up a docker container, so should probably skip in CI
