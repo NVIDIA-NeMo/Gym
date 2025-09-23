@@ -170,9 +170,9 @@ class BixBenchDataset(TaskDataset[BixBenchEnv]):
         )
 
 
-class NotebookResourcesServer(AviaryResourcesServer[BixBenchEnv, BixBenchDataset]):
+class BixBenchResourcesServer(AviaryResourcesServer[BixBenchEnv, BixBenchDataset]):
     dataset: BixBenchDataset = Field(default_factory=lambda: BixBenchDataset())
 
 
 if __name__ == "__main__":
-    NotebookResourcesServer.run_webserver()
+    BixBenchResourcesServer.run_webserver()
