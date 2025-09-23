@@ -286,7 +286,6 @@ class ProfilingMiddlewareInputConfig(BaseModel):
 
 class ProfilingMiddlewareConfig(ProfilingMiddlewareInputConfig):
     profiling_enabled: bool = False
-    profiling_clear_previous_logs: bool = False
 
 
 class UvicornLoggingConfig(BaseModel):
@@ -328,9 +327,6 @@ class SimpleServer(BaseServer):
     def setup_profiling(self, app: FastAPI, profiling_config: ProfilingMiddlewareConfig) -> None:
         base_profile_dir = Path(PARENT_DIR) / profiling_config.profiling_results_dirpath
         server_profile_path = (base_profile_dir / self.get_session_middleware_key()).with_suffix(".log")
-        if profiling_config.profiling_clear_previous_logs:
-            print(f"Clearing previous profiling results at {server_profile_path}")
-            server_profile_path.unlink(missing_ok=True)
 
         base_profile_dir.mkdir(parents=True, exist_ok=True)
 
