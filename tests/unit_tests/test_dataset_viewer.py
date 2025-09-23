@@ -92,14 +92,14 @@ class TestDatasetViewer:
         # Check computed values
         reward_stats = result_1["reward"]
         assert reward_stats["Total # non-null values"] == 3
-        assert reward_stats["Average"] == (1.0 + 0.0 + 0.5) / 3
+        assert reward_stats["Average"] == round(((1.0 + 0.0 + 0.5) / 3), 3)
         assert reward_stats["Min"] == 0.0
         assert reward_stats["Max"] == 1.0
 
         # Check computed values with bools converted to int
         accuracy_stats = result_1["accuracy"]
         assert accuracy_stats["Total # non-null values"] == 3
-        assert accuracy_stats["Average"] == (1 + 0 + 1) / 3
+        assert accuracy_stats["Average"] == round(((1 + 0 + 1) / 3), 3)
         assert accuracy_stats["Min"] == 0
         assert accuracy_stats["Max"] == 1
 
