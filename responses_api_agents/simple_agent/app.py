@@ -85,7 +85,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 json=new_body,
                 cookies=model_server_cookies,
             )
-            model_response_json = model_response.json()
+            model_response_json = await model_response.json()
             model_server_cookies = model_response.cookies
             try:
                 model_response = NeMoGymResponse.model_validate(model_response_json)
@@ -116,7 +116,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 tool_response = NeMoGymFunctionCallOutput(
                     type="function_call_output",
                     call_id=output_function_call.call_id,
-                    output=api_response.content.decode(),
+                    output=(await api_response.content.read()).decode(),
                 )
                 new_outputs.append(tool_response)
 
@@ -150,7 +150,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         )
         cookies = response.cookies
 
-        verify_request = SimpleAgentVerifyRequest.model_validate(body.model_dump() | {"response": response.json()})
+        verify_request = SimpleAgentVerifyRequest.model_validate(
+            body.model_dump() | {"response": await response.json()}
+        )
 
         verify_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
@@ -158,7 +160,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             json=verify_request.model_dump(),
             cookies=cookies,
         )
-        return SimpleAgentVerifyResponse.model_validate(verify_response.json())
+        return SimpleAgentVerifyResponse.model_validate(await verify_response.json())
 
 
 if __name__ == "__main__":

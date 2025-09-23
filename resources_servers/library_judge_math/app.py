@@ -252,7 +252,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
             url_path="/v1/responses",
             json=responses_create_params,
         )
-        judge_response = NeMoGymResponse.model_validate(response.json())
+        judge_response = NeMoGymResponse.model_validate(await response.json())
         judge_evaluation = JudgeEvaluation(responses_create_params=responses_create_params, response=judge_response)
 
         # Currently, for all the cases in which the response from the LLM judge

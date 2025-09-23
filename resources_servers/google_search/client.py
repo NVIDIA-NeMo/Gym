@@ -68,4 +68,4 @@ task = server_client.post(
     ),
 )
 result = run(task)
-print(json.dumps(result.json(), indent=4))
+print(json.dumps(run(result.json()), indent=4))
