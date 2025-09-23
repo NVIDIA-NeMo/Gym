@@ -1,0 +1,23 @@
+import sys
+
+def main():
+    data = sys.stdin.read().split()
+    N = int(data[0])
+    K = int(data[1])
+    M = int(data[2])
+
+    for x in range(1, N+1):
+        dp = {0: 1}
+        for i in range(1, N+1):
+            d = i - x
+            new_dp = dp.copy()
+            for s, cnt in dp.items():
+                for a in range(1, K+1):
+                    new_s = s + a * d
+                    new_dp[new_s] = (new_dp.get(new_s, 0) + cnt) % M
+            dp = new_dp
+        result = (dp.get(0, 0) - 1) % M
+        print(result)
+
+if __name__ == '__main__':
+    main()
