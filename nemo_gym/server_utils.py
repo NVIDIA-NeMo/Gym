@@ -16,6 +16,7 @@ import atexit
 import json
 from abc import abstractmethod
 from contextlib import asynccontextmanager
+from io import StringIO
 from logging import Filter as LoggingFilter
 from logging import LogRecord, getLogger
 from os import getenv
@@ -347,17 +348,27 @@ class SimpleServer(BaseServer):
             print(f"🛑 Stopping profiler for {self.config.name}. Check {server_profile_path} for the metrics!")
             yappi.stop()
 
+            buffer = StringIO()
+            yappi.get_func_stats().print_all(
+                out=buffer,
+                columns={
+                    0: ("name", 200),
+                    1: ("ncall", 10),
+                    2: ("tsub", 8),
+                    3: ("ttot", 8),
+                    4: ("tavg", 8),
+                },
+            )
+
+            buffer.seek(0)
             with open(server_profile_path, "w") as f:
-                yappi.get_func_stats().print_all(
-                    out=f,
-                    columns={
-                        0: ("name", 100),
-                        1: ("ncall", 5),
-                        2: ("tsub", 8),
-                        3: ("ttot", 8),
-                        4: ("tavg", 8),
-                    },
-                )
+                past_header = False
+                for line in buffer:
+                    if not past_header or self.config.entrypoint in line:
+                        f.write(line)
+
+                    if line.startswith("name"):
+                        past_header = True
 
         app.router.lifespan_context = lifespan_wrapper
 
