@@ -201,7 +201,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
         return app
 
     # ------------ verifier ------------
-    async def verify(self, body: CompCodingVerifyRequest) -> CompCodingVerifyResponse:
+    def verify(self, body: CompCodingVerifyRequest) -> CompCodingVerifyResponse:
         # Enforce a single source of truth for model output: the Responses API object
         response_obj = getattr(body, "response", None)
         if not response_obj:
