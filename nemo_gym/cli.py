@@ -27,8 +27,6 @@ import uvicorn
 from devtools import pprint
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel
-from pyinstrument.renderers import HTMLRenderer
-from pyinstrument.session import Session
 from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR
@@ -42,7 +40,6 @@ from nemo_gym.global_config import (
 from nemo_gym.server_utils import (
     HEAD_SERVER_KEY_NAME,
     HeadServer,
-    ProfilingMiddlewareInputConfig,
     ServerClient,
     ServerStatus,
 )
@@ -593,29 +590,3 @@ Dependencies
 def dump_config():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     print(OmegaConf.to_yaml(global_config_dict, resolve=True))
-
-
-def view_profile():  # pragma: no cover
-    global_config_dict = get_global_config_dict()
-    cfg = ProfilingMiddlewareInputConfig.model_validate(global_config_dict)
-
-    assert cfg.profiling_results_dirpath, (
-        "You must provide a profiling results dirpath via `+profiling_results_dirpath=...`!"
-    )
-
-    dir_path = Path(cfg.profiling_results_dirpath)
-    search_path = str(dir_path / "*.json")
-    session_paths = glob(search_path)
-    assert session_paths, f"Didn't find any profiling data that matched the following path {search_path}"
-
-    base_session: Optional[Session] = None
-    for path in tqdm(session_paths, desc="Loading and combining profiling sessions"):
-        new_session = Session.load(path)
-        if base_session:
-            base_session = Session.combine(base_session, new_session)
-        else:
-            base_session = new_session
-
-    print("Rendering profile html. This may take a few moments...")
-    html_renderer = HTMLRenderer()
-    html_renderer.open_in_browser(base_session)
