@@ -15,16 +15,15 @@ import asyncio
 import atexit
 import json
 from abc import abstractmethod
+from contextlib import asynccontextmanager
 from logging import Filter as LoggingFilter
 from logging import LogRecord, getLogger
 from os import getenv
 from pathlib import Path
-from shutil import rmtree
 from threading import Thread
 from typing import Literal, Optional, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
-import aiofiles
 import requests
 import uvicorn
 from aiohttp import ClientResponse, ClientSession, ClientTimeout, DummyCookieJar, ServerDisconnectedError, TCPConnector
@@ -281,12 +280,12 @@ class BaseServer(BaseModel):
 
 class ProfilingMiddlewareInputConfig(BaseModel):
     # Relative to the Gym root dir.
-    profiling_middleware_results_dirpath: Optional[str] = None
+    profiling_results_dirpath: Optional[str] = None
 
 
 class ProfilingMiddlewareConfig(ProfilingMiddlewareInputConfig):
-    profiling_middleware_enabled: bool = False
-    profiling_middleware_clear_previous_logs: bool = False
+    profiling_enabled: bool = False
+    profiling_clear_previous_logs: bool = False
 
 
 class UvicornLoggingConfig(BaseModel):
@@ -325,33 +324,37 @@ class SimpleServer(BaseServer):
         session_middleware_key = self.get_session_middleware_key()
         app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
 
-    def setup_profiling_middleware(self, app: FastAPI, profiling_middleware_config: ProfilingMiddlewareConfig) -> None:
-        base_profile_dir = Path(PARENT_DIR) / profiling_middleware_config.profiling_middleware_results_dirpath
-        server_profile_dir = base_profile_dir / self.get_session_middleware_key()
-        if profiling_middleware_config.profiling_middleware_clear_previous_logs and server_profile_dir.exists():
-            print(f"Clearing previous profiling results at {server_profile_dir}")
-            rmtree(server_profile_dir)
+    def setup_profiling(self, app: FastAPI, profiling_config: ProfilingMiddlewareConfig) -> None:
+        base_profile_dir = Path(PARENT_DIR) / profiling_config.profiling_results_dirpath
+        server_profile_path = (base_profile_dir / self.get_session_middleware_key()).with_suffix(".json")
+        if profiling_config.profiling_clear_previous_logs:
+            print(f"Clearing previous profiling results at {server_profile_path}")
+            server_profile_path.unlink(missing_ok=True)
 
-        server_profile_dir.mkdir(parents=True, exist_ok=True)
+        base_profile_dir.mkdir(parents=True, exist_ok=True)
 
-        print(f"Enabled profiling. Results will be output to {server_profile_dir}")
+        main_app_lifespan = app.router.lifespan_context
 
-        @app.middleware("http")
-        async def profile_request(request: Request, call_next):
+        @asynccontextmanager
+        async def lifespan_wrapper(app):
             profiler = Profiler()
             profiler.start()
+            print(f"🔍 Enabled profiling. Results will be output to {server_profile_path}")
 
-            result = await call_next(request)
+            async with main_app_lifespan(app) as maybe_state:
+                yield maybe_state
 
+            print("🛑 Stopping profiler...")
             profiler.stop()
 
-            json_output_fpath = (server_profile_dir / str(uuid4())).with_suffix(".json")
             to_dump = profiler.last_session.to_json()
-            if to_dump:
-                async with aiofiles.open(json_output_fpath, "w") as f:
-                    await f.write(json.dumps(to_dump, separators=(",", ":")))
+            if not to_dump:
+                return
 
-            return result
+            with open(server_profile_path, "w") as f:
+                json.dump(to_dump, f, separators=(",", ":"))
+
+        app.router.lifespan_context = lifespan_wrapper
 
     @classmethod
     def run_webserver(cls) -> None:  # pragma: no cover
@@ -366,9 +369,9 @@ class SimpleServer(BaseServer):
 
         app = server.setup_webserver()
 
-        profiling_middleware_config = ProfilingMiddlewareConfig.model_validate(global_config_dict)
-        if profiling_middleware_config.profiling_middleware_enabled:
-            server.setup_profiling_middleware(app, profiling_middleware_config)
+        profiling_config = ProfilingMiddlewareConfig.model_validate(global_config_dict)
+        if profiling_config.profiling_enabled:
+            server.setup_profiling(app, profiling_config)
 
         uvicorn_logging_cfg = UvicornLoggingConfig.model_validate(global_config_dict)
         if not uvicorn_logging_cfg.uvicorn_logging_show_200_ok:
@@ -389,9 +392,6 @@ class SimpleServer(BaseServer):
             app,
             host=server.config.host,
             port=server.config.port,
-            # We don't have any explicit lifespan logic, so instead of defaulting to "auto"
-            # We just turn lifespan off
-            lifespan="off",
         )
 
 

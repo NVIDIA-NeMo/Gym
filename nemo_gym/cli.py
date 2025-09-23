@@ -599,13 +599,12 @@ def view_profile():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     cfg = ProfilingMiddlewareInputConfig.model_validate(global_config_dict)
 
-    assert cfg.profiling_middleware_results_dirpath, (
-        "You must provide a profiling results dirpath via `+profiling_middleware_results_dirpath=...`!"
+    assert cfg.profiling_results_dirpath, (
+        "You must provide a profiling results dirpath via `+profiling_results_dirpath=...`!"
     )
 
-    dir_path = Path(cfg.profiling_middleware_results_dirpath)
-    # Here we use `*/*.json` since that is the structure of output in nemo_gym.server_utils::SimpleServer::setup_profiling_middleware
-    search_path = str(dir_path / "*/*.json")
+    dir_path = Path(cfg.profiling_results_dirpath)
+    search_path = str(dir_path / "*.json")
     session_paths = glob(search_path)
     assert session_paths, f"Didn't find any profiling data that matched the following path {search_path}"
 
