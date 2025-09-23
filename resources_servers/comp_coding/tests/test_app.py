@@ -28,9 +28,14 @@ from nemo_gym.server_utils import ServerClient
 
 
 class TestApp:
+    def _setup_server(self) -> CompCodingResourcesServer:
+        return CompCodingResourcesServer(
+            config=CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
     def test_sanity(self) -> None:
-        cfg = CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
-        CompCodingResourcesServer(config=cfg, server_client=MagicMock(spec=ServerClient))
+        self._setup_server()
 
     async def test_verify_pass_via_response(self) -> None:
         # Assistant returns a python code block that squares the input
@@ -59,10 +64,7 @@ class TestApp:
             tools=[],
         )
 
-        server = CompCodingResourcesServer(
-            config=CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
-            server_client=MagicMock(spec=ServerClient),
-        )
+        server = self._setup_server()
 
         verify_req = CompCodingVerifyRequest(
             responses_create_params={
@@ -104,10 +106,7 @@ class TestApp:
             tools=[],
         )
 
-        server = CompCodingResourcesServer(
-            config=CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
-            server_client=MagicMock(spec=ServerClient),
-        )
+        server = self._setup_server()
 
         verify_req_bad = CompCodingVerifyRequest(
             responses_create_params={"input": [{"role": "user", "content": "square n"}]},
@@ -126,7 +125,7 @@ class TestApp:
         )
 
         with pytest.raises(ValidationError):
-            _ = CompCodingVerifyRequest(
+            CompCodingVerifyRequest(
                 responses_create_params={"input": [{"role": "user", "content": "anything"}]},
                 # response is intentionally omitted
                 verifier_metadata={"unit_tests": {"inputs": ["1\n"], "outputs": ["1"]}},
@@ -159,10 +158,7 @@ class TestApp:
             tools=[],
         )
 
-        server = CompCodingResourcesServer(
-            config=CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
-            server_client=MagicMock(spec=ServerClient),
-        )
+        server = self._setup_server()
 
         verify_req = CompCodingVerifyRequest(
             responses_create_params={
@@ -177,10 +173,7 @@ class TestApp:
 
     async def test_verify_syntax_error(self) -> None:
         """Code has a syntax error -> should report ERROR and reward 0.0"""
-        server = CompCodingResourcesServer(
-            config=CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
-            server_client=MagicMock(spec=ServerClient),
-        )
+        server = self._setup_server()
 
         response = NeMoGymResponse(
             id="resp_syntax_error",
