@@ -24,6 +24,7 @@ from threading import Thread
 from typing import Literal, Optional, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
+import aiofiles
 import requests
 import uvicorn
 from aiohttp import ClientResponse, ClientSession, ClientTimeout, DummyCookieJar, ServerDisconnectedError, TCPConnector
@@ -347,8 +348,8 @@ class SimpleServer(BaseServer):
             json_output_fpath = (server_profile_dir / str(uuid4())).with_suffix(".json")
             to_dump = profiler.last_session.to_json()
             if to_dump:
-                with open(json_output_fpath, "w") as f:
-                    json.dump(to_dump, f, separators=(",", ":"))
+                async with aiofiles.open(json_output_fpath, "w") as f:
+                    await f.write(json.dumps(to_dump, separators=(",", ":")))
 
             return result
 
