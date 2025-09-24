@@ -14,6 +14,7 @@
 
 import re
 import sys
+import unicodedata
 from pathlib import Path
 
 import yaml
@@ -113,7 +114,19 @@ def generate_table() -> str:
         else:
             rows.append(["?", server_name, path, "?"])
 
-    rows.sort(key=lambda r: ((r[0] or "").casefold(), r[1].casefold()))
+    def normalize_str(s: str) -> str:
+        if not s:
+            return ""
+        return unicodedata.normalize("NFKD", s).casefold().strip()
+
+    rows.sort(
+        key=lambda r: (
+            normalize_str(r[0]),
+            normalize_str(r[1]),
+            normalize_str(r[2]),
+            normalize_str(r[3]),
+        )
+    )
 
     table = [col_names, ["-" for _ in col_names]] + rows
     return format_table(table)
