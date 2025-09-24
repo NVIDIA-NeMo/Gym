@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Generator
 from unittest.mock import MagicMock
 
 import pytest
@@ -19,7 +20,9 @@ from app import (
     CompCodingResourcesServer,
     CompCodingResourcesServerConfig,
     CompCodingVerifyRequest,
+    CompCodingVerifyResponse,
 )
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from nemo_gym.openai_utils import NeMoGymResponse
@@ -28,15 +31,18 @@ from nemo_gym.server_utils import ServerClient
 
 class TestApp:
     @pytest.fixture(scope="module")
-    def comp_coding_resources_server(self) -> CompCodingResourcesServer:
-        return CompCodingResourcesServer(
+    def comp_coding_resources_server_client(self) -> Generator[TestClient, None, None]:
+        server = CompCodingResourcesServer(
             config=CompCodingResourcesServerConfig(
                 host="0.0.0.0", port=8080, entrypoint="", name="", num_processes=1, unit_test_timeout_secs=1
             ),
             server_client=MagicMock(spec=ServerClient),
         )
+        app = server.setup_webserver()
+        with TestClient(app) as client:
+            yield client
 
-    async def test_verify_pass_via_response(self, comp_coding_resources_server) -> None:
+    async def test_verify_pass_via_response(self, comp_coding_resources_server_client: TestClient) -> None:
         # Assistant returns a python code block that squares the input
         response = NeMoGymResponse(
             id="resp_ok",
@@ -73,10 +79,14 @@ class TestApp:
             verifier_metadata={"unit_tests": {"inputs": ["2\n", "5\n"], "outputs": ["4", "25"]}},
         )
 
-        res = await comp_coding_resources_server.verify(verify_req)
+        response = comp_coding_resources_server_client.post(
+            url="/verify",
+            json=verify_req.model_dump(),
+        )
+        res = CompCodingVerifyResponse.model_validate(response.json())
         assert res.reward == 1.0, res.reason
 
-    async def test_verify_fail_wrong_answer(self, comp_coding_resources_server) -> None:
+    async def test_verify_fail_wrong_answer(self, comp_coding_resources_server_client: TestClient) -> None:
         # Assistant prints n+1 instead of n*n
         response_bad = NeMoGymResponse(
             id="resp_bad",
@@ -109,8 +119,12 @@ class TestApp:
             verifier_metadata={"unit_tests": {"inputs": ["3\n"], "outputs": ["9"]}},
         )
 
-        res2 = await comp_coding_resources_server.verify(verify_req_bad)
-        assert res2.reward == 0.0 and "FAILED" in res2.reason
+        response = comp_coding_resources_server_client.post(
+            url="/verify",
+            json=verify_req_bad.model_dump(),
+        )
+        res = CompCodingVerifyResponse.model_validate(response.json())
+        assert res.reward == 0.0 and "FAILED" in res.reason
 
     def test_verify_missing_response_validation_error(self) -> None:
         """Omitting `response` should fail request validation (schema requires it)."""
@@ -121,7 +135,7 @@ class TestApp:
                 verifier_metadata={"unit_tests": {"inputs": ["1\n"], "outputs": ["1"]}},
             )
 
-    async def test_verify_no_code_block(self, comp_coding_resources_server) -> None:
+    async def test_verify_no_code_block(self, comp_coding_resources_server_client: TestClient) -> None:
         """Test when response contains no code block - should extract raw text"""
         response = NeMoGymResponse(
             id="resp_no_block",
@@ -156,10 +170,14 @@ class TestApp:
             verifier_metadata={"unit_tests": {"inputs": ["2\n"], "outputs": ["4"]}},
         )
 
-        res = await comp_coding_resources_server.verify(verify_req)
+        response = comp_coding_resources_server_client.post(
+            url="/verify",
+            json=verify_req.model_dump(),
+        )
+        res = CompCodingVerifyResponse.model_validate(response.json())
         assert res.reward == 1.0, res.reason
 
-    async def test_verify_syntax_error(self, comp_coding_resources_server) -> None:
+    async def test_verify_syntax_error(self, comp_coding_resources_server_client: TestClient) -> None:
         """Code has a syntax error -> should report ERROR and reward 0.0"""
         response = NeMoGymResponse(
             id="resp_syntax_error",
@@ -192,10 +210,14 @@ class TestApp:
             verifier_metadata={"unit_tests": {"inputs": ["\n"], "outputs": ["hello"]}},
         )
 
-        res = await comp_coding_resources_server.verify(verify_req)
+        response = comp_coding_resources_server_client.post(
+            url="/verify",
+            json=verify_req.model_dump(),
+        )
+        res = CompCodingVerifyResponse.model_validate(response.json())
         assert res.reward == 0.0 and "ERROR" in res.reason
 
-    async def test_verify_runtime_error(self, comp_coding_resources_server) -> None:
+    async def test_verify_runtime_error(self, comp_coding_resources_server_client: TestClient) -> None:
         response = NeMoGymResponse(
             id="resp_runtime_error",
             created_at=0.0,
@@ -227,5 +249,9 @@ class TestApp:
             verifier_metadata={"unit_tests": {"inputs": ["5\n"], "outputs": ["error"]}},
         )
 
-        res = await comp_coding_resources_server.verify(verify_req)
+        response = comp_coding_resources_server_client.post(
+            url="/verify",
+            json=verify_req.model_dump(),
+        )
+        res = CompCodingVerifyResponse.model_validate(response.json())
         assert res.reward == 0.0 and "ERROR" in res.reason
