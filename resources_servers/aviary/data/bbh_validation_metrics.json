@@ -1,0 +1,52 @@
+{
+    "name": "validation",
+    "type": "validation",
+    "jsonl_fpath": "resources_servers/aviary/data/bbh_validation.jsonl",
+    "gitlab_identifier": {
+        "dataset_name": "PLACEHOLDER",
+        "version": "0.0.1",
+        "artifact_fpath": "train.jsonl"
+    },
+    "license": "Apache 2.0",
+    "Number of examples": 10,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 10,
+        "Average": 2.0,
+        "Min": 2.0,
+        "Max": 2.0,
+        "Median": 2.0,
+        "Standard deviation": 0.0
+    },
+    "Number of turns": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "task_idx": {
+        "Total # non-null values": 10,
+        "Average": 28.2,
+        "Min": 9.0,
+        "Max": 49.0,
+        "Median": 26.5,
+        "Standard deviation": 14.497509364638388
+    }
+}

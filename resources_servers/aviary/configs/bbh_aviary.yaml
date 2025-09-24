@@ -1,0 +1,41 @@
+bbh_aviary_resources_server:
+  resources_servers:
+    aviary:
+      entrypoint: bbh_app.py
+
+bbh_aviary_agent:
+  responses_api_agents:
+    aviary_agent:
+      entrypoint: app.py
+
+      resources_server:
+        type: resources_servers
+        name: bbh_aviary_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+      max_total_sequence_length: 32768
+      collapse_old_env_states: true
+      old_env_state_message: "[Previous notebook state - hidden]"
+
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/aviary/data/bbh_train.jsonl
+        gitlab_identifier:
+          dataset_name: PLACEHOLDER 
+          version: 0.0.1
+          artifact_fpath: train.jsonl
+        license: Apache 2.0
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/aviary/data/bbh_validation.jsonl
+        gitlab_identifier:
+          dataset_name: PLACEHOLDER 
+          version: 0.0.1
+          artifact_fpath: train.jsonl
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/aviary/data/bbh_example.jsonl
