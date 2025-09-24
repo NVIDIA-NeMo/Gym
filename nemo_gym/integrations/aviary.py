@@ -85,3 +85,7 @@ class AviaryCloseRequest(BaseModel):
 class AviaryCloseResponse(BaseModel):
     message: str
     success: bool
+
+
+class AviaryEnvStateEasyInputMessage(NeMoGymEasyInputMessage):
+    """Special subclass so we can identify messages representing environment state."""

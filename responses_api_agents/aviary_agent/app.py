@@ -13,6 +13,7 @@
 # limitations under the License.
 import json
 import logging
+from collections.abc import Sequence
 from typing import List, cast
 
 from pydantic import ConfigDict, Field, ValidationError
@@ -23,12 +24,14 @@ from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.integrations.aviary import (
     AviaryAgentVerifyRequest,
     AviaryAgentVerifyResponse,
+    AviaryEnvStateEasyInputMessage,
     AviaryNeMoGymResponse,
     AviarySeedSessionResponse,
     AviaryStepResponse,
 )
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
+    NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
@@ -49,6 +52,9 @@ class AviaryAgentConfig(BaseResponsesAPIAgentConfig):
     # exceed the limit. If not set, vLLM will reject the request.
     max_total_sequence_length: int | None = None
 
+    collapse_old_env_states: bool = False
+    old_env_state_message: str = "[Previous environment state - hidden]"
+
 
 class AviaryAgentRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
@@ -62,6 +68,26 @@ class AviaryAgentRunRequest(BaseRunRequest):
 
 class AviaryAgent(SimpleResponsesAPIAgent):
     config: AviaryAgentConfig
+
+    def update_agent_state(
+        self,
+        agent_state: NeMoGymResponseInput,
+        model_output: list[NeMoGymResponseOutputMessage],
+        obs: list[NeMoGymEasyInputMessage | NeMoGymFunctionCallOutput],
+    ) -> NeMoGymResponseInput:
+        """Update the agent state.
+
+        Separate method so subclasses can override.
+        """
+
+        prev_messages = agent_state.input
+        if self.config.collapse_old_env_states:
+            hidden_message = NeMoGymEasyInputMessage(role="user", content=self.config.old_env_state_message)
+            prev_messages = [
+                hidden_message if isinstance(m, AviaryEnvStateEasyInputMessage) else m for m in prev_messages
+            ]
+
+        return agent_state.model_copy(update={"input": prev_messages + model_output + obs})
 
     async def responses(self, req: AviaryAgentRunRequest) -> AviaryNeMoGymResponse:
         req = req.model_copy(deep=True)
@@ -132,7 +158,9 @@ class AviaryAgent(SimpleResponsesAPIAgent):
 
             if not all_fn_calls and all_output_messages:
                 # Got non-tool-call outputs, so ask the model to try again.
-                obs = [NeMoGymEasyInputMessage(role="user", content="Please call a tool to proceed.")]
+                obs: Sequence[NeMoGymEasyInputMessage | NeMoGymFunctionCallOutput] = [
+                    NeMoGymEasyInputMessage(role="user", content="Please call a tool to proceed.")
+                ]
             else:
                 # Apply action to environment
                 raw_env_response = await self.server_client.post(
@@ -144,7 +172,7 @@ class AviaryAgent(SimpleResponsesAPIAgent):
                 obs = env_response.obs
                 done = env_response.done
 
-            agent_state = agent_state.model_copy(update={"input": agent_state.input + model_output + obs})
+            agent_state = self.update_agent_state(agent_state, model_output, obs)
             agent_state_history.append(cast(NeMoGymResponseInput, agent_state.input))
 
             # NOTE: this doesn't count the tool response tokens. Would need to call the tokenizer to properly count
