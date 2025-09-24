@@ -135,7 +135,7 @@ class BaseRunServerConfig(BaseServerConfig):
     @model_validator(mode="after")
     def validate_domain(self) -> "BaseRunServerTypeConfig":
         name = getattr(self, "name", None)
-        if name and "resources_server" in self.name:
+        if name and self.name.endswith("_resources_server"):
             assert self.domain is not None, "A domain is required for resource servers."
 
         return self
