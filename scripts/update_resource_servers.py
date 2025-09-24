@@ -24,60 +24,96 @@ README_PATH = Path("README.md")
 TARGET_FOLDER = Path("resources_servers")
 
 
-def extract_domain_and_license(yaml_path: Path) -> list[tuple[str, str]]:
+def extract_domain_and_license(yaml_path: Path) -> tuple[str, str]:
     """
-    {name}_resources_server:
-        resources_servers:
-            {name}:
-                entrypoint: app.py
-                license: Test License <--
-                domain: Test Domain   <--
+    Domain:
+        {name}_resources_server:
+            resources_servers:
+                {name}:
+                    domain: ...
+
+    License:
+        {something}_simple_agent:
+            responses_api_agents:
+                simple_agent:
+                    datasets:
+                        - name: train
+                          type: train
+                          license: ...
     """
     with yaml_path.open() as f:
         data = yaml.safe_load(f)
 
-    results = []
+    domain = None
+    license = None
 
-    def visit(data, level=1):
-        if level == 4:  # domain and license
+    def visit_domains(data, level=1):
+        nonlocal domain
+        if not isinstance(data, dict):
+            return
+        if level == 4 and domain is None:
             domain = data.get("domain")
-            license = data.get("license")
-            if domain is not None or license is not None:
-                results.append((domain, license))
+            return
         else:
             for k, v in data.items():
                 if level == 2 and k != "resources_servers":
                     continue
-                visit(v, level + 1)
+                visit_domains(v, level + 1)
 
-    visit(data)
-    return results
+    def visit_license(data):
+        nonlocal license
+        if not isinstance(data, dict):
+            return
+        for k1, v1 in data.items():
+            if k1.endswith("_simple_agent") and isinstance(v1, dict):
+                v2 = v1.get("responses_api_agents")
+                if isinstance(v2, dict):
+                    v3 = v2.get("simple_agent")
+                    if isinstance(v3, dict):
+                        datasets = v3.get("datasets")
+                        if isinstance(datasets, list):
+                            for entry in datasets:
+                                if (
+                                    isinstance(entry, dict)
+                                    and entry.get("name") == "train"
+                                    and entry.get("type") == "train"
+                                ):
+                                    license = entry.get("license")
+                                    return
+
+    visit_domains(data)
+    visit_license(data)
+
+    return domain, license
 
 
 def generate_table() -> str:
     """Outputs a grid with table data"""
-    col_names = ["Domain", "License", "Server Type Name", "Path"]
+    col_names = ["Domain", "Resource Server Name", "Config Path", "License"]
 
     rows = []
-    for subdir in sorted(TARGET_FOLDER.iterdir()):
-        path = f"`{TARGET_FOLDER.name}/{subdir.name}`"
+    for subdir in TARGET_FOLDER.iterdir():
+        path = f"{TARGET_FOLDER.name}/{subdir.name}"
         server_name = subdir.name.replace("_", " ").title()
 
         configs_folder = subdir / "configs"
         if configs_folder.exists() and configs_folder.is_dir():
-            yaml_files = sorted(configs_folder.glob("*.yaml"))
+            yaml_files = configs_folder.glob("*.yaml")
             if yaml_files:
                 for yaml_file in yaml_files:
+                    config_path = f"`{path + '/configs/' + yaml_file.name}`"
                     extraction = extract_domain_and_license(yaml_file)
                     if extraction:
-                        for domain, license in extraction:
-                            rows.append([domain, license, server_name, path])
+                        domain, license = extraction
+                        rows.append([domain, server_name, config_path, license])
                     else:
-                        rows.append(["?", "?", server_name, path])
+                        rows.append(["?", server_name, config_path, "?"])
             else:
-                rows.append(["?", "?", server_name, path])
+                rows.append(["?", server_name, path, "?"])
         else:
-            rows.append(["?", "?", server_name, path])
+            rows.append(["?", server_name, path, "?"])
+
+    rows.sort(key=lambda r: (r[0] or "").lower())
 
     table = [col_names, ["-" for _ in col_names]] + rows
     return format_table(table)
