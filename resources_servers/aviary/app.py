@@ -23,6 +23,7 @@ from pydantic import ConfigDict, Field
 
 from aviary.core import (
     Environment,
+    EnvStateMessage,
     Message,
     TaskDataset,
     Tool,
@@ -37,6 +38,7 @@ from nemo_gym.integrations.aviary import (
     AviaryAgentVerifyResponse,
     AviaryCloseRequest,
     AviaryCloseResponse,
+    AviaryEnvStateEasyInputMessage,
     AviaryResourcesServerConfig,
     AviarySeedSessionRequest,
     AviarySeedSessionResponse,
@@ -73,7 +75,8 @@ def obs_msg_to_nemo_gym(obs: Message) -> NeMoGymEasyInputMessage:
                 return {**c, "type": type_remap.get(c["type"], c["type"])}
 
         dump["content"] = [fix_content(c) for c in dump["content"]]
-    return NeMoGymEasyInputMessage.model_validate(dump)
+    message_cls = AviaryEnvStateEasyInputMessage if isinstance(obs, EnvStateMessage) else NeMoGymEasyInputMessage
+    return message_cls.model_validate(dump)
 
 
 class AviaryResourcesServer(SimpleResourcesServer, Generic[TEnv, TDataset], ABC):
