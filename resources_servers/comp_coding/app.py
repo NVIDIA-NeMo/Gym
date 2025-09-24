@@ -52,7 +52,9 @@ class CompCodingVerifyRequest(CompCodingRunRequest, BaseVerifyRequest):
 
 
 class CompCodingVerifyResponse(BaseVerifyResponse):
-    reason: Optional[str] = None
+    reason: str
+    extracted_model_output: Optional[str]
+    extracted_model_code: Optional[str]
 
 
 # ------------ helpers ------------
@@ -184,14 +186,26 @@ class CompCodingResourcesServer(SimpleResourcesServer):
         model_out = _extract_text_from_response(body.response)
         if not model_out or not model_out.strip():
             # A response existed but had no usable text -> model failure
-            return CompCodingVerifyResponse(**body.model_dump(), reward=0.0, reason="Empty model output")
+            return CompCodingVerifyResponse(
+                **body.model_dump(),
+                reward=0.0,
+                reason="Empty model output",
+                extracted_model_code=None,
+                extracted_model_output=None,
+            )
 
         tests = UnitTests.model_validate(body.verifier_metadata["unit_tests"])
 
         # 3) extract code (code fence or raw)
         code = _extract_code(model_out)
         if not code:
-            return CompCodingVerifyResponse(**body.model_dump(), reward=0.0, reason="Could not extract code")
+            return CompCodingVerifyResponse(
+                **body.model_dump(),
+                reward=0.0,
+                reason="Could not extract code",
+                extracted_model_output=model_out,
+                extracted_model_code=None,
+            )
 
         # 4) run (no sandbox)
         ok, msg = _run_code_against_tests(code, tests)
@@ -199,7 +213,9 @@ class CompCodingResourcesServer(SimpleResourcesServer):
         return CompCodingVerifyResponse(
             **body.model_dump(),
             reward=1.0 if ok else 0.0,
-            reason=msg,  # always include the reason message
+            reason=msg,
+            extracted_model_output=model_out,
+            extracted_model_code=code,
         )
 
 
