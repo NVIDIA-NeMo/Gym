@@ -193,14 +193,13 @@ class CompCodingResourcesServer(SimpleResourcesServer):
     config: CompCodingResourcesServerConfig
 
     def model_post_init(self, context):
-        self.pool: Optional[Pool] = None
-        return super().model_post_init(context)
+        self._pool: Optional[Pool] = None
 
     def setup_webserver(self) -> FastAPI:
         @asynccontextmanager
         async def lifespan(app: FastAPI):
             with Pool(self.config.num_workers) as pool:
-                self.pool = pool
+                self._pool = pool
                 yield
 
         app = FastAPI(lifespan=lifespan)
@@ -238,7 +237,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             )
 
         # 4) run (no sandbox)
-        result = self.pool.apply_async(_run_code_against_tests, (code, tests))
+        result = self._pool.apply_async(_run_code_against_tests, (code, tests))
         start_time = time()
         await sleep(self.config.unit_test_timeout_secs)
 
