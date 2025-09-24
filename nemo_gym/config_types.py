@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from enum import Enum
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
 
 from omegaconf import DictConfig, OmegaConf
@@ -110,6 +111,18 @@ class DatasetConfig(BaseModel):
 ########################################
 
 
+class Domain(str, Enum):
+    MATH = "math"
+    CODING = "coding"
+    AGENT = "agent"
+    KNOWLEDGE = "knowledge"
+    INSTRUCTION_FOLLOWING = "instruction_following"
+    LONG_CONTEXT = "long_context"
+    SAFETY = "safety"
+    GAMES = "games"
+    OTHER = "other"
+
+
 class BaseServerConfig(BaseModel):
     host: str
     port: int
@@ -117,6 +130,15 @@ class BaseServerConfig(BaseModel):
 
 class BaseRunServerConfig(BaseServerConfig):
     entrypoint: str
+    domain: Optional[Domain] = None  # Only required for resource servers
+
+    @model_validator(mode="after")
+    def validate_domain(self) -> "BaseRunServerTypeConfig":
+        name = getattr(self, "name", None)
+        if name and "resources_server" in self.name:
+            assert self.domain is not None, "A domain is required for resource servers."
+
+        return self
 
 
 class BaseRunServerInstanceConfig(BaseRunServerConfig):

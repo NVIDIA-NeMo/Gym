@@ -14,7 +14,6 @@
 import asyncio
 import json
 import shlex
-from enum import Enum
 from glob import glob
 from os import environ, makedirs
 from os.path import exists
@@ -56,22 +55,8 @@ def _run_command(command: str, working_directory: Path) -> Popen:  # pragma: no 
     return Popen(command, executable="/bin/bash", shell=True, env=custom_env)
 
 
-class Domain(str, Enum):
-    MATH = "math"
-    CODING = "coding"
-    AGENT = "agent"
-    KNOWLEDGE = "knowledge"
-    INSTRUCTION_FOLLOWING = "instruction_following"
-    LONG_CONTEXT = "long_context"
-    SAFETY = "safety"
-    GAMES = "games"
-    OTHER = "other"
-
-
 class RunConfig(BaseModel):
     entrypoint: str
-    domain: Optional[Domain] = None
-    license: Optional[str] = None
 
 
 class TestConfig(RunConfig):
@@ -99,8 +84,6 @@ class ServerInstanceDisplayConfig(BaseModel):
     pid: Optional[int] = None
     config_path: str
     url: Optional[str] = None
-    domain: Optional[Domain] = None
-    license: Optional[str] = None
 
 
 class RunHelper:  # pragma: no cover
@@ -140,19 +123,6 @@ class RunHelper:  # pragma: no cover
             if not isinstance(server_config_dict, DictConfig):
                 continue
 
-            # Enforce domain and license for resources_server
-            if first_key == "resources_servers":
-                missing_fields = []
-                for field in ("domain", "license"):
-                    if field not in server_config_dict or server_config_dict[field] in (None, ""):
-                        missing_fields.append(field)
-                if missing_fields:
-                    raise ValueError(
-                        f"Config error in `{top_level_path}` > `{first_key}` > `{second_key}`: "
-                        f"Missing required field(s): {', '.join(missing_fields)}. "
-                        "Please add them to your YAML config."
-                    )
-
             if "entrypoint" not in server_config_dict:
                 continue
 
@@ -173,9 +143,6 @@ class RunHelper:  # pragma: no cover
             host = server_config_dict.get("host")
             port = server_config_dict.get("port")
 
-            domain = server_config_dict.get("domain")
-            license = server_config_dict.get("license")
-
             self._server_instance_display_configs.append(
                 ServerInstanceDisplayConfig(
                     process_name=top_level_path,
@@ -188,8 +155,6 @@ class RunHelper:  # pragma: no cover
                     url=f"http://{host}:{port}" if host and port else None,
                     pid=process.pid,
                     config_path=top_level_path,
-                    domain=domain,
-                    license=license,
                 )
             )
 
