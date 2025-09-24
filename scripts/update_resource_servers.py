@@ -12,11 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import filecmp
 import re
-import shutil
 import sys
-import tempfile
 from pathlib import Path
 
 import yaml
@@ -116,7 +113,7 @@ def generate_table() -> str:
         else:
             rows.append(["?", server_name, path, "?"])
 
-    rows.sort(key=lambda r: (r[0] or "").lower())
+    rows.sort(key=lambda r: ((r[0] or "").casefold(), r[1].casefold()))
 
     table = [col_names, ["-" for _ in col_names]] + rows
     return format_table(table)
@@ -166,18 +163,7 @@ def main():
         sys.exit(1)
 
     new_text = pattern.sub(lambda m: f"{m.group(1)}\n{generate_table()}\n{m.group(3)}", text)
-
-    # idempotent write
-    with tempfile.NamedTemporaryFile("w", delete=False) as tmp:
-        tmp_path = Path(tmp.name)
-        tmp.write(new_text)
-
-    if not README_PATH.exists() or not filecmp.cmp(tmp_path, README_PATH, shallow=False):
-        shutil.move(tmp_path, README_PATH)
-        print("README.md updated.")
-    else:
-        tmp_path.unlink()
-        print("README.md already up to date.")
+    README_PATH.write_text(new_text)
 
 
 if __name__ == "__main__":

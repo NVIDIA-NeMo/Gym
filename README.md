@@ -86,16 +86,16 @@ ng_test_all
 <!-- START_RESOURCE_TABLE -->
 | Domain                | Resource Server Name  | Config Path                                                                  | License                                                   |
 | --------------------- | --------------------- | ---------------------------------------------------------------------------- | --------------------------------------------------------- |
-| agent                 | Simple Weather        | `resources_servers/simple_weather/configs/simple_weather.yaml`               | None                                                      |
-| agent                 | Workbench             | `resources_servers/workbench/configs/workbench.yaml`                         | Apache 2.0                                                |
 | agent                 | Multiverse Math Hard  | `resources_servers/multiverse_math_hard/configs/multiverse_math_hard.yaml`   | Apache 2.0                                                |
+| agent                 | Simple Weather        | `resources_servers/simple_weather/configs/simple_weather.yaml`               | None                                                      |
 | agent                 | Stateful Counter      | `resources_servers/stateful_counter/configs/stateful_counter.yaml`           | Apache 2.0                                                |
+| agent                 | Workbench             | `resources_servers/workbench/configs/workbench.yaml`                         | Apache 2.0                                                |
 | coding                | Comp Coding           | `resources_servers/comp_coding/configs/comp_coding.yaml`                     | Apache 2.0                                                |
-| instruction_following | Multineedle           | `resources_servers/multineedle/configs/multineedle.yaml`                     | Apache 2.0                                                |
-| instruction_following | Instruction Following | `resources_servers/instruction_following/configs/instruction_following.yaml` | Apache 2.0                                                |
 | instruction_following | Google Search         | `resources_servers/google_search/configs/google_search.yaml`                 | Apache 2.0                                                |
-| knowledge             | Mcqa                  | `resources_servers/mcqa/configs/mcqa.yaml`                                   | Apache 2.0                                                |
+| instruction_following | Instruction Following | `resources_servers/instruction_following/configs/instruction_following.yaml` | Apache 2.0                                                |
+| instruction_following | Multineedle           | `resources_servers/multineedle/configs/multineedle.yaml`                     | Apache 2.0                                                |
 | knowledge             | Equivalence Llm Judge | `resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml` | None                                                      |
+| knowledge             | Mcqa                  | `resources_servers/mcqa/configs/mcqa.yaml`                                   | Apache 2.0                                                |
 | math                  | Library Judge Math    | `resources_servers/library_judge_math/configs/dapo17k.yaml`                  | Apache 2.0                                                |
 | math                  | Library Judge Math    | `resources_servers/library_judge_math/configs/math_stack_overflow.yaml`      | Creative Commons Attribution-ShareAlike 4.0 International |
 | math                  | Library Judge Math    | `resources_servers/library_judge_math/configs/bytedtsinghua_dapo17k.yaml`    | Apache 2.0                                                |
