@@ -96,10 +96,10 @@ ng_test_all
 | instruction_following | Multineedle           | `resources_servers/multineedle/configs/multineedle.yaml`                     | Apache 2.0                                                |
 | knowledge             | Equivalence Llm Judge | `resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml` | None                                                      |
 | knowledge             | Mcqa                  | `resources_servers/mcqa/configs/mcqa.yaml`                                   | Apache 2.0                                                |
-| math                  | Library Judge Math    | `resources_servers/library_judge_math/configs/dapo17k.yaml`                  | Apache 2.0                                                |
-| math                  | Library Judge Math    | `resources_servers/library_judge_math/configs/math_stack_overflow.yaml`      | Creative Commons Attribution-ShareAlike 4.0 International |
 | math                  | Library Judge Math    | `resources_servers/library_judge_math/configs/bytedtsinghua_dapo17k.yaml`    | Apache 2.0                                                |
+| math                  | Library Judge Math    | `resources_servers/library_judge_math/configs/dapo17k.yaml`                  | Apache 2.0                                                |
 | math                  | Library Judge Math    | `resources_servers/library_judge_math/configs/library_judge_math.yaml`       | Creative Commons Attribution 4.0 International            |
+| math                  | Library Judge Math    | `resources_servers/library_judge_math/configs/math_stack_overflow.yaml`      | Creative Commons Attribution-ShareAlike 4.0 International |
 | math                  | Python Math Exec      | `resources_servers/python_math_exec/configs/python_math_exec.yaml`           | Apache 2.0                                                |
 <!-- END_RESOURCE_TABLE -->
 
