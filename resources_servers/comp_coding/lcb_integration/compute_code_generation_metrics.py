@@ -14,8 +14,8 @@ from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
+from lcb_integration.testing_util import run_test
 from lcb_runner.evaluation.pass_k_utils import compute_metrics_from_results
-from lcb_runner.evaluation.testing_util import run_test
 from tqdm import tqdm
 
 
