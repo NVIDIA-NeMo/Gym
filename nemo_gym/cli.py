@@ -14,6 +14,7 @@
 import asyncio
 import json
 import shlex
+from enum import Enum
 from glob import glob
 from os import environ, makedirs
 from os.path import exists
@@ -55,8 +56,22 @@ def _run_command(command: str, working_directory: Path) -> Popen:  # pragma: no 
     return Popen(command, executable="/bin/bash", shell=True, env=custom_env)
 
 
+class Domain(str, Enum):
+    MATH = "math"
+    CODING = "coding"
+    AGENT = "agent"
+    KNOWLEDGE = "knowledge"
+    INSTRUCTION_FOLLOWING = "instruction_following"
+    LONG_CONTEXT = "long_context"
+    SAFETY = "safety"
+    GAMES = "games"
+    OTHER = "other"
+
+
 class RunConfig(BaseModel):
     entrypoint: str
+    domain: Optional[Domain] = None
+    license: Optional[str] = None
 
 
 class TestConfig(RunConfig):
@@ -84,8 +99,8 @@ class ServerInstanceDisplayConfig(BaseModel):
     pid: Optional[int] = None
     config_path: str
     url: Optional[str] = None
+    domain: Optional[Domain] = None
     license: Optional[str] = None
-    domain: Optional[str] = None
 
 
 class RunHelper:  # pragma: no cover
@@ -158,8 +173,8 @@ class RunHelper:  # pragma: no cover
             host = server_config_dict.get("host")
             port = server_config_dict.get("port")
 
-            license = server_config_dict.get("license")
             domain = server_config_dict.get("domain")
+            license = server_config_dict.get("license")
 
             self._server_instance_display_configs.append(
                 ServerInstanceDisplayConfig(
@@ -173,9 +188,8 @@ class RunHelper:  # pragma: no cover
                     url=f"http://{host}:{port}" if host and port else None,
                     pid=process.pid,
                     config_path=top_level_path,
-                    # TODO: hide Nones for agent + model servers
-                    license=license,
                     domain=domain,
+                    license=license,
                 )
             )
 
@@ -211,7 +225,7 @@ class RunHelper:  # pragma: no cover
 
         for i, inst in enumerate(self._server_instance_display_configs, 1):
             print(f"[{i}] {inst.process_name} ({inst.server_type}/{inst.name})")
-            pprint(inst.model_dump())
+            pprint(inst.model_dump(mode="json"))
         print(f"{'#' * 100}\n")
 
     def poll(self) -> None:

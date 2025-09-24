@@ -2,6 +2,7 @@ google_search:
   resources_servers:
     google_search:
       entrypoint: app.py
+      domain: instruction_following
 google_search_simple_agent:
   responses_api_agents:
     simple_agent:

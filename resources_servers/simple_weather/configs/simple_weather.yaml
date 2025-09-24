@@ -2,6 +2,7 @@ simple_weather:
   resources_servers:
     simple_weather:
       entrypoint: app.py
+      domain: agent
 simple_weather_simple_agent:
   responses_api_agents:
     simple_agent:

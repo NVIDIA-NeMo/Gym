@@ -2,6 +2,7 @@ workbench:
   resources_servers:
     workbench:
       entrypoint: app.py
+      domain: agent
 workbench_simple_agent:
   responses_api_agents:
     simple_agent:
