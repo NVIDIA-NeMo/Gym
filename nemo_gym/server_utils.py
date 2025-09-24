@@ -161,27 +161,21 @@ class ServerClient(BaseModel):
     @classmethod
     def load_from_global_config(cls, head_server_config: Optional[BaseServerConfig] = None) -> "ServerClient":
         if head_server_config is None:
-            print(f"DEBUG: ServerClient.load_from_global_config: head_server_config is None, load...", flush=True)
             head_server_config = cls.load_head_server_config()
-        print(f"DEBUG: ServerClient.load_from_global_config: head_server_config = {head_server_config}", flush=True)
 
         # It's critical we use requests here instead of the global httpx client since a FastAPI server may be run downstream of this function call.
         head_server_url = f"http://{head_server_config.host}:{head_server_config.port}"
-        print(f"DEBUG: ServerClient.load_from_global_config: connect: head_server_url = {head_server_url}", flush=True)
         try:
             response = requests.get(
                 f"{head_server_url}/global_config_dict_yaml",
             )
-            print(f"DEBUG: ServerClient.load_from_global_config: connect: response = {response}", flush=True)
         except ConnectionError as e:
-            print(f"DEBUG: ServerClient.load_from_global_config: connect: except = {e}", flush=True)
             raise ValueError(
                 f"Could not connect to the head server at {head_server_url}. Perhaps you are not running a server or your head server is on a different port?"
             ) from e
 
         global_config_dict_yaml = response.content.decode()
         global_config_dict = OmegaConf.create(json.loads(global_config_dict_yaml))
-        print(f"DEBUG: ServerClient.load_from_global_config: global_config_dict = {global_config_dict}", flush=True)
 
         return cls(head_server_config=head_server_config, global_config_dict=global_config_dict)
 
