@@ -131,6 +131,11 @@ dependencies = [
     # Updated Sun Sep 21, 2025 with aiohttp==3.12.15
     # License: Apache 2.0 https://github.com/aio-libs/aiohttp/blob/9a2f146a12e3525b43e96723ef41584bf9cf784e/LICENSE.txt
     "aiohttp",
+
+    # yappi: profiling tool
+    # Updated Mon Sep 22, 2025 with yappi==1.6.10
+    # License: MIT https://github.com/sumerc/yappi/blob/1d3f7501701e1f050b6dcd6a86fd36aec08185c7/LICENSE
+    "yappi",
 ]
 
 [dependency-groups]
