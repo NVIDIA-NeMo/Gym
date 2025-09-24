@@ -577,7 +577,7 @@ class TrainDataProcessor(BaseModel):
 
             parent = Path(config.output_dirpath)
             parent.mkdir(exist_ok=True)
-            metrics_fpath = parent / f"{type}_metrics.jsonl"
+            metrics_fpath = parent / f"{type}_metrics.json"
             maybe_conflicting_metrics_fpath = self._validate_aggregate_metrics(
                 aggregate_metrics_dict=aggregate_metrics_dict,
                 metrics_fpath=metrics_fpath,

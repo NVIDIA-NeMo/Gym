@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 from unittest.mock import MagicMock
 
 import pytest
@@ -28,11 +27,16 @@ from nemo_gym.server_utils import ServerClient
 
 
 class TestApp:
-    def test_sanity(self) -> None:
-        cfg = CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
-        CompCodingResourcesServer(config=cfg, server_client=MagicMock(spec=ServerClient))
+    def _setup_server(self) -> CompCodingResourcesServer:
+        return CompCodingResourcesServer(
+            config=CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
+            server_client=MagicMock(spec=ServerClient),
+        )
 
-    async def test_verify_pass_via_response(self) -> None:
+    def test_sanity(self) -> None:
+        self._setup_server()
+
+    def test_verify_pass_via_response(self) -> None:
         # Assistant returns a python code block that squares the input
         response = NeMoGymResponse(
             id="resp_ok",
@@ -59,10 +63,7 @@ class TestApp:
             tools=[],
         )
 
-        server = CompCodingResourcesServer(
-            config=CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
-            server_client=MagicMock(spec=ServerClient),
-        )
+        server = self._setup_server()
 
         verify_req = CompCodingVerifyRequest(
             responses_create_params={
@@ -74,10 +75,10 @@ class TestApp:
             verifier_metadata={"unit_tests": {"inputs": ["2\n", "5\n"], "outputs": ["4", "25"]}},
         )
 
-        res = await server.verify(verify_req)
+        res = server.verify(verify_req)
         assert res.reward == 1.0, res.reason
 
-    async def test_verify_fail_wrong_answer(self) -> None:
+    def test_verify_fail_wrong_answer(self) -> None:
         # Assistant prints n+1 instead of n*n
         response_bad = NeMoGymResponse(
             id="resp_bad",
@@ -104,10 +105,7 @@ class TestApp:
             tools=[],
         )
 
-        server = CompCodingResourcesServer(
-            config=CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
-            server_client=MagicMock(spec=ServerClient),
-        )
+        server = self._setup_server()
 
         verify_req_bad = CompCodingVerifyRequest(
             responses_create_params={"input": [{"role": "user", "content": "square n"}]},
@@ -115,10 +113,10 @@ class TestApp:
             verifier_metadata={"unit_tests": {"inputs": ["3\n"], "outputs": ["9"]}},
         )
 
-        res2 = await server.verify(verify_req_bad)
+        res2 = server.verify(verify_req_bad)
         assert res2.reward == 0.0 and "FAILED" in res2.reason
 
-    async def test_verify_missing_response_validation_error(self) -> None:
+    def test_verify_missing_response_validation_error(self) -> None:
         """Omitting `response` should fail request validation (schema requires it)."""
         _ = CompCodingResourcesServer(
             config=CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
@@ -126,13 +124,13 @@ class TestApp:
         )
 
         with pytest.raises(ValidationError):
-            _ = CompCodingVerifyRequest(
+            CompCodingVerifyRequest(
                 responses_create_params={"input": [{"role": "user", "content": "anything"}]},
                 # response is intentionally omitted
                 verifier_metadata={"unit_tests": {"inputs": ["1\n"], "outputs": ["1"]}},
             )
 
-    async def test_verify_no_code_block(self) -> None:
+    def test_verify_no_code_block(self) -> None:
         """Test when response contains no code block - should extract raw text"""
         response = NeMoGymResponse(
             id="resp_no_block",
@@ -159,10 +157,7 @@ class TestApp:
             tools=[],
         )
 
-        server = CompCodingResourcesServer(
-            config=CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
-            server_client=MagicMock(spec=ServerClient),
-        )
+        server = self._setup_server()
 
         verify_req = CompCodingVerifyRequest(
             responses_create_params={
@@ -172,15 +167,12 @@ class TestApp:
             verifier_metadata={"unit_tests": {"inputs": ["2\n"], "outputs": ["4"]}},
         )
 
-        res = await server.verify(verify_req)
+        res = server.verify(verify_req)
         assert res.reward == 1.0, res.reason
 
-    async def test_verify_syntax_error(self) -> None:
+    def test_verify_syntax_error(self) -> None:
         """Code has a syntax error -> should report ERROR and reward 0.0"""
-        server = CompCodingResourcesServer(
-            config=CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
-            server_client=MagicMock(spec=ServerClient),
-        )
+        server = self._setup_server()
 
         response = NeMoGymResponse(
             id="resp_syntax_error",
@@ -213,10 +205,10 @@ class TestApp:
             verifier_metadata={"unit_tests": {"inputs": ["\n"], "outputs": ["hello"]}},
         )
 
-        res = await server.verify(verify_req)
+        res = server.verify(verify_req)
         assert res.reward == 0.0 and "ERROR" in res.reason
 
-    async def test_verify_runtime_error(self) -> None:
+    def test_verify_runtime_error(self) -> None:
         server = CompCodingResourcesServer(
             config=CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
             server_client=MagicMock(spec=ServerClient),
@@ -253,5 +245,5 @@ class TestApp:
             verifier_metadata={"unit_tests": {"inputs": ["5\n"], "outputs": ["error"]}},
         )
 
-        res = await server.verify(verify_req)
+        res = server.verify(verify_req)
         assert res.reward == 0.0 and "ERROR" in res.reason

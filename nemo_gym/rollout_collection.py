@@ -17,9 +17,9 @@ from asyncio import Semaphore
 from collections import Counter
 from contextlib import nullcontext
 from itertools import chain, repeat
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
 
 from nemo_gym.config_types import BaseServerConfig
@@ -39,18 +39,19 @@ class RolloutCollectionConfig(BaseModel):
     limit: Optional[int] = None
     num_repeats: Optional[int] = None
     num_samples_in_parallel: Optional[int] = None
+    responses_create_params: Dict[str, Any] = Field(default_factory=dict)
 
 
 class RolloutCollectionHelper(BaseModel):  # pragma: no cover
     async def run_from_config(self, config: RolloutCollectionConfig):
-        with open(config.input_jsonl_fpath) as input_dataset:
-            rows = list(map(json.loads, input_dataset))
-        print(f"Found {len(rows)} rows!")
-
+        range_iterator = repeat(0)
         if config.limit:
-            previous_length = len(rows)
-            rows = rows[: config.limit]
-            print(f"Limiting rows from {previous_length} to {len(rows)}!")
+            range_iterator = range(config.limit)
+            print(f"Limiting the number of rows to {config.limit}!")
+
+        with open(config.input_jsonl_fpath) as input_dataset:
+            rows = [row for _, row in zip(range_iterator, map(json.loads, input_dataset))]
+        print(f"Found {len(rows)} rows!")
 
         if config.num_repeats:
             previous_length = len(rows)
@@ -63,17 +64,26 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
 
         server_client = self.setup_server_client()
 
+        tqdm_miniters = 10
+        print(
+            f"The tqdm progress bar will only update every {tqdm_miniters} samples that finish to ensure that you are not being spammed."
+        )
+
+        if config.responses_create_params:
+            print(f"Overriding responses_create_params fields with {config.responses_create_params}")
+
         metrics = Counter()
         with open(config.output_jsonl_fpath, "a") as f:
 
             async def _post_coroutine(row: dict) -> None:
+                row["responses_create_params"] = row["responses_create_params"] | config.responses_create_params
                 async with semaphore:
                     response = await server_client.post(server_name=config.agent_name, url_path="/run", json=row)
                     result = await response.json()
                     f.write(json.dumps(result) + "\n")
                     metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
 
-            await tqdm.gather(*map(_post_coroutine, rows), desc="Collecting rollouts")
+            await tqdm.gather(*map(_post_coroutine, rows), desc="Collecting rollouts", miniters=tqdm_miniters)
 
         avg_metrics = {k: v / len(rows) for k, v in metrics.items()}
 
@@ -88,7 +98,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
             res = await server_client.post(server_name=row.pop("agent_ref")["name"], url_path="/run", json=row)
             return await res.json()
 
-        return await tqdm.gather(*map(_post_subroutine, examples), desc="Collecting rollouts")
+        return await tqdm.gather(*map(_post_subroutine, examples), desc="Collecting rollouts", miniters=10)
 
     def setup_server_client(self, head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:
         server_client = ServerClient.load_from_global_config(head_server_config)

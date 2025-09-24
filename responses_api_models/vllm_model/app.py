@@ -323,6 +323,11 @@ class VLLMConverter(BaseModel):
         if model is not None:
             responses_create_params["model"] = model
 
+        # The corresponding parameter to `max_output_tokens`` is `max_tokens`
+        max_output_tokens = responses_create_params.pop("max_output_tokens", None)
+        if max_output_tokens is not None:
+            responses_create_params["max_tokens"] = max_output_tokens
+
         tools = responses_create_params.pop("tools", None)
         if tools is not None:
             responses_create_params["tools"] = []

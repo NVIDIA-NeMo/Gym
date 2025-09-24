@@ -14,24 +14,32 @@
 import asyncio
 import atexit
 import json
+import resource
 from abc import abstractmethod
+from contextlib import asynccontextmanager
+from io import StringIO
 from logging import Filter as LoggingFilter
 from logging import LogRecord, getLogger
 from os import getenv
+from pathlib import Path
 from threading import Thread
+from traceback import print_exc
 from typing import Literal, Optional, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
 import requests
 import uvicorn
+import yappi
 from aiohttp import ClientResponse, ClientSession, ClientTimeout, DummyCookieJar, ServerDisconnectedError, TCPConnector
 from aiohttp.client import _RequestOptions
 from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, ConfigDict
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.config_types import (
     BaseRunServerInstanceConfig,
     BaseServerConfig,
@@ -50,8 +58,8 @@ _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
 
 
 class GlobalAIOHTTPAsyncClientConfig(BaseModel):
-    global_aiohttp_connector_limit: int = 1000
-    global_aiohttp_connector_limit_per_host: int = 100
+    global_aiohttp_connector_limit: int = 100 * 1024
+    global_aiohttp_connector_limit_per_host: int = 1024
 
 
 def get_global_aiohttp_client(
@@ -123,7 +131,7 @@ async def request(method: str, url: str, **kwargs: Unpack[_RequestOptions]) -> C
             await asyncio.sleep(0.5)
         except Exception as e:
             print(
-                f"""Hit an exception while making a request (try {num_tries}): {e}
+                f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}
 Sleeping 0.5s and retrying...
 """
             )
@@ -274,6 +282,20 @@ class BaseServer(BaseModel):
         return server_config
 
 
+class ProfilingMiddlewareInputConfig(BaseModel):
+    # Relative to the Gym root dir.
+    profiling_results_dirpath: Optional[str] = None
+
+
+class ProfilingMiddlewareConfig(ProfilingMiddlewareInputConfig):
+    profiling_enabled: bool = False
+
+
+class UvicornLoggingConfig(BaseModel):
+    # Default to False for regular use cases.
+    uvicorn_logging_show_200_ok: bool = False
+
+
 class SimpleServer(BaseServer):
     server_client: ServerClient
 
@@ -305,36 +327,135 @@ class SimpleServer(BaseServer):
         session_middleware_key = self.get_session_middleware_key()
         app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
 
+    def setup_exception_middleware(self, app: FastAPI) -> None:  # pragma: no cover
+        @app.middleware("http")
+        async def exception_handling_middleware(request: Request, call_next):
+            try:
+                return await call_next(request)
+            except Exception as e:
+                print_exc()
+                print(
+                    "🚨 Caught an exception printed above. Right now, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"
+                )
+                return JSONResponse(content=repr(e), status_code=500)
+            except:
+                print_exc()
+                print(
+                    "🚨 Caught an unknown exception printed above. Right now, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"
+                )
+                return JSONResponse(content="An unknown error occurred", status_code=500)
+
+    def setup_profiling(self, app: FastAPI, profiling_config: ProfilingMiddlewareConfig) -> None:  # pragma: no cover
+        base_profile_dir = Path(PARENT_DIR) / profiling_config.profiling_results_dirpath
+        server_profile_path = (base_profile_dir / self.get_session_middleware_key()).with_suffix(".log")
+
+        base_profile_dir.mkdir(parents=True, exist_ok=True)
+
+        main_app_lifespan = app.router.lifespan_context
+
+        def _dump_yappi_stats() -> str:
+            buffer = StringIO()
+            yappi.get_func_stats().print_all(
+                out=buffer,
+                columns={
+                    0: ("name", 200),
+                    1: ("ncall", 10),
+                    2: ("tsub", 8),
+                    3: ("ttot", 8),
+                    4: ("tavg", 8),
+                },
+            )
+
+            buffer.seek(0)
+            res = ""
+            past_header = False
+            for line in buffer:
+                if not past_header or self.config.entrypoint in line:
+                    res += line
+
+                if line.startswith("name"):
+                    past_header = True
+
+            return res
+
+        @asynccontextmanager
+        async def lifespan_wrapper(app):
+            yappi.set_clock_type("CPU")
+            yappi.start()
+            print(f"🔍 Enabled profiling for {self.config.name}")
+
+            async with main_app_lifespan(app) as maybe_state:
+                yield maybe_state
+
+            print(f"🛑 Stopping profiler for {self.config.name}. Check {server_profile_path} for the metrics!")
+            yappi.stop()
+
+            with open(server_profile_path, "w") as f:
+                f.write(_dump_yappi_stats())
+
+        app.router.lifespan_context = lifespan_wrapper
+
+        @app.get("/stats")
+        def stats():
+            return Response(_dump_yappi_stats())
+
+    def set_ulimit(self, target_soft_limit: int = 65535):  # pragma: no cover
+        # From https://github.com/vllm-project/vllm/blob/fed8a9b107df3e27d57728c6911c7d308b871477/vllm/utils/__init__.py#L2790
+        resource_type = resource.RLIMIT_NOFILE
+        current_soft, current_hard = resource.getrlimit(resource_type)
+
+        if current_soft < target_soft_limit:
+            try:
+                resource.setrlimit(resource_type, (target_soft_limit, current_hard))
+            except ValueError as e:
+                print(
+                    "Found ulimit of %s and failed to automatically increase "
+                    "with error %s. This can cause fd limit errors like "
+                    "`OSError: [Errno 24] Too many open files`. Consider "
+                    "increasing with ulimit -n",
+                    current_soft,
+                    e,
+                )
+
     @classmethod
     def run_webserver(cls) -> None:  # pragma: no cover
+        global_config_dict = get_global_config_dict()
+
         server_config = cls.load_config_from_global_config()
         server_client = ServerClient(
             head_server_config=ServerClient.load_head_server_config(),
-            global_config_dict=get_global_config_dict(),
+            global_config_dict=global_config_dict,
         )
         server = cls(config=server_config, server_client=server_client)
 
         app = server.setup_webserver()
+        server.set_ulimit()
+        server.setup_session_middleware(app)
+        server.setup_exception_middleware(app)
 
-        class No200Filter(LoggingFilter):
-            def filter(self, record: LogRecord) -> bool:
-                msg = record.getMessage()
-                return not msg.strip().endswith("200")
+        profiling_config = ProfilingMiddlewareConfig.model_validate(global_config_dict)
+        if profiling_config.profiling_enabled:
+            server.setup_profiling(app, profiling_config)
 
-        uvicorn_logger = getLogger("uvicorn.access")
-        uvicorn_logger.addFilter(No200Filter())
+        uvicorn_logging_cfg = UvicornLoggingConfig.model_validate(global_config_dict)
+        if not uvicorn_logging_cfg.uvicorn_logging_show_200_ok:
 
-        print(
-            "Adding a uvicorn logging filter so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
-        )
+            class No200Filter(LoggingFilter):
+                def filter(self, record: LogRecord) -> bool:
+                    msg = record.getMessage()
+                    return not msg.strip().endswith("200")
+
+            uvicorn_logger = getLogger("uvicorn.access")
+            uvicorn_logger.addFilter(No200Filter())
+
+            print(
+                "Adding a uvicorn logging filter so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
+            )
 
         uvicorn.run(
             app,
             host=server.config.host,
             port=server.config.port,
-            # We don't have any explicit lifespan logic, so instead of defaulting to "auto"
-            # We just turn lifespan off
-            lifespan="off",
         )
 
 

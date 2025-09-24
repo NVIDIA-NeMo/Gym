@@ -2,6 +2,7 @@ comp_coding:
   resources_servers:
     comp_coding:
       entrypoint: app.py
+      num_workers: 8
 
 comp_coding_simple_agent:
   responses_api_agents:

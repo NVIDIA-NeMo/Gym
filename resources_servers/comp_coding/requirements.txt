@@ -1,2 +1,2 @@
--e nemo-gym @ ../../
+-e nemo-gym[dev] @ ../../
 datasets>=2.20.0

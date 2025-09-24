@@ -13,11 +13,9 @@
 # limitations under the License.
 
 import io
-import re
 import sys
-from typing import Any, ClassVar, List, Optional, Pattern, Tuple
+from typing import Any, List, Optional, Tuple
 
-from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from nemo_gym.base_resources_server import (
@@ -33,7 +31,7 @@ from nemo_gym.base_resources_server import (
 # Config
 # ----------------------------
 class CompCodingResourcesServerConfig(BaseResourcesServerConfig):
-    pass
+    num_workers: int
 
 
 # ----------------------------
@@ -54,27 +52,34 @@ class CompCodingVerifyRequest(CompCodingRunRequest, BaseVerifyRequest):
 
 
 class CompCodingVerifyResponse(BaseVerifyResponse):
-    reason: Optional[str] = None
+    reason: str
+    extracted_model_output: Optional[str]
+    extracted_model_code: Optional[str]
 
 
 # ------------ helpers ------------
-CODE_BLOCK_RE: ClassVar[Pattern[str]] = re.compile(r"```(?:python)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 
 
 def _extract_code(text: str) -> Optional[str]:
     # We allow two kinds of responses:
     # 1. Code inside a fenced block (```python ... ``` or ``` ... ```)
     # 2. Raw code returned without any fences
-    if not text:
-        return None
-    m = CODE_BLOCK_RE.search(text)
-    if m:
-        return m.group(1).strip()
-    return text.strip()
+    if not text or "```" not in text:
+        return text
 
+    last_backtick = text.rfind("```")
+    if last_backtick == -1:
+        return text
 
-def _parse_unit_tests(ut_dict: dict) -> UnitTests:
-    return UnitTests.model_validate(ut_dict)
+    second_last_backtick = text.rfind("```", None, last_backtick)
+    if second_last_backtick == -1:
+        return text
+
+    first_newline = text.find("\n", second_last_backtick, last_backtick)
+    if first_newline == -1:
+        return text
+
+    return text[first_newline + 1 : last_backtick]
 
 
 def _run_code_against_tests(code: str, tests: UnitTests) -> Tuple[bool, str]:
@@ -177,42 +182,30 @@ def _extract_text_from_response(response_obj) -> Optional[str]:
 class CompCodingResourcesServer(SimpleResourcesServer):
     config: CompCodingResourcesServerConfig
 
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-
-        # (optional) a simple health route
-        @app.get("/health")
-        async def health():
-            return {"ok": True, "server": "comp_coding"}
-
-        return app
-
-    # ------------ verifier ------------
-    async def verify(self, body: CompCodingVerifyRequest) -> CompCodingVerifyResponse:
-        # Enforce a single source of truth for model output: the Responses API object
-        response_obj = getattr(body, "response", None)
-        if not response_obj:
-            # Treat absence of a response as an input/contract error
-            raise HTTPException(status_code=422, detail="Missing response")
-
-        model_out = _extract_text_from_response(response_obj)
+    def verify(self, body: CompCodingVerifyRequest) -> CompCodingVerifyResponse:
+        model_out = _extract_text_from_response(body.response)
         if not model_out or not model_out.strip():
             # A response existed but had no usable text -> model failure
-            return CompCodingVerifyResponse(**body.model_dump(), reward=0.0, reason="Empty model output")
+            return CompCodingVerifyResponse(
+                **body.model_dump(),
+                reward=0.0,
+                reason="Empty model output",
+                extracted_model_code=None,
+                extracted_model_output=None,
+            )
 
-        # 2) unit tests (must be present & valid BEFORE runtime; otherwise raise)
-        if not body.verifier_metadata or "unit_tests" not in body.verifier_metadata:
-            raise HTTPException(status_code=422, detail="Missing verifier_metadata.unit_tests")
-        try:
-            tests = _parse_unit_tests(body.verifier_metadata["unit_tests"])
-        except Exception as e:
-            # Treat bad inputs as an input error, not a model failure.
-            raise HTTPException(status_code=422, detail=f"Invalid unit_tests: {e}")
+        tests = UnitTests.model_validate(body.verifier_metadata["unit_tests"])
 
         # 3) extract code (code fence or raw)
         code = _extract_code(model_out)
         if not code:
-            return CompCodingVerifyResponse(**body.model_dump(), reward=0.0, reason="Could not extract code")
+            return CompCodingVerifyResponse(
+                **body.model_dump(),
+                reward=0.0,
+                reason="Could not extract code",
+                extracted_model_output=model_out,
+                extracted_model_code=None,
+            )
 
         # 4) run (no sandbox)
         ok, msg = _run_code_against_tests(code, tests)
@@ -220,7 +213,9 @@ class CompCodingResourcesServer(SimpleResourcesServer):
         return CompCodingVerifyResponse(
             **body.model_dump(),
             reward=1.0 if ok else 0.0,
-            reason=msg,  # always include the reason message
+            reason=msg,
+            extracted_model_output=model_out,
+            extracted_model_code=code,
         )
 
 
