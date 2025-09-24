@@ -15,15 +15,19 @@ import asyncio
 import atexit
 import json
 from abc import abstractmethod
+from contextlib import asynccontextmanager
+from io import StringIO
 from logging import Filter as LoggingFilter
 from logging import LogRecord, getLogger
 from os import getenv
+from pathlib import Path
 from threading import Thread
 from typing import Literal, Optional, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
 import requests
 import uvicorn
+import yappi
 from aiohttp import ClientResponse, ClientSession, ClientTimeout, DummyCookieJar, ServerDisconnectedError, TCPConnector
 from aiohttp.client import _RequestOptions
 from fastapi import FastAPI, Request, Response
@@ -32,6 +36,7 @@ from pydantic import BaseModel, ConfigDict
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.config_types import (
     BaseRunServerInstanceConfig,
     BaseServerConfig,
@@ -50,8 +55,8 @@ _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
 
 
 class GlobalAIOHTTPAsyncClientConfig(BaseModel):
-    global_aiohttp_connector_limit: int = 1000
-    global_aiohttp_connector_limit_per_host: int = 100
+    global_aiohttp_connector_limit: int = 100 * 1024
+    global_aiohttp_connector_limit_per_host: int = 1024
 
 
 def get_global_aiohttp_client(
@@ -123,7 +128,7 @@ async def request(method: str, url: str, **kwargs: Unpack[_RequestOptions]) -> C
             await asyncio.sleep(0.5)
         except Exception as e:
             print(
-                f"""Hit an exception while making a request (try {num_tries}): {e}
+                f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}
 Sleeping 0.5s and retrying...
 """
             )
@@ -274,6 +279,20 @@ class BaseServer(BaseModel):
         return server_config
 
 
+class ProfilingMiddlewareInputConfig(BaseModel):
+    # Relative to the Gym root dir.
+    profiling_results_dirpath: Optional[str] = None
+
+
+class ProfilingMiddlewareConfig(ProfilingMiddlewareInputConfig):
+    profiling_enabled: bool = False
+
+
+class UvicornLoggingConfig(BaseModel):
+    # Default to False for regular use cases.
+    uvicorn_logging_show_200_ok: bool = False
+
+
 class SimpleServer(BaseServer):
     server_client: ServerClient
 
@@ -305,36 +324,86 @@ class SimpleServer(BaseServer):
         session_middleware_key = self.get_session_middleware_key()
         app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
 
+    def setup_profiling(self, app: FastAPI, profiling_config: ProfilingMiddlewareConfig) -> None:  # pragma: no cover
+        base_profile_dir = Path(PARENT_DIR) / profiling_config.profiling_results_dirpath
+        server_profile_path = (base_profile_dir / self.get_session_middleware_key()).with_suffix(".log")
+
+        base_profile_dir.mkdir(parents=True, exist_ok=True)
+
+        main_app_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan_wrapper(app):
+            yappi.set_clock_type("WALL")
+            yappi.start()
+            print(f"🔍 Enabled profiling for {self.config.name}")
+
+            async with main_app_lifespan(app) as maybe_state:
+                yield maybe_state
+
+            print(f"🛑 Stopping profiler for {self.config.name}. Check {server_profile_path} for the metrics!")
+            yappi.stop()
+
+            buffer = StringIO()
+            yappi.get_func_stats().print_all(
+                out=buffer,
+                columns={
+                    0: ("name", 200),
+                    1: ("ncall", 10),
+                    2: ("tsub", 8),
+                    3: ("ttot", 8),
+                    4: ("tavg", 8),
+                },
+            )
+
+            buffer.seek(0)
+            with open(server_profile_path, "w") as f:
+                past_header = False
+                for line in buffer:
+                    if not past_header or self.config.entrypoint in line:
+                        f.write(line)
+
+                    if line.startswith("name"):
+                        past_header = True
+
+        app.router.lifespan_context = lifespan_wrapper
+
     @classmethod
     def run_webserver(cls) -> None:  # pragma: no cover
+        global_config_dict = get_global_config_dict()
+
         server_config = cls.load_config_from_global_config()
         server_client = ServerClient(
             head_server_config=ServerClient.load_head_server_config(),
-            global_config_dict=get_global_config_dict(),
+            global_config_dict=global_config_dict,
         )
         server = cls(config=server_config, server_client=server_client)
 
         app = server.setup_webserver()
 
-        class No200Filter(LoggingFilter):
-            def filter(self, record: LogRecord) -> bool:
-                msg = record.getMessage()
-                return not msg.strip().endswith("200")
+        profiling_config = ProfilingMiddlewareConfig.model_validate(global_config_dict)
+        if profiling_config.profiling_enabled:
+            server.setup_profiling(app, profiling_config)
 
-        uvicorn_logger = getLogger("uvicorn.access")
-        uvicorn_logger.addFilter(No200Filter())
+        uvicorn_logging_cfg = UvicornLoggingConfig.model_validate(global_config_dict)
+        if not uvicorn_logging_cfg.uvicorn_logging_show_200_ok:
 
-        print(
-            "Adding a uvicorn logging filter so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
-        )
+            class No200Filter(LoggingFilter):
+                def filter(self, record: LogRecord) -> bool:
+                    msg = record.getMessage()
+                    return not msg.strip().endswith("200")
+
+            uvicorn_logger = getLogger("uvicorn.access")
+            uvicorn_logger.addFilter(No200Filter())
+
+            print(
+                "Adding a uvicorn logging filter so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
+            )
 
         uvicorn.run(
             app,
             host=server.config.host,
             port=server.config.port,
-            # We don't have any explicit lifespan logic, so instead of defaulting to "auto"
-            # We just turn lifespan off
-            lifespan="off",
         )
 
 

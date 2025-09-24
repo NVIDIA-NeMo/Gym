@@ -608,7 +608,7 @@ class TestCollateSamples:
         )
 
         assert list(write_filenames_to_mock.keys()) == [
-            Path("example_metrics.jsonl"),
+            Path("example_metrics.json"),
             Path("resources_servers/multineedle/data/example_prepare.jsonl"),
             Path("example.jsonl"),
         ]
@@ -628,7 +628,7 @@ class TestCollateSamples:
                 written_data = write_mock.return_value.write.call_args_list[0].args[0]
                 return mock_open(read_data=written_data)()
 
-            if filename == Path("example_metrics.jsonl"):
+            if filename == Path("example_metrics.json"):
                 read_data = {"some extra field to cause a conflict": "lmao"}
                 return mock_open(read_data=json.dumps(read_data))()
             return original_open(filename, mode)
