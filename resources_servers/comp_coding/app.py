@@ -198,7 +198,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
     def setup_webserver(self) -> FastAPI:
         @asynccontextmanager
         async def lifespan(app: FastAPI):
-            with Pool(self.config.num_workers) as pool:
+            with Pool(self.config.num_processes) as pool:
                 self._pool = pool
                 yield
 
@@ -251,7 +251,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
 
             ok = False
             msg = ""
-            tests_time_taken = time() - start_time()
+            tests_time_taken = time() - start_time
 
         return CompCodingVerifyResponse(
             **body.model_dump(),
