@@ -111,7 +111,7 @@ class RunHelper:  # pragma: no cover
     ) -> dict:
         dynamic_cfg = initial_global_config.get("dynamic", None)
         if not dynamic_cfg:
-            print(f"DEBUG: RunHelper: warning: no dynamic config, using provided defaults...", flush=True)
+            print("DEBUG: RunHelper: warning: no dynamic config, using provided defaults...", flush=True)
             initial_global_config["head_server"] = {
                 "host": head_server_host,
                 "port": head_server_port,
@@ -121,7 +121,7 @@ class RunHelper:  # pragma: no cover
             initial_global_config["policy_api_key"] = policy_api_key
             return initial_global_config
 
-        print(f"DEBUG: RunHelper: using dynamic config...", flush=True)
+        print("DEBUG: RunHelper: using dynamic config...", flush=True)
 
         # Special top-level config keys (head server, policy).
         initial_global_config["head_server"] = {
@@ -132,14 +132,14 @@ class RunHelper:  # pragma: no cover
         initial_global_config["policy_base_url"] = dynamic_cfg["policy_model"]["base_url"]
         initial_global_config["policy_api_key"] = "dummy_key"
 
-        def _merge_dict_inplace(target: dict, source: dict):
+        def _merge_config_dict_inplace(target: dict, source: dict):
             for src_key, src_value in source.items():
                 if (
                     src_key in target and
                     isinstance(target[src_key], dict) and
                     isinstance(src_value, dict)
                 ):
-                    _merge_dict_inplace(target[src_key], src_value)
+                    _merge_config_dict_inplace(target[src_key], src_value)
                 else:
                     target[src_key] = deepcopy(src_value)
 
@@ -160,7 +160,7 @@ class RunHelper:  # pragma: no cover
                 raise ValueError(
                     f"expected top-level key {repr(key)} to be a dict, got {type(initial_global_config[key]).__name__}"
                 )
-            _merge_dict_inplace(initial_global_config[key], sub_cfg)
+            _merge_config_dict_inplace(initial_global_config[key], sub_cfg)
 
         return initial_global_config
 
