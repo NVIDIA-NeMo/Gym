@@ -14,8 +14,14 @@
 
 import io
 import sys
+from asyncio import sleep
+from contextlib import asynccontextmanager
+from multiprocessing.pool import Pool
+from time import time
+from traceback import print_exc
 from typing import Any, List, Optional, Tuple
 
+from fastapi import FastAPI
 from pydantic import BaseModel
 
 from nemo_gym.base_resources_server import (
@@ -31,7 +37,8 @@ from nemo_gym.base_resources_server import (
 # Config
 # ----------------------------
 class CompCodingResourcesServerConfig(BaseResourcesServerConfig):
-    num_workers: int
+    num_processes: int
+    unit_test_timeout_secs: float
 
 
 # ----------------------------
@@ -55,6 +62,7 @@ class CompCodingVerifyResponse(BaseVerifyResponse):
     reason: str
     extracted_model_output: Optional[str]
     extracted_model_code: Optional[str]
+    tests_time_taken: Optional[float]
 
 
 # ------------ helpers ------------
@@ -82,12 +90,14 @@ def _extract_code(text: str) -> Optional[str]:
     return text[first_newline + 1 : last_backtick]
 
 
-def _run_code_against_tests(code: str, tests: UnitTests) -> Tuple[bool, str]:
+def _run_code_against_tests(code: str, tests: UnitTests) -> Tuple[bool, str, float]:
     """
     Executes `code` with in-process exec(), redirecting stdin/stdout per test.
     Assumes dataset pre-processing has already validated test shapes (non-empty,
     equal-length inputs/outputs).
     """
+    start_time = time()
+
     for i, (test_input, expected_output) in enumerate(zip(tests.inputs, tests.outputs), start=1):
         # capture originals
         orig_stdin, orig_stdout = sys.stdin, sys.stdout
@@ -135,13 +145,13 @@ def _run_code_against_tests(code: str, tests: UnitTests) -> Tuple[bool, str]:
                 )
         except SystemExit as e:
             # Handle sys.exit() calls in the executed code
-            return False, f"TEST_CASE_{i}_ERROR: Code called sys.exit({e.code})"
+            return False, f"TEST_CASE_{i}_ERROR: Code called sys.exit({e.code})", time() - start_time
         except Exception as e:
-            return False, f"TEST_CASE_{i}_ERROR: {e}"
+            return False, f"TEST_CASE_{i}_ERROR: {e}", time() - start_time
         finally:
             sys.stdin, sys.stdout = orig_stdin, orig_stdout
 
-    return True, f"SUCCESS: All {len(tests.inputs)} test cases passed"
+    return True, f"SUCCESS: All {len(tests.inputs)} test cases passed", time() - start_time
 
 
 def _extract_text_from_response(response_obj) -> Optional[str]:
@@ -182,7 +192,25 @@ def _extract_text_from_response(response_obj) -> Optional[str]:
 class CompCodingResourcesServer(SimpleResourcesServer):
     config: CompCodingResourcesServerConfig
 
-    def verify(self, body: CompCodingVerifyRequest) -> CompCodingVerifyResponse:
+    def model_post_init(self, context):
+        self.pool: Optional[Pool] = None
+        return super().model_post_init(context)
+
+    def setup_webserver(self) -> FastAPI:
+        @asynccontextmanager
+        async def lifespan(app: FastAPI):
+            with Pool(self.config.num_workers) as pool:
+                self.pool = pool
+                yield
+
+        app = FastAPI(lifespan=lifespan)
+
+        app.post("/seed_session")(self.seed_session)
+        app.post("/verify")(self.verify)
+
+        return app
+
+    async def verify(self, body: CompCodingVerifyRequest) -> CompCodingVerifyResponse:
         model_out = _extract_text_from_response(body.response)
         if not model_out or not model_out.strip():
             # A response existed but had no usable text -> model failure
@@ -192,6 +220,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 reason="Empty model output",
                 extracted_model_code=None,
                 extracted_model_output=None,
+                tests_time_taken=None,
             )
 
         tests = UnitTests.model_validate(body.verifier_metadata["unit_tests"])
@@ -205,10 +234,25 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 reason="Could not extract code",
                 extracted_model_output=model_out,
                 extracted_model_code=None,
+                tests_time_taken=None,
             )
 
         # 4) run (no sandbox)
-        ok, msg = _run_code_against_tests(code, tests)
+        result = self.pool.apply_async(_run_code_against_tests, (code, tests))
+        start_time = time()
+        await sleep(self.config.unit_test_timeout_secs)
+
+        try:
+            ok, msg, tests_time_taken = result.get()
+        except:
+            print_exc()
+            print(
+                f"Comp coding verifier {self.config.name} hit an exception while retrieving unit test result. The traceback is shown above."
+            )
+
+            ok = False
+            msg = ""
+            tests_time_taken = time() - start_time()
 
         return CompCodingVerifyResponse(
             **body.model_dump(),
@@ -216,6 +260,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             reason=msg,
             extracted_model_output=model_out,
             extracted_model_code=code,
+            tests_time_taken=tests_time_taken,
         )
 
 

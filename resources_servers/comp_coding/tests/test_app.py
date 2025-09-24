@@ -118,11 +118,6 @@ class TestApp:
 
     def test_verify_missing_response_validation_error(self) -> None:
         """Omitting `response` should fail request validation (schema requires it)."""
-        _ = CompCodingResourcesServer(
-            config=CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
-            server_client=MagicMock(spec=ServerClient),
-        )
-
         with pytest.raises(ValidationError):
             CompCodingVerifyRequest(
                 responses_create_params={"input": [{"role": "user", "content": "anything"}]},
@@ -209,10 +204,7 @@ class TestApp:
         assert res.reward == 0.0 and "ERROR" in res.reason
 
     def test_verify_runtime_error(self) -> None:
-        server = CompCodingResourcesServer(
-            config=CompCodingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
-            server_client=MagicMock(spec=ServerClient),
-        )
+        server = self._setup_server()
 
         response = NeMoGymResponse(
             id="resp_runtime_error",

@@ -2,7 +2,8 @@ comp_coding:
   resources_servers:
     comp_coding:
       entrypoint: app.py
-      num_workers: 8
+      num_processes: 8
+      unit_test_timeout_secs: 10
 
 comp_coding_simple_agent:
   responses_api_agents:
