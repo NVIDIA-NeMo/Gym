@@ -137,6 +137,9 @@ class BaseRunServerConfig(BaseServerConfig):
         name = getattr(self, "name", None)
         if name and self.name.endswith("_resources_server"):
             assert self.domain is not None, "A domain is required for resource servers."
+        else:
+            if hasattr(self, "domain"):
+                del self.domain
 
         return self
 
