@@ -17,9 +17,9 @@ from asyncio import Semaphore
 from collections import Counter
 from contextlib import nullcontext
 from itertools import chain, repeat
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
 
 from nemo_gym.config_types import BaseServerConfig
@@ -39,6 +39,7 @@ class RolloutCollectionConfig(BaseModel):
     limit: Optional[int] = None
     num_repeats: Optional[int] = None
     num_samples_in_parallel: Optional[int] = None
+    responses_create_params: Dict[str, Any] = Field(default_factory=dict)
 
 
 class RolloutCollectionHelper(BaseModel):  # pragma: no cover
@@ -73,7 +74,9 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
 
             async def _post_coroutine(row: dict) -> None:
                 async with semaphore:
-                    response = await server_client.post(server_name=config.agent_name, url_path="/run", json=row)
+                    response = await server_client.post(
+                        server_name=config.agent_name, url_path="/run", json=row | config.responses_create_params
+                    )
                     result = await response.json()
                     f.write(json.dumps(result) + "\n")
                     metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
