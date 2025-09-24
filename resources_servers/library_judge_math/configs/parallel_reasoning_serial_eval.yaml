@@ -1,0 +1,55 @@
+library_judge_math:
+  resources_servers:
+    library_judge_math:
+      entrypoint: app.py
+      judge_model_server:
+        type: responses_api_models
+        name: ???
+      judge_responses_create_params: {
+        input: []
+      }
+      should_use_judge: false
+parallel_reasoning_simple_agent:
+  responses_api_agents:
+    parallel_reasoning_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: library_judge_math
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/library_judge_math/data/train.jsonl
+        gitlab_identifier:
+          dataset_name: math_open_math_reasoning
+          version: 0.0.1
+          artifact_fpath: open_math_reasoning_problems.jsonl
+        license: Creative Commons Attribution 4.0 International
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/library_judge_math/data/example.jsonl
+      num_planner: 2
+      num_executor: 8
+library_judge_math_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: library_judge_math
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/library_judge_math/data/aime24_bytedtsinghua_validation.jsonl
+        gitlab_identifier:
+          dataset_name: bytedtsinghua_dapo17k
+          version: 0.0.1
+          artifact_fpath: aime24_bytedtsinghua_validation.jsonl
+        license: Apache 2.0
+
