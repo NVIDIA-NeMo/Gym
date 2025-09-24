@@ -793,7 +793,7 @@ ng_collect_rollouts +agent_name=library_judge_math_simple_agent \
     +input_jsonl_fpath=resources_servers/library_judge_math/data/dapo17k_bytedtsinghua_train.jsonl \
     +output_jsonl_fpath=temp/library_judge_math_rollouts.jsonl \
     +limit=1024 \
-    +num_repeats 1
+    +num_repeats=1
 ```
 
 After `ng_collect_rollouts` finishes, ctrl+c to quit your servers. You should see some output in the terminal like this:

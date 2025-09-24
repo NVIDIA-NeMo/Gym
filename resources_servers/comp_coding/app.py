@@ -12,13 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from asyncio import sleep
+import sys
+from asyncio import Semaphore, sleep
 from contextlib import asynccontextmanager, redirect_stdout
 from io import StringIO
 from multiprocessing.pool import Pool
 from time import time
 from traceback import print_exc
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -62,6 +63,7 @@ class CompCodingVerifyResponse(BaseVerifyResponse):
     extracted_model_output: Optional[str]
     extracted_model_code: Optional[str]
     tests_time_taken: Optional[float]
+    stdout: Optional[str]
 
 
 # ------------ helpers ------------
@@ -74,22 +76,26 @@ def _extract_code(text: str) -> Optional[str]:
     if not text or "```" not in text:
         return text
 
-    last_backtick = text.rfind("```")
-    if last_backtick == -1:
+    start_code_idx = text.rfind("```python\n")
+    if start_code_idx == -1:
         return text
+    start_code_idx += len("```python\n")
 
-    second_last_backtick = text.rfind("```", None, last_backtick)
-    if second_last_backtick == -1:
-        return text
+    end_code_idx = text.find("```", start_code_idx)
+    if end_code_idx == -1:
+        return text[start_code_idx:]
 
-    first_newline = text.find("\n", second_last_backtick, last_backtick)
-    if first_newline == -1:
-        return text
-
-    return text[first_newline + 1 : last_backtick]
+    return text[start_code_idx:end_code_idx]
 
 
-def _run_code_against_tests(code: str, tests: UnitTests) -> Tuple[bool, str, float]:
+class TestResult(BaseModel):
+    ok: bool
+    message: str
+    tests_time_taken: float
+    stdout: Optional[str]
+
+
+def _run_code_against_tests(code: str, tests: UnitTests) -> TestResult:
     """
     Executes `code` with in-process exec(), redirecting stdin/stdout per test.
     Assumes dataset pre-processing has already validated test shapes (non-empty,
@@ -100,54 +106,50 @@ def _run_code_against_tests(code: str, tests: UnitTests) -> Tuple[bool, str, flo
     for i, (test_input, expected_output) in enumerate(zip(tests.inputs, tests.outputs), start=1):
         exec_globals = {
             "__builtins__": __builtins__,
-            "input": lambda *args, **kwargs: test_input.replace("\\n", "\n"),
-            "print": print,
-            "range": range,
-            "len": len,
-            "list": list,
-            "int": int,
-            "str": str,
-            "float": float,
-            "bool": bool,
-            "enumerate": enumerate,
-            "zip": zip,
-            "sum": sum,
-            "max": max,
-            "min": min,
-            "abs": abs,
-            "round": round,
-            "sorted": sorted,
-            "reversed": reversed,
-            "all": all,
-            "any": any,
-            "set": set,
-            "dict": dict,
-            "tuple": tuple,
-            "map": map,
-            "filter": filter,
         }
 
+        orig_stdin = sys.stdin
         with StringIO() as captured_output:
             with redirect_stdout(captured_output):
+                # This is ONLY safe because we run this in a separate process.
+                sys.stdin = StringIO(test_input)
+
                 try:
                     exec(code, exec_globals)
-                except SystemExit as e:
-                    # Handle sys.exit() calls in the executed code
-                    return False, f"TEST_CASE_{i}_ERROR: Code called sys.exit({e.code})", time() - start_time
                 except Exception as e:
-                    return False, f"TEST_CASE_{i}_ERROR: {e}", time() - start_time
+                    return TestResult(
+                        ok=False,
+                        message=f"TEST_CASE_{i}_ERROR: {e}",
+                        tests_time_taken=time() - start_time,
+                        stdout=captured_output.getvalue(),
+                    )
+                except:
+                    # Handle Non-exception-based calls in the executed code
+                    return TestResult(
+                        ok=False,
+                        message=f"TEST_CASE_{i}_ERROR: {print_exc()}",
+                        tests_time_taken=time() - start_time,
+                        stdout=captured_output.getvalue(),
+                    )
+                finally:
+                    sys.stdin = orig_stdin
 
-            actual_output = captured_output.getvalue()
+                actual_output = captured_output.getvalue()
 
-        exp = expected_output.replace("\\n", "\n")
-        if actual_output.rstrip() != exp.rstrip():
-            return (
-                False,
-                f"TEST_CASE_{i}_FAILED: Expected {repr(exp)} got {repr(actual_output)}",
-                time() - start_time,
+        if actual_output.rstrip() != expected_output.rstrip():
+            return TestResult(
+                ok=False,
+                message=f"TEST_CASE_{i}_FAILED: Expected {repr(expected_output)} got {repr(actual_output)}",
+                tests_time_taken=time() - start_time,
+                stdout=actual_output,
             )
 
-    return True, f"SUCCESS: All {len(tests.inputs)} test cases passed", time() - start_time
+    return TestResult(
+        ok=True,
+        message=f"SUCCESS: All {len(tests.inputs)} test cases passed",
+        tests_time_taken=time() - start_time,
+        stdout=actual_output,  # Just the last one is fine.
+    )
 
 
 # ----------------------------
@@ -158,6 +160,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context):
         self._pool: Optional[Pool] = None
+        self._semaphore: Semaphore = Semaphore(value=self.config.num_processes)
 
     def setup_webserver(self) -> FastAPI:
         @asynccontextmanager
@@ -203,29 +206,35 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             )
 
         # 4) run (no sandbox)
-        result = self._pool.apply_async(_run_code_against_tests, (code, tests))
-        start_time = time()
-        await sleep(self.config.unit_test_timeout_secs)
+        # Use a semaphore here to guarantee that we are actually running this actively during the timeout.
+        async with self._semaphore:
+            result = self._pool.apply_async(_run_code_against_tests, (code, tests))
+            start_time = time()
+            await sleep(self.config.unit_test_timeout_secs)
 
-        try:
-            ok, msg, tests_time_taken = result.get()
-        except:
-            print_exc()
-            print(
-                f"Comp coding verifier {self.config.name} hit an exception while retrieving unit test result. The traceback is shown above."
-            )
+            try:
+                test_result = result.get()
+            except:
+                print_exc()
+                print(
+                    f"Comp coding verifier {self.config.name} hit an exception while retrieving unit test result. The traceback is shown above."
+                )
 
-            ok = False
-            msg = ""
-            tests_time_taken = time() - start_time
+                test_result = TestResult(
+                    ok=False,
+                    message="",
+                    tests_time_taken=time() - start_time,
+                    stdout=None,
+                )
 
         return CompCodingVerifyResponse(
             **body.model_dump(),
-            reward=1.0 if ok else 0.0,
-            reason=msg,
+            reward=1.0 if test_result.ok else 0.0,
+            reason=test_result.message,
             extracted_model_output=model_out,
             extracted_model_code=code,
-            tests_time_taken=tests_time_taken,
+            tests_time_taken=test_result.tests_time_taken,
+            stdout=test_result.stdout,
         )
 
 
