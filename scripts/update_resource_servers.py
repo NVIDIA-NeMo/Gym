@@ -111,6 +111,11 @@ def generate_table() -> str:
             rows.append(["?", server_name, path, "?"])
 
     def normalize_str(s: str) -> str:
+        """
+        Rows with identical domain values may get reordered differently
+        between local and CI runs. We normalize text and
+        use all columns as tie-breakers to ensure deterministic sorting.
+        """
         if not s:
             return ""
         return unicodedata.normalize("NFKD", s).casefold().strip()
