@@ -49,7 +49,9 @@ class AviaryAgentConfig(BaseResponsesAPIAgentConfig):
 
     # Doesn't cause an issue if not set, but if it is, then
     # we can avoid sending requests that are guaranteed to
-    # exceed the limit. If not set, vLLM will reject the request.
+    # exceed the limit. If not set, vLLM will reject the request
+    # for us (but also clutter logs with exceptions).
+    # TODO: see if we can retrieve this from /models endpoint
     max_total_sequence_length: int | None = None
 
     collapse_old_env_states: bool = False
@@ -87,7 +89,7 @@ class AviaryAgent(SimpleResponsesAPIAgent):
                 hidden_message if isinstance(m, AviaryEnvStateEasyInputMessage) else m for m in prev_messages
             ]
 
-        return agent_state.model_copy(update={"input": prev_messages + model_output + obs})
+        return agent_state.model_copy(update={"input": agent_state.input + model_output + obs})
 
     async def responses(self, req: AviaryAgentRunRequest) -> AviaryNeMoGymResponse:
         req = req.model_copy(deep=True)
