@@ -12,10 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import io
-import sys
 from asyncio import sleep
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, redirect_stdout
+from io import StringIO
 from multiprocessing.pool import Pool
 from time import time
 from traceback import print_exc
@@ -99,91 +98,56 @@ def _run_code_against_tests(code: str, tests: UnitTests) -> Tuple[bool, str, flo
     start_time = time()
 
     for i, (test_input, expected_output) in enumerate(zip(tests.inputs, tests.outputs), start=1):
-        # capture originals
-        orig_stdin, orig_stdout = sys.stdin, sys.stdout
-        try:
-            sys.stdin = io.StringIO(test_input.replace("\\n", "\n"))
-            sys.stdout = io.StringIO()
+        exec_globals = {
+            "__builtins__": __builtins__,
+            "input": lambda *args, **kwargs: test_input.replace("\\n", "\n"),
+            "print": print,
+            "range": range,
+            "len": len,
+            "list": list,
+            "int": int,
+            "str": str,
+            "float": float,
+            "bool": bool,
+            "enumerate": enumerate,
+            "zip": zip,
+            "sum": sum,
+            "max": max,
+            "min": min,
+            "abs": abs,
+            "round": round,
+            "sorted": sorted,
+            "reversed": reversed,
+            "all": all,
+            "any": any,
+            "set": set,
+            "dict": dict,
+            "tuple": tuple,
+            "map": map,
+            "filter": filter,
+        }
 
-            exec_globals = {
-                "__builtins__": __builtins__,
-                "input": input,
-                "print": print,
-                "range": range,
-                "len": len,
-                "list": list,
-                "int": int,
-                "str": str,
-                "float": float,
-                "bool": bool,
-                "enumerate": enumerate,
-                "zip": zip,
-                "sum": sum,
-                "max": max,
-                "min": min,
-                "abs": abs,
-                "round": round,
-                "sorted": sorted,
-                "reversed": reversed,
-                "all": all,
-                "any": any,
-                "set": set,
-                "dict": dict,
-                "tuple": tuple,
-                "map": map,
-                "filter": filter,
-            }
+        with StringIO() as captured_output:
+            with redirect_stdout(captured_output):
+                try:
+                    exec(code, exec_globals)
+                except SystemExit as e:
+                    # Handle sys.exit() calls in the executed code
+                    return False, f"TEST_CASE_{i}_ERROR: Code called sys.exit({e.code})", time() - start_time
+                except Exception as e:
+                    return False, f"TEST_CASE_{i}_ERROR: {e}", time() - start_time
 
-            exec(code, exec_globals)
+            actual_output = captured_output.getvalue()
 
-            actual_output = sys.stdout.getvalue()
-            exp = expected_output.replace("\\n", "\n")
-            if actual_output.rstrip() != exp.rstrip():
-                return (
-                    False,
-                    f"TEST_CASE_{i}_FAILED: Expected {repr(exp)} got {repr(actual_output)}",
-                )
-        except SystemExit as e:
-            # Handle sys.exit() calls in the executed code
-            return False, f"TEST_CASE_{i}_ERROR: Code called sys.exit({e.code})", time() - start_time
-        except Exception as e:
-            return False, f"TEST_CASE_{i}_ERROR: {e}", time() - start_time
-        finally:
-            sys.stdin, sys.stdout = orig_stdin, orig_stdout
+        exp = expected_output.replace("\\n", "\n")
+        if actual_output.rstrip() != exp.rstrip():
+            return (
+                False,
+                f"TEST_CASE_{i}_FAILED: Expected {repr(exp)} got {repr(actual_output)}",
+                time() - start_time,
+            )
 
     return True, f"SUCCESS: All {len(tests.inputs)} test cases passed", time() - start_time
-
-
-def _extract_text_from_response(response_obj) -> Optional[str]:
-    """
-    Extract the assistant's output_text string from a NeMoGymResponse-like object:
-    response.output -> list of messages
-        message.content -> list of blocks with {"type": "output_text", "text": "..."}
-    """
-    try:
-        if not response_obj:
-            return None
-        output_list = getattr(response_obj, "output", None)
-        if not output_list:
-            return None
-        for msg in output_list:
-            content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
-            if not content:
-                continue
-
-            # content may be a list of blocks or a bare string (be tolerant)
-            if isinstance(content, str) and content.strip():
-                return content
-
-            for block in content:
-                btype = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
-                if btype in ("output_text", "text"):
-                    text = block.get("text") if isinstance(block, dict) else getattr(block, "text", None)
-                    if isinstance(text, str) and text.strip():
-                        return text
-        return None
-    except Exception:
-        return None
 
 
 # ----------------------------
@@ -210,7 +174,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
         return app
 
     async def verify(self, body: CompCodingVerifyRequest) -> CompCodingVerifyResponse:
-        model_out = _extract_text_from_response(body.response)
+        model_out = body.response.output_text
         if not model_out or not model_out.strip():
             # A response existed but had no usable text -> model failure
             return CompCodingVerifyResponse(
