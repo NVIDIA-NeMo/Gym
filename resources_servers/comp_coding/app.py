@@ -166,6 +166,8 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 self._pool = pool
                 yield
 
+            print(f"Finished {self.__class__.__name__} {self.config.name} and shut down pool!")
+
         app = FastAPI(lifespan=lifespan)
 
         app.post("/seed_session")(self.seed_session)
