@@ -48,23 +48,19 @@ def extract_domain_and_license(yaml_path: Path) -> tuple[str, str]:
     domain = None
     license = None
 
-    def visit_domains(data, level=1):
+    def visit_domain(data, level=1):
         nonlocal domain
-        if not isinstance(data, dict):
-            return
-        if level == 4 and domain is None:
+        if level == 4:
             domain = data.get("domain")
             return
         else:
             for k, v in data.items():
                 if level == 2 and k != "resources_servers":
                     continue
-                visit_domains(v, level + 1)
+                visit_domain(v, level + 1)
 
     def visit_license(data):
         nonlocal license
-        if not isinstance(data, dict):
-            return
         for k1, v1 in data.items():
             if k1.endswith("_simple_agent") and isinstance(v1, dict):
                 v2 = v1.get("responses_api_agents")
@@ -82,7 +78,7 @@ def extract_domain_and_license(yaml_path: Path) -> tuple[str, str]:
                                     license = entry.get("license")
                                     return
 
-    visit_domains(data)
+    visit_domain(data)
     visit_license(data)
 
     return domain, license
