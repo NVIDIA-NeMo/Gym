@@ -66,8 +66,17 @@ def _extract_code(text: str) -> Optional[str]:
         return text
 
     last_backtick = text.rfind("```")
+    if last_backtick == -1:
+        return text
+
     second_last_backtick = text.rfind("```", None, last_backtick)
+    if second_last_backtick == -1:
+        return text
+
     first_newline = text.find("\n", second_last_backtick, last_backtick)
+    if first_newline == -1:
+        return text
+
     return text[first_newline + 1 : last_backtick]
 
 
