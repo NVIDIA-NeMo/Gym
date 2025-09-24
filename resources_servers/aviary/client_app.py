@@ -19,7 +19,11 @@ class AviaryClientApp(AviaryResourcesServer[TaskEnvironmentClient, TaskDatasetCl
     def load_dataset(cls, data: dict) -> dict:
         if "dataset" not in data:
             config = data["config"] = AviaryClientAppConfig.model_validate(data.get("config", {}))
-            data["dataset"] = TaskDatasetClient(**config.model_dump())
+            data["dataset"] = TaskDatasetClient(
+                server_url=config.server_url,
+                request_timeout=config.request_timeout,
+                api_key=config.api_key,
+            )
         return data
 
 
