@@ -15,10 +15,10 @@ from os import environ
 from pathlib import Path
 
 import yaml
-from huggingface_hub import HfApi, add_collection_item
+from huggingface_hub import HfApi, add_collection_item, hf_hub_download
 from huggingface_hub.utils import HfHubHTTPError
 
-from nemo_gym.config_types import UploadJsonlDatasetHuggingFaceConfig
+from nemo_gym.config_types import DownloadJsonlDatasetHfConfig, UploadJsonlDatasetHuggingFaceConfig
 from nemo_gym.server_utils import get_global_config_dict
 
 
@@ -87,6 +87,28 @@ def upload_jsonl_dataset_to_hf(
 
 
 def upload_jsonl_dataset_cli() -> None:  # pragma: no cover
+    # TODO: do simple format check
     global_config = get_global_config_dict()
     config = UploadJsonlDatasetHuggingFaceConfig.model_validate(global_config)
     upload_jsonl_dataset_to_hf(config)
+
+
+def download_jsonl_dataset(
+    config: DownloadJsonlDatasetHfConfig,
+) -> None:  # pragma: no cover
+    try:
+        downloaded_path = hf_hub_download(
+            repo_id=config.repo_id,
+            repo_type="dataset",
+            filename=config.filename_in_repo,  # e.g., "data.jsonl"
+            token=config.hf_token,
+        )
+        Path(config.output_fpath).write_bytes(Path(downloaded_path).read_bytes())
+    except HfHubHTTPError as e:
+        print("ERROR: ", e)
+
+
+def download_jsonl_dataset_cli() -> None:  # pragma: no cover
+    global_config = get_global_config_dict()
+    config = DownloadJsonlDatasetHfConfig.model_validate(global_config)
+    download_jsonl_dataset(config)
