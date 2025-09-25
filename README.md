@@ -27,7 +27,6 @@
 - [FAQ: NeMo Gym, training frameworks, and token IDs](#faq-nemo-gym-training-frameworks-and-token-ids)
 - [FAQ: NeMo Gym what CI/CD do I need to pass?](#faq-nemo-gym-what-cicd-do-i-need-to-pass)
 - [FAQ: Why aiohttp backend and not httpx/httpcore for async http?](#faq-why-aiohttp-backend-and-not-httpxhttpcore-for-async-http)
-- [FAQ: ValueError: Found conflicting aggregate metrics that need to be corrected](#faq-valueerror-found-conflicting-aggregate-metrics-that-need-to-be-corrected)
 
 
 # NeMo-Gym
@@ -976,22 +975,3 @@ Here are some Github issues related to this problem. They didn't help too much, 
 - https://github.com/encode/httpx/issues/3215#issuecomment-2220795088
 
 If you are using AsyncOpenAI client with a parallelism > 32, you may also want to check if this kind of inefficiency also affects your setup.
-
-
-# FAQ: ValueError: Found conflicting aggregate metrics that need to be corrected
-Each environment requires a `example_metrics.json` to be provided, which includes the expected output when running `ng_prepare_data` with `+mode=example_validation`.
-
-Should the schema for these metrics ever change, data preparation will be rerun and the updated `example_metrics.json` would be pushed to `main`. However, the metrics files for actual training (`+mode=train_preparation`) are **NOT** updated. If `ng_prepare_data` was already run previously, the outdated metrics files may still exist and you will get an aggregate metrics conflict error:
-```bash
-Traceback (most recent call last):
-raise ValueError(f"Found conflicting aggregate metrics that need to be corrected:{conflicting_fpaths_str}")
-ValueError: Found conflicting aggregate metrics that need to be corrected:
-- path/to/metrics/train_metrics_conflict.json
-- path/to/metrics/validation_metrics_conflict.json
-```
-
-If you run into the error above for any of the files listed, you will need to delete the necessary files (e.g. below) and rerun:
-- `data/{resource_server_name}/train_metrics.json`
-- `data/{resource_server_name}/validation_metrics.json`
-- `resources_servers/{resource_server_name}/data/train_metrics.json`
-- `resources_servers/{resource_server_name}/data/validation_metrics.json`
