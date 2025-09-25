@@ -240,6 +240,8 @@ ng_prepare_data = "nemo_gym.train_data_utils:prepare_data"
 # HF dataset management
 nemo_gym_gitlab_to_hf_dataset = "nemo_gym.hf_utils:upload_jsonl_dataset_cli"
 ng_gitlab_to_hf_dataset = "nemo_gym.hf_utils:upload_jsonl_dataset_cli"
+nemo_gym_download_dataset_from_hf = "nemo_gym.hf_utils:download_jsonl_dataset_cli"
+ng_download_dataset_from_hf = "nemo_gym.hf_utils:download_jsonl_dataset_cli"
 
 # Configuration utils
 nemo_gym_dump_config = "nemo_gym.cli:dump_config"

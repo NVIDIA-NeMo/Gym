@@ -87,11 +87,11 @@ class UploadJsonlDatasetHuggingFaceConfig(BaseModel):
     resource_config_path: str
 
 
-class DownloadJsonlDatasetHfConfig(BaseModel):
+class DownloadJsonlDatasetHuggingFaceConfig(BaseModel):
     output_fpath: str
     hf_token: str
-    filename_in_repo: str  # TODO: is this needed?
-    repo_id: str  # TODO: is this needed?
+    artifact_fpath: str
+    repo_id: str
 
 
 DatasetType = Union[Literal["train"], Literal["validation"], Literal["example"]]

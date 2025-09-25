@@ -25,6 +25,34 @@ README_PATH = Path("README.md")
 TARGET_FOLDER = Path("resources_servers")
 
 
+def get_dataset_domain(data, level=1):
+    if level == 4:
+        return data.get("domain")
+    else:
+        for k, v in data.items():
+            if level == 2 and k != "resources_servers":
+                continue
+            return get_dataset_domain(v, level + 1)
+
+
+def get_dataset_license(data):
+    for k1, v1 in data.items():
+        if k1.endswith("_simple_agent") and isinstance(v1, dict):
+            v2 = v1.get("responses_api_agents")
+            if isinstance(v2, dict):
+                v3 = v2.get("simple_agent")
+                if isinstance(v3, dict):
+                    datasets = v3.get("datasets")
+                    if isinstance(datasets, list):
+                        for entry in datasets:
+                            if (
+                                isinstance(entry, dict)
+                                and entry.get("name") == "train"
+                                and entry.get("type") == "train"
+                            ):
+                                return entry.get("license")
+
+
 def extract_domain_and_license(yaml_path: Path) -> tuple[str, str]:
     """
     Domain:
@@ -45,41 +73,8 @@ def extract_domain_and_license(yaml_path: Path) -> tuple[str, str]:
     with yaml_path.open() as f:
         data = yaml.safe_load(f)
 
-    domain = None
-    license = None
-
-    def visit_domain(data, level=1):
-        nonlocal domain
-        if level == 4:
-            domain = data.get("domain")
-            return
-        else:
-            for k, v in data.items():
-                if level == 2 and k != "resources_servers":
-                    continue
-                visit_domain(v, level + 1)
-
-    def visit_license(data):
-        nonlocal license
-        for k1, v1 in data.items():
-            if k1.endswith("_simple_agent") and isinstance(v1, dict):
-                v2 = v1.get("responses_api_agents")
-                if isinstance(v2, dict):
-                    v3 = v2.get("simple_agent")
-                    if isinstance(v3, dict):
-                        datasets = v3.get("datasets")
-                        if isinstance(datasets, list):
-                            for entry in datasets:
-                                if (
-                                    isinstance(entry, dict)
-                                    and entry.get("name") == "train"
-                                    and entry.get("type") == "train"
-                                ):
-                                    license = entry.get("license")
-                                    return
-
-    visit_domain(data)
-    visit_license(data)
+    domain = get_dataset_domain(data)
+    license = get_dataset_license(data)
 
     return domain, license
 
