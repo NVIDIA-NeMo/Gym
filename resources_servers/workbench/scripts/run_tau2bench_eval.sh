@@ -1,7 +1,7 @@
-export $SCRATCH_PATH=/lustre/fsw/portfolios/llmservice/users/rgala
-export DISTCP_FILE_PATH=/lustre/fsw/portfolios/llmservice/users/rgala/repos/RL/results/v3_base_qwen_8b_airline_verifier_qwen235b_mixed_data_base_model_qwen3-8b_sft_lr5e-6/step_45
-export MODEL_NAME=v3_base_qwen_8b_airline_chkpt_45
-export HF_MODEL_PATH=$DISTCP_FILE_PATH/hf
+# export $SCRATCH_PATH=/lustre/fsw/portfolios/llmservice/users/rgala
+# export DISTCP_FILE_PATH=/lustre/fsw/portfolios/llmservice/users/rgala/repos/RL/results/v3_base_qwen_8b_airline_verifier_qwen235b_mixed_data_base_model_qwen3-8b_sft_lr5e-6/step_45
+# export MODEL_NAME=v3_base_qwen_8b_airline_chkpt_45
+# export HF_MODEL_PATH=$DISTCP_FILE_PATH/hf
 # bash /lustre/fsw/portfolios/llmservice/users/rgala/repos/RL/ritu_temp/convert_megatron_to_hf.sh $DISTCP_FILE_PATH
 
 # export DISTCP_FILE_PATH=/lustre/fsw/portfolios/llmservice/users/rgala/repos/RL/results/qwen_8b_thinking_airline_verifier_qwen235b_mixed_data_sft_lr5e-6/step_45
@@ -9,8 +9,11 @@ export HF_MODEL_PATH=$DISTCP_FILE_PATH/hf
 # export HF_MODEL_PATH=$DISTCP_FILE_PATH/hf
 
 # export DISTCP_FILE_PATH=Qwen/Qwen3-8B
-export MODEL_NAME="Qwen3-4B-Instruct-2507"
-export HF_MODEL_PATH="Qwen/Qwen3-4B-Instruct-2507"
+# export MODEL_NAME="Qwen3-4B-Instruct-2507"
+# export HF_MODEL_PATH="Qwen/Qwen3-4B-Instruct-2507"
+
+export MODEL_NAME=qwen3-4b-Instruct
+export HF_MODEL_PATH=/lustre/fsw/portfolios/llmservice/users/abhibhag/nemo-rl/results/20250924/workbench/qwen3_4binstruct/workbench-test/step_57-hf
 
 
 export VLLM_PORT=10241
