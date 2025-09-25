@@ -17,4 +17,5 @@ srun -A llmservice_modelalignment_sft \
       --config="${BASE_PATH}/config.yaml" \
       --megatron-ckpt-path="${BASE_PATH}/policy/weights/iter_0000000" \
       --hf-ckpt-path=$HF_CKPT_PATH
-    cp "${BASE_PATH}/config.yaml" "${HF_CKPT_PATH}/nemo_rl_config.yaml"
+    cp \"${BASE_PATH}/config.yaml\" \"${HF_CKPT_PATH}/nemo_rl_config.yaml\"
+"
