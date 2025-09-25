@@ -614,6 +614,7 @@ multineedle_simple_agent:
         type: train
         license: Apache 2.0
         jsonl_fpath: resources_servers/multineedle/data/train.jsonl
+        num_repeats: 1
         gitlab_identifier:
           dataset_name: multineedle
           version: 0.0.1
@@ -623,6 +624,7 @@ multineedle_simple_agent:
         type: validation
         license: Apache 2.0
         jsonl_fpath: resources_servers/multineedle/data/validation.jsonl
+        num_repeats: 1
         gitlab_identifier:
           dataset_name: multineedle
           version: 0.0.1
@@ -631,12 +633,14 @@ multineedle_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/multineedle/data/example.jsonl
+        num_repeats: 1
 ```
 
 A dataset object consists of:
 - Name: An identifier for you
 - Type: train, validation, or example. Train and validation are as used in NeMo RL or other train frameworks. More information about the example type is in the next section.
 - Jsonl fpath: the local file path to your jsonl file for this dataset.
+- Num repeats: optionally repeat each row when preparing or collating data. Defaults to 1 if unspecified.
 - Gitlab identifier: The remote path to the dataset as held in the Gitlab dataset registry. This field is required for train and validation datasets. (Not required for example datasets since those are required to be committed to Git).
 - License: The license of that dataset. Required for train and validation datasets and not required for example datasets, similar in principle to the Gitlab identifier.
 - Start idx, end idx: used for slicing your dataset.
