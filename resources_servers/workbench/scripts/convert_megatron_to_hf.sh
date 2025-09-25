@@ -28,7 +28,7 @@ srun -A llmservice_modelalignment_sft \
   -t 02:00:00 \
   --pty bash -c "
     cd $REPO_PATH
-    uv run --extra mcore python  examples/convert_dcp_to_hf.py  \
+    uv run --extra mcore python  examples/converters/convert_dcp_to_hf.py  \
       --config="${CKPT_DIR}/config.yaml" \
       --dcp-ckpt-path="${CKPT_DIR}/policy/weights" \
       --hf-ckpt-path="${CKPT_DIR}-hf" rsync -ahP ${CKPT_DIR}/policy/tokenizer ${CKPT_DIR}-hf/ "
