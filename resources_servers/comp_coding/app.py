@@ -12,16 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import sys
-from asyncio import Semaphore, sleep
-from contextlib import asynccontextmanager, redirect_stdout
-from io import StringIO
-from multiprocessing.pool import Pool
-from time import time
-from traceback import print_exc
+from asyncio import Semaphore, get_running_loop
 from typing import Any, List, Optional
 
-from fastapi import FastAPI
+from lcb_integration.compute_code_generation_metrics import check_correctness
+from lcb_integration.extraction_utils import LMStyle, extract_code
 from pydantic import BaseModel
 
 from nemo_gym.base_resources_server import (
@@ -59,97 +54,9 @@ class CompCodingVerifyRequest(CompCodingRunRequest, BaseVerifyRequest):
 
 
 class CompCodingVerifyResponse(BaseVerifyResponse):
-    reason: str
     extracted_model_output: Optional[str]
     extracted_model_code: Optional[str]
-    tests_time_taken: Optional[float]
-    stdout: Optional[str]
-
-
-# ------------ helpers ------------
-
-
-def _extract_code(text: str) -> Optional[str]:
-    # We allow two kinds of responses:
-    # 1. Code inside a fenced block (```python ... ``` or ``` ... ```)
-    # 2. Raw code returned without any fences
-    if not text or "```" not in text:
-        return text
-
-    start_code_idx = text.rfind("```python\n")
-    if start_code_idx == -1:
-        return text
-    start_code_idx += len("```python\n")
-
-    end_code_idx = text.find("```", start_code_idx)
-    if end_code_idx == -1:
-        return text[start_code_idx:]
-
-    return text[start_code_idx:end_code_idx]
-
-
-class TestResult(BaseModel):
-    ok: bool
-    message: str
-    tests_time_taken: float
-    stdout: Optional[str]
-
-
-def _run_code_against_tests(code: str, tests: UnitTests) -> TestResult:
-    """
-    Executes `code` with in-process exec(), redirecting stdin/stdout per test.
-    Assumes dataset pre-processing has already validated test shapes (non-empty,
-    equal-length inputs/outputs).
-    """
-    start_time = time()
-
-    for i, (test_input, expected_output) in enumerate(zip(tests.inputs, tests.outputs), start=1):
-        exec_globals = {
-            "__builtins__": __builtins__,
-        }
-
-        orig_stdin = sys.stdin
-        with StringIO() as captured_output:
-            with redirect_stdout(captured_output):
-                # This is ONLY safe because we run this in a separate process.
-                sys.stdin = StringIO(test_input)
-
-                try:
-                    exec(code, exec_globals)
-                except Exception as e:
-                    return TestResult(
-                        ok=False,
-                        message=f"TEST_CASE_{i}_ERROR: {e}",
-                        tests_time_taken=time() - start_time,
-                        stdout=captured_output.getvalue(),
-                    )
-                except:
-                    # Handle Non-exception-based calls in the executed code
-                    return TestResult(
-                        ok=False,
-                        message=f"TEST_CASE_{i}_ERROR: {print_exc()}",
-                        tests_time_taken=time() - start_time,
-                        stdout=captured_output.getvalue(),
-                    )
-                finally:
-                    sys.stdin = orig_stdin
-
-                actual_output = captured_output.getvalue()
-
-        if actual_output.rstrip() != expected_output.rstrip():
-            return TestResult(
-                ok=False,
-                message=f"TEST_CASE_{i}_FAILED: Expected {repr(expected_output)} got {repr(actual_output)}",
-                tests_time_taken=time() - start_time,
-                stdout=actual_output,
-            )
-
-    return TestResult(
-        ok=True,
-        message=f"SUCCESS: All {len(tests.inputs)} test cases passed",
-        tests_time_taken=time() - start_time,
-        stdout=actual_output,  # Just the last one is fine.
-    )
+    metadata: Optional[str]
 
 
 # ----------------------------
@@ -159,24 +66,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
     config: CompCodingResourcesServerConfig
 
     def model_post_init(self, context):
-        self._pool: Optional[Pool] = None
         self._semaphore: Semaphore = Semaphore(value=self.config.num_processes)
-
-    def setup_webserver(self) -> FastAPI:
-        @asynccontextmanager
-        async def lifespan(app: FastAPI):
-            with Pool(self.config.num_processes) as pool:
-                self._pool = pool
-                yield
-
-            print(f"Finished {self.__class__.__name__} {self.config.name} and shut down pool!")
-
-        app = FastAPI(lifespan=lifespan)
-
-        app.post("/seed_session")(self.seed_session)
-        app.post("/verify")(self.verify)
-
-        return app
 
     async def verify(self, body: CompCodingVerifyRequest) -> CompCodingVerifyResponse:
         model_out = body.response.output_text
@@ -194,7 +84,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
         tests = UnitTests.model_validate(body.verifier_metadata["unit_tests"])
 
         # 3) extract code (code fence or raw)
-        code = _extract_code(model_out)
+        code = extract_code(model_out, LMStyle.OpenAIChat)
         if not code:
             return CompCodingVerifyResponse(
                 **body.model_dump(),
@@ -208,33 +98,20 @@ class CompCodingResourcesServer(SimpleResourcesServer):
         # 4) run (no sandbox)
         # Use a semaphore here to guarantee that we are actually running this actively during the timeout.
         async with self._semaphore:
-            result = self._pool.apply_async(_run_code_against_tests, (code, tests))
-            start_time = time()
-            await sleep(self.config.unit_test_timeout_secs)
-
-            try:
-                test_result = result.get()
-            except:
-                print_exc()
-                print(
-                    f"Comp coding verifier {self.config.name} hit an exception while retrieving unit test result. The traceback is shown above."
-                )
-
-                test_result = TestResult(
-                    ok=False,
-                    message="",
-                    tests_time_taken=time() - start_time,
-                    stdout=None,
-                )
+            loop = get_running_loop()
+            result, metadata = await loop.run_in_executor(
+                check_correctness,
+                tests,  # sample
+                None,  # generation
+                self.config.unit_test_timeout_secs,  # timeout
+            )
 
         return CompCodingVerifyResponse(
             **body.model_dump(),
-            reward=1.0 if test_result.ok else 0.0,
-            reason=test_result.message,
-            extracted_model_output=model_out,
-            extracted_model_code=code,
-            tests_time_taken=test_result.tests_time_taken,
-            stdout=test_result.stdout,
+            reward=1.0 if result["graded_list"][0] else 0.0,
+            extracted_model_output=result["output_list"][0],
+            extracted_model_code=result["code_list"][0],
+            metadata=metadata,
         )
 
 

@@ -32,6 +32,8 @@ python -m lcb_runner.runner.main \
     --model gpt-4o-2024-05-13 \
     --scenario codegeneration \
     --evaluate \
+    --continue_existing_with_eval \
+    --num_process_evaluate 4 \
     --release_version release_v5 \
     --start_date 2024-07-01 \
     --end_date 2025-02-01
