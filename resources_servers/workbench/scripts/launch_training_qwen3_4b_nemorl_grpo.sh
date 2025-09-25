@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export TRAINING_SCRIPT="Gym/resources_servers/workbench/scripts/train_qwen3_4b_nemorl_grpo.slurm"
+export TRAINING_SCRIPT="3rdparty/Penguin-workspace/Penguin/resources_servers/workbench/scripts/train_qwen3_4b_nemorl_grpo.slurm"
 export NAME="nemorl-grpo-qwen3-4b"
 export NUM_NODES=1
 
