@@ -16,41 +16,62 @@
 We use the livecodebench verification logic directly so we don't need to re-implement all the code parsing, test case run, etc ourselves.
 The train data we use is fundamentally different from livecodebench however.
 
-Reproduce the accuracy test setting used to test the accuracy of our integration:
+Download the verification data (produced by resources_servers/comp_coding/livecodebench_accuracy_test_prep.py):
 ```bash
-git clone https://github.com/LiveCodeBench/LiveCodeBench
-cd LiveCodeBench
-uv venv --python 3.11
-source .venv/bin/activate
-uv pip install -e .
-# Downgrade datasets to match the poetry.lock version.
-uv pip install datasets==2.18.0
-
-HF_HOME=.cache \
-OPENAI_KEY={your OpenAI API key} \
-python -m lcb_runner.runner.main \
-    --model gpt-4o-2024-05-13 \
-    --scenario codegeneration \
-    --evaluate \
-    --continue_existing_with_eval \
-    --num_process_evaluate 4 \
-    --release_version release_v5 \
-    --start_date 2024-07-01 \
-    --end_date 2025-02-01
+ng_upload_dataset_to_gitlab \
+    +dataset_name=livecodebench \
+    +version=0.0.1 \
+    +input_jsonl_fpath=resources_servers/comp_coding/data/livecodebench_v5_2024-07-01_2025-02-01_validation.jsonl
 ```
 
-This is the expected output:
+Run the comp coding server via:
 ```bash
-Downloading builder script: 5.01kB [00:00, 5.57MB/s]
-Downloading readme: 3.39kB [00:00, 23.3MB/s]
-Downloading data: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1.25G/1.25G [00:11<00:00, 107MB/s]
-Downloading data: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 713M/713M [00:06<00:00, 107MB/s]
-Downloading data: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 623M/623M [00:05<00:00, 107MB/s]
-Downloading data: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1.20G/1.20G [00:11<00:00, 105MB/s]
-Downloading data: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 558M/558M [00:05<00:00, 107MB/s]
-Downloading data: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 134M/134M [00:01<00:00, 107MB/s]
-Generating test split: 880 examples [00:10, 86.65 examples/s]
-Loaded 322 problems
- 15%|██████████████████████████████▉                                                                                                                                                                            | 49/322 [04:52<23:04,  5.07s/it]
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/comp_coding/configs/comp_coding.yaml"
+ng_run "+config_paths=[${config_paths}]"
 ```
 """
+
+import json
+from asyncio import run
+
+from tqdm.auto import tqdm
+
+from nemo_gym.server_utils import ServerClient
+
+
+async def main():
+    server_client = ServerClient.load_from_global_config()
+    limit = 10
+
+    with open("resources_servers/comp_coding/data/livecodebench_v5_2024-07-01_2025-02-01_validation.jsonl") as f:
+        expected_total_reward = 0.0
+        tasks = []
+        for _, row in zip(range(limit), f):
+            row = json.loads(row)
+            task = server_client.post(
+                "comp_coding",
+                url_path="/verify",
+                json=row,
+            )
+            tasks.append(task)
+
+            expected_total_reward += row["reward"]
+
+        actual_total_reward = 0.0
+        with open("resources_servers/comp_coding/data/livecodebench_verify_accuracy_results.jsonl", "w") as f:
+            for future in tqdm.as_completed(tasks, desc="Verifying"):
+                response = await future
+                result = await response.json()
+                f.write(json.dumps(result) + "\n")
+
+                actual_total_reward += result["reward"]
+
+        expected_average_reward = expected_total_reward / len(tasks)
+        actual_average_reward = actual_total_reward / len(tasks)
+        print(f"""Expected average reward: {expected_average_reward:.3f}
+Actual average reward: {actual_average_reward:.3f}""")
+
+
+if __name__ == "__main__":
+    run(main())

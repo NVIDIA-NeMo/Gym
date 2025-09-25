@@ -33,7 +33,7 @@ from nemo_gym.base_resources_server import (
 # ----------------------------
 class CompCodingResourcesServerConfig(BaseResourcesServerConfig):
     num_processes: int
-    unit_test_timeout_secs: float
+    unit_test_timeout_secs: int
 
 
 # ----------------------------
@@ -99,18 +99,47 @@ class CompCodingResourcesServer(SimpleResourcesServer):
         # Use a semaphore here to guarantee that we are actually running this actively during the timeout.
         async with self._semaphore:
             loop = get_running_loop()
+
+            """
+            Sample looks like this:
+            ```json
+            {
+                "input_output": "{\"inputs\": [...], ...}",
+            }
+            ```
+            `input_output` looks like this:
+            ```json
+            {
+                "inputs": [
+                    "6\n4 13 2 3 2 6",
+                    ...
+                ],
+                "outputs": [
+                    "4 30 2 13 2 13",
+                    ...
+                ],
+                "fn_name": null
+            }
+            ```
+            """
+
             result, metadata = await loop.run_in_executor(
+                None,
                 check_correctness,
-                tests,  # sample
-                None,  # generation
+                {"input_output": tests.model_dump_json()},  # sample
+                code,  # generation
                 self.config.unit_test_timeout_secs,  # timeout
             )
 
+        reward = 0.0
+        if "graded_list" in result:
+            reward = 1.0 if result["graded_list"][0] else 0.0
+
         return CompCodingVerifyResponse(
             **body.model_dump(),
-            reward=1.0 if result["graded_list"][0] else 0.0,
-            extracted_model_output=result["output_list"][0],
-            extracted_model_code=result["code_list"][0],
+            reward=reward,
+            extracted_model_output=model_out,
+            extracted_model_code=code,
             metadata=metadata,
         )
 
