@@ -527,7 +527,14 @@ class TrainDataProcessor(BaseModel):
 
         if conflicting_fpaths:
             conflicting_fpaths_str = "\n- ".join([""] + conflicting_fpaths)
-            raise ValueError(f"Found conflicting aggregate metrics that need to be corrected:{conflicting_fpaths_str}")
+            target_fpaths_str = "\n- ".join(
+                [""] + [fp.replace("_conflict.json", ".json") for fp in conflicting_fpaths]
+            )
+            raise ValueError(f"""
+Found conflicting aggregate metrics that need to be corrected:{conflicting_fpaths_str}
+
+This could be due to a change in how metrics are calculated, leading to outdated metrics. Try deleting the below file(s) and rerunning data preparation:{target_fpaths_str}
+""")
 
         return dict(dataset_type_to_aggregate_metrics)
 
@@ -606,7 +613,14 @@ class TrainDataProcessor(BaseModel):
 
         if conflicting_fpaths:
             conflicting_fpaths_str = "\n- ".join([""] + conflicting_fpaths)
-            raise ValueError(f"Found conflicting aggregate metrics that need to be corrected:{conflicting_fpaths_str}")
+            target_fpaths_str = "\n- ".join(
+                [""] + [fp.replace("_conflict.json", ".json") for fp in conflicting_fpaths]
+            )
+            raise ValueError(f"""
+Found conflicting aggregate metrics that need to be corrected:{conflicting_fpaths_str}
+
+This could be due to a change in how metrics are calculated, leading to outdated metrics. Try deleting the below file(s) and rerunning data preparation:{target_fpaths_str}
+""")
 
         final_fpaths_str = "\n- ".join([""] + [f"{type}: {fpath}" for type, fpath in final_fpaths.items()])
         print(f"View your final data!{final_fpaths_str}")
