@@ -2,7 +2,7 @@ set -euo pipefail
 
 REPO_PATH=/lustre/fsw/portfolios/llmservice/users/abhibhag/nemo-rl
 BASE_PATH=/lustre/fsw/portfolios/llmservice/users/abhibhag/nemo-rl/results/20250924/workbench/qwen3_4binstruct/workbench-test/step_57
-HF_CKPT_PATH=$BASE_PATH
+HF_CKPT_PATH=$BASE_PATH/hf
 
 srun -A llmservice_modelalignment_sft \
   --container-image=/lustre/fsw/portfolios/llmservice/users/jkyi/containers/nemo-rl:main-2aea5add.squashfs \
