@@ -15,7 +15,7 @@ srun -A llmservice_modelalignment_sft \
     cd $REPO_PATH
     uv run --extra mcore python examples/converters/convert_megatron_to_hf.py \
       --config="${BASE_PATH}/config.yaml" \
-      --megatron-ckpt-path="${BASE_PATH}/policy/weights/iter_0000000" \
+      --megatron-ckpt-path="${BASE_PATH}/policy/weights" \
       --hf-ckpt-path=$HF_CKPT_PATH
     cp \"${BASE_PATH}/config.yaml\" \"${HF_CKPT_PATH}/nemo_rl_config.yaml\"
 "
