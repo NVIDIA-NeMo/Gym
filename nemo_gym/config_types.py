@@ -79,6 +79,14 @@ class DownloadJsonlDatasetGitlabConfig(JsonlDatasetGitlabIdentifer):
     output_fpath: str
 
 
+class UploadJsonlDatasetHuggingFaceConfig(BaseModel):
+    hf_username: str
+    hf_token: str
+    dataset_name: str
+    input_jsonl_fpath: str
+    resource_config_path: str
+
+
 DatasetType = Union[Literal["train"], Literal["validation"], Literal["example"]]
 
 
