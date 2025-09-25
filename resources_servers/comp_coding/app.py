@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from asyncio import Semaphore, get_running_loop
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from lcb_integration.compute_code_generation_metrics import check_correctness
 from lcb_integration.extraction_utils import LMStyle, extract_code
@@ -39,24 +39,27 @@ class CompCodingResourcesServerConfig(BaseResourcesServerConfig):
 # ----------------------------
 # Schemas
 # ----------------------------
+
+
+# This is LiveCodeBench format
 class UnitTests(BaseModel):
     inputs: List[str]
     outputs: List[str]
+    fn_name: Optional[str]
 
 
 class CompCodingRunRequest(BaseRunRequest):
-    uuid: Optional[str] = None
-    metadata: Optional[dict[str, Any]] = None
+    pass
 
 
 class CompCodingVerifyRequest(CompCodingRunRequest, BaseVerifyRequest):
-    verifier_metadata: Optional[dict[str, Any]] = None
+    verifier_metadata: Optional[Dict[str, Any]] = None
 
 
 class CompCodingVerifyResponse(BaseVerifyResponse):
     extracted_model_output: Optional[str]
     extracted_model_code: Optional[str]
-    metadata: Optional[str]
+    metadata: Optional[Dict[str, Any]]
 
 
 # ----------------------------

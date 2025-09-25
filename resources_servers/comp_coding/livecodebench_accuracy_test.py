@@ -33,44 +33,47 @@ ng_run "+config_paths=[${config_paths}]"
 """
 
 import json
-from asyncio import run
+from asyncio import Semaphore, run
 
 from tqdm.auto import tqdm
 
 from nemo_gym.server_utils import ServerClient
 
 
+async def _single_post(semaphore: Semaphore, server_client: ServerClient, f) -> dict:
+    async with semaphore:
+        row = json.loads(next(f))
+        response = await server_client.post(
+            "comp_coding",
+            url_path="/verify",
+            json=row,
+        )
+        result = await response.json()
+
+        expected_reward = row["reward"]
+        actual_reward = result["reward"]
+        print(f"Expected reward: {expected_reward} | Actual reward: {actual_reward}")
+        return result
+
+
 async def main():
     server_client = ServerClient.load_from_global_config()
-    limit = 10
+    semaphore = Semaphore(4)
 
-    with open("resources_servers/comp_coding/data/livecodebench_v5_2024-07-01_2025-02-01_validation.jsonl") as f:
-        expected_total_reward = 0.0
+    input_fpath = "resources_servers/comp_coding/data/livecodebench_v5_2024-07-01_2025-02-01_validation.jsonl"
+    with open(input_fpath) as f:
+        num_rows = sum(1 for _ in f)
+
+    with open(input_fpath) as f:
         tasks = []
-        for _, row in zip(range(limit), f):
-            row = json.loads(row)
-            task = server_client.post(
-                "comp_coding",
-                url_path="/verify",
-                json=row,
-            )
+        for _ in range(num_rows):
+            task = _single_post(semaphore, server_client, f)
             tasks.append(task)
 
-            expected_total_reward += row["reward"]
-
-        actual_total_reward = 0.0
         with open("resources_servers/comp_coding/data/livecodebench_verify_accuracy_results.jsonl", "w") as f:
             for future in tqdm.as_completed(tasks, desc="Verifying"):
-                response = await future
-                result = await response.json()
+                result = await future
                 f.write(json.dumps(result) + "\n")
-
-                actual_total_reward += result["reward"]
-
-        expected_average_reward = expected_total_reward / len(tasks)
-        actual_average_reward = actual_total_reward / len(tasks)
-        print(f"""Expected average reward: {expected_average_reward:.3f}
-Actual average reward: {actual_average_reward:.3f}""")
 
 
 if __name__ == "__main__":
