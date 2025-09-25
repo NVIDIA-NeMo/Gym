@@ -2,8 +2,8 @@ bbh_aviary_resources_server:
   resources_servers:
     aviary:
       entrypoint: client_app.py
-      server_url: ${bbh_server_url}
-      api_key: ${bbh_api_key}
+      server_url: null 
+      api_key: null 
 
 
 bbh_aviary_agent:
