@@ -15,6 +15,7 @@
 - [How To: Add a resource server](#how-to-add-a-resource-server)
   - [TLDR final expected artifacts](#tldr-final-expected-artifacts)
 - [How To: Upload and download a dataset from Gitlab](#how-to-upload-and-download-a-dataset-from-gitlab)
+- [How To: Upload and download a dataset from HuggingFace](#how-to-upload-and-download-a-dataset-from-huggingface)
 - [How To: Offline rollout collection or synthetic data generation](#how-to-offline-rollout-collection-or-synthetic-data-generation)
 - [How To: Prepare and validate data for PR submission or RL training](#how-to-prepare-and-validate-data-for-pr-submission-or-rl-training)
 - [How To: ng\_dump\_config - Dump a YAML config as exactly as NeMo Gym sees it](#how-to-ng_dump_config---dump-a-yaml-config-as-exactly-as-nemo-gym-sees-it)
@@ -567,6 +568,64 @@ ng_download_dataset_from_gitlab \
     +version=0.0.1 \
     +artifact_fpath=multineedle_benchmark.jsonl \
     +output_fpath=data/multineedle_benchmark.jsonl
+```
+
+
+# How To: Upload and download a dataset from Gitlab
+The huggingface client requires that your credentials are in `env.yaml`, along with some other pertinent details needed to upload to the designated place.
+```yaml
+hf_token: {your huggingface token}
+hf_organization: {your huggingface org}
+hf_collection_name: {your collection}
+hf_collection_slug: {your collection slug}  # alphanumeric string found at the end of a collection URI
+```
+
+Naming convention for Huggingface datasets is as follows:
+`{hf_organization}/{hf_collection_name}-{domain}–{resource_server_name}-{your dataset name}`
+
+E.g.: `Nvidia/Nemo-Gym-Math-library_judge_math-dapo17k`
+
+You will only need to manually input the `{your dataset name}` portion of the above when inputting the `dataset_name` flag. Everything preceding it will be automatically populated prior to upload.
+
+To upload to Huggingface, use the below command:
+```bash
+resource_config_path="resources_servers/multineedle/configs/multineedle.yaml"
+ng_upload_dataset_to_hf \
+    +dataset_name={your dataset name} \
+    +input_jsonl_fpath=data/multineedle_benchmark.jsonl \
+    +resource_config_path=${resource_config_path}
+```
+
+Because of the required dataset nomenclature, the resource server config path is required when uploading. Specifically, `domain` is used in the naming of a dataset in Huggingface.
+
+You can optionally pass a `+delete_from_gitlab=true` flag to the above command, which will delete the model and all of its artifacts from Gitlab. By default, this is set to `False`.
+```bash
+resource_config_path="resources_servers/multineedle/configs/multineedle.yaml"
+ng_upload_dataset_to_hf \
+    +dataset_name={your dataset name} \
+    +input_jsonl_fpath=data/multineedle_benchmark.jsonl \
+    +resource_config_path=${resource_config_path} \
+    +delete_from_gitlab=true
+```
+
+You can also run the below command which does the same thing without the need for a `+delete_from_gitlab` flag:
+
+```bash
+resource_config_path="resources_servers/multineedle/configs/multineedle.yaml"
+ng_gitlab_to_hf_dataset \
+    +dataset_name={your dataset name} \
+    +input_jsonl_fpath=data/multineedle_benchmark.jsonl \
+    +resource_config_path=${resource_config_path}
+```
+
+**Important note**: Gitlab model names are case sensitive. There can be models named 'My_Model' and 'my_model' living simultaneously in the registry. When uploading to Huggingface with the intention of deleting Gitlab artifacts, be sure the casing of your Huggingface dataset name matches that of Gitlab's.
+
+Downloading a dataset from Huggingface is straightforward:
+```bash
+ng_download_dataset_from_hf \
+    +repo_id=Nvidia/NeMo-Gym-Instruction_Following-multineedle-{your dataset name} \
+    +artifact_fpath=multineedle_benchmark.jsonl \
+    +output_fpath=data/multineedle_benchmark_hf.jsonl
 ```
 
 
