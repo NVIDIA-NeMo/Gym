@@ -19,10 +19,10 @@ export HF_MODEL_PATH=/lustre/fsw/portfolios/llmservice/users/abhibhag/nemo-rl/re
 export VLLM_PORT=10241
 
 export TOOL_PARSER="hermes"
+cd  /lustre/fsw/portfolios/llmservice/users/abhibhag/nemo-rl/3rdparty/Penguin-workspace/Penguin
+cmd_start_server="bash resources_servers/workbench/scripts/tau2bench/trained_model.sh $MODEL_NAME $HF_MODEL_PATH $TOOL_PARSER $VLLM_PORT"
 
-cmd_start_server="bash /lustre/fsw/portfolios/llmservice/users/rgala/slurm_scripts/vllm_serve/trained_model.sh $MODEL_NAME $HF_MODEL_PATH $TOOL_PARSER $VLLM_PORT"
-
-tmux new-session -d -s model "$cmd_start_server; sleep 2; bash"
+# tmux new-session -d -s model "$cmd_start_server; sleep 2; bash"
 echo "Started vLLM server session in tmux for $MODEL_NAME"
 i=0
 while ! curl -s "http://localhost:$VLLM_PORT/v1/models" >/dev/null 2>&1; do
@@ -36,8 +36,9 @@ while ! curl -s "http://localhost:$VLLM_PORT/v1/models" >/dev/null 2>&1; do
 done
 echo "vLLM server is ready"
 DOMAINS=("telecom" "retail" "airline")
+SAVE_FILE_NAME="/lustre/fsw/portfolios/llmservice/users/abhibhag/nemo-rl/results/20250924/workbench/qwen3_4binstruct/workbench-test/tau2bench"
 for DOMAIN in "${DOMAINS[@]}"; do
-    cmd_tb_eval="bash /lustre/fsw/portfolios/llmservice/users/rgala/repos/tau2-bench/ritu_run_dummy_baseline.sh $MODEL_NAME $DOMAIN"
+    cmd_tb_eval="bash /lustre/fsw/portfolios/llmservice/users/rgala/repos/tau2-bench/ritu_run_dummy_baseline.sh $MODEL_NAME $DOMAIN $SAVE_FILE_NAME $VLLM_PORT"
     tmux new-session -d -s tb_${DOMAIN} "$cmd_tb_eval; sleep 2; bash"
     echo "Started tb eval session in tmux for $MODEL_NAME"
 done
