@@ -56,11 +56,13 @@ class UnitTests(BaseModel):
 
 with open("resources_servers/comp_coding/data/opencodereasoning_filtered_25k_train.jsonl", "w") as f:
     for d in ds:
-        unit_tests = json.loads(d["unit_tests"])
-        if isinstance(unit_tests["inputs"][0], list):
-            unit_tests["inputs"] = unit_tests["inputs"][0]
-        if isinstance(unit_tests["outputs"][0], list):
-            unit_tests["outputs"] = unit_tests["outputs"][0]
+        try:
+            UnitTests.model_validate_json[d["unit_tests"]]
+        except:
+            from collections import Counter
+
+            print(Counter([type(v) for v in json.loads(d["unit_tests"])]))
+            continue
 
         row = {
             "responses_create_params": {
@@ -71,7 +73,7 @@ with open("resources_servers/comp_coding/data/opencodereasoning_filtered_25k_tra
                     },
                 ],
             },
-            "verifier_metadata": {"unit_tests": UnitTests.model_validate(unit_tests).model_dump()},
+            "verifier_metadata": {"unit_tests": UnitTests.model_validate_json[d["unit_tests"]].model_dump()},
             # Carry over original columns, even though they are unused for Gym
             "hash_id": d["hash_id"],
             "dataset": d["dataset"],
