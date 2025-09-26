@@ -40,12 +40,12 @@ from tqdm.auto import tqdm
 from nemo_gym.server_utils import ServerClient
 
 
-async def _single_post(semaphore: Semaphore, server_client: ServerClient, f) -> dict:
+async def _single_post(semaphore: Semaphore, server_client: ServerClient, agent_name: str, url_path: str, f) -> dict:
     async with semaphore:
         row = json.loads(next(f))
         response = await server_client.post(
-            "comp_coding",
-            url_path="/verify",
+            agent_name,
+            url_path=url_path,
             json=row,
         )
         result = await response.json()
@@ -78,10 +78,36 @@ async def test_verifier_accuracy():
     with open(input_fpath) as f:
         tasks = []
         for _ in range(num_rows):
-            task = _single_post(semaphore, server_client, f)
+            task = _single_post(semaphore, server_client, "comp_coding", "/verify", f)
             tasks.append(task)
 
         with open("resources_servers/comp_coding/data/livecodebench_verify_accuracy_results.jsonl", "w") as f:
+            for future in tqdm.as_completed(tasks, desc="Verifying"):
+                result = await future
+                f.write(json.dumps(result) + "\n")
+
+
+async def test_e2e_accuracy():
+    server_client = ServerClient.load_from_global_config()
+    semaphore = Semaphore(
+        server_client.global_config_dict["comp_coding"]["resources_servers"]["comp_coding"]["num_processes"]
+    )
+    limit = None
+
+    input_fpath = "resources_servers/comp_coding/data/livecodebench_v5_2024-07-01_2025-02-01_validation.jsonl"
+    with open(input_fpath) as f:
+        num_rows = sum(1 for _ in tqdm(f, desc="Reading num rows"))
+
+    if limit:
+        num_rows = min(num_rows, limit)
+
+    with open(input_fpath) as f:
+        tasks = []
+        for _ in range(num_rows):
+            task = _single_post(semaphore, server_client, "comp_coding_simple_agent", "/run", f)
+            tasks.append(task)
+
+        with open("resources_servers/comp_coding/data/livecodebench_e2e_accuracy_results.jsonl", "w") as f:
             for future in tqdm.as_completed(tasks, desc="Verifying"):
                 result = await future
                 f.write(json.dumps(result) + "\n")
