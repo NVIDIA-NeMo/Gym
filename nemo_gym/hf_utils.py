@@ -54,7 +54,7 @@ def check_jsonl_format(file_path: str) -> bool:  # pragma: no cover
     return True
 
 
-def upload_jsonl_dataset_to_hf(
+def upload_jsonl_dataset(
     config: UploadJsonlDatasetHuggingFaceConfig,
 ) -> None:  # pragma: no cover
     client = create_huggingface_client(config.hf_token)
@@ -70,7 +70,7 @@ def upload_jsonl_dataset_to_hf(
     # Dataset format check
     if not check_jsonl_format(config.input_jsonl_fpath):
         print("[Nemo-Gym] - JSONL file format check failed.")
-        return
+        raise
 
     # Repo id/creation
     try:
@@ -82,6 +82,7 @@ def upload_jsonl_dataset_to_hf(
             print(f"[Nemo-Gym] - Repo '{repo_id}' created successfully")
         else:
             print(f"[Nemo-Gym] - Error checking/creating repo: {e}")
+            raise
 
     # Collection id + addition
     try:
@@ -95,6 +96,7 @@ def upload_jsonl_dataset_to_hf(
             print(f"[Nemo-Gym] - Dataset '{repo_id}' added to collection '{collection_id}'")
     except HfHubHTTPError as e:
         print(f"[Nemo-Gym] - Error adding to collection: {e}")
+        raise
 
     # File upload
     try:
@@ -108,12 +110,7 @@ def upload_jsonl_dataset_to_hf(
         print("[Nemo-Gym] - Dataset uploaded successful")
     except HfHubHTTPError as e:
         print(f"[Nemo-Gym] - Error uploading file: {e}")
-
-
-def upload_jsonl_dataset_cli() -> None:  # pragma: no cover
-    global_config = get_global_config_dict()
-    config = UploadJsonlDatasetHuggingFaceConfig.model_validate(global_config)
-    upload_jsonl_dataset_to_hf(config)
+        raise
 
 
 def download_jsonl_dataset(

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from enum import Enum
-from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Set, Union
 
 from omegaconf import DictConfig, OmegaConf
 from pydantic import (
@@ -79,7 +79,7 @@ class DownloadJsonlDatasetGitlabConfig(JsonlDatasetGitlabIdentifer):
     output_fpath: str
 
 
-class UploadJsonlDatasetHuggingFaceConfig(BaseModel):
+class BaseUploadJsonlDatasetHuggingFaceConfig(BaseModel):
     hf_token: str
     hf_organization: str
     hf_collection_name: str
@@ -87,6 +87,21 @@ class UploadJsonlDatasetHuggingFaceConfig(BaseModel):
     dataset_name: str
     input_jsonl_fpath: str
     resource_config_path: str
+
+
+class UploadJsonlDatasetHuggingFaceConfig(BaseUploadJsonlDatasetHuggingFaceConfig):
+    forbidden_fields: ClassVar[Set[str]] = {"delete_from_gitlab"}
+
+    @model_validator(mode="before")
+    def check_forbidden_fields(cls, data):
+        if isinstance(data, dict) or hasattr(data, "keys"):
+            forbidden = cls.forbidden_fields.intersection(set(data.keys()))
+            if forbidden:
+                raise ValueError(f"Forbidden fields present: {forbidden}")
+        return data
+
+
+class UploadJsonlDatasetHuggingFaceMaybeDeleteConfig(BaseUploadJsonlDatasetHuggingFaceConfig):
     delete_from_gitlab: Optional[bool] = False
 
 

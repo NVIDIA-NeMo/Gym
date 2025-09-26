@@ -103,3 +103,17 @@ def download_jsonl_dataset_cli() -> None:  # pragma: no cover
     global_config = get_global_config_dict()
     config = DownloadJsonlDatasetGitlabConfig.model_validate(global_config)
     download_jsonl_dataset(config)
+
+
+def is_model_in_gitlab(model_name: str) -> bool:  # pragma: no cover
+    client = create_mlflow_client()
+
+    # model_name in gitlab is case sensitive
+    model_exists = client.get_registered_model(model_name)
+
+    return bool(model_exists)
+
+
+def delete_model_from_gitlab(model_name: str) -> None:  # pragma: no cover
+    client = create_mlflow_client()
+    client.delete_registered_model(name=model_name)
