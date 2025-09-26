@@ -40,6 +40,18 @@ from nemo_gym.server_utils import ServerClient
 async def _single_post(semaphore: Semaphore, server_client: ServerClient, agent_name: str, url_path: str, f) -> dict:
     async with semaphore:
         row = json.loads(next(f))
+
+        # From LCB defaults in lcb_runner/runner/oai_runner.py and the cli args defaults
+        row["responses_create_params"] = row["responses_create_params"] | {
+            "temperature": 0.2,
+            # Changed from max_tokens to max_output_tokens for Responses.
+            "max_output_tokens": 2000,
+            "top_p": 0.95,
+            # Unused in Responses
+            # "frequency_penalty": 0,
+            # "presence_penalty": 0,
+        }
+
         response = await server_client.post(
             agent_name,
             url_path=url_path,
