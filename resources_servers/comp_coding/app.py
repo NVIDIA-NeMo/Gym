@@ -82,14 +82,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 reward=0.0,
             )
 
-        # TODO remove this try-except
-        try:
-            tests = UnitTests.model_validate(body.verifier_metadata["unit_tests"])
-        except:
-            with open("failed_test_parsing.json", "a") as f:
-                import json
-
-                f.write(json.dumps(body.verifier_metadata) + "\n")
+        tests = UnitTests.model_validate(body.verifier_metadata["unit_tests"])
 
         # 3) extract code (code fence or raw)
         code = extract_code(model_out, LMStyle.OpenAIChat)
@@ -101,7 +94,6 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             )
 
         # 4) run (no sandbox)
-        # Use a semaphore here to guarantee that we are actually running this actively during the timeout.
         async with self._semaphore:
             loop = get_running_loop()
 
