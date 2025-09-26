@@ -110,3 +110,4 @@ async def e2e_accuracy_test():
 
 if __name__ == "__main__":
     run(verifier_accuracy_test())
+    # run(e2e_accuracy_test())
