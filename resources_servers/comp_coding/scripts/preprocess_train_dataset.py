@@ -22,6 +22,7 @@ ng_collect_rollouts +agent_name=comp_coding_simple_agent \
     +responses_create_params.temperature=0.2 \
     +responses_create_params.max_output_tokens=2000 \
     +responses_create_params.top_p=0.95 \
+    +num_samples_in_parallel=16 \
     +limit=1000
 ```
 """
