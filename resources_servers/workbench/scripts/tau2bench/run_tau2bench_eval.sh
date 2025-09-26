@@ -38,7 +38,7 @@ echo "vLLM server is ready"
 DOMAINS=("telecom" "retail" "airline")
 SAVE_FILE_NAME="/lustre/fsw/portfolios/llmservice/users/abhibhag/nemo-rl/results/20250924/workbench/qwen3_4binstruct/workbench-test/tau2bench"
 for DOMAIN in "${DOMAINS[@]}"; do
-    cmd_tb_eval="bash /lustre/fsw/portfolios/llmservice/users/rgala/repos/tau2-bench/ritu_run_dummy_baseline.sh $MODEL_NAME $DOMAIN $SAVE_FILE_NAME $VLLM_PORT"
+    cmd_tb_eval="bash resources_servers/workbench/scripts/tau2bench/ritu_run_dummy_baseline.sh $MODEL_NAME $DOMAIN $SAVE_FILE_NAME $VLLM_PORT"
     tmux new-session -d -s tb_${DOMAIN} "$cmd_tb_eval; sleep 2; bash"
     echo "Started tb eval session in tmux for $MODEL_NAME"
 done
