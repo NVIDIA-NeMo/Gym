@@ -4,6 +4,7 @@ comp_coding:
       entrypoint: app.py
       num_processes: 8
       unit_test_timeout_secs: 10
+      debug: false
 
 comp_coding_simple_agent:
   responses_api_agents:

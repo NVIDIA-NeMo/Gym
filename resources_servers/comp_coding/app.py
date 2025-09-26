@@ -34,6 +34,7 @@ from nemo_gym.base_resources_server import (
 class CompCodingResourcesServerConfig(BaseResourcesServerConfig):
     num_processes: int
     unit_test_timeout_secs: int
+    debug: bool
 
 
 # ----------------------------
