@@ -12,7 +12,7 @@ import json
 from datasets import load_dataset
 
 
-ds = load_dataset("Nexusflow/comp_prog_filtered_no_function", split="train", stream=True)
+ds = load_dataset("Nexusflow/comp_prog_filtered_no_function", split="train")
 
 # Largely taken from https://github.com/NVIDIA/NeMo-Skills/blob/0af0b169ba62be9097f6362c4fb29202849ae036/nemo_skills/prompt/config/eval/livecodebench/python_codegen_reasoning.yaml
 prompt_template = """You are a helpful and harmless assistant. You should think step-by-step before responding to the instruction below.
