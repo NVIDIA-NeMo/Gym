@@ -45,9 +45,13 @@ class TimeoutException(Exception):
     pass
 
 
-def timeout_handler(signum, frame):
-    print("timeout occured: alarm went off")
-    raise TimeoutException
+def timeout_handler_factory(debug: bool):
+    def timeout_handler(signum, frame):
+        if debug:
+            print("timeout occured: alarm went off")
+        raise TimeoutException
+
+    return timeout_handler
 
 
 # used to capture stdout as a list
@@ -418,7 +422,7 @@ def run_test(sample, test=None, debug=False, timeout=6):
     if test(generated_code) is not None it'll try to run the code.
     otherwise it'll just return an input and output pair.
     """
-    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.signal(signal.SIGALRM, timeout_handler_factory(debug))
 
     # Disable functionalities that can make destructive changes to the test.
     # max memory is set to 4GB
