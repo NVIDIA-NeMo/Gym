@@ -826,86 +826,56 @@ name                                                                            
 
 # FAQ: DCO and Commit Signing (VSCode + Git setup)
 
-## Preventing DCO Issues (Recommended Setup)
+## Why am I blocked by DCO?
 
-### VSCode settings
+Sometimes the **DCO check** fails on your PR. Click into the **DCO test in your PR checks** to see details.
+You’ll see something like:
 
-Add to `.vscode/settings.json`:
-
-```json
-{
-  "git.enableCommitSigning": true,
-  "git.alwaysSignOff": true
-}
+```
+Commit sha: 8a43fd2, Author: Your Name, Committer: Your Name
+The sign-off is missing.
 ```
 
-### GitHub signing keys
-
-Follow [GitHub docs](https://docs.github.com/en/authentication/managing-commit-signature-verification/about-commit-signature-verification#ssh-commit-signature-verification).
-
-Check your keys at [GitHub → Settings → SSH keys](https://github.com/settings/keys):
-
-* **Authentication keys**
-* **Signing keys**
-
-Often the same SSH key is used for both. If not, add one as a signing key.
-
-### Git config for SSH signing
-
-```bash
-git config gpg.format ssh
-git config user.signingkey ~/.ssh/id_ed25519.pub
-```
-
-### Git config for automatic sign-off
-
-```bash
-git config --global format.signoff true
-```
-
-(or remember `git commit -s`)
+This means one or more commits don’t have a `Signed-off-by:` line in the message.
 
 ---
 
-## Fixing a PR Blocked by DCO (Retroactive)
+## Quick Fix (when PR blocked)
 
-If your PR fails because commits lack `Signed-off-by`:
+If you’re the only author on the branch:
 
 ```bash
-# Checkout your PR branch
-git checkout <your-branch>
-git fetch origin
-
-# Find base with target branch (adjust as needed)
-BASE=$(git merge-base origin/bxyu/dev-20250923 HEAD)
-
-# Stash local changes (if any)
-git stash push -u -m "pre-rebase (DCO fix)"
-
-# Rebase and add sign-off to each commit
-git rebase --signoff "$BASE"
+# Rebase the last N commits (replace 22 with the number in the DCO error)
+git rebase HEAD~22 --signoff
 
 # Push rewritten history
-git push --force-with-lease origin <your-branch>
-
-# Restore local changes
-git stash pop
+git push --force-with-lease origin aviary
 ```
 
-### Notes
+That’s it—the DCO bot should pass once the branch updates.
 
-* If merge commits exist:
-  `git rebase --rebase-merges --signoff "$BASE"`
-* To fix only last N commits:
-  `git rebase HEAD~N --signoff`
-* Verify all commits have sign-off (should print nothing):
+---
+
+## Preventing future issues
+
+* Enable sign-off in VSCode (`.vscode/settings.json`):
+
+  ```json
+  {
+    "git.enableCommitSigning": true,
+    "git.alwaysSignOff": true
+  }
+  ```
+* Or always commit with:
 
   ```bash
-  git log "$BASE"..HEAD --pretty='%h %s%n%b%n----' \
-  | awk 'BEGIN{RS="----"} !/Signed-off-by:/'
+  git commit -s
   ```
+* You can also set this globally:
 
-
+  ```bash
+  git config --global format.signoff true
+  ```
 
 # FAQ: SFT and RL
 Reading time: 5 mins
