@@ -88,7 +88,7 @@ async def _test_accuracy_helper(output_fpath: str, agent_name: str, url_path: st
         print(f"Average reward: {total_reward / num_rows:.3f}")
 
 
-async def test_verifier_accuracy():
+async def verifier_accuracy_test():
     return await _test_accuracy_helper(
         output_fpath="resources_servers/comp_coding/data/livecodebench_verify_accuracy_results.jsonl",
         agent_name="comp_coding",
@@ -96,7 +96,7 @@ async def test_verifier_accuracy():
     )
 
 
-async def test_e2e_accuracy():
+async def e2e_accuracy_test():
     return await _test_accuracy_helper(
         output_fpath="resources_servers/comp_coding/data/livecodebench_e2e_accuracy_results.jsonl",
         agent_name="comp_coding_simple_agent",
@@ -105,4 +105,4 @@ async def test_e2e_accuracy():
 
 
 if __name__ == "__main__":
-    run(test_verifier_accuracy())
+    run(verifier_accuracy_test())
