@@ -16,9 +16,9 @@ ng_upload_dataset_to_gitlab \
 
 Rollout collection. We match the LCB setting for reward profiling. For gpt-4o-2024-05-13 this should be around 33%.
 ```bash
-ng_collect_rollouts +agent_name=multineedle_simple_agent \
-    +input_jsonl_fpath=resources_servers/multineedle/data/example.jsonl \
-    +output_jsonl_fpath=resources_servers/multineedle/data/example_rollouts.jsonl \
+ng_collect_rollouts +agent_name=comp_coding_simple_agent \
+    +input_jsonl_fpath=resources_servers/comp_coding/data/opencodereasoning_filtered_25k_train.jsonl \
+    +output_jsonl_fpath=resources_servers/comp_coding/data/opencodereasoning_filtered_25k_train_1k_gpt-4o-2024-05-13_rollouts.jsonl \
     +limit=1000 \
     +responses_create_params.temperature=0.2 \
     +responses_create_params.max_output_tokens=2000 \
