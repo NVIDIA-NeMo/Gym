@@ -22,7 +22,7 @@ comp_coding_simple_agent:
         jsonl_fpath: resources_servers/comp_coding/data/train.jsonl
         gitlab_identifier:
           dataset_name: comp_coding
-          version: 0.0.1
+          version: 0.1.1
           artifact_fpath: train.jsonl
         license: Apache 2.0
       - name: example
