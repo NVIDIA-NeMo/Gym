@@ -80,11 +80,14 @@ class DownloadJsonlDatasetGitlabConfig(JsonlDatasetGitlabIdentifer):
 
 
 class UploadJsonlDatasetHuggingFaceConfig(BaseModel):
-    hf_username: str
     hf_token: str
+    hf_organization: str
+    hf_collection_name: str
+    hf_collection_slug: str
     dataset_name: str
     input_jsonl_fpath: str
     resource_config_path: str
+    delete_from_gitlab: Optional[bool] = False
 
 
 class DownloadJsonlDatasetHuggingFaceConfig(BaseModel):

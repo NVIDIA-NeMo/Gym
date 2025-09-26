@@ -16,7 +16,7 @@ from os import environ
 from pathlib import Path
 
 import yaml
-from huggingface_hub import HfApi, add_collection_item, hf_hub_download
+from huggingface_hub import HfApi, hf_hub_download
 from huggingface_hub.utils import HfHubHTTPError
 from scripts.update_resource_servers import get_dataset_domain
 
@@ -44,12 +44,11 @@ def check_jsonl_format(file_path: str) -> bool:  # pragma: no cover
                     missing_keys_info.append((line_number, missing_keys))
 
         if missing_keys_info:
-            for line_number, missing_keys in missing_keys_info:
-                print(f"Line {line_number} is missing keys: {missing_keys}")
+            print(f"[Nemo-Gym] - Missing keys across {len(missing_keys_info)} lines: {missing_keys}")
             return False
 
     except (FileNotFoundError, json.JSONDecodeError) as e:
-        print(f"Error reading or prasing the JSON file: {e}")
+        print(f"[Nemo-Gym] - Error reading or prasing the JSON file: {e}")
         return False
 
     return True
@@ -59,33 +58,45 @@ def upload_jsonl_dataset_to_hf(
     config: UploadJsonlDatasetHuggingFaceConfig,
 ) -> None:  # pragma: no cover
     client = create_huggingface_client(config.hf_token)
-
     with open(config.resource_config_path, "r") as f:
         data = yaml.safe_load(f)
 
-    domain = get_dataset_domain(data)
-
-    # TODO: prefix should be Nvidia
-    prefix = config.hf_username
-    suffix = "68d4abe7a735ee7ae216993e"
-    # prefix = "Nvidia"
-    # suffix = "68d1e0902765fbacc937bb4f"
-    collection = "Nemo-Gym"
-    domain = domain.title() if domain else None
+    domain = d.title() if (d := get_dataset_domain(data)) else None
     resource_server = config.resource_config_path.split("/")[1]
     dataset_name = config.dataset_name
-    repo_id = f"{prefix}/{collection}-{domain}-{resource_server}-{dataset_name}"
-    collection_slug = f"{prefix}/{collection}-{suffix}"
+    repo_id = f"{config.hf_organization}/{config.hf_collection_name}-{domain}-{resource_server}-{dataset_name}"
+    collection_id = f"{config.hf_organization}/{config.hf_collection_name}-{config.hf_collection_slug}"
 
+    # Dataset format check
     if not check_jsonl_format(config.input_jsonl_fpath):
-        print("JSONL file format check failed.")
+        print("[Nemo-Gym] - JSONL file format check failed.")
         return
 
+    # Repo id/creation
     try:
-        client.create_repo(repo_id=repo_id, token=config.hf_token, repo_type="dataset", private=True)
+        client.repo_info(repo_id=repo_id, repo_type="dataset", token=config.hf_token)
+        print(f"[Nemo-Gym] - Repo '{repo_id}' already exists")
     except HfHubHTTPError as e:
-        print(f"Error creating repo: {e}")
+        if e.response is not None and e.response.status_code == 404:
+            client.create_repo(repo_id=repo_id, token=config.hf_token, repo_type="dataset", private=True)
+            print(f"[Nemo-Gym] - Repo '{repo_id}' created successfully")
+        else:
+            print(f"[Nemo-Gym] - Error checking/creating repo: {e}")
 
+    # Collection id + addition
+    try:
+        collection = client.get_collection(collection_id)
+        if any(item.item_id.lower() == repo_id.lower() and item.item_type == "dataset" for item in collection.items):
+            print(
+                f"[Nemo-Gym] - Dataset '{dataset_name}' under Repo '{repo_id}' is already in Collection '{collection_id}'"
+            )
+        else:
+            client.add_collection_item(collection_slug=collection_id, item_id=repo_id, item_type="dataset")
+            print(f"[Nemo-Gym] - Dataset '{repo_id}' added to collection '{collection_id}'")
+    except HfHubHTTPError as e:
+        print(f"[Nemo-Gym] - Error adding to collection: {e}")
+
+    # File upload
     try:
         client.upload_file(
             path_or_fileobj=config.input_jsonl_fpath,
@@ -94,13 +105,9 @@ def upload_jsonl_dataset_to_hf(
             token=config.hf_token,
             repo_type="dataset",
         )
+        print("[Nemo-Gym] - Dataset uploaded successful")
     except HfHubHTTPError as e:
-        print(f"Error uploading file: {e}")
-
-    try:
-        add_collection_item(collection_slug=collection_slug, item_id=repo_id, item_type="dataset")
-    except HfHubHTTPError as e:
-        print(f"Error adding to collection: {e}")
+        print(f"[Nemo-Gym] - Error uploading file: {e}")
 
 
 def upload_jsonl_dataset_cli() -> None:  # pragma: no cover
@@ -121,7 +128,7 @@ def download_jsonl_dataset(
         )
         Path(config.output_fpath).write_bytes(Path(downloaded_path).read_bytes())
     except HfHubHTTPError as e:
-        print(f"Error downloading file: {e}")
+        print(f"[Nemo-Gym] - Error downloading file: {e}")
 
 
 def download_jsonl_dataset_cli() -> None:  # pragma: no cover
