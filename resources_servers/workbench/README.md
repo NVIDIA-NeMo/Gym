@@ -29,8 +29,7 @@ ng_collect_rollouts +agent_name=workbench_simple_agent \
 ```
 
 Data links: 
-Nemogym prompt datasets: https://gitlab-master.nvidia.com/bxyu/nemo-gym/-/ml/models/55/versions/89#/
-Database for workbench tool execution: https://gitlab-master.nvidia.com/bxyu/nemo-gym/-/ml/models/55/versions/69#/
+Nemogym prompt datasets: https://gitlab-master.nvidia.com/bxyu/nemo-gym/-/ml/models/55/versions/98#/
 
 # Licensing information
 Code: Apache 2.0
