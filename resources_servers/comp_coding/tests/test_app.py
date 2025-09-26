@@ -90,7 +90,7 @@ class TestApp:
             json=verify_req.model_dump(),
         )
         res = CompCodingVerifyResponse.model_validate(response.json())
-        assert res.reward == 1.0, res.reason
+        assert res.reward == 1.0
 
     async def test_verify_fail_wrong_answer(self, comp_coding_resources_server_client: TestClient) -> None:
         # Assistant prints n+1 instead of n*n
@@ -130,7 +130,7 @@ class TestApp:
             json=verify_req_bad.model_dump(),
         )
         res = CompCodingVerifyResponse.model_validate(response.json())
-        assert res.reward == 0.0 and "FAILED" in res.reason
+        assert res.reward == 0.0 and res.metadata["error_message"] == "Wrong answer at output_line_idx=0: 4 != 9"
 
     def test_verify_missing_response_validation_error(self) -> None:
         """Omitting `response` should fail request validation (schema requires it)."""
@@ -181,7 +181,8 @@ class TestApp:
             json=verify_req.model_dump(),
         )
         res = CompCodingVerifyResponse.model_validate(response.json())
-        assert res.reward == 1.0, res.reason
+        # LCB code extraction only accepts fenced code blocks.
+        assert res.reward == 0.0 and res.extracted_model_output and not res.extracted_model_code
 
     async def test_verify_syntax_error(self, comp_coding_resources_server_client: TestClient) -> None:
         """Code has a syntax error -> should report ERROR and reward 0.0"""
@@ -221,7 +222,10 @@ class TestApp:
             json=verify_req.model_dump(),
         )
         res = CompCodingVerifyResponse.model_validate(response.json())
-        assert res.reward == 0.0 and "ERROR" in res.reason
+        assert (
+            res.reward == 0.0
+            and res.metadata["error_message"] == "Error during testing: '(' was never closed (<string>, line 1)"
+        )
 
     async def test_verify_runtime_error(self, comp_coding_resources_server_client: TestClient) -> None:
         response = NeMoGymResponse(
@@ -260,4 +264,4 @@ class TestApp:
             json=verify_req.model_dump(),
         )
         res = CompCodingVerifyResponse.model_validate(response.json())
-        assert res.reward == 0.0 and "ERROR" in res.reason
+        assert res.reward == 0.0 and res.metadata["error_message"] == "Runtime Error"
