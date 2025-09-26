@@ -132,16 +132,16 @@ async def request(
         except ServerDisconnectedError:
             await asyncio.sleep(0.5)
         except Exception as e:
-            print(
-                f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}
-Sleeping 0.5s and retrying...
-"""
-            )
-            if num_tries >= MAX_NUM_TRIES:
-                raise e
-
             # Don't increment internal since we know we are ok. If we are not, the head server will shut everything down anyways.
             if not _internal:
+                print(
+                    f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}
+Sleeping 0.5s and retrying...
+"""
+                )
+                if num_tries >= MAX_NUM_TRIES:
+                    raise e
+
                 num_tries += 1
 
             await asyncio.sleep(0.5)
