@@ -34,7 +34,7 @@ from asyncio import Semaphore, as_completed, run
 
 from tqdm.auto import tqdm
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import ServerClient, raise_for_status
 
 
 async def _single_post(semaphore: Semaphore, server_client: ServerClient, agent_name: str, url_path: str, f) -> dict:
@@ -57,6 +57,7 @@ async def _single_post(semaphore: Semaphore, server_client: ServerClient, agent_
             url_path=url_path,
             json=row,
         )
+        raise_for_status(response)
         result = await response.json()
 
         expected_reward = row["reward"]
