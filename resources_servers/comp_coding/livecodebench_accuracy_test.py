@@ -31,6 +31,7 @@ ng_run "+config_paths=[${config_paths}]"
 
 import json
 from asyncio import Semaphore, as_completed, run
+from typing import Optional
 
 from tqdm.auto import tqdm
 
@@ -71,11 +72,16 @@ async def _single_post(semaphore: Semaphore, server_client: ServerClient, agent_
         return result
 
 
-async def _test_accuracy_helper(output_fpath: str, agent_name: str, url_path: str) -> None:
+async def _test_accuracy_helper(
+    output_fpath: str, agent_name: str, url_path: str, num_concurrent_calls: Optional[int] = None
+) -> None:
     server_client = ServerClient.load_from_global_config()
-    semaphore = Semaphore(
-        server_client.global_config_dict["comp_coding"]["resources_servers"]["comp_coding"]["num_processes"]
-    )
+
+    if not num_concurrent_calls:
+        num_concurrent_calls = server_client.global_config_dict["comp_coding"]["resources_servers"]["comp_coding"][
+            "num_processes"
+        ]
+    semaphore = Semaphore(num_concurrent_calls)
     limit = None
 
     input_fpath = "resources_servers/comp_coding/data/livecodebench_v5_2024-07-01_2025-02-01_validation.jsonl"
@@ -118,6 +124,7 @@ async def e2e_accuracy_test():
         output_fpath="resources_servers/comp_coding/data/livecodebench_e2e_accuracy_results.jsonl",
         agent_name="comp_coding_simple_agent",
         url_path="/run",
+        num_concurrent_calls=16,
     )
 
 
