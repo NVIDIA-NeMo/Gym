@@ -36,6 +36,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
+from nemo_gym.server_utils import raise_for_status
 
 
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
@@ -86,7 +87,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 cookies=model_server_cookies,
             )
             # We raise for status here since we expect model calls to always work.
-            model_response.raise_for_status()
+            raise_for_status(model_response)
             model_response_json = await model_response.json()
             model_server_cookies = model_response.cookies
             try:
@@ -143,7 +144,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             json=body.model_dump(),
             cookies=cookies,
         )
-        seed_session_response.raise_for_status()
+        raise_for_status(seed_session_response)
         cookies = seed_session_response.cookies
 
         response = await self.server_client.post(
@@ -152,7 +153,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             json=body.responses_create_params,
             cookies=cookies,
         )
-        response.raise_for_status()
+        raise_for_status(response)
         cookies = response.cookies
 
         verify_request = SimpleAgentVerifyRequest.model_validate(
@@ -165,7 +166,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             json=verify_request.model_dump(),
             cookies=cookies,
         )
-        verify_response.raise_for_status()
+        raise_for_status(verify_response)
         return SimpleAgentVerifyResponse.model_validate(await verify_response.json())
 
 

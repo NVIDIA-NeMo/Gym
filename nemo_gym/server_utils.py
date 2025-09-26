@@ -147,6 +147,12 @@ Sleeping 0.5s and retrying...
             await asyncio.sleep(0.5)
 
 
+def raise_for_status(response: ClientResponse) -> None:  # pragma: no cover
+    if not response.ok:
+        print(response.content)
+        response.raise_for_status()
+
+
 DEFAULT_HEAD_SERVER_PORT = 11000
 
 ServerStatus = Union[Literal["success"], Literal["connection_error"], Literal["timeout"], Literal["unknown_error"]]
