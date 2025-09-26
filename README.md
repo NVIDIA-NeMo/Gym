@@ -726,7 +726,7 @@ Here is an e2e example of how to spin up a NeMo Gym compatible vLLM Chat Complet
 - If you want to use tools, please find the appropriate vLLM arguments regarding the tool call parser to use. In this example, we use Qwen3-30B-A3B, which is suggested to use the `hermes` tool call parser.
 - **Important note**: Please do NOT use a reasoning parser argument to vLLM here. The Responses to Chat Completions middleware logic needs to parse to and from Responses Reasoning items and Chat Completion Message content. **Do NOT use things like `--reasoning-parser qwen3`**.
 ```bash
-uv venv --python 3.12 --seed 
+uv venv --python 3.12 --seed
 source .venv/bin/activate
 # hf_transfer for faster model download. datasets for downloading data from HF
 uv pip install hf_transfer datasets vllm --torch-backend=auto
@@ -806,7 +806,7 @@ After `ng_collect_rollouts` finishes, ctrl+c to quit your servers. You should se
 
 The log file content for a server will look something like the following:
 ```
-name                                                                                                                      ncall       tsub      ttot      tavg      
+name                                                                                                                      ncall       tsub      ttot      tavg
 .../nemo-gym/resources_servers/library_judge_math/app.py:118 LibraryJudgeMathResourcesServer.verify                       1024        0.009755  17.98387  0.017562
 .../nemo-gym/resources_servers/library_judge_math/app.py:145 LibraryJudgeMathResourcesServer._verify_answer               1024        0.002933  17.87998  0.017461
 .../nemo-gym/resources_servers/library_judge_math/app.py:173 LibraryJudgeMathResourcesServer._verify_answer_with_library  1024        0.007851  17.87704  0.017458
@@ -824,32 +824,87 @@ name                                                                            
   - The `LibraryJudgeMathResourcesServer.verify` function took 0.017562s per call on average.
 
 
-# FAQ: DCO and commit signing VSCode and Git setup
-Here are some suggestions for easier development using the VSCode code editor.
+# FAQ: DCO and Commit Signing (VSCode + Git setup)
 
-VSCode workspace settings at `.vscode/settings.json`
-```
+## Preventing DCO Issues (Recommended Setup)
+
+### VSCode settings
+
+Add to `.vscode/settings.json`:
+
+```json
 {
-    "git.enableCommitSigning": true,
-    "git.alwaysSignOff": true
+  "git.enableCommitSigning": true,
+  "git.alwaysSignOff": true
 }
 ```
 
-Set up your Github signing keys! https://docs.github.com/en/authentication/managing-commit-signature-verification/about-commit-signature-verification#ssh-commit-signature-verification
+### GitHub signing keys
 
-Specifically, if you visit https://github.com/settings/keys while logged into your account, you should see the following:
-1. Under the "SSH keys" major section, there are 2 subsections
-   1. Authentication keys
-   2. Signing key
+Follow [GitHub docs](https://docs.github.com/en/authentication/managing-commit-signature-verification/about-commit-signature-verification#ssh-commit-signature-verification).
 
-More often than node, the SHA256 displayed by Github (SHA256:xxxx) should be the same for the two keys above since you probably want to just use the same SSH key for both purposes. If you do not see the following, please following the signing keys link above!
+Check your keys at [GitHub → Settings → SSH keys](https://github.com/settings/keys):
 
+* **Authentication keys**
+* **Signing keys**
 
-For developers that sign commits via SSH keys, this is configuration so that VSCode source control is able to sign commits properly!
+Often the same SSH key is used for both. If not, add one as a signing key.
+
+### Git config for SSH signing
+
 ```bash
 git config gpg.format ssh
 git config user.signingkey ~/.ssh/id_ed25519.pub
 ```
+
+### Git config for automatic sign-off
+
+```bash
+git config --global format.signoff true
+```
+
+(or remember `git commit -s`)
+
+---
+
+## Fixing a PR Blocked by DCO (Retroactive)
+
+If your PR fails because commits lack `Signed-off-by`:
+
+```bash
+# Checkout your PR branch
+git checkout <your-branch>
+git fetch origin
+
+# Find base with target branch (adjust as needed)
+BASE=$(git merge-base origin/bxyu/dev-20250923 HEAD)
+
+# Stash local changes (if any)
+git stash push -u -m "pre-rebase (DCO fix)"
+
+# Rebase and add sign-off to each commit
+git rebase --signoff "$BASE"
+
+# Push rewritten history
+git push --force-with-lease origin <your-branch>
+
+# Restore local changes
+git stash pop
+```
+
+### Notes
+
+* If merge commits exist:
+  `git rebase --rebase-merges --signoff "$BASE"`
+* To fix only last N commits:
+  `git rebase HEAD~N --signoff`
+* Verify all commits have sign-off (should print nothing):
+
+  ```bash
+  git log "$BASE"..HEAD --pretty='%h %s%n%b%n----' \
+  | awk 'BEGIN{RS="----"} !/Signed-off-by:/'
+  ```
+
 
 
 # FAQ: SFT and RL
