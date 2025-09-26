@@ -426,7 +426,7 @@ def run_test(sample, test=None, debug=False, timeout=6):
 
     # Disable functionalities that can make destructive changes to the test.
     # max memory is set to 4GB
-    reliability_guard(4 * 1024 * 1024)
+    reliability_guard()
 
     if debug:
         print(f"start = {datetime.now().time()}")
