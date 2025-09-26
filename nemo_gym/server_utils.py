@@ -441,7 +441,6 @@ class SimpleServer(BaseServer):
 
         app = server.setup_webserver()
         server.set_ulimit()
-        server.setup_session_middleware(app)
         server.setup_exception_middleware(app)
 
         profiling_config = ProfilingMiddlewareConfig.model_validate(global_config_dict)

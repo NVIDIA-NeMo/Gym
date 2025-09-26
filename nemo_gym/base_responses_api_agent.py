@@ -37,6 +37,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, SimpleServer):
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
+        self.setup_session_middleware(app)
+
         app.post("/v1/responses")(self.responses)
         app.post("/run")(self.run)
 

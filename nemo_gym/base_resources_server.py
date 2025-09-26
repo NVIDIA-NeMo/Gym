@@ -57,6 +57,8 @@ class SimpleResourcesServer(BaseResourcesServer, SimpleServer):
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
+        self.setup_session_middleware(app)
+
         app.post("/seed_session")(self.seed_session)
         app.post("/verify")(self.verify)
 
