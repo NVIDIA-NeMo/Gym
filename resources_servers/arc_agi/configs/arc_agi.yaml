@@ -6,6 +6,8 @@ arc_agi_simple_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py
+      host: 127.0.0.1
+      port: 15214
       resources_server:
         type: resources_servers
         name: arc_agi
@@ -13,6 +15,12 @@ arc_agi_simple_agent:
         type: responses_api_models
         name: policy_model
       datasets:
-      - name: example
+      - name: example_1
         type: example
-        jsonl_fpath: resources_servers/arc_agi/data/example.jsonl
+        jsonl_fpath: resources_servers/arc_agi/data/example_1.jsonl
+      - name: training_1
+        type: validation
+        jsonl_fpath: resources_servers/arc_agi/data/arc_agi_1_training.jsonl
+      - name: evaluation_1
+        type: validation
+        jsonl_fpath: resources_servers/arc_agi/data/arc_agi_1_evaluation.jsonl

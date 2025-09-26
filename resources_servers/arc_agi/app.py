@@ -49,7 +49,6 @@ class ARCAGIVerifyResponse(BaseVerifyResponse):
 
 
 def _extract_assistant_text(body: BaseVerifyRequest) -> str:
-    """Extract assistant message text from structured response."""
     texts = []
     for output in body.response.output:
         if getattr(output, "type", None) == "message" and getattr(output, "role", None) == "assistant":
@@ -65,11 +64,14 @@ def _extract_assistant_text(body: BaseVerifyRequest) -> str:
 
 
 def _parse_grid(text: str) -> Optional[List[List[int]]]:
-    """Parse 2D grid from text. Expects format: [[1,2,3],[4,5,6]]"""
-    pattern = r'\[\s*\[[\d\s,\[\]]+\]\s*\]'
-    matches = re.findall(pattern, text, re.DOTALL)
+    """expects format: \\boxed{[[1,2,3],[4,5,6]]}"""
+    boxed_pattern = r'\\boxed\{(\[\s*\[[\d\s,\[\]]+\]\s*\])\}'
+    boxed_matches = re.findall(boxed_pattern, text, re.DOTALL)
 
-    for match in matches:
+    if not boxed_matches:
+        boxed_matches = re.findall(r'\[\s*\[[\d\s,\[\]]+\]\s*\]', text, re.DOTALL)
+
+    for match in boxed_matches:
         try:
             cleaned = re.sub(r'\s+', '', match)
             grid = json.loads(cleaned)
