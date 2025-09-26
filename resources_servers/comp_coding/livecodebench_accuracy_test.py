@@ -78,10 +78,14 @@ async def test_verifier_accuracy():
             task = _single_post(semaphore, server_client, "comp_coding", "/verify", f)
             tasks.append(task)
 
+        total_reward = 0.0
         with open("resources_servers/comp_coding/data/livecodebench_verify_accuracy_results.jsonl", "w") as f:
             for future in tqdm.as_completed(tasks, desc="Verifying"):
                 result = await future
+                total_reward += result["reward"]
                 f.write(json.dumps(result) + "\n")
+
+        print(f"Average reward: {total_reward / num_rows:.3f}")
 
 
 async def test_e2e_accuracy():
@@ -104,10 +108,14 @@ async def test_e2e_accuracy():
             task = _single_post(semaphore, server_client, "comp_coding_simple_agent", "/run", f)
             tasks.append(task)
 
+        total_reward = 0.0
         with open("resources_servers/comp_coding/data/livecodebench_e2e_accuracy_results.jsonl", "w") as f:
             for future in tqdm.as_completed(tasks, desc="Verifying"):
                 result = await future
+                total_reward += result["reward"]
                 f.write(json.dumps(result) + "\n")
+
+        print(f"Average reward: {total_reward / num_rows:.3f}")
 
 
 if __name__ == "__main__":
