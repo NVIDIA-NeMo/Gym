@@ -30,7 +30,7 @@ ng_run "+config_paths=[${config_paths}]"
 """
 
 import json
-from asyncio import Semaphore, run
+from asyncio import Semaphore, as_completed, run
 
 from tqdm.auto import tqdm
 
@@ -79,11 +79,15 @@ async def _test_accuracy_helper(output_fpath: str, agent_name: str, url_path: st
             tasks.append(task)
 
         total_reward = 0.0
+        pbar = tqdm(total=len(tasks), desc=f"Verifying (reward={total_reward / num_rows:.3f})")
         with open(output_fpath, "w") as f:
-            for future in tqdm.as_completed(tasks, desc="Verifying"):
+            for future in as_completed(tasks):
                 result = await future
                 total_reward += result["reward"]
                 f.write(json.dumps(result) + "\n")
+
+                pbar.update()
+                pbar.set_description(f"Verifying (reward={total_reward / num_rows:.3f})")
 
         print(f"Average reward: {total_reward / num_rows:.3f}")
 
