@@ -59,13 +59,13 @@ Download the test data using:
 ng_download_dataset_from_gitlab \
     +dataset_name=livecodebench \
     +version=0.0.1 \
-    +input_jsonl_fpath=gpt-4o-2024-05-13_Scenario.codegeneration_10_0.2_eval_all.json \
+    +artifact_fpath=gpt-4o-2024-05-13_Scenario.codegeneration_10_0.2_eval_all.json \
     +output_fpath=resources_servers/comp_coding/data/gpt-4o-2024-05-13_Scenario.codegeneration_10_0.2_eval_all.json
 
 ng_download_dataset_from_gitlab \
     +dataset_name=livecodebench \
     +version=0.0.1 \
-    +input_jsonl_fpath=livecodebench_prompts.jsonl \
+    +artifact_fpath=livecodebench_prompts.jsonl \
     +output_fpath=resources_servers/comp_coding/data/livecodebench_prompts.jsonl
 ```
 """

@@ -18,10 +18,11 @@ The train data we use is fundamentally different from livecodebench however.
 
 Download the verification data (produced by resources_servers/comp_coding/livecodebench_accuracy_test_prep.py):
 ```bash
-ng_upload_dataset_to_gitlab \
+ng_download_dataset_from_gitlab \
     +dataset_name=livecodebench \
     +version=0.0.1 \
-    +input_jsonl_fpath=resources_servers/comp_coding/data/livecodebench_v5_2024-07-01_2025-02-01_validation.jsonl
+    +artifact_fpath=livecodebench_prompts.jsonl \
+    +output_fpath=resources_servers/comp_coding/data/livecodebench_v5_2024-07-01_2025-02-01_validation.jsonl
 ```
 
 Run the comp coding server via:
