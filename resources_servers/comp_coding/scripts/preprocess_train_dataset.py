@@ -28,8 +28,10 @@ ng_collect_rollouts +agent_name=comp_coding_simple_agent \
 """
 
 import json
+from typing import List
 
 from datasets import load_dataset
+from pydantic import BaseModel
 
 
 ds = load_dataset("Nexusflow/comp_prog_filtered_no_function", split="train")
@@ -47,6 +49,11 @@ You must use ```python for just the final solution code block with the following
 {question}"""
 
 
+class UnitTests(BaseModel):
+    inputs: List[str]
+    outputs: List[str]
+
+
 with open("resources_servers/comp_coding/data/opencodereasoning_filtered_25k_train.jsonl", "w") as f:
     for d in ds:
         row = {
@@ -58,7 +65,7 @@ with open("resources_servers/comp_coding/data/opencodereasoning_filtered_25k_tra
                     },
                 ],
             },
-            "verifier_metadata": {"unit_tests": json.loads(d["unit_tests"])},
+            "verifier_metadata": {"unit_tests": UnitTests.model_validate_json(d["unit_tests"]).model_dump()},
             # Carry over original columns, even though they are unused for Gym
             "hash_id": d["hash_id"],
             "dataset": d["dataset"],
