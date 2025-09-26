@@ -56,6 +56,12 @@ class UnitTests(BaseModel):
 
 with open("resources_servers/comp_coding/data/opencodereasoning_filtered_25k_train.jsonl", "w") as f:
     for d in ds:
+        unit_tests = json.loads(d["unit_tests"])
+        if isinstance(unit_tests["inputs"][0], list):
+            unit_tests["inputs"] = unit_tests["inputs"][0]
+        if isinstance(unit_tests["outputs"][0], list):
+            unit_tests["outputs"] = unit_tests["outputs"][0]
+
         row = {
             "responses_create_params": {
                 "input": [
