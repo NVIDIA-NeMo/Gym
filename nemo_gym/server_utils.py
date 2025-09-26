@@ -346,13 +346,13 @@ class SimpleServer(BaseServer):
             except Exception as e:
                 print_exc()
                 print(
-                    "🚨 Caught an exception printed above. Right now, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"
+                    f"🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"
                 )
                 return JSONResponse(content=repr(e), status_code=500)
             except:
                 print_exc()
                 print(
-                    "🚨 Caught an unknown exception printed above. Right now, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"
+                    f"🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"
                 )
                 return JSONResponse(content="An unknown error occurred", status_code=500)
 
