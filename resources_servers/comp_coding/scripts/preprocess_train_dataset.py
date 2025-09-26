@@ -61,7 +61,11 @@ with open("resources_servers/comp_coding/data/opencodereasoning_filtered_25k_tra
         except:
             from collections import Counter
 
-            print(Counter([type(v) for v in json.loads(d["unit_tests"])]))
+            unit_tests = json.loads(d["unit_tests"])
+            inputs = unit_tests["inputs"]
+            outputs = unit_tests["outputs"]
+            print(Counter([type(v) for v in inputs]), Counter([type(v) for v in outputs]))
+
             continue
 
         row = {
