@@ -87,4 +87,4 @@ with open("resources_servers/comp_coding/data/opencodereasoning_filtered_25k_tra
         }
         f.write(json.dumps(row) + "\n")
 
-print(num_failed_examples)
+print(f"Skipped examples with improperly structured unit test test cases: {num_failed_examples}")
