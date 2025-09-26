@@ -58,8 +58,8 @@ class CompCodingVerifyRequest(CompCodingRunRequest, BaseVerifyRequest):
 
 
 class CompCodingVerifyResponse(BaseVerifyResponse):
-    extracted_model_output: Optional[str]
-    extracted_model_code: Optional[str]
+    extracted_model_output: Optional[str] = None
+    extracted_model_code: Optional[str] = None
     result: Optional[List[Union[int, bool]]] = None
     metadata: Optional[Dict[str, Any]] = None
 
