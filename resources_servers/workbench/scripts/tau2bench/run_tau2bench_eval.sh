@@ -22,7 +22,7 @@ export TOOL_PARSER="hermes"
 cd  /lustre/fsw/portfolios/llmservice/users/abhibhag/nemo-rl/3rdparty/Penguin-workspace/Penguin
 cmd_start_server="bash resources_servers/workbench/scripts/tau2bench/trained_model.sh $MODEL_NAME $HF_MODEL_PATH $TOOL_PARSER $VLLM_PORT"
 
-# tmux new-session -d -s model "$cmd_start_server; sleep 2; bash"
+tmux new-session -d -s model "$cmd_start_server; sleep 2; bash"
 echo "Started vLLM server session in tmux for $MODEL_NAME"
 i=0
 while ! curl -s "http://localhost:$VLLM_PORT/v1/models" >/dev/null 2>&1; do
