@@ -541,7 +541,7 @@ class TestIterDatasetLines:
         # Test default behavior (num_repeats defaults to 1 when not specified)
         config = DatasetConfig(name="test", type="example", jsonl_fpath=str(test_file))
         lines = list(processor._iter_dataset_lines(config))
-        expected = ['{"id": 1, "content": "line1"}', '{"id": 2, "content": "line2"}']
+        expected = ['{"id": 1, "content": "line1"}\n', '{"id": 2, "content": "line2"}\n']
         assert lines == expected
 
         # Test num_repeats=1 (explicit)
@@ -553,12 +553,12 @@ class TestIterDatasetLines:
         config = DatasetConfig(name="test", type="example", jsonl_fpath=str(test_file), num_repeats=3)
         lines = list(processor._iter_dataset_lines(config))
         expected_repeated = [
-            '{"id": 1, "content": "line1"}',
-            '{"id": 1, "content": "line1"}',
-            '{"id": 1, "content": "line1"}',
-            '{"id": 2, "content": "line2"}',
-            '{"id": 2, "content": "line2"}',
-            '{"id": 2, "content": "line2"}',
+            '{"id": 1, "content": "line1"}\n',
+            '{"id": 1, "content": "line1"}\n',
+            '{"id": 1, "content": "line1"}\n',
+            '{"id": 2, "content": "line2"}\n',
+            '{"id": 2, "content": "line2"}\n',
+            '{"id": 2, "content": "line2"}\n',
         ]
         assert lines == expected_repeated
 
