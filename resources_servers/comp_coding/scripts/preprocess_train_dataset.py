@@ -71,7 +71,7 @@ with open("resources_servers/comp_coding/data/opencodereasoning_filtered_25k_tra
                     },
                 ],
             },
-            "verifier_metadata": {"unit_tests": UnitTests.model_validate_json(d["unit_tests"]).model_dump()},
+            "verifier_metadata": {"unit_tests": UnitTests.model_validate(unit_tests).model_dump()},
             # Carry over original columns, even though they are unused for Gym
             "hash_id": d["hash_id"],
             "dataset": d["dataset"],
