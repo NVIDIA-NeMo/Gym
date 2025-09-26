@@ -79,7 +79,7 @@ async def _test_accuracy_helper(output_fpath: str, agent_name: str, url_path: st
             tasks.append(task)
 
         total_reward = 0.0
-        pbar = tqdm(total=len(tasks), desc=f"Verifying (reward={total_reward / num_rows:.3f})")
+        pbar = tqdm(total=len(tasks), desc=f"Verifying (reward={total_reward:.3f})")
         with open(output_fpath, "w") as f:
             for future in as_completed(tasks):
                 result = await future
@@ -87,7 +87,7 @@ async def _test_accuracy_helper(output_fpath: str, agent_name: str, url_path: st
                 f.write(json.dumps(result) + "\n")
 
                 pbar.update()
-                pbar.set_description(f"Verifying (reward={total_reward / num_rows:.3f})")
+                pbar.set_description(f"Verifying (reward={total_reward / pbar.n:.3f})")
 
         print(f"Average reward: {total_reward / num_rows:.3f}")
 
