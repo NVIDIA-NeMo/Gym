@@ -16,13 +16,9 @@
 We use the livecodebench verification logic directly so we don't need to re-implement all the code parsing, test case run, etc ourselves.
 The train data we use is fundamentally different from livecodebench however.
 
-Download the verification data (produced by resources_servers/comp_coding/livecodebench_accuracy_test_prep.py):
+Prepare the verification data
 ```bash
-ng_download_dataset_from_gitlab \
-    +dataset_name=livecodebench \
-    +version=0.0.1 \
-    +artifact_fpath=livecodebench_prompts.jsonl \
-    +output_fpath=resources_servers/comp_coding/data/livecodebench_v5_2024-07-01_2025-02-01_validation.jsonl
+python resources_servers/comp_coding/livecodebench_accuracy_test_prep.py
 ```
 
 Run the comp coding server via:
