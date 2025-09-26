@@ -14,9 +14,10 @@ from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
+from tqdm import tqdm
+
 from lcb_integration.pass_k_utils import compute_metrics_from_results
 from lcb_integration.testing_util import run_test
-from tqdm import tqdm
 
 
 def _temp_run(sample, generation, debug, result, metadata_list, timeout):
@@ -45,6 +46,7 @@ def check_correctness(sample, generation, timeout, debug=True):
         in_outs = json.loads(sample["input_output"])
         # consider that all tests failed
         result = [[-1 for i in range(len(in_outs["inputs"]))]]
+        metadata_list = [None]
         if debug:
             print("global timeout")
     return result[0], metadata_list[0]
