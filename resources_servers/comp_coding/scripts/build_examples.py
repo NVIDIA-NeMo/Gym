@@ -179,7 +179,7 @@ def stream_dataset(ds_name: str, split: str = "train") -> Iterable[dict]:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, help="Output .jsonl or .jsonl.gz")
-    ap.add_argument("--count", type=int, default=None, help="Number of rows to write")
+    ap.add_argument("--count", type=int, default=5000, help="Number of rows to write")
     ap.add_argument("--split", default="train", help="HF split name (default: train)")
     ap.add_argument("--pretty-sample", default=None, help="Optional pretty JSON of first K rows")
     ap.add_argument("--pretty-k", type=int, default=10, help="How many rows to pretty-print")
