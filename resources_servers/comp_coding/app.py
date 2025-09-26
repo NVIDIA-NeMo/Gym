@@ -82,7 +82,14 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 reward=0.0,
             )
 
-        tests = UnitTests.model_validate(body.verifier_metadata["unit_tests"])
+        # TODO remove this try-except
+        try:
+            tests = UnitTests.model_validate(body.verifier_metadata["unit_tests"])
+        except:
+            with open("failed_test_parsing.json", "a") as f:
+                import json
+
+                f.write(json.dumps(body.verifier_metadata) + "\n")
 
         # 3) extract code (code fence or raw)
         code = extract_code(model_out, LMStyle.OpenAIChat)
