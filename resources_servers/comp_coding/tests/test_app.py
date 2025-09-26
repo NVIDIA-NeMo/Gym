@@ -34,7 +34,13 @@ class TestApp:
     def comp_coding_resources_server_client(self) -> Generator[TestClient, None, None]:
         server = CompCodingResourcesServer(
             config=CompCodingResourcesServerConfig(
-                host="0.0.0.0", port=8080, entrypoint="", name="", num_processes=1, unit_test_timeout_secs=1
+                host="0.0.0.0",
+                port=8080,
+                entrypoint="",
+                name="",
+                num_processes=1,
+                unit_test_timeout_secs=10,
+                debug=False,
             ),
             server_client=MagicMock(spec=ServerClient),
         )

@@ -46,7 +46,7 @@ class CompCodingResourcesServerConfig(BaseResourcesServerConfig):
 class UnitTests(BaseModel):
     inputs: List[str]
     outputs: List[str]
-    fn_name: Optional[str]
+    fn_name: Optional[str] = None
 
 
 class CompCodingRunRequest(BaseRunRequest):
