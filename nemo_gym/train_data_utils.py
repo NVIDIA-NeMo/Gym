@@ -471,7 +471,6 @@ class TrainDataProcessor(BaseModel):
         # Don't load everything into memory at once. Throw things away immediately.
         with open(dataset_config.jsonl_fpath) as f:
             for line in f:
-                line = line.rstrip("\n")
                 for _ in range(repeats):
                     yield line
 
@@ -559,9 +558,9 @@ class TrainDataProcessor(BaseModel):
                 prepare_path = data_path.with_name(f"{data_path.stem}_prepare.jsonl")
                 with open(prepare_path, "w") as target:
                     for line in self._iter_dataset_lines(d):
-                        dct = json.loads(line)
-                        dct[AGENT_REF_KEY] = AgentServerRef(type="responses_api_agents", name=c.name).model_dump()
-                        target.write(f"{json.dumps(dct)}\n")
+                        d = json.loads(line)
+                        d[AGENT_REF_KEY] = AgentServerRef(type="responses_api_agents", name=c.name).model_dump()
+                        target.write(f"{json.dumps(d)}\n")
 
                 paths_to_collate.append(prepare_path)
 
