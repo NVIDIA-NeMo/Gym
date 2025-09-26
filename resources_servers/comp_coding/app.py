@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from asyncio import Semaphore, get_running_loop
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from lcb_integration.compute_code_generation_metrics import check_correctness
 from lcb_integration.extraction_utils import LMStyle, extract_code
@@ -59,7 +59,8 @@ class CompCodingVerifyRequest(CompCodingRunRequest, BaseVerifyRequest):
 class CompCodingVerifyResponse(BaseVerifyResponse):
     extracted_model_output: Optional[str]
     extracted_model_code: Optional[str]
-    metadata: Optional[Dict[str, Any]]
+    result: Optional[List[Union[int, bool]]] = None
+    metadata: Optional[Dict[str, Any]] = None
 
 
 # ----------------------------
@@ -78,10 +79,6 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             return CompCodingVerifyResponse(
                 **body.model_dump(),
                 reward=0.0,
-                reason="Empty model output",
-                extracted_model_code=None,
-                extracted_model_output=None,
-                tests_time_taken=None,
             )
 
         tests = UnitTests.model_validate(body.verifier_metadata["unit_tests"])
@@ -92,10 +89,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             return CompCodingVerifyResponse(
                 **body.model_dump(),
                 reward=0.0,
-                reason="Could not extract code",
                 extracted_model_output=model_out,
-                extracted_model_code=None,
-                tests_time_taken=None,
             )
 
         # 4) run (no sandbox)
@@ -132,17 +126,15 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 {"input_output": tests.model_dump_json()},  # sample
                 code,  # generation
                 self.config.unit_test_timeout_secs,  # timeout
+                False,  # debug
             )
-
-        reward = 0.0
-        if "graded_list" in result:
-            reward = 1.0 if result["graded_list"][0] else 0.0
 
         return CompCodingVerifyResponse(
             **body.model_dump(),
-            reward=reward,
+            reward=1.0 if all(r == True for r in result) else 0.0,
             extracted_model_output=model_out,
             extracted_model_code=code,
+            result=result,
             metadata=metadata,
         )
 

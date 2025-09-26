@@ -52,17 +52,28 @@ async def _single_post(semaphore: Semaphore, server_client: ServerClient, f) -> 
 
         expected_reward = row["reward"]
         actual_reward = result["reward"]
-        print(f"Expected reward: {expected_reward} | Actual reward: {actual_reward}")
+
+        mismatch_str = ""
+        if expected_reward != actual_reward:
+            mismatch_str = " | MISMATCH!!!!!"
+            print(f"Expected reward: {expected_reward} | Actual reward: {actual_reward}{mismatch_str}")
+
         return result
 
 
-async def main():
+async def test_verifier_accuracy():
     server_client = ServerClient.load_from_global_config()
-    semaphore = Semaphore(4)
+    semaphore = Semaphore(
+        server_client.global_config_dict["comp_coding"]["resources_servers"]["comp_coding"]["num_processes"]
+    )
+    limit = None
 
     input_fpath = "resources_servers/comp_coding/data/livecodebench_v5_2024-07-01_2025-02-01_validation.jsonl"
     with open(input_fpath) as f:
-        num_rows = sum(1 for _ in f)
+        num_rows = sum(1 for _ in tqdm(f, desc="Reading num rows"))
+
+    if limit:
+        num_rows = min(num_rows, limit)
 
     with open(input_fpath) as f:
         tasks = []
@@ -77,4 +88,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    run(main())
+    run(test_verifier_accuracy())
