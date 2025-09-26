@@ -5,6 +5,14 @@ HF_HOME=.cache \
 HF_TOKEN={your HF token} \
 python resources_servers/comp_coding/scripts/preprocess_train_dataset.py
 ```
+
+Upload:
+```bash
+ng_upload_dataset_to_gitlab \
+    +dataset_name=opencodereasoning_filtered \
+    +version=0.0.1 \
+    +input_jsonl_fpath=resources_servers/comp_coding/data/opencodereasoning_filtered_25k_train.jsonl
+```
 """
 
 import json
