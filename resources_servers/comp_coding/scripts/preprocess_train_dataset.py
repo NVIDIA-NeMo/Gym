@@ -57,7 +57,7 @@ class UnitTests(BaseModel):
 with open("resources_servers/comp_coding/data/opencodereasoning_filtered_25k_train.jsonl", "w") as f:
     for d in ds:
         try:
-            UnitTests.model_validate_json[d["unit_tests"]]
+            UnitTests.model_validate_json(d["unit_tests"])
         except:
             from collections import Counter
 
