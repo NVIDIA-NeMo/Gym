@@ -54,6 +54,7 @@ class UnitTests(BaseModel):
     outputs: List[str]
 
 
+num_failed_examples = 0
 with open("resources_servers/comp_coding/data/opencodereasoning_filtered_25k_train.jsonl", "w") as f:
     for d in ds:
         try:
@@ -64,6 +65,7 @@ with open("resources_servers/comp_coding/data/opencodereasoning_filtered_25k_tra
             unit_tests = json.loads(d["unit_tests"])
             inputs = unit_tests["inputs"]
             outputs = unit_tests["outputs"]
+            num_failed_examples += 1
             print(Counter([type(v) for v in inputs]), Counter([type(v) for v in outputs]))
 
             continue
@@ -84,3 +86,5 @@ with open("resources_servers/comp_coding/data/opencodereasoning_filtered_25k_tra
             "source": d["source"],
         }
         f.write(json.dumps(row) + "\n")
+
+print(num_failed_examples)
