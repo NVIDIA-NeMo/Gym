@@ -121,7 +121,9 @@ atexit.register(global_aiohttp_client_exit)
 MAX_NUM_TRIES = 3
 
 
-async def request(method: str, url: str, **kwargs: Unpack[_RequestOptions]) -> ClientResponse:
+async def request(
+    method: str, url: str, _internal: bool = False, **kwargs: Unpack[_RequestOptions]
+) -> ClientResponse:  # pragma: no cover
     client = get_global_aiohttp_client()
     num_tries = 1
     while True:
@@ -138,7 +140,10 @@ Sleeping 0.5s and retrying...
             if num_tries >= MAX_NUM_TRIES:
                 raise e
 
-            num_tries += 1
+            # Don't increment internal since we know we are ok. If we are not, the head server will shut everything down anyways.
+            if not _internal:
+                num_tries += 1
+
             await asyncio.sleep(0.5)
 
 
