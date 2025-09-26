@@ -58,7 +58,7 @@ async def _single_post(semaphore: Semaphore, server_client: ServerClient, agent_
         return result
 
 
-async def test_verifier_accuracy():
+async def _test_accuracy_helper(output_fpath: str, agent_name: str, url_path: str) -> None:
     server_client = ServerClient.load_from_global_config()
     semaphore = Semaphore(
         server_client.global_config_dict["comp_coding"]["resources_servers"]["comp_coding"]["num_processes"]
@@ -75,47 +75,33 @@ async def test_verifier_accuracy():
     with open(input_fpath) as f:
         tasks = []
         for _ in range(num_rows):
-            task = _single_post(semaphore, server_client, "comp_coding", "/verify", f)
+            task = _single_post(semaphore, server_client, agent_name, url_path, f)
             tasks.append(task)
 
         total_reward = 0.0
-        with open("resources_servers/comp_coding/data/livecodebench_verify_accuracy_results.jsonl", "w") as f:
+        with open(output_fpath, "w") as f:
             for future in tqdm.as_completed(tasks, desc="Verifying"):
                 result = await future
                 total_reward += result["reward"]
                 f.write(json.dumps(result) + "\n")
 
         print(f"Average reward: {total_reward / num_rows:.3f}")
+
+
+async def test_verifier_accuracy():
+    return await _test_accuracy_helper(
+        output_fpath="resources_servers/comp_coding/data/livecodebench_verify_accuracy_results.jsonl",
+        agent_name="comp_coding",
+        url_path="/verify",
+    )
 
 
 async def test_e2e_accuracy():
-    server_client = ServerClient.load_from_global_config()
-    semaphore = Semaphore(
-        server_client.global_config_dict["comp_coding"]["resources_servers"]["comp_coding"]["num_processes"]
+    return await _test_accuracy_helper(
+        output_fpath="resources_servers/comp_coding/data/livecodebench_e2e_accuracy_results.jsonl",
+        agent_name="comp_coding_simple_agent",
+        url_path="/run",
     )
-    limit = None
-
-    input_fpath = "resources_servers/comp_coding/data/livecodebench_v5_2024-07-01_2025-02-01_validation.jsonl"
-    with open(input_fpath) as f:
-        num_rows = sum(1 for _ in tqdm(f, desc="Reading num rows"))
-
-    if limit:
-        num_rows = min(num_rows, limit)
-
-    with open(input_fpath) as f:
-        tasks = []
-        for _ in range(num_rows):
-            task = _single_post(semaphore, server_client, "comp_coding_simple_agent", "/run", f)
-            tasks.append(task)
-
-        total_reward = 0.0
-        with open("resources_servers/comp_coding/data/livecodebench_e2e_accuracy_results.jsonl", "w") as f:
-            for future in tqdm.as_completed(tasks, desc="Verifying"):
-                result = await future
-                total_reward += result["reward"]
-                f.write(json.dumps(result) + "\n")
-
-        print(f"Average reward: {total_reward / num_rows:.3f}")
 
 
 if __name__ == "__main__":
