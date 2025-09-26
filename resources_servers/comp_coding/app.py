@@ -127,7 +127,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 {"input_output": tests.model_dump_json()},  # sample
                 code,  # generation
                 self.config.unit_test_timeout_secs,  # timeout
-                False,  # debug
+                self.config.debug,  # debug
             )
 
         return CompCodingVerifyResponse(
