@@ -201,7 +201,7 @@ class ServerClient(BaseModel):
             if isinstance(json_obj, BaseModel):
                 kwargs["json"] = json_obj.model_dump(exclude_unset=True)
 
-        return await request(method=method, url=f"{base_url}{url_path}", **kwargs)
+        return await request(method=method, url=f"{base_url}{url_path}", _internal=True, **kwargs)
 
     async def get(
         self,
