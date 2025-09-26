@@ -37,7 +37,7 @@ Usage:
 CLI flags:
   --in PATH [--in PATH ...]         One or more JSONL files to validate
   --out PATH                        Where to write a cleaned JSONL (optional)
-  --autofix                         Try to parse stringified unit_tests to dict
+  --autofix                          Try to parse stringified unit_tests to dict
   --normalize-newlines              Replace literal "\\n" with "\n" in tests
   --fail-fast                       Stop at first error (default: keep scanning)
   --drop-bad                        When --out is set, skip invalid rows instead of failing
