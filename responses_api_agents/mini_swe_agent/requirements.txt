@@ -1,3 +1,3 @@
 -e nemo-gym[dev] @ ../../
-mini-swe-agent @ git+https://github.com/sdevare-nv/nv-mini-swe-agent.git@373c3f90b2eb936e230d62be1c0904a61092e0c1
+mini-swe-agent @ git+https://github.com/sdevare-nv/nv-mini-swe-agent.git@03be610d7e5c58975ff533f2520a0d89c08f2ac0
 swegym @ git+https://github.com/sdevare-nv/nv-SWE-Bench-Package.git@31e1cb8f0241da1707d00faa633c3d6ce1a8ba3b
