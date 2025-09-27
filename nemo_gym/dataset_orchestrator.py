@@ -25,7 +25,7 @@ from nemo_gym.hf_utils import upload_jsonl_dataset as upload_jsonl_dataset_to_hf
 from nemo_gym.server_utils import get_global_config_dict
 
 
-def delete_jsonl_dataset_from_gitlab(gitlab_model_name: str) -> None:
+def delete_jsonl_dataset_from_gitlab(gitlab_model_name: str) -> None:  # pragma: no cover
     model_exists = is_model_in_gitlab(gitlab_model_name)
 
     # gitlab model_name must match hf dataset name
