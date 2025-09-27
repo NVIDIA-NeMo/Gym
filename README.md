@@ -608,6 +608,12 @@ ng_upload_dataset_to_hf \
     +delete_from_gitlab=true
 ```
 
+There will be a confirmation dialog to confirm the deletion:
+```bash
+[Nemo-Gym] - Dataset uploaded successful
+[Nemo-Gym] - Found model 'fs-test' in the registry. Are you sure you want to delete it from Gitlab? [y/N]:
+```
+
 You can also run the below command which does the same thing without the need for a `+delete_from_gitlab` flag:
 
 ```bash
@@ -616,6 +622,12 @@ ng_gitlab_to_hf_dataset \
     +dataset_name={your dataset name} \
     +input_jsonl_fpath=data/multineedle_benchmark.jsonl \
     +resource_config_path=${resource_config_path}
+```
+
+If you've already uploaded to Huggingface and just want to do a standalone delete from Gitlab:
+```bash
+ng_delete_dataset_from_gitlab \
+    +dataset_name={your dataset name}
 ```
 
 **Important note**: Gitlab model names are case sensitive. There can be models named 'My_Model' and 'my_model' living simultaneously in the registry. When uploading to Huggingface with the intention of deleting Gitlab artifacts, be sure the casing of your Huggingface dataset name matches that of Gitlab's.

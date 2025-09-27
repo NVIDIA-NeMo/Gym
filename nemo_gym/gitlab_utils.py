@@ -109,9 +109,13 @@ def is_model_in_gitlab(model_name: str) -> bool:  # pragma: no cover
     client = create_mlflow_client()
 
     # model_name in gitlab is case sensitive
-    model_exists = client.get_registered_model(model_name)
+    try:
+        client.get_registered_model(model_name)
+    except RestException as e:
+        print(f"[Nemo-Gym] - Model '{model_name}' not found in Gitlab: {e}")
+        return False
 
-    return bool(model_exists)
+    return True
 
 
 def delete_model_from_gitlab(model_name: str) -> None:  # pragma: no cover

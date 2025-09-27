@@ -79,6 +79,10 @@ class DownloadJsonlDatasetGitlabConfig(JsonlDatasetGitlabIdentifer):
     output_fpath: str
 
 
+class DeleteJsonlDatasetGitlabConfig(BaseModel):
+    dataset_name: str
+
+
 class BaseUploadJsonlDatasetHuggingFaceConfig(BaseModel):
     hf_token: str
     hf_organization: str
