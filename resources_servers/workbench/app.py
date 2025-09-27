@@ -12,18 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
-from typing import Dict, Any
+from typing import Any, Dict
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
-
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    SimpleResourcesServer,
-)
-from resources_servers.workbench.utils import is_correct
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -33,9 +25,9 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-
 from nemo_gym.server_utils import SESSION_ID_KEY
-from resources_servers.workbench.utils import get_tools
+from resources_servers.workbench.utils import get_tools, is_correct
+
 
 REASONING_TAG = os.getenv("REASONING_TAG", "think")
 
@@ -72,9 +64,7 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
         app.post("/{path}")(self.route_to_python_function)
         return app
 
-    async def seed_session(
-        self, request: Request, body: BaseSeedSessionRequest
-    ) -> BaseSeedSessionResponse:
+    async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
         # init session once for each sample.
         session_id = request.session[SESSION_ID_KEY]
         toolkits = [
@@ -87,9 +77,7 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
         self.session_id_to_tool_env[session_id] = get_tools(toolkits)
         return BaseSeedSessionResponse()
 
-    async def route_to_python_function(
-        self, path: str, body: WorkbenchRequest, request: Request
-    ) -> WorkbenchResponse:
+    async def route_to_python_function(self, path: str, body: WorkbenchRequest, request: Request) -> WorkbenchResponse:
         session_id = request.session[SESSION_ID_KEY]
 
         # Check if session exists
@@ -100,11 +88,7 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
             )
 
         tool_env = self.session_id_to_tool_env[session_id]
-        args = {
-            key: value
-            for key, value in body.model_dump(exclude_unset=True).items()
-            if value is not None
-        }
+        args = {key: value for key, value in body.model_dump(exclude_unset=True).items() if value is not None}
 
         # assert out if function is not found
         assert path in tool_env["functions"], f"There is no such tool '{path}'"
