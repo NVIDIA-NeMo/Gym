@@ -91,6 +91,7 @@ class DatasetConfig(BaseModel):
     license: Optional[
         Union[
             Literal["Apache 2.0"],
+            Literal["MIT"],
             Literal["Creative Commons Attribution 4.0 International"],
             Literal["Creative Commons Attribution-ShareAlike 4.0 International"],
             Literal["TBD"],

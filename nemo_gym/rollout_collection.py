@@ -17,9 +17,9 @@ from asyncio import Semaphore
 from collections import Counter
 from contextlib import nullcontext
 from itertools import chain, repeat
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
 
 from nemo_gym.config_types import BaseServerConfig
@@ -39,6 +39,7 @@ class RolloutCollectionConfig(BaseModel):
     limit: Optional[int] = None
     num_repeats: Optional[int] = None
     num_samples_in_parallel: Optional[int] = None
+    responses_create_params: Dict[str, Any] = Field(default_factory=dict)
 
 
 class RolloutCollectionHelper(BaseModel):  # pragma: no cover
@@ -68,10 +69,14 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
             f"The tqdm progress bar will only update every {tqdm_miniters} samples that finish to ensure that you are not being spammed."
         )
 
+        if config.responses_create_params:
+            print(f"Overriding responses_create_params fields with {config.responses_create_params}")
+
         metrics = Counter()
         with open(config.output_jsonl_fpath, "a") as f:
 
             async def _post_coroutine(row: dict) -> None:
+                row["responses_create_params"] = row["responses_create_params"] | config.responses_create_params
                 async with semaphore:
                     response = await server_client.post(server_name=config.agent_name, url_path="/run", json=row)
                     result = await response.json()
