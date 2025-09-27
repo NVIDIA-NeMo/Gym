@@ -14,7 +14,6 @@
 import json
 from abc import abstractmethod
 from collections import Counter, defaultdict
-from itertools import count, repeat
 from math import sqrt
 from pathlib import Path
 from shutil import copyfileobj
@@ -460,20 +459,29 @@ class TrainDataProcessor(BaseModel):
 
         aggregate_other_metrics(state.other_metrics, sample_dict)
 
+    def _iter_dataset_lines(self, dataset_config: DatasetConfig):
+        repeats = dataset_config.num_repeats
+
+        # Print dataset repetition info
+        if repeats > 1:
+            print(
+                f"Dataset {dataset_config.name} repeating {repeats}x: each line repeated {repeats} times (e.g. pattern: abc -> aaaabbbbcccc)"
+            )
+
+        # Don't load everything into memory at once. Throw things away immediately.
+        with open(dataset_config.jsonl_fpath) as f:
+            for line in f:
+                for _ in range(repeats):
+                    yield line
+
     def _validate_samples_and_aggregate_metrics_single_dataset(
         self, dataset_config: DatasetConfig
     ) -> DatasetValidatorState:
         state = DatasetValidatorState()
 
         map_fn = self._validate_samples_and_aggregate_metrics_single_sample
-        with open(dataset_config.jsonl_fpath) as f:
-            # Don't load everything into memory at once. Throw things away immediately.
-            any(
-                tqdm(
-                    map(map_fn, repeat(state), count(), f),
-                    desc=f"Process {dataset_config.jsonl_fpath}",
-                )
-            )
+        for sample_idx, sample_dict_str in enumerate(self._iter_dataset_lines(dataset_config)):
+            map_fn(state, sample_idx, sample_dict_str)
 
         postprocess_other_metrics(state.metrics, state.other_metrics)
 
@@ -548,8 +556,8 @@ class TrainDataProcessor(BaseModel):
 
                 data_path = Path(d.jsonl_fpath)
                 prepare_path = data_path.with_name(f"{data_path.stem}_prepare.jsonl")
-                with open(data_path) as source, open(prepare_path, "w") as target:
-                    for line in tqdm(source, desc=f"Preparing data at {data_path}"):
+                with open(prepare_path, "w") as target:
+                    for line in self._iter_dataset_lines(d):
                         d = json.loads(line)
                         d[AGENT_REF_KEY] = AgentServerRef(type="responses_api_agents", name=c.name).model_dump()
                         target.write(f"{json.dumps(d)}\n")
