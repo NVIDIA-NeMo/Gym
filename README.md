@@ -571,7 +571,7 @@ ng_download_dataset_from_gitlab \
 ```
 
 
-# How To: Upload and download a dataset from Gitlab
+# How To: Upload and download a dataset from HuggingFace
 The huggingface client requires that your credentials are in `env.yaml`, along with some other pertinent details needed to upload to the designated place.
 ```yaml
 hf_token: {your huggingface token}
