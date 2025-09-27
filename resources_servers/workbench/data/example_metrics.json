@@ -17,7 +17,9 @@
         "Total # non-null values": 5,
         "Average": 1730.2,
         "Min": 1724.0,
-        "Max": 1735.0
+        "Max": 1735.0,
+        "Median": 1729.0,
+        "Standard deviation": 4.76
     },
     "Number of turns": {
         "Total # non-null values": 5,
