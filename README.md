@@ -671,14 +671,15 @@ ng_collect_rollouts +agent_name=multineedle_simple_agent \
     +output_jsonl_fpath=results/multineedle_rollout_collection.jsonl \
     +limit=null \
     +num_repeats=null \
-    +num_samples_in_parallel=null
+    +num_samples_in_parallel=null \
+    +responses_create_params.max_output_tokens=32_768
 ```
 
 The supported parameters include:
 - `limit`: Limits how many examples from the input JSONL file to process
 - `num_repeats`: Repeats each input example multiple times to collect multiple rollouts per example
 - `num_samples_in_parallel`: Controls how many rollout collection requests run concurrently
-
+- `responses_create_params`: A dictionary of sampling parameter overrides.
 
 View the rollouts just collected!
 ```
@@ -891,7 +892,7 @@ ng_collect_rollouts +agent_name=library_judge_math_simple_agent \
     +input_jsonl_fpath=resources_servers/library_judge_math/data/dapo17k_bytedtsinghua_train.jsonl \
     +output_jsonl_fpath=temp/library_judge_math_rollouts.jsonl \
     +limit=1024 \
-    +num_repeats 1
+    +num_repeats=1
 ```
 
 After `ng_collect_rollouts` finishes, ctrl+c to quit your servers. You should see some output in the terminal like this:
