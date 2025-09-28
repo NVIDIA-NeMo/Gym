@@ -70,7 +70,7 @@ def upload_jsonl_dataset(
     # Dataset format check
     if not check_jsonl_format(config.input_jsonl_fpath):
         print("[Nemo-Gym] - JSONL file format check failed.")
-        raise
+        return
 
     # Repo id/creation
     try:
@@ -113,9 +113,7 @@ def upload_jsonl_dataset(
         raise
 
 
-def download_jsonl_dataset(
-    config: DownloadJsonlDatasetHuggingFaceConfig,
-) -> None:  # pragma: no cover
+def download_jsonl_dataset(config: DownloadJsonlDatasetHuggingFaceConfig) -> None:  # pragma: no cover
     try:
         downloaded_path = hf_hub_download(
             repo_id=config.repo_id,
