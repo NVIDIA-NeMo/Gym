@@ -90,9 +90,6 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
         tool_env = self.session_id_to_tool_env[session_id]
         args = {key: value for key, value in body.model_dump(exclude_unset=True).items() if value is not None}
 
-        # assert out if function is not found
-        assert path in tool_env["functions"], f"There is no such tool '{path}'"
-
         try:
             function = tool_env["functions"][path]
             result = function(**args)
