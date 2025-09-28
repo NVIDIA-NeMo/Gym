@@ -70,11 +70,7 @@ def extract_domain_and_license(yaml_path: Path) -> tuple[str, str]:
                         datasets = v3.get("datasets")
                         if isinstance(datasets, list):
                             for entry in datasets:
-                                if (
-                                    isinstance(entry, dict)
-                                    and entry.get("name") == "train"
-                                    and entry.get("type") == "train"
-                                ):
+                                if isinstance(entry, dict) and entry.get("type") == "train":
                                     license = entry.get("license")
                                     return
 
