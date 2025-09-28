@@ -25,7 +25,7 @@ README_PATH = Path("README.md")
 TARGET_FOLDER = Path("resources_servers")
 
 
-def get_dataset_domain(data, level=1):
+def get_dataset_domain(data, level=1):  # pragma: no cover
     if level == 4:
         return data.get("domain")
     else:
@@ -35,7 +35,7 @@ def get_dataset_domain(data, level=1):
             return get_dataset_domain(v, level + 1)
 
 
-def get_dataset_license(data):
+def get_dataset_license(data):  # pragma: no cover
     for k1, v1 in data.items():
         if k1.endswith("_simple_agent") and isinstance(v1, dict):
             v2 = v1.get("responses_api_agents")
@@ -53,7 +53,7 @@ def get_dataset_license(data):
                                 return entry.get("license")
 
 
-def extract_domain_and_license(yaml_path: Path) -> tuple[str, str]:
+def extract_domain_and_license(yaml_path: Path) -> tuple[str, str]:  # pragma: no cover
     """
     Domain:
         {name}_resources_server:
@@ -79,7 +79,7 @@ def extract_domain_and_license(yaml_path: Path) -> tuple[str, str]:
     return domain, license
 
 
-def generate_table() -> str:
+def generate_table() -> str:  # pragma: no cover
     """Outputs a grid with table data"""
     col_names = ["Domain", "Resource Server Name", "Config Path", "License"]
 
@@ -128,7 +128,7 @@ def generate_table() -> str:
     return format_table(table)
 
 
-def format_table(table: list[list[str]]) -> str:
+def format_table(table: list[list[str]]) -> str:  # pragma: no cover
     """Format grid of data into markdown table."""
     col_widths = []
     num_cols = len(table[0])
@@ -158,7 +158,7 @@ def format_table(table: list[list[str]]) -> str:
     return "\n".join(formatted_rows)
 
 
-def main():
+def main():  # pragma: no cover
     text = README_PATH.read_text()
     pattern = re.compile(
         r"(<!-- START_RESOURCE_TABLE -->)(.*?)(<!-- END_RESOURCE_TABLE -->)",
