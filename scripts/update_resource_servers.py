@@ -45,11 +45,7 @@ def get_dataset_license(data):  # pragma: no cover
                     datasets = v3.get("datasets")
                     if isinstance(datasets, list):
                         for entry in datasets:
-                            if (
-                                isinstance(entry, dict)
-                                and entry.get("name") == "train"
-                                and entry.get("type") == "train"
-                            ):
+                            if isinstance(entry, dict) and entry.get("type") == "train":
                                 return entry.get("license")
 
 
