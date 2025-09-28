@@ -13,57 +13,46 @@
 # limitations under the License.
 
 r"""
-Build N rows of train/validation/example data from the HF dataset:
-  Nexusflow/comp_prog_filtered_no_function
+Build N rows of train/validation/example data from either:
+  1) a Hugging Face dataset (streaming), or
+  2) a local JSONL file (optionally .gz) with rows shaped like:
+     {
+       "hash_id": "...",
+       "question": "...",
+       "unit_tests": "{\"inputs\": [...], \"outputs\": [...]}",
+       ...
+     }
+     (The script tolerates both proper JSON and Python-dict-style lines with single quotes.)
 
 Each output row conforms to NeMo-Gym dataset requirements:
 - responses_create_params: OpenAI Responses-compatible input
 - verifier_metadata.unit_tests: {inputs: [...], outputs: [...]} (strings)
 
-Usage:
+Usage examples:
+  # From HF dataset (default):
   uv run python resources_servers/comp_coding/scripts/build_examples.py \
     --out resources_servers/comp_coding/data/example.jsonl \
     --count 5000
 
-  # Also write a human-readable sample of the first 10 rows:
+  # From a local JSONL:
   uv run python resources_servers/comp_coding/scripts/build_examples.py \
+    --in-jsonl /path/to/source.jsonl \
     --out resources_servers/comp_coding/data/example.jsonl \
-    --count 5000 --pretty-sample resources_servers/comp_coding/data/sample.json \
+    --count 5000
+
+  # Pretty sample and gzip output:
+  uv run python resources_servers/comp_coding/scripts/build_examples.py \
+    --in-jsonl /path/to/source.jsonl.gz \
+    --out resources_servers/comp_coding/data/example.jsonl.gz \
+    --count 5000 \
+    --pretty-sample resources_servers/comp_coding/data/sample.json \
     --pretty-k 10
 
-  # Gzip the jsonl:
-  uv run python resources_servers/comp_coding/scripts/build_examples.py \
-    --out resources_servers/comp_coding/data/example.jsonl.gz \
-    --count 5000
-
 Sanity checks after writing:
-  # Confirm total rows written
   jq -c . resources_servers/comp_coding/data/example.jsonl | wc -l
-
-  # Inspect first few rows in pretty form
   head -n 3 resources_servers/comp_coding/data/example.jsonl | jq .
-
-  # Ensure each row is single-line JSON (no embedded real newlines)
   awk 'NR==1{print; exit}' resources_servers/comp_coding/data/example.jsonl | tr -d '\n' | wc -c
-
-  # Detect raw Unicode LS/PS (should be NONE after this script)
-  # grep (PCRE) variant:
   grep -nP '\x{2028}|\x{2029}' resources_servers/comp_coding/data/example.jsonl || echo "No LS/PS found"
-  # or python:
-  python - <<'PY'
-import sys, re
-p = re.compile('[\u2028\u2029]')
-fn = 'resources_servers/comp_coding/data/example.jsonl'
-bad = []
-with open(fn, 'r', encoding='utf-8') as f:
-    for i, line in enumerate(f, 1):
-        if p.search(line):
-            bad.append(i)
-print("LS/PS lines:", bad if bad else "None")
-PY
-
-Notes:
-  - We escape U+2028 (LS) and U+2029 (PS) as \\u2028 / \\u2029 so JSON parsers (esp. JS) won’t choke.
 """
 
 import argparse
@@ -160,6 +149,12 @@ def _open_out(path: str):
     return open(path, "w", encoding="utf-8")
 
 
+def _open_in(path: str):
+    if path.endswith(".gz"):
+        return gzip.open(path, "rt", encoding="utf-8")
+    return open(path, "r", encoding="utf-8")
+
+
 def json_safe_dumps(obj: dict) -> str:
     """
     Dump JSON compactly and escape problematic Unicode line separators.
@@ -176,6 +171,40 @@ def stream_dataset(ds_name: str, split: str = "train") -> Iterable[dict]:
         yield ex
 
 
+def _parse_jsonl_line(line: str) -> Optional[dict]:
+    """
+    Robustly parse a JSONL line that might be:
+    - proper JSON (double quotes), or
+    - a Python dict-like string with single quotes.
+
+    Returns a dict or None if it can't be parsed.
+    """
+    s = line.strip()
+    if not s:
+        return None
+    # Try JSON first
+    try:
+        obj = json.loads(s)
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+    # Try Python literal (single-quoted dicts, etc.)
+    maybe = _safe_literal_eval(s)
+    if isinstance(maybe, dict):
+        return maybe
+    return None
+
+
+def stream_jsonl(path: str) -> Iterable[dict]:
+    with _open_in(path) as f:
+        for raw in f:
+            obj = _parse_jsonl_line(raw)
+            if obj is None:
+                continue
+            yield obj
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, help="Output .jsonl or .jsonl.gz")
@@ -184,16 +213,24 @@ def main():
     ap.add_argument("--pretty-sample", default=None, help="Optional pretty JSON of first K rows")
     ap.add_argument("--pretty-k", type=int, default=10, help="How many rows to pretty-print")
     ap.add_argument("--ds-name", default="Nexusflow/comp_prog_filtered_no_function")
+    ap.add_argument(
+        "--in-jsonl",
+        default=None,
+        help="Optional input JSONL (.jsonl or .jsonl.gz). If provided, overrides HF dataset input.",
+    )
     args = ap.parse_args()
 
     rows_for_pretty = []
     total = 0
 
+    # Choose input stream
+    if args.in_jsonl:
+        source_iter: Iterable[dict] = stream_jsonl(args.in_jsonl)
+    else:
+        source_iter = stream_dataset(args.ds_name, args.split)
+
     with _open_out(args.out) as f:
-        for ex in tqdm(
-            islice(stream_dataset(args.ds_name, args.split), args.count),
-            total=args.count,
-        ):
+        for ex in tqdm(islice(source_iter, args.count), total=args.count):
             q = ex.get("question", "")
             raw_ut = ex.get("unit_tests", {}) or {}
             ut = _parse_unit_tests(raw_ut)
@@ -203,7 +240,9 @@ def main():
             f.write(json_safe_dumps(row) + "\n")
 
             if args.pretty_sample and len(rows_for_pretty) < args.pretty_k:
-                rows_for_pretty.append(row)
+                rows_for_prety_limit = args.pretty_k  # alias to clarify intent
+                if len(rows_for_pretty) < rows_for_prety_limit:
+                    rows_for_pretty.append(row)
 
             total += 1
 

@@ -518,6 +518,7 @@ def init_resources_server():  # pragma: no cover
       - name: train
         type: train
         jsonl_fpath: resources_servers/{server_type_name}/data/train.jsonl
+        num_repeats: 1
         gitlab_identifier:
           dataset_name: {server_type_name}
           version: 0.0.1
@@ -526,6 +527,7 @@ def init_resources_server():  # pragma: no cover
       - name: validation
         type: validation
         jsonl_fpath: resources_servers/{server_type_name}/data/validation.jsonl
+        num_repeats: 1
         gitlab_identifier:
           dataset_name: {server_type_name}
           version: 0.0.1
@@ -534,6 +536,7 @@ def init_resources_server():  # pragma: no cover
       - name: example
         type: example
         jsonl_fpath: resources_servers/{server_type_name}/data/example.jsonl
+        num_repeats: 1
 """)
 
     app_fpath = dirpath / "app.py"
