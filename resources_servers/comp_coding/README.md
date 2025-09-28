@@ -2,7 +2,7 @@
 
 ### Overview
 Verifies competitive programming solutions by executing submitted code against unit tests. The server consumes agent trajectories and returns a reward based on whether the assistant's code produces the correct outputs for given test inputs.
-Model registry link: https://gitlab-master.nvidia.com/bxyu/nemo-gym/-/ml/models/53#/ 
+Model registry link: https://gitlab-master.nvidia.com/bxyu/nemo-gym/-/ml/models/53#/
 
 ### Input schema
 - `responses_create_params`: OpenAI Responses create params
@@ -65,7 +65,7 @@ ng_prepare_data "+config_paths=[$config_paths]" \
 # Download train data from gitlab model registry
 ng_download_dataset_from_gitlab \
     +dataset_name=comp_coding \
-    +version=0.0.1 \
+    +version=0.1.1 \
     +run_id=5a1167ef-3533-486f-9c0e-49d1e97fc887 \
     +artifact_fpath=train.jsonl \
     +output_fpath=resources_servers/comp_coding/data/train.jsonl
@@ -90,15 +90,5 @@ uv run python resources_servers/comp_coding/scripts/validate_dataset.py \
     --in data/comp_coding/train.jsonl --fail-fast
 ```
 
-### Error handling
-The server provides specific error messages for different failure modes:
-- `Empty model output`: No text found in the response
-- `Missing verifier_metadata.unit_tests`: Required test data not provided
-- `Invalid unit_tests`: Malformed test case data
-- `Could not extract code`: No valid Python code found in response
-- `INVALID_TEST_FORMAT`: Test inputs/outputs length mismatch or empty
-- `TEST_CASE_N_FAILED`: Specific test case failed with expected vs actual output
-- `TEST_CASE_N_ERROR`: Runtime error during test execution
-
 ## Licensing information
-TODO: @kbhardwaj to confirm data/code licensing information w Vahid and team
+Apache 2.0
