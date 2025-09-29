@@ -101,7 +101,12 @@ class ParallelReasoningUtils:
         generated_text = planner_output
 
         if use_identity:
-            rewrites = [original_problem]
+            problem = original_problem.replace('\n\nRemember to put your answer on its own line after "Answer:".', "")
+            problem = problem.replace(
+                "Solve the following math problem step by step. The last line of your response should be of the form Answer: $Answer (without quotes) where $Answer is the answer to the problem.\n\n",
+                "",
+            )
+            rewrites = [problem]
         else:
             if "<rewrite" in generated_text and "</rewrite" in generated_text:
                 import re
