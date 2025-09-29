@@ -120,4 +120,4 @@ def is_model_in_gitlab(model_name: str) -> bool:  # pragma: no cover
 
 def delete_model_from_gitlab(model_name: str) -> None:  # pragma: no cover
     client = create_mlflow_client()
-    client.delete_registered_model(name=model_name)
+    client.delete_registered_model(model_name)
