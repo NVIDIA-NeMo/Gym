@@ -1530,6 +1530,7 @@ class TestApp:
             )
 
 
+
             verification_response = await resources_server.verify(verify_request)
 
             # The reward should be 1.0 because the predicted function calls in our
