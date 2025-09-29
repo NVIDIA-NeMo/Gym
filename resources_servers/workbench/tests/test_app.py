@@ -1138,16 +1138,13 @@ class TestApp:
         ):
             mock_read_csv.return_value = mock_df
 
-            # 1. Initialize the server ONCE, inside the patch context.
             resources_server = self.init_server(config)
 
-            # 2. Seed the session on that specific server instance.
             session_id = "test_session_crm_add"
             mock_scope = {"type": "http", "session": {SESSION_ID_KEY: session_id}}
             mock_request_with_session = Request(scope=mock_scope)
             await resources_server.seed_session(mock_request_with_session, BaseSeedSessionRequest())
 
-            # 3. Route the function call to the SAME server instance.
             mock_request_body = WorkbenchRequest(
                 **{
                     "customer_name": "Some customer",
@@ -1165,7 +1162,6 @@ class TestApp:
                 request=mock_request_with_session,
             )
 
-            # 4. Assert the results, including the side effect.
             assert response.output == "00000200"
 
     async def test_customer_relationship_manager_delete_customer(self, config: WorkbenchResourcesServerConfig) -> None:
@@ -1184,16 +1180,16 @@ class TestApp:
         ):
             mock_read_csv.return_value = mock_df
 
-            # 1. Initialize the server ONCE, inside the patch context.
+
             resources_server = self.init_server(config)
 
-            # 2. Seed the session on that specific server instance.
+
             session_id = "test_session_crm_delete"
             mock_scope = {"type": "http", "session": {SESSION_ID_KEY: session_id}}
             mock_request_with_session = Request(scope=mock_scope)
             await resources_server.seed_session(mock_request_with_session, BaseSeedSessionRequest())
 
-            # 3. Route the function call to the SAME server instance.
+
             mock_request_body = WorkbenchRequest(**{"customer_id": "00000189"})
             response = await resources_server.route_to_python_function(
                 path="customer_relationship_manager_delete_customer",
@@ -1201,7 +1197,7 @@ class TestApp:
                 request=mock_request_with_session,
             )
 
-            # 4. Assert the results, including the side effect.
+
             assert response.output == "Customer deleted successfully."
 
     async def test_verify(self, config: WorkbenchResourcesServerConfig) -> None:
@@ -1550,7 +1546,6 @@ class TestApp:
         Tests if the server correctly handles a TypeError when a tool function is called with an unexpected keyword argument and hence will be added as part of model context
         """
 
-        # 1. Setup mock data for the email tool
         mock_email_data = [
             {
                 "email_id": "00000057",
@@ -1571,14 +1566,10 @@ class TestApp:
         ):
             mock_email_csv.return_value = mock_email_df
 
-            # 2. Initialize the server
             resources_server = self.init_server(config)
 
-            # 3. Manually seed a session to initialize the tools
             session_id = "test_session_for_error_handling"
 
-            # Create a mock FastAPI Request object with a session
-            # The `route_to_python_function` expects this to get the session_id
 
             mock_scope = {"type": "http", "session": {SESSION_ID_KEY: session_id}}
             mock_request = Request(scope=mock_scope)
@@ -1593,12 +1584,10 @@ class TestApp:
                 useless_argument="this should cause an error",  # This is the extra argument
             )
 
-            # 5. Call the function that we want to test
             response = await resources_server.route_to_python_function(
                 path=path, body=request_body, request=mock_request
             )
 
-            # 6. Assert that the correct error response was returned
 
             assert isinstance(response, WorkbenchResponse)
 
