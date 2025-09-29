@@ -83,7 +83,7 @@ class ParallelReasoningUtils:
             with open(prompt_path, "r", encoding="utf-8") as f:
                 PLANNER_PROMPT = f.read()
         except FileNotFoundError:
-            raise RuntimeError(f"Planner prompt file not found at {prompt_path}")
+            raise RuntimeError(f"Rewriter prompt file not found at {prompt_path}")
 
         planner_prompt = PLANNER_PROMPT.format(problem=problem)
         return planner_prompt.strip()
@@ -93,34 +93,44 @@ class ParallelReasoningUtils:
         prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "rewriter_execute.txt")
         with open(prompt_path, "r", encoding="utf-8") as f:
             EXECUTOR_PROMPT = f.read()
-        executor_prompt = EXECUTOR_PROMPT.format(problem=original_problem, rewrite=rewrite)
+        executor_prompt = EXECUTOR_PROMPT.format(problem=rewrite)
         return executor_prompt.strip()
 
     @staticmethod
-    def parse_plan(planner_output: str) -> str:
-        if PLANNER_BEGIN_TAG in planner_output and PLANNER_END_TAG in planner_output:
-            if THINK_END_TAG in planner_output:
-                processed_text = planner_output.split(THINK_END_TAG)[1]
-            else:
-                processed_text = planner_output
-            plans = re.findall(
-                rf"{PLANNER_BEGIN_TAG}\s*(.*?)\s*{PLANNER_END_TAG}",
-                processed_text,
-                flags=re.IGNORECASE | re.DOTALL,
-            )
-            if not plans:
-                wrapper = re.search(
-                    rf"{PLANNER_BEGIN_TAG}(.*?){PLANNER_END_TAG}",
+    def parse_rewrite(original_problem: str, planner_output: str, use_identity: bool = False) -> str:
+        generated_text = planner_output
+
+        if use_identity:
+            rewrites = [original_problem]
+        else:
+            if "<rewrite" in generated_text and "</rewrite" in generated_text:
+                import re
+
+                if "</think>" in generated_text:
+                    processed_text = generated_text.split("</think>")[1]
+                else:
+                    processed_text = generated_text
+
+                rewrites = re.findall(
+                    r"<rewrite>\s*(.*?)\s*</rewrite>",
                     processed_text,
                     flags=re.IGNORECASE | re.DOTALL,
                 )
-                if wrapper:
-                    plans = [line.strip() for line in wrapper.group(1).splitlines() if line.strip()]
-            plans = [r.strip() for r in plans if r.strip()]
-            if len(plans) < 1:
-                plans.extend([""] * (1 - len(plans)))
+                if not rewrites:
+                    wrapper = re.search(
+                        r"<rewrites>(.*?)</rewrites>",
+                        processed_text,
+                        flags=re.IGNORECASE | re.DOTALL,
+                    )
+                    if wrapper:
+                        rewrites = [line.strip() for line in wrapper.group(1).splitlines() if line.strip()]
+                rewrites = [r.strip() for r in rewrites if r.strip()]
+                if len(rewrites) < 1:
+                    rewrites.extend([original_problem] * (1 - len(rewrites)))
+                else:
+                    rewrites = rewrites[:1]
             else:
-                plans = plans[:1]
-        else:
-            plans = [""] * 1
-        return plans
+                rewrites = [original_problem] * 1
+
+        # TODO(jk): handle multiple rewrites as currently app.py takes only the first rewrite
+        return rewrites
