@@ -1180,15 +1180,12 @@ class TestApp:
         ):
             mock_read_csv.return_value = mock_df
 
-
             resources_server = self.init_server(config)
-
 
             session_id = "test_session_crm_delete"
             mock_scope = {"type": "http", "session": {SESSION_ID_KEY: session_id}}
             mock_request_with_session = Request(scope=mock_scope)
             await resources_server.seed_session(mock_request_with_session, BaseSeedSessionRequest())
-
 
             mock_request_body = WorkbenchRequest(**{"customer_id": "00000189"})
             response = await resources_server.route_to_python_function(
@@ -1196,7 +1193,6 @@ class TestApp:
                 body=mock_request_body,
                 request=mock_request_with_session,
             )
-
 
             assert response.output == "Customer deleted successfully."
 
@@ -1570,7 +1566,6 @@ class TestApp:
 
             session_id = "test_session_for_error_handling"
 
-
             mock_scope = {"type": "http", "session": {SESSION_ID_KEY: session_id}}
             mock_request = Request(scope=mock_scope)
 
@@ -1587,7 +1582,6 @@ class TestApp:
             response = await resources_server.route_to_python_function(
                 path=path, body=request_body, request=mock_request
             )
-
 
             assert isinstance(response, WorkbenchResponse)
 
