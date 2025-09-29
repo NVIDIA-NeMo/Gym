@@ -41,15 +41,12 @@ DEFAULT_RUN_SWEGYM_RESULT = {
         ],
         "responses": [
             {
-                "choices": [
-                    {
-                        "provider_specific_fields": {
-                            "prompt_token_ids": [],
-                            "generation_token_ids": [],
-                            "generation_log_probs": [],
-                        }
-                    }
-                ]
+                "choices": [],
+                "provider_specific_fields": {
+                    "prompt_token_ids": [],
+                    "generation_token_ids": [],
+                    "generation_log_probs": [],
+                },
             }
         ],
         "eval_report": {
