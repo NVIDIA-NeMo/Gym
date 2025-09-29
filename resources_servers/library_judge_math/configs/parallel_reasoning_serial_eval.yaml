@@ -31,7 +31,7 @@ parallel_reasoning_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/library_judge_math/data/example.jsonl
-      num_planner: 2
+      num_parallelizer: 2
       num_executor: 8
       keep_executor_prompt: false
 library_judge_math_simple_agent:

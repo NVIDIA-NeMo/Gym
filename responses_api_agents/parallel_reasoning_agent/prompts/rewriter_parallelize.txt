@@ -1,0 +1,20 @@
+Given a problem, your task is to rephrase the problem.
+You must put the rewrite in the following format: the rewrite should be in-between <rewrite> and </rewrite> tags.
+
+Here is an example of the format you must follow:
+
+<rewrite>
+{{rewrite_1}}
+</rewrite>
+
+Please follow these rules in the rewrite:
+1. Make sure the rewrite is easy to understand and solvable independently.
+2. Make sure the rewrite preserves the same information as the original problem.
+
+Now, provide the rewrite for this problem:
+<problem>
+{problem}
+</problem>
+
+DO NOT SOLVE THE PROBLEM IN THE REWRITE. YOU JUST PROVIDE THE REWRITE.
+Please provide the rewrite in the specified format. You should provide only 1 rewrite exactly. MAKE SURE TO GIVE ME 1 REWRITE!! Ensure to follow the XML format exactly.

@@ -46,7 +46,7 @@ class ParallelReasoningConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     max_steps: int = None
-    num_planner: int
+    num_parallelizer: int
     num_executor: int
     keep_executor_prompt: bool = False
 
@@ -68,7 +68,7 @@ class ParallelReasoningVerifyResponse(BaseModel):
 
 
 class Stage(StrEnum):
-    PLANNER = "planner"
+    PARALLELIZER = "parallelizer"
     EXECUTOR = "executor"
 
 
@@ -98,7 +98,7 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
 
         logger.info("[bold green]🚀 Parallel Reasoning Agent initialized[/bold green]")
         logger.info(
-            f"[blue]Configuration:[/blue] Planners={self.config.num_planner}, Executors={self.config.num_executor}"
+            f"[blue]Configuration:[/blue] Parallelizers={self.config.num_parallelizer}, Executors={self.config.num_executor}"
         )
 
     @property
@@ -123,63 +123,66 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
         resources_server_cookies = request.cookies  # update the cookies on every resources server response
 
         # CONFIG
-        num_planner = self.config.num_planner
+        num_parallelizer = self.config.num_parallelizer
         num_executor = self.config.num_executor
 
         self.logger.debug(
             f"[yellow]📝 Input query:[/yellow] {body.input[0].content[:100]}{'...' if len(body.input[0].content) > 100 else ''}"
         )
         self.logger.debug(
-            f"[blue]⚙️  Configuration:[/blue] {num_planner} planners, {num_executor} executors per planner"
+            f"[blue]⚙️  Configuration:[/blue] {num_parallelizer} parallelizers, {num_executor} executors per parallelizers"
         )
 
-        # PLANNER STAGE
-        self.logger.debug("[bold magenta]🧠 Starting planner stage[/bold magenta]")
+        # Parallelizer STAGE
+        self.logger.debug("[bold magenta]🧠 Starting parallelizer stage[/bold magenta]")
 
-        async def get_planner_response(planner_prompt: str):
+        async def get_parallelizer_response(parallelizer_prompt: str):
             new_body = body.model_copy(
-                update={"input": [NeMoGymEasyInputMessage(role="user", content=planner_prompt)]}
+                update={"input": [NeMoGymEasyInputMessage(role="user", content=parallelizer_prompt)]}
             )
-            planner_response = await self.server_client.post(
+            parallelizer_response = await self.server_client.post(
                 server_name=self.config.model_server.name,
                 url_path="/v1/responses",
                 json=new_body,
                 cookies=model_server_cookies,
             )
-            model_response_json = await planner_response.json()
-            planner_cookies = planner_response.cookies
+            model_response_json = await parallelizer_response.json()
+            parallelizer_cookies = parallelizer_response.cookies
             try:
-                planner_response_obj: NeMoGymResponse = NeMoGymResponse.model_validate(model_response_json)
-                planner_response_obj.metadata = {"stage": Stage.PLANNER.value}
+                parallelizer_response_obj: NeMoGymResponse = NeMoGymResponse.model_validate(model_response_json)
+                parallelizer_response_obj.metadata = {"stage": Stage.PARALLELIZER.value}
             except ValidationError as e:
                 raise RuntimeError(
                     f"Received an invalid response from model server: {json.dumps(model_response_json)}"
                 ) from e
 
-            return planner_response_obj, planner_cookies
+            return parallelizer_response_obj, parallelizer_cookies
 
-        planner_prompts = [
-            ParallelReasoningUtils.construct_planner_prompt(body.input[0].content) for _ in range(num_planner)
+        parallelizer_prompts = [
+            ParallelReasoningUtils.construct_parallelizer_prompt(body.input[0].content)
+            for _ in range(num_parallelizer)
         ]
 
-        self.logger.debug(f"[magenta]🔄 Running {len(planner_prompts)} planner requests concurrently[/magenta]")
-        planner_results = await asyncio.gather(
-            *(get_planner_response(planner_prompt) for planner_prompt in planner_prompts)
+        self.logger.debug(
+            f"[magenta]🔄 Running {len(parallelizer_prompts)} parallelizer requests concurrently[/magenta]"
+        )
+        parallelizer_results = await asyncio.gather(
+            *(get_parallelizer_response(parallelizer_prompt) for parallelizer_prompt in parallelizer_prompts)
         )
 
-        planner_responses = []
-        all_planner_cookies = {}
-        for i, (planner_response, planner_cookies) in enumerate(planner_results):
-            planner_responses.append(planner_response)
-            all_planner_cookies.update(planner_cookies)
-            self.logger.debug(f"[green]✅ Planner {i + 1} completed[/green] (ID: {planner_response.id})")
+        parallelizer_responses = []
+        all_parallelizer_cookies = {}
+        for i, (parallelizer_response, parallelizer_cookies) in enumerate(parallelizer_results):
+            parallelizer_responses.append(parallelizer_response)
+            all_parallelizer_cookies.update(parallelizer_cookies)
+            self.logger.debug(f"[green]✅ Parallelizer {i + 1} completed[/green] (ID: {parallelizer_response.id})")
 
         # EXECUTOR STAGE
         self.logger.debug("[bold orange3]⚡ Starting executor stage[/bold orange3]")
 
-        async def get_executor_response(planner_response: NeMoGymResponse, planner_cookies: dict):
-            planner_output = planner_response.output[0].content[0].text
-            plan = ParallelReasoningUtils.parse_plan(planner_output)[0]
+        async def get_executor_response(parallelizer_response: NeMoGymResponse, parallelizer_cookies: dict):
+            parallelizer_output = parallelizer_response.output[0].content[0].text
+            plan = ParallelReasoningUtils.parse_plan(parallelizer_output)[0]
             executor_prompt = ParallelReasoningUtils.construct_executor_prompt(body.input[0].content, plan)
             executor_body = body.model_copy(
                 update={"input": [NeMoGymEasyInputMessage(role="user", content=executor_prompt)]}
@@ -188,13 +191,13 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
                 server_name=self.config.model_server.name,
                 url_path="/v1/responses",
                 json=executor_body,
-                cookies=planner_cookies,
+                cookies=parallelizer_cookies,
             )
             executor_cookies = executor_response.cookies
             try:
                 executor_response_obj: NeMoGymResponse = NeMoGymResponse.model_validate(await executor_response.json())
                 executor_response_obj.metadata = {
-                    "planner_resp_id": planner_response.id,
+                    "parallelizer_resp_id": parallelizer_response.id,
                     "stage": Stage.EXECUTOR.value,
                 }
             except ValidationError as e:
@@ -206,9 +209,9 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
 
         # Create all executor tasks
         executor_tasks = []
-        for planner_response in planner_responses:
+        for parallelizer_response in parallelizer_responses:
             for _ in range(num_executor):
-                executor_tasks.append(get_executor_response(planner_response, all_planner_cookies))
+                executor_tasks.append(get_executor_response(parallelizer_response, all_parallelizer_cookies))
 
         total_executors = len(executor_tasks)
         self.logger.debug(f"[orange3]🔄 Running {total_executors} executor requests concurrently[/orange3]")
@@ -222,19 +225,23 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
         for i, (executor_response, executor_cookies) in enumerate(executor_results):
             executor_responses.append(executor_response)
             all_executor_cookies.update(executor_cookies)
-            planner_id = executor_response.metadata.get("planner_resp_id", "unknown")
+            parallelizer_id = executor_response.metadata.get("parallelizer_resp_id", "unknown")
             self.logger.debug(
-                f"[green]✅ Executor {i + 1} completed[/green] (ID: {executor_response.id}, Planner: {planner_id})"
+                f"[green]✅ Executor {i + 1} completed[/green] (ID: {executor_response.id}, Parallelizer: {parallelizer_id})"
             )
 
-        for k, v in (*resources_server_cookies.items(), *all_planner_cookies.items(), *all_executor_cookies.items()):
+        for k, v in (
+            *resources_server_cookies.items(),
+            *all_parallelizer_cookies.items(),
+            *all_executor_cookies.items(),
+        ):
             response.set_cookie(k, v)
 
-        responses = planner_responses + executor_responses
+        responses = parallelizer_responses + executor_responses
 
         self.logger.debug("[bold green]🎉 Parallel reasoning completed successfully![/bold green]")
         self.logger.debug(
-            f"[cyan]📊 Generated {len(planner_responses)} planner responses and {len(executor_responses)} executor responses[/cyan]"
+            f"[cyan]📊 Generated {len(parallelizer_responses)} parallelizer responses and {len(executor_responses)} executor responses[/cyan]"
         )
 
         return responses
@@ -270,17 +277,17 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
         responses = await responses.json()
         self.logger.debug(f"[green]✅ Generated {len(responses)} total responses[/green]")
 
-        planner_responses = []
+        parallelizer_responses = []
         executor_responses = []
         for response in responses:
             response = NeMoGymResponse.model_validate(response)
-            if response.metadata["stage"] == Stage.PLANNER.value:
-                planner_responses.append(response)
+            if response.metadata["stage"] == Stage.PARALLELIZER.value:
+                parallelizer_responses.append(response)
             elif response.metadata["stage"] == Stage.EXECUTOR.value:
                 executor_responses.append(response)
 
         self.logger.debug(
-            f"[magenta]🧠 Categorized responses:[/magenta] {len(planner_responses)} planners, {len(executor_responses)} executors"
+            f"[magenta]🧠 Categorized responses:[/magenta] {len(parallelizer_responses)} parallelizers, {len(executor_responses)} executors"
         )
 
         self.logger.debug("[orange3]🔍 Starting verification of executor responses[/orange3]")
@@ -309,50 +316,54 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
                     f"Received an invalid response from resources server: {json.dumps(await verify_response.json())}"
                 ) from e
 
-        # Aggregate executor rewards for each planner response group.
-        # Using the metadata information to aggregate rewards for each planner response
-        self.logger.debug("[yellow]📊 Aggregating rewards for planner responses[/yellow]")
-        planner_verify_responses = []
-        for i, planner_response in enumerate(planner_responses):
-            planner_response_group = [
+        # Aggregate executor rewards for each parallelizer response group.
+        # Using the metadata information to aggregate rewards for each parallelizer response
+        self.logger.debug("[yellow]📊 Aggregating rewards for parallelizer responses[/yellow]")
+        parallelizer_verify_responses = []
+        for i, parallelizer_response in enumerate(parallelizer_responses):
+            parallelizer_response_group = [
                 resp
                 for resp in executor_verify_responses
-                if resp.response.metadata["planner_resp_id"] == planner_response.id
+                if resp.response.metadata["parallelizer_resp_id"] == parallelizer_response.id
             ]
-            planner_response_group_rewards = [resp.reward for resp in planner_response_group]
-            if planner_response_group_rewards:
-                planner_reward = sum(planner_response_group_rewards) / len(planner_response_group_rewards)
+            parallelizer_response_group_rewards = [resp.reward for resp in parallelizer_response_group]
+            if parallelizer_response_group_rewards:
+                parallelizer_reward = sum(parallelizer_response_group_rewards) / len(
+                    parallelizer_response_group_rewards
+                )
             else:
-                planner_reward = 0.0
+                parallelizer_reward = 0.0
 
             self.logger.debug(
-                f"[cyan]Planner {i + 1}:[/cyan] {len(planner_response_group_rewards)} executors, avg reward: {planner_reward:.3f}"
+                f"[cyan]Parallelizer {i + 1}:[/cyan] {len(parallelizer_response_group_rewards)} executors, avg reward: {parallelizer_reward:.3f}"
             )
 
-            planner_verify_response = BaseParallelReasoningVerifyResponse.model_validate(
-                body.model_dump() | {"response": planner_response.model_dump(), "reward": planner_reward}
+            parallelizer_verify_response = BaseParallelReasoningVerifyResponse.model_validate(
+                body.model_dump() | {"response": parallelizer_response.model_dump(), "reward": parallelizer_reward}
             )
 
             # Swap parallelizer input with parallelizer prompt
-            planner_verify_response.responses_create_params.input[
+            parallelizer_verify_response.responses_create_params.input[
                 0
-            ].content = ParallelReasoningUtils.construct_planner_prompt(body.responses_create_params.input[0].content)
-            planner_verify_responses.append(planner_verify_response)
+            ].content = ParallelReasoningUtils.construct_parallelizer_prompt(
+                body.responses_create_params.input[0].content
+            )
+            parallelizer_verify_responses.append(parallelizer_verify_response)
 
             # Optionally swap executor input with executor prompt
             if self.config.keep_executor_prompt:
-                planner_output = planner_response.output[0].content[0].text
-                plan = ParallelReasoningUtils.parse_plan(planner_output)[0]
+                parallelizer_output = parallelizer_response.output[0].content[0].text
+                plan = ParallelReasoningUtils.parse_plan(parallelizer_output)[0]
 
                 for i in range(len(executor_verify_responses)):
                     resp = executor_verify_responses[i]
-                    if not resp.response.metadata["planner_resp_id"] == planner_response.id:
+                    if not resp.response.metadata["parallelizer_resp_id"] == parallelizer_response.id:
                         continue
                     resp.responses_create_params.input[0].content = ParallelReasoningUtils.construct_executor_prompt(
                         body.responses_create_params.input[0].content, plan
                     )
 
-        verify_responses = planner_verify_responses + executor_verify_responses
+        verify_responses = parallelizer_verify_responses + executor_verify_responses
         parallel_reasoning_verify_responses = ParallelReasoningVerifyResponse(responses=verify_responses)
 
         self.logger.debug("[bold green]🏆 Parallel reasoning run completed successfully![/bold green]")
