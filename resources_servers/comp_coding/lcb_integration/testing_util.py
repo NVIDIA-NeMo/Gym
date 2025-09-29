@@ -515,6 +515,9 @@ def _set_resource_limit(resource_type: str, target_soft_limit):
     import resource
 
     current_soft, current_hard = resource.getrlimit(resource_type)
+    print(
+        f"current_soft: {current_soft} current_hard: {current_hard} target_soft_limit: {target_soft_limit} current_soft < target_soft_limit: {current_soft < target_soft_limit}"
+    )
     if current_soft < target_soft_limit:
         try:
             resource.setrlimit(resource_type, (target_soft_limit, current_hard))
