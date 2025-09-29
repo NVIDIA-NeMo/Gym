@@ -48,8 +48,7 @@ class MiniSWEAgentUtils:
                 )
             elif role == "assistant":
                 assistant_response = responses[responses_idx]
-                choice = assistant_response["choices"][0]
-                provider_specific_fields = choice["provider_specific_fields"]
+                provider_specific_fields = assistant_response.get("provider_specific_fields", {})
                 prompt_token_ids = provider_specific_fields.get("prompt_token_ids", [])
                 generation_token_ids = provider_specific_fields.get("generation_token_ids", [])
                 generation_log_probs = provider_specific_fields.get("generation_log_probs", [])
