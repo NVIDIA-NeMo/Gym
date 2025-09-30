@@ -41,8 +41,8 @@ def process_jsonl_file(input_file, output_file):
 input_filename = "/lustre/fsw/portfolios/llmservice/users/abhibhag/nemo-rl/3rdparty/Penguin-workspace/Penguin/data/workbench/train.jsonl"
 output_filename = "/lustre/fsw/portfolios/llmservice/users/abhibhag/nemo-rl/3rdparty/Penguin-workspace/Penguin/data/workbench/train_pre_cot.jsonl"
 
-input_filename = "/lustre/fsw/portfolios/llmservice/users/abhibhag/nemo-rl/3rdparty/Penguin-workspace/Penguin/data/workbench/validation.jsonl"
-output_filename = "/lustre/fsw/portfolios/llmservice/users/abhibhag/nemo-rl/3rdparty/Penguin-workspace/Penguin/data/workbench/validation_pre_cot.jsonl"
+# input_filename = "/lustre/fsw/portfolios/llmservice/users/abhibhag/nemo-rl/3rdparty/Penguin-workspace/Penguin/data/workbench/validation.jsonl"
+# output_filename = "/lustre/fsw/portfolios/llmservice/users/abhibhag/nemo-rl/3rdparty/Penguin-workspace/Penguin/data/workbench/validation_pre_cot.jsonl"
 
 
 # Run the script
