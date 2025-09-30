@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import re
 import sys
 import unicodedata
@@ -20,8 +21,8 @@ import yaml
 
 
 README_PATH = Path("README.md")
-
 TARGET_FOLDER = Path("resources_servers")
+SEEN_ENVS_PATH = Path(".seen_envs.json")
 
 
 def extract_config_metadata(yaml_path: Path) -> tuple[str, str, list[str]]:
@@ -48,7 +49,7 @@ def extract_config_metadata(yaml_path: Path) -> tuple[str, str, list[str]]:
 
     domain = None
     license = None
-    usages = []
+    types = []
 
     def visit_domain(data, level=1):
         nonlocal domain
@@ -73,7 +74,7 @@ def extract_config_metadata(yaml_path: Path) -> tuple[str, str, list[str]]:
                         if isinstance(datasets, list):
                             for entry in datasets:
                                 if isinstance(entry, dict):
-                                    usages.append(entry.get("type"))
+                                    types.append(entry.get("type"))
                                     if entry.get("type") == "train":
                                         license = entry.get("license")
                             return
@@ -81,44 +82,50 @@ def extract_config_metadata(yaml_path: Path) -> tuple[str, str, list[str]]:
     visit_domain(data)
     visit_license_and_types(data)
 
-    return domain, license, usages
+    return domain, license, types
 
 
-def generate_table() -> str:
-    """Outputs a grid with table data"""
+def generate_table() -> tuple[str, list[str]]:
+    """
+    Outputs a grid with table data. Raw html <a> tags are used for the links instead of markdown
+    to avoid cross-reference warnings in the 'build-docs' CI/CD run (15+ warnings == fail)
+    """
     col_names = ["Domain", "Resource Server Name", "Config Path", "License", "Usage"]
 
     rows = []
+    seen_subdirs = []
     for subdir in TARGET_FOLDER.iterdir():
-        path = f"{TARGET_FOLDER.name}/{subdir.name}"
-        path_link = f"<a href='{path}'>{path}</a>"
-        server_name = subdir.name.replace("_", " ").title()
+        if subdir.is_dir():
+            seen_subdirs.append(subdir.name)
+            path = f"{TARGET_FOLDER.name}/{subdir.name}"
+            path_link = f"<a href='{path}'>{path}</a>"
+            server_name = subdir.name.replace("_", " ").title()
 
-        configs_folder = subdir / "configs"
-        if configs_folder.exists() and configs_folder.is_dir():
-            yaml_files = configs_folder.glob("*.yaml")
-            if yaml_files:
-                for yaml_file in yaml_files:
-                    config_path = path + "/configs/" + yaml_file.name
-                    config_path_link = f"<a href='{config_path}'>{config_path}</a>"
-                    extraction = extract_config_metadata(yaml_file)
-                    if extraction:
-                        domain, license, usages = extraction
-                        rows.append(
-                            [
-                                domain,
-                                server_name,
-                                config_path_link,
-                                license,
-                                ", ".join([u.title() for u in usages]),
-                            ]
-                        )
-                    else:
-                        rows.append(["?", server_name, config_path_link, "?", "?"])
+            configs_folder = subdir / "configs"
+            if configs_folder.exists() and configs_folder.is_dir():
+                yaml_files = configs_folder.glob("*.yaml")
+                if yaml_files:
+                    for yaml_file in yaml_files:
+                        config_path = path + "/configs/" + yaml_file.name
+                        config_path_link = f"<a href='{config_path}'>{config_path}</a>"
+                        extraction = extract_config_metadata(yaml_file)
+                        if extraction:
+                            domain, license, usages = extraction
+                            rows.append(
+                                [
+                                    domain,
+                                    server_name,
+                                    config_path_link,
+                                    license,
+                                    ", ".join([u.title() for u in usages]),
+                                ]
+                            )
+                        else:
+                            rows.append(["?", server_name, config_path_link, "?", "?"])
+                else:
+                    rows.append(["?", server_name, path_link, "?", "?"])
             else:
                 rows.append(["?", server_name, path_link, "?", "?"])
-        else:
-            rows.append(["?", server_name, path_link, "?", "?"])
 
     def normalize_str(s: str) -> str:
         """
@@ -140,7 +147,7 @@ def generate_table() -> str:
     )
 
     table = [col_names, ["-" for _ in col_names]] + rows
-    return format_table(table)
+    return format_table(table), sorted(seen_subdirs)
 
 
 def format_table(table: list[list[str]]) -> str:
@@ -174,6 +181,19 @@ def format_table(table: list[list[str]]) -> str:
 
 
 def main():
+    current_envs = [str(subdir.name) for subdir in TARGET_FOLDER.iterdir() if subdir.is_dir()]
+    # Check last seen environments
+    seen_envs = []
+    if SEEN_ENVS_PATH.exists():
+        with SEEN_ENVS_PATH.open() as f:
+            seen_envs = json.load(f)
+
+    if set(current_envs) == set(seen_envs):
+        print("No changes in resource_servers. Exiting.")
+        return
+
+    print("Detected changes in resource_servers. Proceeding.")
+
     text = README_PATH.read_text()
     pattern = re.compile(
         r"(<!-- START_RESOURCE_TABLE -->)(.*?)(<!-- END_RESOURCE_TABLE -->)",
@@ -186,7 +206,13 @@ def main():
         )
         sys.exit(1)
 
-    new_text = pattern.sub(lambda m: f"{m.group(1)}\n{generate_table()}\n{m.group(3)}", text)
+    table_str, subdirs_seen = generate_table()
+
+    # Save seen environments
+    with SEEN_ENVS_PATH.open("w") as f:
+        json.dump(subdirs_seen, f)
+
+    new_text = pattern.sub(lambda m: f"{m.group(1)}\n{table_str}\n{m.group(3)}", text)
     README_PATH.write_text(new_text)
 
 
