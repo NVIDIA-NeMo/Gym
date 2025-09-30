@@ -56,7 +56,6 @@ repos:
             if git diff --cached --name-only --diff-filter=ACMR | grep -q "^resources_servers/.*/configs/.*\.yaml$"; then
               echo "[pre-commit] Saw staged config changes; updating resource servers in README." >&2
               python scripts/update_resource_servers.py
-              git add README.md
             else
               echo [pre-commit] "No staged config changes; skipping README update." >&2
             fi
