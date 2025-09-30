@@ -91,7 +91,7 @@ def generate_table() -> str:
     rows = []
     for subdir in TARGET_FOLDER.iterdir():
         path = f"{TARGET_FOLDER.name}/{subdir.name}"
-        path_link = f"[{path}]({path})"
+        path_link = f"<a href='{path}'>{path}</a>"
         server_name = subdir.name.replace("_", " ").title()
 
         configs_folder = subdir / "configs"
@@ -100,7 +100,7 @@ def generate_table() -> str:
             if yaml_files:
                 for yaml_file in yaml_files:
                     config_path = path + "/configs/" + yaml_file.name
-                    config_path_link = f"[{config_path}]({config_path})"
+                    config_path_link = f"<a href='{config_path}'>{config_path}</a>"
                     extraction = extract_config_metadata(yaml_file)
                     if extraction:
                         domain, license, usages = extraction
