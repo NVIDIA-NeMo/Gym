@@ -21,7 +21,7 @@ class ParallelReasoningUtils:
             "",
         )
 
-        prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "planner_parallelize.txt")
+        prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "parallelizer_planner.txt")
         try:
             with open(prompt_path, "r", encoding="utf-8") as f:
                 PLANNER_PROMPT = f.read()
@@ -33,7 +33,7 @@ class ParallelReasoningUtils:
 
     @staticmethod
     def construct_prompt_planner_execute(original_problem: str, plan: str) -> str:
-        prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "planner_execute.txt")
+        prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "executor_planner.txt")
         with open(prompt_path, "r", encoding="utf-8") as f:
             EXECUTOR_PROMPT = f.read()
         executor_prompt = EXECUTOR_PROMPT.format(problem=original_problem, plan=plan)
@@ -78,7 +78,7 @@ class ParallelReasoningUtils:
             "",
         )
 
-        prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "rewriter_parallelize.txt")
+        prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "parallelizer_rewriter.txt")
         try:
             with open(prompt_path, "r", encoding="utf-8") as f:
                 PLANNER_PROMPT = f.read()
@@ -90,7 +90,7 @@ class ParallelReasoningUtils:
 
     @staticmethod
     def construct_prompt_rewriter_execute(original_problem: str, rewrite: str) -> str:
-        prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "rewriter_execute.txt")
+        prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "executor_rewriter.txt")
         with open(prompt_path, "r", encoding="utf-8") as f:
             EXECUTOR_PROMPT = f.read()
         executor_prompt = EXECUTOR_PROMPT.format(problem=rewrite)
@@ -139,3 +139,19 @@ class ParallelReasoningUtils:
 
         # TODO(jk): handle multiple rewrites as currently app.py takes only the first rewrite
         return rewrites
+
+    # ----------- Genselect ----------- #
+    @staticmethod
+    def construct_prompt_genselect_reducer(original_problem: str, solutions: list[str]) -> str:
+        problem = original_problem.replace('\n\nRemember to put your answer on its own line after "Answer:".', "")
+        problem = problem.replace(
+            "Solve the following math problem step by step. The last line of your response should be of the form Answer: $Answer (without quotes) where $Answer is the answer to the problem.\n\n",
+            "",
+        )
+        prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "reducer_genselect.txt")
+        with open(prompt_path, "r", encoding="utf-8") as f:
+            REDUCER_PROMPT = f.read()
+        reducer_prompt = REDUCER_PROMPT.format(
+            problem=problem, solutions=solutions, numsolutions=len(solutions), max_idx=(len(solutions) - 1)
+        )
+        return reducer_prompt.strip()

@@ -51,6 +51,10 @@ class ParallelReasoningConfig(BaseResponsesAPIAgentConfig):
     keep_executor_prompt: bool = False
     parallel_type: Literal["planner", "rewriter"] = "planner"
     use_identity_rewrite: bool = False
+    use_reducer: bool = False
+    return_reducer_only: bool = False
+    reducer_type: Literal["genselect"] = "genselect"
+    reduce_across: Literal["all"] = "all"
 
 
 class ParallelReasoningRunRequest(BaseRunRequest):
@@ -72,6 +76,7 @@ class ParallelReasoningVerifyResponse(BaseModel):
 class Stage(StrEnum):
     PARALLELIZER = "parallelizer"
     EXECUTOR = "executor"
+    REDUCER = "reducer"
 
 
 class ParallelReasoning(SimpleResponsesAPIAgent):
@@ -83,8 +88,16 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
 
         if self.config.parallel_type not in ["planner", "rewriter"]:
             raise NotImplementedError(
-                f"Parallel type must be one of ['planner', 'rewriter'], got {self.config.parallel_type}"
+                f"'parallel_type' must be one of ['planner', 'rewriter'], got {self.config.parallel_type}"
             )
+
+        if self.config.use_reducer:
+            if self.config.reducer_type not in ["genselect"]:
+                raise NotImplementedError(
+                    f"'reducer_type' must be one of ['genselect'], got {self.config.reducer_type}"
+                )
+            if self.config.reduce_across not in ["all"]:
+                raise NotImplementedError(f"'reduce_across' must be one of ['all'], got {self.config.reduce_across}")
 
     def _setup_logger(self):
         # Install rich traceback handler for better error formatting
@@ -113,6 +126,39 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
         """Get the configured rich logger for this agent."""
         return logging.getLogger("parallel_reasoning")
 
+    async def get_reducer_response_genselect(
+        self, body, executor_responses: List[NeMoGymResponse], executor_cookies: dict
+    ):
+        if self.config.reduce_across == "all":
+            executor_outputs = [
+                executor_response.output[0].content[0].text for executor_response in executor_responses
+            ]
+            reducer_prompt = ParallelReasoningUtils.construct_prompt_genselect_reducer(
+                body.input[0].content, executor_outputs
+            )
+            reducer_body = body.model_copy(
+                update={"input": [NeMoGymEasyInputMessage(role="user", content=reducer_prompt)]}
+            )
+            reducer_response = await self.server_client.post(
+                server_name=self.config.model_server.name,
+                url_path="v1/responses",
+                json=reducer_body,
+                cookies=executor_cookies,
+            )
+            reducer_cookies = reducer_response.cookies
+            try:
+                reducer_response_obj: NeMoGymResponse = NeMoGymResponse.model_validate(await reducer_response.json())
+                reducer_response_obj.metadata = {
+                    "executor_resp_ids": [executor_response.id for executor_response in executor_responses],
+                    "stage": Stage.REDUCER.value,
+                }
+            except ValidationError as e:
+                raise RuntimeError(
+                    f"Received an invalid response from model server: {json.dumps(await reducer_response.json())}"
+                ) from e
+
+        return reducer_response_obj, reducer_cookies
+
     async def responses(
         self,
         request: Request,
@@ -140,7 +186,7 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
             f"[blue]⚙️  Configuration:[/blue] {num_parallelizer} parallelizers, {num_executor} executors per parallelizers"
         )
 
-        # Parallelizer STAGE
+        # ------ STAGE 1: PARALLELIZER ------- #
         self.logger.debug("[bold magenta]🧠 Starting parallelizer stage[/bold magenta]")
 
         async def get_parallelizer_response(parallelizer_prompt: str):
@@ -190,7 +236,7 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
             all_parallelizer_cookies.update(parallelizer_cookies)
             self.logger.debug(f"[green]✅ Parallelizer {i + 1} completed[/green] (ID: {parallelizer_response.id})")
 
-        # EXECUTOR STAGE
+        # ------ STAGE 2: EXECUTOR ------- #
         self.logger.debug("[bold orange3]⚡ Starting executor stage[/bold orange3]")
 
         async def get_executor_response(parallelizer_response: NeMoGymResponse, parallelizer_cookies: dict):
@@ -208,7 +254,10 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
                 )
 
             executor_body = body.model_copy(
-                update={"input": [NeMoGymEasyInputMessage(role="user", content=executor_prompt)]}
+                update={
+                    "input": [NeMoGymEasyInputMessage(role="user", content=executor_prompt)],
+                    "max_output_tokens": 1024,
+                }
             )
             executor_response = await self.server_client.post(
                 server_name=self.config.model_server.name,
@@ -253,18 +302,34 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
                 f"[green]✅ Executor {i + 1} completed[/green] (ID: {executor_response.id}, Parallelizer: {parallelizer_id})"
             )
 
+        # ------ STAGE 3: REDUCER ------- #
+        if self.config.use_reducer:
+            self.logger.debug("[bold blue]⚡ Starting reducer stage[/bold blue]")
+            if self.config.redcuer_type == "genselect":
+                reducer_responses, all_reducer_cookies = self.get_reducer_response_genselect(
+                    body, executor_responses, all_executor_cookies
+                )
+        else:
+            reducer_responses = []
+            all_reducer_cookies = {}
+        # TODO(jk): appease linter and dispose
+        # reducer_responses = []
+        # all_reducer_cookies = {}
+        # self.logger.debug(f"{reducer_responses} {reducer_body}")
+
         for k, v in (
             *resources_server_cookies.items(),
             *all_parallelizer_cookies.items(),
             *all_executor_cookies.items(),
+            *all_reducer_cookies.items(),
         ):
             response.set_cookie(k, v)
 
-        responses = parallelizer_responses + executor_responses
+        responses = parallelizer_responses + executor_responses + reducer_responses
 
         self.logger.debug("[bold green]🎉 Parallel reasoning completed successfully![/bold green]")
         self.logger.debug(
-            f"[cyan]📊 Generated {len(parallelizer_responses)} parallelizer responses and {len(executor_responses)} executor responses[/cyan]"
+            f"[cyan]📊 Generated {len(parallelizer_responses)} parallelizer responses, {len(executor_responses)} executor responses and {len(reducer_responses)} reducer responses[/cyan]"
         )
 
         return responses
@@ -339,6 +404,11 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
                     f"Received an invalid response from resources server: {json.dumps(await verify_response.json())}"
                 ) from e
 
+        # self.logger.debug("[orange3]🔍 Calculate reward of reducer responses[/orange3]")
+        # reducer_verify_responses = []
+        # for i, response in enumerate(reducer_responses):
+        #     verify_request =
+
         # Aggregate executor rewards for each parallelizer response group.
         # Using the metadata information to aggregate rewards for each parallelizer response
         self.logger.debug("[yellow]📊 Aggregating rewards for parallelizer responses[/yellow]")
@@ -397,7 +467,9 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
                         )
                     elif self.config.parallel_type == "rewriter":
                         rewrite = ParallelReasoningUtils.parse_rewrite(
-                            body.input[0].content, parallelizer_output, use_identity=self.config.use_identity_rewrite
+                            body.responses_create_params.input[0].content,
+                            parallelizer_output,
+                            use_identity=self.config.use_identity_rewrite,
                         )[0]
                         executor_verify_responses[i].responses_create_params.input[
                             0

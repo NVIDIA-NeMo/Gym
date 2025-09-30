@@ -1,0 +1,43 @@
+You will be given a challenging math problem followed by {numsolutions} solutions.
+Your task is to systematically analyze these solutions to identify the most sound approach.
+
+Input Format:
+Problem: A complex word problem at advanced high school or college level  
+Solutions: Detailed solutions indexed 0−{max_idx}, each concluding with an answer in \boxed{{}} notation  
+
+YOUR TASK
+Problem: {problem}
+Solutions:
+{solutions}
+
+Evaluation Process:
+1. Initial Screening
+− Group solutions by their final answers
+− Identify and explain mathematical contradictions between different answers
+− Eliminate solutions with clear mathematical errors
+
+2. Detailed Analysis
+For remaining solutions, evaluate:
+− Mathematical precision and accuracy
+− Logical progression of steps
+− Completeness of mathematical reasoning
+− Proper use of mathematical notation, including \boxed{{}}
+− Handling of edge cases or special conditions
+− For solutions containing and addressing errors, evaluate the error identification and correction methodology
+
+3. Solution Comparison
+Compare viable solutions based on:
+− Efficiency of approach
+− Clarity of mathematical reasoning
+− Sophistication of method
+− Robustness of solution (works for all cases)
+
+Your response should include:
+1. Brief analysis of conflicting answers
+2. Detailed evaluation of mathematically sound solutions
+3. Justification for eliminating incorrect solutions
+4. Clear explanation for selecting the best approach
+
+End your evaluation with exactly:
+Judgment: [IDX]
+where IDX is the index 0−{max_idx} of the best solution.
