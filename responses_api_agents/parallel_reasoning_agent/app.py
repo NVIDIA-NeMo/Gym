@@ -256,7 +256,6 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
             executor_body = body.model_copy(
                 update={
                     "input": [NeMoGymEasyInputMessage(role="user", content=executor_prompt)],
-                    "max_output_tokens": 1024,
                 }
             )
             executor_response = await self.server_client.post(
