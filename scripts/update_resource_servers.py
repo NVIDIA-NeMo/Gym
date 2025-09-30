@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import re
 import sys
 import unicodedata
@@ -25,28 +24,31 @@ README_PATH = Path("README.md")
 TARGET_FOLDER = Path("resources_servers")
 
 
-def extract_domain_and_license(yaml_path: Path) -> tuple[str, str]:
+def extract_config_metadata(yaml_path: Path) -> tuple[str, str, list[str]]:
     """
-    Domain:
+    Domain, License, Types:
         {name}_resources_server:
             resources_servers:
                 {name}:
-                    domain: ...
-
-    License:
+                    domain: {example_domain}
+                    ...
         {something}_simple_agent:
             responses_api_agents:
                 simple_agent:
                     datasets:
                         - name: train
-                          type: train
-                          license: ...
+                          type: {example_type_1}
+                          license: {example_license_1}
+                        - name: validation
+                          type: {example_type_2}
+                          license: {example_license_2}
     """
     with yaml_path.open() as f:
         data = yaml.safe_load(f)
 
     domain = None
     license = None
+    usages = []
 
     def visit_domain(data, level=1):
         nonlocal domain
@@ -59,7 +61,7 @@ def extract_domain_and_license(yaml_path: Path) -> tuple[str, str]:
                     continue
                 visit_domain(v, level + 1)
 
-    def visit_license(data):
+    def visit_license_and_types(data):
         nonlocal license
         for k1, v1 in data.items():
             if k1.endswith("_simple_agent") and isinstance(v1, dict):
@@ -70,23 +72,26 @@ def extract_domain_and_license(yaml_path: Path) -> tuple[str, str]:
                         datasets = v3.get("datasets")
                         if isinstance(datasets, list):
                             for entry in datasets:
-                                if isinstance(entry, dict) and entry.get("type") == "train":
-                                    license = entry.get("license")
-                                    return
+                                if isinstance(entry, dict):
+                                    usages.append(entry.get("type"))
+                                    if entry.get("type") == "train":
+                                        license = entry.get("license")
+                            return
 
     visit_domain(data)
-    visit_license(data)
+    visit_license_and_types(data)
 
-    return domain, license
+    return domain, license, usages
 
 
 def generate_table() -> str:
     """Outputs a grid with table data"""
-    col_names = ["Domain", "Resource Server Name", "Config Path", "License"]
+    col_names = ["Domain", "Resource Server Name", "Config Path", "License", "Usage"]
 
     rows = []
     for subdir in TARGET_FOLDER.iterdir():
         path = f"{TARGET_FOLDER.name}/{subdir.name}"
+        path_link = f"[{path}]({path})"
         server_name = subdir.name.replace("_", " ").title()
 
         configs_folder = subdir / "configs"
@@ -94,17 +99,26 @@ def generate_table() -> str:
             yaml_files = configs_folder.glob("*.yaml")
             if yaml_files:
                 for yaml_file in yaml_files:
-                    config_path = f"`{path + '/configs/' + yaml_file.name}`"
-                    extraction = extract_domain_and_license(yaml_file)
+                    config_path = path + "/configs/" + yaml_file.name
+                    config_path_link = f"[{config_path}]({config_path})"
+                    extraction = extract_config_metadata(yaml_file)
                     if extraction:
-                        domain, license = extraction
-                        rows.append([domain, server_name, config_path, license])
+                        domain, license, usages = extraction
+                        rows.append(
+                            [
+                                domain,
+                                server_name,
+                                config_path_link,
+                                license,
+                                ", ".join([u.title() for u in usages]),
+                            ]
+                        )
                     else:
-                        rows.append(["?", server_name, config_path, "?"])
+                        rows.append(["?", server_name, config_path_link, "?", "?"])
             else:
-                rows.append(["?", server_name, path, "?"])
+                rows.append(["?", server_name, path_link, "?", "?"])
         else:
-            rows.append(["?", server_name, path, "?"])
+            rows.append(["?", server_name, path_link, "?", "?"])
 
     def normalize_str(s: str) -> str:
         """
