@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import asyncio
 import json
 import logging
 from collections.abc import Sequence
@@ -69,10 +68,6 @@ class AviaryAgentRunRequest(BaseRunRequest):
     max_steps: int | None = None
 
 
-lock = asyncio.Lock()
-from pathlib import Path
-
-
 class AviaryAgent(SimpleResponsesAPIAgent):
     config: AviaryAgentConfig
 
@@ -123,13 +118,9 @@ class AviaryAgent(SimpleResponsesAPIAgent):
         steps = 0
         while True:
             if req.max_steps is not None and steps >= req.max_steps:
+                print("Done, max steps reached", flush=True)
                 break
             steps += 1
-
-            async with lock:
-                dump_path = Path("/home/sid/dump.json")
-                if not dump_path.exists():
-                    dump_path.write_text(json.dumps(agent_state.model_dump(mode="json")))
 
             # Sample action from model
             try:
@@ -199,6 +190,7 @@ class AviaryAgent(SimpleResponsesAPIAgent):
                     break
 
             if done:
+                print("Done, last tool call:", [c.name for c in all_fn_calls], flush=True)
                 break
 
         await self.server_client.post(

@@ -18,7 +18,7 @@ bbh_aviary_agent:
         type: responses_api_models
         name: policy_model
 
-      max_total_sequence_length: 8192 
+      max_total_sequence_length: 16384 
       collapse_old_env_states: true
       old_env_state_message: "[Previous notebook state - hidden]"
 
