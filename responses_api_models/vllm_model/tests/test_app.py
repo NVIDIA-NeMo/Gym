@@ -21,6 +21,7 @@ from pytest import MonkeyPatch, mark
 import nemo_gym.server_utils
 from nemo_gym import PARENT_DIR
 from nemo_gym.openai_utils import (
+    NeMoGymAsyncOpenAI,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionAssistantMessageForTrainingParam,
     NeMoGymChatCompletionAssistantMessageParam,
@@ -1480,6 +1481,8 @@ class TestApp:
         server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
         app = server.setup_webserver()
 
+        assert len(server._clients) == 2
+
         mock_chat_completion = NeMoGymChatCompletion(
             id="chtcmpl",
             object="chat.completion",
@@ -1510,24 +1513,19 @@ class TestApp:
             input=input_messages,
         )
 
-        assert len(server._clients) == 2
-
         mock_chat_completion_1 = mock_chat_completion.model_copy(deep=True)
         mock_chat_completion_1.choices[0].message.content = "1"
-        mock_method_1 = AsyncMock(return_value=mock_chat_completion_1)
-        monkeypatch.setattr(
-            server._clients[0].chat.completions,
-            "create",
-            mock_method_1,
-        )
+        mock_method_1 = AsyncMock(return_value=mock_chat_completion_1.model_dump())
+        client_1 = MagicMock(spec=NeMoGymAsyncOpenAI)
+        client_1.create_chat_completion = mock_method_1
+
         mock_chat_completion_2 = mock_chat_completion.model_copy(deep=True)
         mock_chat_completion_2.choices[0].message.content = "2"
-        mock_method_2 = AsyncMock(return_value=mock_chat_completion_2)
-        monkeypatch.setattr(
-            server._clients[1].chat.completions,
-            "create",
-            mock_method_2,
-        )
+        mock_method_2 = AsyncMock(return_value=mock_chat_completion_2.model_dump())
+        client_2 = MagicMock(spec=NeMoGymAsyncOpenAI)
+        client_2.create_chat_completion = mock_method_2
+
+        server._clients = [client_1, client_2]
 
         # Test first query by client 1 goes to underlying client 1
         client_1 = TestClient(app)

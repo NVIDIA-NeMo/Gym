@@ -19,12 +19,14 @@
 - [How To: ng\_dump\_config - Dump a YAML config as exactly as NeMo Gym sees it](#how-to-ng_dump_config---dump-a-yaml-config-as-exactly-as-nemo-gym-sees-it)
 - [How To: Use NeMo Gym with a non-Responses compatible API endpoint like vLLM](#how-to-use-nemo-gym-with-a-non-responses-compatible-api-endpoint-like-vllm)
 - [How To: Multi-verifier usage](#how-to-multi-verifier-usage)
+- [How To: Profile your resources server](#how-to-profile-your-resources-server)
 - [FAQ: DCO and commit signing VSCode and Git setup](#faq-dco-and-commit-signing-vscode-and-git-setup)
 - [FAQ: SFT and RL](#faq-sft-and-rl)
 - [FAQ: Error: Found files with missing copyright](#faq-error-found-files-with-missing-copyright)
 - [FAQ: build-docs / Build docs CI failures](#faq-build-docs--build-docs-ci-failures)
 - [FAQ: NeMo Gym, training frameworks, and token IDs](#faq-nemo-gym-training-frameworks-and-token-ids)
 - [FAQ: NeMo Gym what CI/CD do I need to pass?](#faq-nemo-gym-what-cicd-do-i-need-to-pass)
+- [FAQ: Why aiohttp backend and not httpx/httpcore for async http?](#faq-why-aiohttp-backend-and-not-httpxhttpcore-for-async-http)
 
 
 # NeMo-Gym
@@ -575,14 +577,15 @@ ng_collect_rollouts +agent_name=multineedle_simple_agent \
     +output_jsonl_fpath=results/multineedle_rollout_collection.jsonl \
     +limit=null \
     +num_repeats=null \
-    +num_samples_in_parallel=null
+    +num_samples_in_parallel=null \
+    +responses_create_params.max_output_tokens=32_768
 ```
 
 The supported parameters include:
 - `limit`: Limits how many examples from the input JSONL file to process
 - `num_repeats`: Repeats each input example multiple times to collect multiple rollouts per example
 - `num_samples_in_parallel`: Controls how many rollout collection requests run concurrently
-
+- `responses_create_params`: A dictionary of sampling parameter overrides.
 
 View the rollouts just collected!
 ```
@@ -612,6 +615,7 @@ multineedle_simple_agent:
         type: train
         license: Apache 2.0
         jsonl_fpath: resources_servers/multineedle/data/train.jsonl
+        num_repeats: 1
         gitlab_identifier:
           dataset_name: multineedle
           version: 0.0.1
@@ -621,6 +625,7 @@ multineedle_simple_agent:
         type: validation
         license: Apache 2.0
         jsonl_fpath: resources_servers/multineedle/data/validation.jsonl
+        num_repeats: 1
         gitlab_identifier:
           dataset_name: multineedle
           version: 0.0.1
@@ -629,12 +634,14 @@ multineedle_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/multineedle/data/example.jsonl
+        num_repeats: 1
 ```
 
 A dataset object consists of:
 - Name: An identifier for you
 - Type: train, validation, or example. Train and validation are as used in NeMo RL or other train frameworks. More information about the example type is in the next section.
 - Jsonl fpath: the local file path to your jsonl file for this dataset.
+- Num repeats: optionally repeat each row when preparing or collating data. Defaults to 1 if unspecified.
 - Gitlab identifier: The remote path to the dataset as held in the Gitlab dataset registry. This field is required for train and validation datasets. (Not required for example datasets since those are required to be committed to Git).
 - License: The license of that dataset. Required for train and validation datasets and not required for example datasets, similar in principle to the Gitlab identifier.
 - Start idx, end idx: used for slicing your dataset.
@@ -771,6 +778,53 @@ ng_run "+config_paths=[$config_paths]"
 The same process goes for data preparation and downstream training framework Gym configuration, you would just add additional server configs.
 
 
+# How To: Profile your resources server
+For large scale verifier training, it's critical that your resources server is as efficient as possible. It may be slammed with 16k concurrent requests or more. Gym provides easy tools to profile and understand the efficiency of your servers.
+
+In one terminal, start your agent, model, and resources servers, with profiling enabled.
+- `profiling_enabled` (bool): whether profiling is enabled or not. By default this is disabled since it incurs some slight overhead we don't want at runtime.
+- `profiling_results_dirpath` (str): The directory to save all server profiling results in. Previous logs for the same will be overwritten in the same directory.
+```bash
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/library_judge_math/configs/bytedtsinghua_dapo17k.yaml"
+ng_run "+config_paths=[${config_paths}]" \
+    +profiling_enabled=true \
+    +profiling_results_dirpath=results/profiling/library_judge_math
+```
+
+In another terminal, run some large number of rollouts against your servers. Use the `limit` and `num_repeats` flags to adjust the number of samples you want to run.
+```bash
+ng_collect_rollouts +agent_name=library_judge_math_simple_agent \
+    +input_jsonl_fpath=resources_servers/library_judge_math/data/dapo17k_bytedtsinghua_train.jsonl \
+    +output_jsonl_fpath=temp/library_judge_math_rollouts.jsonl \
+    +limit=1024 \
+    +num_repeats=1
+```
+
+After `ng_collect_rollouts` finishes, ctrl+c to quit your servers. You should see some output in the terminal like this:
+```bash
+```
+
+The log file content for a server will look something like the following:
+```
+name                                                                                                                      ncall       tsub      ttot      tavg      
+.../nemo-gym/resources_servers/library_judge_math/app.py:118 LibraryJudgeMathResourcesServer.verify                       1024        0.009755  17.98387  0.017562
+.../nemo-gym/resources_servers/library_judge_math/app.py:145 LibraryJudgeMathResourcesServer._verify_answer               1024        0.002933  17.87998  0.017461
+.../nemo-gym/resources_servers/library_judge_math/app.py:173 LibraryJudgeMathResourcesServer._verify_answer_with_library  1024        0.007851  17.87704  0.017458
+.../nemo-gym/resources_servers/library_judge_math/app.py:191 <genexpr>                                                    2339        0.001695  0.029082  0.000012
+.../nemo-gym/resources_servers/library_judge_math/app.py:163 _mute_output                                                 2048        0.007473  0.016538  0.000008
+```
+
+- `ncall`: number of calls (how many times the function/subroutine was invoked).
+  - The `LibraryJudgeMathResourcesServer.verify` function was invoked 1024 times.
+- `tsub`: time spent inside the subroutine itself, excluding calls to other functions (sometimes called "self time").
+  - The `LibraryJudgeMathResourcesServer.verify` function __itself__ accounted for only 0.009755s of time.
+- `ttot`: total time spent in the subroutine, including all the functions it called.
+  - The `LibraryJudgeMathResourcesServer.verify` function and all functions it called including `_verify_answer`, etc accounted for a total of 17.98387s.
+- `tavg`: average time per call (often ttot / ncall).
+  - The `LibraryJudgeMathResourcesServer.verify` function took 0.017562s per call on average.
+
+
 # FAQ: DCO and commit signing VSCode and Git setup
 Here are some suggestions for easier development using the VSCode code editor.
 
@@ -886,3 +940,43 @@ Examples of PR checks that most PRs do not need to wait for to pass:
 1. CICD NeMo / cicd-container-build / build / main (push)
 2. CICD NeMo / Nemo_CICD_Test (push)
 ...
+
+
+# FAQ: Why aiohttp backend and not httpx/httpcore for async http?
+
+TL;DR: httpx is O(n^2) runtime where n is the number of queued requests (i.e. for each request, we check all other queued requests). This is terribly inefficient and results in major slowdowns.
+
+On Wed Sep 17, 2025, inspired by the Deepseek R1 Nature paper, we tried launching a larger rollout batch run with up to 16 off policy steps in NeMo RL. Our setting resulted in Gym being slammed with 16k concurrent requests. At the time, we were using a single Gym instance with multiple data-parallel vLLM workers, and that setup hung for 40 minutes before the first request was processed. Something was wrong.
+
+Before that time, we had also gotten reports that the rollout collection in Gym couldn't be used with high concurrency i.e. in some cases people had to set the concurrency to 32 requests in parallel. Putting these two data points together, we figured something was wrong with the concurrency setup in Gym.
+
+For some context, Gym is a set of servers that end up calling a model endpoint server at some point. And it's really important that we never artificially restrict the concurrency in the Gym side since technically we are always clients of that model endpoint server, since the model endpoint server could handle many more requests than we're restricting the concurrency to. So we always want Gym to be as efficient as possible and not have e.g. max parallel requests or smth parameter in Gym.
+
+Eventually, we isolated the issue to our async http backend -- httpx and httpcore. We originally decided to use httpx for the async http backend in Gym because the OpenAI client uses it by default so we can share the same backend http client. Unfortunately, the httpcore connection pool subroutine for pooling connections over requests is O(n^2) where n is the number of queued requests.
+
+Networking mental model:
+1. A request is sent by Gym to the model endpoint server.
+2. This request requires a connection from our client side to the server side.
+   1. This connection is a socket (identified by a port) and a socket is an open file (managed by the operating system).
+   2. If we are sending 100 requests, in the worst case we could open 100 connections == 100 open files. This quickly becomes very expensive.
+   3. So, async http backends will pool requests across connections to a single endpoint, where multiple requests can leverage the same file if they are going to the same endpoint origin.
+   4. This is called connection pooling. And it's possible that all 100 requests share a single connection.
+3. But this connection pooling now needs some management logic. When the client sends a new request, it needs to determine if that request can reuse an existing connection.
+   1. And this is where the httpcore connection pool logic is very inefficient.
+
+Here are the key calls in the stack trace:
+1. OpenAI client at some point calls httpx client
+2. httpx client calls into the transport [here](https://github.com/encode/httpx/blob/4b23574cf83307ce27d3b14b4a425dc58c57d28d/httpx/_client.py#L1014)
+3. Transport calls into httpcore connection pool [here](https://github.com/encode/httpx/blob/4b23574cf83307ce27d3b14b4a425dc58c57d28d/httpx/_transports/default.py#L250)
+4. For each request, the httpcore connection pool calls this `_assign_requests_to_connections` subroutine [here](https://github.com/encode/httpcore/blob/5974b03c7df89d3ee4e23779900d5349d550753c/httpcore/_async/connection_pool.py#L228)
+   1. This subroutine loops through connections [here](https://github.com/encode/httpcore/blob/5974b03c7df89d3ee4e23779900d5349d550753c/httpcore/_async/connection_pool.py#L284)
+   2. and loops through queued requests [here](https://github.com/encode/httpcore/blob/5974b03c7df89d3ee4e23779900d5349d550753c/httpcore/_async/connection_pool.py#L303)
+   3. Which results in a total of O(n^2) runtime if the number of queued requests is large. Which is always the case if we slam with some larger number of requests.
+
+In the end, we decided to swap our http backend from httpx to aiohttp since we had good prior experience working with aiohttp in production infra.
+
+Here are some Github issues related to this problem. They didn't help too much, but they did validate our solution (kind of) to use aiohttp as as async http backend instead.
+- https://github.com/openai/openai-python/issues/1596
+- https://github.com/encode/httpx/issues/3215#issuecomment-2220795088
+
+If you are using AsyncOpenAI client with a parallelism > 32, you may also want to check if this kind of inefficiency also affects your setup.

@@ -288,7 +288,7 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
             url_path="/v1/responses",
             json=responses_create_params,
         )
-        judge_response = NeMoGymResponse.model_validate(response.json())
+        judge_response = NeMoGymResponse.model_validate(await response.json())
         eval_record = JudgeEvaluation(
             responses_create_params=responses_create_params,
             response=judge_response,

@@ -86,10 +86,12 @@ class DatasetConfig(BaseModel):
     type: DatasetType
     jsonl_fpath: str
 
+    num_repeats: int = Field(default=1, ge=1)
     gitlab_identifier: Optional[JsonlDatasetGitlabIdentifer] = None
     license: Optional[
         Union[
             Literal["Apache 2.0"],
+            Literal["MIT"],
             Literal["Creative Commons Attribution 4.0 International"],
             Literal["Creative Commons Attribution-ShareAlike 4.0 International"],
             Literal["TBD"],
