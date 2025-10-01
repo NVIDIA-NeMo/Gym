@@ -90,7 +90,7 @@ class AviaryAgent(SimpleResponsesAPIAgent):
                 hidden_message if isinstance(m, AviaryEnvStateEasyInputMessage) else m for m in prev_messages
             ]
 
-        return agent_state.model_copy(update={"input": agent_state.input + model_output + obs})
+        return agent_state.model_copy(update={"input": prev_messages + model_output + obs})
 
     async def responses(self, req: AviaryAgentRunRequest) -> AviaryNeMoGymResponse:
         req = req.model_copy(deep=True)
