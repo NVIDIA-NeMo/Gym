@@ -40,11 +40,12 @@ parallel_reasoning_simple_agent:
         type: example
         jsonl_fpath: resources_servers/library_judge_math/data/example.jsonl
       num_parallelizer: 2
-      num_executor: 2
-      executor_max_output_tokens: 20480
+      num_executor: 4
+      num_reducer: 1
+      executor_max_output_tokens: 32768
       parallel_type: planner
       keep_executor_prompt: true
       use_reducer: true
       reducer_type: genselect
       reduce_across: all
-      return_reducer_only: true
+      return_reducer_only: false

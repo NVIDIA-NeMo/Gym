@@ -46,8 +46,10 @@ class ParallelReasoningConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     max_steps: int = None
-    num_parallelizer: int
-    num_executor: int
+    num_parallelizer: int = 4
+    num_executor: int = 4
+    num_reducer: int = 1
+    use_summary: bool = False
     executor_max_output_tokens: Optional[int] = None
     keep_executor_prompt: bool = False
     parallel_type: Literal["planner", "rewriter"] = "planner"
@@ -143,28 +145,40 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
             reducer_body = body.model_copy(
                 update={"input": [NeMoGymEasyInputMessage(role="user", content=reducer_prompt)]}
             )
-            reducer_response = await self.server_client.post(
-                server_name=self.config.model_server.name,
-                url_path="/v1/responses",
-                json=reducer_body,
-                cookies=executor_cookies,
-            )
-            reducer_cookies = reducer_response.cookies
-            try:
-                reducer_response_obj = await reducer_response.json()
-                reducer_response_obj: NeMoGymResponse = NeMoGymResponse.model_validate(reducer_response_obj)
-                reducer_response_obj.metadata = {
-                    "executor_resp_ids": json.dumps(
-                        [executor_response.id for executor_response in executor_responses]
-                    ),
-                    "stage": Stage.REDUCER.value,
-                    "request": reducer_body.model_dump_json(),
-                }
-            except ValidationError as e:
-                raise RuntimeError(
-                    f"Received an invalid response from model server: {json.dumps(await reducer_response.json())}"
-                ) from e
-            reducer_responses = [reducer_response_obj]
+
+            async def process_reducer_task():
+                reducer_response = await self.server_client.post(
+                    server_name=self.config.model_server.name,
+                    url_path="/v1/responses",
+                    json=reducer_body,
+                    cookies=executor_cookies,
+                )
+                reducer_cookies = reducer_response.cookies
+                try:
+                    reducer_response_obj = await reducer_response.json()
+                    reducer_response_obj: NeMoGymResponse = NeMoGymResponse.model_validate(reducer_response_obj)
+                    reducer_response_obj.metadata = {
+                        "executor_resp_ids": json.dumps(
+                            [executor_response.id for executor_response in executor_responses]
+                        ),
+                        "stage": Stage.REDUCER.value,
+                        "request": reducer_body.model_dump_json(),
+                    }
+                except ValidationError as e:
+                    raise RuntimeError(
+                        f"Received an invalid response from model server: {json.dumps(await reducer_response.json())}"
+                    ) from e
+                return reducer_response_obj, reducer_cookies
+
+            reducer_tasks = [process_reducer_task() for _ in range(self.config.num_reducer)]
+            reducer_results = await asyncio.gather(*reducer_tasks)
+
+            reducer_responses = []
+            all_reducer_cookies = {}
+            for i, (reducer_response, reducer_cookies) in enumerate(reducer_results):
+                reducer_responses.append(reducer_response)
+                all_reducer_cookies.update(reducer_cookies)
+                self.logger.debug(f"[green]✅ Reducer ({i + 1} / {self.config.num_reducer}) completed[/green]")
 
         return reducer_responses, reducer_cookies
 
