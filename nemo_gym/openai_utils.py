@@ -74,7 +74,7 @@ from openai.types.shared_params import FunctionDefinition
 from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import TypedDict
 
-from nemo_gym.server_utils import request
+from nemo_gym.server_utils import raise_for_status, request
 
 
 ########################################
@@ -432,6 +432,7 @@ class NeMoGymAsyncOpenAI(BaseModel):
             json=kwargs,
             headers={"Authorization": f"Bearer {self.api_key}"},
         )
+        raise_for_status(response)
         return await response.json()
 
     async def create_response(self, **kwargs):
@@ -441,6 +442,7 @@ class NeMoGymAsyncOpenAI(BaseModel):
             json=kwargs,
             headers={"Authorization": f"Bearer {self.api_key}"},
         )
+        raise_for_status(response)
         return await response.json()
 
     async def create_tokenize(self, **kwargs):
@@ -451,4 +453,5 @@ class NeMoGymAsyncOpenAI(BaseModel):
             json=kwargs,
             headers={"Authorization": f"Bearer {self.api_key}"},
         )
+        raise_for_status(response)
         return await response.json()
