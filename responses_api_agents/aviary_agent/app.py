@@ -47,6 +47,8 @@ class AviaryAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
 
+    max_steps: int | None = None
+
     # Doesn't cause an issue if not set, but if it is, then
     # we can avoid sending requests that are guaranteed to
     # exceed the limit. If not set, vLLM will reject the request
@@ -65,7 +67,6 @@ class AviaryAgentRunRequest(BaseRunRequest):
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming = Field(
         default_factory=lambda: NeMoGymResponseCreateParamsNonStreaming(input=[])
     )
-    max_steps: int | None = None
 
 
 class AviaryAgent(SimpleResponsesAPIAgent):
@@ -117,7 +118,7 @@ class AviaryAgent(SimpleResponsesAPIAgent):
 
         steps = 0
         while True:
-            if req.max_steps is not None and steps >= req.max_steps:
+            if self.config.max_steps is not None and steps >= self.config.max_steps:
                 print("Done, max steps reached", flush=True)
                 break
             steps += 1

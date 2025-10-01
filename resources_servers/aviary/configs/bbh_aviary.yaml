@@ -11,6 +11,8 @@ bbh_aviary_agent:
     aviary_agent:
       entrypoint: app.py
 
+      max_steps: 25
+
       resources_server:
         type: resources_servers
         name: bbh_aviary_resources_server
