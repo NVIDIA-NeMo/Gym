@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from asyncio import sleep
 from typing import (
     Dict,
     List,
@@ -74,7 +75,7 @@ from openai.types.shared_params import FunctionDefinition
 from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import TypedDict
 
-from nemo_gym.server_utils import raise_for_status, request
+from nemo_gym.server_utils import ClientResponse, raise_for_status, request
 
 
 ########################################
@@ -425,8 +426,24 @@ class NeMoGymAsyncOpenAI(BaseModel):
     base_url: str
     api_key: str
 
+    async def _request(self, **request_kwargs: Dict) -> ClientResponse:
+        tries = 0
+        while True:
+            tries += 1
+            response = await request(**request_kwargs)
+            # See https://platform.openai.com/docs/guides/error-codes/api-errors
+            if response.status in (429, 500, 503):
+                content = (await response.content.read()).decode()
+                print(
+                    f"Hit a {response.status} trying to query an OpenAI endpoint (try {tries}). Sleeping 0.5s. Error message: {content}"
+                )
+                await sleep(0.5)
+                continue
+            else:
+                return response
+
     async def create_chat_completion(self, **kwargs):
-        response = await request(
+        response = await self._request(
             method="POST",
             url=f"{self.base_url}/chat/completions",
             json=kwargs,
@@ -436,7 +453,7 @@ class NeMoGymAsyncOpenAI(BaseModel):
         return await response.json()
 
     async def create_response(self, **kwargs):
-        response = await request(
+        response = await self._request(
             method="POST",
             url=f"{self.base_url}/responses",
             json=kwargs,
@@ -447,7 +464,7 @@ class NeMoGymAsyncOpenAI(BaseModel):
 
     async def create_tokenize(self, **kwargs):
         base_url = self.base_url.removesuffix("/v1")
-        response = await request(
+        response = await self._request(
             method="POST",
             url=f"{base_url}/tokenize",
             json=kwargs,
