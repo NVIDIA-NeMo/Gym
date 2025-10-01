@@ -157,15 +157,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             self._session_id_to_client[session_id] = client
         client = self._session_id_to_client[session_id]
 
-        # set_trace()
         tokenize_response = await client.create_tokenize(**tokenize_body_dict)
-
-        tokenize_response = await client.post(
-            "../tokenize",
-            cast_to=VLLMTokenizeResponse,
-            body=tokenize_body_dict,
-        )
-
         return tokenize_response
 
     async def chat_completions(

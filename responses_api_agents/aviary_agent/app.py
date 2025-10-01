@@ -14,7 +14,6 @@
 import json
 import logging
 from collections.abc import Sequence
-from pdb import set_trace
 from typing import List, cast
 
 from pydantic import ConfigDict, Field, ValidationError
@@ -163,7 +162,12 @@ class AviaryAgent(SimpleResponsesAPIAgent):
             if not all_fn_calls and all_output_messages:
                 # Got non-tool-call outputs, so ask the model to try again.
                 obs: Sequence[NeMoGymEasyInputMessage | NeMoGymFunctionCallOutput] = [
-                    NeMoGymEasyInputMessage(role="user", content="Please call a tool to proceed.")
+                    NeMoGymEasyInputMessage(
+                        role="user",
+                        content="You either responded with no tool calls or an invalid tool call "
+                        "(invalid tool name and/or arguments). Please call at least one tool to "
+                        "proceed",
+                    )
                 ]
             else:
                 # Apply action to environment
@@ -182,14 +186,10 @@ class AviaryAgent(SimpleResponsesAPIAgent):
             if self.config.max_total_sequence_length is not None:
                 # NOTE: this assumes vLLM backend.
                 tokenize_response = await self.server_client.post(
-                    server_name=self.config.model_server.name,
-                    url_path="/tokenize",
-                    json=agent_state.model_copy(update={"messages": obs}),
+                    server_name=self.config.model_server.name, url_path="/tokenize", json=agent_state
                 )
                 tokenize_response_json = await tokenize_response.json()
-                set_trace()
-                total_len = len(tokenize_response_json["tokens"])
-                if total_len >= self.config.max_total_sequence_length:
+                if tokenize_response_json["count"] >= self.config.max_total_sequence_length:
                     break
 
             if done:

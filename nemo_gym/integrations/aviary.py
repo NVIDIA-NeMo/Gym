@@ -44,9 +44,15 @@ class AviarySeedSessionRequest(BaseSeedSessionRequest):
     task_idx: int
 
 
+class AviaryEnvStateEasyInputMessage(NeMoGymEasyInputMessage):
+    """Special subclass so we can identify messages representing environment state."""
+
+    is_env_state: Literal[True] = True
+
+
 class AviarySeedSessionResponse(BaseSeedSessionResponse):
     env_id: str
-    obs: list[NeMoGymEasyInputMessage]
+    obs: list[NeMoGymEasyInputMessage | AviaryEnvStateEasyInputMessage]
     tools: list[FunctionToolParam]
 
 
@@ -56,7 +62,7 @@ class AviaryStepRequest(BaseModel):
 
 
 class AviaryStepResponse(BaseModel):
-    obs: list[NeMoGymEasyInputMessage | NeMoGymFunctionCallOutput]
+    obs: list[NeMoGymFunctionCallOutput | NeMoGymEasyInputMessage | AviaryEnvStateEasyInputMessage]
     reward: float
     done: bool
 
@@ -85,7 +91,3 @@ class AviaryCloseRequest(BaseModel):
 class AviaryCloseResponse(BaseModel):
     message: str
     success: bool
-
-
-class AviaryEnvStateEasyInputMessage(NeMoGymEasyInputMessage):
-    """Special subclass so we can identify messages representing environment state."""
