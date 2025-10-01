@@ -190,6 +190,7 @@ class AviaryAgent(SimpleResponsesAPIAgent):
                 )
                 tokenize_response_json = await tokenize_response.json()
                 if tokenize_response_json["count"] >= self.config.max_total_sequence_length:
+                    print("Done, max sequence length reached", flush=True)
                     break
 
             if done:
