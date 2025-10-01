@@ -24,3 +24,32 @@ arc_agi_simple_agent:
       - name: evaluation_1
         type: validation
         jsonl_fpath: resources_servers/arc_agi/data/arc_agi_1_evaluation.jsonl
+arc_agi_berman_agent:
+  responses_api_agents:
+    berman_agent:
+      entrypoint: app.py
+      host: 127.0.0.1
+      port: 15215
+      resources_server:
+        type: resources_servers
+        name: arc_agi
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+      # Phase configuration
+      num_initial_candidates: 5
+      num_top_for_revision: 5
+      num_pooled_candidates: 2
+      initial_temperature: 0.9
+
+      datasets:
+      - name: example_1
+        type: example
+        jsonl_fpath: resources_servers/arc_agi/data/example_1.jsonl
+      - name: training_1
+        type: validation
+        jsonl_fpath: resources_servers/arc_agi/data/arc_agi_1_training.jsonl
+      - name: evaluation_1
+        type: validation
+        jsonl_fpath: resources_servers/arc_agi/data/arc_agi_1_evaluation.jsonl

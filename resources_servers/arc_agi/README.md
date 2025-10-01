@@ -52,6 +52,16 @@ ARC-AGI-2 eval set rollouts (120 problems):
 ng_collect_rollouts +agent_name=arc_agi_2_simple_agent +input_jsonl_fpath=resources_servers/arc_agi/data/arc_agi_2_evaluation.jsonl +output_jsonl_fpath=resources_servers/arc_agi/data/arc_agi_2_evaluation_rollouts.jsonl +limit=null +num_repeats=null +num_samples_in_parallel=null
 ```
 
+berman agent arc agi 1 rollouts example
+```bash
+ng_collect_rollouts +agent_name=arc_agi_berman_agent +input_jsonl_fpath=resources_servers/arc_agi/data/example_1.jsonl +output_jsonl_fpath=resources_servers/arc_agi/data/example_1_rollouts.jsonl +limit=5 +num_repeats=null +num_samples_in_parallel=null
+```
+
+berman agent arc agi 1 rollouts eval set
+```bash
+ng_collect_rollouts +agent_name=arc_agi_berman_agent +input_jsonl_fpath=resources_servers/arc_agi/data/arc_agi_1_evaluation.jsonl +output_jsonl_fpath=resources_servers/arc_agi/data/arc_agi_1_evaluation_rollouts.jsonl +limit=20 +num_repeats=null +num_samples_in_parallel=null
+```
+
 view rollouts:
 ```bash
 ng_viewer +jsonl_fpath=resources_servers/arc_agi/data/example_1_rollouts.jsonl

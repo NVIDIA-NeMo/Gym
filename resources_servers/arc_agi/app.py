@@ -65,22 +65,25 @@ def _extract_assistant_text(body: BaseVerifyRequest) -> str:
 
 def _parse_grid(text: str) -> Optional[List[List[int]]]:
     """expects format: \\boxed{[[1,2,3],[4,5,6]]}"""
-    boxed_pattern = r'\\boxed\{(\[\s*\[[\d\s,\[\]]+\]\s*\])\}'
+    boxed_pattern = r"\\boxed\{(\[\s*\[[\d\s,\[\]]+\]\s*\])\}"
     boxed_matches = re.findall(boxed_pattern, text, re.DOTALL)
 
     if not boxed_matches:
-        boxed_matches = re.findall(r'\[\s*\[[\d\s,\[\]]+\]\s*\]', text, re.DOTALL)
+        boxed_matches = re.findall(r"\[\s*\[[\d\s,\[\]]+\]\s*\]", text, re.DOTALL)
 
     for match in boxed_matches:
         try:
-            cleaned = re.sub(r'\s+', '', match)
+            cleaned = re.sub(r"\s+", "", match)
             grid = json.loads(cleaned)
 
-            if (isinstance(grid, list) and
-                all(isinstance(row, list) and all(isinstance(cell, int) for cell in row) for row in grid) and
-                len(grid) > 0 and len(grid[0]) > 0):
+            if (
+                isinstance(grid, list)
+                and all(isinstance(row, list) and all(isinstance(cell, int) for cell in row) for row in grid)
+                and len(grid) > 0
+                and len(grid[0]) > 0
+            ):
                 return grid
-        except (json.JSONDecodeError, (IndexError, TypeError)):
+        except (json.JSONDecodeError, IndexError, TypeError):
             continue
 
     return None
