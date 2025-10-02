@@ -1,0 +1,10 @@
+You are an Execution Agent. Given a problem and a plan, solve the problem by executing the plan steps in order.
+Problem:
+<problem>
+{problem}
+</problem>
+
+Plan:
+<plan>
+{plan}
+</plan>

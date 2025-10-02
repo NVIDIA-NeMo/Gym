@@ -1,0 +1,42 @@
+You will be given a challenging competitive programming problem followed by {numsolutions} different solutions (in python code).
+Your task is to systematically analyze these solutions to identify the correct and most efficient approach.
+
+Input Format:
+Problem: A competitive programming problem with constraints
+Solutions: Detailed candidate solutions indexed 0−{max_idx}, each concluding with their final output format or expected result
+
+YOUR TASK
+Problem: {problem}
+Solutions:
+{solutions}
+
+Evaluation Process:
+1. Initial Screening
+− Group solutions by their final outputs/approaches
+− Identify and explain contradictions in time/space complexity or correctness
+− Eliminate solutions with clear logical, runtime, or implementation errors
+
+2. Detailed Analysis
+For remaining solutions, evaluate:
+− Correctness: Does it always yield the right answer under constraints?
+− Complexity: Time and space analysis against input limits
+− Algorithmic rigor: Proper use of data structures, algorithms, and edge case handling
+− Clarity: Logical flow of the approach and readability of reasoning
+− Robustness: Handles edge cases, extreme constraints, and avoids undefined behavior
+
+3. Solution Comparison
+Compare viable solutions based on:
+− Efficiency: Which is asymptotically faster and practically feasible?
+− Elegance: Simplicity and clarity of implementation
+− Scalability: Can it handle the largest allowed inputs within limits?
+− Generalization: Works correctly across all test cases
+
+Your response should include:
+1. Brief analysis of conflicting outputs or approaches
+2. Detailed evaluation of sound solutions
+3. Justification for eliminating incorrect or suboptimal ones
+4. Clear explanation for selecting the best solution
+
+End your evaluation with exactly:
+Judgment: [IDX]
+where IDX is the index 0−{max_idx} of the best solution.

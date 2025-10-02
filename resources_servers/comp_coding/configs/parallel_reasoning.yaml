@@ -1,0 +1,32 @@
+comp_coding:
+  resources_servers:
+    comp_coding:
+      entrypoint: app.py
+      num_workers: 8
+parallel_reasoning_simple_agent:
+  responses_api_agents:
+    parallel_reasoning_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: comp_coding
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/comp_coding/data/train.jsonl
+        gitlab_identifier:
+          dataset_name: comp_coding
+          version: 0.0.1
+          artifact_fpath: train.jsonl
+        license: Creative Commons Attribution 4.0 International
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/comp_coding/data/example.jsonl
+      num_parallelizer: 2
+      num_executor: 4
+      keep_executor_prompt: true
+      use_reducer: true
+      return_reducer_only: true

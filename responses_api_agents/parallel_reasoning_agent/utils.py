@@ -140,6 +140,16 @@ class ParallelReasoningUtils:
         # TODO(jk): handle multiple rewrites as currently app.py takes only the first rewrite
         return rewrites
 
+
+    @staticmethod
+    def _format_solutions(solutions: list[str]):
+        formatted_solutions = ""
+        
+        for idx, solution in enumerate(solutions):
+            formatted_solutions += f"Solution {idx}:\n{solution}"
+            
+        return formatted_solutions
+            
     # ----------- Genselect ----------- #
     @staticmethod
     def construct_prompt_genselect_reducer(original_problem: str, solutions: list[str]) -> str:
@@ -148,11 +158,13 @@ class ParallelReasoningUtils:
             "Solve the following math problem step by step. The last line of your response should be of the form Answer: $Answer (without quotes) where $Answer is the answer to the problem.\n\n",
             "",
         )
+        
+        formatted_solutions = ParallelReasoningUtils._format_solutions(solutions)
         prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "reducer_genselect.txt")
         with open(prompt_path, "r", encoding="utf-8") as f:
             REDUCER_PROMPT = f.read()
         reducer_prompt = REDUCER_PROMPT.format(
-            problem=problem, solutions=solutions, numsolutions=len(solutions), max_idx=(len(solutions) - 1)
+            problem=problem, solutions=formatted_solutions, numsolutions=len(solutions), max_idx=(len(solutions) - 1)
         )
         return reducer_prompt.strip()
 
