@@ -133,14 +133,14 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
         return logging.getLogger("parallel_reasoning")
 
     async def get_reducer_response_genselect(
-        self, body, executor_responses: List[NeMoGymResponse], executor_cookies: dict
+        self, body, executor_responses: List[NeMoGymResponse], executor_cookies: dict, original_problem: str
     ):
         if self.config.reduce_across == "all":
             executor_outputs = [
                 executor_response.output[0].content[0].text for executor_response in executor_responses
             ]
             reducer_prompt = ParallelReasoningUtils.construct_prompt_genselect_reducer(
-                body.input[0].content, executor_outputs
+                original_problem, executor_outputs
             )
             reducer_body = body.model_copy(
                 update={"input": [NeMoGymEasyInputMessage(role="user", content=reducer_prompt)]}
@@ -273,14 +273,21 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
 
             return parallelizer_response_obj, parallelizer_cookies
 
+        # If there are more than 1 messages in the input dump it in the prompt
+        print(f"DEBUG: num messages in input {len(body.input)}")
+        if len(body.input) > 1:
+            original_problem = str([inp.model_dump() for inp in body.input])
+        else:
+            original_problem = body.input[0].content
+
         if self.config.parallel_type == "planner":
             parallelizer_prompts = [
-                ParallelReasoningUtils.construct_prompt_planner_parallelize(body.input[0].content)
+                ParallelReasoningUtils.construct_prompt_planner_parallelize(original_problem)
                 for _ in range(num_parallelizer)
             ]
         elif self.config.parallel_type == "rewriter":
             parallelizer_prompts = [
-                ParallelReasoningUtils.construct_prompt_rewriter_parallelize(body.input[0].content)
+                ParallelReasoningUtils.construct_prompt_rewriter_parallelize(original_problem)
                 for _ in range(num_parallelizer)
             ]
 
@@ -306,14 +313,12 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
 
             if self.config.parallel_type == "planner":
                 plan = ParallelReasoningUtils.parse_plan(parallelizer_output)[0]
-                executor_prompt = ParallelReasoningUtils.construct_prompt_planner_execute(body.input[0].content, plan)
+                executor_prompt = ParallelReasoningUtils.construct_prompt_planner_execute(original_problem, plan)
             elif self.config.parallel_type == "rewriter":
                 rewrite = ParallelReasoningUtils.parse_rewrite(
-                    body.input[0].content, parallelizer_output, use_identity=self.config.use_identity_rewrite
+                    original_problem, parallelizer_output, use_identity=self.config.use_identity_rewrite
                 )[0]
-                executor_prompt = ParallelReasoningUtils.construct_prompt_rewriter_execute(
-                    body.input[0].content, rewrite
-                )
+                executor_prompt = ParallelReasoningUtils.construct_prompt_rewriter_execute(original_problem, rewrite)
 
             executor_body = body.model_copy(
                 update={
@@ -371,7 +376,7 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
             self.logger.debug("[bold blue]⚡ Starting reducer stage[/bold blue]")
             if self.config.reducer_type == "genselect":
                 reducer_responses, all_reducer_cookies = await self.get_reducer_response_genselect(
-                    body, executor_responses, all_executor_cookies
+                    body, executor_responses, all_executor_cookies, original_problem
                 )
         else:
             reducer_responses = []
@@ -513,19 +518,27 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
                 body.model_dump() | {"response": parallelizer_response.model_dump(), "reward": parallelizer_reward}
             )
 
+            # Dump the trajectories into the user message for the parallelizer.
+            if len(body.responses_create_params.input) > 1:
+                original_problem = str([inp.model_dump() for inp in body.responses_create_params.input])
+            else:
+                original_problem = body.responses_create_params.input[0].content
+
             # Swap parallelizer input with parallelizer prompt
             if self.config.parallel_type == "planner":
-                parallelizer_verify_response.responses_create_params.input[
-                    0
-                ].content = ParallelReasoningUtils.construct_prompt_planner_parallelize(
-                    body.responses_create_params.input[0].content
-                )
+                parallelizer_verify_response.responses_create_params.input = [
+                    NeMoGymEasyInputMessage(
+                        role="user",
+                        content=ParallelReasoningUtils.construct_prompt_planner_parallelize(original_problem),
+                    )
+                ]
             elif self.config.parallel_type == "rewriter":
-                parallelizer_verify_response.responses_create_params.input[
-                    0
-                ].content = ParallelReasoningUtils.construct_prompt_rewriter_parallelize(
-                    body.responses_create_params.input[0].content
-                )
+                parallelizer_verify_response.responses_create_params.input = [
+                    NeMoGymEasyInputMessage(
+                        role="user",
+                        content=ParallelReasoningUtils.construct_prompt_rewriter_parallelize(original_problem),
+                    )
+                ]
             parallelizer_verify_responses.append(parallelizer_verify_response)
 
             # Optionally swap executor input with executor prompt
@@ -538,22 +551,28 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
 
                     if self.config.parallel_type == "planner":
                         plan = ParallelReasoningUtils.parse_plan(parallelizer_output)[0]
-                        executor_verify_responses[i].responses_create_params.input[
-                            0
-                        ].content = ParallelReasoningUtils.construct_prompt_planner_execute(
-                            body.responses_create_params.input[0].content, plan
-                        )
+                        executor_verify_responses[i].responses_create_params.input = [
+                            NeMoGymEasyInputMessage(
+                                role="user",
+                                content=ParallelReasoningUtils.construct_prompt_planner_execute(
+                                    original_problem, plan
+                                ),
+                            )
+                        ]
                     elif self.config.parallel_type == "rewriter":
                         rewrite = ParallelReasoningUtils.parse_rewrite(
-                            body.responses_create_params.input[0].content,
+                            original_problem,
                             parallelizer_output,
                             use_identity=self.config.use_identity_rewrite,
                         )[0]
-                        executor_verify_responses[i].responses_create_params.input[
-                            0
-                        ].content = ParallelReasoningUtils.construct_prompt_rewriter_execute(
-                            body.responses_create_params.input[0].content, rewrite
-                        )
+                        executor_verify_responses[i].responses_create_params.input = [
+                            NeMoGymEasyInputMessage(
+                                role="user",
+                                content=ParallelReasoningUtils.construct_prompt_rewriter_execute(
+                                    original_problem, rewrite
+                                ),
+                            )
+                        ]
             else:
                 # Swap the prompt_token_ids of the executor with the original problem.
                 # Mostly to backprop on original prompt

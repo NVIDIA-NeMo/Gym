@@ -18,7 +18,7 @@ Evaluation Process:
 
 2. Detailed Analysis
 For remaining solutions, evaluate:
-− Correctness: Does it always yield the right answer under constraints?
+− Correctness: Does it always yield the right answer under constraints? Run through the test cases given in the problem.
 − Complexity: Time and space analysis against input limits
 − Algorithmic rigor: Proper use of data structures, algorithms, and edge case handling
 − Clarity: Logical flow of the approach and readability of reasoning

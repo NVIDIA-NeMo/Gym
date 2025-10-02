@@ -2,7 +2,9 @@ comp_coding:
   resources_servers:
     comp_coding:
       entrypoint: app.py
-      num_workers: 8
+      num_processes: 8
+      unit_test_timeout_secs: 10
+      debug: false
 parallel_reasoning_simple_agent:
   responses_api_agents:
     parallel_reasoning_agent:
@@ -22,11 +24,20 @@ parallel_reasoning_simple_agent:
           version: 0.0.1
           artifact_fpath: train.jsonl
         license: Creative Commons Attribution 4.0 International
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/comp_coding/data/validation.jsonl
+        gitlab_identifier:
+          dataset_name: comp_coding
+          version: 0.0.1
+          artifact_fpath: validation.jsonl
+        license: Creative Commons Attribution 4.0 International
       - name: example
         type: example
         jsonl_fpath: resources_servers/comp_coding/data/example.jsonl
-      num_parallelizer: 2
-      num_executor: 4
-      keep_executor_prompt: true
+      num_parallelizer: 1
+      num_executor: 2
+      num_reducer: 1
+      keep_executor_prompt: false
       use_reducer: true
-      return_reducer_only: true
+      return_reducer_only: false
