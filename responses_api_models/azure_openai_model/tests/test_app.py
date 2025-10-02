@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from unittest.mock import AsyncMock, MagicMock
+
 from fastapi.testclient import TestClient
 from openai import AsyncAzureOpenAI
 from pytest import MonkeyPatch
@@ -30,6 +31,7 @@ from responses_api_models.azure_openai_model.app import (
     SimpleModelServerConfig,
 )
 
+
 # Used for mocking created_at timestamp generation
 FIXED_TIME = 1691418000
 FIXED_UUID = "123"
@@ -37,6 +39,7 @@ FIXED_UUID = "123"
 
 class FakeUUID:
     """Used for mocking UUIDs"""
+
     hex = FIXED_UUID
 
 

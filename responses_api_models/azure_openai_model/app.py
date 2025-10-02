@@ -68,7 +68,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
                 print(f"AzureOpenAI API Error: {e}")
                 print(f"Error type: {type(e)}")
                 raise
-            
+
         choice = chat_completion_response.choices[0]
         response_output = self._converter.postprocess_chat_response(choice)
         response_output_dicts = [item.model_dump() for item in response_output]
@@ -97,7 +97,6 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             instructions=body.instructions,
             user=body.user,
         )
-
 
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
