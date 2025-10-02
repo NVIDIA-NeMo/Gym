@@ -140,7 +140,7 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
                 executor_response.output[0].content[0].text for executor_response in executor_responses
             ]
             reducer_prompt = ParallelReasoningUtils.construct_prompt_genselect_reducer(
-                body.input[0].content, executor_outputs
+                self.config, body.input[0].content, executor_outputs
             )
             reducer_body = body.model_copy(
                 update={"input": [NeMoGymEasyInputMessage(role="user", content=reducer_prompt)]}
@@ -306,13 +306,15 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
 
             if self.config.parallel_type == "planner":
                 plan = ParallelReasoningUtils.parse_plan(parallelizer_output)[0]
-                executor_prompt = ParallelReasoningUtils.construct_prompt_planner_execute(body.input[0].content, plan)
+                executor_prompt = ParallelReasoningUtils.construct_prompt_planner_execute(
+                    self.config, body.input[0].content, plan
+                )
             elif self.config.parallel_type == "rewriter":
                 rewrite = ParallelReasoningUtils.parse_rewrite(
                     body.input[0].content, parallelizer_output, use_identity=self.config.use_identity_rewrite
                 )[0]
                 executor_prompt = ParallelReasoningUtils.construct_prompt_rewriter_execute(
-                    body.input[0].content, rewrite
+                    self.config, body.input[0].content, rewrite
                 )
 
             executor_body = body.model_copy(
@@ -394,7 +396,7 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
 
         return responses
 
-    async def run(self, request: Request, body: ParallelReasoningRunRequest) -> ParallelReasoningVerifyResponse:
+    async def _run(self, request: Request, body: ParallelReasoningRunRequest) -> ParallelReasoningVerifyResponse:
         self.logger.debug("[bold purple]🏃 Starting parallel reasoning run workflow[/bold purple]")
 
         # Base input
@@ -541,7 +543,7 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
                         executor_verify_responses[i].responses_create_params.input[
                             0
                         ].content = ParallelReasoningUtils.construct_prompt_planner_execute(
-                            body.responses_create_params.input[0].content, plan
+                            self.config, body.responses_create_params.input[0].content, plan
                         )
                     elif self.config.parallel_type == "rewriter":
                         rewrite = ParallelReasoningUtils.parse_rewrite(
@@ -552,7 +554,7 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
                         executor_verify_responses[i].responses_create_params.input[
                             0
                         ].content = ParallelReasoningUtils.construct_prompt_rewriter_execute(
-                            body.responses_create_params.input[0].content, rewrite
+                            self.config, body.responses_create_params.input[0].content, rewrite
                         )
             else:
                 # Swap the prompt_token_ids of the executor with the original problem.
@@ -590,6 +592,15 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
         parallel_reasoning_verify_responses = ParallelReasoningVerifyResponse(responses=verify_responses)
 
         self.logger.debug("[bold green]🏆 Parallel reasoning run completed successfully![/bold green]")
+        return parallel_reasoning_verify_responses
+
+    async def run(self, request: Request, body: ParallelReasoningRunRequest) -> ParallelReasoningVerifyResponse:
+        try:
+            parallel_reasoning_verify_responses = await self._run(request, body)
+        except Exception as e:
+            self.logger.error(f"Caught Error: {e}")
+            parallel_reasoning_verify_responses = ParallelReasoningVerifyResponse(responses=[])
+
         return parallel_reasoning_verify_responses
 
 
