@@ -4,10 +4,10 @@
 
 Set up your `env.yaml` file:
 ```yaml
-policy_base_url: https://prod.api.nvidia.com/llm/
+policy_base_url: https://prod.api.nvidia.com/llm/v1/azure
 policy_api_key: <API_KEY>
 policy_model_name: gpt-5-nano
-policy_api_version: 2025-08-07
+policy_api_version: 2024-10-21
 ```
 
 ## Usage
@@ -21,15 +21,17 @@ ng_run "+config_paths=[${config_paths}]"
 ```
 
 ### Collecting Rollouts
-```bash
-ng_collect_rollouts +agent_name=equivalence_llm_judge_simple_agent \
-  +input_jsonl_fpath=resources_servers/equivalence_llm_judge/data/example.jsonl \  
-  +output_jsonl_fpath=results/example_rollouts.jsonl \
-  +limit=5
-```
 
+```
 ng_collect_rollouts +agent_name=equivalence_llm_judge_simple_agent   +input_jsonl_fpath=resources_servers/equivalence_llm_judge/data/example.jsonl   +output_jsonl_fpath=results/example_rollouts.jsonl   +limit=5
 ```
+
+### Test cases:
+
+```
+ng_test +entrypoint=responses_api_models/azure_openai_model
+```
+
 # Licensing information
 Code: Apache 2.0
 Data: N/A

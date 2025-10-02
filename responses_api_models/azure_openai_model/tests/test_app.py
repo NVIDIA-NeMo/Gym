@@ -12,26 +12,44 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from unittest.mock import AsyncMock, MagicMock
-
+from openai import AsyncAzureOpenAI
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
 from nemo_gym.server_utils import ServerClient
-from responses_api_models.openai_model.app import (
-    NeMoGymAsyncOpenAI,
+from nemo_gym.openai_utils import (
+    NeMoGymChoice, 
+    NeMoGymChatCompletionMessage,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponse,
+    NeMoGymResponseOutputMessage,
+    NeMoGymChatCompletion,
+)
+from responses_api_models.azure_openai_model.app import (
     SimpleModelServer,
     SimpleModelServerConfig,
 )
 
 
+# Used for mocking created_at timestamp generation
+FIXED_TIME = 1691418000
+FIXED_UUID = "123"
+
+
+class FakeUUID:
+    """Used for mocking UUIDs"""
+    hex = FIXED_UUID
+
+
 class TestApp:
-    def _setup_server(self):
+    def _setup_server(self, monkeypatch=None):
         config = SimpleModelServerConfig(
             host="0.0.0.0",
             port=8081,
-            openai_base_url="https://api.openai.com/v1",
+            openai_base_url="https://prod.api.nvidia.com/llm/v1/azure",
             openai_api_key="dummy_key",  # pragma: allowlist secret
             openai_model="dummy_model",
+            default_query={"api-version": "dummy_version"},
             entrypoint="",
             name="",
         )
@@ -69,8 +87,8 @@ class TestApp:
             called_args_chat = kwargs
             return mock_chat_data
 
-        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
-        server._client.create_chat_completion = AsyncMock(side_effect=mock_create_chat)
+        server._client = MagicMock(spec=AsyncAzureOpenAI)
+        server._client.chat.completions.create = AsyncMock(side_effect=mock_create_chat)
 
         chat_no_model = client.post(
             "/v1/chat/completions",
@@ -89,59 +107,69 @@ class TestApp:
         assert chat_with_model.status_code == 200
         assert called_args_chat.get("model") == "override_model"
 
-        server._client.create_chat_completion.assert_any_await(
+        server._client.chat.completions.create.assert_any_await(
             messages=[{"role": "user", "content": "hi"}],
             model="override_model",
         )
 
     async def test_responses(self, monkeypatch: MonkeyPatch) -> None:
-        server = self._setup_server()
+        server = self._setup_server(monkeypatch)
         app = server.setup_webserver()
         client = TestClient(app)
 
-        mock_response_data = {
-            "id": "resp_688babb004988199b26c5250ba69c1e80abdf302bcd600d3",
-            "created_at": 1753983920.0,
-            "model": "dummy_model",
-            "object": "response",
-            "output": [
-                {
-                    "id": "msg_688babb17a7881998cc7a42d53c8e5790abdf302bcd600d3",
-                    "content": [
+        monkeypatch.setattr("responses_api_models.azure_openai_model.app.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("responses_api_models.azure_openai_model.app.time", lambda: FIXED_TIME)
+        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
+
+        mock_response_data = NeMoGymChatCompletion(
+            id="chtcmpl-123",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="stop",
+                    message=NeMoGymChatCompletionMessage(role="assistant", content="Hello! How can I help you today?"),
+                )
+            ],
+            created=FIXED_TIME,
+            model="dummy_model",
+            object="chat.completion",
+        )
+
+        # Expected response
+        expected_response = NeMoGymResponse(
+            id="resp_123",
+            created_at=FIXED_TIME,
+            model="dummy_model",
+            object="response",
+            output=[
+                NeMoGymResponseOutputMessage(
+                    id="msg_123",
+                    content=[
                         {
                             "annotations": [],
                             "text": "Hello! How can I help you today?",
                             "type": "output_text",
                         }
                     ],
-                    "role": "assistant",
-                    "status": "completed",
-                    "type": "message",
-                }
+                    role="assistant",
+                    status="completed",
+                    type="message",
+                )
             ],
-            "parallel_tool_calls": True,
-            "tool_choice": "auto",
-            "tools": [],
-        }
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+        )
 
-        called_args_response = {}
+        responses_create_params = NeMoGymResponseCreateParamsNonStreaming(input="hello")
 
-        async def mock_create_response(**kwargs):
-            nonlocal called_args_response
-            called_args_response = kwargs
-            return mock_response_data
+        # Mock the Azure OpenAI client directly since responses() calls it directly
+        server._client = MagicMock(spec=AsyncAzureOpenAI)
+        server._client.chat.completions.create = AsyncMock(return_value=mock_response_data)
 
-        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
-        server._client.create_response = AsyncMock(side_effect=mock_create_response)
-
-        # No model provided should use the one from the config
-        res_no_model = client.post("/v1/responses", json={"input": "hello"})
-        assert res_no_model.status_code == 200
-        assert called_args_response.get("model") == "dummy_model"
-
-        # model provided should override config
-        res_with_model = client.post("/v1/responses", json={"input": "hello", "model": "override_model"})
-        assert res_with_model.status_code == 200
-        assert called_args_response.get("model") == "override_model"
-
-        server._client.create_response.assert_any_await(input="hello", model="override_model")
+        response = client.post(
+            "/v1/responses",
+            json=responses_create_params.model_dump(exclude_unset=True, mode="json"),
+        )
+        assert response.status_code == 200
+        assert expected_response.model_dump() == response.json()
