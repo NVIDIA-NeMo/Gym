@@ -2,7 +2,7 @@
 
 Integration of reasoning gym: https://github.com/open-thought/reasoning-gym
 
-**Single task (knights_knaves):**
+**Single task:**
 ```bash
 python scripts/create_dataset.py \
     --task knights_knaves \
