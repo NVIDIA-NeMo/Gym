@@ -55,7 +55,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
         print("post init client", self._client)
         return super().model_post_init(context)
 
-    async def responses(   
+    async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:
         async with self._semaphore:

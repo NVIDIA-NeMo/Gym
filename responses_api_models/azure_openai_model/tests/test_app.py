@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 from openai import AsyncAzureOpenAI
 from pytest import MonkeyPatch
 
-from nemo_gym.openai_utils import ( 
+from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionMessage,
     NeMoGymChoice,
