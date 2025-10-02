@@ -32,7 +32,7 @@ async def main():
             "messages": [{"role": "user", "content": "hello"}],
         },
     )
-    # print(await task_1.json())
+    print(await task_1.json())
     print(await task_2.json())
 
 

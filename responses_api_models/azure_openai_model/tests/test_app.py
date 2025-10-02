@@ -12,24 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from unittest.mock import AsyncMock, MagicMock
-from openai import AsyncAzureOpenAI
 from fastapi.testclient import TestClient
+from openai import AsyncAzureOpenAI
 from pytest import MonkeyPatch
 
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.openai_utils import (
-    NeMoGymChoice, 
-    NeMoGymChatCompletionMessage,
-    NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponse,
-    NeMoGymResponseOutputMessage,
+from nemo_gym.openai_utils import ( 
     NeMoGymChatCompletion,
+    NeMoGymChatCompletionMessage,
+    NeMoGymChoice,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseOutputMessage,
 )
+from nemo_gym.server_utils import ServerClient
 from responses_api_models.azure_openai_model.app import (
     SimpleModelServer,
     SimpleModelServerConfig,
 )
-
 
 # Used for mocking created_at timestamp generation
 FIXED_TIME = 1691418000

@@ -11,13 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-from openai import AsyncAzureOpenAI
 from asyncio import Semaphore
-from fastapi import Request
 from time import time
 from typing import Optional
 from uuid import uuid4
+
+from fastapi import Request
+from openai import AsyncAzureOpenAI
+
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
     Body,
@@ -54,7 +55,9 @@ class SimpleModelServer(SimpleResponsesAPIModel):
         print("post init client", self._client)
         return super().model_post_init(context)
 
-    async def responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+    async def responses(   
+        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
+    ) -> NeMoGymResponse:
         async with self._semaphore:
             try:
                 chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(body)
