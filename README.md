@@ -98,6 +98,7 @@ config_paths="resources_servers/simple_weather/configs/simple_weather.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml"
 ng_run "+config_paths=[${config_paths}]"
 
+# In a separate terminal:
 python responses_api_agents/simple_agent/client.py
 ```
 
@@ -242,7 +243,7 @@ INFO:     Started server process [49768]
 INFO:     Uvicorn running on http://127.0.0.1:62921 (Press CTRL+C to quit)
 ```
 
-Now we can query our agent.
+Now we can query our agent. In a separate terminal run the following:
 ```bash
 python responses_api_agents/simple_agent/client.py
 ```
