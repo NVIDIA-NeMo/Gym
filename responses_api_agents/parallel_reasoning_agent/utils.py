@@ -11,6 +11,36 @@ PLANNER_END_TAG = "</plan>"
 
 @dataclass
 class ParallelReasoningUtils:
+    # ----------- Shared ----------- #
+    @staticmethod
+    def parse_summary(model_output: str) -> str:
+        SUMMARY_BEGIN_TAG = "<summary>"
+        SUMMARY_END_TAG = "</summary>"
+        if THINK_END_TAG in model_output:
+            processed_text = model_output.split(THINK_END_TAG)[1]
+        else:
+            processed_text = model_output
+        if SUMMARY_BEGIN_TAG in processed_text and SUMMARY_END_TAG in processed_text:
+            summaries = re.findall(
+                rf"{SUMMARY_BEGIN_TAG}\s*(.*?)\s*{SUMMARY_END_TAG}",
+                processed_text,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+
+            if not summaries:
+                wrapper = re.search(
+                    rf"{SUMMARY_BEGIN_TAG}(.*?){SUMMARY_END_TAG}",
+                    processed_text,
+                    flags=re.IGNORECASE | re.DOTALL,
+                )
+                if wrapper:
+                    summaries = [line.strip() for line in wrapper.group(1).splitlines() if line.strip()]
+
+            summaries = [r.strip() for r in summaries if r.strip()]
+            return summaries[-1] if summaries else ""  # ✅ return only the last one
+        else:
+            return ""
+
     # ----------- Planner ----------- #
     @staticmethod
     def construct_prompt_planner_parallelize(original_problem: str, prompt_name: str = None) -> str:
@@ -35,13 +65,16 @@ class ParallelReasoningUtils:
         return planner_prompt.strip()
 
     @staticmethod
-    def construct_prompt_planner_execute(original_problem: str, plan: str, prompt_name: str = None) -> str:
+    def construct_prompt_planner_execute(config, original_problem: str, plan: str, prompt_name: str = None) -> str:
         if prompt_name is None:
-            prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "executor_planner.txt")
+            if config.use_summary:
+                prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "executor_planner_summary.txt")
+            else:
+                prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "executor_planner.txt")
+            with open(prompt_path, "r", encoding="utf-8") as f:
+                EXECUTOR_PROMPT = f.read()
         else:
             prompt_path = os.path.join(os.path.dirname(__file__), "prompts", f"{prompt_name}.txt")
-        with open(prompt_path, "r", encoding="utf-8") as f:
-            EXECUTOR_PROMPT = f.read()
         executor_prompt = EXECUTOR_PROMPT.format(problem=original_problem, plan=plan)
         return executor_prompt.strip()
 
@@ -95,8 +128,11 @@ class ParallelReasoningUtils:
         return planner_prompt.strip()
 
     @staticmethod
-    def construct_prompt_rewriter_execute(original_problem: str, rewrite: str) -> str:
-        prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "executor_rewriter.txt")
+    def construct_prompt_rewriter_execute(config, original_problem: str, rewrite: str) -> str:
+        if config.use_summary:
+            prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "executor_planner_summary.txt")
+        else:
+            prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "executor_rewriter.txt")
         with open(prompt_path, "r", encoding="utf-8") as f:
             EXECUTOR_PROMPT = f.read()
         executor_prompt = EXECUTOR_PROMPT.format(problem=rewrite)
@@ -148,7 +184,7 @@ class ParallelReasoningUtils:
 
     # ----------- Genselect ----------- #
     @staticmethod
-    def construct_prompt_genselect_reducer(original_problem: str, solutions: list[str]) -> str:
+    def construct_prompt_genselect_reducer(config, original_problem: str, solutions: list[str]) -> str:
         problem = original_problem.replace('\n\nRemember to put your answer on its own line after "Answer:".', "")
         problem = problem.replace(
             "Solve the following math problem step by step. The last line of your response should be of the form Answer: $Answer (without quotes) where $Answer is the answer to the problem.\n\n",
@@ -157,6 +193,19 @@ class ParallelReasoningUtils:
         prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "reducer_genselect.txt")
         with open(prompt_path, "r", encoding="utf-8") as f:
             REDUCER_PROMPT = f.read()
+
+        if config.use_summary:
+            solutions = [ParallelReasoningUtils.parse_summary(solution) for solution in solutions]
+        else:
+            new_texts = []
+            for solution in solutions:
+                if "</think>" in solution:
+                    text = solution.split("</think>")[-1].strip()
+                    new_texts.append(text)
+                else:
+                    new_texts.append(solution)
+            solutions = new_texts
+
         reducer_prompt = REDUCER_PROMPT.format(
             problem=problem, solutions=solutions, numsolutions=len(solutions), max_idx=(len(solutions) - 1)
         )
