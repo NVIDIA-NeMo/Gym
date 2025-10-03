@@ -474,7 +474,10 @@ class VLLMConverter(BaseModel):
             )
             response_output.append(reasoning_item)
 
-        if content:
+        tool_calls_raw = raw_message.get("tool_calls", []) or []
+        has_empty_output = not (response_output or tool_calls_raw)
+
+        if content or has_empty_output:
             response_output.append(
                 NeMoGymResponseOutputMessage(
                     id=f"msg_{uuid4().hex}",
@@ -491,7 +494,6 @@ class VLLMConverter(BaseModel):
                 )
             )
 
-        tool_calls_raw = raw_message.get("tool_calls", []) or []
         for tc in tool_calls_raw:
             assert "id" in tc
             response_output.append(
