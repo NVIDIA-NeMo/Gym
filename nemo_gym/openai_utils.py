@@ -449,7 +449,7 @@ class NeMoGymAsyncOpenAI(BaseModel):
             json=kwargs,
             headers={"Authorization": f"Bearer {self.api_key}"},
         )
-        raise_for_status(response)
+        await raise_for_status(response)
         return await response.json()
 
     async def create_response(self, **kwargs):
@@ -459,7 +459,7 @@ class NeMoGymAsyncOpenAI(BaseModel):
             json=kwargs,
             headers={"Authorization": f"Bearer {self.api_key}"},
         )
-        raise_for_status(response)
+        await raise_for_status(response)
         return await response.json()
 
     async def create_tokenize(self, **kwargs):
@@ -470,5 +470,5 @@ class NeMoGymAsyncOpenAI(BaseModel):
             json=kwargs,
             headers={"Authorization": f"Bearer {self.api_key}"},
         )
-        raise_for_status(response)
+        await raise_for_status(response)
         return await response.json()
