@@ -86,11 +86,11 @@ def get_global_aiohttp_client(
     if _GLOBAL_AIOHTTP_CLIENT is not None:
         return _GLOBAL_AIOHTTP_CLIENT
 
-    global_config_dict = get_global_config_dict(
-        global_config_dict_parser_config=global_config_dict_parser_config,
-        global_config_dict_parser_cls=global_config_dict_parser_cls,
-    )
-    cfg = GlobalAIOHTTPAsyncClientConfig.model_validate(global_config_dict)
+    #global_config_dict = get_global_config_dict(
+    #    global_config_dict_parser_config=global_config_dict_parser_config,
+    #    global_config_dict_parser_cls=global_config_dict_parser_cls,
+    #)
+    cfg = GlobalAIOHTTPAsyncClientConfig()
 
     return set_global_aiohttp_client(cfg)
 
@@ -217,6 +217,7 @@ class ServerClient(BaseModel):
                 f"Could not connect to the head server at {head_server_url}. Perhaps you are not running a server or your head server is on a different port?"
             ) from e
 
+        response.raise_for_status()
         global_config_dict_yaml = response.content.decode()
         global_config_dict = OmegaConf.create(json.loads(global_config_dict_yaml))
 
