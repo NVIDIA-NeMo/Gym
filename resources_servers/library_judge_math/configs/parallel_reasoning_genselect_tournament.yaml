@@ -46,7 +46,7 @@ parallel_reasoning_simple_agent:
       parallel_type: planner
       keep_executor_prompt: true
       use_reducer: true
-      reducer_type: genselect
+      reducer_type: genselect_tournament
       reduce_across: all
       return_reducer_only: false
       tournament_group_size: 4
