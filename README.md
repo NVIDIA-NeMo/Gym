@@ -99,6 +99,7 @@ responses_api_models/openai_model/configs/openai_model.yaml"
 ng_run "+config_paths=[${config_paths}]"
 
 # In a separate terminal:
+source .venv/bin/activate
 python responses_api_agents/simple_agent/client.py
 ```
 
@@ -245,6 +246,7 @@ INFO:     Uvicorn running on http://127.0.0.1:62921 (Press CTRL+C to quit)
 
 Now we can query our agent. In a separate terminal run the following:
 ```bash
+source .venv/bin/activate
 python responses_api_agents/simple_agent/client.py
 ```
 Inside the client.py file, we import the `ServerClient` class and instantiate a `server_client`. The server client is immediately usable to query our Responses API-compatible agent. This is also how you query servers from inside other servers at runtime.
