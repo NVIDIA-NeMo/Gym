@@ -13,7 +13,7 @@ PLANNER_END_TAG = "</plan>"
 class ParallelReasoningUtils:
     # ----------- Planner ----------- #
     @staticmethod
-    def construct_prompt_planner_parallelize(original_problem: str) -> str:
+    def construct_prompt_planner_parallelize(original_problem: str, prompt_name: str = None) -> str:
         # Strip dataset boilerplate in the embedded problem to avoid conflicting instructions
         problem = original_problem.replace('\n\nRemember to put your answer on its own line after "Answer:".', "")
         problem = problem.replace(
@@ -21,7 +21,10 @@ class ParallelReasoningUtils:
             "",
         )
 
-        prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "parallelizer_planner.txt")
+        if prompt_name is None:
+            prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "parallelizer_planner.txt")
+        else:
+            prompt_path = os.path.join(os.path.dirname(__file__), "prompts", f"{prompt_name}.txt")
         try:
             with open(prompt_path, "r", encoding="utf-8") as f:
                 PLANNER_PROMPT = f.read()
@@ -32,8 +35,11 @@ class ParallelReasoningUtils:
         return planner_prompt.strip()
 
     @staticmethod
-    def construct_prompt_planner_execute(original_problem: str, plan: str) -> str:
-        prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "executor_planner.txt")
+    def construct_prompt_planner_execute(original_problem: str, plan: str, prompt_name: str = None) -> str:
+        if prompt_name is None:
+            prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "executor_planner.txt")
+        else:
+            prompt_path = os.path.join(os.path.dirname(__file__), "prompts", f"{prompt_name}.txt")
         with open(prompt_path, "r", encoding="utf-8") as f:
             EXECUTOR_PROMPT = f.read()
         executor_prompt = EXECUTOR_PROMPT.format(problem=original_problem, plan=plan)
