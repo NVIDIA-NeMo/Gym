@@ -92,18 +92,33 @@ Example output:
 ```json
 [
     {
-        "type": "function_call",
-        "name": "get_weather",
         "arguments": "{\"city\":\"San Francisco\"}",
+        "call_id": "call_OnWAk719Jr3tte4OmCJtJOB4",
+        "name": "get_weather",
+        "type": "function_call",
+        "id": "fc_68a3739f2f0081a1aae4b93d5df07c100cb216b5cc4adbc4",
         "status": "completed"
     },
     {
-        "type": "function_call_output", 
-        "output": "{\"city\": \"San Francisco\", \"weather_description\": \"The weather in San Francisco is cold.\"}"
+        "call_id": "call_OnWAk719Jr3tte4OmCJtJOB4",
+        "output": "{\"city\": \"San Francisco\", \"weather_description\": \"The weather in San Francisco is cold.\"}",
+        "type": "function_call_output",
+        "id": null,
+        "status": null
     },
     {
-        "type": "message",
-        "content": "The weather in San Francisco tonight is cold. You might want to wear layers..."
+        "id": "msg_68a373a1099081a1bb265ecf3b26c0dc0cb216b5cc4adbc4",
+        "content": [
+            {
+                "annotations": [],
+                "text": "The weather in San Francisco tonight is cold. You might want to wear layers or bring a jacket to stay comfortable while you're out. Let me know if you want outfit advice or tips on where to go!",
+                "type": "output_text",
+                "logprobs": []
+            }
+        ],
+        "role": "assistant",
+        "status": "completed",
+        "type": "message"
     }
 ]
 ```
