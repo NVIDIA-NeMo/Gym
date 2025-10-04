@@ -100,9 +100,9 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
             )
 
         if self.config.use_reducer:
-            if self.config.reducer_type not in ["genselect"]:
+            if self.config.reducer_type not in ["genselect", "genselect_tournament"]:
                 raise NotImplementedError(
-                    f"'reducer_type' must be one of ['genselect'], got {self.config.reducer_type}"
+                    f"'reducer_type' must be one of ['genselect', 'genselect_tournament'], got {self.config.reducer_type}"
                 )
             if self.config.reduce_across not in ["all"]:
                 raise NotImplementedError(f"'reduce_across' must be one of ['all'], got {self.config.reduce_across}")
