@@ -229,7 +229,7 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
                 
                 # Construct reducer prompt for this group
                 reducer_prompt = ParallelReasoningUtils.construct_prompt_genselect_reducer(
-                    body.input[0].content, group_outputs
+                    self.config, body.input[0].content, group_outputs
                 )
                 reducer_body = body.model_copy(
                     update={"input": [NeMoGymEasyInputMessage(role="user", content=reducer_prompt)]}
