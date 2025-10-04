@@ -2,7 +2,7 @@
 
 Before diving into code, let's understand the three core building blocks of NeMo Gym.
 
-## The Three Pillars
+## Core Abstractions
 
 ```
 
@@ -19,7 +19,6 @@ Before diving into code, let's understand the three core building blocks of NeMo
         │             │    │                 │ 
         │ • OpenAI    │    │ • Tools         │ 
         │ • vLLM      │    │ • Verifiers     │ 
-        │             │    │ • Environments  │ 
         └─────────────┘    └─────────────────┘ 
 
 
@@ -124,4 +123,4 @@ Let's trace through a weather request:
 
 Now that you understand the concepts, let's get everything installed and running.
 
-**[Next: Setup and Installation](02-setup.md)**
+→ **[Next: Setup and Installation](02-setup.md)**
