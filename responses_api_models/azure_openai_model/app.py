@@ -13,7 +13,6 @@
 # limitations under the License.
 from asyncio import Semaphore
 from time import time
-from typing import Optional
 from uuid import uuid4
 
 from fastapi import Request
