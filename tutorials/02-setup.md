@@ -1,5 +1,7 @@
 # Setup and Installation
 
+**Goal**: Get NeMo Gym installed and servers running with your first successful agent interaction
+
 ## Prerequisites
 
 - **Python 3.12+** (check with `python3 --version`)
