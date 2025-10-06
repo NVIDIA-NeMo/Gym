@@ -7,5 +7,5 @@ policy_model:
       openai_model: ${policy_model_name}
        # for azure openai only
       default_query:
-        api-version: ${policy_api_version}
-    
+        api-version: ???
+      num_concurrent_requests: 8

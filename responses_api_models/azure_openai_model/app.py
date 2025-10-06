@@ -38,7 +38,7 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
     openai_api_key: str
     openai_model: str
     default_query: dict
-    num_processes: Optional[int] = 8
+    num_concurrent_requests: int
 
 
 class SimpleModelServer(SimpleResponsesAPIModel):
@@ -51,23 +51,17 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             api_version=self.config.default_query.get("api-version"),
         )
         self._converter = VLLMConverter(return_token_id_information=False)
-        self._semaphore: Semaphore = Semaphore(self.config.num_processes)
-        print("post init client", self._client)
+        self._semaphore: Semaphore = Semaphore(self.config.num_concurrent_requests)
         return super().model_post_init(context)
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:
         async with self._semaphore:
-            try:
-                chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(body)
-                chat_completion_params_dict = chat_completion_create_params.model_dump(exclude_unset=True)
-                chat_completion_params_dict.setdefault("model", self.config.openai_model)
-                chat_completion_response = await self._client.chat.completions.create(**chat_completion_params_dict)
-            except Exception as e:
-                print(f"AzureOpenAI API Error: {e}")
-                print(f"Error type: {type(e)}")
-                raise
+            chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(body)
+            chat_completion_params_dict = chat_completion_create_params.model_dump(exclude_unset=True)
+            chat_completion_params_dict.setdefault("model", self.config.openai_model)
+            chat_completion_response = await self._client.chat.completions.create(**chat_completion_params_dict)
 
         choice = chat_completion_response.choices[0]
         response_output = self._converter.postprocess_chat_response(choice)
@@ -101,7 +95,6 @@ class SimpleModelServer(SimpleResponsesAPIModel):
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
-        print("chat completions body", body)
         body_dict = body.model_dump(exclude_unset=True)
         body_dict.setdefault("model", self.config.openai_model)
         openai_response_dict = await self._client.chat.completions.create(**body_dict)
