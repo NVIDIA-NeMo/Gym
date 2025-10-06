@@ -163,4 +163,4 @@ This verification system is what makes NeMo Gym powerful for agent training:
 
 The next step in your NeMo Gym journey is building custom resource servers with meaningful verification for your specific use cases.
 
-→ **[Next: Building Custom Resource Servers](05-building-custom-resources.md)**
+→ **[Next: Rollout Generation Fundamentals](05-rollout-generation.md)**
