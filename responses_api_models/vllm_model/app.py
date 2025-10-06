@@ -507,7 +507,14 @@ class VLLMConverter(BaseModel):
             )
             response_output.append(reasoning_item)
 
-        if content:
+        tool_calls_raw = raw_message.get("tool_calls", []) or []
+
+        if content or not tool_calls_raw:
+            # The second condition: sometimes during training we see the model
+            # immediately respond with EOS. If that happens, this method returns
+            # an empty list, which then crashes Qwen3's chat template. In that case
+            # (i.e. both content and tool_calls_raw are empty), allow an empty message
+            # to be inserted here.
             response_output.append(
                 NeMoGymResponseOutputMessage(
                     id=f"msg_{uuid4().hex}",
@@ -524,7 +531,6 @@ class VLLMConverter(BaseModel):
                 )
             )
 
-        tool_calls_raw = raw_message.get("tool_calls", []) or []
         for tc in tool_calls_raw:
             assert "id" in tc
             response_output.append(
