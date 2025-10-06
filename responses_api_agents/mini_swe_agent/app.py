@@ -56,6 +56,7 @@ class MiniSWEAgentConfig(BaseResponsesAPIAgentConfig):
     step_timeout: int = 600
     eval_timeout: int = 1800
     skip_if_exists: bool = False
+    step_limit: int = 250
 
 
 class MiniSWEAgentRunRequest(BaseRunRequest):
@@ -111,6 +112,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             step_timeout = self.config.step_timeout
             eval_timeout = self.config.eval_timeout
             env = self.config.env
+            step_limit = self.config.step_limit
             instance_id = body.instance_id
 
             mini_swe_config_path = builtin_config_dir / "extra" / "swebench.yaml"
@@ -169,6 +171,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                     responses_create_params=json.dumps(reseponses_create_params_dict),
                     step_timeout=step_timeout,
                     eval_timeout=eval_timeout,
+                    step_limit=step_limit,
                 )
                 result = result[instance_id]
                 messages = result["messages"]
