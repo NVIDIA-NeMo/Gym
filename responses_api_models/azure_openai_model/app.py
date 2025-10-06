@@ -14,7 +14,6 @@
 from asyncio import Semaphore
 from time import time
 from uuid import uuid4
-
 from fastapi import Request
 from openai import AsyncAzureOpenAI
 
@@ -32,7 +31,7 @@ from nemo_gym.openai_utils import (
 from responses_api_models.vllm_model.app import VLLMConverter
 
 
-class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
+class AzureOpenAIModelServerConfig(BaseResponsesAPIModelConfig):
     openai_base_url: str
     openai_api_key: str
     openai_model: str
@@ -40,8 +39,8 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
     num_concurrent_requests: int
 
 
-class SimpleModelServer(SimpleResponsesAPIModel):
-    config: SimpleModelServerConfig
+class AzureOpenAIModelServer(SimpleResponsesAPIModel):
+    config: AzureOpenAIModelServerConfig
 
     def model_post_init(self, context):
         self._client = AsyncAzureOpenAI(
@@ -101,4 +100,4 @@ class SimpleModelServer(SimpleResponsesAPIModel):
 
 
 if __name__ == "__main__":
-    SimpleModelServer.run_webserver()
+    AzureOpenAIModelServer.run_webserver()
