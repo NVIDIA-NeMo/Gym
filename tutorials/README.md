@@ -2,7 +2,7 @@
 
 A progressive learning path for building AI agents with NeMo Gym.
 
-## Getting Started (Basics)
+## Getting Started
 
 These four tutorials provide everything you need to understand and use NeMo Gym effectively:
 
@@ -28,7 +28,7 @@ Understand how NeMo Gym evaluates agent performance and what verification means 
 
 ---
 
-## Advanced Topics (Coming Soon)
+## Advanced Topics (In-Progress, More Coming Soon)
 
 ### **[05 - Building Custom Resource Servers](05-building-custom-resources.md)**
 *Coming soon* - Learn to create your own tools and verification systems.
@@ -46,7 +46,9 @@ Understand how NeMo Gym evaluates agent performance and what verification means 
 *Coming soon* - Ensure reliability and correctness of your custom components.
 
 ### **[10 - Configuration Management](10-configuration-guide.md)**
-*Coming soon* - Master env.yaml, config files, and CLI arguments for flexible deployments.
+Master NeMo Gym's flexible configuration system to handle different environments, secrets, and deployment scenarios. Learn the three-tier configuration hierarchy and practical patterns for development, testing, and production.
+
+*Prerequisites: Completed basic tutorials*
 
 ### **[11 - Data Generation for SFT/DPO](11-data-generation.md)**
 *Coming soon* - Collect agent interactions to generate training data for supervised fine-tuning and DPO.
