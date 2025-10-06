@@ -2,6 +2,27 @@
 
 A progressive learning path for building AI agents with NeMo Gym.
 
+## Tutorial Structure
+
+**Getting Started (1-3)**: Get up and running with NeMo Gym
+- Understand the architecture
+- Set up your environment  
+- Run and interact with agents
+
+**Basics (4-7)**: Master NeMo Gym's core capabilities
+- Understand verification and training fundamentals
+- Generate rollouts systematically
+- Apply rollouts for offline training (SFT/DPO)
+- Apply rollouts for online training (RL)
+
+**Advanced (8-15)**: Build production agent systems
+- Master configuration and deployment
+- Create custom components
+- Handle complex scenarios
+- Integrate with external systems
+- Deploy and scale
+
+
 ## Getting Started
 
 ### **[01 - Understanding Core Concepts](01-concepts.md)**
@@ -52,26 +73,4 @@ Master NeMo Gym's flexible configuration system to handle different environments
 
 ### **[15 - Performance & Scaling](15-performance-scaling.md)**
 *Coming soon* - Profile, optimize, and scale your agent systems for high-throughput scenarios.
-
----
-
-## Tutorial Structure
-
-**Getting Started (1-3)**: Get up and running with NeMo Gym
-- Understand the architecture
-- Set up your environment  
-- Run and interact with agents
-
-**Basics (4-7)**: Master NeMo Gym's core capabilities
-- Understand verification and training fundamentals
-- Generate rollouts systematically
-- Apply rollouts for offline training (SFT/DPO)
-- Apply rollouts for online training (RL)
-
-**Advanced (8-15)**: Build production agent systems
-- Master configuration and deployment
-- Create custom components
-- Handle complex scenarios
-- Integrate with external systems
-- Deploy and scale
 
