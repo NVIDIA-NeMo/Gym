@@ -24,7 +24,7 @@ import re
 from typing import Any, Optional
 
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -74,6 +74,9 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     check_twice_swap: bool = False
     # Reward to assign if the second (swap) pass fails. Defaults to 0.0; can be set to -1.0.
     reward_if_swap_fails: float = 0.0
+    # If true, use per-record regex from template_metadata.output_regex when available.
+    # If false, always use the global response_extract_regex config. Default is false.
+    use_per_record_regex: bool = False
 
 
 class LLMJudgeRunRequest(BaseRunRequest):
@@ -83,7 +86,9 @@ class LLMJudgeRunRequest(BaseRunRequest):
     grading, but `options` and `metadata` are accepted for compatibility.
     """
 
-    uuid: Optional[str] = None
+    model_config = ConfigDict(extra="allow")
+
+    uuid: Optional[str | int] = None
     expected_answer: Optional[str] = None
     options: Optional[list[dict[str, str]]] = None
     metadata: Optional[dict[str, Any]] = None
@@ -227,7 +232,16 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
     async def verify(self, body: LLMJudgeVerifyRequest) -> LLMJudgeVerifyResponse:
         expected = _extract_expected_answer(body) or ""
         question = _extract_question_text(body.responses_create_params, self.config.question_extract_regex)
-        generated = _extract_last_assistant_text(body, self.config.response_extract_regex)
+
+        # Use per-request regex from template_metadata if enabled and present, otherwise fall back to config
+        extract_regex = self.config.response_extract_regex
+        if self.config.use_per_record_regex:
+            if hasattr(body, "template_metadata") and isinstance(body.template_metadata, dict):
+                regex_override = body.template_metadata.get("output_regex")
+                if regex_override:
+                    extract_regex = regex_override
+
+        generated = _extract_last_assistant_text(body, extract_regex)
 
         # Run judge twice to mitigate positional or presentation bias by swapping orders.
         first_equal, first_eval = await self._generate_judge_evaluation(
