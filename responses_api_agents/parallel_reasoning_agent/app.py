@@ -150,6 +150,8 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
             reducer_body = body.model_copy(
                 update={"input": [NeMoGymEasyInputMessage(role="user", content=reducer_prompt)]}
             )
+            if self.config.executor_max_output_tokens is not None:
+                reducer_body.max_output_tokens = self.config.executor_max_output_tokens
 
             async def process_reducer_task():
                 reducer_response = await self.server_client.post(
@@ -197,36 +199,36 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
         """
         Tournament-style selection where executor_responses compete in groups of size n.
         Winners advance to the next round until a final winner is selected.
-        
+
         Args:
             body: The original request body
             executor_responses: List of responses to compete
             executor_cookies: Cookies from executor
             n: Group size for each tournament round
-            
+
         Returns:
             Final winner response and cookies
         """
         current_round_responses = executor_responses
         round_num = 0
         all_reducer_responses = []  # Track all reducer responses from all rounds
-        
+
         while len(current_round_responses) > 1:
             round_num += 1
-            self.logger.info(f"[blue]🏆 Tournament Round {round_num}: {len(current_round_responses)} contestants[/blue]")
-            
+            self.logger.info(
+                f"[blue]🏆 Tournament Round {round_num}: {len(current_round_responses)} contestants[/blue]"
+            )
+
             # Group responses into batches of size n
             groups = []
             for i in range(0, len(current_round_responses), n):
-                groups.append(current_round_responses[i:i+n])
-            
+                groups.append(current_round_responses[i : i + n])
+
             # Process each group in parallel
             async def process_group(group_responses: List[NeMoGymResponse], group_idx: int):
                 # Extract outputs for this group
-                group_outputs = [
-                    response.output[0].content[0].text for response in group_responses
-                ]
-                
+                group_outputs = [response.output[0].content[0].text for response in group_responses]
+
                 # Construct reducer prompt for this group
                 reducer_prompt = ParallelReasoningUtils.construct_prompt_genselect_reducer(
                     self.config, body.input[0].content, group_outputs
@@ -234,7 +236,9 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
                 reducer_body = body.model_copy(
                     update={"input": [NeMoGymEasyInputMessage(role="user", content=reducer_prompt)]}
                 )
-                
+                if self.config.executor_max_output_tokens is not None:
+                    reducer_body.max_output_tokens = self.config.executor_max_output_tokens
+
                 # Get reducer response
                 reducer_response = await self.server_client.post(
                     server_name=self.config.model_server.name,
@@ -243,14 +247,12 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
                     cookies=executor_cookies,
                 )
                 reducer_cookies = reducer_response.cookies
-                
+
                 try:
                     reducer_response_obj = await reducer_response.json()
                     reducer_response_obj: NeMoGymResponse = NeMoGymResponse.model_validate(reducer_response_obj)
                     reducer_response_obj.metadata = {
-                        "executor_resp_ids": json.dumps(
-                            [resp.id for resp in group_responses]
-                        ),
+                        "executor_resp_ids": json.dumps([resp.id for resp in group_responses]),
                         "stage": f"{Stage.REDUCER.value}_round_{round_num}_group_{group_idx}",
                         "request": reducer_body.model_dump_json(),
                     }
@@ -258,50 +260,49 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
                     raise RuntimeError(
                         f"Received an invalid response from model server: {json.dumps(await reducer_response.json())}"
                     ) from e
-                
+
                 # Parse the winner IDX from reducer output
                 reducer_text = reducer_response_obj.output[0].content[0].text
                 winner_idx = ParallelReasoningUtils.parse_genselect_reduction(reducer_text)
-                
+
                 if winner_idx is None or winner_idx < 0 or winner_idx >= len(group_responses):
                     self.logger.warning(
                         f"[yellow]⚠️  Group {group_idx}: Invalid winner IDX {winner_idx}, defaulting to 0[/yellow]"
                     )
                     winner_idx = 0
-                
+
                 winner_response = group_responses[winner_idx]
                 self.logger.debug(
                     f"[green]✅ Group {group_idx} winner: IDX {winner_idx} (ID: {winner_response.id})[/green]"
                 )
-                reducer_response_obj.metadata.update({
-                    "winner_idx": str(winner_idx),
-                    "winner_resp_id": winner_response.id,
-                })
-                
+                reducer_response_obj.metadata.update(
+                    {
+                        "winner_idx": str(winner_idx),
+                        "winner_resp_id": winner_response.id,
+                    }
+                )
+
                 return winner_response, reducer_response_obj, reducer_cookies
-            
+
             # Run all groups in parallel
-            group_tasks = [
-                process_group(group, group_idx) 
-                for group_idx, group in enumerate(groups)
-            ]
+            group_tasks = [process_group(group, group_idx) for group_idx, group in enumerate(groups)]
             group_results = await asyncio.gather(*group_tasks)
-            
+
             # Extract winners and reducer responses for next round
             current_round_responses = []
             for winner_response, reducer_response_obj, reducer_cookies in group_results:
                 current_round_responses.append(winner_response)
                 all_reducer_responses.append(reducer_response_obj)
-            
+
             self.logger.info(
                 f"[green]✅ Round {round_num} complete: {len(current_round_responses)} winners advance[/green]"
             )
-        
+
         # Final winner
         final_winner = copy.deepcopy(current_round_responses[0])
         final_winner.metadata["stage"] = Stage.FINAL_WINNER.value
         self.logger.info(f"[bold green]🏆 Tournament Champion: Response ID {final_winner.id}[/bold green]")
-        
+
         # Return all reducer responses (one per group across all rounds) and final cookies
         return final_winner, all_reducer_responses, reducer_cookies
 
@@ -398,7 +399,9 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
 
         if self.config.parallel_type == "planner":
             parallelizer_prompts = [
-                ParallelReasoningUtils.construct_prompt_planner_parallelize(body.input[0].content, self.config.parallelizer_prompt_name)
+                ParallelReasoningUtils.construct_prompt_planner_parallelize(
+                    body.input[0].content, self.config.parallelizer_prompt_name
+                )
                 for _ in range(num_parallelizer)
             ]
         elif self.config.parallel_type == "rewriter":
@@ -500,11 +503,15 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
                 )
                 final_winner_response = None
             elif self.config.reducer_type == "genselect_tournament":
-                final_winner_response, reducer_responses, all_reducer_cookies = await self.get_reducer_response_genselect_tournament(
+                (
+                    final_winner_response,
+                    reducer_responses,
+                    all_reducer_cookies,
+                ) = await self.get_reducer_response_genselect_tournament(
                     body, executor_responses, all_executor_cookies, self.config.tournament_group_size
                 )
-
         else:
+            final_winner_response = None
             reducer_responses = []
             all_reducer_cookies = {}
 
@@ -573,7 +580,9 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
             elif response.metadata["stage"] == Stage.FINAL_WINNER.value:
                 final_winner_responses.append(response)
         if len(final_winner_responses) > 1:
-            self.logger.error(f"There should be at most one final winner response, but got {len(final_winner_responses)}")
+            self.logger.error(
+                f"There should be at most one final winner response, but got {len(final_winner_responses)}"
+            )
             final_winner_responses = []
 
         self.logger.debug(
@@ -631,7 +640,11 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
             for each_executor_verify_response in executor_verify_responses:
                 if each_executor_verify_response.response.id == final_winner_responses[0].id:
                     final_winner_verify_response = BaseParallelReasoningVerifyResponse.model_validate(
-                        body.model_dump() | {"response": final_winner_responses[0].model_dump(), "reward": each_executor_verify_response.reward}
+                        body.model_dump()
+                        | {
+                            "response": final_winner_responses[0].model_dump(),
+                            "reward": each_executor_verify_response.reward,
+                        }
                     )
                     final_winner_verify_responses.append(final_winner_verify_response)
 
@@ -689,7 +702,10 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
                         executor_verify_responses[i].responses_create_params.input[
                             0
                         ].content = ParallelReasoningUtils.construct_prompt_planner_execute(
-                            self.config, body.responses_create_params.input[0].content, plan, self.config.executor_prompt_name
+                            self.config,
+                            body.responses_create_params.input[0].content,
+                            plan,
+                            self.config.executor_prompt_name,
                         )
                     elif self.config.parallel_type == "rewriter":
                         rewrite = ParallelReasoningUtils.parse_rewrite(
@@ -734,7 +750,12 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
         if self.config.return_reducer_only:
             verify_responses = reducer_verify_responses
         else:
-            verify_responses = parallelizer_verify_responses + executor_verify_responses + reducer_verify_responses + final_winner_verify_responses
+            verify_responses = (
+                parallelizer_verify_responses
+                + executor_verify_responses
+                + reducer_verify_responses
+                + final_winner_verify_responses
+            )
         parallel_reasoning_verify_responses = ParallelReasoningVerifyResponse(responses=verify_responses)
 
         self.logger.debug("[bold green]🏆 Parallel reasoning run completed successfully![/bold green]")
