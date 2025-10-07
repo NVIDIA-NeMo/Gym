@@ -861,14 +861,15 @@ It's an analogous story for Responses-compatible APIs.
 # How To: Detailed anatony of a Gym config
 Let's break down the anatomy of a Gym config further and help clarify some things.
 
-    {server_type_name}:  # This is the resources server type. This is not unique at runtime, and you can spin up multiple instances of this with different configs if you wish!
-      entrypoint: app.py  # This is the entrypoint of your 
+TODO: bxyu-nvidia
+
 ```yaml
 # `library_judge_math` here at the top most level is the unique name of your resources server. This must be unique across your config.
 # When you or other servers call this server, they will do so using the ServerClient and its name.
 library_judge_math:
   # `resources_servers` here at the second level is the server type. There are 3 server types in gym: agent, model, or resources.
   resources_servers:
+    # This is the resources server type. This is not unique at runtime, and you can spin up multiple instances of this with different configs if you wish!
     library_judge_math:
       entrypoint: app.py
       judge_model_server:
