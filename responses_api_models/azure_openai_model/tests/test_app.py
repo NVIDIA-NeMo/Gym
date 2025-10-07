@@ -27,8 +27,8 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import ServerClient
 from responses_api_models.azure_openai_model.app import (
-    SimpleModelServer,
-    SimpleModelServerConfig,
+    AzureOpenAIModelServer,
+    AzureOpenAIModelServerConfig,
 )
 
 
@@ -45,17 +45,18 @@ class FakeUUID:
 
 class TestApp:
     def _setup_server(self, monkeypatch=None):
-        config = SimpleModelServerConfig(
+        config = AzureOpenAIModelServerConfig(
             host="0.0.0.0",
             port=8081,
             openai_base_url="https://prod.api.nvidia.com/llm/v1/azure",
             openai_api_key="dummy_key",  # pragma: allowlist secret
             openai_model="dummy_model",
             default_query={"api-version": "dummy_version"},
+            num_concurrent_requests=8,
             entrypoint="",
             name="",
         )
-        return SimpleModelServer(config=config, server_client=MagicMock(spec=ServerClient))
+        return AzureOpenAIModelServer(config=config, server_client=MagicMock(spec=ServerClient))
 
     async def test_sanity(self) -> None:
         self._setup_server()
