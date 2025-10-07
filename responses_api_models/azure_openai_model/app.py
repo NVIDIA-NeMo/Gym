@@ -14,6 +14,7 @@
 from asyncio import Semaphore
 from time import time
 from uuid import uuid4
+
 from fastapi import Request
 from openai import AsyncAzureOpenAI
 
