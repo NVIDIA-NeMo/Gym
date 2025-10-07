@@ -2,27 +2,11 @@
 
 Before diving into code, let's understand the three core building blocks of NeMo Gym.
 
-## Core Abstractions
+## Overview
 
-```
-
-                 ┌─────────────┐
-                 │   AGENTS    │
-                 │             │
-                 └─────────────┘
-                        │
-            ┌───────────┼───────────┐
-            │                       │
-            │                       │
-        ┌─────────────┐    ┌─────────────────┐ 
-        │   MODELS    │    │   RESOURCES     │ 
-        │             │    │                 │ 
-        │ • OpenAI    │    │ • Tools         │ 
-        │ • vLLM      │    │ • Verifiers     │ 
-        └─────────────┘    └─────────────────┘ 
-
-
-```
+<div align="center">
+  <img src="../resources/product_overview.png" alt="NeMo Gym Architecture" width="800">
+</div>
 
 ## 1. Models
 
