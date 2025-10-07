@@ -156,14 +156,19 @@ def _match_option_text(text: str, options: list[dict[str, str]], allowed_letters
 def _parse_answer_with_custom_regex(
     text: str, regex_pattern: str, allowed_letters: set[str], options: Optional[list[dict[str, str]]]
 ) -> Optional[str]:
-    """Parse answer using custom regex from template_metadata"""
+    """Parse answer using custom regex from template_metadata.
+
+    Uses rightmost (last) match to handle reasoning before final answer.
+    Case-insensitive matching to handle capitalization variations.
+    """
     try:
-        pattern = re.compile(regex_pattern)
-        match = pattern.search(text)
-        if not match:
+        # Use IGNORECASE flag and findall to get all matches
+        matches = re.findall(regex_pattern, text, re.IGNORECASE)
+        if not matches:
             return None
 
-        captured = match.group(1).strip().upper()
+        # Take the LAST match (rightmost)
+        captured = matches[-1].strip().upper()
 
         # Try direct letter match first
         if len(captured) == 1 and captured in allowed_letters:
@@ -190,7 +195,6 @@ class MCQAResourcesServer(SimpleResourcesServer):
         return app
 
     async def verify(self, body: MCQAVerifyRequest) -> MCQAVerifyResponse:
-        print(f"🔍 VERIFY CALLED - UUID: {getattr(body, 'uuid', 'no-uuid')}")
         text = _extract_last_assistant_text(body)
         # Pull options/expected_answer from dataset-style metadata if available
         options, expected_answer = _extract_options_and_expected(body)
