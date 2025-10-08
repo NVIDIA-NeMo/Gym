@@ -242,6 +242,7 @@ class TestApp:
                 ),
                 cookies=None,
             ),
+            call().ok.__bool__(),
             call().json(),
             call(
                 server_name="my server name",
@@ -260,6 +261,7 @@ class TestApp:
                 ),
                 cookies=dotjson_mock.cookies,
             ),
+            call().ok.__bool__(),
             call().json(),
             call().cookies.items(),
             call().cookies.items().__iter__(),

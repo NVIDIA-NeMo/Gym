@@ -9,7 +9,7 @@
 6. Legal Approval Status: TBD
 
 Rollouts - 
-Link: https://huggingface.co/datasets/Nexusflow/abhibha-traj-coll-workbench
+Link: https://huggingface.co/datasets/Nexusflow/abhibha-gpt-rollouts-completions-fixed-tools
 
 Commands - 
 Spin up server:
@@ -28,7 +28,8 @@ ng_collect_rollouts +agent_name=workbench_simple_agent \
    +limit=1
 ```
 
-Data links: https://gitlab-master.nvidia.com/bxyu/nemo-gym/-/ml/models/55/versions/69#/
+Data links: 
+Nemogym prompt datasets: https://gitlab-master.nvidia.com/bxyu/nemo-gym/-/ml/models/55/versions/98#/
 
 # Licensing information
 Code: Apache 2.0

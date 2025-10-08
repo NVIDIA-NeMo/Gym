@@ -14,6 +14,7 @@
 import asyncio
 import atexit
 import json
+import resource
 from abc import abstractmethod
 from contextlib import asynccontextmanager
 from io import StringIO
@@ -22,6 +23,7 @@ from logging import LogRecord, getLogger
 from os import getenv
 from pathlib import Path
 from threading import Thread
+from traceback import print_exc
 from typing import Literal, Optional, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
@@ -31,6 +33,7 @@ import yappi
 from aiohttp import ClientResponse, ClientSession, ClientTimeout, DummyCookieJar, ServerDisconnectedError, TCPConnector
 from aiohttp.client import _RequestOptions
 from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, ConfigDict
 from requests.exceptions import ConnectionError
@@ -62,7 +65,7 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
 def get_global_aiohttp_client(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
     global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,
-) -> ClientSession:
+) -> ClientSession:  # pragma: no cover
     global _GLOBAL_AIOHTTP_CLIENT
 
     if _GLOBAL_AIOHTTP_CLIENT is not None:
@@ -77,7 +80,7 @@ def get_global_aiohttp_client(
     return set_global_aiohttp_client(cfg)
 
 
-def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSession:
+def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSession:  # pragma: no cover
     assert not is_global_aiohttp_client_setup(), (
         "There is already a global aiohttp client setup. Please refactor your code or call `global_aiohttp_client_exit` if you want to explicitly re-make the client!"
     )
@@ -97,11 +100,11 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
     return _GLOBAL_AIOHTTP_CLIENT
 
 
-def is_global_aiohttp_client_setup() -> bool:
+def is_global_aiohttp_client_setup() -> bool:  # pragma: no cover
     return _GLOBAL_AIOHTTP_CLIENT is not None
 
 
-def global_aiohttp_client_exit():
+def global_aiohttp_client_exit():  # pragma: no cover
     if not is_global_aiohttp_client_setup():
         return
 
@@ -118,7 +121,9 @@ atexit.register(global_aiohttp_client_exit)
 MAX_NUM_TRIES = 3
 
 
-async def request(method: str, url: str, **kwargs: Unpack[_RequestOptions]) -> ClientResponse:
+async def request(
+    method: str, url: str, _internal: bool = False, **kwargs: Unpack[_RequestOptions]
+) -> ClientResponse:  # pragma: no cover
     client = get_global_aiohttp_client()
     num_tries = 1
     while True:
@@ -127,16 +132,26 @@ async def request(method: str, url: str, **kwargs: Unpack[_RequestOptions]) -> C
         except ServerDisconnectedError:
             await asyncio.sleep(0.5)
         except Exception as e:
-            print(
-                f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}
+            # Don't increment internal since we know we are ok. If we are not, the head server will shut everything down anyways.
+            if not _internal:
+                print(
+                    f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}
 Sleeping 0.5s and retrying...
 """
-            )
-            if num_tries >= MAX_NUM_TRIES:
-                raise e
+                )
+                if num_tries >= MAX_NUM_TRIES:
+                    raise e
 
-            num_tries += 1
+                num_tries += 1
+
             await asyncio.sleep(0.5)
+
+
+async def raise_for_status(response: ClientResponse) -> None:  # pragma: no cover
+    if not response.ok:
+        content = await response.content.read()
+        print(content)
+        response.raise_for_status()
 
 
 DEFAULT_HEAD_SERVER_PORT = 11000
@@ -193,7 +208,7 @@ class ServerClient(BaseModel):
             if isinstance(json_obj, BaseModel):
                 kwargs["json"] = json_obj.model_dump(exclude_unset=True)
 
-        return await request(method=method, url=f"{base_url}{url_path}", **kwargs)
+        return await request(method=method, url=f"{base_url}{url_path}", _internal=True, **kwargs)
 
     async def get(
         self,
@@ -324,6 +339,24 @@ class SimpleServer(BaseServer):
         session_middleware_key = self.get_session_middleware_key()
         app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
 
+    def setup_exception_middleware(self, app: FastAPI) -> None:  # pragma: no cover
+        @app.middleware("http")
+        async def exception_handling_middleware(request: Request, call_next):
+            try:
+                return await call_next(request)
+            except Exception as e:
+                print_exc()
+                print(
+                    f"🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"
+                )
+                return JSONResponse(content=repr(e), status_code=500)
+            except:
+                print_exc()
+                print(
+                    f"🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"
+                )
+                return JSONResponse(content="An unknown error occurred", status_code=500)
+
     def setup_profiling(self, app: FastAPI, profiling_config: ProfilingMiddlewareConfig) -> None:  # pragma: no cover
         base_profile_dir = Path(PARENT_DIR) / profiling_config.profiling_results_dirpath
         server_profile_path = (base_profile_dir / self.get_session_middleware_key()).with_suffix(".log")
@@ -332,18 +365,7 @@ class SimpleServer(BaseServer):
 
         main_app_lifespan = app.router.lifespan_context
 
-        @asynccontextmanager
-        async def lifespan_wrapper(app):
-            yappi.set_clock_type("WALL")
-            yappi.start()
-            print(f"🔍 Enabled profiling for {self.config.name}")
-
-            async with main_app_lifespan(app) as maybe_state:
-                yield maybe_state
-
-            print(f"🛑 Stopping profiler for {self.config.name}. Check {server_profile_path} for the metrics!")
-            yappi.stop()
-
+        def _dump_yappi_stats() -> str:
             buffer = StringIO()
             yappi.get_func_stats().print_all(
                 out=buffer,
@@ -357,16 +379,55 @@ class SimpleServer(BaseServer):
             )
 
             buffer.seek(0)
-            with open(server_profile_path, "w") as f:
-                past_header = False
-                for line in buffer:
-                    if not past_header or self.config.entrypoint in line:
-                        f.write(line)
+            res = ""
+            past_header = False
+            for line in buffer:
+                if not past_header or self.config.entrypoint in line:
+                    res += line
 
-                    if line.startswith("name"):
-                        past_header = True
+                if line.startswith("name"):
+                    past_header = True
+
+            return res
+
+        @asynccontextmanager
+        async def lifespan_wrapper(app):
+            yappi.set_clock_type("CPU")
+            yappi.start()
+            print(f"🔍 Enabled profiling for {self.config.name}")
+
+            async with main_app_lifespan(app) as maybe_state:
+                yield maybe_state
+
+            print(f"🛑 Stopping profiler for {self.config.name}. Check {server_profile_path} for the metrics!")
+            yappi.stop()
+
+            with open(server_profile_path, "w") as f:
+                f.write(_dump_yappi_stats())
 
         app.router.lifespan_context = lifespan_wrapper
+
+        @app.get("/stats")
+        def stats():
+            return Response(_dump_yappi_stats())
+
+    def set_ulimit(self, target_soft_limit: int = 65535):  # pragma: no cover
+        # From https://github.com/vllm-project/vllm/blob/fed8a9b107df3e27d57728c6911c7d308b871477/vllm/utils/__init__.py#L2790
+        resource_type = resource.RLIMIT_NOFILE
+        current_soft, current_hard = resource.getrlimit(resource_type)
+
+        if current_soft < target_soft_limit:
+            try:
+                resource.setrlimit(resource_type, (target_soft_limit, current_hard))
+            except ValueError as e:
+                print(
+                    "Found ulimit of %s and failed to automatically increase "
+                    "with error %s. This can cause fd limit errors like "
+                    "`OSError: [Errno 24] Too many open files`. Consider "
+                    "increasing with ulimit -n",
+                    current_soft,
+                    e,
+                )
 
     @classmethod
     def run_webserver(cls) -> None:  # pragma: no cover
@@ -380,6 +441,8 @@ class SimpleServer(BaseServer):
         server = cls(config=server_config, server_client=server_client)
 
         app = server.setup_webserver()
+        server.set_ulimit()
+        server.setup_exception_middleware(app)
 
         profiling_config = ProfilingMiddlewareConfig.model_validate(global_config_dict)
         if profiling_config.profiling_enabled:
