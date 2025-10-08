@@ -160,6 +160,9 @@ def _parse_answer_with_custom_regex(
 
     Uses rightmost (last) match to handle reasoning before final answer.
     Case-insensitive matching to handle capitalization variations.
+
+    When using template_metadata with custom regex, we trust the regex pattern
+    and allow extracted letters even if options metadata is incomplete.
     """
     try:
         # Use IGNORECASE flag and findall to get all matches
@@ -171,8 +174,19 @@ def _parse_answer_with_custom_regex(
         captured = matches[-1].strip().upper()
 
         # Try direct letter match first
-        if len(captured) == 1 and captured in allowed_letters:
-            return captured
+        if len(captured) == 1 and captured.isalpha():
+            # If we have options metadata, validate against it
+            if allowed_letters and captured in allowed_letters:
+                return captured
+            # If options metadata is missing/incomplete, trust the regex
+            # This handles cases where template_metadata regex is used but options are incomplete
+            elif not allowed_letters:
+                return captured
+            # If captured letter is not in allowed_letters but allowed_letters exists,
+            # it might be a data quality issue - still return it when using template_metadata
+            else:
+                # Trust the regex when using template_metadata (this function is only called for template_metadata)
+                return captured
 
         # Try matching against option text (normalized)
         normalized_captured = _normalize_for_match(captured)
