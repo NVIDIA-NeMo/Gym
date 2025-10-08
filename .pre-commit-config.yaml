@@ -49,3 +49,16 @@ repos:
         files: '.*\/[^\/]*_[^\/]*\.md$'
         exclude: '^\.github/'
         types: [file]
+      - id: update-readme-table
+        name: "Update resource server list in README"
+        entry: |
+          bash -c '
+            if git diff --cached --name-only --diff-filter=ACMR | grep -q "^resources_servers/.*/configs/.*\.yaml$"; then
+              echo "[pre-commit] Saw staged config changes; updating resource servers in README." >&2
+              python scripts/update_resource_servers.py
+            else
+              echo [pre-commit] "No staged config changes; skipping README update." >&2
+            fi
+          '
+        language: system
+        files: ^README\.md$

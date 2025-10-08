@@ -2,6 +2,7 @@ mcqa:
   resources_servers:
     mcqa:
       entrypoint: app.py
+      domain: knowledge
 mcqa_simple_agent:
   responses_api_agents:
     simple_agent:
