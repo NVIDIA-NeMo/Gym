@@ -21,6 +21,8 @@
 - [How To: Use NeMo Gym with a non-Responses compatible API endpoint like vLLM](#how-to-use-nemo-gym-with-a-non-responses-compatible-api-endpoint-like-vllm)
 - [How To: Multi-verifier usage](#how-to-multi-verifier-usage)
 - [How To: Profile your resources server](#how-to-profile-your-resources-server)
+- [How To: Use a custom client to call Gym Responses API model endpoints during training](#how-to-use-a-custom-client-to-call-gym-responses-api-model-endpoints-during-training)
+- [How To: Detailed anatony of a Gym config](#how-to-detailed-anatony-of-a-gym-config)
 - [FAQ: DCO and commit signing VSCode and Git setup](#faq-dco-and-commit-signing-vscode-and-git-setup)
 - [FAQ: SFT and RL](#faq-sft-and-rl)
 - [FAQ: Error: Found files with missing copyright](#faq-error-found-files-with-missing-copyright)
@@ -120,6 +122,8 @@ config_paths="resources_servers/simple_weather/configs/simple_weather.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml"
 ng_run "+config_paths=[${config_paths}]"
 
+# In a separate terminal:
+source .venv/bin/activate
 python responses_api_agents/simple_agent/client.py
 ```
 
@@ -264,8 +268,9 @@ INFO:     Started server process [49768]
 INFO:     Uvicorn running on http://127.0.0.1:62921 (Press CTRL+C to quit)
 ```
 
-Now we can query our agent.
+Now we can query our agent. In a separate terminal run the following:
 ```bash
+source .venv/bin/activate
 python responses_api_agents/simple_agent/client.py
 ```
 Inside the client.py file, we import the `ServerClient` class and instantiate a `server_client`. The server client is immediately usable to query our Responses API-compatible agent. This is also how you query servers from inside other servers at runtime.
@@ -846,6 +851,85 @@ name                                                                            
   - The `LibraryJudgeMathResourcesServer.verify` function and all functions it called including `_verify_answer`, etc accounted for a total of 17.98387s.
 - `tavg`: average time per call (often ttot / ncall).
   - The `LibraryJudgeMathResourcesServer.verify` function took 0.017562s per call on average.
+
+
+# How To: Use a custom client to call Gym Responses API model endpoints during training
+During training time, Gym keeps track of the ground truth prompt token ids, generation token ids, and generation log probs for downstream consumption by the RL framework. As a result, we need to add a few fields to request and response schemas in order to properly facilitate this. This usually doesn't matter if you are using 100% Gym, but in certain situations you may need or want to use a separate client (e.g. LiteLLM, your own OpenAI client, etc) to call model endpoints.
+
+For Chat Completions, outside of training, an Assistant message will look like:
+```python
+ChatCompletionMessage(
+    content="<think>I'm thinking</think>Hi there!",
+    tool_calls=[{...}, {...}],
+    ...
+)
+```
+During training, a Chat Completions Assistant message will look like:
+```python
+ChatCompletionMessage(
+    content="<think>I'm thinking</think>Hi there!",
+    tool_calls=[{...}, {...}],
+    prompt_token_ids=[...],  # List[int]
+    generation_token_ids=[...],  # List[int]
+    generation_log_probs=[...],  # List[float]
+    ...
+)
+```
+And you have to ensure that when you make a request with your custom client that these three extra fields (prompt_token_ids, generation_token_ids, and generation_log_probs) are passed through correctly on a message level. And this also applies to the response i.e. you need to ensure that your custom client will correctly return these three extra fields.
+
+
+It's an analogous story for Responses-compatible APIs.
+
+
+# How To: Detailed anatony of a Gym config
+Let's break down the anatomy of a Gym config further and help clarify some things.
+
+TODO: bxyu-nvidia
+
+```yaml
+# `library_judge_math` here at the top most level is the unique name of your resources server. This must be unique across your config.
+# When you or other servers call this server, they will do so using the ServerClient and its name.
+library_judge_math:
+  # `resources_servers` here at the second level is the server type. There are 3 server types in gym: agent, model, or resources.
+  resources_servers:
+    # This is the resources server type. This is not unique at runtime, and you can spin up multiple instances of this with different configs if you wish!
+    library_judge_math:
+      entrypoint: app.py
+      judge_model_server:
+        type: responses_api_models
+        name: ???
+      judge_responses_create_params: {
+        input: []
+      }
+      should_use_judge: false
+library_judge_math_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: library_judge_math
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/library_judge_math/data/dapo17k_bytedtsinghua_train.jsonl
+        gitlab_identifier:
+          dataset_name: bytedtsinghua_dapo17k
+          version: 0.0.1
+          artifact_fpath: dapo17k_bytedtsinghua_train.jsonl
+        license: Apache 2.0
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/library_judge_math/data/aime24_bytedtsinghua_validation.jsonl
+        gitlab_identifier:
+          dataset_name: bytedtsinghua_dapo17k
+          version: 0.0.1
+          artifact_fpath: aime24_bytedtsinghua_validation.jsonl
+        license: Apache 2.0
+```
 
 
 # FAQ: DCO and commit signing VSCode and Git setup
