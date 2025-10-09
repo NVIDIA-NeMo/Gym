@@ -48,6 +48,7 @@ class ParallelReasoningConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
     max_steps: int = None
     num_parallelizer: int = 4
+    num_plans_in_parallelizer: int = 1
     num_executor: int = 4
     num_reducer: int = 1
     use_summary: bool = False
@@ -62,7 +63,7 @@ class ParallelReasoningConfig(BaseResponsesAPIAgentConfig):
     tournament_group_size: int = 4
     parallelizer_prompt_name: str = None
     executor_prompt_name: str = None
-    parallel_reward_type : Literal["max", "mean"] = "mean"
+    parallel_reward_type: Literal["max", "mean"] = "mean"
 
 
 class ParallelReasoningRunRequest(BaseRunRequest):
@@ -110,6 +111,14 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
         else:
             if self.config.return_reducer_only:
                 raise NotImplementedError("'return_reducer_only' must be used with 'use_reducer' !")
+
+        if self.config.num_plans_in_parallelizer > 1:
+            assert self.config.num_executor == 1, (
+                "The number of executors must be 1 when num_plans_in_parallelizer > 1"
+            )
+            assert self.config.parallel_type == "planner", (
+                "The parallel_type must be 'planner' when num_plans_in_parallelizer > 1"
+            )
 
     def _setup_logger(self):
         # Install rich traceback handler for better error formatting
@@ -401,7 +410,9 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
         if self.config.parallel_type == "planner":
             parallelizer_prompts = [
                 ParallelReasoningUtils.construct_prompt_planner_parallelize(
-                    body.input[0].content, self.config.parallelizer_prompt_name
+                    body.input[0].content,
+                    self.config.parallelizer_prompt_name,
+                    self.config.num_plans_in_parallelizer,
                 )
                 for _ in range(num_parallelizer)
             ]
@@ -428,20 +439,16 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
         # ------ STAGE 2: EXECUTOR ------- #
         self.logger.debug("[bold orange3]⚡ Starting executor stage[/bold orange3]")
 
-        async def get_executor_response(parallelizer_response: NeMoGymResponse, parallelizer_cookies: dict):
-            parallelizer_output = parallelizer_response.output[0].content[0].text
-
+        async def get_executor_response(
+            parallelizer_response: NeMoGymResponse, parallelizer_output: str, parallelizer_cookies: dict
+        ):
             if self.config.parallel_type == "planner":
-                plan = ParallelReasoningUtils.parse_plan(parallelizer_output)[0]
                 executor_prompt = ParallelReasoningUtils.construct_prompt_planner_execute(
-                    self.config, body.input[0].content, plan, self.config.executor_prompt_name
+                    self.config, body.input[0].content, parallelizer_output, self.config.executor_prompt_name
                 )
             elif self.config.parallel_type == "rewriter":
-                rewrite = ParallelReasoningUtils.parse_rewrite(
-                    body.input[0].content, parallelizer_output, use_identity=self.config.use_identity_rewrite
-                )[0]
                 executor_prompt = ParallelReasoningUtils.construct_prompt_rewriter_execute(
-                    self.config, body.input[0].content, rewrite
+                    self.config, body.input[0].content, parallelizer_output
                 )
 
             executor_body = body.model_copy(
@@ -473,10 +480,30 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
             return executor_response_obj, executor_cookies
 
         # Create all executor tasks
-        executor_tasks = []
-        for parallelizer_response in parallelizer_responses:
-            for _ in range(num_executor):
-                executor_tasks.append(get_executor_response(parallelizer_response, all_parallelizer_cookies))
+        if self.config.parallel_type == "planner":
+            executor_tasks = []
+            for parallelizer_response in parallelizer_responses:
+                plans = ParallelReasoningUtils.parse_plan(
+                    parallelizer_response.output[0].content[0].text, num_plans=self.config.num_plans_in_parallelizer
+                )
+                # Currently, we are only supporting one executor per plan
+                for plan in plans:
+                    executor_tasks.append(get_executor_response(parallelizer_response, plan, all_parallelizer_cookies))
+
+        elif self.config.parallel_type == "rewriter":
+            executor_tasks = []
+            for parallelizer_response in parallelizer_responses:
+                rewrite = ParallelReasoningUtils.parse_rewrite(
+                    body.input[0].content,
+                    parallelizer_response.output[0].content[0].text,
+                    use_identity=self.config.use_identity_rewrite,
+                )[0]
+                for _ in range(num_executor):
+                    executor_tasks.append(
+                        get_executor_response(parallelizer_response, rewrite, all_parallelizer_cookies)
+                    )
+        else:
+            raise NotImplementedError(f"The parallel_type {self.config.parallel_type} is not supported")
 
         total_executors = len(executor_tasks)
         self.logger.debug(f"[orange3]🔄 Running {total_executors} executor requests concurrently[/orange3]")
@@ -684,7 +711,9 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
                 parallelizer_verify_response.responses_create_params.input[
                     0
                 ].content = ParallelReasoningUtils.construct_prompt_planner_parallelize(
-                    body.responses_create_params.input[0].content, self.config.parallelizer_prompt_name
+                    body.responses_create_params.input[0].content,
+                    self.config.parallelizer_prompt_name,
+                    self.config.num_plans_in_parallelizer,
                 )
             elif self.config.parallel_type == "rewriter":
                 parallelizer_verify_response.responses_create_params.input[
@@ -697,21 +726,26 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
             # Optionally swap executor input with executor prompt
             if self.config.keep_executor_prompt:
                 parallelizer_output = parallelizer_response.output[0].content[0].text
+                plans = ParallelReasoningUtils.parse_plan(
+                    parallelizer_output, num_plans=self.config.num_plans_in_parallelizer
+                )
+                plan_idx = 0
                 for i in range(len(executor_verify_responses)):
                     resp = executor_verify_responses[i]
+
                     if not resp.response.metadata["parallelizer_resp_id"] == parallelizer_response.id:
                         continue
 
                     if self.config.parallel_type == "planner":
-                        plan = ParallelReasoningUtils.parse_plan(parallelizer_output)[0]
                         executor_verify_responses[i].responses_create_params.input[
                             0
                         ].content = ParallelReasoningUtils.construct_prompt_planner_execute(
                             self.config,
                             body.responses_create_params.input[0].content,
-                            plan,
+                            plans[plan_idx],
                             self.config.executor_prompt_name,
                         )
+                        plan_idx += 1
                     elif self.config.parallel_type == "rewriter":
                         rewrite = ParallelReasoningUtils.parse_rewrite(
                             body.responses_create_params.input[0].content,

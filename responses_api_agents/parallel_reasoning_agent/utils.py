@@ -43,7 +43,9 @@ class ParallelReasoningUtils:
 
     # ----------- Planner ----------- #
     @staticmethod
-    def construct_prompt_planner_parallelize(original_problem: str, prompt_name: str = None) -> str:
+    def construct_prompt_planner_parallelize(
+        original_problem: str, prompt_name: str = None, num_plans: int = 1
+    ) -> str:
         # Strip dataset boilerplate in the embedded problem to avoid conflicting instructions
         problem = original_problem.replace('\n\nRemember to put your answer on its own line after "Answer:".', "")
         problem = problem.replace(
@@ -61,7 +63,7 @@ class ParallelReasoningUtils:
         except FileNotFoundError:
             raise RuntimeError(f"Planner prompt file not found at {prompt_path}")
 
-        planner_prompt = PLANNER_PROMPT.format(problem=problem)
+        planner_prompt = PLANNER_PROMPT.format(problem=problem, num_plans=num_plans)
         return planner_prompt.strip()
 
     @staticmethod
@@ -79,7 +81,7 @@ class ParallelReasoningUtils:
         return executor_prompt.strip()
 
     @staticmethod
-    def parse_plan(planner_output: str) -> str:
+    def parse_plan(planner_output: str, num_plans: int = 1) -> str:
         if PLANNER_BEGIN_TAG in planner_output and PLANNER_END_TAG in planner_output:
             if THINK_END_TAG in planner_output:
                 processed_text = planner_output.split(THINK_END_TAG)[1]
@@ -99,12 +101,13 @@ class ParallelReasoningUtils:
                 if wrapper:
                     plans = [line.strip() for line in wrapper.group(1).splitlines() if line.strip()]
             plans = [r.strip() for r in plans if r.strip()]
+            if len(plans) < num_plans:
+                # extend the plans with the last one
+                plans.extend([plans[-1]] * (num_plans - len(plans)))
             if len(plans) < 1:
-                plans.extend([""] * (1 - len(plans)))
-            else:
-                plans = plans[:1]
+                plans.extend([""] * (num_plans - len(plans)))
         else:
-            plans = [""] * 1
+            plans = [""] * num_plans
         return plans
 
     # ----------- Rewriter ----------- #
@@ -207,7 +210,10 @@ class ParallelReasoningUtils:
             solutions = new_texts
 
         reducer_prompt = REDUCER_PROMPT.format(
-            problem=problem, solutions=solutions, numsolutions=len(solutions), max_idx=(len(solutions) - 1)
+            problem=problem,
+            solutions=solutions,
+            numsolutions=len(solutions),
+            max_idx=(len(solutions) - 1),
         )
         return reducer_prompt.strip()
 

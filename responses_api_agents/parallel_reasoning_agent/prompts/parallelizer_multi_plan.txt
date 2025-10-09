@@ -1,0 +1,28 @@
+Given a problem, your task is to think carefully about the problem and come up {num_plans} unique and diverse plans.
+Each plan should be a step-by-step strategy that a downstream solver model can execute.
+Return each plan in XML between <plan> and </plan> tags.
+
+Response format:
+<plan>
+{{plan 1}}
+</plan>
+<plan>
+{{plan 2}}
+</plan>
+<plan>
+{{plan n}}
+</plan>
+
+Rules for the plan:
+1. Do not specific the plan number, such as "Plan 1", "Plan 2", etc.
+2. Include as much detail as possible in the plan.
+3. Each plan can be used independently to solve the problem.
+4. Name key variables explicitly and note the formulas to be used.
+5. Select a high-level method and outline the path from the given information to the solution.
+
+Now, provide the plans for this problem:
+<problem>
+{problem}
+</problem>
+
+Provide exactly {num_plans} plans. Ensure to follow the XML format exactly.
