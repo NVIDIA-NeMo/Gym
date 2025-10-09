@@ -107,6 +107,7 @@ class JudgeEvaluation(BaseModel):
 
 class LLMJudgeVerifyResponse(BaseVerifyResponse):
     expected_answer: str
+    extracted_answer: Optional[str] = None
     judge_evaluations: list[JudgeEvaluation]
 
 
@@ -253,7 +254,11 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
             # Avoid duplicate field when constructing response
             payload.pop("expected_answer", None)
             return LLMJudgeVerifyResponse(
-                **payload, reward=reward, expected_answer=expected, judge_evaluations=[first_eval]
+                **payload,
+                reward=reward,
+                expected_answer=expected,
+                extracted_answer=generated,
+                judge_evaluations=[first_eval],
             )
 
         # If first pass says equal, optionally confirm with a second pass (swap answers).
@@ -261,7 +266,11 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
             payload = body.model_dump()
             payload.pop("expected_answer", None)
             return LLMJudgeVerifyResponse(
-                **payload, reward=1.0, expected_answer=expected, judge_evaluations=[first_eval]
+                **payload,
+                reward=1.0,
+                expected_answer=expected,
+                extracted_answer=generated,
+                judge_evaluations=[first_eval],
             )
 
         second_equal, second_eval = await self._generate_judge_evaluation(
@@ -273,7 +282,11 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         payload = body.model_dump()
         payload.pop("expected_answer", None)
         return LLMJudgeVerifyResponse(
-            **payload, reward=reward, expected_answer=expected, judge_evaluations=[first_eval, second_eval]
+            **payload,
+            reward=reward,
+            expected_answer=expected,
+            extracted_answer=generated,
+            judge_evaluations=[first_eval, second_eval],
         )
 
     async def _generate_judge_evaluation(
