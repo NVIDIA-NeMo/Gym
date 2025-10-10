@@ -10,7 +10,8 @@ Prompt and labels are configurable via config.
 - `judge_prompt_template` (required): user prompt template. Placeholders: `{question}`, `{expected_answer}`, `{generated_answer}`.
 - `judge_equal_label` / `judge_not_equal_label`: labels the judge must output. Defaults to `[[A=B]]` and `[[A!=B]]`.
 - `check_twice_swap` (bool, default false): if true, after an initial equal verdict, performs a second judge call swapping expected and generated answers to reduce bias.
-- `reward_if_swap_fails` (float, default 0.0): reward to assign if the second (swap) pass disagrees (i.e., fails). You may set this to -1.0 or other value to catch it on the training side..
+- `reward_if_swap_fails` (float, default 0.0): reward to assign if the second (swap) pass disagrees (i.e., fails). You may set this to -1.0 or other value to catch it on the training side.
+- `question_extract_regex`: optional string. Used to extract the question from the last user message's text content.
 
 ### Input schema
 Accepts the same outer request structure as other resources servers:
@@ -55,6 +56,13 @@ ng_run "+config_paths=[$config_paths]" \
 <|Problem|>\n{question}\n\n<|Gold|>\n{expected_answer}\n\n<|Prediction|>\n{generated_answer}\n"""
 ```
 
+Note, the last user message's text content is used as the question. You can optionally apply a regex to extract a specific part as the question:
+```
+ng_run "+config_paths=[$config_paths]" \
+  ...
+  +equivalence_llm_judge.resources_servers.equivalence_llm_judge.question_extract_regex='Here is the question:\s*\(.*?\)\n\n'
+```
+
 Then query via any agent; verification happens with `/verify` on this server when evaluating rollouts.
 
 For our tests we used Gemma3-27B-it.  
@@ -68,5 +76,3 @@ You should always check the license of your chosen judge model to make sure your
 ## Licensing
 Code: Apache 2.0   
 Data: CC-BY-NC-3.0 (Examples from https://huggingface.co/datasets/allenai/sciq)
-
-
