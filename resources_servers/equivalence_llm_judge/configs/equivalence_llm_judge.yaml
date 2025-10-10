@@ -81,7 +81,7 @@ equivalence_llm_judge:
       # group is returned; otherwise, the entire last match is used.
       # Example: "^Answer:\\s*(.*)$"
       response_extract_regex: null
-
+      domain: knowledge
 equivalence_llm_judge_simple_agent:
   responses_api_agents:
     simple_agent:
