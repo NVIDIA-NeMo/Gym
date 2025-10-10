@@ -17,6 +17,7 @@ import json
 import logging
 from enum import StrEnum
 from typing import Any, List, Literal, Optional, Tuple
+from uuid import uuid4
 
 from fastapi import Request, Response
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -53,6 +54,7 @@ class ParallelReasoningConfig(BaseResponsesAPIAgentConfig):
     use_summary: bool = False
     executor_max_output_tokens: Optional[int] = None
     keep_executor_prompt: bool = False
+    use_one_original_problem_for_executor: bool = False
     parallel_type: Literal["planner", "rewriter"] = "planner"
     use_identity_rewrite: bool = False
     use_reducer: bool = False
@@ -137,13 +139,21 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
         """Get the configured rich logger for this agent."""
         return logging.getLogger("parallel_reasoning")
 
+    def get_contents(self, response: NeMoGymResponse):
+        contents = []
+        for output in response.output:
+            if "content" in output.model_dump():
+                contents.append(output.content[0].text)
+        return "\n".join(contents)
+
     async def get_reducer_response_genselect(
         self, body, executor_responses: List[NeMoGymResponse], executor_cookies: dict
     ):
         if self.config.reduce_across == "all":
-            executor_outputs = [
-                executor_response.output[0].content[0].text for executor_response in executor_responses
-            ]
+            # executor_outputs = [
+            #     executor_response.output[0].content[0].text for executor_response in executor_responses
+            # ]
+            executor_outputs = [self.get_contents(executor_response) for executor_response in executor_responses]
             reducer_prompt = ParallelReasoningUtils.construct_prompt_genselect_reducer(
                 self.config, body.input[0].content, executor_outputs
             )
@@ -227,7 +237,8 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
             # Process each group in parallel
             async def process_group(group_responses: List[NeMoGymResponse], group_idx: int):
                 # Extract outputs for this group
-                group_outputs = [response.output[0].content[0].text for response in group_responses]
+                # group_outputs = [response.output[0].content[0].text for response in group_responses]
+                group_outputs = [self.get_contents(response) for response in group_responses]
 
                 # Construct reducer prompt for this group
                 reducer_prompt = ParallelReasoningUtils.construct_prompt_genselect_reducer(
@@ -262,7 +273,8 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
                     ) from e
 
                 # Parse the winner IDX from reducer output
-                reducer_text = reducer_response_obj.output[0].content[0].text
+                # reducer_text = reducer_response_obj.output[0].content[0].text
+                reducer_text = self.get_contents(reducer_response_obj)
                 winner_idx = ParallelReasoningUtils.parse_genselect_reduction(reducer_text)
 
                 if winner_idx is None or winner_idx < 0 or winner_idx >= len(group_responses):
@@ -322,7 +334,8 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
         ]
 
         # Extract genselect answer
-        reducer_text = reducer_verify_request.response.output[0].content[0].text
+        # reducer_text = reducer_verify_request.response.output[0].content[0].text
+        reducer_text = self.get_contents(reducer_verify_request.response)
         reducer_answer_idx = ParallelReasoningUtils.parse_genselect_reduction(reducer_text)
 
         if reducer_answer_idx in executor_max_reward_idxs:
@@ -397,17 +410,20 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
 
             return parallelizer_response_obj, parallelizer_cookies
 
+        num_parallel_prompts_ = (
+            num_parallelizer if not self.config.use_one_original_problem_for_executor else num_parallelizer - 1
+        )
         if self.config.parallel_type == "planner":
             parallelizer_prompts = [
                 ParallelReasoningUtils.construct_prompt_planner_parallelize(
                     body.input[0].content, self.config.parallelizer_prompt_name
                 )
-                for _ in range(num_parallelizer)
+                for _ in range(num_parallel_prompts_)
             ]
         elif self.config.parallel_type == "rewriter":
             parallelizer_prompts = [
                 ParallelReasoningUtils.construct_prompt_rewriter_parallelize(body.input[0].content)
-                for _ in range(num_parallelizer)
+                for _ in range(num_parallel_prompts_)
             ]
 
         self.logger.debug(
@@ -427,13 +443,21 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
         # ------ STAGE 2: EXECUTOR ------- #
         self.logger.debug("[bold orange3]⚡ Starting executor stage[/bold orange3]")
 
-        async def get_executor_response(parallelizer_response: NeMoGymResponse, parallelizer_cookies: dict):
+        async def get_executor_response(
+            parallelizer_response: NeMoGymResponse,
+            parallelizer_cookies: dict,
+            use_one_original_problem_for_executor: bool = False,
+        ):
             parallelizer_output = parallelizer_response.output[0].content[0].text
 
             if self.config.parallel_type == "planner":
                 plan = ParallelReasoningUtils.parse_plan(parallelizer_output)[0]
                 executor_prompt = ParallelReasoningUtils.construct_prompt_planner_execute(
-                    self.config, body.input[0].content, plan, self.config.executor_prompt_name
+                    self.config,
+                    body.input[0].content,
+                    plan,
+                    self.config.executor_prompt_name,
+                    use_one_original_problem_for_executor,
                 )
             elif self.config.parallel_type == "rewriter":
                 rewrite = ParallelReasoningUtils.parse_rewrite(
@@ -461,7 +485,9 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
             try:
                 executor_response_obj: NeMoGymResponse = NeMoGymResponse.model_validate(await executor_response.json())
                 executor_response_obj.metadata = {
-                    "parallelizer_resp_id": parallelizer_response.id,
+                    "parallelizer_resp_id": parallelizer_response.id
+                    if parallelizer_response is not None
+                    else "original",
                     "stage": Stage.EXECUTOR.value,
                 }
             except ValidationError as e:
@@ -473,6 +499,15 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
 
         # Create all executor tasks
         executor_tasks = []
+        if self.config.use_one_original_problem_for_executor:
+            for _ in range(num_executor):
+                # create fake response with unique id
+                fake_response = parallelizer_responses[0].model_copy(update={"id": str(uuid4())})
+                executor_tasks.append(
+                    get_executor_response(
+                        fake_response, all_parallelizer_cookies, use_one_original_problem_for_executor=True
+                    )
+                )
         for parallelizer_response in parallelizer_responses:
             for _ in range(num_executor):
                 executor_tasks.append(get_executor_response(parallelizer_response, all_parallelizer_cookies))
@@ -605,6 +640,9 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
                 executor_verify_response: BaseParallelReasoningVerifyResponse = (
                     BaseParallelReasoningVerifyResponse.model_validate(await verify_response.json())
                 )
+                executor_verify_response = executor_verify_response.model_copy(
+                    update={"question": body.input[0].content}
+                )
                 executor_verify_responses.append(executor_verify_response)
                 self.logger.debug(
                     f"[green]✅ Executor {i + 1} verified[/green] (Reward: {executor_verify_response.reward})"
@@ -691,7 +729,8 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
 
             # Optionally swap executor input with executor prompt
             if self.config.keep_executor_prompt:
-                parallelizer_output = parallelizer_response.output[0].content[0].text
+                # parallelizer_output = parallelizer_response.output[0].content[0].text
+                parallelizer_output = self.get_contents(parallelizer_response)
                 for i in range(len(executor_verify_responses)):
                     resp = executor_verify_responses[i]
                     if not resp.response.metadata["parallelizer_resp_id"] == parallelizer_response.id:
