@@ -1,6 +1,6 @@
-# Rollout Generation Fundamentals
+# Rollout Collection Fundamentals
 
-**Goal**: Master NeMo Gym's rollout generation system - the foundation for understanding agent behavior, creating training data, and evaluating performance.
+**Goal**: Master NeMo Gym's rollout collection system - the foundation for understanding agent behavior, creating training data, and evaluating performance.
 
 ## What Are Rollouts?
 
@@ -17,7 +17,7 @@ Think of rollouts as "interaction transcripts" that capture:
 
 Rollouts are the foundation for multiple critical use cases:
 
-- **Training Data**: Create examples for supervised fine-tuning or preference learning
+- **Reinforcement Learning**: Generate reward signals and training experiences for RL algorithms
 - **Evaluation**: Benchmark agent performance across different scenarios
 - **Debugging**: Understand agent behavior patterns and identify failure modes
 - **Research**: Analyze agent reasoning strategies and tool usage patterns

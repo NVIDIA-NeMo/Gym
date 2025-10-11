@@ -150,6 +150,13 @@ ng_run "+config_paths=[${config_paths}]"
 
 Keep your servers running, and run your new custom client in new terminal:
 ```bash
+# Navigate to project directory
+cd /path/to/Gym
+
+# Activate virtual environment
+source .venv/bin/activate
+
+# Run your new custom client
 python responses_api_agents/simple_agent/custom_client.py
 ```
 

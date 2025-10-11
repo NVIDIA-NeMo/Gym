@@ -1,6 +1,6 @@
 # NeMo Gym Tutorials
 
-A progressive learning path for building AI agents with NeMo Gym.
+A progressive learning path for training AI agents with NeMo Gym.
 
 ## Tutorial Structure
 
@@ -32,7 +32,7 @@ Understand how your weather agent works and learn to interact with it. Break dow
 ### **[04 - Verifying Agent Results](04-verifying-results.md)**
 Understand how NeMo Gym evaluates agent performance and what verification means for training. Learn about different verification patterns and how they drive agent improvement.
 
-### **[05 - Rollout Generation Fundamentals](05-rollout-generation.md)**
+### **[05 - Rollout Collection Fundamentals](05-rollout-collection.md)**
 Master NeMo Gym's rollout generation system - the foundation for understanding agent behavior, creating training data, and evaluating performance. Learn to systematically capture complete agent interactions.
 
 ### **[06 - Collecting Rollouts for Reinforcement Learning](06-rl-rollout-collection.md)**
@@ -45,22 +45,22 @@ Use generated rollouts to create training data for supervised fine-tuning and di
 
 ## Resource Servers
 
-### **[09 - Building Custom Resource Servers](09-custom-resources.md)**
+### **[08 - Building Custom Resource Servers](08-custom-resources.md)**
 *Coming soon* - Learn to create your own tools and verification systems.
 
-### **[10 - Model Context Protocol (MCP) Integration](10-mcp-integration.md)**
+### **[09 - Model Context Protocol (MCP) Integration](09-mcp-integration.md)**
 *Coming soon* - Connect NeMo Gym to MCP-compatible tools and services for expanded agent capabilities.
 
-### **[11 - Integration with External Services](11-external-services.md)**
+### **[10 - Integration with External Services](10-external-services.md)**
 *Coming soon* - Connect to real APIs, databases, and external systems beyond mock implementations.
 
-### **[12 - Dynamic Prompts and Scenarios](12-dynamic-prompts.md)**
+### **[11 - Dynamic Prompts and Scenarios](11-dynamic-prompts.md)**
 *Coming soon* - Generate adaptive prompts and complex scenarios for robust agent training across diverse situations.
 
 
 
-### **[13 - Multi-Verifier Environments](13-multi-verifier.md)**
-*Coming soon* - Build resource servers that use multiple verification systems simultaneously.
+### **[12 - Multi-Task Training](12-multi-task.md)**
+*Coming soon* - Train agents to handle multiple different tasks simultaneously.
 
 
 
@@ -71,7 +71,7 @@ Use generated rollouts to create training data for supervised fine-tuning and di
 
 ## Agents
 
-### **[13 - Complex Agent Interactions](13-multi-step-interactions.md)**
+### **[13 - Complex Agent Interactions](13-complex-agents.md)**
 *Coming soon* - Overview of advanced agent patterns: multi-step reasoning, multi-turn conversations, and hybrid approaches. Learn when to use each pattern and how they work together.
 
 ### **[14 - Multi-Step Agent Interactions](14-multi-step-agents.md)**
@@ -98,4 +98,3 @@ Master NeMo Gym's flexible configuration system to handle different environments
 
 ### **[20 - Performance & Scaling](20-performance-scaling.md)**
 *Coming soon* - Profile, optimize, and scale your agent systems for high-throughput scenarios.
-
