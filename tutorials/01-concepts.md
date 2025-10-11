@@ -2,6 +2,9 @@
 
 Before diving into code, let's understand the three core building blocks of NeMo Gym.
 
+> [!TIP]
+> If you are new to reinforcement learning for LLMs, we recommend you review **[Key Terminology](00-terminology.md)** first.
+
 ## Overview
 
 <div align="center">
