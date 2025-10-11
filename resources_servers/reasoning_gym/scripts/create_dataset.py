@@ -22,6 +22,9 @@ python create_dataset.py --tasks knights_knaves,syllogism --size 500 --output da
 # All tasks in a category
 python create_dataset.py --category logic --size 500 --output data/train.jsonl
 
+# All tasks from all categories
+python create_dataset.py --all-tasks --size 5000 --output data/train_all.jsonl
+
 # Single task with custom config
 python create_dataset.py --task knights_knaves --size 500 --config '{"n_people": 3}' --output data/train.jsonl
 """
@@ -250,6 +253,9 @@ def main():
     task_group.add_argument(
         "--category", type=str, choices=list(TASK_CATEGORIES.keys()), help="Task category (e.g., logic, arithmetic)"
     )
+    task_group.add_argument(
+        "--all-tasks", action="store_true", help="Use all tasks from all categories"
+    )
 
     parser.add_argument("--size", type=int, default=500, help="Number of samples to generate (default: 500)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
@@ -278,8 +284,12 @@ def main():
         task_names = [t.strip() for t in args.tasks.split(",")]
     elif args.category:
         task_names = TASK_CATEGORIES[args.category]
+    elif args.all_tasks:
+        task_names = []
+        for category_tasks in TASK_CATEGORIES.values():
+            task_names.extend(category_tasks)
     else:
-        print("Error: Must specify --task, --tasks, or --category")
+        print("Error: Must specify --task, --tasks, --category, or --all-tasks")
         sys.exit(1)
 
     if len(task_names) == 1:
