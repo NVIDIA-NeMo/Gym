@@ -1,6 +1,6 @@
 # NeMo Gym
 
-NeMo Gym orchestrates scalable rollout collection for LLM training. It provides both the infrastructure to systematically generate agent interaction data and a large collection of NVIDIA and community curated environments with verification logic, making it easy to generate large-scale, high-quality data for RL workflows using the training framework of your choice.
+NeMo Gym enables scalable data collection for reinforcement learning of AI agents. It provides both the infrastructure to systematically capture agent interactions and a collection of high-quality RL environments, making it easy to generate training data for reinforcement learning workflows using the framework of your choice.
 
 TODO:
 - add link to hugging face data
@@ -8,12 +8,12 @@ TODO:
 
 ## 🏆 Why NeMo Gym?
 
-- **Fast Development** - Less boilerplate, more innovation - get from idea to working agent quickly
-- **Production-Ready** - Async architecture designed for high-throughput training workloads  
+- **Fast Data Generation** - Less boilerplate, more innovation: get from prompt to training rollouts quickly
+- **Flexible Environment Integration** - Connect to any environment: custom APIs, MCP-compatible tools, external services, or leverage our curated resources
+- **Smart Orchestration** - Async architecture automatically coordinates model-resource calls for high-throughput training workloads
 - **Configuration-Driven** - Swap models, resources, and environments via YAML without touching code
-- **Unified Patterns** - Standardized interfaces across the fragmented agent ecosystem
-- **Smart Orchestration** - Agents automatically coordinate model↔resource calls with async efficiency
-- **Focus on Logic, Not Plumbing** - Built-in server framework handles infrastructure concerns
+- **Standardized Interfaces** - Consistent patterns for models, environments, and agents across different systems
+
 
 ## 🚀 Quick Start
 
