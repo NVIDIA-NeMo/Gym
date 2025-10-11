@@ -74,7 +74,8 @@ dependencies = [
     # OpenAI: We leverage OpenAI Responses, Chat Completions, and Completions schemas for Nemo Gym abstractions. It may also be used to directly query endpoints.
     # Updated Fri Jul 25, 2025 with openai==1.97.1
     # License: Apache 2.0 https://github.com/openai/openai-python/blob/a8258744cbecf51321587fc870e8920bd2c07809/LICENSE
-    "openai<=1.97.1",
+    #"openai<=1.97.1",
+    "openai<=1.99.1,<2.0",
 
     # tqdm: Use for progress tracking on batch operations.
     # Updated Fri Jul 25, 2025 with tqdm==4.67.1
@@ -200,7 +201,7 @@ version = {attr = "nemo_gym.__version__"}
 readme = {file = "README.md", content-type = "text/markdown"}
 
 [tool.distutils.egg_info]
-egg_base = "cache"
+egg_base = "."
 
 [project.urls]
 Download = "https://github.com/NVIDIA-NeMo/NeMo-Gym/releases"
