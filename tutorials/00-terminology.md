@@ -85,6 +85,11 @@ OpenAI's simpler interface for basic LLM interactions. NeMo Gym includes middlew
 ### vLLM
 High-performance inference server for running open-source language models locally. Alternative to commercial APIs.
 
-### JSONL (JSON Lines)
-File format where each line contains a complete JSON object. Used for storing rollout data and training datasets.
+
+
+## What's Next?
+
+Now that you're familiar with the key terminology, let's understand how the core components work together.
+
+→ **[Next: Understanding Core Concepts](01-concepts.md)**
 

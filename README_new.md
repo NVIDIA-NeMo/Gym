@@ -19,9 +19,10 @@ TODO:
 
 ### New to NeMo Gym?
 Follow our **[Tutorial Series](tutorials/README.md)** for a progressive learning experience:
-- **Getting Started**: Setup and first agent interaction
-- **Basics**: Verification, rollouts, and training fundamentals  
-- **Advanced**: Custom environments, deployment, and scaling
+- **Setup & Core Concepts**: Understand Models, Resources, Agents and run your first interaction
+- **Rollout Generation**: Capture agent interactions for RL, SFT, and DPO training  
+- **Custom Environments**: Build your own tools, verification systems, and training scenarios
+- **Production Deployment**: Configuration, testing, scaling, and advanced agent patterns
 
 ### Quick Installation
 ```bash

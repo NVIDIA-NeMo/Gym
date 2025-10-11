@@ -161,6 +161,6 @@ This verification system is what makes NeMo Gym powerful for agent training:
 - **Reward signals** from verification drive agent improvement through RL
 - **Good verification** is reliable, meaningful, and scalable
 
-The next step in your NeMo Gym journey is building custom resource servers with meaningful verification for your specific use cases.
+Now that you understand how agent performance is measured, the next step is learning how to systematically collect this verification data at scale through rollout generation.
 
-→ **[Next: Rollout Generation Fundamentals](05-rollout-generation.md)**
+→ **[Next: Rollout Collection Fundamentals](05-rollout-collection.md)**
