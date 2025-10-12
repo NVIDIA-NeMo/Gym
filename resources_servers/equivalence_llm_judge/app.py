@@ -77,6 +77,10 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     # If true, use per-record regex from template_metadata.output_regex when available.
     # If false, always use the global response_extract_regex config. Default is false.
     use_per_record_regex: bool = False
+    # If set, skip regex extraction when expected_answer length exceeds this threshold.
+    # When skipped, the full generation is used instead of extracting with regex.
+    # Only applies when use_per_record_regex is True. None = disabled. Default is None.
+    extraction_length_threshold: Optional[int] = None
 
 
 class LLMJudgeRunRequest(BaseRunRequest):
@@ -241,6 +245,11 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
                 regex_override = body.template_metadata.get("output_regex")
                 if regex_override:
                     extract_regex = regex_override
+
+        # Skip regex extraction for long expected answers if threshold is configured
+        if self.config.use_per_record_regex and self.config.extraction_length_threshold is not None:
+            if len(expected) > self.config.extraction_length_threshold:
+                extract_regex = None  # Use full generation instead of extracting
 
         generated = _extract_last_assistant_text(body, extract_regex)
 

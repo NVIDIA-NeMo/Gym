@@ -81,6 +81,12 @@ equivalence_llm_judge:
       # group is returned; otherwise, the entire last match is used.
       # Example: "^Answer:\\s*(.*)$"
       response_extract_regex: null
+      # Enable per-record regex override from template_metadata.output_regex
+      use_per_record_regex: false
+      # Skip regex extraction when expected_answer length exceeds this threshold.
+      # When skipped, the full generation is shown to judge instead of extracting.
+      # Set to null to disable. Only works when use_per_record_regex is true.
+      extraction_length_threshold: null
       domain: knowledge
 equivalence_llm_judge_simple_agent:
   responses_api_agents:
