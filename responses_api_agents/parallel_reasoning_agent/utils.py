@@ -65,7 +65,15 @@ class ParallelReasoningUtils:
         return planner_prompt.strip()
 
     @staticmethod
-    def construct_prompt_planner_execute(config, original_problem: str, plan: str, prompt_name: str = None) -> str:
+    def construct_prompt_planner_execute(
+        config,
+        original_problem: str,
+        plan: str,
+        prompt_name: str = None,
+        use_one_original_problem_for_executor: bool = False,
+    ) -> str:
+        if use_one_original_problem_for_executor:
+            return original_problem
         if prompt_name is None:
             if config.use_summary:
                 prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "executor_planner_summary.txt")
@@ -129,6 +137,8 @@ class ParallelReasoningUtils:
 
     @staticmethod
     def construct_prompt_rewriter_execute(config, original_problem: str, rewrite: str) -> str:
+        if config.use_identity_rewrite:
+            return original_problem
         if config.use_summary:
             prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "executor_planner_summary.txt")
         else:
