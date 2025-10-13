@@ -1588,6 +1588,227 @@ class TestApp:
         data = response_2_2.json()
         assert data["output"][0]["content"][0]["text"] == "2"
 
+    def test_responses_reasoning_parser(self, monkeypatch: MonkeyPatch):
+        server = self._setup_server(monkeypatch)
+        server.config.uses_reasoning_parser = True
+
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        mock_chat_completion = NeMoGymChatCompletion(
+            id="chtcmpl-123",
+            object="chat.completion",
+            created=FIXED_TIME,
+            model="dummy_model",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="tool_calls",
+                    message=NeMoGymChatCompletionMessage(
+                        role="assistant",
+                        content=" hello hello",
+                        tool_calls=[
+                            NeMoGymChatCompletionMessageToolCall(
+                                id="call_123",
+                                function=NeMoGymFunction(
+                                    name="get_order_status",
+                                    arguments='{"order_id": "123"}',
+                                ),
+                                type="function",
+                            ),
+                            NeMoGymChatCompletionMessageToolCall(
+                                id="call_234",
+                                function=NeMoGymFunction(
+                                    name="get_delivery_date",
+                                    arguments='{"order_id": "234"}',
+                                ),
+                                type="function",
+                            ),
+                        ],
+                        reasoning_content="Gathering order status and delivery info...",
+                    ),
+                )
+            ],
+        )
+
+        input_messages = [
+            NeMoGymEasyInputMessage(
+                type="message",
+                role="user",
+                content=[NeMoGymResponseInputText(text="Check my order status", type="input_text")],
+                status="completed",
+            ),
+            NeMoGymEasyInputMessage(
+                type="message",
+                role="assistant",
+                content=[NeMoGymResponseInputText(text="Sure, one sec.", type="input_text")],
+                status="completed",
+            ),
+        ]
+
+        input_tools = [
+            NeMoGymFunctionToolParam(
+                name="get_order_status",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "order_id": {
+                            "type": "string",
+                            "description": "The ID of the order",
+                        },
+                    },
+                    "required": ["order_id"],
+                },
+                type="function",
+                description="Get the current status for a given order",
+                strict=True,
+            ),
+            NeMoGymFunctionToolParam(
+                name="get_delivery_date",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "order_id": {
+                            "type": "string",
+                            "description": "The ID of the order",
+                        },
+                    },
+                    "required": ["order_id"],
+                },
+                type="function",
+                description="Get the estimated delivery date for a given order",
+                strict=True,
+            ),
+        ]
+
+        expected_response = NeMoGymResponse(
+            **COMMON_RESPONSE_PARAMS,
+            id="resp_123",
+            object="response",
+            tools=input_tools,
+            created_at=FIXED_TIME,
+            model="dummy_model",
+            output=[
+                NeMoGymResponseReasoningItem(
+                    id="rs_123",
+                    status="completed",
+                    type="reasoning",
+                    summary=[
+                        NeMoGymSummary(
+                            type="summary_text",
+                            text="Gathering order status and delivery info...",
+                        )
+                    ],
+                ),
+                NeMoGymResponseOutputMessage(
+                    id="rs_123",
+                    status="completed",
+                    type="message",
+                    content=[
+                        NeMoGymResponseOutputText(
+                            type="output_text",
+                            text=" hello hello",
+                            annotations=[],
+                            logprobs=None,
+                        )
+                    ],
+                ),
+                NeMoGymResponseFunctionToolCall(
+                    type="function_call",
+                    name="get_order_status",
+                    arguments='{"order_id": "123"}',
+                    call_id="call_123",
+                    status="completed",
+                    id="call_123",
+                ),
+                NeMoGymResponseFunctionToolCall(
+                    type="function_call",
+                    name="get_delivery_date",
+                    arguments='{"order_id": "234"}',
+                    call_id="call_234",
+                    status="completed",
+                    id="call_234",
+                ),
+            ],
+        )
+
+        mock_method = AsyncMock(return_value=mock_chat_completion)
+        monkeypatch.setattr(
+            VLLMModel,
+            "chat_completions",
+            mock_method,
+        )
+
+        monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
+        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
+
+        request_body = NeMoGymResponseCreateParamsNonStreaming(
+            input=input_messages,
+            tools=input_tools,
+        )
+
+        response = client.post(
+            "/v1/responses",
+            json=request_body.model_dump(exclude_unset=True, mode="json"),
+        )
+        assert response.status_code == 200
+
+        data = response.json()
+
+        expected_dict = expected_response.model_dump()
+        assert data == expected_dict
+
+        # Verify input_messages made it to the model
+        assert mock_method.await_args is not None
+        called_args, _ = mock_method.await_args
+        sent_tools = called_args[1].tools
+
+        def _standardize(messages: list) -> list:
+            return [
+                (
+                    i["role"],
+                    i["content"][0]["text"] if isinstance(i["content"], list) else i["content"],
+                )
+                for i in messages
+            ]
+
+        assert _standardize([m.model_dump() for m in input_messages]) == _standardize(called_args[1].messages)
+
+        actual_sent_tools = [t["function"] for t in sent_tools]
+        expected_sent_tools = [
+            {
+                "name": "get_order_status",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "order_id": {
+                            "type": "string",
+                            "description": "The ID of the order",
+                        }
+                    },
+                    "required": ["order_id"],
+                },
+                "description": "Get the current status for a given order",
+                "strict": True,
+            },
+            {
+                "name": "get_delivery_date",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "order_id": {
+                            "type": "string",
+                            "description": "The ID of the order",
+                        }
+                    },
+                    "required": ["order_id"],
+                },
+                "description": "Get the estimated delivery date for a given order",
+                "strict": True,
+            },
+        ]
+        assert expected_sent_tools == actual_sent_tools
+
 
 class TestVLLMConverter:
     def setup_method(self, _):
