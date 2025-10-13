@@ -24,7 +24,7 @@ import re
 from typing import Any, Optional
 
 from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -74,10 +74,16 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     check_twice_swap: bool = False
     # Reward to assign if the second (swap) pass fails. Defaults to 0.0; can be set to -1.0.
     reward_if_swap_fails: float = 0.0
-    # If true, use per-record regex from template_metadata.output_regex when available.
+    # [NEW] If true, when first pass fails and use_per_record_regex=true,
+    # compare expected against full generation (no regex) instead of swap.
+    check_full_generation_on_fail: bool = False
+    # [NEW] Reward when full generation check succeeds after first pass fails.
+    # Default is 0.5 (partial credit).
+    reward_if_full_generation_succeeds: float = 0.5
+    # [NEW] If true, use per-record regex from template_metadata.output_regex when available.
     # If false, always use the global response_extract_regex config. Default is false.
     use_per_record_regex: bool = False
-    # If set, skip regex extraction when expected_answer length exceeds this threshold.
+    # [NEW] If set, skip regex extraction when expected_answer length exceeds this threshold.
     # When skipped, the full generation is used instead of extracting with regex.
     # Only applies when use_per_record_regex is True. None = disabled. Default is None.
     extraction_length_threshold: Optional[int] = None
@@ -90,9 +96,7 @@ class LLMJudgeRunRequest(BaseRunRequest):
     grading, but `options` and `metadata` are accepted for compatibility.
     """
 
-    model_config = ConfigDict(extra="allow")
-
-    uuid: Optional[str | int] = None
+    uuid: Optional[str] = None
     expected_answer: Optional[str] = None
     options: Optional[list[dict[str, str]]] = None
     metadata: Optional[dict[str, Any]] = None
@@ -111,7 +115,6 @@ class JudgeEvaluation(BaseModel):
 
 class LLMJudgeVerifyResponse(BaseVerifyResponse):
     expected_answer: str
-    extracted_answer: Optional[str] = None
     judge_evaluations: list[JudgeEvaluation]
 
 
@@ -238,7 +241,7 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         expected = _extract_expected_answer(body) or ""
         question = _extract_question_text(body.responses_create_params, self.config.question_extract_regex)
 
-        # Use per-request regex from template_metadata if enabled and present, otherwise fall back to config
+        # [NEW] Use per-request regex from template_metadata if enabled and present, otherwise fall back to config
         extract_regex = self.config.response_extract_regex
         if self.config.use_per_record_regex:
             if hasattr(body, "template_metadata") and isinstance(body.template_metadata, dict):
@@ -246,7 +249,7 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
                 if regex_override:
                     extract_regex = regex_override
 
-        # Skip regex extraction for long expected answers if threshold is configured
+        # [NEW] Skip regex extraction for long expected answers if threshold is configured
         if self.config.use_per_record_regex and self.config.extraction_length_threshold is not None:
             if len(expected) > self.config.extraction_length_threshold:
                 extract_regex = None  # Use full generation instead of extracting
@@ -258,28 +261,56 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
             question=question, expected_answer=expected, generated_answer=generated
         )
         if not first_equal:
-            reward = 0.0
-            payload = body.model_dump()
-            # Avoid duplicate field when constructing response
-            payload.pop("expected_answer", None)
-            return LLMJudgeVerifyResponse(
-                **payload,
-                reward=reward,
-                expected_answer=expected,
-                extracted_answer=generated,
-                judge_evaluations=[first_eval],
-            )
+            # [NEW] Optionally run fallback check when first pass fails
+            if self.config.check_full_generation_on_fail:
+                # Determine which fallback behavior to use based on use_per_record_regex
+                if self.config.use_per_record_regex:
+                    # NEW FEATURE: Compare expected vs full generation (no regex)
+                    generated_full = _extract_last_assistant_text(body, extract_regex=None)
+                    second_equal, second_eval = await self._generate_judge_evaluation(
+                        question=question, expected_answer=expected, generated_answer=generated_full
+                    )
+                else:
+                    # Fallback to swap behavior when not using per-record regex
+                    second_equal, second_eval = await self._generate_judge_evaluation(
+                        question=question, expected_answer=generated, generated_answer=expected
+                    )
+
+                # Use configured reward for fallback success
+                reward = self.config.reward_if_full_generation_succeeds if second_equal else 0.0
+                payload = body.model_dump()
+                payload.pop("expected_answer", None)
+                return LLMJudgeVerifyResponse(
+                    **payload, reward=reward, expected_answer=expected, judge_evaluations=[first_eval, second_eval]
+                )
+            else:
+                # Default behavior: stop immediately when first pass fails
+                reward = 0.0
+                payload = body.model_dump()
+                payload.pop("expected_answer", None)
+                return LLMJudgeVerifyResponse(
+                    **payload, reward=reward, expected_answer=expected, judge_evaluations=[first_eval]
+                )
 
         # If first pass says equal, optionally confirm with a second pass (swap answers).
         if not self.config.check_twice_swap:
             payload = body.model_dump()
             payload.pop("expected_answer", None)
             return LLMJudgeVerifyResponse(
-                **payload,
-                reward=1.0,
-                expected_answer=expected,
-                extracted_answer=generated,
-                judge_evaluations=[first_eval],
+                **payload, reward=1.0, expected_answer=expected, judge_evaluations=[first_eval]
+            )
+
+        # [NEW] Check if we should skip swap (length threshold triggered - swap unreliable for long text)
+        skip_swap = (
+            self.config.use_per_record_regex
+            and self.config.extraction_length_threshold is not None
+            and len(expected) > self.config.extraction_length_threshold
+        )
+        if skip_swap:
+            payload = body.model_dump()
+            payload.pop("expected_answer", None)
+            return LLMJudgeVerifyResponse(
+                **payload, reward=1.0, expected_answer=expected, judge_evaluations=[first_eval]
             )
 
         second_equal, second_eval = await self._generate_judge_evaluation(
@@ -291,11 +322,7 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         payload = body.model_dump()
         payload.pop("expected_answer", None)
         return LLMJudgeVerifyResponse(
-            **payload,
-            reward=reward,
-            expected_answer=expected,
-            extracted_answer=generated,
-            judge_evaluations=[first_eval, second_eval],
+            **payload, reward=reward, expected_answer=expected, judge_evaluations=[first_eval, second_eval]
         )
 
     async def _generate_judge_evaluation(
