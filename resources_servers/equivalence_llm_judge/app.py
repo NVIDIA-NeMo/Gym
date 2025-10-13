@@ -24,7 +24,7 @@ import re
 from typing import Any, Optional
 
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -96,7 +96,9 @@ class LLMJudgeRunRequest(BaseRunRequest):
     grading, but `options` and `metadata` are accepted for compatibility.
     """
 
-    uuid: Optional[str] = None
+    model_config = ConfigDict(extra="allow")
+
+    uuid: Optional[str | int] = None
     expected_answer: Optional[str] = None
     options: Optional[list[dict[str, str]]] = None
     metadata: Optional[dict[str, Any]] = None
