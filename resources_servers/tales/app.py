@@ -52,7 +52,7 @@ class ExecuteCommandResponse(BaseModel):
     observation: str
     score: int
     done: bool
-    won: bool
+    info: dict
     admissible_commands: list[str] | None = None
 
 
@@ -87,7 +87,7 @@ class TALESResponse(BaseModel):
     observation: str
     score: int
     done: bool
-    won: bool
+    info: dict
     admissible_commands: list[str] | None = None
 
 
@@ -116,12 +116,16 @@ class TALESResourcesServer(SimpleResourcesServer):
 
         args = {key: value for key, value in body.model_dump(exclude_unset=True).items() if value is not None}
 
-        print("Args:", args)
-        # try:
-        if "command" in args:
-            return await self.execute_command(request, ExecuteCommandRequest(**args))
-        else:
-            return await self.reset(request)
+        try:
+            if "command" in args:
+                return await self.execute_command(request, ExecuteCommandRequest(**args))
+            else:
+                return await self.reset(request)
+        except:
+            raise HTTPException(
+                status_code=400,
+                detail="Error trying to execute command.",
+            )
 
     async def seed_session(self, request: Request, body: TALESSeedSessionRequest) -> TALESSeedSessionResponse:
         session_id = request.session[SESSION_ID_KEY]
@@ -198,7 +202,7 @@ class TALESResourcesServer(SimpleResourcesServer):
             observation=obs,
             score=score,
             done=done,
-            won=info.get("won", False),
+            info=info,
         )
 
         if self.config.expose_admissible_commands and "admissible_commands" in info:
