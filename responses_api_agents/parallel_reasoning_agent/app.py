@@ -641,7 +641,7 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
                     BaseParallelReasoningVerifyResponse.model_validate(await verify_response.json())
                 )
                 executor_verify_response = executor_verify_response.model_copy(
-                    update={"question": body.input[0].content}
+                    update={"question": body.responses_create_params.input[0].content}
                 )
                 executor_verify_responses.append(executor_verify_response)
                 self.logger.debug(
@@ -711,7 +711,6 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
             parallelizer_verify_response = BaseParallelReasoningVerifyResponse.model_validate(
                 body.model_dump() | {"response": parallelizer_response.model_dump(), "reward": parallelizer_reward}
             )
-
             # Swap parallelizer input with parallelizer prompt
             if self.config.parallel_type == "planner":
                 parallelizer_verify_response.responses_create_params.input[
