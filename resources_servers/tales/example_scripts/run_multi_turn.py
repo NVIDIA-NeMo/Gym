@@ -17,6 +17,13 @@ from asyncio import run
 from nemo_gym.server_utils import ServerClient
 
 
+SYSTEM_PROMPT = (
+    "You are playing a text-based game and your goal is to finish it with the highest score."
+    " Upon reading the text observation, provide a *single* short phrase to interact with the game, e.g. `get lamp` (without the backticks)."
+    " When stuck, try using the `help` command to see what commands are available."
+)
+
+
 async def process_single(task):
     result = await task
     output = (await result.json())["output"]
@@ -52,7 +59,7 @@ async def run_multi_turn_loop():
             },
         )
         response = await task_2.json()
-        print(response["choices"][0]["message"])
+        print(response["choices"][0]["message"]["content"])
         print("___MODEL_RESPONSE_END____")
 
         task = server_client.post(
