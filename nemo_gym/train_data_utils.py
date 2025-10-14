@@ -505,9 +505,11 @@ class TrainDataProcessor(BaseModel):
                     b_f = float(b)
                 except Exception:
                     return False
-                scale = max(abs(a_f), abs(b_f))
-                tol = 5e-3 if scale >= 1 else 5e-4  # may need to adjust this threshold
-                return abs(a_f - b_f) <= max(tol, 1e-9)
+                scale = max(abs(a_f), abs(b_f))  # Adjuster for tolerance
+
+                # may need to adjust this threshold:
+                tol = 5e-3 if scale >= 1 else 5e-4  # Higher threshold for larger numbers
+                return abs(a_f - b_f) <= max(tol, 1e-9)  # Allow small differences
 
             def diff_values(prev_v, new_v, path: str, diffs: List[str]) -> None:
                 """
@@ -524,13 +526,34 @@ class TrainDataProcessor(BaseModel):
                         diff_values(prev_v[k], new_v[k], sub_path, diffs)
                     return
 
+                # Lists/tuples: Check for equality regardless of order
                 if isinstance(prev_v, (list, tuple)) and isinstance(new_v, (list, tuple)):
                     if len(prev_v) != len(new_v):
                         diffs.append(f"List length differs at {path}: {len(prev_v)} != {len(new_v)}")
                         return
-                    for i, (pv, nv) in enumerate(zip(prev_v, new_v)):
-                        diff_values(pv, nv, f"{path}[{i}]", diffs)
-                    return
+                    try:
+                        prev_counter = Counter(prev_v)
+                        new_counter = Counter(new_v)
+                        if prev_counter != new_counter:
+                            diffs.append(f"Multiset mismatch at {path}: {prev_counter} != {new_counter}")
+                        return
+                    except TypeError:
+                        # Manual fallback for unhashable elements
+                        used = set()
+                        for i, pv in enumerate(prev_v):
+                            found = False
+                            for j, nv in enumerate(new_v):
+                                if j in used:
+                                    continue
+                                sub_diffs = []
+                                diff_values(pv, nv, f"{path}[{i}]", sub_diffs)
+                                if not sub_diffs:
+                                    used.add(j)
+                                    found = True
+                                    break
+                            if not found:
+                                diffs.append(f"No matching element for {path}[{i}] in new metrics (unordered)")
+                        return
 
                 if isinstance(prev_v, Number) and isinstance(new_v, Number):
                     if not numeric_close(prev_v, new_v):
