@@ -581,6 +581,7 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
             body.responses_create_params.input = [
                 NeMoGymEasyInputMessage(role="user", content=body.responses_create_params.input)
             ]
+        original_problem = body.responses_create_params.input[0].content
 
         cookies = request.cookies
 
@@ -731,7 +732,6 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
             parallelizer_verify_responses.append(parallelizer_verify_response)
 
             # Optionally swap executor input with executor prompt
-            original_problem = body.responses_create_params.input[0].content
             if self.config.keep_executor_prompt:
                 # parallelizer_output = parallelizer_response.output[0].content[0].text
                 parallelizer_output = self.get_contents(parallelizer_response)
@@ -765,8 +765,9 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
                     if self.config.execute_from_original_problem:
                         # Swap the prompt_token_ids of the executor with the executor problem.
                         # Mostly to get the executor prompt on passthrough executor setting
+                        # but also don't swap the token ids totally, just add this separately
                         # TODO(jk): find better way to do this than actually using GPU even with max_output_tokens=1
-                        false_tokenize_body = body.responses_create_params.model_copy()
+                        false_tokenize_body = body.responses_create_params.model_copy(deep=True)
                         # TODO(jk): check if I don't have to set this to None
                         false_tokenize_body = false_tokenize_body.model_copy(update={"max_output_tokens": 16})
                         false_tokenize_body.input[0].content = (
@@ -787,12 +788,14 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
                                 f"Received an invalid response from model server: {json.dumps(await false_tokenize_response.json())}"
                             ) from e
                         executor_prompt_token_ids = false_tokenize_response_obj.output[0].prompt_token_ids
-                        executor_verify_responses[i].response.output[0].prompt_token_ids = executor_prompt_token_ids
+                        executor_verify_responses[i].response.metadata["prompt_token_ids_executor"] = json.dumps(
+                            executor_prompt_token_ids
+                        )
             else:
                 # Swap the prompt_token_ids of the executor with the original problem.
                 # Mostly to backprop on original prompt
                 # TODO(jk): find better way to do this than actually using GPU even with max_output_tokens=1
-                false_tokenize_body = body.responses_create_params.model_copy()
+                false_tokenize_body = body.responses_create_params.model_copy(deep=True)
                 false_tokenize_body = false_tokenize_body.model_copy(update={"max_output_tokens": 16})
                 false_tokenize_response = await self.server_client.post(
                     server_name=self.config.model_server.name,
