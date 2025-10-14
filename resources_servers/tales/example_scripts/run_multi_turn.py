@@ -11,8 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import asyncio
 from asyncio import run
+
+import tqdm
 
 from nemo_gym.server_utils import ServerClient
 
@@ -24,60 +25,51 @@ SYSTEM_PROMPT = (
 )
 
 
-async def process_single(task):
-    result = await task
-    output = (await result.json())["output"]
-    return output
-
-
-message_history = []
+message_history = [{"role": "developer", "content": SYSTEM_PROMPT}]
 
 
 async def run_multi_turn_loop():
     server_client = ServerClient.load_from_global_config()
-    task = server_client.post(
+    reset_task = await server_client.post(
         server_name="tales",
         url_path="/seed_session",
         json={},
     )
-    async with await task as result:
-        output = await result.json()
-    await asyncio.sleep(0.5)
+    output = await reset_task.json()
 
     obs = output["observation"]
     message_history.append({"role": "user", "content": obs})
     _ = output["info"]
     session_id = output["session_id"]
-    walkthrough = output["info"]["extra.walkthrough"]
-    for action in walkthrough:
-        print("___MODEL_RESPONSE_START___")
-        task_2 = await server_client.post(
+    # Use tdqm to show progress bar
+
+    for _ in tqdm.tqdm(range(25)):
+        query_model = await server_client.post(
             server_name="policy_model",
             url_path="/v1/chat/completions",
             json={
                 "messages": message_history,
             },
         )
-        response = await task_2.json()
-        print(response["choices"][0]["message"]["content"])
-        print("___MODEL_RESPONSE_END____")
+        response = await query_model.json()
+        action = response["choices"][0]["message"]["content"]
 
-        task = server_client.post(
+        action_task = await server_client.post(
             server_name="tales",
             url_path="/execute_command",
             json={"command": action, "session_id": session_id},
         )
-        async with await task as result:
-            output = await result.json()
-            observation = output["observation"]
-            _ = output["score"]
-            _ = output["done"]
-            _ = output["info"]
-
-        await asyncio.sleep(0.5)
+        output = await action_task.json()
+        observation = output["observation"]
+        _ = output["score"]
+        done = output["done"]
+        _ = output["info"]
         message_history.append({"role": "developer", "content": action})
 
         message_history.append({"role": "user", "content": observation})
+
+        if done:
+            break
 
     for turn in message_history:
         print(turn)

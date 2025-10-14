@@ -43,6 +43,8 @@ class TALESVerifyRequest(BaseVerifyRequest):
 
 class TALESSeedSessionResponse(BaseSeedSessionResponse):
     observation: str
+    score: int
+    done: bool
     info: dict
     session_id: str
     admissible_commands: list[str] | None = None
@@ -117,14 +119,14 @@ class TALESResourcesServer(SimpleResourcesServer):
         args = {key: value for key, value in body.model_dump(exclude_unset=True).items() if value is not None}
 
         try:
-            if "command" in args:
+            if "command" in args.keys():
                 return await self.execute_command(request, ExecuteCommandRequest(**args))
             else:
                 return await self.reset(request)
-        except:
+        except Exception as e:
             raise HTTPException(
                 status_code=400,
-                detail="Error trying to execute command.",
+                detail=f"Error trying to execute command {args}, request body: {request}, Exception \n{e}\n",
             )
 
     async def seed_session(self, request: Request, body: TALESSeedSessionRequest) -> TALESSeedSessionResponse:
@@ -152,6 +154,8 @@ class TALESResourcesServer(SimpleResourcesServer):
 
         response = TALESSeedSessionResponse(
             observation=obs,
+            done=False,
+            score=0,
             info=info,
             session_id=session_id,
         )
