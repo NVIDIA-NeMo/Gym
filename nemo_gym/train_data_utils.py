@@ -526,8 +526,8 @@ class TrainDataProcessor(BaseModel):
                         diff_values(prev_v[k], new_v[k], sub_path, diffs)
                     return
 
-                # Lists/tuples: Check for equality regardless of order
-                if isinstance(prev_v, (list, tuple)) and isinstance(new_v, (list, tuple)):
+                # Lists: Check for equality regardless of order
+                if isinstance(prev_v, list) and isinstance(new_v, list):
                     if len(prev_v) != len(new_v):
                         diffs.append(f"List length differs at {path}: {len(prev_v)} != {len(new_v)}")
                         return
