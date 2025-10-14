@@ -54,6 +54,7 @@ class ParallelReasoningConfig(BaseResponsesAPIAgentConfig):
     use_summary: bool = False
     executor_max_output_tokens: Optional[int] = None
     keep_executor_prompt: bool = False
+    execute_from_original_problem: bool = False  # pass through executor prompt
     use_one_original_problem_for_executor: bool = False
     parallel_type: Literal["planner", "rewriter"] = "planner"
     use_identity_rewrite: bool = False
@@ -450,22 +451,25 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
         ):
             parallelizer_output = parallelizer_response.output[0].content[0].text
 
-            if self.config.parallel_type == "planner":
-                plan = ParallelReasoningUtils.parse_plan(parallelizer_output)[0]
-                executor_prompt = ParallelReasoningUtils.construct_prompt_planner_execute(
-                    self.config,
-                    body.input[0].content,
-                    plan,
-                    self.config.executor_prompt_name,
-                    use_one_original_problem_for_executor,
-                )
-            elif self.config.parallel_type == "rewriter":
-                rewrite = ParallelReasoningUtils.parse_rewrite(
-                    body.input[0].content, parallelizer_output, use_identity=self.config.use_identity_rewrite
-                )[0]
-                executor_prompt = ParallelReasoningUtils.construct_prompt_rewriter_execute(
-                    self.config, body.input[0].content, rewrite
-                )
+            if self.config.execute_from_original_problem:
+                executor_prompt = body.input[0].content
+            else:
+                if self.config.parallel_type == "planner":
+                    plan = ParallelReasoningUtils.parse_plan(parallelizer_output)[0]
+                    executor_prompt = ParallelReasoningUtils.construct_prompt_planner_execute(
+                        self.config,
+                        body.input[0].content,
+                        plan,
+                        self.config.executor_prompt_name,
+                        use_one_original_problem_for_executor,
+                    )
+                elif self.config.parallel_type == "rewriter":
+                    rewrite = ParallelReasoningUtils.parse_rewrite(
+                        body.input[0].content, parallelizer_output, use_identity=self.config.use_identity_rewrite
+                    )[0]
+                    executor_prompt = ParallelReasoningUtils.construct_prompt_rewriter_execute(
+                        self.config, body.input[0].content, rewrite
+                    )
 
             executor_body = body.model_copy(
                 update={
@@ -756,6 +760,33 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
                         ].content = ParallelReasoningUtils.construct_prompt_rewriter_execute(
                             self.config, body.responses_create_params.input[0].content, rewrite
                         )
+
+                    if self.config.execute_from_original_problem:
+                        # Swap the prompt_token_ids of the executor with the executor problem.
+                        # Mostly to get the executor prompt on passthrough executor setting
+                        # TODO(jk): find better way to do this than actually using GPU even with max_output_tokens=1
+                        false_tokenize_body = body.responses_create_params
+                        # TODO(jk): check if I don't have to set this to None
+                        false_tokenize_body = false_tokenize_body.model_copy(update={"max_output_tokens": 16})
+                        false_tokenize_body.input[0].content = (
+                            executor_verify_responses[i].responses_create_params.input[0].content
+                        )
+                        false_tokenize_response = await self.server_client.post(
+                            server_name=self.config.model_server.name,
+                            url_path="/v1/responses",
+                            json=false_tokenize_body,
+                            cookies=None,
+                        )
+                        try:
+                            false_tokenize_response_obj: NeMoGymResponse = NeMoGymResponse.model_validate(
+                                await false_tokenize_response.json()
+                            )
+                        except ValidationError as e:
+                            raise RuntimeError(
+                                f"Received an invalid response from model server: {json.dumps(await false_tokenize_response.json())}"
+                            ) from e
+                        executor_prompt_token_ids = false_tokenize_response_obj.output[0].prompt_token_ids
+                        executor_verify_responses[i].response.output[0].prompt_token_ids = executor_prompt_token_ids
             else:
                 # Swap the prompt_token_ids of the executor with the original problem.
                 # Mostly to backprop on original prompt
