@@ -772,7 +772,6 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
                         false_tokenize_body.input[0].content = (
                             executor_verify_responses[i].responses_create_params.input[0].content
                         )
-                        self.logger.info(f"{false_tokenize_body.input}")
                         false_tokenize_response = await self.server_client.post(
                             server_name=self.config.model_server.name,
                             url_path="/v1/responses",
