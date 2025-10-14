@@ -17,7 +17,7 @@ What should we do?
 What files should be touched? What logic should be written?
 
 **Out of scope**:
-What are some items that this issue could be mistaken to cover that thisissue should explicitly NOT cover?
+What are some items that this issue could be mistaken to cover that this issue should explicitly NOT cover?
 
 **Acceptance Criteria**:
 - [ ] Individual items that need to be finished in order for this issue to be considered completed
