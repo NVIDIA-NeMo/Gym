@@ -731,6 +731,7 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
             parallelizer_verify_responses.append(parallelizer_verify_response)
 
             # Optionally swap executor input with executor prompt
+            original_problem = body.responses_create_params.input[0].content
             if self.config.keep_executor_prompt:
                 # parallelizer_output = parallelizer_response.output[0].content[0].text
                 parallelizer_output = self.get_contents(parallelizer_response)
@@ -745,32 +746,33 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
                             0
                         ].content = ParallelReasoningUtils.construct_prompt_planner_execute(
                             self.config,
-                            body.responses_create_params.input[0].content,
+                            original_problem,
                             plan,
                             self.config.executor_prompt_name,
                         )
                     elif self.config.parallel_type == "rewriter":
                         rewrite = ParallelReasoningUtils.parse_rewrite(
-                            body.responses_create_params.input[0].content,
+                            original_problem,
                             parallelizer_output,
                             use_identity=self.config.use_identity_rewrite,
                         )[0]
                         executor_verify_responses[i].responses_create_params.input[
                             0
                         ].content = ParallelReasoningUtils.construct_prompt_rewriter_execute(
-                            self.config, body.responses_create_params.input[0].content, rewrite
+                            self.config, original_problem, rewrite
                         )
 
                     if self.config.execute_from_original_problem:
                         # Swap the prompt_token_ids of the executor with the executor problem.
                         # Mostly to get the executor prompt on passthrough executor setting
                         # TODO(jk): find better way to do this than actually using GPU even with max_output_tokens=1
-                        false_tokenize_body = body.responses_create_params
+                        false_tokenize_body = body.responses_create_params.model_copy()
                         # TODO(jk): check if I don't have to set this to None
                         false_tokenize_body = false_tokenize_body.model_copy(update={"max_output_tokens": 16})
                         false_tokenize_body.input[0].content = (
                             executor_verify_responses[i].responses_create_params.input[0].content
                         )
+                        self.logger.info(f"{false_tokenize_body.input}")
                         false_tokenize_response = await self.server_client.post(
                             server_name=self.config.model_server.name,
                             url_path="/v1/responses",
@@ -791,7 +793,7 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
                 # Swap the prompt_token_ids of the executor with the original problem.
                 # Mostly to backprop on original prompt
                 # TODO(jk): find better way to do this than actually using GPU even with max_output_tokens=1
-                false_tokenize_body = body.responses_create_params
+                false_tokenize_body = body.responses_create_params.model_copy()
                 false_tokenize_body = false_tokenize_body.model_copy(update={"max_output_tokens": 16})
                 false_tokenize_response = await self.server_client.post(
                     server_name=self.config.model_server.name,
