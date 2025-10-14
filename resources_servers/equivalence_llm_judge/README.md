@@ -11,6 +11,10 @@ Prompt and labels are configurable via config.
 - `judge_equal_label` / `judge_not_equal_label`: labels the judge must output. Defaults to `[[A=B]]` and `[[A!=B]]`.
 - `check_twice_swap` (bool, default false): if true, after an initial equal verdict, performs a second judge call swapping expected and generated answers to reduce bias.
 - `reward_if_swap_fails` (float, default 0.0): reward to assign if the second (swap) pass disagrees (i.e., fails). You may set this to -1.0 or other value to catch it on the training side..
+- `use_per_record_regex` (bool, default true): if true, use per-record regex from `template_metadata.output_regex` to extract answers. Enables mixed datasets with different answer formats. Safe to enable - falls back to global regex when no per-record regex present.
+- `check_full_generation_on_fail` (bool, default true): if true, when regex extraction fails, retry with full generation (no regex) for partial credit. Only activates when per-record regex exists.
+- `reward_if_full_generation_succeeds` (float, default 0.5): reward when full generation check succeeds after extraction failure. Set to 1.0 for full credit.
+- `extraction_length_threshold` (int, default 120): skip regex extraction when expected answer exceeds this length. Use full generation instead. Only applies when per-record regex is present. Set to null to disable.
 
 ### Input schema
 Accepts the same outer request structure as other resources servers:
@@ -61,7 +65,8 @@ You should always check the license of your chosen judge model to make sure your
 ### Notes
 - By default (`check_twice_swap=false`), the server performs a single judge pass. If the verdict is equal, reward is 1 and one evaluation is returned; if not equal, reward is 0 and one evaluation is returned.
 - If `check_twice_swap=true` and the first pass is equal, a second pass is performed with expected and generated answers swapped. Reward is 1 only if the second pass is also equal; otherwise `reward_if_swap_fails` is used (default 0.0). In the double-check case, two evaluations are returned.
-- If the judge output doesn’t include either label, it defaults to not-equal.
+- If the judge output doesn't include either label, it defaults to not-equal.
+- **OpenQA support (enabled by default)**: The server now enables per-record regex extraction (`use_per_record_regex=true`), full generation rescue (`check_full_generation_on_fail=true`), and length-based thresholds (`extraction_length_threshold=120`) by default. These features only activate when `template_metadata.output_regex` is present, making them safe for all datasets. They reduce false negatives from regex extraction failures while maintaining backward compatibility.
 
 ## Licensing
 Code: Apache 2.0   
