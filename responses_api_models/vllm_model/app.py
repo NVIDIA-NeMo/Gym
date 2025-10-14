@@ -167,7 +167,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 if isinstance(content, str):
                     reasoning_matches, remaining_content = self._converter._extract_reasoning_from_content(content)
                     message_dict["content"] = remaining_content
-                    message_dict["reasoning_content"] = reasoning_matches[0]
+                    if reasoning_matches:
+                        message_dict["reasoning_content"] = reasoning_matches[0]
                 elif isinstance(content, list):
                     reasoning_content = None
                     for content_item_dict in content:
@@ -180,7 +181,8 @@ class VLLMModel(SimpleResponsesAPIModel):
 
                         # Even though we set the reasoning content already here, we still loop through all the content item dicts for the assert above.
                         content_item_dict["text"] = remaining_content
-                        message_dict["reasoning_content"] = reasoning_matches[0]
+                        if reasoning_matches:
+                            message_dict["reasoning_content"] = reasoning_matches[0]
                 else:
                     raise NotImplementedError
 
