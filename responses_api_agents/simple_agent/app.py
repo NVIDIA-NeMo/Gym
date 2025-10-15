@@ -42,7 +42,7 @@ from nemo_gym.server_utils import raise_for_status
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
-    max_steps: int = None
+    max_steps: int = 1
 
 
 class SimpleAgentRunRequest(BaseRunRequest):
