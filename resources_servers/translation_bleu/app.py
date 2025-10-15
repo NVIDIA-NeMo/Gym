@@ -31,8 +31,8 @@ class TranslationBleuResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class TranslationBleuRequest(BaseRunRequest):
-    ground_truth: str
-    target_lang: str
+    trg_text: str
+    trg_lang: str
 
 
 class TranslationBleuVerifyRequest(TranslationBleuRequest, BaseVerifyRequest):
@@ -40,8 +40,8 @@ class TranslationBleuVerifyRequest(TranslationBleuRequest, BaseVerifyRequest):
 
 
 class TranslationBleuVerifyResponse(BaseVerifyResponse):
-    ground_truth: str
-    target_lang: str
+    trg_text: str
+    trg_lang: str
     extracted_answer: str
 
 
@@ -88,7 +88,7 @@ class TranslationBleuResourcesServer(SimpleResourcesServer):
         combined_response = "".join(assistant_responses)
 
         (reward, extracted_answer) = self._verify_answer(
-            ground_truth=body.ground_truth, target_lang=body.target_lang, model_response=combined_response
+            ground_truth=body.trg_text, target_lang=body.trg_lang, model_response=combined_response
         )
 
         return TranslationBleuVerifyResponse(**body.model_dump(), extracted_answer=extracted_answer, reward=reward)
@@ -98,9 +98,10 @@ class TranslationBleuResourcesServer(SimpleResourcesServer):
 
         if target_lang in self.TOKENIZER_MAP:
             tokenize = self.TOKENIZER_MAP[target_lang]
-            bleu = BLEU(tokenize=tokenize, trg_lang=target_lang)
         else:
-            bleu = BLEU(trg_lang=target_lang)
+            tokenize = None
+        # Use effective_order for sentence-level BLEU
+        bleu = BLEU(trg_lang=target_lang, effective_order=True, tokenize=tokenize)
 
         # TODO how to handle multiple sentences? bleu.corpus_score expects a list of pre-split sentences
         bleu_output = bleu.sentence_score(extracted_answer, [ground_truth])

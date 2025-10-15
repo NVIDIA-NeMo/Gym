@@ -83,24 +83,24 @@ class TestApp:
         identical_verify_request = TranslationBleuVerifyRequest(
             responses_create_params=deepcopy(model_create_params),
             response=model_response.model_copy(deep=True),
-            ground_truth=ground_truth,
-            target_lang=target_lang,
+            trg_text=ground_truth,
+            trg_lang=target_lang,
         )
         identical_verify_response = await resources_server.verify(identical_verify_request)
         assert identical_verify_response.responses_create_params == model_create_params
         assert identical_verify_response.response == model_response
-        assert identical_verify_response.ground_truth == ground_truth
-        assert identical_verify_response.target_lang == target_lang
+        assert identical_verify_response.trg_text == ground_truth
+        assert identical_verify_response.trg_lang == target_lang
         assert identical_verify_response.reward == approx(1.0)
         assert identical_verify_response.extracted_answer == ground_truth
 
         assert sorted(list(identical_verify_response.model_dump())) == [
             "extracted_answer",
-            "ground_truth",
             "response",
             "responses_create_params",
             "reward",
-            "target_lang",
+            "trg_lang",
+            "trg_text",
         ]
 
     def test_verify_answer_identical(self, config: TranslationBleuResourcesServerConfig) -> None:
