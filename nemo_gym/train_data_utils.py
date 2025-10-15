@@ -15,7 +15,6 @@ import json
 from abc import abstractmethod
 from collections import Counter, defaultdict
 from math import sqrt
-from numbers import Number
 from pathlib import Path
 from shutil import copyfileobj
 from typing import Any, Dict, List, Literal, Optional, Self, Tuple, Union
@@ -496,7 +495,7 @@ class TrainDataProcessor(BaseModel):
             with open(metrics_fpath) as f:
                 previous_aggregate_metrics_dict = json.load(f)
 
-            def numeric_close(a: Number, b: Number) -> bool:
+            def numeric_close(a: float, b: float) -> bool:
                 """Helper to compare numbers with a tolerance"""
                 if a == b:
                     return True
@@ -555,7 +554,7 @@ class TrainDataProcessor(BaseModel):
                                 diffs.append(f"No matching element for {path}[{i}] in new metrics (unordered)")
                         return
 
-                if isinstance(prev_v, Number) and isinstance(new_v, Number):
+                if isinstance(prev_v, float) and isinstance(new_v, float):
                     if not numeric_close(prev_v, new_v):
                         diffs.append(f"Numeric mismatch at {path}: {prev_v} != {new_v}")
                     return
