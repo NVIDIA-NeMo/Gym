@@ -527,127 +527,32 @@ class TestValidateSamplesAndAggregateMetrics:
         )
         assert expected_metrics.model_dump() == state.metrics.model_dump()
 
-    def test_numeric_close_large_numbers_are_similar(self, monkeypatch: MonkeyPatch) -> None:
-        """Test numeric_close with large numbers (scale >= 1) do not conflict"""
+    def test_numeric_close_tolerance_validation(self, monkeypatch: MonkeyPatch) -> None:
+        """Test numeric_close with various numeric values to validate tolerance thresholds"""
         processor = TrainDataProcessor()
 
         test_cases = [
-            (100.000, 100.004),
-            (1.000, 1.005),
-            (10.000, 10.004),
-            (1000.0, 1000.004),
-        ]
-
-        for prev_value, new_value in test_cases:
-            prev_metrics = {"test_field": prev_value}
-
-            original_open = open
-
-            def custom_open(filename, mode="r"):
-                if filename == Path("test_metrics.json") and mode == "r":
-                    return mock_open(read_data=json.dumps(prev_metrics))()
-                return original_open(filename, mode)
-
-            monkeypatch.setattr("builtins.open", custom_open)
-            monkeypatch.setattr("pathlib.Path.exists", lambda self: True)
-
-            new_metrics = {"test_field": new_value}
-            result = processor._validate_aggregate_metrics(new_metrics, Path("test_metrics.json"))
-            assert result is None
-
-    def test_numeric_close_large_numbers_conflict(self, monkeypatch: MonkeyPatch) -> None:
-        """Test numeric_close with large numbers (scale >= 1) raise conflict"""
-        processor = TrainDataProcessor()
-
-        test_cases = [
-            (100.000, 100.006),
-            (1000.0, 1000.01),
-        ]
-
-        for prev_value, new_value in test_cases:
-            mock_write = mock_open()
-            prev_metrics = {"test_field": prev_value}
-
-            original_open = open
-
-            def custom_open(filename, mode="r"):
-                if filename == Path("test_metrics.json") and mode == "r":
-                    return mock_open(read_data=json.dumps(prev_metrics))()
-                if mode == "w":
-                    return mock_write()
-                return original_open(filename, mode)
-
-            monkeypatch.setattr("builtins.open", custom_open)
-            monkeypatch.setattr("pathlib.Path.exists", lambda self: True)
-
-            new_metrics = {"test_field": new_value}
-            result = processor._validate_aggregate_metrics(new_metrics, Path("test_metrics.json"))
-            assert result is not None
-            assert "_conflict.json" in str(result)
-
-    def test_numeric_close_small_numbers_are_similar(self, monkeypatch: MonkeyPatch) -> None:
-        """Test numeric_close with small numbers (scale < 1) do not conflict"""
-        processor = TrainDataProcessor()
-
-        test_cases = [
-            (0.500, 0.5004),
-            (0.999, 0.9994),
-            (0.1, 0.10049),
-        ]
-
-        for prev_value, new_value in test_cases:
-            prev_metrics = {"test_field": prev_value}
-
-            original_open = open
-
-            def custom_open(filename, mode="r"):
-                if filename == Path("test_metrics.json") and mode == "r":
-                    return mock_open(read_data=json.dumps(prev_metrics))()
-                return original_open(filename, mode)
-
-            monkeypatch.setattr("builtins.open", custom_open)
-            monkeypatch.setattr("pathlib.Path.exists", lambda self: True)
-
-            new_metrics = {"test_field": new_value}
-            result = processor._validate_aggregate_metrics(new_metrics, Path("test_metrics.json"))
-            assert result is None
-
-    def test_numeric_close_small_numbers_conflict(self, monkeypatch: MonkeyPatch) -> None:
-        """Test numeric_close with small numbers (scale < 1) raise conflict"""
-        processor = TrainDataProcessor()
-
-        test_cases = [
-            (0.500, 0.5006),
-        ]
-
-        for prev_value, new_value in test_cases:
-            mock_write = mock_open()
-            prev_metrics = {"test_field": prev_value}
-
-            original_open = open
-
-            def custom_open(filename, mode="r"):
-                if filename == Path("test_metrics.json") and mode == "r":
-                    return mock_open(read_data=json.dumps(prev_metrics))()
-                if mode == "w":
-                    return mock_write()
-                return original_open(filename, mode)
-
-            monkeypatch.setattr("builtins.open", custom_open)
-            monkeypatch.setattr("pathlib.Path.exists", lambda self: True)
-
-            new_metrics = {"test_field": new_value}
-            result = processor._validate_aggregate_metrics(new_metrics, Path("test_metrics.json"))
-            assert result is not None
-            assert "_conflict.json" in str(result)
-
-    def test_numeric_close_edge_case_around_one(self, monkeypatch: MonkeyPatch) -> None:
-        """Test numeric_close at the boundary around scale = 1.0"""
-        processor = TrainDataProcessor()
-
-        test_cases = [
-            (0.999, 1.0039, True),
-            (0.999, 0.9994, True),
+            # Large numbers within tolerance (0.005)
+            (100.000, 100.004, True),  # diff = 0.004
+            (1.000, 1.005, True),  # at scale boundary
+            (10.000, 10.004, True),  # medium scale
+            (1000.0, 1000.004, True),  # large scale
+            # Large numbers exceeding tolerance
+            (100.000, 100.006, False),  # diff = 0.006 > 0.005
+            (1000.0, 1000.01, False),  # diff = 0.01 > 0.005
+            # Small numbers within tolerance
+            (0.500, 0.5004, True),  # diff = 0.0004
+            (0.999, 0.9994, True),  # near scale=1
+            (0.1, 0.10049, True),  # very small
+            # Small numbers exceeding tolerance
+            (0.500, 0.5006, False),  # diff = 0.0006 > 0.005
+            # Edge cases around scale = 1.0
+            (0.999, 1.0039, True),  # crosses boundary, diff = 0.0049
+            (0.999, 0.9994, True),  # below boundary, diff = 0.0006
+            # Exact equality
+            (100.0, 100.0, True),
+            (0.5, 0.5, True),
+            (1.0, 1.0, True),
         ]
 
         for prev_value, new_value, should_pass in test_cases:
@@ -656,12 +561,15 @@ class TestValidateSamplesAndAggregateMetrics:
 
             original_open = open
 
-            def custom_open(filename, mode="r"):
-                if filename == Path("test_metrics.json") and mode == "r":
+            def custom_open(filename, mode="r", *args, **kwargs):
+                filename_str = str(filename)
+                actual_mode = kwargs.get("mode", mode)
+
+                if "test_metrics.json" in filename_str and "r" in actual_mode:
                     return mock_open(read_data=json.dumps(prev_metrics))()
-                if mode == "w":
+                if "w" in actual_mode or "a" in actual_mode:
                     return mock_write()
-                return original_open(filename, mode)
+                return original_open(filename, actual_mode, *args, **kwargs)
 
             monkeypatch.setattr("builtins.open", custom_open)
             monkeypatch.setattr("pathlib.Path.exists", lambda self: True)
@@ -670,89 +578,98 @@ class TestValidateSamplesAndAggregateMetrics:
             result = processor._validate_aggregate_metrics(new_metrics, Path("test_metrics.json"))
 
             if should_pass:
-                assert result is None
+                assert result is None, f"Expected pass for {prev_value} vs {new_value}"
             else:
-                assert result is not None
+                assert result is not None, f"Expected fail for {prev_value} vs {new_value}"
+                assert "_conflict.json" in str(result)
 
-    def test_validate_aggregate_metrics_extra_fields_allowed(self, monkeypatch: MonkeyPatch) -> None:
-        """Test that extra fields in new metrics are allowed"""
+            monkeypatch.undo()
+
+    def test_validate_aggregate_metrics_structure(self, monkeypatch: MonkeyPatch) -> None:
+        """Test validation of metric structure: extra fields, missing fields, and lists"""
         processor = TrainDataProcessor()
 
-        # Additional fields in new metrics
+        # Format: (prev_metrics, new_metrics, should_pass)
         test_cases = [
-            ({"field1": 10, "field2": 20}, {"field1": 10, "field2": 20, "field3": 30}),  # extra top level field
-            ({"nested": {"a": 1}}, {"nested": {"a": 1, "b": 2}}),  # extra nested field
+            # Extra fields (allowed)
+            (
+                {"field1": 10, "field2": 20},
+                {"field1": 10, "field2": 20, "field3": 30},  # extra top-level
+                True,
+            ),
+            (
+                {"nested": {"a": 1}},
+                {"nested": {"a": 1, "b": 2}},  # extra nested
+                True,
+            ),
             (
                 {"field1": 10},
-                {"field1": 10, "field2": 20, "field3": {"nested": "value"}},  # multiple extra fields with nesting
+                {"field1": 10, "field2": 20, "field3": {"nested": "value"}},  # multiple extra
+                True,
             ),
-        ]
-
-        for prev_metrics, new_metrics in test_cases:
-            original_open = open
-
-            def custom_open(filename, mode="r"):
-                if filename == Path("test_metrics.json") and mode == "r":
-                    return mock_open(read_data=json.dumps(prev_metrics))()
-                return original_open(filename, mode)
-
-            monkeypatch.setattr("builtins.open", custom_open)
-            monkeypatch.setattr("pathlib.Path.exists", lambda self: True)
-
-            result = processor._validate_aggregate_metrics(new_metrics, Path("test_metrics.json"))
-            assert result is None
-
-    def test_validate_aggregate_metrics_missing_fields_not_allowed(self, monkeypatch: MonkeyPatch) -> None:
-        """Test that missing fields in new metrics cause validation to fail"""
-        processor = TrainDataProcessor()
-
-        test_cases = [
-            ({"field1": 10, "field2": 20}, {"field1": 10}),  # missing top-level field
-            ({"nested": {"a": 1, "b": 2}}, {"nested": {"a": 1}}),  # missing nested field
-            ({"field1": 10, "field2": 20, "field3": 30}, {"field1": 10}),  # missing multiple fields
-        ]
-
-        for prev_metrics, new_metrics in test_cases:
-            mock_write = mock_open()
-            original_open = open
-
-            def custom_open(filename, mode="r"):
-                if filename == Path("test_metrics.json") and mode == "r":
-                    return mock_open(read_data=json.dumps(prev_metrics))()
-                if mode == "w":
-                    return mock_write()
-                return original_open(filename, mode)
-
-            monkeypatch.setattr("builtins.open", custom_open)
-            monkeypatch.setattr("pathlib.Path.exists", lambda self: True)
-
-            result = processor._validate_aggregate_metrics(new_metrics, Path("test_metrics.json"))
-            assert result is not None
-            assert "_conflict.json" in str(result)
-
-    def test_validate_aggregate_metrics_list_comparison(self, monkeypatch: MonkeyPatch) -> None:
-        """Test that list comparison is order-independent using multiset equality"""
-        processor = TrainDataProcessor()
-
-        test_cases = [
-            ({"items": [1, 2, 3]}, {"items": [3, 1, 2]}, True),  # reordered
-            ({"items": ["a", "b", "c"]}, {"items": ["c", "b", "a"]}, True),  # strings reordered
-            ({"items": [1, 1, 2, 3]}, {"items": [3, 2, 1, 1]}, True),  # duplicates reordered
-            ({"items": [1, 2, 3]}, {"items": [1, 2, 4]}, False),  # different element
-            ({"items": [1, 2, 3]}, {"items": [1, 2]}, False),  # different length
-            ({"items": [1, 1, 2]}, {"items": [1, 2, 2]}, False),  # different duplicates
+            # Missing fields (not allowed)
+            (
+                {"field1": 10, "field2": 20},
+                {"field1": 10},  # missing field2
+                False,
+            ),
+            (
+                {"nested": {"a": 1, "b": 2}},
+                {"nested": {"a": 1}},  # missing nested.b
+                False,
+            ),
+            (
+                {"field1": 10, "field2": 20, "field3": 30},
+                {"field1": 10},  # missing multiple
+                False,
+            ),
+            # List comparisons (reordering allowed)
+            (
+                {"items": [1, 2, 3]},
+                {"items": [3, 1, 2]},  # reordered
+                True,
+            ),
+            (
+                {"items": ["a", "b", "c"]},
+                {"items": ["c", "b", "a"]},  # strings reordered
+                True,
+            ),
+            (
+                {"items": [1, 1, 2, 3]},
+                {"items": [3, 2, 1, 1]},  # duplicates reordered
+                True,
+            ),
+            # Different list elements (fail)
+            (
+                {"items": [1, 2, 3]},
+                {"items": [1, 2, 4]},  # different element
+                False,
+            ),
+            (
+                {"items": [1, 2, 3]},
+                {"items": [1, 2]},  # different length
+                False,
+            ),
+            (
+                {"items": [1, 1, 2]},
+                {"items": [1, 2, 2]},  # different duplicates
+                False,
+            ),
         ]
 
         for prev_metrics, new_metrics, should_pass in test_cases:
             mock_write = mock_open()
             original_open = open
 
-            def custom_open(filename, mode="r"):
-                if filename == Path("test_metrics.json") and mode == "r":
+            def custom_open(filename, mode="r", *args, **kwargs):
+                filename_str = str(filename)
+                actual_mode = kwargs.get("mode", mode)
+
+                if "test_metrics.json" in filename_str and "r" in actual_mode:
                     return mock_open(read_data=json.dumps(prev_metrics))()
-                if mode == "w":
+                if "w" in actual_mode or "a" in actual_mode:
                     return mock_write()
-                return original_open(filename, mode)
+                return original_open(filename, actual_mode, *args, **kwargs)
 
             monkeypatch.setattr("builtins.open", custom_open)
             monkeypatch.setattr("pathlib.Path.exists", lambda self: True)
@@ -764,6 +681,8 @@ class TestValidateSamplesAndAggregateMetrics:
             else:
                 assert result is not None
                 assert "_conflict.json" in str(result)
+
+            monkeypatch.undo()
 
 
 class TestIterDatasetLines:
