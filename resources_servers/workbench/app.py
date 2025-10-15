@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import os
 from typing import Any, Dict
 
 from fastapi import FastAPI, HTTPException, Request
@@ -27,9 +26,6 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.workbench.utils import get_tools, is_correct
-
-
-REASONING_TAG = os.getenv("REASONING_TAG", "think")
 
 
 class WorkbenchResourcesServerConfig(BaseResourcesServerConfig):
@@ -96,7 +92,7 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
             return WorkbenchResponse(output=result)
         except Exception as e:
             return WorkbenchResponse(
-                output=f"Error executing tool '{function.__name__}': {str(e)}"
+                output=f"Error executing tool '{path}': {str(e)}"
             )  # return error to model so that it can correct itself
 
     async def verify(self, body: WorkbenchVerifyRequest) -> WorkbenchVerifyResponse:
