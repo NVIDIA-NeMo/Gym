@@ -1811,6 +1811,32 @@ class TestApp:
             tools=input_tools,
         )
 
+        mock_chat_completion = NeMoGymChatCompletion(
+            id="chtcmpl-123",
+            object="chat.completion",
+            created=FIXED_TIME,
+            model="dummy_model",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="tool_calls",
+                    message=NeMoGymChatCompletionMessage(
+                        role="assistant",
+                        # Test the None path ehre
+                        content=None,
+                        tool_calls=[],
+                        reasoning_content="None content test",
+                    ),
+                )
+            ],
+        )
+        mock_method = AsyncMock(return_value=mock_chat_completion.model_dump())
+        monkeypatch.setattr(
+            server._clients[0].__class__,
+            "create_chat_completion",
+            mock_method,
+        )
+
         response = client.post(
             "/v1/responses",
             json=request_body.model_dump(exclude_unset=True, mode="json"),
@@ -1819,6 +1845,27 @@ class TestApp:
 
         data = response.json()
 
+        expected_response = NeMoGymResponse(
+            **COMMON_RESPONSE_PARAMS,
+            id="resp_123",
+            object="response",
+            tools=input_tools,
+            created_at=FIXED_TIME,
+            model="dummy_model",
+            output=[
+                NeMoGymResponseReasoningItem(
+                    id="rs_123",
+                    status="completed",
+                    type="reasoning",
+                    summary=[
+                        NeMoGymSummary(
+                            type="summary_text",
+                            text="None content test",
+                        )
+                    ],
+                ),
+            ],
+        )
         expected_dict = expected_response.model_dump()
         assert data == expected_dict
 

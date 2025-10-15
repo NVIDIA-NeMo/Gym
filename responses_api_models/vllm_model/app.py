@@ -183,10 +183,14 @@ class VLLMModel(SimpleResponsesAPIModel):
                         content_item_dict["text"] = remaining_content
                         if reasoning_matches:
                             message_dict["reasoning_content"] = reasoning_matches[0]
+                elif not content:
+                    # No content or content None is a no-op
+                    pass
                 else:
                     raise NotImplementedError
 
         chat_completion_dict = await client.create_chat_completion(**create_params)
+
         choice_dict = chat_completion_dict["choices"][0]
         if self.config.uses_reasoning_parser:
             reasoning_content = choice_dict["message"].get("reasoning_content")
@@ -194,10 +198,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                 choice_dict["message"].pop("reasoning_content")
 
                 # We wrap this here in think tags for Gym's sake and to return a valid OpenAI Chat Completions response.
-                choice_dict["message"]["content"] = (
-                    self._converter._wrap_reasoning_in_think_tags([reasoning_content])
-                    + choice_dict["message"]["content"]
-                )
+                choice_dict["message"]["content"] = self._converter._wrap_reasoning_in_think_tags(
+                    [reasoning_content]
+                ) + (choice_dict["message"]["content"] or "")
         else:
             assert not choice_dict["message"].get("reasoning_content"), (
                 "Please do not use a reasoning parser in vLLM! There is one source of truth for handling data (including reasoning), which is NeMo Gym!"
