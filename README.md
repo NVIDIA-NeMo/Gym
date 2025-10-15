@@ -104,6 +104,7 @@ ng_test_all
 | math                  | Library Judge Math    | <a href='resources_servers/library_judge_math/configs/library_judge_math.yaml'>resources_servers/library_judge_math/configs/library_judge_math.yaml</a>             | Creative Commons Attribution 4.0 International            | Train, Validation, Example |
 | math                  | Library Judge Math    | <a href='resources_servers/library_judge_math/configs/math_stack_overflow.yaml'>resources_servers/library_judge_math/configs/math_stack_overflow.yaml</a>           | Creative Commons Attribution-ShareAlike 4.0 International | Train, Validation          |
 | math                  | Python Math Exec      | <a href='resources_servers/python_math_exec/configs/python_math_exec.yaml'>resources_servers/python_math_exec/configs/python_math_exec.yaml</a>                     | Apache 2.0                                                | Train, Example             |
+| translation           | Translation Bleu      | <a href='resources_servers/translation_bleu/configs/translation_bleu.yaml'>resources_servers/translation_bleu/configs/translation_bleu.yaml</a>                     | Apache 2.0                                                | Train, Validation, Example |
 <!-- END_RESOURCE_TABLE -->
 
 
