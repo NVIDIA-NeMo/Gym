@@ -40,3 +40,4 @@ mini_swe_main_agent:
       eval_timeout: 1800
       skip_if_exists: False
       step_limit: 250
+      collapse_limit: 3
