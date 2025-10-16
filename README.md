@@ -890,18 +890,35 @@ TODO: bxyu-nvidia
 # `library_judge_math` here at the top most level is the unique name of your resources server. This must be unique across your config.
 # When you or other servers call this server, they will do so using the ServerClient and its name.
 library_judge_math:
-  # `resources_servers` here at the second level is the server type. There are 3 server types in gym: agent, model, or resources.
+  # `resources_servers` here at the second level is the server type. There are 3 server types in NeMo Gym:
+  #   - responses_api_agents
+  #   - responses_api_models
+  #   - responses_servers
   resources_servers:
     # This is the resources server type. This is not unique at runtime, and you can spin up multiple instances of this with different configs if you wish!
     library_judge_math:
+      # `entrypoint` specifies the file that contains your resource server implementation.
+      # It is relative to the implementation directory (resources_servers/library_judge_math/).
       entrypoint: app.py
+      # This is a server reference object that points to your model server.
+      # By default this would be called 'model_server', but it essentially must match your Resource Server Config in `app.py`.
       judge_model_server:
+        # `type` specifies what kind of server this points to.
+        # Must be one of: responses_api_agents, responses_api_models, or resources_servers.
         type: responses_api_models
+        # `name` is the exact server instance name (from level 1 above)
+        # The ??? is Hydra syntax for a required but missing field that must be provided at runtime.
+        # NeMo Gym will validate that a server with this name and type exists in your config.
         name: ???
+      # `domain` is required for categorizing the server for organization and documentation.
+      # Valid values: (see Domain class in nemo_gym.config_types)
+      domain: math
+      # Below are some custom parameters for this implementation.
       judge_responses_create_params: {
         input: []
       }
       should_use_judge: false
+
 library_judge_math_simple_agent:
   responses_api_agents:
     simple_agent:
