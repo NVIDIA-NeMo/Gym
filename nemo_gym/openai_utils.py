@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 from asyncio import sleep
 from typing import (
     Any,
@@ -445,7 +446,7 @@ class NeMoGymAsyncOpenAI(BaseModel):
 
     async def _raise_for_status(self, response: ClientResponse, request_kwargs: Dict[str, Any]) -> None:
         if not response.ok:
-            print(f"Request kwargs: {request_kwargs}")
+            print(f"Request kwargs: {json.dumps(request_kwargs)}")
 
         await raise_for_status(response)
 
