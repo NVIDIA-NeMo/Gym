@@ -98,6 +98,8 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         # Chat Completion Create Params -> Chat Completion
         chat_completion_response = await self.chat_completions(request, chat_completion_create_params)
+        # TODO remove
+        print(chat_completion_response)
 
         choice = chat_completion_response.choices[0]
 
