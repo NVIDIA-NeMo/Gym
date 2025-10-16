@@ -13,6 +13,7 @@
 # limitations under the License.
 from asyncio import sleep
 from typing import (
+    Any,
     Dict,
     List,
     Literal,
@@ -442,33 +443,42 @@ class NeMoGymAsyncOpenAI(BaseModel):
             else:
                 return response
 
+    async def _raise_for_status(self, response: ClientResponse, request_kwargs: Dict[str, Any]) -> None:
+        if not response.ok:
+            print(f"Request kwargs: {request_kwargs}")
+
+        await raise_for_status(response)
+
     async def create_chat_completion(self, **kwargs):
-        response = await self._request(
-            method="POST",
+        request_kwargs = dict(
             url=f"{self.base_url}/chat/completions",
             json=kwargs,
             headers={"Authorization": f"Bearer {self.api_key}"},
         )
-        await raise_for_status(response)
+        response = await self._request(method="POST", **request_kwargs)
+
+        await self._raise_for_status(response, request_kwargs)
         return await response.json()
 
     async def create_response(self, **kwargs):
-        response = await self._request(
-            method="POST",
+        request_kwargs = dict(
             url=f"{self.base_url}/responses",
             json=kwargs,
             headers={"Authorization": f"Bearer {self.api_key}"},
         )
-        await raise_for_status(response)
+        response = await self._request(method="POST", **request_kwargs)
+
+        await self._raise_for_status(response, request_kwargs)
         return await response.json()
 
     async def create_tokenize(self, **kwargs):
         base_url = self.base_url.removesuffix("/v1")
-        response = await self._request(
-            method="POST",
+        request_kwargs = dict(
             url=f"{base_url}/tokenize",
             json=kwargs,
             headers={"Authorization": f"Bearer {self.api_key}"},
         )
-        await raise_for_status(response)
+        response = await self._request(method="POST", **request_kwargs)
+
+        await self._raise_for_status(response, request_kwargs)
         return await response.json()
