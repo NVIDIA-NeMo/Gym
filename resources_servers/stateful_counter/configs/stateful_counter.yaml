@@ -2,6 +2,7 @@ stateful_counter_resources_server:
   resources_servers:
     stateful_counter:
       entrypoint: app.py
+      domain: agent
 stateful_counter_simple_agent:
   responses_api_agents:
     simple_agent:

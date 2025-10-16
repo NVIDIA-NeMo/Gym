@@ -58,7 +58,7 @@ async def _single_post(semaphore: Semaphore, server_client: ServerClient, agent_
             url_path=url_path,
             json=row,
         )
-        raise_for_status(response)
+        await raise_for_status(response)
         result = await response.json()
 
         expected_reward = row["reward"]
