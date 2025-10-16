@@ -150,7 +150,8 @@ Sleeping 0.5s and retrying...
 async def raise_for_status(response: ClientResponse) -> None:  # pragma: no cover
     if not response.ok:
         content = await response.content.read()
-        print(content)
+        print(f"""Request info: {response.request_info}
+Response content: {content}""")
         response.raise_for_status()
 
 

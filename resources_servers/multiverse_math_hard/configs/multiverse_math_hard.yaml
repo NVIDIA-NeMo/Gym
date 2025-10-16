@@ -2,6 +2,7 @@ multiverse_math_hard:
   resources_servers:
     multiverse_math_hard:
       entrypoint: app.py
+      domain: agent
 multiverse_math_hard_simple_agent:
   responses_api_agents:
     simple_agent:

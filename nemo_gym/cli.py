@@ -195,7 +195,7 @@ class RunHelper:  # pragma: no cover
 
         for i, inst in enumerate(self._server_instance_display_configs, 1):
             print(f"[{i}] {inst.process_name} ({inst.server_type}/{inst.name})")
-            pprint(inst.model_dump())
+            pprint(inst.model_dump(mode="json"))
         print(f"{'#' * 100}\n")
 
     def poll(self) -> None:
