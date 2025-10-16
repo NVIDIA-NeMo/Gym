@@ -2,7 +2,8 @@ mini_swe_resource_resources_server:
   resources_servers:
     mini_swe_resource:
       entrypoint: app.py
-mini_swe_main_agent:
+      domain: coding
+mini_swe_simple_agent:
   responses_api_agents:
     mini_swe_agent:
       entrypoint: app.py

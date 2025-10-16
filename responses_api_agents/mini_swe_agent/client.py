@@ -19,7 +19,7 @@ from nemo_gym.server_utils import ServerClient
 
 server_client = ServerClient.load_from_global_config()
 task = server_client.post(
-    server_name="mini_swe_main_agent",
+    server_name="mini_swe_simple_agent",
     url_path="/run",
     json={
         "responses_create_params": {

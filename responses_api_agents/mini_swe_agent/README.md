@@ -57,7 +57,8 @@ mini_swe_resource_resources_server:
   resources_servers:
     mini_swe_resource:
       entrypoint: app.py
-mini_swe_main_agent:
+      domain: coding
+mini_swe_simple_agent:
   responses_api_agents:
     mini_swe_agent:
       entrypoint: app.py
@@ -116,15 +117,15 @@ ng_download_dataset_from_gitlab \
 # Start server
 CONFIG_PATHS="resources_servers/mini_swe_resource/configs/mini_swe_resource.yaml,responses_api_models/openai_model/configs/openai_model.yaml"
 ng_run +config_paths=[$CONFIG_PATHS] \
-        '+mini_swe_main_agent.responses_api_agents.mini_swe_agent.cache_dir_template=/lustre/fsw/portfolios/llmservice/users/igitman/images/swe-bench/xingyaoww_sweb.eval.x86_64.\{instance_id\}.sif' \
-        +mini_swe_main_agent.responses_api_agents.mini_swe_agent.run_golden=False \
-        +mini_swe_main_agent.responses_api_agents.mini_swe_agent.skip_if_exists=True \
-        +mini_swe_main_agent.responses_api_agents.mini_swe_agent.concurrency=16 \
-        +mini_swe_main_agent.responses_api_agents.mini_swe_agent.step_timeout=300 \
-        +mini_swe_main_agent.responses_api_agents.mini_swe_agent.eval_timeout=900 &
+        '+mini_swe_simple_agent.responses_api_agents.mini_swe_agent.cache_dir_template=/lustre/fsw/portfolios/llmservice/users/igitman/images/swe-bench/xingyaoww_sweb.eval.x86_64.\{instance_id\}.sif' \
+        +mini_swe_simple_agent.responses_api_agents.mini_swe_agent.run_golden=False \
+        +mini_swe_simple_agent.responses_api_agents.mini_swe_agent.skip_if_exists=True \
+        +mini_swe_simple_agent.responses_api_agents.mini_swe_agent.concurrency=16 \
+        +mini_swe_simple_agent.responses_api_agents.mini_swe_agent.step_timeout=300 \
+        +mini_swe_simple_agent.responses_api_agents.mini_swe_agent.eval_timeout=900 &
 
 # Collect rollouts
-ng_collect_rollouts +agent_name=mini_swe_main_agent \
+ng_collect_rollouts +agent_name=mini_swe_simple_agent \
             +input_jsonl_fpath=data/train.jsonl \
             +output_jsonl_fpath=results/mini_swe_agent_swe_gym.jsonl
 

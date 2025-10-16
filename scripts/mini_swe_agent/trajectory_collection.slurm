@@ -6,6 +6,7 @@
 #SBATCH --cpus-per-task=96
 #SBATCH --gpus-per-node=1
 #SBATCH --mem=1000G
+#SBATCH --dependency=singleton
 #SBATCH --output=mini_swe_traj_collection-%j.out
 #SBATCH --error=mini_swe_traj_collection-%j.err
 
@@ -40,17 +41,17 @@ srun --container-image=/lustre/fsw/portfolios/llmservice/users/sdevare/repos/con
         ng_run --help
 
         ng_run +config_paths=[$CONFIG_PATHS] \
-        '+mini_swe_main_agent.responses_api_agents.mini_swe_agent.cache_dir_template=/lustre/fsw/portfolios/llmservice/users/igitman/images/swe-bench/xingyaoww_sweb.eval.x86_64.\{instance_id\}.sif' \
-        +mini_swe_main_agent.responses_api_agents.mini_swe_agent.skip_if_exists=True \
-        +mini_swe_main_agent.responses_api_agents.mini_swe_agent.concurrency=16 \
-        +mini_swe_main_agent.responses_api_agents.mini_swe_agent.step_timeout=300 \
-        +mini_swe_main_agent.responses_api_agents.mini_swe_agent.eval_timeout=1800 &
+        '+mini_swe_simple_agent.responses_api_agents.mini_swe_agent.cache_dir_template=/lustre/fsw/portfolios/llmservice/users/igitman/images/swe-bench/xingyaoww_sweb.eval.x86_64.\{instance_id\}.sif' \
+        +mini_swe_simple_agent.responses_api_agents.mini_swe_agent.skip_if_exists=True \
+        +mini_swe_simple_agent.responses_api_agents.mini_swe_agent.concurrency=16 \
+        +mini_swe_simple_agent.responses_api_agents.mini_swe_agent.step_timeout=300 \
+        +mini_swe_simple_agent.responses_api_agents.mini_swe_agent.eval_timeout=1800 &
 
         # Wait for a few seconds to ensure the service is up before starting trajectory collection
         sleep 30
 
         # Run trajectory collection
-        ng_collect_rollouts +agent_name=mini_swe_main_agent \
+        ng_collect_rollouts +agent_name=mini_swe_simple_agent \
             +input_jsonl_fpath=data/train.jsonl \
             +output_jsonl_fpath=results/mini_swe_agent.jsonl
         wait
