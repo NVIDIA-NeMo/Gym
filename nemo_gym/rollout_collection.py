@@ -97,7 +97,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
 
         async def _post_subroutine(row: Dict) -> Dict:
             res = await server_client.post(server_name=row.pop("agent_ref")["name"], url_path="/run", json=row)
-            # res.raise_for_status()
+            res.raise_for_status()
             return await res.json()
 
         return await tqdm.gather(*map(_post_subroutine, examples), desc="Collecting rollouts", miniters=10)
