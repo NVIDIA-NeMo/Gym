@@ -215,6 +215,14 @@ def _extract_question_text(
     return text
 
 
+def _compute_verdict(eq_pos: int, neq_pos: int, equal_label, not_equal_label) -> tuple[bool, Optional[Any]]:
+    if eq_pos < 0 and neq_pos < 0:
+        return False, None
+    if eq_pos >= 0 and (neq_pos < 0 or eq_pos < neq_pos):
+        return True, equal_label
+    return False, not_equal_label
+
+
 class LLMJudgeResourcesServer(SimpleResourcesServer):
     """Judge-only verifier using an LLM to compare answers."""
 
@@ -307,14 +315,16 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
 
         eq_pos = text.find(equal_label)
         neq_pos = text.find(not_equal_label)
-        if eq_pos < 0 and neq_pos < 0:
-            eval_record.verdict_label = None
-            return False, eval_record
-        if eq_pos >= 0 and (neq_pos < 0 or eq_pos < neq_pos):
-            eval_record.verdict_label = equal_label
-            return True, eval_record
-        eval_record.verdict_label = not_equal_label
-        return False, eval_record
+
+        verdict, verdict_label = _compute_verdict(
+            eq_pos,
+            neq_pos,
+            equal_label,
+            not_equal_label,
+        )
+
+        eval_record.verdict_label = verdict_label
+        return verdict, eval_record
 
 
 if __name__ == "__main__":
