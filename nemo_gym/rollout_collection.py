@@ -101,7 +101,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
             return await res.json()
 
         return await tqdm.gather(
-            *map(_post_subroutine, examples), desc="Collecting rollouts", miniters=10, mininterval=10
+            *map(_post_subroutine, examples), desc="Collecting rollouts", miniters=10, maxinterval=10
         )
 
     def setup_server_client(self, head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:
