@@ -456,10 +456,7 @@ class NeMoGymAsyncOpenAI(BaseModel):
             json=kwargs,
             headers={"Authorization": f"Bearer {self.api_key}"},
         )
-        # TODO Remove
-        print("Hit chat completion")
         response = await self._request(method="POST", **request_kwargs)
-        print("Got response status", response.status)
 
         await self._raise_for_status(response, request_kwargs)
         return await response.json()
