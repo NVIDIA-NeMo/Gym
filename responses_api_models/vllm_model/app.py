@@ -149,7 +149,7 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         create_params = body_dict
         # Always disable skip_special_tokens to preserve <think> </think> tags for reasoning parsing
-        # create_params |= dict(skip_special_tokens=False)
+        create_params |= dict(skip_special_tokens=False)
 
         if self.config.return_token_id_information:
             create_params |= dict(
