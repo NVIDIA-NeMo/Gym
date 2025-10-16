@@ -77,7 +77,7 @@ from openai.types.shared_params import FunctionDefinition
 from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import TypedDict
 
-from nemo_gym.server_utils import ClientResponse, raise_for_status, request
+from nemo_gym.server_utils import MAX_NUM_TRIES, ClientResponse, raise_for_status, request
 
 
 ########################################
@@ -430,7 +430,7 @@ class NeMoGymAsyncOpenAI(BaseModel):
 
     async def _request(self, **request_kwargs: Dict) -> ClientResponse:
         tries = 0
-        while True:
+        while tries < MAX_NUM_TRIES:
             tries += 1
             response = await request(**request_kwargs)
             # See https://platform.openai.com/docs/guides/error-codes/api-errors
@@ -443,6 +443,9 @@ class NeMoGymAsyncOpenAI(BaseModel):
                 continue
             else:
                 return response
+
+        # We've exited the loop
+        response.raise_for_status()
 
     async def _raise_for_status(self, response: ClientResponse, request_kwargs: Dict[str, Any]) -> None:
         if not response.ok:
