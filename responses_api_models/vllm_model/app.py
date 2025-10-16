@@ -193,8 +193,6 @@ class VLLMModel(SimpleResponsesAPIModel):
                     raise NotImplementedError
 
         chat_completion_dict = await client.create_chat_completion(**create_params)
-        # TODO remove
-        print("Chat completion raw dict", chat_completion_dict)
 
         choice_dict = chat_completion_dict["choices"][0]
         if self.config.uses_reasoning_parser:
