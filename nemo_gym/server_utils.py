@@ -65,7 +65,7 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
 def get_global_aiohttp_client(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
     global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,
-) -> ClientSession:
+) -> ClientSession:  # pragma: no cover
     global _GLOBAL_AIOHTTP_CLIENT
 
     if _GLOBAL_AIOHTTP_CLIENT is not None:
@@ -80,7 +80,7 @@ def get_global_aiohttp_client(
     return set_global_aiohttp_client(cfg)
 
 
-def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSession:
+def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSession:  # pragma: no cover
     assert not is_global_aiohttp_client_setup(), (
         "There is already a global aiohttp client setup. Please refactor your code or call `global_aiohttp_client_exit` if you want to explicitly re-make the client!"
     )
@@ -100,11 +100,11 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
     return _GLOBAL_AIOHTTP_CLIENT
 
 
-def is_global_aiohttp_client_setup() -> bool:
+def is_global_aiohttp_client_setup() -> bool:  # pragma: no cover
     return _GLOBAL_AIOHTTP_CLIENT is not None
 
 
-def global_aiohttp_client_exit():
+def global_aiohttp_client_exit():  # pragma: no cover
     if not is_global_aiohttp_client_setup():
         return
 
@@ -121,7 +121,9 @@ atexit.register(global_aiohttp_client_exit)
 MAX_NUM_TRIES = 3
 
 
-async def request(method: str, url: str, **kwargs: Unpack[_RequestOptions]) -> ClientResponse:
+async def request(
+    method: str, url: str, _internal: bool = False, **kwargs: Unpack[_RequestOptions]
+) -> ClientResponse:  # pragma: no cover
     client = get_global_aiohttp_client()
     num_tries = 1
     while True:
@@ -130,16 +132,27 @@ async def request(method: str, url: str, **kwargs: Unpack[_RequestOptions]) -> C
         except ServerDisconnectedError:
             await asyncio.sleep(0.5)
         except Exception as e:
-            print(
-                f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}
+            # Don't increment internal since we know we are ok. If we are not, the head server will shut everything down anyways.
+            if not _internal:
+                print(
+                    f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}
 Sleeping 0.5s and retrying...
 """
-            )
-            if num_tries >= MAX_NUM_TRIES:
-                raise e
+                )
+                if num_tries >= MAX_NUM_TRIES:
+                    raise e
 
-            num_tries += 1
+                num_tries += 1
+
             await asyncio.sleep(0.5)
+
+
+async def raise_for_status(response: ClientResponse) -> None:  # pragma: no cover
+    if not response.ok:
+        content = await response.content.read()
+        print(f"""Request info: {response.request_info}
+Response content: {content}""")
+        response.raise_for_status()
 
 
 DEFAULT_HEAD_SERVER_PORT = 11000
@@ -196,7 +209,7 @@ class ServerClient(BaseModel):
             if isinstance(json_obj, BaseModel):
                 kwargs["json"] = json_obj.model_dump(exclude_unset=True)
 
-        return await request(method=method, url=f"{base_url}{url_path}", **kwargs)
+        return await request(method=method, url=f"{base_url}{url_path}", _internal=True, **kwargs)
 
     async def get(
         self,
@@ -335,13 +348,13 @@ class SimpleServer(BaseServer):
             except Exception as e:
                 print_exc()
                 print(
-                    "🚨 Caught an exception printed above. Right now, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"
+                    f"🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"
                 )
                 return JSONResponse(content=repr(e), status_code=500)
             except:
                 print_exc()
                 print(
-                    "🚨 Caught an unknown exception printed above. Right now, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"
+                    f"🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"
                 )
                 return JSONResponse(content="An unknown error occurred", status_code=500)
 
@@ -430,7 +443,6 @@ class SimpleServer(BaseServer):
 
         app = server.setup_webserver()
         server.set_ulimit()
-        server.setup_session_middleware(app)
         server.setup_exception_middleware(app)
 
         profiling_config = ProfilingMiddlewareConfig.model_validate(global_config_dict)

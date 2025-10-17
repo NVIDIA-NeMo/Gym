@@ -303,8 +303,6 @@ schema_add_customer = {
             "customer_name",
             "assigned_to_email",
             "status",
-            "customer_email",
-            "",
         ],
         "additionalProperties": False,
     },

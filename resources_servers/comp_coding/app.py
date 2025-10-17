@@ -12,10 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import io
-import sys
-from typing import Any, List, Optional, Tuple
 
+from asyncio import Semaphore, get_running_loop
+from time import time
+from typing import Any, Dict, List, Optional, Union
+
+from lcb_integration.compute_code_generation_metrics import check_correctness
+from lcb_integration.extraction_utils import LMStyle, extract_code
 from pydantic import BaseModel
 
 from nemo_gym.base_resources_server import (
@@ -31,149 +34,37 @@ from nemo_gym.base_resources_server import (
 # Config
 # ----------------------------
 class CompCodingResourcesServerConfig(BaseResourcesServerConfig):
-    num_workers: int
+    num_processes: int
+    unit_test_timeout_secs: int
+    debug: bool
 
 
 # ----------------------------
 # Schemas
 # ----------------------------
+
+
+# This is LiveCodeBench format
 class UnitTests(BaseModel):
     inputs: List[str]
     outputs: List[str]
+    fn_name: Optional[str] = None
 
 
 class CompCodingRunRequest(BaseRunRequest):
-    uuid: Optional[str] = None
-    metadata: Optional[dict[str, Any]] = None
+    pass
 
 
 class CompCodingVerifyRequest(CompCodingRunRequest, BaseVerifyRequest):
-    verifier_metadata: Optional[dict[str, Any]] = None
+    verifier_metadata: Optional[Dict[str, Any]] = None
 
 
 class CompCodingVerifyResponse(BaseVerifyResponse):
-    reason: str
-    extracted_model_output: Optional[str]
-    extracted_model_code: Optional[str]
-
-
-# ------------ helpers ------------
-
-
-def _extract_code(text: str) -> Optional[str]:
-    # We allow two kinds of responses:
-    # 1. Code inside a fenced block (```python ... ``` or ``` ... ```)
-    # 2. Raw code returned without any fences
-    if not text or "```" not in text:
-        return text
-
-    last_backtick = text.rfind("```")
-    if last_backtick == -1:
-        return text
-
-    second_last_backtick = text.rfind("```", None, last_backtick)
-    if second_last_backtick == -1:
-        return text
-
-    first_newline = text.find("\n", second_last_backtick, last_backtick)
-    if first_newline == -1:
-        return text
-
-    return text[first_newline + 1 : last_backtick]
-
-
-def _run_code_against_tests(code: str, tests: UnitTests) -> Tuple[bool, str]:
-    """
-    Executes `code` with in-process exec(), redirecting stdin/stdout per test.
-    Assumes dataset pre-processing has already validated test shapes (non-empty,
-    equal-length inputs/outputs).
-    """
-    for i, (test_input, expected_output) in enumerate(zip(tests.inputs, tests.outputs), start=1):
-        # capture originals
-        orig_stdin, orig_stdout = sys.stdin, sys.stdout
-        try:
-            sys.stdin = io.StringIO(test_input.replace("\\n", "\n"))
-            sys.stdout = io.StringIO()
-
-            exec_globals = {
-                "__builtins__": __builtins__,
-                "input": input,
-                "print": print,
-                "range": range,
-                "len": len,
-                "list": list,
-                "int": int,
-                "str": str,
-                "float": float,
-                "bool": bool,
-                "enumerate": enumerate,
-                "zip": zip,
-                "sum": sum,
-                "max": max,
-                "min": min,
-                "abs": abs,
-                "round": round,
-                "sorted": sorted,
-                "reversed": reversed,
-                "all": all,
-                "any": any,
-                "set": set,
-                "dict": dict,
-                "tuple": tuple,
-                "map": map,
-                "filter": filter,
-            }
-
-            exec(code, exec_globals)
-
-            actual_output = sys.stdout.getvalue()
-            exp = expected_output.replace("\\n", "\n")
-            if actual_output.rstrip() != exp.rstrip():
-                return (
-                    False,
-                    f"TEST_CASE_{i}_FAILED: Expected {repr(exp)} got {repr(actual_output)}",
-                )
-        except SystemExit as e:
-            # Handle sys.exit() calls in the executed code
-            return False, f"TEST_CASE_{i}_ERROR: Code called sys.exit({e.code})"
-        except Exception as e:
-            return False, f"TEST_CASE_{i}_ERROR: {e}"
-        finally:
-            sys.stdin, sys.stdout = orig_stdin, orig_stdout
-
-    return True, f"SUCCESS: All {len(tests.inputs)} test cases passed"
-
-
-def _extract_text_from_response(response_obj) -> Optional[str]:
-    """
-    Extract the assistant's output_text string from a NeMoGymResponse-like object:
-    response.output -> list of messages
-        message.content -> list of blocks with {"type": "output_text", "text": "..."}
-    """
-    try:
-        if not response_obj:
-            return None
-        output_list = getattr(response_obj, "output", None)
-        if not output_list:
-            return None
-        for msg in output_list:
-            content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
-            if not content:
-                continue
-
-            # content may be a list of blocks or a bare string (be tolerant)
-            if isinstance(content, str) and content.strip():
-                return content
-
-            for block in content:
-                btype = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
-                if btype in ("output_text", "text"):
-                    text = block.get("text") if isinstance(block, dict) else getattr(block, "text", None)
-                    if isinstance(text, str) and text.strip():
-                        return text
-        return None
-    except Exception:
-        return None
+    extracted_model_output: Optional[str] = None
+    extracted_model_code: Optional[str] = None
+    result: Optional[List[Union[int, bool]]] = None
+    metadata: Optional[Dict[str, Any]] = None
+    unit_tests_time_taken: Optional[float] = None
 
 
 # ----------------------------
@@ -182,40 +73,76 @@ def _extract_text_from_response(response_obj) -> Optional[str]:
 class CompCodingResourcesServer(SimpleResourcesServer):
     config: CompCodingResourcesServerConfig
 
-    def verify(self, body: CompCodingVerifyRequest) -> CompCodingVerifyResponse:
-        model_out = _extract_text_from_response(body.response)
+    def model_post_init(self, context):
+        self._semaphore: Semaphore = Semaphore(value=self.config.num_processes)
+
+    async def verify(self, body: CompCodingVerifyRequest) -> CompCodingVerifyResponse:
+        model_out = body.response.output_text
         if not model_out or not model_out.strip():
             # A response existed but had no usable text -> model failure
             return CompCodingVerifyResponse(
                 **body.model_dump(),
                 reward=0.0,
-                reason="Empty model output",
-                extracted_model_code=None,
-                extracted_model_output=None,
             )
 
         tests = UnitTests.model_validate(body.verifier_metadata["unit_tests"])
 
         # 3) extract code (code fence or raw)
-        code = _extract_code(model_out)
+        code = extract_code(model_out, LMStyle.OpenAIChat)
         if not code:
             return CompCodingVerifyResponse(
                 **body.model_dump(),
                 reward=0.0,
-                reason="Could not extract code",
                 extracted_model_output=model_out,
-                extracted_model_code=None,
             )
 
         # 4) run (no sandbox)
-        ok, msg = _run_code_against_tests(code, tests)
+        async with self._semaphore:
+            loop = get_running_loop()
+
+            """
+            Sample looks like this:
+            ```json
+            {
+                "input_output": "{\"inputs\": [...], ...}",
+            }
+            ```
+            `input_output` looks like this:
+            ```json
+            {
+                "inputs": [
+                    "6\n4 13 2 3 2 6",
+                    ...
+                ],
+                "outputs": [
+                    "4 30 2 13 2 13",
+                    ...
+                ],
+                "fn_name": null
+            }
+            ```
+            """
+
+            # We can directly measure here since we are inside the semaphore.
+            start_time = time()
+            result, metadata = await loop.run_in_executor(
+                None,
+                check_correctness,
+                {"input_output": tests.model_dump_json()},  # sample
+                code,  # generation
+                self.config.unit_test_timeout_secs,  # timeout
+                self.config.debug,  # debug
+            )
+            unit_tests_time_taken = time() - start_time
 
         return CompCodingVerifyResponse(
             **body.model_dump(),
-            reward=1.0 if ok else 0.0,
-            reason=msg,
+            reward=1.0 if all(r == True for r in result) else 0.0,
             extracted_model_output=model_out,
             extracted_model_code=code,
+            result=result,
+            metadata=metadata,
+            unit_tests_time_taken=unit_tests_time_taken,
         )
 
 
