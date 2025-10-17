@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-from typing import List, Optional
+from typing import List
 
 from fastapi import Request, Response
 from pydantic import ConfigDict, ValidationError
@@ -43,7 +43,6 @@ class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     max_steps: int = None
-    max_output_tokens: Optional[int] = None
 
 
 class SimpleAgentRunRequest(BaseRunRequest):
@@ -68,8 +67,6 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
         body = body.model_copy(deep=True)
-        if self.config.max_output_tokens:
-            body = body.model_copy(update={"max_output_tokens": self.config.max_output_tokens})
 
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
