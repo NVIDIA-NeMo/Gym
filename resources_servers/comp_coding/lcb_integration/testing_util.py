@@ -440,7 +440,7 @@ def run_test(sample, test=None, debug=False, timeout=6):
 
     # Disable functionalities that can make destructive changes to the test.
     # max memory is set to 4GB
-    reliability_guard()
+    reliability_guard(4 * 1024**3)
 
     if debug:
         print(f"start = {datetime.now().time()}")
@@ -511,6 +511,17 @@ def run_test(sample, test=None, debug=False, timeout=6):
                 signal.alarm(0)
 
 
+def _set_resource_limit(resource_type: str, target_soft_limit):
+    import resource
+
+    current_soft, current_hard = resource.getrlimit(resource_type)
+    if current_soft < target_soft_limit:
+        try:
+            resource.setrlimit(resource_type, (target_soft_limit, current_hard))
+        except ValueError as e:
+            print(repr(e))
+
+
 def reliability_guard(maximum_memory_bytes=None):
     """
     This disables various destructive functions and prevents the generated code
@@ -526,10 +537,11 @@ def reliability_guard(maximum_memory_bytes=None):
     if maximum_memory_bytes is not None:
         import resource
 
-        resource.setrlimit(resource.RLIMIT_AS, (maximum_memory_bytes, maximum_memory_bytes))
-        resource.setrlimit(resource.RLIMIT_DATA, (maximum_memory_bytes, maximum_memory_bytes))
+        _set_resource_limit(resource.RLIMIT_AS, maximum_memory_bytes)
+        _set_resource_limit(resource.RLIMIT_DATA, maximum_memory_bytes)
+
         if not platform.uname().system == "Darwin":
-            resource.setrlimit(resource.RLIMIT_STACK, (maximum_memory_bytes, maximum_memory_bytes))
+            _set_resource_limit(resource.RLIMIT_STACK, maximum_memory_bytes)
 
     faulthandler.disable()
 

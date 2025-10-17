@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import re
 import sys
 import unicodedata
@@ -25,7 +24,7 @@ README_PATH = Path("README.md")
 TARGET_FOLDER = Path("resources_servers")
 
 
-def get_dataset_domain(data, level=1):  # pragma: no cover
+def get_dataset_domain(data, level=1) -> str:  # pragma: no cover
     if level == 4:
         return data.get("domain")
     else:
@@ -35,7 +34,9 @@ def get_dataset_domain(data, level=1):  # pragma: no cover
             return get_dataset_domain(v, level + 1)
 
 
-def get_dataset_license(data):  # pragma: no cover
+def get_dataset_license_and_types(data) -> tuple[str, list[str]]:  # pragma: no cover
+    types = []
+    license = None
     for k1, v1 in data.items():
         if k1.endswith("_simple_agent") and isinstance(v1, dict):
             v2 = v1.get("responses_api_agents")
@@ -45,11 +46,14 @@ def get_dataset_license(data):  # pragma: no cover
                     datasets = v3.get("datasets")
                     if isinstance(datasets, list):
                         for entry in datasets:
-                            if isinstance(entry, dict) and entry.get("type") == "train":
-                                return entry.get("license")
+                            if isinstance(entry, dict):
+                                types.append(entry.get("type"))
+                                if entry.get("type") == "train":
+                                    license = entry.get("license")
+    return license, types
 
 
-def extract_domain_and_license(yaml_path: Path) -> tuple[str, str]:  # pragma: no cover
+def extract_config_metadata(yaml_path: Path) -> tuple[str, str, list[str]]:  # pragma: no cover
     """
     Domain:
         {name}_resources_server:
@@ -57,49 +61,66 @@ def extract_domain_and_license(yaml_path: Path) -> tuple[str, str]:  # pragma: n
                 {name}:
                     domain: ...
 
-    License:
+    License + Type:
         {something}_simple_agent:
             responses_api_agents:
                 simple_agent:
                     datasets:
                         - name: train
-                          type: train
-                          license: ...
+                          type: {example_type_1}
+                          license: {example_license_1}
+                        - name: validation
+                          type: {example_type_2}
+                          license: {example_license_2}
     """
     with yaml_path.open() as f:
         data = yaml.safe_load(f)
 
     domain = get_dataset_domain(data)
-    license = get_dataset_license(data)
+    license, types = get_dataset_license_and_types(data)
 
-    return domain, license
+    return domain, license, types
 
 
-def generate_table() -> str:  # pragma: no cover
-    """Outputs a grid with table data"""
-    col_names = ["Domain", "Resource Server Name", "Config Path", "License"]
+def generate_table() -> str:
+    """
+    Outputs a grid with table data. Raw html <a> tags are used for the links instead of markdown
+    to avoid cross-reference warnings in the 'build-docs' CI/CD run (15+ warnings == fail)
+    """
+    col_names = ["Domain", "Resource Server Name", "Config Path", "License", "Usage"]
 
     rows = []
     for subdir in TARGET_FOLDER.iterdir():
-        path = f"{TARGET_FOLDER.name}/{subdir.name}"
-        server_name = subdir.name.replace("_", " ").title()
+        if subdir.is_dir():
+            path = f"{TARGET_FOLDER.name}/{subdir.name}"
+            path_link = f"<a href='{path}'>{path}</a>"
+            server_name = subdir.name.replace("_", " ").title()
 
-        configs_folder = subdir / "configs"
-        if configs_folder.exists() and configs_folder.is_dir():
-            yaml_files = configs_folder.glob("*.yaml")
-            if yaml_files:
-                for yaml_file in yaml_files:
-                    config_path = f"`{path + '/configs/' + yaml_file.name}`"
-                    extraction = extract_domain_and_license(yaml_file)
-                    if extraction:
-                        domain, license = extraction
-                        rows.append([domain, server_name, config_path, license])
-                    else:
-                        rows.append(["?", server_name, config_path, "?"])
+            configs_folder = subdir / "configs"
+            if configs_folder.exists() and configs_folder.is_dir():
+                yaml_files = configs_folder.glob("*.yaml")
+                if yaml_files:
+                    for yaml_file in yaml_files:
+                        config_path = path + "/configs/" + yaml_file.name
+                        config_path_link = f"<a href='{config_path}'>{config_path}</a>"
+                        extraction = extract_config_metadata(yaml_file)
+                        if extraction:
+                            domain, license, usages = extraction
+                            rows.append(
+                                [
+                                    domain,
+                                    server_name,
+                                    config_path_link,
+                                    license,
+                                    ", ".join([u.title() for u in usages]),
+                                ]
+                            )
+                        else:
+                            rows.append(["?", server_name, config_path_link, "?", "?"])
+                else:
+                    rows.append(["?", server_name, path_link, "?", "?"])
             else:
-                rows.append(["?", server_name, path, "?"])
-        else:
-            rows.append(["?", server_name, path, "?"])
+                rows.append(["?", server_name, path_link, "?", "?"])
 
     def normalize_str(s: str) -> str:
         """
@@ -167,7 +188,9 @@ def main():  # pragma: no cover
         )
         sys.exit(1)
 
-    new_text = pattern.sub(lambda m: f"{m.group(1)}\n{generate_table()}\n{m.group(3)}", text)
+    table_str = generate_table()
+
+    new_text = pattern.sub(lambda m: f"{m.group(1)}\n{table_str}\n{m.group(3)}", text)
     README_PATH.write_text(new_text)
 
 

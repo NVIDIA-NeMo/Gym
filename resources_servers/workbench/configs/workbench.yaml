@@ -19,7 +19,7 @@ workbench_simple_agent:
           jsonl_fpath: resources_servers/workbench/data/train.jsonl
           gitlab_identifier:
             dataset_name: workbench
-            version: 0.0.1
+            version: 0.0.4
             artifact_fpath: train.jsonl
           license: Apache 2.0
         - name: validation
@@ -27,7 +27,7 @@ workbench_simple_agent:
           jsonl_fpath: resources_servers/workbench/data/validation.jsonl
           gitlab_identifier:
             dataset_name: workbench
-            version: 0.0.1
+            version: 0.0.4
             artifact_fpath: validation.jsonl
           license: Apache 2.0
         - name: example
