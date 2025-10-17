@@ -37,8 +37,6 @@ class RolloutCollectionConfig(BaseModel):
     input_jsonl_fpath: str
     output_jsonl_fpath: str
     limit: Optional[int] = None
-    num_splits: Optional[int] = None
-    index: Optional[int] = None
     num_repeats: Optional[int] = None
     num_samples_in_parallel: Optional[int] = None
     responses_create_params: Dict[str, Any] = Field(default_factory=dict)
@@ -50,15 +48,10 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
         if config.limit:
             range_iterator = range(config.limit)
             print(f"Limiting the number of rows to {config.limit}!")
-        if config.num_splits is None or config.index is None:
-            with open(config.input_jsonl_fpath) as input_dataset:
-                rows = [row for _, row in zip(range_iterator, map(json.loads, input_dataset))]
-            print(f"Found {len(rows)} rows!")
-        else:
-            with open(config.input_jsonl_fpath) as input_dataset:
-                rows = [row for row in map(json.loads, input_dataset)]
-                chunk_size = len(rows) // config.num_splits
-                rows = rows[(chunk_size * config.index) : (chunk_size * (config.index + 1))]
+
+        with open(config.input_jsonl_fpath) as input_dataset:
+            rows = [row for _, row in zip(range_iterator, map(json.loads, input_dataset))]
+        print(f"Found {len(rows)} rows!")
 
         if config.num_repeats:
             previous_length = len(rows)
