@@ -41,9 +41,8 @@ parallel_reasoning_simple_agent:
         jsonl_fpath: resources_servers/library_judge_math/data/example.jsonl
       num_executor: 16
       num_reducer: 1
-      executor_max_output_tokens: 32768
+      max_output_tokens: 32768
       use_reducer: true
       reducer_type: genselect_tournament
-      reduce_across: all
       return_reducer_only: false
       tournament_group_size: 4

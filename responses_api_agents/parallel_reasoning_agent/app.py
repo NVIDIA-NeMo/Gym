@@ -52,8 +52,7 @@ class ParallelReasoningConfig(BaseResponsesAPIAgentConfig):
     max_output_tokens: Optional[int] = None
     use_reducer: bool = True
     return_reducer_only: bool = False
-    reducer_type: Literal["genselect", "genselect_tournament"] = "genselect_tournament"
-    reduce_across: Literal["all"] = "all"
+    reducer_type: Literal["genselect_tournament"] = "genselect_tournament"
     tournament_group_size: int = 4
 
 
@@ -87,12 +86,10 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
         self._setup_logger()
 
         if self.config.use_reducer:
-            if self.config.reducer_type not in ["genselect", "genselect_tournament"]:
+            if self.config.reducer_type not in ["genselect_tournament"]:
                 raise NotImplementedError(
                     f"'reducer_type' must be one of ['genselect', 'genselect_tournament'], got {self.config.reducer_type}"
                 )
-            if self.config.reduce_across not in ["all"]:
-                raise NotImplementedError(f"'reduce_across' must be one of ['all'], got {self.config.reduce_across}")
         else:
             if self.config.return_reducer_only:
                 raise NotImplementedError("'return_reducer_only' must be used with 'use_reducer' !")
@@ -130,56 +127,6 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
             if "content" in output.model_dump():
                 contents.append(output.content[0].text)
         return "\n".join(contents)
-
-    async def get_reducer_response_genselect(
-        self, body, executor_responses: List[NeMoGymResponse], executor_cookies: dict
-    ) -> Tuple[NeMoGymResponse, List[NeMoGymResponse], dict]:
-        if self.config.reduce_across == "all":
-            executor_outputs = [self.get_contents(executor_response) for executor_response in executor_responses]
-            reducer_prompt = ParallelReasoningUtils.construct_prompt_genselect_reducer(
-                self.config, body.input[0].content, executor_outputs
-            )
-            reducer_body = body.model_copy(
-                update={"input": [NeMoGymEasyInputMessage(role="user", content=reducer_prompt)]}
-            )
-            if self.config.max_output_tokens is not None:
-                reducer_body.max_output_tokens = self.config.max_output_tokens
-
-            async def process_reducer_task():
-                reducer_response = await self.server_client.post(
-                    server_name=self.config.model_server.name,
-                    url_path="/v1/responses",
-                    json=reducer_body,
-                    cookies=executor_cookies,
-                )
-                reducer_cookies = reducer_response.cookies
-                try:
-                    reducer_response_obj = await reducer_response.json()
-                    reducer_response_obj: NeMoGymResponse = NeMoGymResponse.model_validate(reducer_response_obj)
-                    reducer_response_obj.metadata = {
-                        "executor_resp_ids": json.dumps(
-                            [executor_response.id for executor_response in executor_responses]
-                        ),
-                        "stage": Stage.REDUCER.value,
-                        "request": reducer_body.model_dump_json(),
-                    }
-                except ValidationError as e:
-                    raise RuntimeError(
-                        f"Received an invalid response from model server: {json.dumps(await reducer_response.json())}"
-                    ) from e
-                return reducer_response_obj, reducer_cookies
-
-            reducer_tasks = [process_reducer_task() for _ in range(self.config.num_reducer)]
-            reducer_results = await asyncio.gather(*reducer_tasks)
-
-            reducer_responses = []
-            all_reducer_cookies = {}
-            for i, (reducer_response, reducer_cookies) in enumerate(reducer_results):
-                reducer_responses.append(reducer_response)
-                all_reducer_cookies.update(reducer_cookies)
-                self.logger.debug(f"[green]✅ Reducer ({i + 1} / {self.config.num_reducer}) completed[/green]")
-
-        return reducer_responses, reducer_cookies
 
     async def get_reducer_response_genselect_tournament(
         self,
@@ -300,46 +247,6 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
         # Return all reducer responses (one per group across all rounds) and final cookies
         return final_winner, all_reducer_responses, reducer_cookies
 
-    async def get_reducer_verify_response_genselect(
-        self,
-        reducer_verify_request: ParallelReasoningVerifyRequest,
-        executor_verify_responses: List[BaseParallelReasoningVerifyResponse],
-    ) -> BaseParallelReasoningVerifyResponse:
-        """
-        Genselect Reducer Reward.
-        We add in the reward calculation in the agent instead of adding a separate resource server as the reward calculation is tied to the executor.
-        """
-        # Check for 'correct' answers in executors
-        executor_rewards = [executor_verify_response.reward for executor_verify_response in executor_verify_responses]
-        executor_max_reward_idxs = [
-            i for (i, reward) in enumerate(executor_rewards) if (reward == max(executor_rewards) and reward > 0)
-        ]
-
-        # Extract genselect answer
-        # reducer_text = reducer_verify_request.response.output[0].content[0].text
-        reducer_text = self.get_contents(reducer_verify_request.response)
-        reducer_answer_idx = ParallelReasoningUtils.parse_genselect_reduction(reducer_text)
-
-        if reducer_answer_idx in executor_max_reward_idxs:
-            # Valid selection
-            reducer_reward = 1.0
-        else:
-            # Even if impossible, score is 0.
-            reducer_reward = 0.0
-
-        # Construct verify response
-        verify_request_fields = {
-            "reward": reducer_reward,
-            "allowed_answers": executor_max_reward_idxs,
-            "predicted_answer": reducer_answer_idx,
-        }
-
-        reducer_verify_response = reducer_verify_request.model_dump()
-        reducer_verify_response.update(verify_request_fields)
-        reducer_verify_response = BaseParallelReasoningVerifyResponse.model_validate(reducer_verify_response)
-
-        return reducer_verify_response
-
     async def responses(
         self,
         request: Request,
@@ -413,12 +320,7 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
         # ------ STAGE 2: REDUCER ------- #
         if self.config.use_reducer:
             self.logger.debug("[bold blue]⚡ Starting reducer stage[/bold blue]")
-            if self.config.reducer_type == "genselect":
-                reducer_responses, all_reducer_cookies = await self.get_reducer_response_genselect(
-                    body, executor_responses, all_executor_cookies
-                )
-                final_winner_response = None
-            elif self.config.reducer_type == "genselect_tournament":
+            if self.config.reducer_type == "genselect_tournament":
                 (
                     final_winner_response,
                     reducer_responses,
@@ -541,11 +443,6 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
                     reducer_response_request.model_dump() | {"response": reducer_response.model_dump()}
                 )
                 reducer_verify_requests.append(verify_request)
-            if self.config.reducer_type == "genselect":
-                reducer_verify_requests = [
-                    self.get_reducer_verify_response_genselect(request, executor_verify_responses)
-                    for request in reducer_verify_requests
-                ]
             reducer_verify_responses = await asyncio.gather(*reducer_verify_requests)
         else:
             reducer_verify_responses = []
