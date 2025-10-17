@@ -35,6 +35,8 @@ class TALESResourcesServerConfig(BaseResourcesServerConfig):
     framework: str = "alfworld"
     task_no: int = 0
     seed: int = 0
+    split: str = "train"  # "train" or "test"
+    max_episode_steps: int = 25  # If not provided, use default from config
 
 
 class TALESVerifyRequest(BaseVerifyRequest):
@@ -43,7 +45,7 @@ class TALESVerifyRequest(BaseVerifyRequest):
 
 class TALESSeedSessionResponse(BaseSeedSessionResponse):
     observation: str
-    score: int
+    score: float
     done: bool
     info: dict
     session_id: str
@@ -52,7 +54,7 @@ class TALESSeedSessionResponse(BaseSeedSessionResponse):
 
 class ExecuteCommandResponse(BaseModel):
     observation: str
-    score: int
+    score: float
     done: bool
     info: dict
     admissible_commands: list[str] | None = None
@@ -77,7 +79,11 @@ class TALESVerifyRequest(BaseVerifyRequest):
 
 
 class TALESSeedSessionRequest(BaseSeedSessionRequest):
-    pass
+    framework: str | None = None
+    task_no: int | None = None
+    split: str | None = None  # "train" or "test"
+    max_episode_steps: int | None = None  # If not provided, use default from config
+    seed: int | None = None  # If not provided, use default from config
 
 
 class TALESRequest(BaseModel):
@@ -87,7 +93,7 @@ class TALESRequest(BaseModel):
 
 class TALESResponse(BaseModel):
     observation: str
-    score: int
+    score: float
     done: bool
     info: dict
     admissible_commands: list[str] | None = None
@@ -96,7 +102,6 @@ class TALESResponse(BaseModel):
 class TALESResourcesServer(SimpleResourcesServer):
     config: TALESResourcesServerConfig
     session_id_to_env: Dict[str, Env] = Field(default_factory=dict)
-
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def setup_webserver(self) -> FastAPI:
@@ -133,9 +138,31 @@ class TALESResourcesServer(SimpleResourcesServer):
         session_id = request.session[SESSION_ID_KEY]
 
         # Lazy importing to avoid slowdown from loading all of the environments if not used
-        framework = importlib.import_module(f"tales.{self.config.framework}")
-        envs = framework.environments
-        task_no = self.config.task_no
+        # Check if framework and other start info was sent in the request body, otherwise use the defaults from config
+        if body.framework is not None:
+            framework_path = f"tales.{body.framework}"
+        else:
+            framework_path = f"tales.{self.config.framework}"
+
+        if body.task_no is not None:
+            task_no = body.task_no
+        else:
+            task_no = self.config.task_no
+
+        if body.split is not None:
+            split = body.split
+        else:
+            split = self.config.split
+
+        if body.seed is not None:
+            self.config.seed = body.seed
+
+        framework = importlib.import_module(framework_path)
+
+        if split == "train":
+            envs = framework.train_environments
+        else:
+            envs = framework.environments
 
         # Make sure the task number is within the range of available tasks. If not, return an error:
         if task_no < 0 or task_no >= len(envs):
@@ -201,6 +228,7 @@ class TALESResourcesServer(SimpleResourcesServer):
         env = self.session_id_to_env[session_id]
 
         obs, score, done, info = env.step(body.command)
+        # print(f"Command: {body.command}\nObservation: {obs}\nScore: {score}\nDone: {done}\nInfo: {info}\n")
 
         response = ExecuteCommandResponse(
             observation=obs,

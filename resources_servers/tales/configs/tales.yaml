@@ -6,6 +6,8 @@ tales:
       framework: textworld
       task_no: 0
       seed: 0
+      steps: 100
+      split: train
 tales_multi_turn_agent:
   responses_api_agents:
     multi_turn_agent:

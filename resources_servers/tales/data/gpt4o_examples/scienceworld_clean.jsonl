@@ -1,0 +1,52 @@
+{"role": "developer", "content": "You are playing a text-based game and your goal is to finish it with the highest score. Upon reading the text observation, provide a *single* short phrase to interact with the game, e.g. `get lamp` (without the backticks). When stuck, try using the `help` command to see what commands are available."}
+{"role": "user", "content": "Task Description:\nYour task is to boil lead. For compounds without a boiling point, combusting the substance is also acceptable. First, focus on the substance. Then, take actions that will cause it to change its state of matter.\n\nThis room is called the bathroom. In it, you see: \n\tthe agent\n\ta substance called air\n\ta bathtub, which is turned off. In the bathtub is: nothing.\n\ta glass cup (containing nothing)\n\ta picture\n\ta sink, which is turned off. In the sink is: nothing.\n\ta toilet. In the toilet is: A drain, which is open, a substance called water.\nYou also see:\n\tA door to the kitchen (that is closed)"}
+{"role": "assistant", "content": "open door", "reward": 0}
+{"role": "user", "content": "The door is now open."}
+{"role": "assistant", "content": "go kitchen", "reward": 0}
+{"role": "user", "content": "You move to the kitchen."}
+{"role": "assistant", "content": "look", "reward": 0}
+{"role": "user", "content": "This room is called the kitchen. In it, you see: \n\tthe agent\n\ta substance called air\n\ta chair. On the chair is: nothing.\n\ta counter. On the counter is: a bowl (containing a red apple, a banana, an orange, a potato), a drawer.\n\ta cupboard. The cupboard door is closed. \n\ta freezer. The freezer door is closed. \n\ta fridge. The fridge door is closed. \n\ta glass jar (containing a substance called sodium chloride)\n\ta lighter\n\ta oven, which is turned off. The oven door is closed. \n\ta painting\n\ta sink, which is turned off. In the sink is: nothing.\n\ta substance called soap\n\ta stopwatch, which is deactivated. \n\ta stove, which is turned off. On the stove is: nothing.\n\ta table. On the table is: a glass cup (containing nothing).\n\ta thermometer, currently reading a temperature of 10 degrees celsius\nYou also see:\n\tA door to the bathroom (that is open)\n\tA door to the hallway (that is closed)\n\tA door to the outside (that is closed)"}
+{"role": "assistant", "content": "open cupboard", "reward": 0}
+{"role": "user", "content": "The cupboard is now open."}
+{"role": "assistant", "content": "look in cupboard", "reward": 0}
+{"role": "user", "content": "Inside the cupboard is: \n\ta ceramic cup (containing nothing)\n\ta drawer\n\ta metal pot (containing nothing)\n\ta tin cup (containing nothing)"}
+{"role": "assistant", "content": "look in drawer", "reward": 0}
+{"role": "user", "content": "Ambiguous request: Please enter the number for the action you intended (or blank to cancel):\n0:\tlook in drawer (in cupboard, in kitchen)\n1:\tlook in drawer (in counter, in kitchen)\n"}
+{"role": "assistant", "content": "0", "reward": 0}
+{"role": "user", "content": "The drawer isn't open, so you can't see inside."}
+{"role": "assistant", "content": "open drawer (in cupboard, in kitchen)", "reward": 0}
+{"role": "user", "content": "No known action matches that input."}
+{"role": "assistant", "content": "open drawer (in counter, in kitchen)", "reward": 0}
+{"role": "user", "content": "No known action matches that input."}
+{"role": "assistant", "content": "take metal pot", "reward": 0}
+{"role": "user", "content": "You move the metal pot to the inventory."}
+{"role": "assistant", "content": "look in fridge", "reward": 0}
+{"role": "user", "content": "The fridge isn't open, so you can't see inside."}
+{"role": "assistant", "content": "open fridge", "reward": 0}
+{"role": "user", "content": "The fridge is now open."}
+{"role": "assistant", "content": "look in fridge", "reward": 0}
+{"role": "user", "content": "Inside the fridge is: \n\ta wood cup (containing orange juice)"}
+{"role": "assistant", "content": "take wood cup", "reward": 0}
+{"role": "user", "content": "You move the wood cup to the inventory."}
+{"role": "assistant", "content": "look in freezer", "reward": 0}
+{"role": "user", "content": "The freezer isn't open, so you can't see inside."}
+{"role": "assistant", "content": "open freezer", "reward": 0}
+{"role": "user", "content": "The freezer is now open."}
+{"role": "assistant", "content": "look in freezer", "reward": 0}
+{"role": "user", "content": "Inside the freezer is: \n\tnothing"}
+{"role": "assistant", "content": "look in oven", "reward": 0}
+{"role": "user", "content": "The oven isn't open, so you can't see inside."}
+{"role": "assistant", "content": "open oven", "reward": 0}
+{"role": "user", "content": "The oven is now open."}
+{"role": "assistant", "content": "look in oven", "reward": 0}
+{"role": "user", "content": "Inside the oven is: \n\tnothing"}
+{"role": "assistant", "content": "look in drawer (in cupboard, in kitchen)", "reward": 0}
+{"role": "user", "content": "No known action matches that input."}
+{"role": "assistant", "content": "open drawer (in cupboard)", "reward": 0}
+{"role": "user", "content": "No known action matches that input."}
+{"role": "assistant", "content": "open drawer (in counter)", "reward": 0}
+{"role": "user", "content": "No known action matches that input."}
+{"role": "assistant", "content": "take lighter", "reward": 2.0}
+{"role": "user", "content": "You move the lighter to the inventory."}
+{"role": "assistant", "content": "look in glass jar", "reward": -2.0}
+{"role": "user", "content": "The glass jar isn't open, so you can't see inside."}
