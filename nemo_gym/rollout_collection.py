@@ -79,6 +79,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
                 row["responses_create_params"] = row["responses_create_params"] | config.responses_create_params
                 async with semaphore:
                     response = await server_client.post(server_name=config.agent_name, url_path="/run", json=row)
+                    response.raise_for_status()
                     result = await response.json()
                     f.write(json.dumps(result) + "\n")
                     metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
@@ -96,6 +97,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
 
         async def _post_subroutine(row: Dict) -> Dict:
             res = await server_client.post(server_name=row.pop("agent_ref")["name"], url_path="/run", json=row)
+            res.raise_for_status()
             return await res.json()
 
         return await tqdm.gather(*map(_post_subroutine, examples), desc="Collecting rollouts", miniters=10)

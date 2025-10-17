@@ -1,0 +1,11 @@
+policy_model:
+  responses_api_models:
+    azure_openai_model:
+      entrypoint: app.py
+      openai_base_url: ${policy_base_url}
+      openai_api_key: ${policy_api_key}
+      openai_model: ${policy_model_name}
+       # for azure openai only
+      default_query:
+        api-version: ???
+      num_concurrent_requests: 8

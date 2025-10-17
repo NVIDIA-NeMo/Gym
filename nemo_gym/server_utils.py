@@ -147,9 +147,11 @@ Sleeping 0.5s and retrying...
             await asyncio.sleep(0.5)
 
 
-def raise_for_status(response: ClientResponse) -> None:  # pragma: no cover
+async def raise_for_status(response: ClientResponse) -> None:  # pragma: no cover
     if not response.ok:
-        print(response.content)
+        content = await response.content.read()
+        print(f"""Request info: {response.request_info}
+Response content: {content}""")
         response.raise_for_status()
 
 
