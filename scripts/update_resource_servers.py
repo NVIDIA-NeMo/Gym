@@ -82,7 +82,7 @@ def extract_config_metadata(yaml_path: Path) -> tuple[str, str, list[str]]:  # p
     return domain, license, types
 
 
-def generate_table() -> str:
+def generate_table() -> str:  # pragma: no cover
     """
     Outputs a grid with table data. Raw html <a> tags are used for the links instead of markdown
     to avoid cross-reference warnings in the 'build-docs' CI/CD run (15+ warnings == fail)
@@ -122,7 +122,7 @@ def generate_table() -> str:
             else:
                 rows.append(["?", server_name, path_link, "?", "?"])
 
-    def normalize_str(s: str) -> str:
+    def normalize_str(s: str) -> str:  # pragma: no cover
         """
         Rows with identical domain values may get reordered differently
         between local and CI runs. We normalize text and

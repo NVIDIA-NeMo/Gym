@@ -64,7 +64,8 @@ def upload_jsonl_dataset(
     domain = d.title() if (d := get_dataset_domain(data)) else None
     resource_server = config.resource_config_path.split("/")[1]
     dataset_name = config.dataset_name
-    repo_id = f"{config.hf_organization}/{config.hf_collection_name}-{domain}-{resource_server}-{dataset_name}"
+    prefix = config.hf_dataset_prefix + "-" if config.hf_dataset_prefix else ""
+    repo_id = f"{config.hf_organization}/{prefix}{domain}-{resource_server}-{dataset_name}"
     collection_id = f"{config.hf_organization}/{config.hf_collection_name}-{config.hf_collection_slug}"
 
     # Dataset format check
@@ -72,17 +73,13 @@ def upload_jsonl_dataset(
         print("[Nemo-Gym] - JSONL file format check failed.")
         return
 
-    # Repo id/creation
+    # Repo creation
     try:
-        client.repo_info(repo_id=repo_id, repo_type="dataset", token=config.hf_token)
-        print(f"[Nemo-Gym] - Repo '{repo_id}' already exists")
+        client.create_repo(repo_id=repo_id, token=config.hf_token, repo_type="dataset", private=True, exist_ok=True)
+        print(f"[Nemo-Gym] - Repo '{repo_id}' is ready for use")
     except HfHubHTTPError as e:
-        if e.response is not None and e.response.status_code == 404:
-            client.create_repo(repo_id=repo_id, token=config.hf_token, repo_type="dataset", private=True)
-            print(f"[Nemo-Gym] - Repo '{repo_id}' created successfully")
-        else:
-            print(f"[Nemo-Gym] - Error checking/creating repo: {e}")
-            raise
+        print(f"[Nemo-Gym] - Error creating repo: {e}")
+        raise
 
     # Collection id + addition
     try:

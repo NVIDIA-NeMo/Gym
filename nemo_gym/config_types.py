@@ -91,6 +91,7 @@ class BaseUploadJsonlDatasetHuggingFaceConfig(BaseModel):
     dataset_name: str
     input_jsonl_fpath: str
     resource_config_path: str
+    hf_dataset_prefix: str = "NeMo-Gym"
 
 
 class UploadJsonlDatasetHuggingFaceConfig(BaseUploadJsonlDatasetHuggingFaceConfig):

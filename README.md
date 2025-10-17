@@ -577,20 +577,27 @@ ng_download_dataset_from_gitlab \
 
 
 # How To: Upload and download a dataset from HuggingFace
-The huggingface client requires that your credentials are in `env.yaml`, along with some other pertinent details needed to upload to the designated place.
+The huggingface client requires that your credentials are in `env.yaml`, along with some other pertinent details needed to upload to the designated place. 
 ```yaml
 hf_token: {your huggingface token}
 hf_organization: {your huggingface org}
 hf_collection_name: {your collection}
 hf_collection_slug: {your collection slug}  # alphanumeric string found at the end of a collection URI
+
+# optional:
+hf_dataset_prefix: str  # field to override the default value "NeMo-Gym" prepended to the dataset name
 ```
 
-Naming convention for Huggingface datasets is as follows:
-`{hf_organization}/{hf_collection_name}-{domain}–{resource_server_name}-{your dataset name}`
+Naming convention for Huggingface datasets is as follows.
 
-E.g.: `Nvidia/Nemo-Gym-Math-library_judge_math-dapo17k`
+`{hf_organization}/{hf_dataset_prefix}-{domain}–{resource_server_name}-{your dataset name}`
 
-You will only need to manually input the `{your dataset name}` portion of the above when inputting the `dataset_name` flag. Everything preceding it will be automatically populated prior to upload.
+E.g.:
+
+`Nvidia/Nemo-Gym-Math-library_judge_math-dapo17k`
+
+
+You will only need to manually input the `{your dataset name}` portion of the above when inputting the `dataset_name` flag in the upload command (see below). Everything preceding it will be automatically populated using your config prior to upload.
 
 To upload to Huggingface, use the below command:
 ```bash
