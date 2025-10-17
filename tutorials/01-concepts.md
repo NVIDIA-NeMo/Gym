@@ -24,7 +24,7 @@ The LLM that performs text inference - stateless, single-call text generation wi
 
 ## 2. Resources
 
-Servers that provide tools for agents to use and verifiers that score agent performance on tasks. NeMo Gym contains a variety of NVIDIA and community contributed resources that you may wish you to utilize. We also have tutorials on how to add your own Resource server.
+Servers that provide tools for agents to use and verifiers that score agent performance on tasks. NeMo Gym contains a variety of NVIDIA and community contributed resources that you may wish to utilize. We also have tutorials on how to add your own Resource server.
 
 **Resources Provide**
 - **Tools**: Functions agents can call (e.g., `get_weather`, `search_web`)
