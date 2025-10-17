@@ -30,7 +30,7 @@ class TranslationBleuResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class TranslationBleuRequest(BaseRunRequest):
-    trg_text: str
+    trg_txt: str
     trg_lang: str
 
 
@@ -39,7 +39,7 @@ class TranslationBleuVerifyRequest(TranslationBleuRequest, BaseVerifyRequest):
 
 
 class TranslationBleuVerifyResponse(BaseVerifyResponse):
-    trg_text: str
+    trg_txt: str
     trg_lang: str
     extracted_answer: str
 
@@ -82,7 +82,7 @@ class TranslationBleuResourcesServer(SimpleResourcesServer):
         combined_response = "".join(assistant_responses)
 
         (reward, extracted_answer) = self._verify_answer(
-            ground_truth=body.trg_text, target_lang=body.trg_lang, model_response=combined_response
+            ground_truth=body.trg_txt, target_lang=body.trg_lang, model_response=combined_response
         )
 
         return TranslationBleuVerifyResponse(**body.model_dump(), extracted_answer=extracted_answer, reward=reward)
