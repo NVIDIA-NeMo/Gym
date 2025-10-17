@@ -2,8 +2,8 @@
 
 NeMo Gym enables scalable data collection for reinforcement learning of AI agents. It provides both the infrastructure to systematically capture agent interactions and a collection of high-quality RL environments, making it easy to generate training data for reinforcement learning workflows using the framework of your choice.
 
-> [!CAUTION]
-> NeMo Gym is currently in early development. While we use it internally for training Nemotron models, you should expect evolving APIs, incomplete documentation, and occasional bugs. We welcome contributions and feedback! For any changes, please open an issue first to coordinate with the team and ensure alignment with product direction.
+> [!IMPORTANT]
+> NeMo Gym is currently in early development. While NVIDIA is using it for training Nemotron models, you should expect evolving APIs, incomplete documentation, and occasional bugs. We welcome contributions and feedback! For any changes, please open an issue first to coordinate with the team and ensure alignment with product direction.
 
 
 ## 🏆 Why NeMo Gym?
