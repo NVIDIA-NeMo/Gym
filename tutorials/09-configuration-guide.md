@@ -299,5 +299,3 @@ NeMo Gym's configuration system provides:
 - **Validation** - helpful error messages when something's wrong
 
 This configuration mastery enables you to handle complex deployment scenarios, multi-environment setups, and rapid experimentation.
-
-→ **[Next: Data Generation for SFT/DPO](11-data-generation.md)**
