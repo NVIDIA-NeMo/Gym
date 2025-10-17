@@ -24,16 +24,19 @@ task = server_client.post(
     server_name="parallel_reasoning_simple_agent",
     url_path="/run",
     json=ParallelReasoningRunRequest(
-        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(    
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
             input=[
-                {"role": "user", "content": "In triangle $ABC$, $\\sin \\angle A = \\frac{4}{5}$ and $\\angle A < 90^\\circ$. Let $D$ be a point outside triangle $ABC$ such that $\\angle BAD = \\angle DAC$ and $\\angle BDC = 90^\\circ$. Suppose that $AD = 1$ and that $\\frac{BD}{CD} = \\frac{3}{2}$. If $AB + AC$ can be expressed in the form $\\frac{a\\sqrt{b}}{c}$ where $a, b, c$ are pairwise relatively prime integers, find $a + b + c$."},
+                {
+                    "role": "user",
+                    "content": "In triangle $ABC$, $\\sin \\angle A = \\frac{4}{5}$ and $\\angle A < 90^\\circ$. Let $D$ be a point outside triangle $ABC$ such that $\\angle BAD = \\angle DAC$ and $\\angle BDC = 90^\\circ$. Suppose that $AD = 1$ and that $\\frac{BD}{CD} = \\frac{3}{2}$. If $AB + AC$ can be expressed in the form $\\frac{a\\sqrt{b}}{c}$ where $a, b, c$ are pairwise relatively prime integers, find $a + b + c$.",
+                },
             ]
         ),
         question="In triangle $ABC$, $\\sin \\angle A = \\frac{4}{5}$ and $\\angle A < 90^\\circ$. Let $D$ be a point outside triangle $ABC$ such that $\\angle BAD = \\angle DAC$ and $\\angle BDC = 90^\\circ$. Suppose that $AD = 1$ and that $\\frac{BD}{CD} = \\frac{3}{2}$. If $AB + AC$ can be expressed in the form $\\frac{a\\sqrt{b}}{c}$ where $a, b, c$ are pairwise relatively prime integers, find $a + b + c$.",
         expected_answer="34",
     ),
     # json=ParallelReasoningRunRequest(
-    #     responses_create_params=NeMoGymResponseCreateParamsNonStreaming(    
+    #     responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
     #         input=[
     #             {"role": "user", "content": "What is 2 + 2 * 8 * 9 * 10 / 4 / 3 + 100?"},
     #         ]
@@ -46,5 +49,5 @@ result = run(task)
 print(result)
 with open("parallel_reasoning_simple_agent_responses.json", "w") as f:
     f.write(json.dumps(result.json(), indent=4))
-    
+
 print(json.dumps(result.json(), indent=4))
