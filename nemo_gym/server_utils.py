@@ -27,11 +27,10 @@ from traceback import print_exc
 from typing import Literal, Optional, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
+import ray
 import requests
 import uvicorn
 import yappi
-import ray
-
 from aiohttp import ClientResponse, ClientSession, ClientTimeout, DummyCookieJar, ServerDisconnectedError, TCPConnector
 from aiohttp.client import _RequestOptions
 from fastapi import FastAPI, Request, Response
