@@ -30,6 +30,8 @@ from uuid import uuid4
 import requests
 import uvicorn
 import yappi
+import ray
+
 from aiohttp import ClientResponse, ClientSession, ClientTimeout, DummyCookieJar, ServerDisconnectedError, TCPConnector
 from aiohttp.client import _RequestOptions
 from fastapi import FastAPI, Request, Response
@@ -309,6 +311,33 @@ class UvicornLoggingConfig(BaseModel):
     uvicorn_logging_show_200_ok: bool = False
 
 
+def initialize_ray() -> None:
+    if ray.is_initialized():
+        print("[Gym Server] Ray already initialized")
+        return
+
+    try:
+        print("[Gym Server] Auto-detecting Ray cluster...")
+        ray.init(address="auto", ignore_reinit_error=True)
+
+        # Log cluster information
+        cluster_resources = ray.cluster_resources()
+        nodes = ray.nodes()
+        alive_nodes = [node for node in nodes if node["Alive"]]
+
+        print(f"[Gym Server] Successfully connected to Ray cluster with {len(alive_nodes)} alive nodes")
+        print(f"[Gym Server] Cluster resources: {cluster_resources}")
+
+        for node in alive_nodes:
+            node_ip = node.get("NodeManagerAddress", "unknown")
+            node_id = node.get("NodeID", "unknown")
+            print(f"[Gym Server] Available Ray node: {node_ip} (ID: {node_id})")
+
+    except Exception as e:
+        print(f"[Gym Server] No Ray cluster detected: {e}")
+        print("[Gym Server] Resource servers will use local processing")
+
+
 class SimpleServer(BaseServer):
     server_client: ServerClient
 
@@ -433,6 +462,8 @@ class SimpleServer(BaseServer):
     @classmethod
     def run_webserver(cls) -> None:  # pragma: no cover
         global_config_dict = get_global_config_dict()
+
+        initialize_ray()
 
         server_config = cls.load_config_from_global_config()
         server_client = ServerClient(

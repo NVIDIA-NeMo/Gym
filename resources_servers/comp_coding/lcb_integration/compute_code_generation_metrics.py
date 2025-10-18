@@ -16,19 +16,14 @@
 # borrowed and extended from
 # https://github.com/Naman-ntc/codescratch/blob/main/evaluation/bigcode-evaluation-harness/lm_eval/tasks/custom_metrics/apps_custom_metrics/utils.py
 
-import os
-import sys
-
-
-sys.set_int_max_str_digits(50000)
-
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import json
 import multiprocessing
+import socket
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
+import ray
 from tqdm import tqdm
 
 from lcb_integration.pass_k_utils import compute_metrics_from_results
@@ -39,6 +34,13 @@ def _temp_run(sample, generation, debug, result, metadata_list, timeout):
     res, metadata = run_test(sample, test=generation, debug=debug, timeout=timeout)
     result.append(res)
     metadata_list.append(metadata)
+
+
+@ray.remote(scheduling_strategy="SPREAD")
+def check_correctness_remote(sample, generation, timeout, debug=True):
+    """Ray remote version of check_correctness for distributed processing."""
+    print(f"[Ray Remote] Running unit tests on host: {socket.gethostbyname(socket.gethostname())}", flush=True)
+    return check_correctness(sample, generation, timeout, debug)
 
 
 def check_correctness(sample, generation, timeout, debug=True):
