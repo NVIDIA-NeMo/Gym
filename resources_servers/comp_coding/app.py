@@ -126,30 +126,19 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             # We can directly measure here since we are inside the semaphore.
             start_time = time()
 
-            # Use Ray remote if available, otherwise use local check_correctness
+            task_args = (
+                {"input_output": tests.model_dump_json()},  # sample
+                code,  # generation
+                self.config.unit_test_timeout_secs,  # timeout
+                self.config.debug,  # debug
+            )
+
+            # Use Ray remote if available, otherwise fallback to local multiprocessing.
             if ray.is_initialized():
-                # Submit Ray remote task directly
-                future = check_correctness_remote.remote(
-                    {"input_output": tests.model_dump_json()},  # sample
-                    code,  # generation
-                    self.config.unit_test_timeout_secs,  # timeout
-                    self.config.debug,  # debug
-                )
+                future = check_correctness_remote.remote(*task_args)
                 result, metadata = await loop.run_in_executor(None, ray.get, future)
-                if self.config.debug:
-                    print("[Penguin Server] Code verification completed via Ray cluster")
             else:
-                # Fallback to local processing
-                result, metadata = await loop.run_in_executor(
-                    None,
-                    check_correctness,
-                    {"input_output": tests.model_dump_json()},  # sample
-                    code,  # generation
-                    self.config.unit_test_timeout_secs,  # timeout
-                    self.config.debug,  # debug
-                )
-                if self.config.debug:
-                    print("[Penguin Server] Code verification completed via local processing")
+                result, metadata = await loop.run_in_executor(None, check_correctness, *task_args)
 
             unit_tests_time_taken = time() - start_time
 
