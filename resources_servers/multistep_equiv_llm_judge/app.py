@@ -449,11 +449,7 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
             generated_answer=model_distilled_answer,
             model_responses_create_params_dict=model_responses_create_params_dict,
             model_response_dict=model_response_dict,
-            train_step=body.rl_metadata.get("train_step", None),
-            rollout_batch_idx=body.rl_metadata.get("rollout_batch_idx", None),
-            prompt_uid=body.rl_metadata.get("prompt_uid", None),
-            prompt_idx=body.rl_metadata.get("prompt_idx", None),
-            serial_idx=body.rl_metadata.get("serial_idx", None),
+            rl_metadata=body.rl_metadata,
         )
         if False:
         # if not first_equal:
@@ -480,11 +476,7 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
             generated_answer=expected_distilled_answer,
             model_responses_create_params_dict=model_responses_create_params_dict,
             model_response_dict=model_response_dict,
-            train_step=body.rl_metadata.get("train_step", None),
-            rollout_batch_idx=body.rl_metadata.get("rollout_batch_idx", None),
-            prompt_uid=body.rl_metadata.get("prompt_uid", None),
-            prompt_idx=body.rl_metadata.get("prompt_idx", None),
-            serial_idx=body.rl_metadata.get("serial_idx", None),
+            rl_metadata=body.rl_metadata,
         )
         # If they are both equal, we give a reward of 1.0; otherwise use configured fallback.
         # User has to expect this on the training side to discard the data points if negative.
@@ -615,11 +607,7 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
         generated_answer: str,
         model_responses_create_params_dict: Optional[dict] = None,
         model_response_dict: Optional[dict] = None,
-        train_step: Optional[int] = None,
-        rollout_batch_idx: Optional[int] = None,
-        prompt_uid: Optional[str] = None,
-        prompt_idx: Optional[int] = None,
-        serial_idx: Optional[int] = None,
+        rl_metadata: Optional[dict] = None,
     ) -> tuple[bool, JudgeEvaluation]:
         # TODO(pjin): logging judge responses.
         global_cfg = get_global_config_dict()
@@ -749,16 +737,8 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
                         log_item["model_responses_create_params"] = model_responses_create_params_dict
                     if model_response_dict is not None:
                         log_item["model_response"] = model_response_dict
-                    if train_step is not None:
-                        log_item["train_step"] = train_step
-                    if rollout_batch_idx is not None:
-                        log_item["rollout_batch_idx"] = rollout_batch_idx
-                    if prompt_uid is not None:
-                        log_item["prompt_uid"] = prompt_uid
-                    if prompt_idx is not None:
-                        log_item["prompt_idx"] = prompt_idx
-                    if serial_idx is not None:
-                        log_item["serial_idx"] = serial_idx
+                    if rl_metadata is not None:
+                        log_item["rl_metadata"] = rl_metadata
                     print(json.dumps(log_item), file=log_file, flush=True)
                     log_file.close()
 
