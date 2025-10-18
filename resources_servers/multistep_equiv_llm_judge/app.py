@@ -445,8 +445,8 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
         # Run judge twice to mitigate positional or presentation bias by swapping orders.
         first_equal, first_eval = await self._generate_judge_evaluation(
             question=question,
-            expected_answer=expected_answer,
-            generated_answer=model_answer,
+            expected_answer=expected_distilled_answer,
+            generated_answer=model_distilled_answer,
             model_responses_create_params_dict=model_responses_create_params_dict,
             model_response_dict=model_response_dict,
             train_step=body.rl_metadata.get("train_step", None),
@@ -476,8 +476,8 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
 
         second_equal, second_eval = await self._generate_judge_evaluation(
             question=question,
-            expected_answer=model_answer,
-            generated_answer=expected_answer,
+            expected_answer=model_distilled_answer,
+            generated_answer=expected_distilled_answer,
             model_responses_create_params_dict=model_responses_create_params_dict,
             model_response_dict=model_response_dict,
             train_step=body.rl_metadata.get("train_step", None),
