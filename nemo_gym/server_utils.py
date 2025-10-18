@@ -313,11 +313,11 @@ class UvicornLoggingConfig(BaseModel):
 
 def initialize_ray() -> None:
     if ray.is_initialized():
-        print("[Gym Server] Ray already initialized")
+        print("Ray already initialized")
         return
 
     try:
-        print("[Gym Server] Auto-detecting Ray cluster...")
+        print("Auto-detecting Ray cluster...")
         ray.init(address="auto", ignore_reinit_error=True)
 
         # Log cluster information
@@ -325,17 +325,17 @@ def initialize_ray() -> None:
         nodes = ray.nodes()
         alive_nodes = [node for node in nodes if node["Alive"]]
 
-        print(f"[Gym Server] Successfully connected to Ray cluster with {len(alive_nodes)} alive nodes")
-        print(f"[Gym Server] Cluster resources: {cluster_resources}")
+        print(f"Successfully connected to Ray cluster with {len(alive_nodes)} alive nodes")
+        print(f"Cluster resources: {cluster_resources}")
 
         for node in alive_nodes:
             node_ip = node.get("NodeManagerAddress", "unknown")
             node_id = node.get("NodeID", "unknown")
-            print(f"[Gym Server] Available Ray node: {node_ip} (ID: {node_id})")
+            print(f"Available Ray node: {node_ip} (ID: {node_id})")
 
     except Exception as e:
-        print(f"[Gym Server] No Ray cluster detected: {e}")
-        print("[Gym Server] Resource servers will use local processing")
+        print(f"No Ray cluster detected: {e}")
+        print("Resource servers will use local processing")
 
 
 class SimpleServer(BaseServer):

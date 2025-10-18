@@ -44,8 +44,8 @@ def _temp_run(sample, generation, debug, result, metadata_list, timeout):
 
 @ray.remote(scheduling_strategy="SPREAD")
 def check_correctness_remote(sample, generation, timeout, debug=True):
-    """Ray remote version of check_correctness for distributed processing."""
-    print(f"[Ray Remote] Running unit tests on host: {socket.gethostbyname(socket.gethostname())}", flush=True)
+    """Ray wrapper of check_correctness for remote execution."""
+    print(f"Running unit tests on host: {socket.gethostbyname(socket.gethostname())}", flush=True)
     return check_correctness(sample, generation, timeout, debug)
 
 
