@@ -18,7 +18,9 @@
 
 import json
 import multiprocessing
+import os
 import socket
+import sys
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
@@ -28,6 +30,10 @@ from tqdm import tqdm
 
 from lcb_integration.pass_k_utils import compute_metrics_from_results
 from lcb_integration.testing_util import run_test
+
+
+sys.set_int_max_str_digits(50000)
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 def _temp_run(sample, generation, debug, result, metadata_list, timeout):
