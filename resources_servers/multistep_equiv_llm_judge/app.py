@@ -101,6 +101,14 @@ class MultistepEquivLLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     # reward_if_swap_fails: float = 0.0
 
 
+class RLMetadata(BaseModel):
+    train_step: Optional[int] = None
+    rollout_batch_idx: Optional[int] = None
+    prompt_uid: Optional[str] = None
+    prompt_idx: Optional[int] = None
+    serial_idx: Optional[int] = None
+
+
 class MultistepEquivLLMJudgeRunRequest(BaseRunRequest):
     """Run/verify request payload.
 
@@ -112,12 +120,8 @@ class MultistepEquivLLMJudgeRunRequest(BaseRunRequest):
     expected_answer: Optional[str] = None
     options: Optional[list[dict[str, str]]] = None
     metadata: Optional[dict[str, Any]] = None
-
-    prompt_uid: Optional[str] = None
-    prompt_idx: Optional[int] = None
-    serial_idx: Optional[int] = None
-    train_step: Optional[int] = None
-    train_batch_idx: Optional[int] = None
+    rl_metadata: Optional[dict[str, Any]] = None
+    # rl_metadata: RLMetadata = Field(default_factory=RLMetadata)
 
 
 class MultistepEquivLLMJudgeVerifyRequest(MultistepEquivLLMJudgeRunRequest, BaseVerifyRequest):
@@ -386,6 +390,7 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
         expected_answer = _extract_expected_answer(body) or ""
         # expected_answer = _get_expected_answer_text(body)
 
+        print(f"DEBUG: MultistepEquivLLMJudgeResourcesServer.verify: question        = {repr(question)}", flush=True)
         print(f"DEBUG: MultistepEquivLLMJudgeResourcesServer.verify: expected answer = {repr(expected_answer)}", flush=True)
 
         if not model_raw_response:
@@ -444,11 +449,11 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
             generated_answer=model_answer,
             model_responses_create_params_dict=model_responses_create_params_dict,
             model_response_dict=model_response_dict,
-            prompt_uid=body.prompt_uid,
-            prompt_idx=body.prompt_idx,
-            serial_idx=body.serial_idx,
-            train_step=body.train_step,
-            train_batch_idx=body.train_batch_idx,
+            train_step=body.rl_metadata.get("train_step", None),
+            rollout_batch_idx=body.rl_metadata.get("rollout_batch_idx", None),
+            prompt_uid=body.rl_metadata.get("prompt_uid", None),
+            prompt_idx=body.rl_metadata.get("prompt_idx", None),
+            serial_idx=body.rl_metadata.get("serial_idx", None),
         )
         if False:
         # if not first_equal:
@@ -475,11 +480,11 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
             generated_answer=expected_answer,
             model_responses_create_params_dict=model_responses_create_params_dict,
             model_response_dict=model_response_dict,
-            prompt_uid=body.prompt_uid,
-            prompt_idx=body.prompt_idx,
-            serial_idx=body.serial_idx,
-            train_step=body.train_step,
-            train_batch_idx=body.train_batch_idx,
+            train_step=body.rl_metadata.get("train_step", None),
+            rollout_batch_idx=body.rl_metadata.get("rollout_batch_idx", None),
+            prompt_uid=body.rl_metadata.get("prompt_uid", None),
+            prompt_idx=body.rl_metadata.get("prompt_idx", None),
+            serial_idx=body.rl_metadata.get("serial_idx", None),
         )
         # If they are both equal, we give a reward of 1.0; otherwise use configured fallback.
         # User has to expect this on the training side to discard the data points if negative.
@@ -610,11 +615,11 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
         generated_answer: str,
         model_responses_create_params_dict: Optional[dict] = None,
         model_response_dict: Optional[dict] = None,
+        train_step: Optional[int] = None,
+        rollout_batch_idx: Optional[int] = None,
         prompt_uid: Optional[str] = None,
         prompt_idx: Optional[int] = None,
         serial_idx: Optional[int] = None,
-        train_step: Optional[int] = None,
-        train_batch_idx: Optional[int] = None,
     ) -> tuple[bool, JudgeEvaluation]:
         # TODO(pjin): logging judge responses.
         global_cfg = get_global_config_dict()
@@ -744,16 +749,16 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
                         log_item["model_responses_create_params"] = model_responses_create_params_dict
                     if model_response_dict is not None:
                         log_item["model_response"] = model_response_dict
+                    if train_step is not None:
+                        log_item["train_step"] = train_step
+                    if rollout_batch_idx is not None:
+                        log_item["rollout_batch_idx"] = rollout_batch_idx
                     if prompt_uid is not None:
                         log_item["prompt_uid"] = prompt_uid
                     if prompt_idx is not None:
                         log_item["prompt_idx"] = prompt_idx
                     if serial_idx is not None:
                         log_item["serial_idx"] = serial_idx
-                    if train_step is not None:
-                        log_item["train_step"] = train_step
-                    if train_batch_idx is not None:
-                        log_item["train_batch_idx"] = train_batch_idx
                     print(json.dumps(log_item), file=log_file, flush=True)
                     log_file.close()
 
