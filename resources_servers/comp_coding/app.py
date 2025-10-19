@@ -133,12 +133,8 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 self.config.debug,  # debug
             )
 
-            # Use Ray remote if available, otherwise fallback to local multiprocessing.
-            if ray.is_initialized():
-                future = check_correctness_remote.remote(*task_args)
-                result, metadata = await loop.run_in_executor(None, ray.get, future)
-            else:
-                result, metadata = await loop.run_in_executor(None, check_correctness, *task_args)
+            future = check_correctness_remote.remote(*task_args)
+            result, metadata = await loop.run_in_executor(None, ray.get, future)
 
             unit_tests_time_taken = time() - start_time
 

@@ -140,7 +140,7 @@ dependencies = [
     # Ray: Used for distributed processing
     # Updated Fri Oct 18, 2025 with ray[default]==2.46.0
     # License: Apache 2.0 https://github.com/ray-project/ray/blob/master/LICENSE
-    "ray[default]==2.46.0",
+    "ray[default]",
 ]
 
 [dependency-groups]

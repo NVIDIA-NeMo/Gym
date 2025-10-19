@@ -315,11 +315,17 @@ def initialize_ray() -> None:
         print("Ray already initialized")
         return
 
-    try:
-        print("Auto-detecting Ray cluster...")
-        ray.init(address="auto", ignore_reinit_error=True)
+    global_config_dict = get_global_config_dict()
+    ray_head_node_address = global_config_dict.get("ray_head_node_address")
 
-        # Log cluster information
+    try:
+        if ray_head_node_address is not None:
+            print(f"Connecting to Ray cluster at specified address: {ray_head_node_address}")
+            ray.init(address=ray_head_node_address, ignore_reinit_error=True)
+        else:
+            print("Auto-detecting Ray cluster...")
+            ray.init(address="auto", ignore_reinit_error=True)
+
         cluster_resources = ray.cluster_resources()
         nodes = ray.nodes()
         alive_nodes = [node for node in nodes if node["Alive"]]
