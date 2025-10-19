@@ -557,7 +557,8 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
                     {
                         # "type": "message",
                         "role": "assistant",
-                        "content": f"<answer>\n{raw_response}\n></answer>",
+                        # "content": f"<answer>\n{raw_response}\n></answer>",
+                        "content": "",
                     }
                 ],
             })
@@ -613,7 +614,8 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
                     {
                         # "type": "message",
                         "role": "assistant",
-                        "content": f"<distilled_answer>\n{answer}\n></distilled_answer>",
+                        # "content": f"<distilled_answer>\n{answer}\n></distilled_answer>",
+                        "content": "",
                     }
                 ],
             })
@@ -731,13 +733,25 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
         msgs.append(NeMoGymEasyInputMessage(role="user", content=user_prompt))
         responses_create_params.input = msgs
 
-        async with self._judge_endpoint_max_concurrency:
-            response = await self.server_client.post(
-                server_name=cfg.judge_model_server.name,
-                url_path="/v1/responses",
-                json=responses_create_params,
-            )
-        judge_response = NeMoGymResponse.model_validate(await response.json())
+        try:
+            async with self._judge_endpoint_max_concurrency:
+                response = await self.server_client.post(
+                    server_name=cfg.judge_model_server.name,
+                    url_path="/v1/responses",
+                    json=responses_create_params,
+                )
+            judge_response = NeMoGymResponse.model_validate(await response.json())
+        except Exception as e:
+            print(f"DEBUG: MultistepEquivLLMJudgeResourcesServer._generate_judge_evaluation: dummy response b/c of POST exception: {type(e).__name__} {e}", flush=True)
+            judge_response = NeMoGymResponse.model_validate({
+                "output": [
+                    {
+                        # "type": "message",
+                        "role": "assistant",
+                        "content": "",
+                    }
+                ],
+            })
         eval_record = JudgeEvaluation(
             responses_create_params=responses_create_params,
             response=judge_response,
