@@ -38,7 +38,7 @@ async def run_single_turn_loop(
     frameworks=["textworld", "textworld_express", "alfworld", "scienceworld"],
     split="test",
     max_steps=25,
-    output_file="resources_servers/tales/data/single_turn_rollouts/qwen3_30B_A3B",
+    output_file="resources_servers/tales/data/single_turn_rollouts/qwen3_235B_A22B_instruct",
 ):
     examples = []
     for framework in frameworks:
@@ -96,7 +96,7 @@ async def run_single_turn_loop(
 
             past_acts = []
             # We condense the past action and history to a single input:
-            current_history = "/no_think The following are the past observations and actions:\n"
+            current_history = "The following are the past observations and actions:\n"
             for obs, act, score in walkthrough_history:
                 # When there is a reward, we feed the LLM the history and see if it will predict the action correctly:
                 if score != 0 and len(past_acts) < 50:
