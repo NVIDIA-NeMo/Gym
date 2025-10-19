@@ -94,7 +94,6 @@ def generate_table() -> str:
     for subdir in TARGET_FOLDER.iterdir():
         if subdir.is_dir():
             path = f"{TARGET_FOLDER.name}/{subdir.name}"
-            path_link = f"<a href='{path}'>{path}</a>"
             server_name = subdir.name.replace("_", " ").title()
 
             configs_folder = subdir / "configs"
@@ -116,12 +115,6 @@ def generate_table() -> str:
                                     ", ".join([u.title() for u in usages]),
                                 ]
                             )
-                        else:
-                            rows.append(["?", server_name, config_path_link, "?", "?"])
-                else:
-                    rows.append(["?", server_name, path_link, "?", "?"])
-            else:
-                rows.append(["?", server_name, path_link, "?", "?"])
 
     def normalize_str(s: str) -> str:
         """

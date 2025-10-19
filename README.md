@@ -33,6 +33,9 @@
 
 
 # NeMo-Gym
+
+**Gym's docs are currently being revamped! Please check out `tutorials/README.md`**.
+
 # Setup
 Clone NeMo-Gym. It's recommended to clone via SSH if you are a developer.
 ```bash
