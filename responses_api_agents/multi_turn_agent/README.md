@@ -1,7 +1,7 @@
 # Description
 Copy of simple agent for testing multi-turn tasks.
 
-Right now, I'm completely recrea
+For now, is mainly a draft that just clones the simple_agent.
 
 # Licensing information
 Code: Apache 2.0
