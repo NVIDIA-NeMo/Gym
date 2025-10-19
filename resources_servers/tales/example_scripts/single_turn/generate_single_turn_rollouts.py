@@ -128,18 +128,18 @@ async def run_single_turn_loop(
                             .split("</action>")[0]
                             .strip()
                         )
-                        if j == 0:
-                            print("Input to LLM:")
-                            print(history_prompt)
-                            print("LLM Response:")
-                            print(raw_generation)
-                            print(f"Extracted Action: {action}")
+                        # if j == 0:
+                        #     print("Input to LLM:")
+                        #     print(history_prompt)
+                        #     print("LLM Response:")
+                        #     print(raw_generation)
+                        #     print(f"Extracted Action: {action}")
 
                         all_responses.append(action)
 
                     # Group the responses into only the unique actions
                     uniq_acts, uniq_counts = np.unique(all_responses, return_counts=True)
-                    print("All responses:", all_responses)
+                    # print("All responses:", all_responses)
                     act_reward_dict = {}
                     for u_act in uniq_acts:
                         # For each unique action, fast-forward the environment to the step and see if it results in a reward:
@@ -158,7 +158,7 @@ async def run_single_turn_loop(
                             },
                         )
                         output = await reset_task.json()
-                        print("Past acts to fast-forward:", past_acts)
+                        # print("Past acts to fast-forward:", past_acts)
                         for p_act in past_acts:
                             action_task = await server_client.post(
                                 server_name="tales",
@@ -200,7 +200,7 @@ async def run_single_turn_loop(
                     for k, u_act in enumerate(uniq_acts):
                         if u_act == act:
                             total_correct += uniq_counts[k]
-                    print(f"Action '{act}' was predicted {total_correct} out of 16 times.")
+                    # print(f"Action '{act}' was predicted {total_correct} out of 16 times.")
                     examples.append(
                         {
                             "framework": framework,

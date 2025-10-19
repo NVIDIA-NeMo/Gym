@@ -1,4 +1,6 @@
-# TALES Example Script Set Up
+# TALES Example Multi-Turn Script Set Up
+
+THIS IS A WORK-IN-PROGRESS DRAFT SECTION. PLEASE MAKE SURE TO NOTE THE LIMITATIONS BELOW WHEN REFERENCING CODE.
 
 Scripts for generating example trajectories from NeMo Integration of [TALES](https://github.com/microsoft/tale-suite).
 
@@ -8,9 +10,12 @@ This can be installed with
 sudo apt-get update && apt-get install default-jre default-jdk
 ```
 
-For the below, unless otherwise specified, we use the train split for Textworld when generating rollouts.
+## Limitations
+- TALES typically represents the observations as 'user' inputs and the actions as 'assistant' inputs. NeMo throws an error when there are 'assistant' tagged messages so in the rollouts we just use the 'developer' tag for now.
 
-*TALES typically represents the observations as 'user' inputs and the actions as 'assistant' inputs. NeMo throws an error when there are 'assistant' tagged messages so in the rollouts we just use the 'developer' tag for now.
+- We use a standard vllm server to generate the rollouts for now due to issues getting the NeMo vllm integration working.
+
+## Commands to generate examples
 
 1. Make sure VLLM is installed and follow the steps to run the simple_weather example in the main repository. 
 
@@ -18,7 +23,6 @@ For the below, unless otherwise specified, we use the train split for Textworld 
 ```bash
 vllm serve Qwen/Qwen3-30B-A3B --enable-expert-parallel --host 0.0.0.0 --port 8000
 ```
-*This is just using a standard vllm server to generate the rollouts since I'm running into issues getting the NeMo vllm integration working.
 
 3. Start the TALES Gym Server:
 ```bash
@@ -32,7 +36,7 @@ ng_run "+config_paths=[$config_paths]"
 
 4. For step 2 in the CONTRIBUTING.md, the following script generates 5 gpt-4o rollouts and dumps them in data under 'gpt_4o_rollouts'.
 ```bash
-python resources_servers/tales/example_scripts/generate_gpt_rollouts.py
+python resources_servers/tales/example_scripts/multi_turn/generate_gpt_rollouts.py
 ```
 *TALES uses 100 steps over 5 seeds for reliability. Only 25 steps are used for the trajectories here to avoid excessively long rollouts.
 
@@ -43,5 +47,5 @@ python resources_servers/tales/example_scripts/generate_gpt_rollouts.py
 
 This results in 50 (tasks) x 10 (seeds) 500 total rollouts. As previously, we cap generations at 25 steps to avoid excessively long rollouts.
 ```bash
-python resources_servers/tales/example_scripts/generate_qwen_rollouts.py
+python resources_servers/tales/example_scripts/multi_turn/generate_qwen_rollouts.py
 ```
