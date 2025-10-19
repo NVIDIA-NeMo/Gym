@@ -35,7 +35,7 @@ ng_run "+config_paths=[$config_paths]"
 python resources_servers/tales/example_scripts/single_turn/generate_single_turn_gpt_rollouts.py 
 ```
 
-5. For step 4, Reward Profiling, in the CONTRIBUTING.md, the following script generates 500+ prompt-response pairs for the specified model. As TALES is inheritently multi-turn, not every step on a correct trajectory will return a reward. We do the following to emulate the reward distribution for single-turn domains.
+5. For step 4, Reward Profiling, in the CONTRIBUTING.md, the following script generates 500+ prompt-response pairs for the specified model. As TALES is inherently multi-turn, not every step on a correct trajectory will return a reward. We do the following to emulate the reward distribution for single-turn domains.
 
 - We extract the walkthrough actions, a_0, a_1, ..., a_k, from the underlying gym environment where a_k represents the action in the walkthrough at step k. 
 - We feed these actions to the environment to obtain trajectory (obs_0, a_0, r_0), (obs_1, a_1, r_1), ..., (obs_k, a_k, r_k).
