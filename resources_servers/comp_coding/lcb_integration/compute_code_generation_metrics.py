@@ -19,7 +19,6 @@
 import json
 import multiprocessing
 import os
-import socket
 import sys
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
