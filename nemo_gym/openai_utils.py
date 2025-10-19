@@ -432,7 +432,7 @@ class NeMoGymAsyncOpenAI(BaseModel):
             tries += 1
             response = await request(**request_kwargs)
             # See https://platform.openai.com/docs/guides/error-codes/api-errors
-            if response.status in (429, 500, 503):
+            if response.status in (429, 500, 503, 504):
                 content = (await response.content.read()).decode()
                 print(
                     f"Hit a {response.status} trying to query an OpenAI endpoint (try {tries}). Sleeping 0.5s. Error message: {content}"
