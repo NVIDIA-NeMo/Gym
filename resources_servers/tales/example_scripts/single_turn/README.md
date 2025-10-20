@@ -30,7 +30,7 @@ resources_servers/tales/configs/tales.yaml"
 ng_run "+config_paths=[$config_paths]" 
 ```
 
-4. For step 2, Simple Correctness Check, in the CONTRIBUTING.md, the following script generates 5 gpt-4o rollouts and dumps them in data under `gpt4o_single_turn_examples`.
+4. For step 2, Simple Correctness Check, in the CONTRIBUTING.md, the following script generates 5 gpt-4o rollouts and dumps them in data under `gpt4o_single_turn_examples`. A example.jsonl is generated and placed directly under the data folder for the PR unit tests.
 ```bash
 python resources_servers/tales/example_scripts/single_turn/generate_single_turn_gpt_rollouts.py 
 ```
