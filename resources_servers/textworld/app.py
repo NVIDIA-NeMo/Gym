@@ -90,16 +90,27 @@ class TextworldResourcesServer(SimpleResourcesServer):
         )
 
         from pathlib import Path
-        from textworld.envs import TextWorldEnv
 
         games_dir = Path(__file__).parent / "games"
+
+        # Try direct path first
         game_path = games_dir / body.game_file
 
+        # Hacky: if game not found, search in train/val/test subdirectories TODO: Fix paths
         if not game_path.exists():
-            raise FileNotFoundError(f"Game file not found: {game_path}")
+            for split in ["train", "val", "test"]:
+                for game_type in ["coin_collector", "treasure_hunter", "simple", "cooking", "custom"]:
+                    potential_path = games_dir / split / game_type / body.game_file
+                    if potential_path.exists():
+                        game_path = potential_path
+                        break
+                if game_path.exists():
+                    break
 
-        env = TextWorldEnv(request_infos=request_infos)
-        env.load(str(game_path))
+        if not game_path.exists():
+            raise FileNotFoundError(f"Game file not found: {body.game_file} (searched in {games_dir})")
+
+        env = textworld.start(str(game_path), request_infos=request_infos)
 
         state = env.reset()
 
