@@ -49,6 +49,7 @@ class TALESSeedSessionResponse(BaseSeedSessionResponse):
     done: bool
     info: dict
     session_id: str
+    available_tasks: int
     admissible_commands: list[str] | None = None
 
 
@@ -180,11 +181,7 @@ class TALESResourcesServer(SimpleResourcesServer):
         self.session_id_to_env[session_id] = env
 
         response = TALESSeedSessionResponse(
-            observation=obs,
-            done=False,
-            score=0,
-            info=info,
-            session_id=session_id,
+            observation=obs, done=False, score=0, info=info, session_id=session_id, available_tasks=len(envs)
         )
 
         if self.config.expose_admissible_commands and "admissible_commands" in info.keys():
