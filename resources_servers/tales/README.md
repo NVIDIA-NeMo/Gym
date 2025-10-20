@@ -27,6 +27,9 @@ Walkthroughs for each environment are also provided. (See generate_single_turn_r
 
 Note, the action sequence in the walkthroughs are often not the only unique sequence of actions that can complete the task. A number of environments in TALES also use nearest-neighbour parsers. This means that, for example, the actions `take lantern`, `get lantern`, and `pick up lantern`, may all be interpreted to be declaring the same intent. For this reason, we recommend that the action is sent to the environment itself for feedback rather than attempting string-matching with the walkthrough.
 
+## CONTRIBUTING.md Notes:
+All of the .jsonl files that are in the top level of the data folder are from the single_turn examples. We place them here to pass the checks on the PR.
+
 ## Key App Functions:
 */seed_session*:
 This is largely used to initialize the environment as well as switch tasks (CookingWorld1, CookingWorld2, etc) or frameworks (Textworld, Textworld_Express, etc).

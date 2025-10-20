@@ -18,6 +18,10 @@ from pathlib import Path
 
 import tqdm
 
+from nemo_gym.openai_utils import (
+    NeMoGymEasyInputMessage,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
 from nemo_gym.server_utils import ServerClient
 
 
@@ -25,6 +29,19 @@ SYSTEM_PROMPT = (
     "You are playing a text-based game and your goal is to finish it with the highest score."
     " Upon reading the text observation, provide a *single* short phrase to interact with the game, e.g. `get lamp` (without the backticks)."
     " When stuck, try using the `help` command to see what commands are available."
+)
+
+base_response_create_params = NeMoGymResponseCreateParamsNonStreaming(
+    input=[
+        {
+            "role": "developer",
+            "content": (
+                "You are playing a text-based game and your goal is to finish it with the highest score."
+                " Upon reading the text observation, provide a *single* short phrase to interact with the game, e.g. `get lamp` (without the backticks)."
+                " When stuck, try using the `help` command to see what commands are available."
+            ),
+        },
+    ],
 )
 
 
@@ -53,9 +70,11 @@ async def run_single_turn_loop(
             session_id = output["session_id"]
             # Use tdqm to show progress bar
             done = False
+            examples = []
             prompt_response_pairs = []
             prompt_response_pairs_full_response = []
             current_history = "The following are the past observations and actions:\n"
+            old_obs = obs
             for _ in tqdm.tqdm(range(25)):
                 history_prompt = (
                     current_history + f"The current observation is:\nObservation: {obs}\nWhat is your action?\n"
@@ -84,12 +103,24 @@ async def run_single_turn_loop(
                     json={"command": action, "session_id": session_id},
                 )
                 output = await action_task.json()
-                observation = output["observation"]
+                obs = output["observation"]
                 _ = output["score"]
                 done = output["done"]
                 _ = output["info"]
 
-                current_history += f"Observation: {observation}\nAction: {action}\n"
+                current_history += f"Observation: {old_obs}\nAction: {action}\n"
+                old_obs = obs
+
+                examples.append(
+                    {
+                        "responses_create_params": {
+                            "input": [
+                                {"content": SYSTEM_PROMPT, "role": "developer"},
+                                {"content": history_prompt, "role": "user"},
+                            ]
+                        }
+                    }
+                )
 
                 if done:
                     break
@@ -102,24 +133,37 @@ async def run_single_turn_loop(
 
             # Grab 'prompts' number of prompt-response pairs from the generated rollout
             clean_message_examples = []
-            full_message_examples = []
+            selected_examples = []
             for i in range(prompts):
                 idx = i % len(prompt_response_pairs)
                 history_prompt, response_content = prompt_response_pairs[idx]
                 clean_message_examples.append({"input": history_prompt, "output": response_content})
 
-                full_messages, full_response = prompt_response_pairs_full_response[idx]
-                full_messages.append(full_response)
-                full_message_examples.append(full_messages)
+                selected_examples.append(history_prompt)
 
             # 'cleaned up' message history:
-            with open(output_file + "examples_clean.jsonl", "w") as f:
+            with open(output_file + "gpt4o_single_turn_examples/examples_clean.jsonl", "w") as f:
                 for message in clean_message_examples:
                     f.write(json.dumps(message) + "\n")
 
-            with open(output_file + "examples_full.jsonl", "w") as f:
-                for message in full_message_examples:
-                    f.write(json.dumps(message) + "\n")
+            # with open(output_file + "example.jsonl", "w") as f:
+            #     for message in selected_examples:
+            #         f.write(json.dumps(message) + "\n")
+
+            example_strs = []
+            for history_prompt in selected_examples:
+                example = base_response_create_params.model_copy(
+                    update={
+                        "input": base_response_create_params.input
+                        + [NeMoGymEasyInputMessage(role="user", content=history_prompt)]
+                    }
+                )
+                example_strs.append(
+                    json.dumps({"responses_create_params": example.model_dump(exclude_unset=True)}) + "\n"
+                )
+
+            with open("resources_servers/tales/data/example.jsonl", "w") as f:
+                f.writelines(example_strs)
 
             print(f"Saved {prompts} examples to {output_file}")
 
@@ -133,6 +177,6 @@ if __name__ == "__main__":
             max_steps=25,
             seed=0,
             prompts=5,
-            output_file="resources_servers/tales/data/gpt4o_single_turn_examples/",
+            output_file="resources_servers/tales/data/",
         )
     )
