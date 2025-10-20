@@ -17,7 +17,7 @@ from time import time
 from typing import Any, Dict, List, Optional, Union
 
 import ray
-from lcb_integration.compute_code_generation_metrics import check_correctness_remote
+from lcb_integration.compute_code_generation_metrics import check_correctness_remote, check_correctness
 from lcb_integration.extraction_utils import LMStyle, extract_code
 from pydantic import BaseModel
 
@@ -37,6 +37,7 @@ class CompCodingResourcesServerConfig(BaseResourcesServerConfig):
     num_processes: int
     unit_test_timeout_secs: int
     debug: bool
+    use_ray: bool = True
 
 
 # ----------------------------
@@ -133,8 +134,11 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 self.config.debug,  # debug
             )
 
-            future = check_correctness_remote.remote(*task_args)
-            result, metadata = await loop.run_in_executor(None, ray.get, future)
+            if self.config.use_ray:
+                future = check_correctness_remote.remote(*task_args)
+                result, metadata = await loop.run_in_executor(None, ray.get, future)
+            else:
+                result, metadata = await loop.run_in_executor(None, check_correctness, *task_args)
 
             unit_tests_time_taken = time() - start_time
 

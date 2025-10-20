@@ -431,7 +431,7 @@ def grade_stdio(
     return all_results, {"execution time": total_execution_time}
 
 
-def run_test(sample, test=None, debug=False, timeout=6):
+def run_test(in_outs, test=None, debug=False, timeout=6):
     """
     if test(generated_code) is not None it'll try to run the code.
     otherwise it'll just return an input and output pair.
@@ -445,11 +445,11 @@ def run_test(sample, test=None, debug=False, timeout=6):
     if debug:
         print(f"start = {datetime.now().time()}")
 
-    try:
-        in_outs = json.loads(sample["input_output"])
-    except ValueError as e:
-        raise e
-        in_outs = None
+    # try:
+    #     in_outs = json.loads(sample["input_output"])
+    # except ValueError as e:
+    #     raise e
+    #     in_outs = None
 
     if in_outs:
         if in_outs.get("fn_name") is None:
