@@ -27,24 +27,70 @@ Walkthroughs for each environment are also provided. (See generate_single_turn_r
 
 Note, the action sequence in the walkthroughs are often not the only unique sequence of actions that can complete the task. A number of environments in TALES also use nearest-neighbour parsers. This means that, for example, the actions `take lantern`, `get lantern`, and `pick up lantern`, may all be interpreted to be declaring the same intent. For this reason, we recommend that the action is sent to the environment itself for feedback rather than attempting string-matching with the walkthrough.
 
-<!-- ## CONTRIBUTING.md Quality Control Information:
+## Key App Functions:
+*/seed_session*:
+This is largely used to initialize the environment as well as switch tasks (CookingWorld1, CookingWorld2, etc) or frameworks (Textworld, Textworld_Express, etc).
+This function also automatically calls 'reset' and returns the corresponding observation and information. If you want to switch the environment, you can call /seed_session. If you want to just reset the current environment, call /reset.
+Input example:
+```
+{
+  "framework": "alfworld",
+  "split": "train",
+  "task_no": 0,
+  "seed": 123
+}
+```
+All arguments are optional and will default to the values in the config if not used.
 
-1. Environment: This is an implementation of TALES: a multi-framework agentic environment that evaluates an agent's ability to reason through and progress through open-ended, situated, text-environments. TALES consists of 5 text-adventure game frameworks with a total of 122 tasks (games) with the rough order difficulty of textworld, textworld_express, alfworld, scienceworld, and jericho.
+Response example:
+```
+{
+  "observation": "You are in a kitchen...",
+  "score": 0.0,
+  "done": false,
+  "info": { "admissible_commands": ["look", "inventory"] },
+  "session_id": "c8a1f3e2-...",
+  "available_tasks": 54,
+  "admissible_commands": ["look", "inventory"]
+}
+```
 
-2. Domain: Text-Game Environments
-3. Source of prompts: 
-- The prompt at each turn consists of the system prompt as well as the observation-action history of the agent up to that step.
-- Our examples use the same system prompt used in TALES, however, this can be adjusted to user preference.
-4. Example prompt: We provide both single-turn and multi-turn examples. Plea
-- Please see any of the *_clean.jsonl examples under data/gpt4o_examples. 
-5. Verifier: Rewards are provided via the underlying gymnasium environment. Ground-truth walkthroughs are provided for each environment, however these walkthroughs do not encompass the full range of action sequences that can successfully complete the corresponding task.
-6. Legal Approval Status: N/A
+*/execute_command*:
+Sends the command to the environment and returns the output. For now, we need to include the `session_id` due to some issues with the wrong server being queried otherwise.
 
+Input example:
+```
+{
+  "session_id": "c8a1f3e2-...",
+  "command": "look"
+}
+```
+Response example:
+```
+{
+  "observation": "You see a fridge and a table...",
+  "score": 0.0,
+  "done": false,
+  "info": { "...": "..." },
+  "admissible_commands": ["open fridge", "open table drawer"]
+}
+```
+*/reset*:
+Resets the environment.
 
-# Licensing information
-Code: ?
-Data: ?
-
-Dependencies
-- nemo_gym: Apache 2.0
-? -->
+Input example:
+```
+{
+  "session_id": "c8a1f3e2-..."
+}
+```
+Response example:
+```
+{
+  "observation": "You are in a kitchen...",
+  "score": 0.0,
+  "done": false,
+  "info": { "...": "..." },
+  "admissible_commands": ["look", "inventory"]
+}
+```
