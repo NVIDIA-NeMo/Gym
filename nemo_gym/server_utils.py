@@ -318,29 +318,12 @@ def initialize_ray() -> None:
     global_config_dict = get_global_config_dict()
     ray_head_node_address = global_config_dict.get("ray_head_node_address")
 
-    try:
-        if ray_head_node_address is not None:
-            print(f"Connecting to Ray cluster at specified address: {ray_head_node_address}")
-            ray.init(address=ray_head_node_address, ignore_reinit_error=True)
-        else:
-            print("Auto-detecting Ray cluster...")
-            ray.init(ignore_reinit_error=True)
-
-        cluster_resources = ray.cluster_resources()
-        nodes = ray.nodes()
-        alive_nodes = [node for node in nodes if node["Alive"]]
-
-        print(f"Successfully connected to Ray cluster with {len(alive_nodes)} alive nodes")
-        print(f"Cluster resources: {cluster_resources}")
-
-        for node in alive_nodes:
-            node_ip = node.get("NodeManagerAddress", "unknown")
-            node_id = node.get("NodeID", "unknown")
-            print(f"Available Ray node: {node_ip} (ID: {node_id})")
-
-    except Exception as e:
-        print(f"No Ray cluster detected: {e}")
-        print("Resource servers will use local processing")
+    if ray_head_node_address is not None:
+        print(f"Connecting to Ray cluster at specified address: {ray_head_node_address}")
+        ray.init(address=ray_head_node_address, ignore_reinit_error=True)
+    else:
+        print("Starting Ray cluster...")
+        ray.init(ignore_reinit_error=True)
 
 
 class SimpleServer(BaseServer):
