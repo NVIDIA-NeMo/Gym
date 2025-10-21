@@ -14,7 +14,7 @@
 from typing import Optional
 
 
-def _get_expected_answer_text(req) -> Optional[str]:
+def _get_request_expected_answer_text(req) -> Optional[str]:
     if req.expected_answer:
         return str(req.expected_answer)
     md = req.metadata or {}

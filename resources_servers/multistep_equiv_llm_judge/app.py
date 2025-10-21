@@ -47,7 +47,7 @@ from nemo_gym.server_utils import (
 )
 
 from resources_servers.equivalence_llm_judge.equivalence_llm_judge_utils import (
-    _get_expected_answer_text,
+    _get_request_expected_answer_text,
 )
 
 
@@ -162,8 +162,6 @@ def _get_response_first_user_content_text(response, parse_reasoning: bool = Fals
     text = _get_response_content_text(response, turn=0, role="user")
     if text is None:
         text = _get_response_content_text(response, turn=1, role="user")
-    if text is None:
-        return None
     return text
 
 
@@ -171,9 +169,8 @@ def _get_response_last_assistant_content_text(response) -> Optional[str]:
     return _get_response_content_text(response, turn=-1, role="assistant")
 
 
-def _get_assistant_raw_response_text(req: BaseVerifyRequest, parse_reasoning: bool = False) -> Optional[str]:
-    # text = _get_response_last_assistant_content_text(req.response)
-    text = _get_response_content_text(req.response, turn=-1, role="assistant")
+def _get_response_last_assistant_raw_response_text(response, parse_reasoning: bool = False) -> Optional[str]:
+    text = _get_response_content_text(response, turn=-1, role="assistant")
     # FIXME: hardcoded reasoning end token.
     if parse_reasoning:
         reasoning_text, _, raw_response_text = text.partition("</think>")
@@ -186,18 +183,19 @@ def _get_assistant_raw_response_text(req: BaseVerifyRequest, parse_reasoning: bo
     return raw_response_text
 
 
-def _extract_answer_tagged_section(haystack: str) -> Optional[str]:
+def _extract_tagged_section(haystack: str, tag: str) -> Optional[str]:
     needle = haystack
-    _, _, needle = needle.partition("<answer>")
-    needle, _, _ = needle.partition("</answer>")
+    _, _, needle = needle.partition(f"<{tag}>")
+    needle, _, _ = needle.partition(f"</{tag}>")
     return needle.strip()
+
+
+def _extract_answer_tagged_section(haystack: str) -> Optional[str]:
+    return _extract_tagged_section(haystack, "answer")
 
 
 def _extract_distilled_answer_tagged_section(haystack: str) -> Optional[str]:
-    needle = haystack
-    _, _, needle = needle.partition("<distilled_answer>")
-    needle, _, _ = needle.partition("</distilled_answer>")
-    return needle.strip()
+    return _extract_tagged_section(haystack, "distilled_answer")
 
 
 class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
@@ -219,6 +217,7 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
         self._judge_extract_prompt_template = None
         self._judge_distill_system_template = None
         self._judge_distill_prompt_template = None
+        self._judge_verdict_prompt_template = None
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -233,11 +232,11 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
         model_responses_create_params_dict = body.responses_create_params.model_dump()
         model_response_dict = body.response.model_dump()
 
-        question = _get_response_first_user_content_text(body)
-        model_raw_response = _get_assistant_raw_response_text(
-            body, parse_reasoning=self.config.model_response_parse_reasoning
+        question = _get_response_first_user_content_text(body.response)
+        model_raw_response = _get_response_last_assistant_raw_response_text(
+            body.response, parse_reasoning=self.config.model_response_parse_reasoning
         )
-        expected_answer = _get_expected_answer_text(body) or ""
+        expected_answer = _get_request_expected_answer_text(body) or ""
 
         if self.config.debug:
             print(
@@ -538,7 +537,6 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
         # prompt_template = cfg.judge_prompt_template
         system_message = cfg.judge_system_message
 
-        self._judge_verdict_prompt_template = cfg.judge_prompt_template
         if self._judge_verdict_prompt_template is None:
             assert cfg.judge_verdict_prompt_template_fpath is not None
             with open(cfg.judge_verdict_prompt_template_fpath, "r") as file:

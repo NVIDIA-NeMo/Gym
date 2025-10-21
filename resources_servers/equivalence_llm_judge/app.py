@@ -41,7 +41,7 @@ from nemo_gym.openai_utils import (
 )
 
 from resources_servers.equivalence_llm_judge.equivalence_llm_judge_utils import (
-    _get_expected_answer_text,
+    _get_request_expected_answer_text,
 )
 
 
@@ -171,7 +171,7 @@ def _extract_last_assistant_text(body: BaseVerifyRequest, extract_regex: Optiona
 
 
 def _extract_expected_answer(req: LLMJudgeRunRequest) -> Optional[str]:
-    return _get_expected_answer_text(req)
+    return _get_request_expected_answer_text(req)
 
 
 def _extract_question_text(
