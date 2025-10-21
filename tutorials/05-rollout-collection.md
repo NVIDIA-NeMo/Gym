@@ -95,8 +95,7 @@ Let's generate rollouts using the **MultiNeedle** resource server, which tests r
 config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
 resources_servers/multineedle/configs/multineedle.yaml"
 
-ng_run "+config_paths=[${config_paths}]" \
-    +simple_agent.responses_api_agents.simple_agent.resources_server.name=multineedle
+ng_run "+config_paths=[${config_paths}]"
 ```
 
 **✅ Success Check**: You should see 4 servers running including the `multineedle_simple_agent`.
