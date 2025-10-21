@@ -1,5 +1,6 @@
 This document is a smattering of How-To's and FAQs that have not made their way into an official tutorial yet!
 
+- [How To: Run tests for simple agent](#how-to-run-tests-for-simple-agent)
 - [How To: Add a resource server](#how-to-add-a-resource-server)
   - [TLDR final expected artifacts](#tldr-final-expected-artifacts)
 - [How To: Upload and download a dataset from Gitlab](#how-to-upload-and-download-a-dataset-from-gitlab)
@@ -10,6 +11,7 @@ This document is a smattering of How-To's and FAQs that have not made their way 
 - [How To: Profile your resources server](#how-to-profile-your-resources-server)
 - [How To: Use a custom client to call Gym Responses API model endpoints during training](#how-to-use-a-custom-client-to-call-gym-responses-api-model-endpoints-during-training)
 - [How To: Detailed anatony of a Gym config](#how-to-detailed-anatony-of-a-gym-config)
+- [FAQ: OpenAI Responses vs Chat Completions API](#faq-openai-responses-vs-chat-completions-api)
 - [FAQ: DCO and commit signing VSCode and Git setup](#faq-dco-and-commit-signing-vscode-and-git-setup)
 - [FAQ: SFT and RL](#faq-sft-and-rl)
 - [FAQ: Error: Found files with missing copyright](#faq-error-found-files-with-missing-copyright)
@@ -17,6 +19,15 @@ This document is a smattering of How-To's and FAQs that have not made their way 
 - [FAQ: NeMo Gym, training frameworks, and token IDs](#faq-nemo-gym-training-frameworks-and-token-ids)
 - [FAQ: NeMo Gym what CI/CD do I need to pass?](#faq-nemo-gym-what-cicd-do-i-need-to-pass)
 - [FAQ: Why aiohttp backend and not httpx/httpcore for async http?](#faq-why-aiohttp-backend-and-not-httpxhttpcore-for-async-http)
+
+
+# How To: Run tests for simple agent
+Run the Simple Chat Agent tests. `ng_test` or `nemo_gym_test` stands for `Nemo Gym Test`.
+```bash
+ng_test +entrypoint=responses_api_agents/simple_agent
+```
+
+Tests are strongly encouraged and you must have at least one test for every server you make. Test coverage is not explicitly required which means that **YOU ARE RESPONSIBLE FOR YOUR OWN SERVER CORRECTNESS AND FUNCTION**.
 
 
 # How To: Add a resource server
@@ -504,6 +515,71 @@ library_judge_math_simple_agent:
           artifact_fpath: aime24_bytedtsinghua_validation.jsonl
         license: Apache 2.0
 ```
+
+
+# FAQ: OpenAI Responses vs Chat Completions API
+Agents and verifiers work with responses in a standardized format based on the OpenAI Responses API schema. The verifier receives an object where the `output` field conforms to the Response object output [documented here](https://platform.openai.com/docs/api-reference/responses/object#responses/object-output).
+
+The `output` list may contain multiple item types, such as:
+- `ResponseOutputMessage` - The main user-facing message content returned by the model.
+- `ResponseOutputItemReasoning` - Internal reasoning or "thinking" traces that explain the model’s thought process.
+- `ResponseFunctionToolCall` - A request from the model to invoke an external function or tool.
+
+**Example**
+If a chat completion contains both thinking traces and user-facing text:
+```python
+ChatCompletion(
+    Choices=[
+        Choice(
+            message=ChatCompletionMessage(
+                content="<think>I'm thinking</think>Hi there!",
+                tool_calls=[{...}, {...}],
+                ...
+            )
+        )
+    ],
+    ...
+)
+```
+In the Responses schema, this would be represented as:
+```python
+Response(
+    output=[
+        ResponseOutputItemReasoning(
+            type="reasoning",
+            summary=[
+                Summary(
+                    type="summary_text",
+                    text="I'm thinking",
+                )
+            ]
+        ),
+        ResponseOutputMessage(
+            role="assistant",
+            type="message",
+            content=[
+                ResponseOutputText(
+                    type="output_text",
+                    text="Hi there!",
+                )
+            ]
+        ),
+        ResponseFunctionToolCall(
+            type="function_call",
+            ...
+
+        ),
+        ResponseFunctionToolCall(
+            type="function_call",
+            ...
+
+        ),
+        ...
+    ]
+)
+```
+
+Reasoning traces (`Reasoning` items) are parsed before the verifier processes the output. The parsing is **model-specific**, and the verifier does not need to worry about the extracting or interpreting reasoning traces. The verifier receives these items already separated and clearly typed.
 
 
 # FAQ: DCO and commit signing VSCode and Git setup
