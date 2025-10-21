@@ -27,7 +27,7 @@ source .venv/bin/activate
 uv sync --extra dev --group docs
 ```
 
-**✅ Success Check**: You should see `(.venv)` in your terminal prompt.
+**✅ Success Check**: You should see something that indicates a newly activated environment e.g. `(.venv)` or `(NeMo-Gym)` in your terminal prompt.
 
 ## Step 2: Configure Your API Key
 

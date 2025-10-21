@@ -8,7 +8,7 @@ Before diving into code, let's understand the three core abstrctions in NeMo Gym
 ## Overview
 
 <div align="center">
-  <img src="../resources/product_overview.png" alt="NeMo Gym Architecture" width="800">
+  <img src="product_overview.png" alt="NeMo Gym Architecture" width="800">
 </div>
 
 ## 1. Models

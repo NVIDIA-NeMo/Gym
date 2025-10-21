@@ -18,7 +18,7 @@ NeMo Gym enables scalable data collection for reinforcement learning of AI agent
 ## 🚀 Quick Start
 
 ### New to NeMo Gym?
-Follow our **[Tutorial Series](tutorials/README.md)** for a progressive learning experience:
+Follow our **[Tutorial Series](docs/tutorials/README.md)** for a progressive learning experience:
 - **Setup & Core Concepts**: Understand Models, Resources, Agents and run your first interaction
 - **Rollout Generation**: Capture agent interactions for RL, SFT, and DPO training  
 - **Custom Environments**: Build your own tools, verification systems, and training scenarios
@@ -37,7 +37,7 @@ uv sync --extra dev --group docs
 ```
 
 ### Run Your First Agent
-Start with **[Understanding Concepts](tutorials/01-concepts.md)**, then follow **[Setup & Installation](tutorials/02-setup.md)** for hands-on implementation.
+Start with **[Understanding Concepts](docs/tutorials/01-concepts.md)**, then follow **[Setup & Installation](docs/tutorials/02-setup.md)** for hands-on implementation.
 
 **TLDR**:
 ```bash
@@ -55,9 +55,9 @@ python responses_api_agents/simple_agent/client.py
 
 ## 📖 Documentation
 
-- **[Tutorials](tutorials/README.md)** - Progressive learning path
-- **[Contributing](https://github.com/NVIDIA-NeMo/Gym/CONTRIBUTING.md)** - Developer setup, testing, and contribution guidelines
-- **[API Documentation](https://github.com/NVIDIA-NeMo/Gym/docs)** - Technical reference and API specifications
+- **[Tutorials](docs/tutorials/README.md)** - Progressive learning path
+- **[Contributing](https://github.com/NVIDIA-NeMo/Gym/blob/main/CONTRIBUTING.md)** - Developer setup, testing, and contribution guidelines
+- **[API Documentation](https://github.com/NVIDIA-NeMo/Gym/tree/main/docs)** - Technical reference and API specifications
  
 
 ## 🤝 Community & Support
@@ -65,8 +65,9 @@ python responses_api_agents/simple_agent/client.py
 We'd love your contributions! Here's how to get involved:
 
 - **[Report Issues](https://github.com/NVIDIA-NeMo/Gym/issues)** - Bug reports and feature requests
-- **[Discussions](https://github.com/NVIDIA-NeMo/Gym/discussions)** - Community Q&A and ideas
-- **[Contributing Guide](https://github.com/NVIDIA-NeMo/Gym/CONTRIBUTING.md)** - How to contribute code, docs, or new environments
+<!-- TODO: Add link [Discussions](https://github.com/NVIDIA-NeMo/Gym/discussions) -->
+- **Discussions (Coming soon!)** - Community Q&A and ideas
+- **[Contributing Guide](https://github.com/NVIDIA-NeMo/Gym/blob/main/CONTRIBUTING.md)** - How to contribute code, docs, or new environments
 
 ## 📦 Available Resource Servers
 

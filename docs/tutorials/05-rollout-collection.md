@@ -66,24 +66,22 @@ Each line in your input JSONL file should follow this schema:
 
 ```json
 {
-  "responses_create_params": {
-    "input": [
-      {"role": "user", "content": "Your task or question here"}
-    ],
-    "verifier_metadata": {
-      // Optional: Resource-specific metadata for verification
-      // e.g., expected answers, test cases, etc.
-    }
-  }
+    // REQUIRED: responses_create_params
+    "responses_create_params": {
+        // Input is an array Response input items (like messages) following OpenAI format (role + content)
+        "input": [
+            {"role": "user", "content": "Your task or question here"}
+        ],
+        // Optional: Other OpenAI Responses API parameters (tools, temperature, etc.)
+    },
+    // Optional: Resource server-specific metadata for verification
+    // e.g., expected answers, test cases, etc.
+    "expected_answer": "...",
+    "test_cases": "...",
+    "your_resource_specific_metadata_field": "..."
 }
 ```
 
-**Required fields**:
-- `responses_create_params.input`: Array of messages following OpenAI format (role + content)
-
-**Optional fields**:
-- `verifier_metadata`: Resource-specific data used by verification functions
-- Other OpenAI Responses API parameters (tools, temperature, etc.)
 
 ## Hands-On: Generating Your First Rollouts
 
@@ -95,24 +93,20 @@ Let's generate rollouts using the **MultiNeedle** resource server, which tests r
 # Start the multineedle agent server
 config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
 resources_servers/multineedle/configs/multineedle.yaml"
-
 ng_run "+config_paths=[${config_paths}]"
 ```
 
-**✅ Success Check**: You should see 4 servers running including the `multineedle_simple_agent`.
-
-### Step 2: Download Sample Data
-
-TODO: Add the hugging face data card link
-
-**What this dataset contains**: Complex reading comprehension tasks where agents must find specific information ("needles") within long documents ("haystacks").
+**✅ Success Check**: You should see 3 servers running including the `multineedle_simple_agent`.
 
 ### Step 3: Generate Rollouts
 
+**What this dataset contains**: Complex reading comprehension tasks where agents must find specific information ("needles") within long documents ("haystacks").
+
+In a separate terminal, run:
 ```bash
 # Generate rollouts from the dataset
 ng_collect_rollouts +agent_name=multineedle_simple_agent \
-    +input_jsonl_fpath=data/multineedle_benchmark.jsonl \
+    +input_jsonl_fpath=resources_servers/multineedle/data/example.jsonl \
     +output_jsonl_fpath=results/multineedle_rollouts.jsonl \
     +limit=5 \
     +num_repeats=2 \
@@ -368,4 +362,4 @@ You now understand NeMo Gym's rollout generation system:
 - **Best practices**: Efficient and reliable rollout generation
 
 <!-- TODO: Add link [Next: Collecting Rollouts for Reinforcement Learning](06-rl-rollout-collection.md) -->
-→ **Next: Collecting Rollouts for Reinforcement Learning (Coming soon!)**
+→ **[Next: Offline Training with Rollouts (SFT/DPO)](07-sft-dpo-rollout-collection.md)**
