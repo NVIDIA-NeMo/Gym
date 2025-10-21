@@ -243,10 +243,10 @@ async def run_single_turn_loop(
 
                     f.write(json.dumps(filtered_example) + "\n")
 
-            # Full response message history:
-            with open(output_directory + "/examples_full.jsonl", "w") as f:
-                for example in examples:
-                    f.write(json.dumps(example) + "\n")
+            # # Full response message history:
+            # with open(output_directory + "/examples_full.jsonl", "w") as f:
+            #     for example in examples:
+            #         f.write(json.dumps(example) + "\n")
 
             print(f"Exported {len(examples)} examples to {output_directory}")
 

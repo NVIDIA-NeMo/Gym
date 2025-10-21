@@ -146,10 +146,6 @@ async def run_single_turn_loop(
                 for message in clean_message_examples:
                     f.write(json.dumps(message) + "\n")
 
-            # with open(output_file + "example.jsonl", "w") as f:
-            #     for message in selected_examples:
-            #         f.write(json.dumps(message) + "\n")
-
             example_strs = []
             for history_prompt in selected_examples:
                 example = base_response_create_params.model_copy(

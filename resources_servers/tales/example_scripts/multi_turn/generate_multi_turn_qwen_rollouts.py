@@ -204,10 +204,10 @@ async def run_multi_turn_loop(frameworks, tasks, split, max_steps, seeds, output
                     for message in corrected_message_history:
                         f.write(json.dumps(message) + "\n")
 
-                # Full response message history:
-                with open(output_directory + framework + "_full.jsonl", "w") as f:
-                    for message in corrected_message_history_full_response:
-                        f.write(json.dumps(message) + "\n")
+                # # Full response message history:
+                # with open(output_directory + framework + "_full.jsonl", "w") as f:
+                #     for message in corrected_message_history_full_response:
+                #         f.write(json.dumps(message) + "\n")
 
                 print(f"\nGenerated rollout of length {len(message_history) // 2} turns for framework {framework}.")
 
