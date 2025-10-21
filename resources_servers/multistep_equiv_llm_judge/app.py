@@ -24,7 +24,6 @@ import asyncio
 import contextlib
 import json
 import os
-import re
 from typing import Any, Optional
 
 from fastapi import FastAPI
@@ -45,6 +44,10 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import (
     get_global_config_dict,
+)
+
+from resources_servers.equivalence_llm_judge.equivalence_llm_judge_utils import (
+    _get_expected_answer_text,
 )
 
 
@@ -88,14 +91,16 @@ class MultistepEquivLLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     # returned; otherwise, the entire last match is used.
     response_extract_regex: Optional[str] = None
 
+    # If true, perform a second judge pass swapping expected and generated answers
+    # to reduce potential positional bias. Default is True.
+    # swap: bool = True
+
+    # trials: int = 1
+
     expected_answer_distill: bool = False
     model_response_parse_reasoning: bool = False
 
-    # If true, perform a second judge pass swapping expected and generated answers
-    # to reduce potential positional bias. Default is false for speed.
-    # check_twice_swap: bool = False
-    # Reward to assign if the second (swap) pass fails. Defaults to 0.0; can be set to -1.0.
-    # reward_if_swap_fails: float = 0.0
+    debug: bool = False
 
 
 class MultistepEquivLLMJudgeRunRequest(BaseRunRequest):
@@ -128,120 +133,6 @@ class MultistepEquivLLMJudgeVerifyResponse(BaseVerifyResponse):
     judge_evaluations: list[JudgeEvaluation]
 
 
-def _extract_last_assistant_text(body: BaseVerifyRequest, extract_regex: Optional[str]) -> str:
-    """Extract the last assistant message text from the response.
-
-    - If the assistant message has multiple text blocks, they are joined with newlines.
-    - If ``extract_regex`` is provided, the last regex match is used; if capture
-      groups exist, the first non-empty group is returned, otherwise the full match.
-    - Returns an empty string when no assistant text is available.
-    """
-    # Return only the last assistant message's text content.
-    for o in reversed(body.response.output):
-        if getattr(o, "type", None) == "message" and getattr(o, "role", None) == "assistant":
-            content = getattr(o, "content", None)
-            if isinstance(content, list):
-                # Some providers split a single assistant message into multiple text blocks.
-                # Join all text blocks to reconstruct the full message text.
-                texts: list[str] = []
-                for c in content:
-                    t = getattr(c, "text", None)
-                    if isinstance(t, str):
-                        texts.append(t)
-                text = "\n".join(texts).strip()
-                if not text:
-                    return text
-                if extract_regex:
-                    try:
-                        matches = list(re.finditer(extract_regex, text, flags=re.MULTILINE | re.DOTALL))
-                    except re.error:
-                        matches = []
-                    if matches:
-                        m = matches[-1]
-                        groups = m.groups()
-                        if groups:
-                            for idx in range(1, len(groups) + 1):
-                                gv = m.group(idx)
-                                if isinstance(gv, str) and gv.strip() != "":
-                                    return gv.strip()
-                        return m.group(0).strip()
-                return text
-            elif isinstance(content, str):
-                text = content.strip()
-                if not text:
-                    return text
-                if extract_regex:
-                    try:
-                        matches = list(re.finditer(extract_regex, text, flags=re.MULTILINE | re.DOTALL))
-                    except re.error:
-                        matches = []
-                    if matches:
-                        m = matches[-1]
-                        groups = m.groups()
-                        if groups:
-                            for idx in range(1, len(groups) + 1):
-                                gv = m.group(idx)
-                                if isinstance(gv, str) and gv.strip() != "":
-                                    return gv.strip()
-                        return m.group(0).strip()
-                return text
-            break
-    return ""
-
-
-def _extract_expected_answer(req: MultistepEquivLLMJudgeRunRequest) -> Optional[str]:
-    if req.expected_answer:
-        return str(req.expected_answer)
-    md = req.metadata or {}
-    exp = md.get("expected_answer")
-    return str(exp) if exp is not None else None
-
-
-def _extract_question_text(
-    params: NeMoGymResponseCreateParamsNonStreaming,
-    question_extract_regex: Optional[str],
-) -> str:
-    """Extract the question text from the last user message in ``params``.
-
-    - Returns the raw last user message text by default.
-    - If ``question_extract_regex`` is provided, the last regex match is used; if
-      capture groups exist, the first non-empty group is returned, otherwise the
-      full match.
-    - Returns an empty string if no user text is available.
-    """
-    # Return only the last user message's text content.
-    last_text: Optional[str] = None
-    for m in params.input or []:
-        if getattr(m, "role", None) == "user":
-            c = getattr(m, "content", None)
-            if isinstance(c, str):
-                last_text = c
-    text = (last_text or "").strip()
-    if not text:
-        return text
-    # Optionally apply a regex to extract a portion of the question text.
-    if question_extract_regex:
-        try:
-            matches = list(re.finditer(question_extract_regex, text, flags=re.MULTILINE | re.DOTALL))
-        except re.error:
-            matches = []
-        if matches:
-            m = matches[-1]  # Use the last match
-            # Prefer first non-empty capturing group, else the entire match.
-            groups = m.groups()
-            if groups:
-                for idx in range(1, len(groups) + 1):
-                    gv = m.group(idx)
-                    if isinstance(gv, str) and gv.strip() != "":
-                        return gv.strip()
-            return m.group(0).strip()
-    return text
-
-
-def _get_user_question_text(req: BaseVerifyRequest) -> Optional[str]:
-    pass
-
-
 def _get_response_content_text(response, turn: int, role: Optional[str] = None) -> Optional[str]:
     if not response.output:
         return None
@@ -257,7 +148,7 @@ def _get_response_content_text(response, turn: int, role: Optional[str] = None) 
         for item in content:
             if item.type != "output_text":
                 print(
-                    f"DEBUG: _get_response_last_content_text: unexpected content item type = {repr(item.type)}",
+                    f"DEBUG: _get_response_content_text: unexpected content item type = {repr(item.type)}",
                     flush=True,
                 )
             text_parts.append(item.text)
@@ -267,50 +158,21 @@ def _get_response_content_text(response, turn: int, role: Optional[str] = None) 
     return text
 
 
-def _get_response_last_content_text(response) -> Optional[str]:
-    if not response.output:
+def _get_response_first_user_content_text(response, parse_reasoning: bool = False) -> Optional[str]:
+    text = _get_response_content_text(response, turn=0, role="user")
+    if text is None:
+        text = _get_response_content_text(response, turn=1, role="user")
+    if text is None:
         return None
-    # FIXME(peter)
-    if response.output[-1].role != "assistant":
-        return None
-    content = response.output[-1].content
-    if isinstance(content, str):
-        text = content
-    elif isinstance(content, list):
-        text_parts = []
-        for item in content:
-            if item.type != "output_text":
-                print(
-                    f"DEBUG: _get_response_last_content_text: unexpected content item type = {repr(item.type)}",
-                    flush=True,
-                )
-            text_parts.append(item.text)
-        text = "".join(text_parts)
-    else:
-        raise NotImplementedError
     return text
 
 
-def _get_user_question_text(req: BaseVerifyRequest, parse_reasoning: bool = False) -> Optional[str]:
-    text = _get_response_content_text(req.response, turn=0, role="user")
-    if text is None:
-        text = _get_response_content_text(req.response, turn=1, role="user")
-    if text is None:
-        return None
-    # FIXME: hardcoded reasoning end token.
-    if parse_reasoning:
-        reasoning_text, _, raw_response_text = text.partition("</think>")
-    else:
-        raw_response_text = text
-    if raw_response_text.startswith("\n\n"):
-        raw_response_text = raw_response_text[2:]
-    elif raw_response_text.startswith("\n"):
-        raw_response_text = raw_response_text[1:]
-    return raw_response_text
+def _get_response_last_assistant_content_text(response) -> Optional[str]:
+    return _get_response_content_text(response, turn=-1, role="assistant")
 
 
 def _get_assistant_raw_response_text(req: BaseVerifyRequest, parse_reasoning: bool = False) -> Optional[str]:
-    # text = _get_response_last_content_text(req.response)
+    # text = _get_response_last_assistant_content_text(req.response)
     text = _get_response_content_text(req.response, turn=-1, role="assistant")
     # FIXME: hardcoded reasoning end token.
     if parse_reasoning:
@@ -322,10 +184,6 @@ def _get_assistant_raw_response_text(req: BaseVerifyRequest, parse_reasoning: bo
     elif raw_response_text.startswith("\n"):
         raw_response_text = raw_response_text[1:]
     return raw_response_text
-
-
-def _get_expected_answer_text(req: MultistepEquivLLMJudgeRunRequest) -> Optional[str]:
-    pass
 
 
 def _extract_answer_tagged_section(haystack: str) -> Optional[str]:
@@ -349,12 +207,9 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        if hasattr(self, "config"):
+        if self.config.debug:
             print(f"DEBUG: MultistepEquivLLMJudgeResourcesServer: config = {self.config}", flush=True)
-            max_concurrency = self.config.judge_endpoint_max_concurrency
-        else:
-            print("DEBUG: MultistepEquivLLMJudgeResourcesServer: missing config during init", flush=True)
-            max_concurrency = 128
+        max_concurrency = self.config.judge_endpoint_max_concurrency
         self._log_write = asyncio.Lock()
         if max_concurrency is not None:
             self._judge_endpoint_max_concurrency = asyncio.Semaphore(value=max_concurrency)
@@ -378,20 +233,21 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
         model_responses_create_params_dict = body.responses_create_params.model_dump()
         model_response_dict = body.response.model_dump()
 
-        question = _extract_question_text(body.responses_create_params, self.config.question_extract_regex)
-        # question = _get_user_question_text(body)
-        # model_answer = _extract_last_assistant_text(body, self.config.response_extract_regex)
+        question = _get_response_first_user_content_text(body)
         model_raw_response = _get_assistant_raw_response_text(
             body, parse_reasoning=self.config.model_response_parse_reasoning
         )
-        expected_answer = _extract_expected_answer(body) or ""
-        # expected_answer = _get_expected_answer_text(body)
+        expected_answer = _get_expected_answer_text(body) or ""
 
-        print(f"DEBUG: MultistepEquivLLMJudgeResourcesServer.verify: question        = {repr(question)}", flush=True)
-        print(
-            f"DEBUG: MultistepEquivLLMJudgeResourcesServer.verify: expected answer = {repr(expected_answer)}",
-            flush=True,
-        )
+        if self.config.debug:
+            print(
+                f"DEBUG: MultistepEquivLLMJudgeResourcesServer.verify: question        = {repr(question)}",
+                flush=True,
+            )
+            print(
+                f"DEBUG: MultistepEquivLLMJudgeResourcesServer.verify: expected answer = {repr(expected_answer)}",
+                flush=True,
+            )
 
         if not model_raw_response:
             payload = body.model_dump()
@@ -408,11 +264,13 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
             question=question,
             raw_response=model_raw_response,
         )
-        model_extract_text = _get_response_last_content_text(model_extract_response) or ""
+        model_extract_text = _get_response_last_assistant_content_text(model_extract_response) or ""
         model_answer = _extract_answer_tagged_section(model_extract_text)
-        print(
-            f"DEBUG: MultistepEquivLLMJudgeResourcesServer.verify: model answer    = {repr(model_answer)}", flush=True
-        )
+        if self.config.debug:
+            print(
+                f"DEBUG: MultistepEquivLLMJudgeResourcesServer.verify: model answer    = {repr(model_answer)}",
+                flush=True,
+            )
 
         if not model_answer:
             payload = body.model_dump()
@@ -429,12 +287,13 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
             question=question,
             answer=model_answer,
         )
-        model_distill_text = _get_response_last_content_text(model_distill_response) or ""
+        model_distill_text = _get_response_last_assistant_content_text(model_distill_response) or ""
         model_distilled_answer = _extract_distilled_answer_tagged_section(model_distill_text)
-        print(
-            f"DEBUG: MultistepEquivLLMJudgeResourcesServer.verify: model distilled answer    = {repr(model_distilled_answer)}",
-            flush=True,
-        )
+        if self.config.debug:
+            print(
+                f"DEBUG: MultistepEquivLLMJudgeResourcesServer.verify: model distilled answer = {repr(model_distilled_answer)}",
+                flush=True,
+            )
 
         if not model_distilled_answer:
             model_distilled_answer = model_answer
@@ -444,12 +303,13 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
                 question=question,
                 answer=expected_answer,
             )
-            expected_distill_text = _get_response_last_content_text(expected_distill_response) or ""
+            expected_distill_text = _get_response_last_assistant_content_text(expected_distill_response) or ""
             expected_distilled_answer = _extract_distilled_answer_tagged_section(expected_distill_text)
-            print(
-                f"DEBUG: MultistepEquivLLMJudgeResourcesServer.verify: expected distilled answer = {repr(expected_distilled_answer)}",
-                flush=True,
-            )
+            if self.config.debug:
+                print(
+                    f"DEBUG: MultistepEquivLLMJudgeResourcesServer.verify: expected distilled answer = {repr(expected_distilled_answer)}",
+                    flush=True,
+                )
 
             if not expected_distilled_answer:
                 expected_distilled_answer = expected_answer
@@ -570,10 +430,11 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
                 }
             )
         extract_response = NeMoGymResponse.model_validate(await extract_response.json())
-        print(
-            f"DEBUG: MultistepEquivLLMJudgeResourcesServer._generate_judge_extract_response: {extract_response}",
-            flush=True,
-        )
+        if self.config.debug:
+            print(
+                f"DEBUG: MultistepEquivLLMJudgeResourcesServer._generate_judge_extract_response: {extract_response}",
+                flush=True,
+            )
 
         return extract_response
 
@@ -638,10 +499,11 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
                     ],
                 }
             )
-        print(
-            f"DEBUG: MultistepEquivLLMJudgeResourcesServer._generate_judge_distill_response: {distill_response}",
-            flush=True,
-        )
+        if self.config.debug:
+            print(
+                f"DEBUG: MultistepEquivLLMJudgeResourcesServer._generate_judge_distill_response: {distill_response}",
+                flush=True,
+            )
 
         return distill_response
 
