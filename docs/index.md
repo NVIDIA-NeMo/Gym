@@ -3,8 +3,18 @@
 ```
 
 ```{toctree}
-:caption: Development
+:caption: Tutorials 📚
 :hidden:
 
 apidocs/index.rst
+```
+
+```{toctree}
+:caption: Development
+:hidden:
+
+tutorials/README.md
+tutorials/00-terminology.md
+tutorials/01-concepts.md
+tutorials/09-configuration-guide.md
 ```
