@@ -18,7 +18,7 @@ NeMo Gym enables scalable data collection for reinforcement learning of AI agent
 ## 🚀 Quick Start
 
 ### New to NeMo Gym?
-Follow our **[Tutorial Series](https://github.com/NVIDIA-NeMo/Gym/docs/tutorials/README.md)** for a progressive learning experience:
+Follow our **[Tutorial Series](docs/tutorials/README.md)** for a progressive learning experience:
 - **Setup & Core Concepts**: Understand Models, Resources, Agents and run your first interaction
 - **Rollout Generation**: Capture agent interactions for RL, SFT, and DPO training  
 - **Custom Environments**: Build your own tools, verification systems, and training scenarios
@@ -37,7 +37,7 @@ uv sync --extra dev --group docs
 ```
 
 ### Run Your First Agent
-Start with **[Understanding Concepts](https://github.com/NVIDIA-NeMo/Gym/docs/tutorials/01-concepts.md)**, then follow **[Setup & Installation](https://github.com/NVIDIA-NeMo/Gym/docs/tutorials/02-setup.md)** for hands-on implementation.
+Start with **[Understanding Concepts](docs/tutorials/01-concepts.md)**, then follow **[Setup & Installation](docs/tutorials/02-setup.md)** for hands-on implementation.
 
 **TLDR**:
 ```bash
@@ -55,7 +55,7 @@ python responses_api_agents/simple_agent/client.py
 
 ## 📖 Documentation
 
-- **[Tutorials](https://github.com/NVIDIA-NeMo/Gym/docs/tutorials/README.md)** - Progressive learning path
+- **[Tutorials](docs/tutorials/README.md)** - Progressive learning path
 - **[Contributing](https://github.com/NVIDIA-NeMo/Gym/CONTRIBUTING.md)** - Developer setup, testing, and contribution guidelines
 - **[API Documentation](https://github.com/NVIDIA-NeMo/Gym/docs)** - Technical reference and API specifications
  
