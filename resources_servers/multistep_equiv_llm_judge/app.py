@@ -256,7 +256,10 @@ def _get_response_content_text(response, turn: int, role: Optional[str] = None) 
         text_parts = []
         for item in content:
             if item.type != "output_text":
-                print(f"DEBUG: _get_response_last_content_text: unexpected content item type = {repr(item.type)}", flush=True)
+                print(
+                    f"DEBUG: _get_response_last_content_text: unexpected content item type = {repr(item.type)}",
+                    flush=True,
+                )
             text_parts.append(item.text)
         text = "".join(text_parts)
     else:
@@ -277,7 +280,10 @@ def _get_response_last_content_text(response) -> Optional[str]:
         text_parts = []
         for item in content:
             if item.type != "output_text":
-                print(f"DEBUG: _get_response_last_content_text: unexpected content item type = {repr(item.type)}", flush=True)
+                print(
+                    f"DEBUG: _get_response_last_content_text: unexpected content item type = {repr(item.type)}",
+                    flush=True,
+                )
             text_parts.append(item.text)
         text = "".join(text_parts)
     else:
@@ -285,7 +291,7 @@ def _get_response_last_content_text(response) -> Optional[str]:
     return text
 
 
-def _get_user_question_text(req: BaseVerifyRequest, parse_reasoning = None) -> Optional[str]:
+def _get_user_question_text(req: BaseVerifyRequest, parse_reasoning: bool = False) -> Optional[str]:
     text = _get_response_content_text(req.response, turn=0, role="user")
     if text is None:
         text = _get_response_content_text(req.response, turn=1, role="user")
@@ -303,7 +309,7 @@ def _get_user_question_text(req: BaseVerifyRequest, parse_reasoning = None) -> O
     return raw_response_text
 
 
-def _get_assistant_raw_response_text(req: BaseVerifyRequest, parse_reasoning = None) -> Optional[str]:
+def _get_assistant_raw_response_text(req: BaseVerifyRequest, parse_reasoning: bool = False) -> Optional[str]:
     # text = _get_response_last_content_text(req.response)
     text = _get_response_content_text(req.response, turn=-1, role="assistant")
     # FIXME: hardcoded reasoning end token.
@@ -366,19 +372,26 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
     async def verify(self, body: MultistepEquivLLMJudgeVerifyRequest) -> MultistepEquivLLMJudgeVerifyResponse:
         return await self._verify_single_trial(body)
 
-    async def _verify_single_trial(self, body: MultistepEquivLLMJudgeVerifyRequest) -> MultistepEquivLLMJudgeVerifyResponse:
+    async def _verify_single_trial(
+        self, body: MultistepEquivLLMJudgeVerifyRequest
+    ) -> MultistepEquivLLMJudgeVerifyResponse:
         model_responses_create_params_dict = body.responses_create_params.model_dump()
         model_response_dict = body.response.model_dump()
 
         question = _extract_question_text(body.responses_create_params, self.config.question_extract_regex)
         # question = _get_user_question_text(body)
         # model_answer = _extract_last_assistant_text(body, self.config.response_extract_regex)
-        model_raw_response = _get_assistant_raw_response_text(body, parse_reasoning=self.config.model_response_parse_reasoning)
+        model_raw_response = _get_assistant_raw_response_text(
+            body, parse_reasoning=self.config.model_response_parse_reasoning
+        )
         expected_answer = _extract_expected_answer(body) or ""
         # expected_answer = _get_expected_answer_text(body)
 
         print(f"DEBUG: MultistepEquivLLMJudgeResourcesServer.verify: question        = {repr(question)}", flush=True)
-        print(f"DEBUG: MultistepEquivLLMJudgeResourcesServer.verify: expected answer = {repr(expected_answer)}", flush=True)
+        print(
+            f"DEBUG: MultistepEquivLLMJudgeResourcesServer.verify: expected answer = {repr(expected_answer)}",
+            flush=True,
+        )
 
         if not model_raw_response:
             payload = body.model_dump()
@@ -397,7 +410,9 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
         )
         model_extract_text = _get_response_last_content_text(model_extract_response) or ""
         model_answer = _extract_answer_tagged_section(model_extract_text)
-        print(f"DEBUG: MultistepEquivLLMJudgeResourcesServer.verify: model answer    = {repr(model_answer)}", flush=True)
+        print(
+            f"DEBUG: MultistepEquivLLMJudgeResourcesServer.verify: model answer    = {repr(model_answer)}", flush=True
+        )
 
         if not model_answer:
             payload = body.model_dump()
@@ -416,7 +431,10 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
         )
         model_distill_text = _get_response_last_content_text(model_distill_response) or ""
         model_distilled_answer = _extract_distilled_answer_tagged_section(model_distill_text)
-        print(f"DEBUG: MultistepEquivLLMJudgeResourcesServer.verify: model distilled answer    = {repr(model_distilled_answer)}", flush=True)
+        print(
+            f"DEBUG: MultistepEquivLLMJudgeResourcesServer.verify: model distilled answer    = {repr(model_distilled_answer)}",
+            flush=True,
+        )
 
         if not model_distilled_answer:
             model_distilled_answer = model_answer
@@ -428,7 +446,10 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
             )
             expected_distill_text = _get_response_last_content_text(expected_distill_response) or ""
             expected_distilled_answer = _extract_distilled_answer_tagged_section(expected_distill_text)
-            print(f"DEBUG: MultistepEquivLLMJudgeResourcesServer.verify: expected distilled answer = {repr(expected_distilled_answer)}", flush=True)
+            print(
+                f"DEBUG: MultistepEquivLLMJudgeResourcesServer.verify: expected distilled answer = {repr(expected_distilled_answer)}",
+                flush=True,
+            )
 
             if not expected_distilled_answer:
                 expected_distilled_answer = expected_answer
@@ -446,7 +467,7 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
             rl_metadata=body.rl_metadata,
         )
         if False:
-        # if not first_equal:
+            # if not first_equal:
             reward = 0.0
             payload = body.model_dump()
             # Avoid duplicate field when constructing response
@@ -457,7 +478,7 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
 
         # If first pass says equal, optionally confirm with a second pass (swap answers).
         if False:
-        # if not self.config.check_twice_swap:
+            # if not self.config.check_twice_swap:
             payload = body.model_dump()
             payload.pop("expected_answer", None)
             return MultistepEquivLLMJudgeVerifyResponse(
@@ -506,17 +527,21 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
                 self._judge_extract_prompt_template = file.read().rstrip()
 
         extract_messages: list[NeMoGymEasyInputMessage] = []
-        extract_messages.append(NeMoGymEasyInputMessage(
-            role="system",
-            content=self._judge_extract_system_template,
-        ))
-        extract_messages.append(NeMoGymEasyInputMessage(
-            role="user",
-            content=self._judge_extract_prompt_template.format(
-                question=question,
-                raw_response=raw_response,
-            ),
-        ))
+        extract_messages.append(
+            NeMoGymEasyInputMessage(
+                role="system",
+                content=self._judge_extract_system_template,
+            )
+        )
+        extract_messages.append(
+            NeMoGymEasyInputMessage(
+                role="user",
+                content=self._judge_extract_prompt_template.format(
+                    question=question,
+                    raw_response=raw_response,
+                ),
+            )
+        )
 
         extract_params = cfg.judge_responses_create_params.model_copy(deep=True)
         extract_params.input = extract_messages
@@ -528,19 +553,27 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
                     json=extract_params,
                 )
         except Exception as e:
-            print(f"DEBUG: MultistepEquivLLMJudgeResourcesServer._generate_judge_extract_response: dummy response b/c of POST exception: {type(e).__name__} {e}", flush=True)
-            extract_response = NeMoGymResponse.model_validate({
-                "output": [
-                    {
-                        # "type": "message",
-                        "role": "assistant",
-                        # "content": f"<answer>\n{raw_response}\n></answer>",
-                        "content": "",
-                    }
-                ],
-            })
+            print(
+                f"DEBUG: MultistepEquivLLMJudgeResourcesServer._generate_judge_extract_response: dummy response b/c of POST exception: {type(e).__name__} {e}",
+                flush=True,
+            )
+            extract_response = NeMoGymResponse.model_validate(
+                {
+                    "output": [
+                        {
+                            # "type": "message",
+                            "role": "assistant",
+                            # "content": f"<answer>\n{raw_response}\n></answer>",
+                            "content": "",
+                        }
+                    ],
+                }
+            )
         extract_response = NeMoGymResponse.model_validate(await extract_response.json())
-        print(f"DEBUG: MultistepEquivLLMJudgeResourcesServer._generate_judge_extract_response: {extract_response}", flush=True)
+        print(
+            f"DEBUG: MultistepEquivLLMJudgeResourcesServer._generate_judge_extract_response: {extract_response}",
+            flush=True,
+        )
 
         return extract_response
 
@@ -562,17 +595,21 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
                 self._judge_distill_prompt_template = file.read().rstrip()
 
         distill_messages: list[NeMoGymEasyInputMessage] = []
-        distill_messages.append(NeMoGymEasyInputMessage(
-            role="system",
-            content=self._judge_distill_system_template,
-        ))
-        distill_messages.append(NeMoGymEasyInputMessage(
-            role="user",
-            content=self._judge_distill_prompt_template.format(
-                question=question,
-                answer=answer,
-            ),
-        ))
+        distill_messages.append(
+            NeMoGymEasyInputMessage(
+                role="system",
+                content=self._judge_distill_system_template,
+            )
+        )
+        distill_messages.append(
+            NeMoGymEasyInputMessage(
+                role="user",
+                content=self._judge_distill_prompt_template.format(
+                    question=question,
+                    answer=answer,
+                ),
+            )
+        )
 
         distill_params = cfg.judge_responses_create_params.model_copy(deep=True)
         distill_params.input = distill_messages
@@ -585,18 +622,26 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
                 )
             distill_response = NeMoGymResponse.model_validate(await distill_response.json())
         except Exception as e:
-            print(f"DEBUG: MultistepEquivLLMJudgeResourcesServer._generate_judge_distill_response: dummy response b/c of POST exception: {type(e).__name__} {e}", flush=True)
-            distill_response = NeMoGymResponse.model_validate({
-                "output": [
-                    {
-                        # "type": "message",
-                        "role": "assistant",
-                        # "content": f"<distilled_answer>\n{answer}\n></distilled_answer>",
-                        "content": "",
-                    }
-                ],
-            })
-        print(f"DEBUG: MultistepEquivLLMJudgeResourcesServer._generate_judge_distill_response: {distill_response}", flush=True)
+            print(
+                f"DEBUG: MultistepEquivLLMJudgeResourcesServer._generate_judge_distill_response: dummy response b/c of POST exception: {type(e).__name__} {e}",
+                flush=True,
+            )
+            distill_response = NeMoGymResponse.model_validate(
+                {
+                    "output": [
+                        {
+                            # "type": "message",
+                            "role": "assistant",
+                            # "content": f"<distilled_answer>\n{answer}\n></distilled_answer>",
+                            "content": "",
+                        }
+                    ],
+                }
+            )
+        print(
+            f"DEBUG: MultistepEquivLLMJudgeResourcesServer._generate_judge_distill_response: {distill_response}",
+            flush=True,
+        )
 
         return distill_response
 
@@ -657,16 +702,21 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
                 )
             judge_response = NeMoGymResponse.model_validate(await response.json())
         except Exception as e:
-            print(f"DEBUG: MultistepEquivLLMJudgeResourcesServer._generate_judge_evaluation: dummy response b/c of POST exception: {type(e).__name__} {e}", flush=True)
-            judge_response = NeMoGymResponse.model_validate({
-                "output": [
-                    {
-                        # "type": "message",
-                        "role": "assistant",
-                        "content": "",
-                    }
-                ],
-            })
+            print(
+                f"DEBUG: MultistepEquivLLMJudgeResourcesServer._generate_judge_evaluation: dummy response b/c of POST exception: {type(e).__name__} {e}",
+                flush=True,
+            )
+            judge_response = NeMoGymResponse.model_validate(
+                {
+                    "output": [
+                        {
+                            # "type": "message",
+                            "role": "assistant",
+                            "content": "",
+                        }
+                    ],
+                }
+            )
         eval_record = JudgeEvaluation(
             responses_create_params=responses_create_params,
             response=judge_response,
@@ -703,7 +753,10 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
                     log_file = open(judge_log_path, "a")
                 except Exception as e:
                     log_file = None
-                    print(f"DEBUG: MultistepEquivLLMJudgeResourcesServer._generate_judge_evaluation: log except: {type(e).__name__} {e}", flush=True)
+                    print(
+                        f"DEBUG: MultistepEquivLLMJudgeResourcesServer._generate_judge_evaluation: log except: {type(e).__name__} {e}",
+                        flush=True,
+                    )
                 if log_file is not None:
                     responses_create_params_dict = responses_create_params.model_dump()
                     judge_response_dict = judge_response.model_dump()
