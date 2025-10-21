@@ -324,7 +324,7 @@ def initialize_ray() -> None:
             ray.init(address=ray_head_node_address, ignore_reinit_error=True)
         else:
             print("Auto-detecting Ray cluster...")
-            ray.init(address="auto", ignore_reinit_error=True)
+            ray.init(ignore_reinit_error=True)
 
         cluster_resources = ray.cluster_resources()
         nodes = ray.nodes()

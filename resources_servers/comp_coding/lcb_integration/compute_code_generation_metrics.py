@@ -35,20 +35,21 @@ sys.set_int_max_str_digits(50000)
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
-def _temp_run(in_outs, generation, debug, result, metadata_list, timeout):
-    res, metadata = run_test(in_outs, test=generation, debug=debug, timeout=timeout)
+def _temp_run(in_outs, generation, debug, result, metadata_list, timeout, is_ray=False):
+    res, metadata = run_test(in_outs, test=generation, debug=debug, timeout=timeout, is_ray=is_ray)
+    res = 1.0 if all(r == True for r in res) else 0.0
     result.append(res)
     metadata_list.append(metadata)
 
 
 # Using SPREAD scheduling so that Ray assigns tasks to as many distinct nodes as possible.
-@ray.remote(scheduling_strategy="SPREAD", memory=8 * 1024**3)  # 8GB
+@ray.remote(scheduling_strategy="SPREAD")
 def check_correctness_remote(sample, generation, timeout, debug=True):
     """Ray wrapper of check_correctness for remote execution."""
-    return check_correctness(sample, generation, timeout, debug)
+    return check_correctness(sample, generation, timeout, debug, True)
 
 
-def check_correctness(sample, generation, timeout, debug=True):
+def check_correctness(sample, generation, timeout, debug=True, is_ray=False):
     """Check correctness of code generation with a global timeout.
     The global timeout is to catch some extreme/rare cases not handled by the timeouts
     inside `run_test`"""
@@ -64,7 +65,7 @@ def check_correctness(sample, generation, timeout, debug=True):
     metadata_list = manager.list()
     p = multiprocessing.Process(
         target=_temp_run,
-        args=(in_outs, generation, debug, result, metadata_list, timeout),
+        args=(in_outs, generation, debug, result, metadata_list, timeout, is_ray),
     )
     p.start()
     p.join(timeout=(timeout + 1) * len(in_outs["inputs"]) + 5)
@@ -72,7 +73,7 @@ def check_correctness(sample, generation, timeout, debug=True):
         p.kill()
     if not result:
         # consider that all tests failed
-        result = [[-1 for _ in range(len(in_outs["inputs"]))]]
+        result = [0.0]
         metadata_list = [None]
         if debug:
             print("global timeout")

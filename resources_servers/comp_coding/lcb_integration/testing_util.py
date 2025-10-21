@@ -21,6 +21,9 @@ import platform
 import signal
 import sys
 import time
+import traceback
+import time
+from collections import deque
 
 # used for debugging to time steps
 from datetime import datetime
@@ -306,6 +309,7 @@ def grade_call_based(code: str, all_inputs: list, all_outputs: list, fn_name: st
                     "error_message": "Runtime Error",
                     "inputs": truncatefn(gt_inp),
                     "expected": truncatefn(gt_out),
+                    "traceback": traceback.format_exc(),
                 }
 
         finally:
@@ -369,6 +373,7 @@ def grade_stdio(
                         "error_message": "Runtime Error",
                         "inputs": truncatefn(gt_inp),
                         "expected": truncatefn(gt_out),
+                        "traceback": traceback.format_exc(),
                     }
 
             finally:
@@ -431,7 +436,7 @@ def grade_stdio(
     return all_results, {"execution time": total_execution_time}
 
 
-def run_test(in_outs, test=None, debug=False, timeout=6):
+def run_test(in_outs, test=None, debug=False, timeout=6, is_ray=False):
     """
     if test(generated_code) is not None it'll try to run the code.
     otherwise it'll just return an input and output pair.
@@ -440,7 +445,10 @@ def run_test(in_outs, test=None, debug=False, timeout=6):
 
     # Disable functionalities that can make destructive changes to the test.
     # max memory is set to 4GB
-    reliability_guard(4 * 1024**3)
+    if not is_ray:
+        reliability_guard(4 * 1024**3)
+    else:
+        reliability_guard(16 * 1024**3)
 
     if debug:
         print(f"start = {datetime.now().time()}")
