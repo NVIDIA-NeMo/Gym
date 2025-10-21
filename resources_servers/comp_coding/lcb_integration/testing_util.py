@@ -22,7 +22,6 @@ import signal
 import sys
 import time
 import traceback
-import time
 from collections import deque
 
 # used for debugging to time steps
@@ -436,7 +435,7 @@ def grade_stdio(
     return all_results, {"execution time": total_execution_time}
 
 
-def run_test(in_outs, test=None, debug=False, timeout=6, is_ray=False):
+def run_test(in_outs, test=None, debug=False, timeout=6):
     """
     if test(generated_code) is not None it'll try to run the code.
     otherwise it'll just return an input and output pair.
@@ -445,10 +444,7 @@ def run_test(in_outs, test=None, debug=False, timeout=6, is_ray=False):
 
     # Disable functionalities that can make destructive changes to the test.
     # max memory is set to 4GB
-    if not is_ray:
-        reliability_guard(maximum_memory_bytes=4 * 1024**3)
-    else:
-        reliability_guard(maximum_memory_bytes=None)
+    reliability_guard(maximum_memory_bytes=4 * 1024**3)
 
     if debug:
         print(f"start = {datetime.now().time()}")
@@ -545,7 +541,9 @@ def reliability_guard(maximum_memory_bytes=None):
     if maximum_memory_bytes is not None:
         import resource
 
-        _set_resource_limit(resource.RLIMIT_AS, maximum_memory_bytes)
+        # The resource limit on RLIMIT_AS has been disabled because setting it caused additional out-of-memory (OOM) issues with Ray.
+        # This happens since Ray and its subprocesses share the same virtual address space.
+        # _set_resource_limit(resource.RLIMIT_AS, maximum_memory_bytes)
         _set_resource_limit(resource.RLIMIT_DATA, maximum_memory_bytes)
 
         if not platform.uname().system == "Darwin":

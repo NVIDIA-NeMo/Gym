@@ -35,8 +35,9 @@ sys.set_int_max_str_digits(50000)
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
-def _temp_run(in_outs, generation, debug, result, metadata_list, timeout, is_ray=False):
-    res, metadata = run_test(in_outs, test=generation, debug=debug, timeout=timeout, is_ray=is_ray)
+def _temp_run(in_outs, generation, debug, result, metadata_list, timeout):
+    res, metadata = run_test(in_outs, test=generation, debug=debug, timeout=timeout)
+    # resolving the reward here to avoid memory issues with serializing the results
     res = 1.0 if all(r == True for r in res) else 0.0
     result.append(res)
     metadata_list.append(metadata)
@@ -46,10 +47,10 @@ def _temp_run(in_outs, generation, debug, result, metadata_list, timeout, is_ray
 @ray.remote(scheduling_strategy="SPREAD")
 def check_correctness_remote(sample, generation, timeout, debug=True):
     """Ray wrapper of check_correctness for remote execution."""
-    return check_correctness(sample, generation, timeout, debug, True)
+    return check_correctness(sample, generation, timeout, debug)
 
 
-def check_correctness(sample, generation, timeout, debug=True, is_ray=False):
+def check_correctness(sample, generation, timeout, debug=True):
     """Check correctness of code generation with a global timeout.
     The global timeout is to catch some extreme/rare cases not handled by the timeouts
     inside `run_test`"""
@@ -65,7 +66,7 @@ def check_correctness(sample, generation, timeout, debug=True, is_ray=False):
     metadata_list = manager.list()
     p = multiprocessing.Process(
         target=_temp_run,
-        args=(in_outs, generation, debug, result, metadata_list, timeout, is_ray),
+        args=(in_outs, generation, debug, result, metadata_list, timeout),
     )
     p.start()
     p.join(timeout=(timeout + 1) * len(in_outs["inputs"]) + 5)

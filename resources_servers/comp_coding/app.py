@@ -37,7 +37,6 @@ class CompCodingResourcesServerConfig(BaseResourcesServerConfig):
     num_processes: int
     unit_test_timeout_secs: int
     debug: bool
-    use_ray: bool = True
 
 
 # ----------------------------
@@ -134,11 +133,8 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 self.config.debug,  # debug
             )
 
-            if self.config.use_ray:
-                future = check_correctness_remote.remote(*task_args)
-                result, metadata = await loop.run_in_executor(None, ray.get, future)
-            else:
-                result, metadata = await loop.run_in_executor(None, check_correctness, *task_args)
+            future = check_correctness_remote.remote(*task_args)
+            result, metadata = await loop.run_in_executor(None, ray.get, future)
 
             unit_tests_time_taken = time() - start_time
 
