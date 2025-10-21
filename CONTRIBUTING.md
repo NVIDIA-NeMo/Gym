@@ -105,8 +105,6 @@ If you're contributing a new resource server to NeMo Gym, follow this comprehens
 
 ### Quality Control Checklist
 
-TODO: this section needs to be updated
-
 1. **Necessary information to be included in the merge request**:
    1. Corresponding dataset on the spreadsheet
    2. Description of the prompt: What is the source? Which domain does it cover?
@@ -138,8 +136,8 @@ TODO: this section needs to be updated
 
 ## Contributing RL Framework Integrations
 
-[TODO: Engineers fill in the technical details]
-
+This section is coming soon!
+<!-- 
 ### Integration Requirements
 - [ ] Interface specifications
 - [ ] Reward signal processing
@@ -158,7 +156,7 @@ TODO: this section needs to be updated
 ### Performance Considerations
 - [ ] Memory usage patterns
 - [ ] GPU utilization optimization
-- [ ] Distributed training support
+- [ ] Distributed training support -->
 
 
 ## CI/CD Requirements
@@ -185,9 +183,9 @@ If the build-docs check fails:
 
 1. **Check for broken links**:
    ```bash
-   # Test documentation locally
-   uv sync --group docs
-   # Run doc build commands
+   # Test documentation locally by running doc build commands
+   cd docs
+   uv run --frozen --only-group docs sphinx-build --fail-on-warning --builder html . _build/html
    ```
 
 2. **Common issues**:
