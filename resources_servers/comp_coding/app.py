@@ -17,7 +17,7 @@ from time import time
 from typing import Any, Dict, List, Optional, Union
 
 import ray
-from lcb_integration.compute_code_generation_metrics import check_correctness_remote, check_correctness
+from lcb_integration.compute_code_generation_metrics import check_correctness_remote
 from lcb_integration.extraction_utils import LMStyle, extract_code
 from pydantic import BaseModel
 

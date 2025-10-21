@@ -22,7 +22,6 @@ import signal
 import sys
 import time
 import traceback
-from collections import deque
 
 # used for debugging to time steps
 from datetime import datetime
