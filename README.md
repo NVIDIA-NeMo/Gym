@@ -65,7 +65,8 @@ python responses_api_agents/simple_agent/client.py
 We'd love your contributions! Here's how to get involved:
 
 - **[Report Issues](https://github.com/NVIDIA-NeMo/Gym/issues)** - Bug reports and feature requests
-- **[Discussions](https://github.com/NVIDIA-NeMo/Gym/discussions)** - Community Q&A and ideas
+<!-- TODO: Add link [Discussions](https://github.com/NVIDIA-NeMo/Gym/discussions) -->
+- **Discussions (Coming soon!)** - Community Q&A and ideas
 - **[Contributing Guide](https://github.com/NVIDIA-NeMo/Gym/blob/main/CONTRIBUTING.md)** - How to contribute code, docs, or new environments
 
 ## 📦 Available Resource Servers
