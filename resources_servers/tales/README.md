@@ -59,8 +59,7 @@ Response example:
 ```
 
 */execute_command*:
-Sends the command to the environment and returns the output. For now, we need to include the `session_id` due to some issues with the wrong server being queried otherwise.
-
+Sends the command to the environment and returns the output. For now, we need to include the `session_id` due to some issues with the wrong server being queried otherwise. If `session_id` is not included, then we default to the last used environment by the server.
 Input example:
 ```
 {
@@ -78,6 +77,31 @@ Response example:
   "admissible_commands": ["open fridge", "open table drawer"]
 }
 ```
+
+*/verify*:
+Since the environment itself acts as a verifier, we basically treat the `verify` function as a step command, the same as `execute_command`. For now, we're keeping them seperate but may change them in the future.
+
+Input example:
+```
+{
+  "responses_create_params": {The input to the model...},
+  "response": {"content":["text": "do something..."]}
+}
+```
+Response example:
+```
+{
+  "observation": "Feedback from doing something...",
+  "score": 0.0,
+  "done": false,
+  "info": { "...": "..." },
+  "admissible_commands": ["open fridge", "open table drawer"],
+  "responses_create_params": {The input to the model...},
+  "response": {"content":["text": "do something..."]}
+}
+```
+
+
 */reset*:
 Resets the environment.
 
