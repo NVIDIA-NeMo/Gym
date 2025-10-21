@@ -37,8 +37,7 @@ uv sync --extra dev --group docs
 ```
 
 ### Run Your First Agent
-<!-- TODO: Add link [Setup & Installation](tutorials/02-setup.md) -->
-Start with **[Understanding Concepts](tutorials/01-concepts.md)**, then follow **Setup & Installation (Coming Soon!)** for hands-on implementation.
+Start with **[Understanding Concepts](tutorials/01-concepts.md)**, then follow **[Setup & Installation](tutorials/02-setup.md)** for hands-on implementation.
 
 **TLDR**:
 ```bash

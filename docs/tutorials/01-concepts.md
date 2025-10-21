@@ -110,5 +110,4 @@ Let's trace through a weather request:
 
 Now that you understand the concepts, let's get everything installed and running.
 
-<!-- TODO: Add link [Next: Setup and Installation](02-setup.md) -->
-→ **Next: Setup and Installation (Coming soon!)**
+→ **Next: [Next: Setup and Installation](02-setup.md)**
