@@ -27,7 +27,8 @@ Rollouts are the foundation for multiple critical use cases:
 
 ## The Rollout Generation Workflow
 
-```mermaid
+<!-- TODO: Enable mermaid graph here i.e. ```mermaid``` -->
+```
 graph LR
     A[Input Dataset] --> B[Agent Server]
     B --> C[Model Reasoning]
@@ -144,7 +145,7 @@ Each rollout contains the complete interaction trace:
     "input": [
       {"role": "user", "content": "Find the hidden information in this document..."}
     ],
-    "tools": [{"type": "function", "name": "search_document", ...}]
+    "tools": [{"type": "function", "name": "search_document", "..."}]
   },
   "output": [
     {"role": "assistant", "content": "I'll search the document for the information."},
@@ -366,4 +367,5 @@ You now understand NeMo Gym's rollout generation system:
 - **Data analysis**: Understanding rollout structure and analyzing results
 - **Best practices**: Efficient and reliable rollout generation
 
-→ **[Next: Collecting Rollouts for Reinforcement Learning](06-rl-rollout-collection.md)**
+<!-- TODO: Add link [Next: Collecting Rollouts for Reinforcement Learning](06-rl-rollout-collection.md) -->
+→ **Next: Collecting Rollouts for Reinforcement Learning (Coming soon!)**

@@ -220,7 +220,7 @@ SFT data follows the conversation format used by most training libraries:
 
 DPO data follows the preference pair format:
 ```json
-{"prompt": [...], "chosen": [...], "rejected": [...]}
+{"prompt": ["..."], "chosen": ["..."], "rejected": ["..."]}
 ```
 
 
@@ -354,7 +354,7 @@ You now know how to transform rollouts into training data:
 - **Best practices** for sustainable offline training workflows
 
 **Next steps**: 
-- **[Online Training with Rollouts (RL)](07-online-training.md)** - Learn real-time training approaches
-- **[Building Custom Resource Servers](08-building-custom-resources.md)** - Create domain-specific training data
-
-→ **[Next: Online Training with Rollouts (RL)](07-online-training.md)**
+<!-- TODO: Add link [Online Training with Rollouts (RL)](07-online-training.md) -->
+- **Online Training with Rollouts (RL) (Coming soon!)** - Learn real-time training approaches
+<!-- TODO: Add link [Building Custom Resource Servers](08-building-custom-resources.md) -->
+- **Building Custom Resource Servers (Coming soon!)** - Create domain-specific training data
