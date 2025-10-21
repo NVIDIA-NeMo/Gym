@@ -22,5 +22,5 @@ tutorials/09-configuration-guide.md
 :hidden:
 
 apidocs/index.rst
-how_to_faq.md
+how-to-faq.md
 ```
