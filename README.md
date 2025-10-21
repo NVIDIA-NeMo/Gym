@@ -37,7 +37,8 @@ uv sync --extra dev --group docs
 ```
 
 ### Run Your First Agent
-Start with **[Understanding Concepts](tutorials/01-concepts.md)**, then follow **[Setup & Installation](tutorials/02-setup.md)** for hands-on implementation.
+<!-- TODO: Add link [Setup & Installation](tutorials/02-setup.md) -->
+Start with **[Understanding Concepts](tutorials/01-concepts.md)**, then follow **Setup & Installation (Coming Soon!)** for hands-on implementation.
 
 **TLDR**:
 ```bash
@@ -56,8 +57,8 @@ python responses_api_agents/simple_agent/client.py
 ## 📖 Documentation
 
 - **[Tutorials](tutorials/README.md)** - Progressive learning path
-- **[Contributing](CONTRIBUTING.md)** - Developer setup, testing, and contribution guidelines
-- **[API Documentation](docs/)** - Technical reference and API specifications
+- **[Contributing](https://github.com/NVIDIA-NeMo/Gym/CONTRIBUTING.md)** - Developer setup, testing, and contribution guidelines
+- **[API Documentation](https://github.com/NVIDIA-NeMo/Gym/docs)** - Technical reference and API specifications
  
 
 ## 🤝 Community & Support
@@ -66,7 +67,7 @@ We'd love your contributions! Here's how to get involved:
 
 - **[Report Issues](https://github.com/NVIDIA-NeMo/Gym/issues)** - Bug reports and feature requests
 - **[Discussions](https://github.com/NVIDIA-NeMo/Gym/discussions)** - Community Q&A and ideas
-- **[Contributing Guide](CONTRIBUTING.md)** - How to contribute code, docs, or new environments
+- **[Contributing Guide](https://github.com/NVIDIA-NeMo/Gym/CONTRIBUTING.md)** - How to contribute code, docs, or new environments
 
 ## 📦 Available Resource Servers
 
