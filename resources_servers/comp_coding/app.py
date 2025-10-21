@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from asyncio import Semaphore, get_running_loop
+from time import time
 from typing import Any, Dict, List, Optional, Union
 
 from lcb_integration.compute_code_generation_metrics import check_correctness
@@ -62,6 +63,7 @@ class CompCodingVerifyResponse(BaseVerifyResponse):
     extracted_model_code: Optional[str] = None
     result: Optional[List[Union[int, bool]]] = None
     metadata: Optional[Dict[str, Any]] = None
+    unit_tests_time_taken: Optional[float] = None
 
 
 # ----------------------------
@@ -120,6 +122,8 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             ```
             """
 
+            # We can directly measure here since we are inside the semaphore.
+            start_time = time()
             result, metadata = await loop.run_in_executor(
                 None,
                 check_correctness,
@@ -128,6 +132,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 self.config.unit_test_timeout_secs,  # timeout
                 self.config.debug,  # debug
             )
+            unit_tests_time_taken = time() - start_time
 
         return CompCodingVerifyResponse(
             **body.model_dump(),
@@ -136,6 +141,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             extracted_model_code=code,
             result=result,
             metadata=metadata,
+            unit_tests_time_taken=unit_tests_time_taken,
         )
 
 
