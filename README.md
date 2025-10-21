@@ -56,8 +56,8 @@ python responses_api_agents/simple_agent/client.py
 ## 📖 Documentation
 
 - **[Tutorials](docs/tutorials/README.md)** - Progressive learning path
-- **[Contributing](https://github.com/NVIDIA-NeMo/Gym/CONTRIBUTING.md)** - Developer setup, testing, and contribution guidelines
-- **[API Documentation](https://github.com/NVIDIA-NeMo/Gym/docs)** - Technical reference and API specifications
+- **[Contributing](https://github.com/NVIDIA-NeMo/Gym/blob/main/CONTRIBUTING.md)** - Developer setup, testing, and contribution guidelines
+- **[API Documentation](https://github.com/NVIDIA-NeMo/Gym/tree/main/docs)** - Technical reference and API specifications
  
 
 ## 🤝 Community & Support
@@ -66,7 +66,7 @@ We'd love your contributions! Here's how to get involved:
 
 - **[Report Issues](https://github.com/NVIDIA-NeMo/Gym/issues)** - Bug reports and feature requests
 - **[Discussions](https://github.com/NVIDIA-NeMo/Gym/discussions)** - Community Q&A and ideas
-- **[Contributing Guide](https://github.com/NVIDIA-NeMo/Gym/CONTRIBUTING.md)** - How to contribute code, docs, or new environments
+- **[Contributing Guide](https://github.com/NVIDIA-NeMo/Gym/blob/main/CONTRIBUTING.md)** - How to contribute code, docs, or new environments
 
 ## 📦 Available Resource Servers
 
