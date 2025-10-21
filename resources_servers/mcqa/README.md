@@ -5,17 +5,21 @@ Verifies multiple-choice QA (MCQA) model outputs.
 It consumes agent trajectories and returns a reward based on whether the assistant’s final output matches the gold answer.
 
 ### Input schema
+Required fields:
 - `responses_create_params`: OpenAI Responses create params
-  - Use only a user message with the question and options (e.g., “A: … B: …”).
-  - `metadata` (dataset format):
-    - `options` (required): list of dicts mapping a single letter to the option text, e.g. `[{"A": "Option_Text"}, {"B": "..."}]`.
-    - `expected_answer` (required): the gold letter (single character). Must be one of the letters present in `metadata.options`.
-    - `prompt_type` (required): must be `"mcqa"`.
+  - Use only a user message with the question and options (e.g., "A: … B: …").
+- `options` (required): List of dicts mapping a single letter to option text, e.g. `[{"A": "Option_Text"}, {"B": "..."}]`
+- `expected_answer` (required): The gold letter (single character). Must be one of the letters present in `options`
 
-Notes
-- Letters are validated against the keys present in `metadata.options`.
-- While most datasets use A–D, any letter set is supported as long as it matches the provided options.
-- Legacy support: top-level `options` and `expected_answer` are still accepted for backward compatibility, but the dataset format above is preferred.
+Optional fields:
+- `grading_mode`: Answer extraction method (default: `"strict_single_letter_boxed"`)
+- `template_metadata`: Custom regex pattern for answer extraction (see below)
+- `uuid`: Unique identifier for the question
+- `metadata`: Optional arbitrary metadata (not used for grading)
+
+Notes:
+- Letters are validated against the keys present in `options`
+- While most datasets use A–D, any letter set is supported as long as it matches the provided options
 
 ### Grading modes
 - `strict_single_letter_boxed` (default)
@@ -28,11 +32,31 @@ Notes
 - `lenient_answer_colon`
   - Extracts content after `Answer:` (case-insensitive).
   - If it is a single allowed letter, use it.
-  - Otherwise, if it exactly equals (after normalization) one option’s text, use that letter.
+  - Otherwise, if it exactly equals (after normalization) one option's text, use that letter.
   - Example: `options = [{"A": "Circle"}, {"B": "Square}]`. This will match `Answer: B` or `Answer: Square`.
     - Legacy from NeMo-RL
 
-### Example dataset row (dataset format)
+### Custom answer extraction (template_metadata) - OPTIONAL
+For datasets with custom prompt formats, you can optionally use `template_metadata` with a custom regex pattern.
+
+**Note:** If you don't need custom formats, see `data/example.jsonl` for standard usage with `grading_mode` only.
+
+- `template_metadata.output_regex`: Custom regex pattern to extract the answer letter
+  - **Optional field** - use only if you need custom answer formats
+  - Takes **priority** over `grading_mode` when present
+  - Case-insensitive matching (IGNORECASE flag)
+  - Uses rightmost (last) match if multiple matches exist
+  - Gracefully falls back to `grading_mode` if regex is invalid
+
+**Example formats supported:**
+- `"Option Selected: B"` → regex: `Option Selected:\s*([A-Za-z])`
+- `"Final Choice: C"` → regex: `Final Choice:\s*([A-Za-z])`
+- `"ANSWER IS D"` → regex: `ANSWER IS\s*([A-Za-z])`
+- `"Answer: B"` (plain) → regex: `Answer\s*:\s*(?!Answer)\s*([A-Za-z])`
+
+**Priority order:** `template_metadata.output_regex` (if present) → `grading_mode` (default)
+
+### Example dataset row (standard format)
 ```json
 {
     "responses_create_params":
@@ -41,51 +65,49 @@ Notes
         [
             {
                 "role": "user",
-                "content": "You should output your final response letter inside \\boxed{} and nothing else You can first think step-by-step. Which of the following genetic tests is used to identify the presence of a specific mutation associated with cystic fibrosis?\nA: Karyotyping\nB: Polymerase Chain Reaction (PCR)\nC: Whole-genome sequencing\nD: Chromosome painting\nE: Restriction Fragment Length Polymorphism (RFLP) analysis\nF: Southern blotting\nG: Microarray analysis\nH: Fluorescence in situ hybridization (FISH)\nI: Enzyme-linked immunosorbent assay (ELISA)\nJ: Methylation-specific PCR"
+                "content": "You should output your final response letter inside \\boxed{} and nothing else You can first think step-by-step. Which of the following genetic tests is used to identify the presence of a specific mutation associated with cystic fibrosis?\nA: Karyotyping\nB: Polymerase Chain Reaction (PCR)\n..."
             }
         ]
     },
-    "options":
-    [
-        {
-            "A": "Karyotyping"
-        },
-        {
-            "B": "Polymerase Chain Reaction (PCR)"
-        },
-        {
-            "C": "Whole-genome sequencing"
-        },
-        {
-            "D": "Chromosome painting"
-        },
-        {
-            "E": "Restriction Fragment Length Polymorphism (RFLP) analysis"
-        },
-        {
-            "F": "Southern blotting"
-        },
-        {
-            "G": "Microarray analysis"
-        },
-        {
-            "H": "Fluorescence in situ hybridization (FISH)"
-        },
-        {
-            "I": "Enzyme-linked immunosorbent assay (ELISA)"
-        },
-        {
-            "J": "Methylation-specific PCR"
-        }
-    ],
+    "options": [{"A": "Karyotyping"}, {"B": "Polymerase Chain Reaction (PCR)"}, ...],
     "expected_answer": "B",
     "grading_mode": "strict_single_letter_boxed",
     "uuid": "3c26f339-4b88-54be-b72a-e9c438ca6335"
 }
 ```
 
+### Example with template_metadata (custom format)
+```json
+{
+    "responses_create_params":
+    {
+        "input":
+        [
+            {
+                "role": "user",
+                "content": "Which genetic test identifies cystic fibrosis mutations?\nA: Karyotyping\nB: PCR\n...\n\nChoose the correct option.\nConclude with \"ANSWER IS X\" on the final line."
+            }
+        ]
+    },
+    "options": [{"A": "Karyotyping"}, {"B": "PCR"}, ...],
+    "expected_answer": "B",
+    "grading_mode": "strict_single_letter_boxed",
+    "template_metadata":
+    {
+        "output_regex": "ANSWER IS\\s*([A-Za-z])\\s*",
+        "template_id": "mcqa_generated_019",
+        "prompt_type": "generated",
+        "format_type": "mcqa"
+    },
+    "uuid": "eb07c826-fed5-57f8-bee6-bb29e099069d"
+}
+```
+
+**Note:** Example files in `data/example_with_template_metadata.jsonl` use simulated `reward_profiles` for demonstration purposes.
+
 ### Example of rollouts and usage
 
+**Standard format (with `grading_mode`):**
 ```bash
 config_paths="responses_api_agents/simple_agent/configs/simple_agent.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml,\
@@ -105,6 +127,16 @@ ng_collect_rollouts \
     +agent_name=simple_agent \
     +input_jsonl_fpath=data/MCQA_filtered_decontaminated.jsonl \
     +output_jsonl_fpath=data/MCQA_filtered_decontaminated_samples_rollouts.jsonl +limit=5
+```
+
+**With template_metadata (custom regex):**
+```bash
+# Using example file with 5 different custom prompt formats
+ng_collect_rollouts \
+    +agent_name=simple_agent \
+    +input_jsonl_fpath=resources_servers/mcqa/data/example_with_template_metadata.jsonl \
+    +output_jsonl_fpath=resources_servers/mcqa/data/example_rollouts_with_template_metadata.jsonl \
+    +limit=5
 ```
 
 Rollout example
@@ -231,9 +263,11 @@ Rollout example
 ```
 
 ### Implementation notes
-- The server extracts the last assistant message’s text from the Responses output.
-- Letters are validated against the provided `metadata.options` keys (or legacy top-level if present).
-- For `lenient_boxed`, only boxed content is considered; it must match exactly one option’s text after normalization.
+- The server extracts the last assistant message's text from the Responses output.
+- Letters are validated against the provided `options` keys.
+- For `lenient_boxed`, only boxed content is considered; it must match exactly one option's text after normalization.
+- **template_metadata priority**: When `template_metadata.output_regex` is present, it takes priority over `grading_mode` for answer extraction.
+- **Backward compatibility**: Existing datasets without `template_metadata` continue to work using `grading_mode`.
 
 
 ## Licensing information

@@ -240,4 +240,6 @@ outputs
 
 # Environment with sensitive information like API keys
 env.yaml
+
+# Backup files
 *.backup

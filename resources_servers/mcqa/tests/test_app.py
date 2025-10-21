@@ -206,3 +206,259 @@ class TestApp:
         )
         result5 = await server.verify(verify_request_answer_colon_text)
         assert result5.reward == 1.0
+
+    async def test_template_metadata_basic(self) -> None:
+        """Test basic template_metadata with custom regex"""
+        server = MCQAResourcesServer(
+            config=MCQAResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        # Test custom regex: "Option Selected: X"
+        response = NeMoGymResponse(
+            id="resp_test",
+            created_at=0.0,
+            model="dummy",
+            object="response",
+            output=[
+                {
+                    "id": "msg_test",
+                    "content": [{"annotations": [], "text": "Option Selected: B", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+        )
+
+        verify_request = MCQAVerifyRequest(
+            responses_create_params={
+                "input": [{"role": "user", "content": "Question?\nA: optA\nB: optB"}],
+                "parallel_tool_calls": False,
+                "temperature": 0,
+            },
+            response=response,
+            options=[{"A": "optA"}, {"B": "optB"}],
+            expected_answer="B",
+            grading_mode="strict_single_letter_boxed",  # Will be overridden by template_metadata
+            template_metadata={"output_regex": r"Option Selected:\s*([A-Za-z])"},
+        )
+
+        result = await server.verify(verify_request)
+        assert result.reward == 1.0
+        assert result.extracted_answer == "B"
+
+    async def test_template_metadata_case_insensitive(self) -> None:
+        """Test that template_metadata regex is case-insensitive"""
+        server = MCQAResourcesServer(
+            config=MCQAResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        # Model outputs lowercase 'b', should match uppercase 'B'
+        response = NeMoGymResponse(
+            id="resp_test",
+            created_at=0.0,
+            model="dummy",
+            object="response",
+            output=[
+                {
+                    "id": "msg_test",
+                    "content": [{"annotations": [], "text": "ANSWER IS b", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+        )
+
+        verify_request = MCQAVerifyRequest(
+            responses_create_params={
+                "input": [{"role": "user", "content": "Question?\nA: optA\nB: optB"}],
+            },
+            response=response,
+            options=[{"A": "optA"}, {"B": "optB"}],
+            expected_answer="B",
+            template_metadata={"output_regex": r"ANSWER IS\s*([A-Za-z])"},
+        )
+
+        result = await server.verify(verify_request)
+        assert result.reward == 1.0
+        assert result.extracted_answer == "B"
+
+    async def test_template_metadata_rightmost_match(self) -> None:
+        """Test that rightmost (last) match is used when multiple matches exist"""
+        server = MCQAResourcesServer(
+            config=MCQAResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        # Model mentions A first, then concludes with B
+        response = NeMoGymResponse(
+            id="resp_test",
+            created_at=0.0,
+            model="dummy",
+            object="response",
+            output=[
+                {
+                    "id": "msg_test",
+                    "content": [
+                        {
+                            "annotations": [],
+                            "text": "Maybe Answer: A? Let me reconsider. Final Answer: B",
+                            "type": "output_text",
+                        }
+                    ],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+        )
+
+        verify_request = MCQAVerifyRequest(
+            responses_create_params={
+                "input": [{"role": "user", "content": "Question?\nA: optA\nB: optB"}],
+            },
+            response=response,
+            options=[{"A": "optA"}, {"B": "optB"}],
+            expected_answer="B",
+            template_metadata={"output_regex": r"Answer:\s*([A-Za-z])"},
+        )
+
+        result = await server.verify(verify_request)
+        assert result.reward == 1.0
+        assert result.extracted_answer == "B"
+
+    async def test_template_metadata_priority_over_grading_mode(self) -> None:
+        """Test that template_metadata takes priority over grading_mode"""
+        server = MCQAResourcesServer(
+            config=MCQAResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        # Model outputs "Final Choice: B" (not boxed format)
+        response = NeMoGymResponse(
+            id="resp_test",
+            created_at=0.0,
+            model="dummy",
+            object="response",
+            output=[
+                {
+                    "id": "msg_test",
+                    "content": [{"annotations": [], "text": "Final Choice: B", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+        )
+
+        verify_request = MCQAVerifyRequest(
+            responses_create_params={
+                "input": [{"role": "user", "content": "Question?\nA: optA\nB: optB"}],
+            },
+            response=response,
+            options=[{"A": "optA"}, {"B": "optB"}],
+            expected_answer="B",
+            grading_mode="strict_single_letter_boxed",  # Would fail without boxed
+            template_metadata={"output_regex": r"Final Choice:\s*([A-Za-z])"},  # Should use this instead
+        )
+
+        result = await server.verify(verify_request)
+        assert result.reward == 1.0  # Should succeed via template_metadata
+        assert result.extracted_answer == "B"
+
+    async def test_template_metadata_invalid_regex(self) -> None:
+        """Test that invalid regex patterns are handled gracefully"""
+        server = MCQAResourcesServer(
+            config=MCQAResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        response = NeMoGymResponse(
+            id="resp_test",
+            created_at=0.0,
+            model="dummy",
+            object="response",
+            output=[
+                {
+                    "id": "msg_test",
+                    "content": [{"annotations": [], "text": "\\boxed{B}", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+        )
+
+        verify_request = MCQAVerifyRequest(
+            responses_create_params={
+                "input": [{"role": "user", "content": "Question?\nA: optA\nB: optB"}],
+            },
+            response=response,
+            options=[{"A": "optA"}, {"B": "optB"}],
+            expected_answer="B",
+            grading_mode="strict_single_letter_boxed",  # Should fallback to this
+            template_metadata={"output_regex": r"(["},  # Invalid regex
+        )
+
+        # Should fallback to grading_mode and succeed
+        result = await server.verify(verify_request)
+        assert result.reward == 1.0
+        assert result.extracted_answer == "B"
+
+    async def test_template_metadata_without_options(self) -> None:
+        """Test template_metadata works even with incomplete options metadata"""
+        server = MCQAResourcesServer(
+            config=MCQAResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        response = NeMoGymResponse(
+            id="resp_test",
+            created_at=0.0,
+            model="dummy",
+            object="response",
+            output=[
+                {
+                    "id": "msg_test",
+                    "content": [{"annotations": [], "text": "Selected: B", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+        )
+
+        verify_request = MCQAVerifyRequest(
+            responses_create_params={
+                "input": [{"role": "user", "content": "Question?"}],
+            },
+            response=response,
+            options=[],  # Empty options
+            expected_answer="B",
+            template_metadata={"output_regex": r"Selected:\s*([A-Za-z])"},
+        )
+
+        result = await server.verify(verify_request)
+        assert result.reward == 1.0
+        assert result.extracted_answer == "B"
