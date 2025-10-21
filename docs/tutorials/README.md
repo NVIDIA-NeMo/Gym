@@ -16,30 +16,25 @@ Essential vocabulary and definitions for building RL workflows with NeMo Gym. Qu
 ### **[01 - Understanding Core Concepts](01-concepts.md)**
 Learn NeMo Gym's core abstractions: Models, Resources, and Agents. Understand how they work together.
 
-<!-- TODO: Add link [02 - Setup and Installation](02-setup.md) -->
-### **02 - Setup and Installation** 
+### **[02 - Setup and Installation](02-setup.md)** 
 Get NeMo Gym installed and servers running with your first successful agent interaction.
 
-<!-- TODO: Add link [03 - Interacting with Agents in NeMo Gym](03-your-first-agent.md) -->
-### **03 - Interacting with Agents in NeMo Gym**
+### **[03 - Interacting with Agents in NeMo Gym](03-your-first-agent.md)**
 Break down the agent workflow step-by-step and experiment with different inputs. This covers the fundamentals you need before beginning verification, rollout collection and training.
 
 ## Training
 
-<!-- TODO: Add link [04 - Verifying Agent Results](04-verifying-results.md) -->
-### **04 - Verifying Agent Results**
+### **[04 - Verifying Agent Results](04-verifying-results.md)**
 Understand how NeMo Gym evaluates agent performance and what verification means for training. Learn about different verification patterns and how they drive agent improvement.
 
-<!-- TODO: Add link [05 - Rollout Collection Fundamentals](05-rollout-collection.md) -->
-### **05 - Rollout Collection Fundamentals**
+### **[05 - Rollout Collection Fundamentals](05-rollout-collection.md)**
 Master NeMo Gym's rollout generation system - the foundation for understanding agent behavior, creating training data, and evaluating performance. Learn to systematically capture complete agent interactions.
 
 <!-- TODO: Add link [06 - Collecting Rollouts for Reinforcement Learning](06-rl-rollout-collection.md) -->
-### **06 - Collecting Rollouts for Reinforcement Learning**
+### **06 - Collecting Rollouts for Reinforcement Learning (Coming soon!)**
 *Coming soon* - Generate rollouts for real-time RL training. Learn online rollout collection, integration with RL frameworks, and continuous agent improvement through environmental feedback.
 
-<!-- TODO: Add link [07 - Collecting Rollouts for SFT and DPO Training](07-sft-dpo-rollout-collection.md) -->
-### **07 - Collecting Rollouts for SFT and DPO Training**
+### **[07 - Collecting Rollouts for SFT and DPO Training](07-sft-dpo-rollout-collection.md)**
 Use generated rollouts to create training data for supervised fine-tuning and direct preference optimization. Learn data preparation and quality filtering.
 
 
