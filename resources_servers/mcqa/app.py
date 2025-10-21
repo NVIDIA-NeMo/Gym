@@ -45,6 +45,8 @@ class MCQARunRequest(BaseRunRequest):
         "lenient_boxed",
         "lenient_answer_colon",
     ] = "strict_single_letter_boxed"
+    # Template metadata with custom regex support
+    template_metadata: Optional[dict[str, Any]] = None
 
 
 class MCQAVerifyRequest(MCQARunRequest, BaseVerifyRequest):
@@ -151,6 +153,54 @@ def _match_option_text(text: str, options: list[dict[str, str]], allowed_letters
     return None
 
 
+def _parse_answer_with_custom_regex(
+    text: str, regex_pattern: str, allowed_letters: set[str], options: Optional[list[dict[str, str]]]
+) -> Optional[str]:
+    """Parse answer using custom regex from template_metadata.
+
+    Uses rightmost (last) match to handle reasoning before final answer.
+    Case-insensitive matching to handle capitalization variations.
+
+    When using template_metadata with custom regex, we trust the regex pattern
+    and allow extracted letters even if options metadata is incomplete.
+    """
+    try:
+        # Use IGNORECASE flag and findall to get all matches
+        matches = re.findall(regex_pattern, text, re.IGNORECASE)
+        if not matches:
+            return None
+
+        # Take the LAST match (rightmost)
+        captured = matches[-1].strip().upper()
+
+        # Try direct letter match first
+        if len(captured) == 1 and captured.isalpha():
+            # If we have options metadata, validate against it
+            if allowed_letters and captured in allowed_letters:
+                return captured
+            # If options metadata is missing/incomplete, trust the regex
+            # This handles cases where template_metadata regex is used but options are incomplete
+            elif not allowed_letters:
+                return captured
+            # If captured letter is not in allowed_letters but allowed_letters exists,
+            # it might be a data quality issue - still return it when using template_metadata
+            else:
+                # Trust the regex when using template_metadata (this function is only called for template_metadata)
+                return captured
+
+        # Try matching against option text (normalized)
+        normalized_captured = _normalize_for_match(captured)
+        for entry in options or []:
+            for k, v in entry.items():
+                if k.upper() in allowed_letters and _normalize_for_match(v) == normalized_captured:
+                    return k.upper()
+
+        return None
+    except re.error:
+        # Invalid regex pattern, return None
+        return None
+
+
 class MCQAResourcesServer(SimpleResourcesServer):
     config: MCQAResourcesServerConfig
 
@@ -167,39 +217,44 @@ class MCQAResourcesServer(SimpleResourcesServer):
 
         pred: Optional[str] = None
 
-        if body.grading_mode == "strict_single_letter_boxed":
-            pred, _, _ = _parse_answer_letter_strict_boxed(text, allowed_letters)
-        elif body.grading_mode == "lenient_boxed":
-            # Try strict boxed first
-            pred, _, _ = _parse_answer_letter_strict_boxed(text, allowed_letters)
-            if pred is None:
-                # Then try to match option text inside boxed content only
-                letter_from_text = _match_option_text(text, options, allowed_letters)
-                if letter_from_text is not None:
-                    pred = letter_from_text
-        elif body.grading_mode == "lenient_answer_colon":
-            # Look for Answer: <...>
-            m = ANSWER_COLON_PATTERN.search(text)
-            if m:
-                candidate = _strip_latex_wrappers(m.group(1)).strip()
-                # Letter case
-                if len(candidate) == 1 and candidate.isalpha():
-                    letter_up = candidate.upper()
-                    if letter_up in allowed_letters:
-                        pred = letter_up
-                # Option text equality (normalized)
+        # Check for template_metadata first (highest priority)
+        if body.template_metadata and "output_regex" in body.template_metadata:
+            regex_pattern = body.template_metadata["output_regex"]
+            pred = _parse_answer_with_custom_regex(text, regex_pattern, allowed_letters, options)
+
+        # Fallback to existing grading_mode logic if template_metadata didn't work
+        if pred is None:
+            if body.grading_mode == "strict_single_letter_boxed":
+                pred, _, _ = _parse_answer_letter_strict_boxed(text, allowed_letters)
+            elif body.grading_mode == "lenient_boxed":
+                # Try strict boxed first
+                pred, _, _ = _parse_answer_letter_strict_boxed(text, allowed_letters)
                 if pred is None:
-                    cand_norm = _normalize_for_match(candidate)
-                    for entry in options or []:
-                        for k, v in entry.items():
-                            k_up = k.upper()
-                            if k_up in allowed_letters and _normalize_for_match(v) == cand_norm:
-                                pred = k_up
+                    # Then try to match option text inside boxed content only
+                    letter_from_text = _match_option_text(text, options, allowed_letters)
+                    if letter_from_text is not None:
+                        pred = letter_from_text
+            elif body.grading_mode == "lenient_answer_colon":
+                # Look for Answer: <...>
+                m = ANSWER_COLON_PATTERN.search(text)
+                if m:
+                    candidate = _strip_latex_wrappers(m.group(1)).strip()
+                    # Letter case
+                    if len(candidate) == 1 and candidate.isalpha():
+                        letter_up = candidate.upper()
+                        if letter_up in allowed_letters:
+                            pred = letter_up
+                    # Option text equality (normalized)
+                    if pred is None:
+                        cand_norm = _normalize_for_match(candidate)
+                        for entry in options or []:
+                            for k, v in entry.items():
+                                k_up = k.upper()
+                                if k_up in allowed_letters and _normalize_for_match(v) == cand_norm:
+                                    pred = k_up
+                                    break
+                            if pred is not None:
                                 break
-                        if pred is not None:
-                            break
-        else:
-            pred = None
 
         gold = (expected_answer or "").strip().upper()
         is_correct = (pred == gold) if (pred is not None and gold) else False
