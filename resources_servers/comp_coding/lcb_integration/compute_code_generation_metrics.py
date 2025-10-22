@@ -37,8 +37,6 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 def _temp_run(in_outs, generation, debug, result, metadata_list, timeout):
     res, metadata = run_test(in_outs, test=generation, debug=debug, timeout=timeout)
-    # resolving the reward here to avoid memory issues with serializing the results
-    res = 1.0 if all(r == True for r in res) else 0.0
     result.append(res)
     metadata_list.append(metadata)
 
@@ -74,7 +72,7 @@ def check_correctness(sample, generation, timeout, debug=True):
         p.kill()
     if not result:
         # consider that all tests failed
-        result = [0.0]
+        result = [[-1 for i in range(len(in_outs["inputs"]))]]
         metadata_list = [None]
         if debug:
             print("global timeout")

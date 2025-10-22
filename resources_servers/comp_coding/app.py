@@ -140,10 +140,10 @@ class CompCodingResourcesServer(SimpleResourcesServer):
 
         return CompCodingVerifyResponse(
             **body.model_dump(),
-            reward=result,
+            reward=1.0 if all(r == True for r in result) else 0.0,
             extracted_model_output=model_out,
             extracted_model_code=code,
-            result=result if isinstance(result, list) else [result],
+            result=result,
             metadata=metadata,
             unit_tests_time_taken=unit_tests_time_taken,
         )
