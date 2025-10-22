@@ -16,6 +16,7 @@ from typing import Generator
 from unittest.mock import MagicMock
 
 import pytest
+import ray
 from app import (
     CompCodingResourcesServer,
     CompCodingResourcesServerConfig,
@@ -32,6 +33,7 @@ from nemo_gym.server_utils import ServerClient
 class TestApp:
     @pytest.fixture(scope="module")
     def comp_coding_resources_server_client(self) -> Generator[TestClient, None, None]:
+        ray.init(num_cpus=1)
         server = CompCodingResourcesServer(
             config=CompCodingResourcesServerConfig(
                 host="0.0.0.0",
