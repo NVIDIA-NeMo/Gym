@@ -125,6 +125,7 @@ class AviaryAgent(SimpleResponsesAPIAgent):
         env_id = seed_session_response.env_id
         model_response: NeMoGymResponse | None = None
         agent_state_history: list[NeMoGymResponseInput] = []
+        model_server_cookies = None
 
         total_len: int | None = None
 
@@ -144,7 +145,9 @@ class AviaryAgent(SimpleResponsesAPIAgent):
                     server_name=self.config.model_server.name,
                     url_path="/v1/responses",
                     json=agent_state,
+                    cookies=model_server_cookies,
                 )
+                model_server_cookies = raw_model_response.cookies
                 model_response_json = await raw_model_response.json()
             except json.JSONDecodeError as e:
                 # JSONDecodeError will be thrown if there's an underlying openai error.

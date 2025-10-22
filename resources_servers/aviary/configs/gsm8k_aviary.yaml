@@ -2,6 +2,7 @@ gsm8k_aviary_resources_server:
   resources_servers:
     aviary:
       entrypoint: gsm8k_app.py
+      domain: math
 
 gsm8k_aviary_agent:
   responses_api_agents:
