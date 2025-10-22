@@ -16,7 +16,8 @@ from asyncio import Semaphore, get_running_loop
 from time import time
 from typing import Any, Dict, List, Optional, Union
 
-from lcb_integration.compute_code_generation_metrics import check_correctness
+import ray
+from lcb_integration.compute_code_generation_metrics import check_correctness_remote
 from lcb_integration.extraction_utils import LMStyle, extract_code
 from pydantic import BaseModel
 
@@ -124,14 +125,17 @@ class CompCodingResourcesServer(SimpleResourcesServer):
 
             # We can directly measure here since we are inside the semaphore.
             start_time = time()
-            result, metadata = await loop.run_in_executor(
-                None,
-                check_correctness,
+
+            task_args = (
                 {"input_output": tests.model_dump_json()},  # sample
                 code,  # generation
                 self.config.unit_test_timeout_secs,  # timeout
                 self.config.debug,  # debug
             )
+
+            future = check_correctness_remote.remote(*task_args)
+            result, metadata = await loop.run_in_executor(None, ray.get, future)
+
             unit_tests_time_taken = time() - start_time
 
         return CompCodingVerifyResponse(
