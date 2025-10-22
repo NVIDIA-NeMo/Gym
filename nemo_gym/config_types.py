@@ -266,3 +266,21 @@ def maybe_get_server_instance_config(name: str, server_type_config_dict: Any) ->
 ########################################
 
 AGENT_REF_KEY = "agent_ref"
+
+
+########################################
+# Base CLI configs
+########################################
+
+
+class BaseNeMoGymCLIConfig(BaseModel):
+    h: bool = False
+    help: bool = False
+
+    def model_post_init(self, context):
+        if not self.h or self.help:
+            return
+
+        print(f"Help for {self.__class__.__name__}:")
+        for field_name, field in self.__class__.model_fields.items():
+            print(f"- {field_name} ({field.annotation}): {field.description}")
