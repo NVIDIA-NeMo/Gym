@@ -3,7 +3,7 @@
 ```
 
 ```{toctree}
-:caption: Tutorials 📚
+:caption: Tutorials📚
 :hidden:
 
 tutorials/README.md
