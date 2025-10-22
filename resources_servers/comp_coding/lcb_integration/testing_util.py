@@ -448,6 +448,7 @@ def run_test(in_outs, test=None, debug=False, timeout=6):
     if debug:
         print(f"start = {datetime.now().time()}")
 
+    # The in_outs is already loaded from the sample from the parent process
     # try:
     #     in_outs = json.loads(sample["input_output"])
     # except ValueError as e:
