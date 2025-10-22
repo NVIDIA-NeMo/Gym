@@ -89,6 +89,14 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
 
         print(json.dumps(avg_metrics, indent=4))
 
+    async def run_agent_func(self, examples: List[Dict], head_server_config: Optional[BaseServerConfig] = None, url_path: str = "/run") -> List[Dict]:
+        server_client = self.setup_server_client(head_server_config)
+        async def _post_subroutine(row: Dict) -> Dict:
+            res = await server_client.post(server_name=row.pop("agent_ref")["name"], url_path=url_path, json=row)
+            return await res.json()
+
+        return await tqdm.gather(*map(_post_subroutine, examples), desc=f"Collecting rollouts with url path {url_path}", miniters=10)
+
     async def run_examples(
         self, examples: List[Dict], head_server_config: Optional[BaseServerConfig] = None
     ) -> List[Dict]:

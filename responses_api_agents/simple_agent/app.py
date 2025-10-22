@@ -21,6 +21,8 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    BaseSeedSessionResponse,
+    BaseSeedSessionRequest,
 )
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
@@ -43,6 +45,13 @@ class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     max_steps: int = None
+
+class SimpleAgentSeedSessionRequest(BaseSeedSessionRequest):
+    model_config = ConfigDict(extra="allow")
+
+
+class SimpleAgentSeedSessionResponse(BaseSeedSessionResponse):
+    model_config = ConfigDict(extra="allow")
 
 
 class SimpleAgentRunRequest(BaseRunRequest):
@@ -133,7 +142,41 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             response.set_cookie(k, v)
 
         model_response.output = new_outputs
+        # print(f"model_response in simple agent run: {model_response}")
         return model_response
+
+    async def get_rollout_response(self, request: Request, body: SimpleAgentRunRequest) -> NeMoGymResponse:
+        cookies = request.cookies
+        response = await self.server_client.post(
+            server_name=self.config.name,
+            url_path="/v1/responses",
+            json=body.responses_create_params,
+            cookies=cookies,
+        )
+        return NeMoGymResponse.model_validate(await response.json())
+
+    async def reset(self, request: Request, body: SimpleAgentSeedSessionRequest) -> SimpleAgentSeedSessionResponse:
+        cookies = request.cookies
+        seed_session_response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/seed_session",
+            json=body.model_dump(),
+            cookies=cookies,
+        )
+        await raise_for_status(seed_session_response)
+        cookies = seed_session_response.cookies
+        return SimpleAgentSeedSessionResponse.model_validate(await seed_session_response.json())
+
+    async def verify(self, request: Request, body: SimpleAgentVerifyRequest) -> SimpleAgentVerifyResponse:
+        cookies = request.cookies
+        verify_response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/verify",
+            json=body.model_dump(),
+            cookies=cookies,
+        )
+        await raise_for_status(verify_response)
+        return SimpleAgentVerifyResponse.model_validate(await verify_response.json())
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
         cookies = request.cookies

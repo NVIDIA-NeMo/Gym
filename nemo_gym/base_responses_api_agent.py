@@ -15,7 +15,7 @@ from abc import abstractmethod
 
 from fastapi import Body, FastAPI
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse, BaseSeedSessionRequest, BaseSeedSessionResponse, BaseVerifyRequest
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -40,7 +40,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, SimpleServer):
         self.setup_session_middleware(app)
 
         app.post("/v1/responses")(self.responses)
+        app.post("/reset")(self.reset)
+        app.post("/verify")(self.verify)
         app.post("/run")(self.run)
+        app.post("/get_rollout_response")(self.get_rollout_response)
 
         return app
 
@@ -48,6 +51,17 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, SimpleServer):
     # We should explicitly add validation at this server level or we should explicitly not validate so that there is flexibility in this API.
     @abstractmethod
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        pass
+
+    async def get_rollout_response(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        pass
+
+    @abstractmethod
+    async def reset(self, body: BaseSeedSessionRequest = Body()) -> BaseSeedSessionResponse:
+        pass
+
+    @abstractmethod
+    async def verify(self, body: BaseVerifyRequest = Body()) -> BaseVerifyResponse:
         pass
 
     @abstractmethod
