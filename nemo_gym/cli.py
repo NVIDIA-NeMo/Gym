@@ -68,15 +68,19 @@ class RunConfig(BaseNeMoGymCLIConfig):
 class TestConfig(RunConfig):
     should_validate_data: bool = False
 
-    dir_path: Path = None  # initialized in model_post_init
+    _dir_path: Path  # initialized in model_post_init
 
     def model_post_init(self, context):  # pragma: no cover
         # TODO: This currently only handles relative entrypoints. Later on we can resolve the absolute path.
-        self.dir_path = Path(self.entrypoint)
+        self._dir_path = Path(self.entrypoint)
         assert not self.dir_path.is_absolute()
         assert len(self.dir_path.parts) == 2
 
         return super().model_post_init(context)
+
+    @property
+    def dir_path(self) -> Path:
+        return self._dir_path
 
 
 class ServerInstanceDisplayConfig(BaseModel):

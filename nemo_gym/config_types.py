@@ -274,20 +274,19 @@ AGENT_REF_KEY = "agent_ref"
 
 
 class BaseNeMoGymCLIConfig(BaseModel):
-    h: bool = False
-    help: bool = False
+    @model_validator(mode="before")
+    @classmethod
+    def pre_process(cls, data):
+        if data.get("h") or data.get("help"):
+            print(f"Help for {cls.__name__}:")
+            for field_name, field in cls.model_fields.items():
+                if field_name in ("h", "help"):
+                    continue
 
-    def model_post_init(self, context):
-        if not (self.h or self.help):
-            return
+                description_str = f": {field.description}" if field.description else ""
+                print(f"- {field_name} ({field.annotation.__name__}){description_str}")
 
-        print(f"Help for {self.__class__.__name__}:")
-        for field_name, field in self.__class__.model_fields.items():
-            if field_name in ("h", "help"):
-                continue
+            # Exit after help is printed.
+            exit()
 
-            description_str = f": {field.description}" if field.description else ""
-            print(f"- {field_name} ({field.annotation.__name__}){description_str}")
-
-        # Exit after help is printed.
-        exit()
+        return data
