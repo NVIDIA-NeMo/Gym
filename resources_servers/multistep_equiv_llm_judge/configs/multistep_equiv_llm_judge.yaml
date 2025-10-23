@@ -7,14 +7,14 @@ multistep_equiv_llm_judge:
         name: policy_model
       judge_responses_create_params:
         input: []
-      judge_extract_system_template_fpath: resources_servers/multistep_equiv_llm_judge/prompt_templates/multistep_equiv_llm_judge_extract_system.txt
-      judge_extract_prompt_template_fpath: resources_servers/multistep_equiv_llm_judge/prompt_templates/multistep_equiv_llm_judge_extract.txt
-      judge_distill_system_template_fpath: resources_servers/multistep_equiv_llm_judge/prompt_templates/multistep_equiv_llm_judge_distill_system.txt
-      judge_distill_prompt_template_fpath: resources_servers/multistep_equiv_llm_judge/prompt_templates/multistep_equiv_llm_judge_distill.txt
-      judge_distill_quorum_template_fpath: resources_servers/multistep_equiv_llm_judge/prompt_templates/multistep_equiv_llm_judge_distill_quorum.txt
-      judge_compare_system_template_fpath: resources_servers/multistep_equiv_llm_judge/prompt_templates/multistep_equiv_llm_judge_compare_system.txt
-      judge_compare_prompt_template_fpath: resources_servers/multistep_equiv_llm_judge/prompt_templates/multistep_equiv_llm_judge_compare.txt
-      judge_verdict_prompt_template_fpath: resources_servers/multistep_equiv_llm_judge/prompt_templates/equivalence_llm_judge.txt
+      judge_extract_system_template_fpath: prompt_templates/multistep_equiv_llm_judge_extract_system.txt
+      judge_extract_prompt_template_fpath: prompt_templates/multistep_equiv_llm_judge_extract.txt
+      judge_distill_system_template_fpath: prompt_templates/multistep_equiv_llm_judge_distill_system.txt
+      judge_distill_prompt_template_fpath: prompt_templates/multistep_equiv_llm_judge_distill.txt
+      judge_distill_quorum_template_fpath: prompt_templates/multistep_equiv_llm_judge_distill_quorum.txt
+      judge_compare_system_template_fpath: prompt_templates/multistep_equiv_llm_judge_compare_system.txt
+      judge_compare_prompt_template_fpath: prompt_templates/multistep_equiv_llm_judge_compare.txt
+      judge_verdict_prompt_template_fpath: prompt_templates/equivalence_llm_judge.txt
       judge_system_message: null
       judge_equal_label: "[[A=B]]"
       judge_not_equal_label: "[[A!=B]]"
