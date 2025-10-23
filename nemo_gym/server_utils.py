@@ -451,7 +451,7 @@ class SimpleServer(BaseServer):
     def run_webserver(cls) -> None:  # pragma: no cover
         global_config_dict = get_global_config_dict()
 
-        # initialize_ray()
+        initialize_ray()
 
         server_config = cls.load_config_from_global_config()
         server_client = ServerClient(
