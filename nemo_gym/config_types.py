@@ -37,10 +37,35 @@ class BaseNeMoGymCLIConfig(BaseModel):
         if data.get("h") or data.get("help"):
             fields = cls.model_fields.items()
             if fields:
-                print(f"Help for {cls.__name__}:")
+                # We use __doc__ directly here since inspect.getdoc will inherit the doc from parent classes.
+                class_doc = cls.__doc__
+                if class_doc:
+                    print(f"""Description
+-----------
+{class_doc.strip()}
+""")
+
+                print("""Parameters
+----------""")
+
+                prefixes: List[str] = []
+                suffixes: List[str] = []
                 for field_name, field in fields:
-                    description_str = f": {field.description}" if field.description else ""
-                    print(f"- {field_name} ({field.annotation.__name__}){description_str}")
+                    description_str = field.description if field.description else ""
+
+                    # Not sure if there is a better way to get this annotation_str, e.g. using typing.get_args or typing.get_origin
+                    annotation_str = (
+                        field.annotation.__name__ if isinstance(field.annotation, type) else str(field.annotation)
+                    )
+                    annotation_str = annotation_str.replace("typing.", "")
+
+                    prefixes.append(f"- {field_name} ({annotation_str})")
+                    suffixes.append(description_str)
+
+                max_prefix_length = max(map(len, prefixes))
+                ljust_length = max_prefix_length + 3
+                for prefix, suffix in zip(prefixes, suffixes):
+                    print(f"{prefix.ljust(ljust_length)}{suffix}")
             else:
                 print("There are no arguments to this CLI command!")
 
@@ -89,6 +114,10 @@ def is_server_ref(config_dict: DictConfig) -> Optional[ServerRef]:
 
 
 class UploadJsonlDatasetGitlabConfig(BaseNeMoGymCLIConfig):
+    """
+    Upload a local jsonl dataset artifact to Gitlab.
+    """
+
     dataset_name: str = Field(description="The dataset name.")
     version: str = Field(description="The version of this dataset. Must be in the format `x.x.x`.")
     input_jsonl_fpath: str = Field(description="Path to the jsonl file to upload.")

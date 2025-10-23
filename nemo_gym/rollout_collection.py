@@ -33,6 +33,10 @@ from nemo_gym.server_utils import (
 
 
 class RolloutCollectionConfig(BaseNeMoGymCLIConfig):
+    """
+    Perform a batch of rollout collection.
+    """
+
     agent_name: str = Field(description="The agent to collect rollouts from.")
     input_jsonl_fpath: str = Field(
         description="The input data source to use to collect rollouts, in the form of a file path to a jsonl file."
