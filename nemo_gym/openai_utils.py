@@ -422,7 +422,7 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
 ########################################
 
 
-class NeMoGymAsyncOpenAI(BaseModel):
+class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     """This is just a stub class that wraps around aiohttp"""
 
     base_url: str
