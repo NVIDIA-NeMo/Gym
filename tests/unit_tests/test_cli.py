@@ -39,7 +39,10 @@ class TestCLI:
                 check=True,
                 shell=True,
             )
-            assert "Help for " in result.stdout, result.stdout
+            assert "Help for " in result.stdout, f"""Test failed for `{script} {arg}`.
+Stdout: {result.stdout}
+Stderr: {result.stderr}
+"""
 
         for script in project_scripts:
             _test_single_arg(script, "+h=true")

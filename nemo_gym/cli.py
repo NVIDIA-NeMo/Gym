@@ -279,6 +279,10 @@ Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
 def run(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
 ):  # pragma: no cover
+    global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
+    # Just here for help
+    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+
     rh = RunHelper()
     rh.start(global_config_dict_parser_config)
     rh.run_forever()
