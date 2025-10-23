@@ -35,16 +35,16 @@ class BaseNeMoGymCLIConfig(BaseModel):
     @classmethod
     def pre_process(cls, data):
         if data.get("h") or data.get("help"):
-            fields = cls.model_fields.items()
-            if fields:
-                # We use __doc__ directly here since inspect.getdoc will inherit the doc from parent classes.
-                class_doc = cls.__doc__
-                if class_doc:
-                    print(f"""Description
+            # We use __doc__ directly here since inspect.getdoc will inherit the doc from parent classes.
+            class_doc = cls.__doc__
+            if class_doc:
+                print(f"""Description
 -----------
 {class_doc.strip()}
 """)
 
+            fields = cls.model_fields.items()
+            if fields:
                 print("""Parameters
 ----------""")
 
