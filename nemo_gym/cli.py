@@ -26,7 +26,7 @@ from typing import Dict, List, Optional
 import uvicorn
 from devtools import pprint
 from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR
@@ -62,11 +62,16 @@ def _run_command(command: str, working_directory: Path) -> Popen:  # pragma: no 
 
 
 class RunConfig(BaseNeMoGymCLIConfig):
-    entrypoint: str
+    entrypoint: str = Field(
+        description="Entrypoint for this command. This must be a relative path with 2 parts. Should look something like `responses_api_agents/simple_agent`."
+    )
 
 
 class TestConfig(RunConfig):
-    should_validate_data: bool = False
+    should_validate_data: bool = Field(
+        default=False,
+        description="Whether or not to validate the example data (examples, metrics, rollouts, etc) for this server.",
+    )
 
     _dir_path: Path  # initialized in model_post_init
 
@@ -396,7 +401,10 @@ def _format_pct(count: int, total: int) -> str:  # pragma: no cover
 
 
 class TestAllConfig(BaseNeMoGymCLIConfig):
-    fail_on_total_and_test_mismatch: bool = False
+    fail_on_total_and_test_mismatch: bool = Field(
+        default=False,
+        description="There may be situations where there are an un-equal number of servers that exist vs have tests. This flag will fail the test job if this mismatch exists.",
+    )
 
 
 def test_all():  # pragma: no cover
