@@ -317,13 +317,14 @@ def initialize_ray() -> None:
 
     global_config_dict = get_global_config_dict()
     ray_head_node_address = global_config_dict.get("ray_head_node_address")
-
+    ray_init_kwargs = dict(ignore_reinit_error=True, runtime_env={"working_dir": PARENT_DIR})
     if ray_head_node_address is not None:
         print(f"Connecting to Ray cluster at specified address: {ray_head_node_address}")
-        ray.init(address=ray_head_node_address, ignore_reinit_error=True, runtime_env={"working_dir": PARENT_DIR})
+        ray_init_kwargs["address"] = ray_head_node_address
     else:
         print("Starting Ray cluster...")
-        ray.init(ignore_reinit_error=True, runtime_env={"working_dir": PARENT_DIR})
+
+    ray.init(**ray_init_kwargs)
 
 
 class SimpleServer(BaseServer):
