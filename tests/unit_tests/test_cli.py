@@ -11,6 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import tomllib
+from pathlib import Path
+from subprocess import run
+
+from nemo_gym import PARENT_DIR
 from nemo_gym.cli import RunConfig
 
 
@@ -18,3 +23,26 @@ from nemo_gym.cli import RunConfig
 class TestCLI:
     def test_sanity(self) -> None:
         RunConfig(entrypoint="", name="")
+
+    def test_pyproject_scripts(self) -> None:
+        pyproject_path = Path(PARENT_DIR) / "pyproject.toml"
+        with pyproject_path.open("rb") as f:
+            pyproject_data = tomllib.load(f)
+
+        project_scripts = pyproject_data["project"]["scripts"]
+
+        for script in project_scripts:
+            run(
+                f"{script} +h=true",
+                capture_output=True,
+                text=True,
+                check=True,
+                shell=True,
+            )
+            run(
+                f"{script} +help=true",
+                capture_output=True,
+                text=True,
+                check=True,
+                shell=True,
+            )
