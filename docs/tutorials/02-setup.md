@@ -27,7 +27,7 @@ source .venv/bin/activate
 uv sync --extra dev --group docs
 ```
 
-**✅ Success Check**: You should see `(.venv)` in your terminal prompt.
+**✅ Success Check**: You should see something that indicates a newly activated environment e.g. `(.venv)` or `(NeMo-Gym)` in your terminal prompt.
 
 ## Step 2: Configure Your API Key
 
@@ -66,9 +66,10 @@ INFO:     Uvicorn running on http://127.0.0.1:62920 (Press CTRL+C to quit)
 
 This means **4 servers are now running**:
 1. **Head server** (coordinates everything)
-2. **Simple weather resource** (provides weather tool)
-3. **OpenAI model server** (connects to GPT-4)
-4. **Simple agent** (orchestrates model + resources)
+2. 3 Gym servers. These 3 servers and their high level config should be printed to terminal!
+   1. **Simple weather resource** (provides weather tool)
+   2. **OpenAI model server** (connects to GPT-4)
+   3. **Simple agent** (orchestrates model + resources)
 
 ## Step 4: Test the Setup
 

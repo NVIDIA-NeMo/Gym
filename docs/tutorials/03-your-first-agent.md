@@ -140,7 +140,7 @@ run(test_agent())
 Specify the config and run NeMo Gym
 ```bash
 # Define which servers to start
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\                           
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
 resources_servers/simple_weather/configs/simple_weather.yaml"
 
 # Start all servers

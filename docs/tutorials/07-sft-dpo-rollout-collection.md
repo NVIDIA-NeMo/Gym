@@ -355,6 +355,7 @@ You now know how to transform rollouts into training data:
 
 **Next steps**: 
 <!-- TODO: Add link [Online Training with Rollouts (RL)](07-online-training.md) -->
-- **Online Training with Rollouts (RL) (Coming soon!)** - Learn real-time training approaches
+<!-- - **Online Training with Rollouts (RL) (Coming soon!)** - Learn real-time training approaches -->
 <!-- TODO: Add link [Building Custom Resource Servers](08-building-custom-resources.md) -->
-- **Building Custom Resource Servers (Coming soon!)** - Create domain-specific training data
+<!-- - **Building Custom Resource Servers (Coming soon!)** - Create domain-specific training data -->
+- **[Configuration Management](09-configuration-guide.md)**

@@ -25,3 +25,6 @@ mcqa_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/mcqa/data/example.jsonl
+      - name: example_with_template_metadata
+        type: example
+        jsonl_fpath: resources_servers/mcqa/data/example_with_template_metadata.jsonl
