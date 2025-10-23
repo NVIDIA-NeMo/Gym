@@ -30,6 +30,7 @@ from pydantic import BaseModel
 from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
@@ -60,7 +61,7 @@ def _run_command(command: str, working_directory: Path) -> Popen:  # pragma: no 
     return Popen(command, executable="/bin/bash", shell=True, env=custom_env)
 
 
-class RunConfig(BaseModel):
+class RunConfig(BaseNeMoGymCLIConfig):
     entrypoint: str
 
 

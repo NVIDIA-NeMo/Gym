@@ -278,9 +278,16 @@ class BaseNeMoGymCLIConfig(BaseModel):
     help: bool = False
 
     def model_post_init(self, context):
-        if not self.h or self.help:
+        if not (self.h or self.help):
             return
 
         print(f"Help for {self.__class__.__name__}:")
         for field_name, field in self.__class__.model_fields.items():
-            print(f"- {field_name} ({field.annotation}): {field.description}")
+            if field_name in ("h", "help"):
+                continue
+
+            description_str = f": {field.description}" if field.description else ""
+            print(f"- {field_name} ({field.annotation.__name__}){description_str}")
+
+        # Exit after help is printed.
+        exit()
