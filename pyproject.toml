@@ -246,6 +246,10 @@ ng_prepare_data = "nemo_gym.train_data_utils:prepare_data"
 nemo_gym_dump_config = "nemo_gym.cli:dump_config"
 ng_dump_config = "nemo_gym.cli:dump_config"
 
+# Display help
+nemo_gym_help = "nemo_gym.cli:display_help"
+ng_help = "nemo_gym.cli:display_help"
+
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -14,6 +14,7 @@
 import asyncio
 import json
 import shlex
+import tomllib
 from glob import glob
 from os import environ, makedirs
 from os.path import exists
@@ -23,6 +24,7 @@ from threading import Thread
 from time import sleep
 from typing import Dict, List, Optional
 
+import rich
 import uvicorn
 from devtools import pprint
 from omegaconf import DictConfig, OmegaConf
@@ -617,3 +619,24 @@ def dump_config():  # pragma: no cover
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
     print(OmegaConf.to_yaml(global_config_dict, resolve=True))
+
+
+def display_help():  # pragma: no cover
+    global_config_dict = get_global_config_dict()
+    # Just here for help
+    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+
+    pyproject_path = Path(PARENT_DIR) / "pyproject.toml"
+    with pyproject_path.open("rb") as f:
+        pyproject_data = tomllib.load(f)
+
+    project_scripts = pyproject_data["project"]["scripts"]
+    rich.print("""Run a command with `+h=true` or `+help=true` to see more detailed information!
+
+[bold]Available CLI scripts[/bold]
+-----------------""")
+    for script in project_scripts:
+        if not script.startswith("ng_"):
+            continue
+
+        print(script)
