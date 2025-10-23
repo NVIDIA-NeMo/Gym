@@ -395,7 +395,7 @@ def _format_pct(count: int, total: int) -> str:  # pragma: no cover
     return f"{count} / {total} ({100 * count / total:.2f}%)"
 
 
-class TestAllConfig(BaseModel):
+class TestAllConfig(BaseNeMoGymCLIConfig):
     fail_on_total_and_test_mismatch: bool = False
 
 
@@ -483,6 +483,10 @@ Extra candidate paths:{_display_list_of_paths(extra_candidates)}"""
 
 
 def dev_test():  # pragma: no cover
+    global_config_dict = get_global_config_dict()
+    # Just here for help
+    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+
     proc = Popen("pytest --cov=. --durations=10", shell=True)
     exit(proc.wait())
 
@@ -601,4 +605,7 @@ Dependencies
 
 def dump_config():  # pragma: no cover
     global_config_dict = get_global_config_dict()
+    # Just here for help
+    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+
     print(OmegaConf.to_yaml(global_config_dict, resolve=True))
