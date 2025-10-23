@@ -288,8 +288,15 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
     async def _verify_single_trial(
         self, body: MultistepEquivLLMJudgeVerifyRequest
     ) -> MultistepEquivLLMJudgeVerifyResponse:
-        model_params_dict = body.responses_create_params.model_dump()
-        model_response_dict = body.response.model_dump()
+        model_params_dict = json.loads(body.responses_create_params.model_dump_json())
+        model_response_dict = json.loads(body.response.model_dump_json())
+        if (
+            "output" in model_response_dict and
+            model_response_dict["output"]
+        ):
+            model_response_dict["output"][0].pop("prompt_token_ids", None)
+            model_response_dict["output"][0].pop("generation_token_ids", None)
+            model_response_dict["output"][0].pop("generation_log_probs", None)
 
         # question = _get_response_first_user_content_text(body.response)
         question = _get_request_first_user_content_text(body)
@@ -639,7 +646,8 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
             rank = i + 1
             prompt_parts.append("")
             prompt_parts.append(f"<answer_{rank}>")
-            prompt_parts.append(answer_i)
+            if answer_i:
+                prompt_parts.append(answer_i)
             prompt_parts.append(f"</answer_{rank}>")
         prompt = "\n".join(prompt_parts)
         quorum_messages.append(
