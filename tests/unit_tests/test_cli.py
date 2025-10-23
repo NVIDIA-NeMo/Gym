@@ -31,18 +31,16 @@ class TestCLI:
 
         project_scripts = pyproject_data["project"]["scripts"]
 
+        def _test_single_arg(script: str, arg: str):
+            result = run(
+                f"{script} {arg}",
+                capture_output=True,
+                text=True,
+                check=True,
+                shell=True,
+            )
+            assert "Help for " in result.stdout, result.stdout
+
         for script in project_scripts:
-            run(
-                f"{script} +h=true",
-                capture_output=True,
-                text=True,
-                check=True,
-                shell=True,
-            )
-            run(
-                f"{script} +help=true",
-                capture_output=True,
-                text=True,
-                check=True,
-                shell=True,
-            )
+            _test_single_arg(script, "+h=true")
+            _test_single_arg(script, "+help=true")
