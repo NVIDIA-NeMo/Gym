@@ -32,6 +32,7 @@ class TestCLI:
         project_scripts = pyproject_data["project"]["scripts"]
 
         def _test_single_arg(script: str, arg: str):
+            print(f"Running `{script} {arg}`")
             result = run(
                 f"{script} {arg}",
                 capture_output=True,
