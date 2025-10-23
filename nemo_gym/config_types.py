@@ -37,6 +37,8 @@ class BaseNeMoGymCLIConfig(BaseModel):
     @classmethod
     def pre_process(cls, data):
         if data.get("h") or data.get("help"):
+            rich.print(f"""Displaying help for [bold]{cls.__name__}[/bold]
+""")
             # We use __doc__ directly here since inspect.getdoc will inherit the doc from parent classes.
             class_doc = cls.__doc__
             if class_doc:
