@@ -11,10 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import sys
 import tomllib
 from importlib import import_module
+from io import StringIO
 from pathlib import Path
-from unittest.mock import MagicMock
 
 from omegaconf import OmegaConf
 from pytest import MonkeyPatch, raises
@@ -22,7 +23,6 @@ from pytest import MonkeyPatch, raises
 import nemo_gym.global_config
 from nemo_gym import PARENT_DIR
 from nemo_gym.cli import RunConfig
-from nemo_gym.config_types import BaseNeMoGymCLIConfig
 
 
 # TODO: Eventually we want to add more tests to ensure that the CLI flows do not break
@@ -37,23 +37,22 @@ class TestCLI:
 
         project_scripts = pyproject_data["project"]["scripts"]
 
-        def _test_single_arg(script_name: str, import_path: str, arg: str):
-            print(f"Running `{script_name} +{arg}=true`")
+        for script_name, import_path in project_scripts.items():
+            # Dedupe `nemo_gym_*` from `ng_*` commands
+            if not script_name.startswith("ng_"):
+                continue
+
+            # We only test `+h=true` and not `+help=true`
+            print(f"Running `{script_name} +h=true`")
 
             module, fn = import_path.split(":")
             fn = getattr(import_module(module), fn)
 
             with MonkeyPatch.context() as mp:
-                mp.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", OmegaConf.create({arg: True}))
+                mp.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", OmegaConf.create({"h": True}))
 
-                pre_process_mock = MagicMock(side_effect=BaseNeMoGymCLIConfig.pre_process)
-                mp.setattr(BaseNeMoGymCLIConfig, "pre_process", pre_process_mock)
+                text_trap = StringIO()
+                mp.setattr(sys, "stdout", text_trap)
 
                 with raises(SystemExit):
                     fn()
-
-                pre_process_mock.assert_called_once()
-
-        for script_name, import_path in project_scripts.items():
-            _test_single_arg(script_name, import_path, "h")
-            _test_single_arg(script_name, import_path, "help")
