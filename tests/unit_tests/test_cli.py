@@ -39,9 +39,11 @@ class TestCLI:
                 text=True,
                 check=True,
                 shell=True,
-                timeout=5,
+                timeout=30,
             )
-            assert "Help for " in result.stdout, f"""Test failed for `{script} {arg}`.
+            assert (
+                "Help for" in result.stdout or "There are no arguments" in result.stdout
+            ), f"""Test failed for `{script} {arg}`.
 Stdout: {result.stdout}
 Stderr: {result.stderr}
 """

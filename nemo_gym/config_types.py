@@ -26,6 +26,31 @@ from pydantic import (
 
 
 ########################################
+# Base CLI configs
+########################################
+
+
+class BaseNeMoGymCLIConfig(BaseModel):
+    @model_validator(mode="before")
+    @classmethod
+    def pre_process(cls, data):
+        if data.get("h") or data.get("help"):
+            fields = cls.model_fields.items()
+            if fields:
+                print(f"Help for {cls.__name__}:")
+                for field_name, field in fields:
+                    description_str = f": {field.description}" if field.description else ""
+                    print(f"- {field_name} ({field.annotation.__name__}){description_str}")
+            else:
+                print("There are no arguments to this CLI command!")
+
+            # Exit after help is printed.
+            exit()
+
+        return data
+
+
+########################################
 # Server references
 #
 # We enable servers to reference other servers. The way they do so is through these schemas below.
@@ -63,10 +88,10 @@ def is_server_ref(config_dict: DictConfig) -> Optional[ServerRef]:
 ########################################
 
 
-class UploadJsonlDatasetGitlabConfig(BaseModel):
-    dataset_name: str
-    version: str  # Must be x.x.x
-    input_jsonl_fpath: str
+class UploadJsonlDatasetGitlabConfig(BaseNeMoGymCLIConfig):
+    dataset_name: str = Field(description="The dataset name.")
+    version: str = Field(description="The version of this dataset. Must be in the format `x.x.x`.")
+    input_jsonl_fpath: str = Field(description="Path to the jsonl file to upload.")
 
 
 class JsonlDatasetGitlabIdentifer(BaseModel):
@@ -75,8 +100,11 @@ class JsonlDatasetGitlabIdentifer(BaseModel):
     artifact_fpath: str
 
 
-class DownloadJsonlDatasetGitlabConfig(JsonlDatasetGitlabIdentifer):
-    output_fpath: str
+class DownloadJsonlDatasetGitlabConfig(JsonlDatasetGitlabIdentifer, BaseNeMoGymCLIConfig):
+    dataset_name: str = Field(description="The dataset name.")
+    version: str = Field(description="The version of this dataset. Must be in the format `x.x.x`.")
+    artifact_fpath: str = Field(description="The filepath to the artifact to download.")
+    output_fpath: str = Field(description="Where to save the downloaded dataset.")
 
 
 DatasetType = Union[Literal["train"], Literal["validation"], Literal["example"]]
@@ -266,28 +294,3 @@ def maybe_get_server_instance_config(name: str, server_type_config_dict: Any) ->
 ########################################
 
 AGENT_REF_KEY = "agent_ref"
-
-
-########################################
-# Base CLI configs
-########################################
-
-
-class BaseNeMoGymCLIConfig(BaseModel):
-    @model_validator(mode="before")
-    @classmethod
-    def pre_process(cls, data):
-        if data.get("h") or data.get("help"):
-            fields = cls.model_fields.items()
-            if fields:
-                print(f"Help for {cls.__name__}:")
-                for field_name, field in fields:
-                    description_str = f": {field.description}" if field.description else ""
-                    print(f"- {field_name} ({field.annotation.__name__}){description_str}")
-            else:
-                print("There are no arguments to this CLI command!")
-
-            # Exit after help is printed.
-            exit()
-
-        return data
