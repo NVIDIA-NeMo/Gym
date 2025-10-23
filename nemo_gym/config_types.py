@@ -14,6 +14,7 @@
 from enum import Enum
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
 
+import rich
 from omegaconf import DictConfig, OmegaConf
 from pydantic import (
     BaseModel,
@@ -23,6 +24,7 @@ from pydantic import (
     ValidationError,
     model_validator,
 )
+from rich.text import Text
 
 
 ########################################
@@ -38,18 +40,18 @@ class BaseNeMoGymCLIConfig(BaseModel):
             # We use __doc__ directly here since inspect.getdoc will inherit the doc from parent classes.
             class_doc = cls.__doc__
             if class_doc:
-                print(f"""Description
+                rich.print(f"""[bold]Description[/bold]
 -----------
 {class_doc.strip()}
 """)
 
             fields = cls.model_fields.items()
             if fields:
-                print("""Parameters
+                rich.print("""[bold]Parameters[/bold]
 ----------""")
 
-                prefixes: List[str] = []
-                suffixes: List[str] = []
+                prefixes: List[Text] = []
+                suffixes: List[Text] = []
                 for field_name, field in fields:
                     description_str = field.description if field.description else ""
 
@@ -59,13 +61,16 @@ class BaseNeMoGymCLIConfig(BaseModel):
                     )
                     annotation_str = annotation_str.replace("typing.", "")
 
-                    prefixes.append(f"- {field_name} ({annotation_str})")
+                    prefixes.append(
+                        Text.from_markup(f"- [blue]{field_name}[/blue] [yellow]({annotation_str})[/yellow]")
+                    )
                     suffixes.append(description_str)
 
                 max_prefix_length = max(map(len, prefixes))
                 ljust_length = max_prefix_length + 3
                 for prefix, suffix in zip(prefixes, suffixes):
-                    print(f"{prefix.ljust(ljust_length)}{suffix}")
+                    prefix.align("left", ljust_length)
+                    rich.print(prefix + suffix)
             else:
                 print("There are no arguments to this CLI command!")
 
