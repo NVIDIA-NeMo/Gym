@@ -278,13 +278,14 @@ class BaseNeMoGymCLIConfig(BaseModel):
     @classmethod
     def pre_process(cls, data):
         if data.get("h") or data.get("help"):
-            print(f"Help for {cls.__name__}:")
-            for field_name, field in cls.model_fields.items():
-                if field_name in ("h", "help"):
-                    continue
-
-                description_str = f": {field.description}" if field.description else ""
-                print(f"- {field_name} ({field.annotation.__name__}){description_str}")
+            fields = cls.model_fields.items()
+            if fields:
+                print(f"Help for {cls.__name__}:")
+                for field_name, field in fields:
+                    description_str = f": {field.description}" if field.description else ""
+                    print(f"- {field_name} ({field.annotation.__name__}){description_str}")
+            else:
+                print("There are no arguments to this CLI command!")
 
             # Exit after help is printed.
             exit()
