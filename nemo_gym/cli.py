@@ -14,6 +14,7 @@
 import asyncio
 import json
 import shlex
+import subprocess
 from glob import glob
 from os import environ, makedirs
 from os.path import exists
@@ -45,11 +46,35 @@ from nemo_gym.server_utils import (
 )
 
 
-def _setup_env_command(dir_path: Path) -> str:  # pragma: no cover
+def _capture_head_server_dependencies() -> Optional[Path]:  # pragma: no cover
+    try:
+        result = subprocess.run(
+            ["uv", "pip", "freeze", "--exclude-editable"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        frozen_deps = result.stdout
+        constraints_file = Path("/tmp/head_server_constraints.txt")
+        constraints_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(constraints_file, "w") as f:
+            f.write(frozen_deps)
+
+        return constraints_file
+    except Exception as e:
+        print(f"Warning: Could not capture head server dependencies: {e}")
+        return None
+
+
+def _setup_env_command(dir_path: Path, constraints_file: Optional[str] = None) -> str:  # pragma: no cover
+    install_cmd = "uv pip install -r requirements.txt"
+    if constraints_file:
+        install_cmd += f" --constraint {constraints_file.absolute()}"
+
     return f"""cd {dir_path} \\
     && uv venv --allow-existing \\
     && source .venv/bin/activate \\
-    && uv pip install -r requirements.txt \\
+    && {install_cmd} \\
    """
 
 
@@ -102,6 +127,9 @@ class RunHelper:  # pragma: no cover
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
         global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
 
+        # Capture head server dependencies to use as constraints for other servers
+        head_server_deps_file = _capture_head_server_dependencies()
+
         # Assume Nemo Gym Run is for a single agent.
         escaped_config_dict_yaml_str = shlex.quote(OmegaConf.to_yaml(global_config_dict))
 
@@ -137,7 +165,7 @@ class RunHelper:  # pragma: no cover
 
             dir_path = PARENT_DIR / Path(first_key, second_key)
 
-            command = f"""{_setup_env_command(dir_path)} \\
+            command = f"""{_setup_env_command(dir_path, head_server_deps_file)} \\
     && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
     {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(top_level_path)} \\
     python {str(entrypoint_fpath)}"""

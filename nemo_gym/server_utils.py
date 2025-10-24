@@ -20,7 +20,8 @@ from contextlib import asynccontextmanager
 from io import StringIO
 from logging import Filter as LoggingFilter
 from logging import LogRecord, getLogger
-from os import getenv
+from os import getcwd, getenv
+from os.path import abspath
 from pathlib import Path
 from threading import Thread
 from traceback import print_exc
@@ -317,12 +318,17 @@ def initialize_ray() -> None:
 
     global_config_dict = get_global_config_dict()
     ray_head_node_address = global_config_dict.get("ray_head_node_address")
-    ray_init_kwargs = dict(ignore_reinit_error=True, runtime_env={"working_dir": PARENT_DIR})
+    ray_init_kwargs = dict(ignore_reinit_error=True)
     if ray_head_node_address is not None:
         print(f"Connecting to Ray cluster at specified address: {ray_head_node_address}")
         ray_init_kwargs["address"] = ray_head_node_address
     else:
         print("Starting Ray cluster...")
+
+    current_dir = abspath(getcwd())
+    if current_dir != abspath(PARENT_DIR):
+        print(f"Setting Ray runtime_env working_dir to {PARENT_DIR} to avoid uv pyproject.toml validation errors")
+        ray_init_kwargs["runtime_env"] = {"working_dir": PARENT_DIR}
 
     ray.init(**ray_init_kwargs)
 
