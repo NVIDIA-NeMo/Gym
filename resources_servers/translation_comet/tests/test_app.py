@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
-import time
 from copy import deepcopy
 from typing import Any
 from unittest.mock import MagicMock
@@ -43,7 +42,6 @@ class TestApp:
         Although, the slowest part is actually `import comet` :)
         """
         logger.info("Spinning up server with COMET model...")
-        start_time = time.perf_counter()
 
         server = TranslationCometResourcesServer(
             config=TranslationCometResourcesServerConfig(
@@ -61,8 +59,28 @@ class TestApp:
             server_client=MagicMock(spec=ServerClient),
         )
 
-        elapsed = time.perf_counter() - start_time
-        logger.info(f"Model loaded and server started successfully in {elapsed:.2f} seconds")
+        logger.info("Model loaded and server started successfully")
+        return server
+
+    def reference_free_resources_server(self) -> TranslationCometResourcesServer:
+        logger.info("Spinning up server with reference-free COMET model...")
+
+        server = TranslationCometResourcesServer(
+            config=TranslationCometResourcesServerConfig(
+                host="0.0.0.0",
+                port=8080,
+                entrypoint="",
+                name="",
+                use_reference=False,
+                comet_model_name="Unbabel/wmt22-cometkiwi-da",  # reference-free COMET
+                comet_gpu_count=0,  # CPU
+                comet_gpu_devices="auto",  # CPU
+                model_cache_dir="cache/ptl_cache",
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        logger.info("Reference-free COMET model loaded and server started successfully")
         return server
 
     def _create_response(self, id: str, model_response_text: str) -> dict[str, Any]:
@@ -150,3 +168,42 @@ class TestApp:
             approx(0.0, abs=0.5),  # This returns about 0.3 in practice but it's fine as long as it's low
             model_response_text,
         )
+
+    async def test_verify_identical_reference_free(self, resources_server: TranslationCometResourcesServer) -> None:
+        reference_free_resources_server = self.reference_free_resources_server()
+
+        source_text = "two three"
+        target_text = "zwei drei"
+        target_lang_name = "German"
+        model_create_params = NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {
+                    "role": "user",
+                    "content": f'Translate this into {target_lang_name}: "{source_text}"',
+                }
+            ]
+        )
+        model_response = NeMoGymResponse(**self._create_response("model_response_id", target_text))
+        identical_verify_request = TranslationCometVerifyRequest(
+            responses_create_params=deepcopy(model_create_params),
+            response=model_response.model_copy(deep=True),
+            src_txt=source_text,
+        )
+        identical_verify_response = await reference_free_resources_server.verify(identical_verify_request)
+        assert identical_verify_response.responses_create_params == model_create_params
+        assert identical_verify_response.response == model_response
+        assert identical_verify_response.src_txt == source_text
+        assert identical_verify_response.trg_txt is None
+        assert identical_verify_response.reward == approx(
+            1.0, abs=0.25
+        )  # It's hard to get a score near 1.0 with the reference-free model
+        assert identical_verify_response.extracted_answer == target_text
+
+        assert sorted(list(identical_verify_response.model_dump())) == [
+            "extracted_answer",
+            "response",
+            "responses_create_params",
+            "reward",
+            "src_txt",
+            "trg_txt",  # Should be present but None
+        ]
