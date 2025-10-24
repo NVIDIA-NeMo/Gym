@@ -410,3 +410,35 @@ class TestServerUtils:
         assert "Unable to find an open port" in str(exc_info.value)
         assert "after 5 attempts" in str(exc_info.value)
         assert socket_instance.getsockname.call_count == 5
+
+    def test_get_global_config_dict_prevents_port_conflict_with_head_server(self, monkeypatch: MonkeyPatch) -> None:
+        """Integration test: verify that child servers never get the head server port."""
+        exists_mock = MagicMock()
+        exists_mock.return_value = False
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        def mock_find_open_port(head_server_host=None, head_server_port=None, max_retries=50):
+            return 12345  # safe port
+
+        monkeypatch.setattr(nemo_gym.global_config, "find_open_port", mock_find_open_port)
+
+        hydra_main_mock = MagicMock()
+
+        def hydra_main_wrapper(fn):
+            """Trigger find_open_port by excluding port from the config"""
+            config_dict = DictConfig(
+                {"test_resource": {"resources_servers": {"test_server": {"entrypoint": "app.py"}}}}
+            )
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        global_config_dict = get_global_config_dict()
+
+        resource_port = global_config_dict["test_resource"]["resources_servers"]["test_server"]["port"]
+        head_port = global_config_dict["head_server"]["port"]
+
+        assert resource_port == 12345
+        assert head_port == 11000
+        assert resource_port != head_port
