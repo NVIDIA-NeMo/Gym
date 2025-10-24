@@ -347,10 +347,10 @@ class NeMoGymChatCompletionMessageToolCallParam(ChatCompletionMessageToolCallPar
     function: NeMoGymChatCompletionMessageToolCallFunctionParam
 
 
-class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageParam):
+class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageParam, total=False):
     # Override the iterable which is annoying to work with.
     content: Union[str, List[ContentArrayOfContentPart], None]
-    tool_calls: List[NeMoGymChatCompletionMessageToolCallParam]
+    tool_calls: Optional[List[NeMoGymChatCompletionMessageToolCallParam]] = None
 
 
 class NeMoGymChatCompletionAssistantMessageForTrainingParam(
