@@ -66,10 +66,10 @@ def _capture_head_server_dependencies() -> Optional[Path]:  # pragma: no cover
         return None
 
 
-def _setup_env_command(dir_path: Path, constraints_file: Optional[str] = None) -> str:  # pragma: no cover
+def _setup_env_command(dir_path: Path, head_server_deps_file: Optional[str] = None) -> str:  # pragma: no cover
     install_cmd = "uv pip install -r requirements.txt"
-    if constraints_file:
-        install_cmd += f" --constraint {constraints_file.absolute()}"
+    if head_server_deps_file:
+        install_cmd += f" --constraint {head_server_deps_file.absolute()}"
 
     return f"""cd {dir_path} \\
     && uv venv --allow-existing \\
