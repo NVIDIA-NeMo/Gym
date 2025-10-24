@@ -434,7 +434,10 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             tries += 1
             response = await request(**request_kwargs)
             # See https://platform.openai.com/docs/guides/error-codes/api-errors
-            if response.status in (429, 500, 503):
+            # 500 is internal server error, which may sporadically occur
+            # 502 is Bad gateway (when the endpoint is overloaded)
+            # 504 is Gateway timeout (when the endpoint config has too low of a gateway timeout setting for the model to finish generating)
+            if response.status in (429, 500, 502, 503, 504):
                 content = (await response.content.read()).decode()
                 print(
                     f"Hit a {response.status} trying to query an OpenAI endpoint (try {tries}). Sleeping 0.5s. Error message: {content}"
