@@ -193,13 +193,9 @@ class GlobalConfigDictParser(BaseModel):
         # Do one pass through all the configs validate and populate various configs for our servers.
         default_host = global_config_dict.get(DEFAULT_HOST_KEY_NAME) or "127.0.0.1"
 
-        head_server_config = global_config_dict.get(HEAD_SERVER_KEY_NAME)
-        if head_server_config:
-            head_server_host = head_server_config.get("host") or default_host
-            head_server_port = head_server_config.get("port") or DEFAULT_HEAD_SERVER_PORT
-        else:
-            head_server_host = default_host
-            head_server_port = DEFAULT_HEAD_SERVER_PORT
+        head_server_config = global_config_dict.get(HEAD_SERVER_KEY_NAME, {})
+        head_server_host = head_server_config.get("host", default_host)
+        head_server_port = head_server_config.get("port", DEFAULT_HEAD_SERVER_PORT)
 
         self.validate_and_populate_defaults(server_instance_configs, default_host, head_server_host, head_server_port)
 

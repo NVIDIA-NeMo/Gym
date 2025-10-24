@@ -18,7 +18,9 @@ from pytest import MonkeyPatch, raises
 import nemo_gym.global_config
 import nemo_gym.server_utils
 from nemo_gym.global_config import (
+    DEFAULT_HEAD_SERVER_PORT,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
+    find_open_port,
     get_first_server_config_dict,
     get_global_config_dict,
 )
@@ -371,3 +373,40 @@ class TestServerUtils:
             }
         )
         assert {"my_key": "my_value"} == get_first_server_config_dict(global_config_dict, "a")
+
+    def test_find_open_port_avoids_head_server_port(self, monkeypatch: MonkeyPatch) -> None:
+        """Test that find_open_port retries when the head server port is returned."""
+        socket_mock = MagicMock()
+        socket_instance = MagicMock()
+        socket_mock.return_value.__enter__ = MagicMock(return_value=socket_instance)
+        socket_mock.return_value.__exit__ = MagicMock(return_value=False)
+
+        socket_instance.getsockname.side_effect = [
+            ("", DEFAULT_HEAD_SERVER_PORT),  # first attempt: 11000 (conflict)
+            ("", 12345),  # second attempt (safe)
+        ]
+
+        monkeypatch.setattr(nemo_gym.global_config, "socket", socket_mock)
+
+        port = find_open_port(head_server_host="127.0.0.1", head_server_port=DEFAULT_HEAD_SERVER_PORT)
+
+        assert port == 12345
+        assert socket_instance.getsockname.call_count == 2  # first: conflict, second: success
+
+    def test_find_open_port_raises_after_max_retries(self, monkeypatch: MonkeyPatch) -> None:
+        """Test that find_open_port raises RuntimeError after exhausting retries."""
+        socket_mock = MagicMock()
+        socket_instance = MagicMock()
+        socket_mock.return_value.__enter__ = MagicMock(return_value=socket_instance)
+        socket_mock.return_value.__exit__ = MagicMock(return_value=False)
+
+        socket_instance.getsockname.return_value = ("", DEFAULT_HEAD_SERVER_PORT)  # force conflict
+
+        monkeypatch.setattr(nemo_gym.global_config, "socket", socket_mock)
+
+        with raises(RuntimeError) as exc_info:
+            find_open_port(head_server_host="127.0.0.1", head_server_port=DEFAULT_HEAD_SERVER_PORT, max_retries=5)
+
+        assert "Unable to find an open port" in str(exc_info.value)
+        assert "after 5 attempts" in str(exc_info.value)
+        assert socket_instance.getsockname.call_count == 5
