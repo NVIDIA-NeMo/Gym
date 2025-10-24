@@ -121,7 +121,11 @@ class GlobalConfigDictParser(BaseModel):
         return server_instance_configs
 
     def validate_and_populate_defaults(
-        self, server_instance_configs: List[ServerInstanceConfig], default_host: str
+        self,
+        server_instance_configs: List[ServerInstanceConfig],
+        default_host: str,
+        head_server_host: Optional[str] = None,
+        head_server_port: Optional[int] = None,
     ) -> None:
         server_refs = [c.get_server_ref() for c in server_instance_configs]
         for server_instance_config in server_instance_configs:
@@ -142,7 +146,10 @@ class GlobalConfigDictParser(BaseModel):
                 if not run_server_config_dict.get("host"):
                     run_server_config_dict["host"] = default_host
                 if not run_server_config_dict.get("port"):
-                    run_server_config_dict["port"] = find_open_port()
+                    run_server_config_dict["port"] = find_open_port(
+                        head_server_port=head_server_port,
+                        head_server_host=head_server_host,
+                    )
 
     def parse(self, parse_config: Optional[GlobalConfigDictParserConfig] = None) -> DictConfig:
         if parse_config is None:
@@ -186,7 +193,15 @@ class GlobalConfigDictParser(BaseModel):
         # Do one pass through all the configs validate and populate various configs for our servers.
         default_host = global_config_dict.get(DEFAULT_HOST_KEY_NAME) or "127.0.0.1"
 
-        self.validate_and_populate_defaults(server_instance_configs, default_host)
+        head_server_config = global_config_dict.get(HEAD_SERVER_KEY_NAME)
+        if head_server_config:
+            head_server_host = head_server_config.get("host") or default_host
+            head_server_port = head_server_config.get("port") or DEFAULT_HEAD_SERVER_PORT
+        else:
+            head_server_host = default_host
+            head_server_port = DEFAULT_HEAD_SERVER_PORT
+
+        self.validate_and_populate_defaults(server_instance_configs, default_host, head_server_host, head_server_port)
 
         # Populate head server defaults
         if not global_config_dict.get(HEAD_SERVER_KEY_NAME):
@@ -261,7 +276,21 @@ def get_first_server_config_dict(global_config_dict: DictConfig, top_level_path:
     return server_config_dict
 
 
-def find_open_port() -> int:  # pragma: no cover
-    with socket() as s:
-        s.bind(("", 0))  # Bind to a free port provided by the host.
-        return s.getsockname()[1]  # Return the port number assigned.
+def find_open_port(
+    head_server_host: Optional[str] = None,
+    head_server_port: Optional[int] = None,
+    max_retries: int = 50,
+) -> int:  # pragma: no cover
+    # Find an open port that doesn't conflict with the head server.
+    for _ in range(max_retries):
+        with socket() as s:
+            s.bind(("", 0))  # Bind to a free port provided by the host.
+            port = s.getsockname()[1]
+
+            if head_server_port is None or port != head_server_port:
+                return port  # Return the port number assigned.
+
+    raise RuntimeError(
+        f"Unable to find an open port that doesn't conflict with head server "
+        f"({head_server_host}:{head_server_port}) after {max_retries} attempts"
+    )
