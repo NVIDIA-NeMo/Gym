@@ -34,6 +34,8 @@ import yappi
 from aiohttp import ClientResponse, ClientSession, ClientTimeout, DummyCookieJar, ServerDisconnectedError, TCPConnector
 from aiohttp.client import _RequestOptions
 from fastapi import FastAPI, Request, Response
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, ConfigDict
@@ -463,6 +465,15 @@ class SimpleServer(BaseServer):
         app = server.setup_webserver()
         server.set_ulimit()
         server.setup_exception_middleware(app)
+
+        @app.exception_handler(RequestValidationError)
+        async def validation_exception_handler(request: Request, exc):
+            print(
+                f"""Hit validation exception! Errors: {json.dumps(exc.errors(), indent=4)}
+Full body: {json.dumps(exc.body, indent=4)}
+"""
+            )
+            return await request_validation_exception_handler(request, exc)
 
         profiling_config = ProfilingMiddlewareConfig.model_validate(global_config_dict)
         if profiling_config.profiling_enabled:
