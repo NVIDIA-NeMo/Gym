@@ -413,6 +413,10 @@ class TestServerUtils:
 
     def test_get_global_config_dict_prevents_port_conflict_with_head_server(self, monkeypatch: MonkeyPatch) -> None:
         """Integration test: verify that child servers never get the head server port."""
+        # Clear any lingering env vars.
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
         exists_mock = MagicMock()
         exists_mock.return_value = False
         monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
