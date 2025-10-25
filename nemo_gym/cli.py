@@ -52,6 +52,11 @@ from nemo_gym.server_utils import (
 
 
 def _capture_head_server_dependencies(global_config_dict: DictConfig) -> None:  # pragma: no cover
+    """
+    Capture head server dependencies and store it in the global config dict.
+    These dependencies are used as constraints to ensure that other servers use the same dependency versions as the head server.
+    """
+
     try:
         result = subprocess.run(
             ["uv", "pip", "freeze", "--exclude-editable"],
