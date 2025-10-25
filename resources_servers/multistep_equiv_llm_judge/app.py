@@ -70,8 +70,8 @@ class MultistepEquivLLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
 
     judge_endpoint_max_concurrency: Optional[int] = 128
 
-    judge_categorize_system_template_fpath: Optional[str] = None
-    judge_categorize_prompt_template_fpath: Optional[str] = None
+    judge_classify_system_template_fpath: Optional[str] = None
+    judge_classify_prompt_template_fpath: Optional[str] = None
 
     judge_distill_prompt_template_fpath: Optional[str] = None
     judge_distill_quorum_template_fpath: Optional[str] = None
@@ -286,8 +286,8 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
         else:
             self._judge_endpoint_max_concurrency = contextlib.nullcontext()
 
-        self._judge_categorize_system_template = None
-        self._judge_categorize_prompt_template = None
+        self._judge_classify_system_template = None
+        self._judge_classify_prompt_template = None
 
         self._judge_distill_system_template = None
         self._judge_distill_prompt_template = None
@@ -386,13 +386,13 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
         else:
             expected_distilled_answer = expected_answer
 
-        expected_categorization = await self._query_judge_categorize_quorum(
+        expected_classifier_dict = await self._query_judge_classify_quorum(
             question=question,
             answer=expected_distilled_answer,
             max_samples=self.config.quorum_max_samples,
         )
-        expected_boolean = expected_categorization["contains_boolean_answer"]
-        expected_short_answer = expected_categorization["contains_non_boolean_short_answer"]
+        expected_boolean = expected_classifier_dict["contains_boolean_answer"]
+        expected_short_answer = expected_classifier_dict["contains_non_boolean_short_answer"]
 
         if expected_boolean and not expected_short_answer:
             equivalent_dict = await self._query_judge_compare_quorum(
@@ -490,7 +490,7 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
             )
         return response
 
-    async def _generate_judge_categorize_response(
+    async def _generate_judge_classify_response(
         self,
         *,
         question: str,
@@ -498,62 +498,62 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
     ):
         cfg = self.config
 
-        if self._judge_categorize_system_template is None:
-            assert cfg.judge_categorize_system_template_fpath is not None
-            with open(cfg.judge_categorize_system_template_fpath, "r") as file:
-                self._judge_categorize_system_template = file.read().rstrip()
-        if self._judge_categorize_prompt_template is None:
-            assert cfg.judge_categorize_prompt_template_fpath is not None
-            with open(cfg.judge_categorize_prompt_template_fpath, "r") as file:
-                self._judge_categorize_prompt_template = file.read().rstrip()
+        if self._judge_classify_system_template is None:
+            assert cfg.judge_classify_system_template_fpath is not None
+            with open(cfg.judge_classify_system_template_fpath, "r") as file:
+                self._judge_classify_system_template = file.read().rstrip()
+        if self._judge_classify_prompt_template is None:
+            assert cfg.judge_classify_prompt_template_fpath is not None
+            with open(cfg.judge_classify_prompt_template_fpath, "r") as file:
+                self._judge_classify_prompt_template = file.read().rstrip()
 
-        categorize_messages: list[NeMoGymEasyInputMessage] = []
-        categorize_messages.append(
+        classify_messages: list[NeMoGymEasyInputMessage] = []
+        classify_messages.append(
             NeMoGymEasyInputMessage(
                 role="system",
-                content=self._judge_categorize_system_template,
+                content=self._judge_classify_system_template,
             )
         )
-        categorize_messages.append(
+        classify_messages.append(
             NeMoGymEasyInputMessage(
                 role="user",
-                content=self._judge_categorize_prompt_template.format(
+                content=self._judge_classify_prompt_template.format(
                     question=question,
                     answer=answer,
                 ),
             )
         )
 
-        categorize_params = cfg.judge_responses_create_params.model_copy(deep=True)
-        categorize_params.input = categorize_messages
-        categorize_response = await self._post_judge_response(categorize_params)
+        classify_params = cfg.judge_responses_create_params.model_copy(deep=True)
+        classify_params.input = classify_messages
+        classify_response = await self._post_judge_response(classify_params)
         if self.config.debug:
             print(
-                f"DEBUG: MultistepEquivLLMJudgeResourcesServer._generate_judge_categorize_response: {categorize_response}",
+                f"DEBUG: MultistepEquivLLMJudgeResourcesServer._generate_judge_classify_response: {classify_response}",
                 flush=True,
             )
 
-        return categorize_response
+        return classify_response
 
-    async def _query_judge_categorize_sample(
+    async def _query_judge_classify_sample(
         self,
         *,
         question: str,
         answer: str,
     ) -> dict[str, Optional[bool]]:
-        categorize_response = await self._generate_judge_categorize_response(
+        classify_response = await self._generate_judge_classify_response(
             question=question,
             answer=answer,
         )
-        categorize_text = _get_response_last_assistant_content_text(categorize_response) or ""
-        contains_boolean_answer = _extract_tagged_section_bool(categorize_text, "contains_boolean_answer")
-        contains_non_boolean_short_answer = _extract_tagged_section_bool(categorize_text, "contains_non_boolean_short_answer")
+        classify_text = _get_response_last_assistant_content_text(classify_response) or ""
+        contains_boolean_answer = _extract_tagged_section_bool(classify_text, "contains_boolean_answer")
+        contains_non_boolean_short_answer = _extract_tagged_section_bool(classify_text, "contains_non_boolean_short_answer")
         return {
             "contains_boolean_answer": contains_boolean_answer,
             "contains_non_boolean_short_answer": contains_non_boolean_short_answer,
         }
 
-    async def _query_judge_categorize_quorum(
+    async def _query_judge_classify_quorum(
         self,
         *,
         question: str,
@@ -564,7 +564,7 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
         work = []
         for _ in range(max_samples):
             work.append(
-                self._query_judge_categorize_sample(
+                self._query_judge_classify_sample(
                     question=question,
                     answer=answer,
                 )
@@ -689,11 +689,14 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
         prompt_parts.append(question)
         prompt_parts.append("</question>")
         for i, r in enumerate(results):
-            if r is None:
-                answer_i = ""
-            else:
-                assert isinstance(r, str)
+            if isinstance(r, str):
                 answer_i = r
+            elif r is None:
+                print("DEBUG: MultistepEquivLLMJudgeResourcesServer._query_judge_distill_quorum: unexpected result is None", flush=True)
+                answer_i = None
+            else:
+                print(f"DEBUG: MultistepEquivLLMJudgeResourcesServer._query_judge_distill_quorum: unexpected result type = {type(r).__name__}", flush=True)
+                answer_i = None
             rank = i + 1
             prompt_parts.append("")
             prompt_parts.append(f"<answer_{rank}>")
