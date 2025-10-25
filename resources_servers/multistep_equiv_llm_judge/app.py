@@ -69,13 +69,6 @@ class MultistepEquivLLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
 
     judge_endpoint_max_concurrency: Optional[int] = 128
-    # judge_endpoint_max_num_retries: int = 2
-
-    # TODO: deprecated config fields.
-    judge_system_message: Optional[str] = None
-    judge_prompt_template: Optional[str] = None
-    judge_equal_label: str = "[[A=B]]"
-    judge_not_equal_label: str = "[[A!=B]]"
 
     judge_distill_system_template_fpath: Optional[str] = None
     judge_distill_prompt_template_fpath: Optional[str] = None
