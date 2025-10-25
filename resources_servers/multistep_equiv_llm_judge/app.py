@@ -294,6 +294,7 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
         self._judge_distill_prompt_template = None
         self._judge_distill_quorum_template = None
 
+        self._judge_compare_boolean_system_template = None
         self._judge_compare_system_template = None
         self._judge_compare_prompt_template = None
 
