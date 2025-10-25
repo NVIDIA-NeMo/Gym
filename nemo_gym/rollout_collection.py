@@ -95,7 +95,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
             res = await server_client.post(server_name=row.pop("agent_ref")["name"], url_path=url_path, json=row)
             return await res.json()
 
-        return await tqdm.gather(*map(_post_subroutine, examples), desc=f"Collecting rollouts with url path {url_path}", miniters=10)
+        return await tqdm.gather(*map(_post_subroutine, examples), desc=f"Collecting rollouts with url path {url_path}", miniters=10, disable=True)
 
     async def run_examples(
         self, examples: List[Dict], head_server_config: Optional[BaseServerConfig] = None
