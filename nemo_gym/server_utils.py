@@ -325,7 +325,7 @@ def initialize_ray() -> None:
     ray_head_node_address = global_config_dict.get("ray_head_node_address")
     ray_init_kwargs = dict(ignore_reinit_error=True)
 
-    if ray_head_node_address is not None:
+    if ray_head_node_address:
         print(f"Connecting to Ray cluster at specified address: {ray_head_node_address}")
         ray_init_kwargs["address"] = ray_head_node_address
     else:
@@ -333,7 +333,7 @@ def initialize_ray() -> None:
 
     ray.init(**ray_init_kwargs)
 
-    if ray_head_node_address is None:
+    if not ray_head_node_address:
         with open_dict(global_config_dict):
             global_config_dict["ray_head_node_address"] = ray.get_runtime_context().gcs_address
 
