@@ -73,6 +73,7 @@ class MultistepEquivLLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     judge_classify_system_template_fpath: Optional[str] = None
     judge_classify_prompt_template_fpath: Optional[str] = None
 
+    judge_distill_system_template_fpath: Optional[str] = None
     judge_distill_prompt_template_fpath: Optional[str] = None
     judge_distill_quorum_template_fpath: Optional[str] = None
 
