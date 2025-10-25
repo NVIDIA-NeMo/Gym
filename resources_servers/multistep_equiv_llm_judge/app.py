@@ -77,9 +77,6 @@ class MultistepEquivLLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     judge_equal_label: str = "[[A=B]]"
     judge_not_equal_label: str = "[[A!=B]]"
 
-    judge_extract_system_template_fpath: Optional[str] = None
-    judge_extract_prompt_template_fpath: Optional[str] = None
-    judge_extract_quorum_template_fpath: Optional[str] = None
     judge_distill_system_template_fpath: Optional[str] = None
     judge_distill_prompt_template_fpath: Optional[str] = None
     judge_distill_quorum_template_fpath: Optional[str] = None
@@ -259,10 +256,6 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
             self._judge_endpoint_max_concurrency = asyncio.Semaphore(value=max_concurrency)
         else:
             self._judge_endpoint_max_concurrency = contextlib.nullcontext()
-
-        self._judge_extract_system_template = None
-        self._judge_extract_prompt_template = None
-        self._judge_extract_quorum_template = None
 
         self._judge_distill_system_template = None
         self._judge_distill_prompt_template = None
@@ -445,94 +438,6 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
                 }
             )
         return response
-
-    async def _generate_judge_extract_response(
-        self,
-        *,
-        question: str,
-        raw_response: str,
-    ):
-        cfg = self.config
-
-        if self._judge_extract_system_template is None:
-            assert cfg.judge_extract_system_template_fpath is not None
-            with open(cfg.judge_extract_system_template_fpath, "r") as file:
-                self._judge_extract_system_template = file.read().rstrip()
-        if self._judge_extract_prompt_template is None:
-            assert cfg.judge_extract_prompt_template_fpath is not None
-            with open(cfg.judge_extract_prompt_template_fpath, "r") as file:
-                self._judge_extract_prompt_template = file.read().rstrip()
-
-        extract_messages: list[NeMoGymEasyInputMessage] = []
-        extract_messages.append(
-            NeMoGymEasyInputMessage(
-                role="system",
-                content=self._judge_extract_system_template,
-            )
-        )
-        extract_messages.append(
-            NeMoGymEasyInputMessage(
-                role="user",
-                content=self._judge_extract_prompt_template.format(
-                    question=question,
-                    raw_response=raw_response,
-                ),
-            )
-        )
-
-        extract_params = cfg.judge_responses_create_params.model_copy(deep=True)
-        extract_params.input = extract_messages
-        extract_response = await self._post_judge_response(extract_params)
-        if self.config.debug:
-            print(
-                f"DEBUG: MultistepEquivLLMJudgeResourcesServer._generate_judge_extract_response: {extract_response}",
-                flush=True,
-            )
-
-        return extract_response
-
-    async def _query_judge_extract_sample(
-        self,
-        *,
-        question: str,
-        raw_response: str,
-    ) -> Optional[str]:
-        extract_response = await self._generate_judge_extract_response(
-            question=question,
-            raw_response=raw_response,
-        )
-        extract_text = _get_response_last_assistant_content_text(extract_response) or ""
-        answer = _extract_tagged_section(extract_text, "answer")
-        if self.config.debug:
-            print(
-                f"DEBUG: MultistepEquivLLMJudgeResourcesServer._query_judge_extract_sample: answer = {repr(answer)}",
-                flush=True,
-            )
-        return answer
-
-    async def _query_judge_extract_quorum(
-        self,
-        *,
-        question: str,
-        raw_response: str,
-        max_samples: int,
-    ) -> Optional[str]:
-        work = []
-        for _ in range(max_samples):
-            work.append(
-                self._query_judge_distill_sample(
-                    question=question,
-                    raw_response=raw_response,
-                )
-            )
-        results = await asyncio.gather(*work, return_exceptions=True)
-        if len(results) == 1:
-            if isinstance(results[0], str):
-                return results[0]
-            else:
-                return None
-        # TODO: quorum.
-        raise NotImplementedError
 
     async def _generate_judge_distill_response(
         self,

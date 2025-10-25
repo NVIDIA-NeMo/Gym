@@ -1,7 +1,0 @@
-<question>
-{question}
-</question>
-
-<raw_response>
-{raw_response}
-</raw_response>
