@@ -315,6 +315,7 @@ def initialize_ray() -> None:
     Initialize ray cluster in a process.
     We store the Ray address in the global config dict so that child processes can connect to it.
     This avoids the need to start a new Ray cluster in each child process.
+    Note: This function will modify the global config dict - update `ray_head_node_address`
     """
 
     if ray.is_initialized():

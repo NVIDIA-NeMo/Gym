@@ -55,6 +55,7 @@ def _capture_head_server_dependencies(global_config_dict: DictConfig) -> None:  
     """
     Capture head server dependencies and store it in the global config dict.
     These dependencies are used as constraints to ensure that other servers use the same dependency versions as the head server.
+    Note: This function will modify the global config dict - update `head_server_deps`
     """
 
     try:
@@ -143,9 +144,11 @@ class RunHelper:  # pragma: no cover
         global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
 
         # Capture head server dependencies and store in global config dict
+        # Note: This function will modify the global config dict - update `head_server_deps`
         _capture_head_server_dependencies(global_config_dict)
 
         # Initialize Ray cluster in the main process
+        # Note: This function will modify the global config dict - update `ray_head_node_address`
         initialize_ray()
 
         # Assume Nemo Gym Run is for a single agent.
