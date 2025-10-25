@@ -47,6 +47,7 @@ from nemo_gym.server_utils import (
     HeadServer,
     ServerClient,
     ServerStatus,
+    initialize_ray,
 )
 
 
@@ -138,6 +139,9 @@ class RunHelper:  # pragma: no cover
 
         # Capture head server dependencies and store in global config dict
         _capture_head_server_dependencies(global_config_dict)
+
+        # Initialize Ray cluster in the main process
+        initialize_ray()
 
         # Assume Nemo Gym Run is for a single agent.
         escaped_config_dict_yaml_str = shlex.quote(OmegaConf.to_yaml(global_config_dict))

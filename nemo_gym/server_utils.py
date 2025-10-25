@@ -35,7 +35,7 @@ from aiohttp import ClientResponse, ClientSession, ClientTimeout, DummyCookieJar
 from aiohttp.client import _RequestOptions
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import BaseModel, ConfigDict
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
@@ -311,6 +311,12 @@ class UvicornLoggingConfig(BaseModel):
 
 
 def initialize_ray() -> None:
+    """
+    Initialize ray cluster in a process.
+    We store the Ray address in the global config dict so that child processes can connect to it.
+    This avoids the need to start a new Ray cluster in each child process.
+    """
+
     if ray.is_initialized():
         print("Ray already initialized")
         return
@@ -324,6 +330,8 @@ def initialize_ray() -> None:
         ray_init_kwargs["address"] = ray_head_node_address
     else:
         print("Starting Ray cluster...")
+        with open_dict(global_config_dict):
+            global_config_dict["ray_head_node_address"] = ray.get_runtime_context().gcs_address
 
     ray.init(**ray_init_kwargs)
 
