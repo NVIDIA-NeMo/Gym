@@ -695,7 +695,7 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
                 print("DEBUG: MultistepEquivLLMJudgeResourcesServer._query_judge_distill_quorum: unexpected result is None", flush=True)
                 answer_i = None
             else:
-                print(f"DEBUG: MultistepEquivLLMJudgeResourcesServer._query_judge_distill_quorum: unexpected result type = {type(r).__name__}", flush=True)
+                print(f"DEBUG: MultistepEquivLLMJudgeResourcesServer._query_judge_distill_quorum: unexpected result: {type(r).__name__} {r}", flush=True)
                 answer_i = None
             rank = i + 1
             prompt_parts.append("")
