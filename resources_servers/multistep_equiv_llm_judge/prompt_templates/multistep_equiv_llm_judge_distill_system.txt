@@ -8,6 +8,8 @@ If the question is numerical or mathematical, the distilled answer may be, for e
 
 If the question is factual knowledge-based, the distilled answer may be, for example, a reference to a concept, logical proposition, place/time, thing, etc.
 
+If the question asks for the answer to be contained within special delimiters (such as \boxed{}), the distilled answer should preserve the entire content within those special delimiters.
+
 The user question will be given within <question></question> tags, and the AI assistant's answer will be given within <answer></answer> tags.
 
 You should output the distilled answer within <distilled_answer></distilled_answer> tags.
