@@ -1,0 +1,15 @@
+gsm8k_atropos_resources_server:
+  resources_servers:
+    atropos:
+      entrypoint: gsm8k_app.py
+
+gsm8k_atropos_agent:
+  responses_api_agents:
+    atropos_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: gsm8k_atropos_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model

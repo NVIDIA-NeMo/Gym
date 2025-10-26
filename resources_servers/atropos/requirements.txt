@@ -1,0 +1,23 @@
+-e ../../  # nemo-gym
+-e ../../atropos
+-e ../../KernelBench
+datasets
+math-verify==0.7.0
+latex2sympy2-extended
+jsonlines
+wandb
+
+# kernelbench stuff:
+torch
+transformers
+together
+nvidia-cutlass-dsl
+modal
+ninja
+pydra_config
+einops
+python-dotenv
+google-generativeai
+openai
+anthropic
+packaging

@@ -1,0 +1,17 @@
+kernelbench_atropos_resources_server:
+  resources_servers:
+    atropos:
+      entrypoint: kernelbench_app.py
+      env:
+        KERNELBENCH_DEVICE: cuda:0
+
+kernelbench_atropos_agent:
+  responses_api_agents:
+    atropos_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: kernelbench_atropos_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
