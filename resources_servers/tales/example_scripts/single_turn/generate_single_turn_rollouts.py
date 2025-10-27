@@ -128,18 +128,10 @@ async def run_single_turn_loop(
                             .split("</action>")[0]
                             .strip()
                         )
-                        # if j == 0:
-                        #     print("Input to LLM:")
-                        #     print(history_prompt)
-                        #     print("LLM Response:")
-                        #     print(raw_generation)
-                        #     print(f"Extracted Action: {action}")
-
                         all_responses.append(action)
 
                     # Group the responses into only the unique actions
                     uniq_acts, uniq_counts = np.unique(all_responses, return_counts=True)
-                    # print("All responses:", all_responses)
                     act_reward_dict = {}
                     for u_act in uniq_acts:
                         # For each unique action, fast-forward the environment to the step and see if it results in a reward:
@@ -242,11 +234,6 @@ async def run_single_turn_loop(
                         filtered_example[key] = example[key]
 
                     f.write(json.dumps(filtered_example) + "\n")
-
-            # # Full response message history:
-            # with open(output_directory + "/examples_full.jsonl", "w") as f:
-            #     for example in examples:
-            #         f.write(json.dumps(example) + "\n")
 
             print(f"Exported {len(examples)} examples to {output_directory}")
 

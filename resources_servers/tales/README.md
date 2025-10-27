@@ -121,3 +121,13 @@ Response example:
   "admissible_commands": ["look", "inventory"]
 }
 ```
+
+
+# Future Updates
+(Things to add when time/infra allows):
+1. True Multi-turn Examples: Waiting for response from NeMo developers about including 'assistant' role messages.
+2. Example RL Training: Waiting for integration.
+3. Tool-Use Agent and corresponding resource server functions: Needs testing and validation before pushing.
+4. Better way of passing in tasks
+5. Remove request for admissible commands from execute command/verify (this should only be on environment seeding/reset)
+6. More detailed README about TALES envs

@@ -158,7 +158,7 @@ async def run_single_turn_loop(
                     json.dumps({"responses_create_params": example.model_dump(exclude_unset=True)}) + "\n"
                 )
 
-            with open("resources_servers/tales/data/example.jsonl", "w") as f:
+            with open("resources_servers/tales/data/example_test.jsonl", "w") as f:
                 f.writelines(example_strs)
 
             print(f"Saved {prompts} examples to {output_file}")
