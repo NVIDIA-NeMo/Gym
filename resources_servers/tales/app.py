@@ -62,6 +62,10 @@ class ExecuteCommandRequest(BaseModel):
     session_id: str
 
 
+class ExecuteCommandRequestBug(BaseModel):
+    command: str
+
+
 class ExecuteResetResponse(BaseModel):
     observation: str
     infos: dict
@@ -137,8 +141,10 @@ class TALESResourcesServer(SimpleResourcesServer):
         args = {key: value for key, value in body.model_dump(exclude_unset=True).items() if value is not None}
 
         try:
-            if "command" in args.keys():
+            if "session_id" in args.keys() and "command" in args.keys():
                 return await self.execute_command(request, ExecuteCommandRequest(**args))
+            elif "command" in args.keys():
+                return await self.execute_bug(request, ExecuteCommandRequestBug(**args))
             else:
                 return await self.reset(request)
         except Exception as e:
@@ -252,6 +258,37 @@ class TALESResourcesServer(SimpleResourcesServer):
                 )
             env = self.last_env_used
 
+        obs, score, done, info = env.step(body.command)
+        # print(f"Command: {body.command}\nObservation: {obs}\nScore: {score}\nDone: {done}\nInfo: {info}\n")
+        if self.framework == "textworld":
+            if score != self.last_score:
+                reward = float(score - self.last_score)
+                self.last_score = score
+            else:
+                reward = 0
+        else:
+            reward = score
+
+        self.total_score += reward
+        self.last_score = score
+
+        response = ExecuteCommandResponse(observation=obs, score=self.total_score, done=done, info=info, reward=reward)
+
+        if self.config.expose_admissible_commands and "admissible_commands" in info:
+            response.admissible_commands = info["admissible_commands"]
+
+        return response
+
+    async def execute_bug(self, request: Request, body: ExecuteCommandRequestBug) -> ExecuteCommandResponse:
+        # If session id is not provided, use the last environment used
+        if self.last_env_used is None or not self.framework:
+            raise HTTPException(
+                status_code=400,
+                detail="No environment has been used yet. Please call seed_session first.",
+            )
+
+        session_id = request.session[SESSION_ID_KEY]
+        env = self.session_id_to_env[session_id]
         obs, score, done, info = env.step(body.command)
         # print(f"Command: {body.command}\nObservation: {obs}\nScore: {score}\nDone: {done}\nInfo: {info}\n")
         if self.framework == "textworld":
