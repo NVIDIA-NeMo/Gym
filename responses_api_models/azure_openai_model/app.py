@@ -59,7 +59,7 @@ class AzureOpenAIModelServer(SimpleResponsesAPIModel):
         async with self._semaphore:
             chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(body)
             chat_completion_params_dict = chat_completion_create_params.model_dump(exclude_unset=True)
-            chat_completion_params_dict.setdefault("model", self.config.openai_model)
+            chat_completion_params_dict["model"] = self.config.openai_model
             chat_completion_response = await self._client.chat.completions.create(**chat_completion_params_dict)
 
         choice = chat_completion_response.choices[0]
@@ -95,7 +95,7 @@ class AzureOpenAIModelServer(SimpleResponsesAPIModel):
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
         body_dict = body.model_dump(exclude_unset=True)
-        body_dict.setdefault("model", self.config.openai_model)
+        body_dict["model"] = self.config.openai_model
         openai_response_dict = await self._client.chat.completions.create(**body_dict)
         return NeMoGymChatCompletion.model_validate(openai_response_dict)
 

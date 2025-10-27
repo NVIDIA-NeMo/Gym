@@ -108,11 +108,11 @@ class TestApp:
             },
         )
         assert chat_with_model.status_code == 200
-        assert called_args_chat.get("model") == "override_model"
+        assert called_args_chat.get("model") == "dummy_model"
 
         server._client.chat.completions.create.assert_any_await(
             messages=[{"role": "user", "content": "hi"}],
-            model="override_model",
+            model="dummy_model",
         )
 
     async def test_responses(self, monkeypatch: MonkeyPatch) -> None:
