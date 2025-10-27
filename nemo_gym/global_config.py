@@ -126,13 +126,11 @@ class GlobalConfigDictParser(BaseModel):
         self,
         server_instance_configs: List[ServerInstanceConfig],
         default_host: str,
-        head_server_port: Optional[int] = None,
+        initial_disallowed_ports: Optional[List[int]] = None,
     ) -> List[int]:
         server_refs = [c.get_server_ref() for c in server_instance_configs]
 
-        disallowed_ports = []
-        if head_server_port is not None:
-            disallowed_ports.append(head_server_port)
+        disallowed_ports = initial_disallowed_ports.copy() if initial_disallowed_ports is not None else []
 
         for server_instance_config in server_instance_configs:
             run_server_config_dict = server_instance_config.get_inner_run_server_config_dict()
@@ -208,7 +206,10 @@ class GlobalConfigDictParser(BaseModel):
         head_server_config = global_config_dict.get(HEAD_SERVER_KEY_NAME, {})
         head_server_port = head_server_config.get("port", DEFAULT_HEAD_SERVER_PORT)
 
-        disallowed_ports = self.validate_and_populate_defaults(server_instance_configs, default_host, head_server_port)
+        initial_disallowed_ports = [head_server_port] if head_server_port is not None else []
+        disallowed_ports = self.validate_and_populate_defaults(
+            server_instance_configs, default_host, initial_disallowed_ports
+        )
 
         # Populate head server defaults
         if not global_config_dict.get(HEAD_SERVER_KEY_NAME):

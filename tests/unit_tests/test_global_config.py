@@ -52,7 +52,7 @@ class TestServerUtils:
         monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
 
         global_config_dict = get_global_config_dict()
-        assert {"head_server": {"host": "127.0.0.1", "port": 11000}} == global_config_dict
+        assert {"head_server": {"host": "127.0.0.1", "port": 11000}, "disallowed_ports": [11000]} == global_config_dict
 
     def test_get_global_config_dict_global_exists(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
@@ -102,6 +102,7 @@ class TestServerUtils:
             "config_paths": ["/var", "var"],
             "extra_dot_env_key": 2,
             "head_server": {"host": "127.0.0.1", "port": 11000},
+            "disallowed_ports": [11000],
         } == global_config_dict
 
     def test_get_global_config_dict_config_paths_recursive(self, monkeypatch: MonkeyPatch) -> None:
@@ -152,6 +153,7 @@ class TestServerUtils:
             "extra_dot_env_key": 2,
             "recursive_config_path_child_key": 3,
             "head_server": {"host": "127.0.0.1", "port": 11000},
+            "disallowed_ports": [11000],
         } == global_config_dict
 
     def test_get_global_config_dict_server_host_port_defaults(self, monkeypatch: MonkeyPatch) -> None:
@@ -192,6 +194,7 @@ class TestServerUtils:
             "b": {"c": {"d": {}}},
             "c": 2,
             "head_server": {"host": "127.0.0.1", "port": 11000},
+            "disallowed_ports": [11000, 12345],
         } == global_config_dict
 
     def test_get_global_config_dict_server_refs_sanity(self, monkeypatch: MonkeyPatch) -> None:
@@ -206,7 +209,7 @@ class TestServerUtils:
 
         # Fix the port returned
         find_open_port_mock = MagicMock()
-        find_open_port_mock.return_value = 12345
+        find_open_port_mock.side_effect = [12345, 123456]
         monkeypatch.setattr(nemo_gym.global_config, "find_open_port", find_open_port_mock)
 
         # Override the hydra main wrapper call. At runtime, this will use sys.argv.
@@ -259,9 +262,10 @@ class TestServerUtils:
                 }
             },
             "resources_name": {
-                "resources_servers": {"c": {"entrypoint": "app.py", "host": "127.0.0.1", "port": 12345}}
+                "resources_servers": {"c": {"entrypoint": "app.py", "host": "127.0.0.1", "port": 123456}}
             },
             "head_server": {"host": "127.0.0.1", "port": 11000},
+            "disallowed_ports": [11000, 12345, 123456],
         } == global_config_dict
 
     def test_get_global_config_dict_server_refs_errors_on_missing(self, monkeypatch: MonkeyPatch) -> None:
@@ -374,7 +378,7 @@ class TestServerUtils:
         )
         assert {"my_key": "my_value"} == get_first_server_config_dict(global_config_dict, "a")
 
-    def test_find_open_port_avoids_head_server_port(self, monkeypatch: MonkeyPatch) -> None:
+    def test_find_open_port_avoids_disallowed_ports(self, monkeypatch: MonkeyPatch) -> None:
         """Test that find_open_port retries when the head server port is returned."""
         socket_mock = MagicMock()
         socket_instance = MagicMock()
@@ -388,7 +392,7 @@ class TestServerUtils:
 
         monkeypatch.setattr(nemo_gym.global_config, "socket", socket_mock)
 
-        port = find_open_port(head_server_host="127.0.0.1", head_server_port=DEFAULT_HEAD_SERVER_PORT)
+        port = find_open_port(disallowed_ports=[DEFAULT_HEAD_SERVER_PORT])
 
         assert port == 12345
         assert socket_instance.getsockname.call_count == 2  # first: conflict, second: success
@@ -405,7 +409,7 @@ class TestServerUtils:
         monkeypatch.setattr(nemo_gym.global_config, "socket", socket_mock)
 
         with raises(RuntimeError) as exc_info:
-            find_open_port(head_server_host="127.0.0.1", head_server_port=DEFAULT_HEAD_SERVER_PORT, max_retries=5)
+            find_open_port(disallowed_ports=[DEFAULT_HEAD_SERVER_PORT], max_retries=5)
 
         assert "Unable to find an open port" in str(exc_info.value)
         assert "after 5 attempts" in str(exc_info.value)
@@ -421,7 +425,7 @@ class TestServerUtils:
         exists_mock.return_value = False
         monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
 
-        def mock_find_open_port(head_server_host=None, head_server_port=None, max_retries=50):
+        def mock_find_open_port(disallowed_ports=None, max_retries=50):
             return 12345  # safe port
 
         monkeypatch.setattr(nemo_gym.global_config, "find_open_port", mock_find_open_port)
@@ -446,3 +450,6 @@ class TestServerUtils:
         assert resource_port == 12345
         assert head_port == 11000
         assert resource_port != head_port
+        assert "disallowed_ports" in global_config_dict
+        assert 11000 in global_config_dict["disallowed_ports"]
+        assert 12345 in global_config_dict["disallowed_ports"]
