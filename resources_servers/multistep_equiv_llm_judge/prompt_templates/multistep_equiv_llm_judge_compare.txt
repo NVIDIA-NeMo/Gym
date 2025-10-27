@@ -1,0 +1,11 @@
+<question>
+{question}
+</question>
+
+<answer_A>
+{answer_0}
+</answer_A>
+
+<answer_B>
+{answer_1}
+</answer_B>

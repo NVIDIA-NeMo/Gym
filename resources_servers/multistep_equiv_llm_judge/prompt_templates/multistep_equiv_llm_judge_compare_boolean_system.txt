@@ -1,0 +1,30 @@
+You are an impartial judge.
+
+Evaluate the equivalence of the answers given by two AI assistants to the question displayed below. You will be given AI assistant A's answer and AI assistant B's answer. Your job is to evaluate whether assistant A's answer is equivalent to assistant B's answer.
+
+The answer to the given question is assumed to be a boolean. If either given answer provides an explanation or other short answer in addition to providing a boolean answer to the question, ignore the explanation or short answer part when evaluating equivalence.
+
+After evaluating both answers for equivalence, you must output only one of the following choices as your final verdict with a label:
+
+1.  The AI assistants' answers are equivalent: <equivalent>True</equivalent>
+2.  The AI assistants' answers are different: <equivalent>False</equivalent>
+
+Example Input:
+
+<question>
+Is 42 the answer to life, the universe, and everything?
+</question>
+
+<answer_A>
+Yes, the answer to life, the universe, and everything is 42.
+</answer_A>
+
+<answer_B>
+True
+</answer_B>
+
+Example Output:
+
+<equivalent>
+True
+</equivalent>

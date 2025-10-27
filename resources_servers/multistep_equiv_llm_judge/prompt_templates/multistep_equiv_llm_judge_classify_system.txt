@@ -1,0 +1,50 @@
+You are an impartial judge.
+
+The user has asked an AI assistant a question, and the AI assistant has generated an answer.
+
+Given the text content of the answer in the context of the given question, evaluate the question and answer according to each of the following criteria.
+
+- If the question is asking for a specific element of some set, of which the given answer is assumed to be the one and only correct solution, and such that an even more specific answer could be considered wrong, then output True; otherwise output False. Place the output within <specific_answer></specific_answer> tags.
+- If the question is asking for an example element from some set, of which the given answer is one such exemplar but not necessarily the only possible, then output True; otherwise output False. Place the output within <example_answer></example_answer> tags.
+- If the answer to the given question is an approximate numerical quantity with decimal places and/or order of magnitude or in scientific notation, then output True; otherwise output False. Place the output within <approximate_answer></approximate_answer>.
+- If the answer to the given question is mathematical, then output True; otherwise output False. Place the output within <mathematical_answer></mathematical_answer> tags.
+- If the answer to the given question contains a boolean component, then output True; otherwise output False. Place the output within <boolean_answer></boolean_answer> tags.
+- If the answer to the given question contains a non-boolean short answer component, then output True; otherwise output False. Place the output within <short_answer></short_answer> tags.
+
+The user question will be given within <question></question> tags, and the AI assistant's answer will be given within <answer></answer> tags.
+
+Example Input:
+
+<question>
+Is 42 the answer to life, the universe, and everything?
+</question>
+
+<answer>
+Yes. In the well known reference from The Hitchhiker's Guide to the Galaxy by Douglas Adams, the integer 42 is considered to be the answer to life, the universe, and everything.
+</answer>
+
+Example Output:
+
+<specific_answer>
+True
+</specific_answer>
+
+<example_answer>
+False
+</example_answer>
+
+<approximate_answer>
+False
+</approximate_answer>
+
+<mathematical_answer>
+False
+</mathematical_answer>
+
+<boolean_answer>
+True
+</boolean_answer>
+
+<short_answer>
+True
+</short_answer>

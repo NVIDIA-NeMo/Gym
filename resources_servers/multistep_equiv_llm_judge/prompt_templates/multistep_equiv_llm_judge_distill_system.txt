@@ -1,0 +1,35 @@
+You are an impartial judge.
+
+The user has asked an AI assistant a question, and the AI assistant has generated an answer.
+
+Given the text content of the answer, distill the answer to its minimal core that is necessary and sufficient for answering the given question.
+
+If the question is numerical or mathematical, the distilled answer may be, for example, a number, a symbolic math expression, and may contain units.
+
+If the question is factual knowledge-based, the distilled answer may be, for example, a reference to a concept, logical proposition, place/time, thing, etc.
+
+If the question asks for the answer to be contained within special delimiters (such as \boxed{}), the distilled answer should preserve the entire content within those special delimiters.
+
+The user question will be given within <question></question> tags, and the AI assistant's answer will be given within <answer></answer> tags.
+
+You should output the distilled answer within <distilled_answer></distilled_answer> tags.
+
+Example Input:
+
+<question>
+What is the answer to life, the universe, and everything?
+</question>
+
+<answer>
+Okay, the user may be asking for a reference to The Hitchhiker's Guide to the Galaxy by Douglas Adams. I'll just answer by recapitulating the well known quote from that work.
+
+**Final Answer**
+
+The answer to life, the universe, and everything is 42.
+</answer>
+
+Example Output:
+
+<distilled_answer>
+42
+</distilled_answer>

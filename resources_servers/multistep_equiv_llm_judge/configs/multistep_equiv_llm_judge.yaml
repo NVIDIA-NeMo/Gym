@@ -1,0 +1,42 @@
+multistep_equiv_llm_judge:
+  resources_servers:
+    multistep_equiv_llm_judge:
+      entrypoint: app.py
+      judge_default_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_classify_model_server: null
+      judge_distill_model_server: null
+      judge_compare_model_server: null
+      judge_responses_create_params:
+        input: []
+      judge_endpoint_max_concurrency: 128
+      judge_classify_system_template_fpath: prompt_templates/multistep_equiv_llm_judge_classify_system.txt
+      judge_classify_prompt_template_fpath: prompt_templates/multistep_equiv_llm_judge_classify.txt
+      judge_distill_system_template_fpath: prompt_templates/multistep_equiv_llm_judge_distill_system.txt
+      judge_distill_prompt_template_fpath: prompt_templates/multistep_equiv_llm_judge_distill.txt
+      judge_distill_quorum_template_fpath: prompt_templates/multistep_equiv_llm_judge_distill_quorum.txt
+      judge_compare_boolean_system_template_fpath: prompt_templates/multistep_equiv_llm_judge_compare_boolean_system.txt
+      judge_compare_system_template_fpath: prompt_templates/multistep_equiv_llm_judge_compare_system.txt
+      judge_compare_prompt_template_fpath: prompt_templates/multistep_equiv_llm_judge_compare.txt
+      judge_verdict_prompt_template_fpath: prompt_templates/equivalence_llm_judge.txt
+      swap: True
+      # trials: 1
+      # domain: knowledge
+      expected_answer_distill: False
+      model_response_parse_reasoning: False
+multistep_equiv_llm_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: multistep_equiv_llm_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        license: "TBD"
+        jsonl_fpath: resources_servers/multistep_equiv_llm_judge/data/example.jsonl
