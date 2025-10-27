@@ -149,6 +149,8 @@ class RunHelper:  # pragma: no cover
                 debug = int(debug)
             except ValueError:
                 debug = -1
+        if debug:
+            print("DEBUG: RunHelper.start: ...", flush=True)
 
         global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
 
