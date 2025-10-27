@@ -11,8 +11,6 @@ sudo apt-get update && apt-get install default-jre default-jdk
 ```
 
 ## Limitations
-- TALES typically represents the observations as 'user' inputs and the actions as 'assistant' inputs. NeMo throws an error when there are 'assistant' tagged messages so in the rollouts we just use the 'developer' tag for now.
-
 - We use a standard vllm server to generate the rollouts for now due to issues getting the NeMo vllm integration working.
 
 ## Commands to generate examples

@@ -12,9 +12,7 @@ This can be installed with
 `sudo apt-get update && apt-get install default-jre default-jdk`
 
 ## Multi-Turn vs. Single-Turn
-TALES is natively a multi-turn environment for evaluating the reasoning capabilities of LLMs, where observations are provided as `user` inputs while the agent's past actions are represented as `assistant` inputs.
-
-Currently, we are encountering some issues regarding our multi-turn implementation with regard to single-turn constraints within the NeMo Gym. The draft code and some examples can be found under their respective folders in data and example_scripts.
+TALES is natively a multi-turn environment for evaluating the reasoning capabilities of LLMs, where observations are provided as `user` inputs while the agent's past actions are represented as `assistant` inputs. The *_clean.jsonl shows some examples from each framework for how the message history looks.
 
 For compatability with NeMo Gym, we provide an alternative single-turn formulation where the entire observation-action history is condensed into the content of the first 'user' message and the LLM is queried for the next action.
 
@@ -68,6 +66,25 @@ Input example:
 }
 ```
 Response example:
+```
+{
+  "observation": "You see a fridge and a table...",
+  "score": 0.0,
+  "done": false,
+  "info": { "...": "..." },
+  "admissible_commands": ["open fridge", "open table drawer"]
+}
+```
+
+*/execute_bug*:
+Illustrates the session_id binding error. To be removed once fixed.
+Input example:
+```
+{
+  "command": "look"
+}
+```
+Response example (Intended, currently will result in a 'session not found' error):
 ```
 {
   "observation": "You see a fridge and a table...",
