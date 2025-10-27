@@ -145,8 +145,6 @@ class VLLMModel(SimpleResponsesAPIModel):
         client = self._session_id_to_client[session_id]
 
         create_params = body_dict
-        # Always disable skip_special_tokens to preserve <think> </think> tags for reasoning parsing
-        create_params |= dict(skip_special_tokens=False)
 
         if self.config.return_token_id_information:
             create_params |= dict(
