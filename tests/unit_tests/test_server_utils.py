@@ -27,6 +27,7 @@ from nemo_gym.server_utils import (
     DictConfig,
     HeadServer,
     ServerClient,
+    initialize_ray,
 )
 
 
@@ -154,3 +155,66 @@ class TestServerUtils:
         resp = await head_server.global_config_dict_yaml()
 
         assert "a: 2\n" == resp
+
+    def _mock_ray_return_value(self, monkeypatch: MonkeyPatch, return_value: bool) -> MagicMock:
+        ray_is_initialized_mock = MagicMock()
+        ray_is_initialized_mock.return_value = return_value
+        monkeypatch.setattr(nemo_gym.server_utils.ray, "is_initialized", ray_is_initialized_mock)
+        return ray_is_initialized_mock
+
+    def _mock_ray_init(self, monkeypatch: MonkeyPatch) -> MagicMock:
+        ray_init_mock = MagicMock()
+        monkeypatch.setattr(nemo_gym.server_utils.ray, "init", ray_init_mock)
+        return ray_init_mock
+
+    def test_initialize_ray_already_initialized(self, monkeypatch: MonkeyPatch) -> None:
+        ray_is_initialized_mock = self._mock_ray_return_value(monkeypatch, True)
+
+        get_global_config_dict_mock = MagicMock()
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
+
+        initialize_ray()
+
+        ray_is_initialized_mock.assert_called_once()
+        get_global_config_dict_mock.assert_not_called()
+
+    def test_initialize_ray_with_address(self, monkeypatch: MonkeyPatch) -> None:
+        ray_is_initialized_mock = self._mock_ray_return_value(monkeypatch, False)
+
+        ray_init_mock = self._mock_ray_init(monkeypatch)
+
+        # Mock global config dict with ray_head_node_address
+        global_config_dict = DictConfig({"ray_head_node_address": "ray://test-address:10001"})
+        get_global_config_dict_mock = MagicMock()
+        get_global_config_dict_mock.return_value = global_config_dict
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
+
+        initialize_ray()
+
+        ray_is_initialized_mock.assert_called_once()
+        get_global_config_dict_mock.assert_called_once()
+        ray_init_mock.assert_called_once_with(address="ray://test-address:10001", ignore_reinit_error=True)
+
+    def test_initialize_ray_without_address(self, monkeypatch: MonkeyPatch) -> None:
+        ray_is_initialized_mock = self._mock_ray_return_value(monkeypatch, False)
+
+        ray_init_mock = self._mock_ray_init(monkeypatch)
+
+        ray_runtime_context_mock = MagicMock()
+        ray_runtime_context_mock.gcs_address = "ray://mock-address:10001"
+        ray_get_runtime_context_mock = MagicMock()
+        ray_get_runtime_context_mock.return_value = ray_runtime_context_mock
+        monkeypatch.setattr(nemo_gym.server_utils.ray, "get_runtime_context", ray_get_runtime_context_mock)
+
+        # Mock global config dict without ray_head_node_address
+        global_config_dict = DictConfig({"k": "v"})
+        get_global_config_dict_mock = MagicMock()
+        get_global_config_dict_mock.return_value = global_config_dict
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
+
+        initialize_ray()
+
+        ray_is_initialized_mock.assert_called_once()
+        get_global_config_dict_mock.assert_called_once()
+        ray_init_mock.assert_called_once_with(ignore_reinit_error=True)
+        ray_get_runtime_context_mock.assert_called_once()

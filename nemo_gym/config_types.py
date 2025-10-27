@@ -14,6 +14,7 @@
 from enum import Enum
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
 
+import rich
 from omegaconf import DictConfig, OmegaConf
 from pydantic import (
     BaseModel,
@@ -23,6 +24,60 @@ from pydantic import (
     ValidationError,
     model_validator,
 )
+from rich.text import Text
+
+
+########################################
+# Base CLI configs
+########################################
+
+
+class BaseNeMoGymCLIConfig(BaseModel):
+    @model_validator(mode="before")
+    @classmethod
+    def pre_process(cls, data):
+        if not (data.get("h") or data.get("help")):
+            return data
+
+        rich.print(f"""Displaying help for [bold]{cls.__name__}[/bold]
+""")
+        # We use __doc__ directly here since inspect.getdoc will inherit the doc from parent classes.
+        class_doc = cls.__doc__
+        if class_doc:
+            rich.print(f"""[bold]Description[/bold]
+-----------
+{class_doc.strip()}
+""")
+
+        fields = cls.model_fields.items()
+        if fields:
+            rich.print("""[bold]Parameters[/bold]
+----------""")
+
+            prefixes: List[Text] = []
+            suffixes: List[Text] = []
+            for field_name, field in fields:
+                description_str = field.description if field.description else ""
+
+                # Not sure if there is a better way to get this annotation_str, e.g. using typing.get_args or typing.get_origin
+                annotation_str = (
+                    field.annotation.__name__ if isinstance(field.annotation, type) else str(field.annotation)
+                )
+                annotation_str = annotation_str.replace("typing.", "")
+
+                prefixes.append(Text.from_markup(f"- [blue]{field_name}[/blue] [yellow]({annotation_str})[/yellow]"))
+                suffixes.append(description_str)
+
+            max_prefix_length = max(map(len, prefixes))
+            ljust_length = max_prefix_length + 3
+            for prefix, suffix in zip(prefixes, suffixes):
+                prefix.align("left", ljust_length)
+                rich.print(prefix + suffix)
+        else:
+            print("There are no arguments to this CLI command!")
+
+        # Exit after help is printed.
+        exit()
 
 
 ########################################
@@ -63,10 +118,14 @@ def is_server_ref(config_dict: DictConfig) -> Optional[ServerRef]:
 ########################################
 
 
-class UploadJsonlDatasetGitlabConfig(BaseModel):
-    dataset_name: str
-    version: str  # Must be x.x.x
-    input_jsonl_fpath: str
+class UploadJsonlDatasetGitlabConfig(BaseNeMoGymCLIConfig):
+    """
+    Upload a local jsonl dataset artifact to Gitlab.
+    """
+
+    dataset_name: str = Field(description="The dataset name.")
+    version: str = Field(description="The version of this dataset. Must be in the format `x.x.x`.")
+    input_jsonl_fpath: str = Field(description="Path to the jsonl file to upload.")
 
 
 class JsonlDatasetGitlabIdentifer(BaseModel):
@@ -75,8 +134,11 @@ class JsonlDatasetGitlabIdentifer(BaseModel):
     artifact_fpath: str
 
 
-class DownloadJsonlDatasetGitlabConfig(JsonlDatasetGitlabIdentifer):
-    output_fpath: str
+class DownloadJsonlDatasetGitlabConfig(JsonlDatasetGitlabIdentifer, BaseNeMoGymCLIConfig):
+    dataset_name: str = Field(description="The dataset name.")
+    version: str = Field(description="The version of this dataset. Must be in the format `x.x.x`.")
+    artifact_fpath: str = Field(description="The filepath to the artifact to download.")
+    output_fpath: str = Field(description="Where to save the downloaded dataset.")
 
 
 DatasetType = Union[Literal["train"], Literal["validation"], Literal["example"]]

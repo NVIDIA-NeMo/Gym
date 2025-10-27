@@ -8,7 +8,7 @@ Before diving into code, let's understand the three core abstrctions in NeMo Gym
 ## Overview
 
 <div align="center">
-  <img src="../resources/product_overview.png" alt="NeMo Gym Architecture" width="800">
+  <img src="product_overview.png" alt="NeMo Gym Architecture" width="800">
 </div>
 
 ## 1. Models
@@ -78,7 +78,7 @@ Let's trace through a weather request:
    ```json
    {
      "messages": [{"role": "user", "content": "What's the weather in NYC?"}],
-     "tools": [{"name": "get_weather", "parameters": {...}}]
+     "tools": [{"name": "get_weather", "parameters": "..."}]
    }
    ```
 
@@ -110,4 +110,4 @@ Let's trace through a weather request:
 
 Now that you understand the concepts, let's get everything installed and running.
 
-→ **[Next: Setup and Installation](02-setup.md)**
+→ **Next: [Next: Setup and Installation](02-setup.md)**
