@@ -29,6 +29,7 @@ from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.config_types import (
     AGENT_REF_KEY,
     AgentServerRef,
+    BaseNeMoGymCLIConfig,
     DatasetConfig,
     DatasetType,
     DownloadJsonlDatasetGitlabConfig,
@@ -42,10 +43,15 @@ from nemo_gym.global_config import (
 )
 
 
-class TrainDataProcessorConfig(BaseModel):
-    output_dirpath: str
-    mode: Union[Literal["train_preparation"], Literal["example_validation"]]
-    should_download: bool = False
+class TrainDataProcessorConfig(BaseNeMoGymCLIConfig):
+    output_dirpath: str = Field(description="Path to the directory to save the outputs.")
+    mode: Union[Literal["train_preparation"], Literal["example_validation"]] = Field(
+        description="Whether to do train_preparation or example_validation."
+    )
+    should_download: bool = Field(
+        default=False,
+        description="Whether or not to download missing datasets. By default, no datasets will be downloaded.",
+    )
 
     @property
     def in_scope_dataset_types(self) -> List[DatasetType]:

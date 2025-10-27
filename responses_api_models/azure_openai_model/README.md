@@ -8,18 +8,18 @@ Set up your `env.yaml` file:
 policy_base_url: https://my.end.point.com/v1/azure
 policy_api_key: <API_KEY>
 policy_model_name: gpt-5-nano
-policy_api_version: 2024-10-21
 ```
 
 ## Usage
 
 ### Running the server
+Set the API version. It usually looks something like "2024-10-21".
 ```bash
 config_paths="responses_api_models/azure_openai_model/configs/azure_openai_model.yaml, \
 resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml"
 
 ng_run "+config_paths=[${config_paths}]" \
-+policy_model.responses_api_models.azure_openai_model.default_query.api-version=<api_version>
+    +policy_model.responses_api_models.azure_openai_model.default_query.api-version=<api_version>
 ```
 
 ### Collecting Rollouts

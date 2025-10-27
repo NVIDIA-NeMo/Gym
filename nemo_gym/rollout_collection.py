@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
 
-from nemo_gym.config_types import BaseServerConfig
+from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
@@ -32,14 +32,30 @@ from nemo_gym.server_utils import (
 )
 
 
-class RolloutCollectionConfig(BaseModel):
-    agent_name: str
-    input_jsonl_fpath: str
-    output_jsonl_fpath: str
-    limit: Optional[int] = None
-    num_repeats: Optional[int] = None
-    num_samples_in_parallel: Optional[int] = None
-    responses_create_params: Dict[str, Any] = Field(default_factory=dict)
+class RolloutCollectionConfig(BaseNeMoGymCLIConfig):
+    """
+    Perform a batch of rollout collection.
+    """
+
+    agent_name: str = Field(description="The agent to collect rollouts from.")
+    input_jsonl_fpath: str = Field(
+        description="The input data source to use to collect rollouts, in the form of a file path to a jsonl file."
+    )
+    output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
+    limit: Optional[int] = Field(
+        default=None, description="Maximum number of examples to load and take from the input dataset."
+    )
+    num_repeats: Optional[int] = Field(
+        default=None,
+        description="The number of times to repeat each example to run. Useful if you want to calculate mean@k e.g. mean@4 or mean@16.",
+    )
+    num_samples_in_parallel: Optional[int] = Field(
+        default=None, description="Limit the number of concurrent samples running at once."
+    )
+    responses_create_params: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Overrides for the responses_create_params e.g. temperature, max_output_tokens, etc.",
+    )
 
 
 class RolloutCollectionHelper(BaseModel):  # pragma: no cover

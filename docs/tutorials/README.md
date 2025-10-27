@@ -30,7 +30,8 @@ Understand how NeMo Gym evaluates agent performance and what verification means 
 ### **[05 - Rollout Collection Fundamentals](05-rollout-collection.md)**
 Master NeMo Gym's rollout generation system - the foundation for understanding agent behavior, creating training data, and evaluating performance. Learn to systematically capture complete agent interactions.
 
-### **[06 - Collecting Rollouts for Reinforcement Learning](06-rl-rollout-collection.md)**
+<!-- TODO: Add link [06 - Collecting Rollouts for Reinforcement Learning](06-rl-rollout-collection.md) -->
+### **06 - Collecting Rollouts for Reinforcement Learning (Coming soon!)**
 *Coming soon* - Generate rollouts for real-time RL training. Learn online rollout collection, integration with RL frameworks, and continuous agent improvement through environmental feedback.
 
 ### **[07 - Collecting Rollouts for SFT and DPO Training](07-sft-dpo-rollout-collection.md)**
@@ -39,11 +40,12 @@ Use generated rollouts to create training data for supervised fine-tuning and di
 
 ## Resource Servers
 
-### **[08 - Building Custom Resource Servers](08-custom-resource-servers.md)**
+<!-- TODO: Add link [08 - Building Custom Resource Servers](08-custom-resource-servers.md) -->
+### **08 - Building Custom Resource Servers**
 *Coming soon* - Learn to create your own tools and verification systems. Over time we plan to add more tutorials that demonstrate integration with MCP and Docker, multi-task training and how to perform dynamic prompting.
 
 
 ## Advanced Operations
 
-### **[09 - Configuration Management](17-configuration-guide.md)**
+### **[09 - Configuration Management](09-configuration-guide.md)**
 Master NeMo Gym's flexible configuration system to handle different environments, secrets, and deployment scenarios.

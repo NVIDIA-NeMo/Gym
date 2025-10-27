@@ -14,6 +14,8 @@
 import asyncio
 import json
 import shlex
+import subprocess
+import tomllib
 from glob import glob
 from os import environ, makedirs
 from os.path import exists
@@ -23,14 +25,17 @@ from threading import Thread
 from time import sleep
 from typing import Dict, List, Optional
 
+import rich
 import uvicorn
 from devtools import pprint
-from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel
+from omegaconf import DictConfig, OmegaConf, open_dict
+from pydantic import BaseModel, Field
 from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
+    HEAD_SERVER_DEPS_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
@@ -42,40 +47,76 @@ from nemo_gym.server_utils import (
     HeadServer,
     ServerClient,
     ServerStatus,
+    initialize_ray,
 )
 
 
-def _setup_env_command(dir_path: Path) -> str:  # pragma: no cover
+def _capture_head_server_dependencies(global_config_dict: DictConfig) -> None:  # pragma: no cover
+    """
+    Capture head server dependencies and store it in the global config dict.
+    These dependencies are used as constraints to ensure that other servers use the same dependency versions as the head server.
+    Note: This function will modify the global config dict - update `head_server_deps`
+    """
+
+    try:
+        result = subprocess.run(
+            ["uv", "pip", "freeze", "--exclude-editable"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        head_server_deps = result.stdout
+    except Exception as e:
+        print(f"Warning: Could not capture head server dependencies: {e}")
+        head_server_deps = None
+
+    with open_dict(global_config_dict):
+        global_config_dict[HEAD_SERVER_DEPS_KEY_NAME] = head_server_deps
+
+
+def _setup_env_command(dir_path: Path, head_server_deps: Optional[str] = None) -> str:  # pragma: no cover
+    install_cmd = "uv pip install -r requirements.txt"
+    if head_server_deps:
+        install_cmd += f" --constraint <(cat << 'EOF'\n{head_server_deps}\nEOF\n)"
+
     return f"""cd {dir_path} \\
     && uv venv --allow-existing \\
     && source .venv/bin/activate \\
-    && uv pip install -r requirements.txt \\
+    && {install_cmd} \\
    """
 
 
 def _run_command(command: str, working_directory: Path) -> Popen:  # pragma: no cover
     custom_env = environ.copy()
     custom_env["PYTHONPATH"] = f"{working_directory.absolute()}:{custom_env.get('PYTHONPATH', '')}"
-    print(f"Executing command:\n{command}\n")
     return Popen(command, executable="/bin/bash", shell=True, env=custom_env)
 
 
-class RunConfig(BaseModel):
-    entrypoint: str
+class RunConfig(BaseNeMoGymCLIConfig):
+    entrypoint: str = Field(
+        description="Entrypoint for this command. This must be a relative path with 2 parts. Should look something like `responses_api_agents/simple_agent`."
+    )
 
 
 class TestConfig(RunConfig):
-    should_validate_data: bool = False
+    should_validate_data: bool = Field(
+        default=False,
+        description="Whether or not to validate the example data (examples, metrics, rollouts, etc) for this server.",
+    )
 
-    dir_path: Path = None  # initialized in model_post_init
+    _dir_path: Path  # initialized in model_post_init
 
     def model_post_init(self, context):  # pragma: no cover
         # TODO: This currently only handles relative entrypoints. Later on we can resolve the absolute path.
-        self.dir_path = Path(self.entrypoint)
+        self._dir_path = Path(self.entrypoint)
         assert not self.dir_path.is_absolute()
         assert len(self.dir_path.parts) == 2
 
         return super().model_post_init(context)
+
+    @property
+    def dir_path(self) -> Path:
+        return self._dir_path
 
 
 class ServerInstanceDisplayConfig(BaseModel):
@@ -101,6 +142,14 @@ class RunHelper:  # pragma: no cover
 
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
         global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
+
+        # Capture head server dependencies and store in global config dict
+        # Note: This function will modify the global config dict - update `head_server_deps`
+        _capture_head_server_dependencies(global_config_dict)
+
+        # Initialize Ray cluster in the main process
+        # Note: This function will modify the global config dict - update `ray_head_node_address`
+        initialize_ray()
 
         # Assume Nemo Gym Run is for a single agent.
         escaped_config_dict_yaml_str = shlex.quote(OmegaConf.to_yaml(global_config_dict))
@@ -137,7 +186,9 @@ class RunHelper:  # pragma: no cover
 
             dir_path = PARENT_DIR / Path(first_key, second_key)
 
-            command = f"""{_setup_env_command(dir_path)} \\
+            head_server_deps = global_config_dict.get(HEAD_SERVER_DEPS_KEY_NAME)
+
+            command = f"""{_setup_env_command(dir_path, head_server_deps)} \\
     && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
     {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(top_level_path)} \\
     python {str(entrypoint_fpath)}"""
@@ -274,6 +325,10 @@ Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
 def run(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
 ):  # pragma: no cover
+    global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
+    # Just here for help
+    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+
     rh = RunHelper()
     rh.start(global_config_dict_parser_config)
     rh.run_forever()
@@ -386,8 +441,11 @@ def _format_pct(count: int, total: int) -> str:  # pragma: no cover
     return f"{count} / {total} ({100 * count / total:.2f}%)"
 
 
-class TestAllConfig(BaseModel):
-    fail_on_total_and_test_mismatch: bool = False
+class TestAllConfig(BaseNeMoGymCLIConfig):
+    fail_on_total_and_test_mismatch: bool = Field(
+        default=False,
+        description="There may be situations where there are an un-equal number of servers that exist vs have tests. This flag will fail the test job if this mismatch exists.",
+    )
 
 
 def test_all():  # pragma: no cover
@@ -474,6 +532,10 @@ Extra candidate paths:{_display_list_of_paths(extra_candidates)}"""
 
 
 def dev_test():  # pragma: no cover
+    global_config_dict = get_global_config_dict()
+    # Just here for help
+    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+
     proc = Popen("pytest --cov=. --durations=10", shell=True)
     exit(proc.wait())
 
@@ -592,4 +654,28 @@ Dependencies
 
 def dump_config():  # pragma: no cover
     global_config_dict = get_global_config_dict()
+    # Just here for help
+    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+
     print(OmegaConf.to_yaml(global_config_dict, resolve=True))
+
+
+def display_help():  # pragma: no cover
+    global_config_dict = get_global_config_dict()
+    # Just here for help
+    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+
+    pyproject_path = Path(PARENT_DIR) / "pyproject.toml"
+    with pyproject_path.open("rb") as f:
+        pyproject_data = tomllib.load(f)
+
+    project_scripts = pyproject_data["project"]["scripts"]
+    rich.print("""Run a command with `+h=true` or `+help=true` to see more detailed information!
+
+[bold]Available CLI scripts[/bold]
+-----------------""")
+    for script in project_scripts:
+        if not script.startswith("ng_"):
+            continue
+
+        print(script)

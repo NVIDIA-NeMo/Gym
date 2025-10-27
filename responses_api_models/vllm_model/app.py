@@ -93,8 +93,7 @@ class VLLMModel(SimpleResponsesAPIModel):
     ) -> NeMoGymResponse:
         # Response Create Params -> Chat Completion Create Params
         chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(body)
-        if not body.model:
-            body.model = self.config.model
+        body.model = self.config.model
 
         # Chat Completion Create Params -> Chat Completion
         chat_completion_response = await self.chat_completions(request, chat_completion_create_params)
@@ -135,7 +134,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
         body_dict = body.model_dump(exclude_unset=True)
-        body_dict.setdefault("model", self.config.model)
+        body_dict["model"] = self.config.model
 
         session_id = request.session[SESSION_ID_KEY]
         if session_id not in self._session_id_to_client:

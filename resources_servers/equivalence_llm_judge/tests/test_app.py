@@ -225,3 +225,131 @@ class TestApp:
         res = await rs.verify(req)
         assert res.reward == approx(-1.0)
         assert len(res.judge_evaluations) == 2
+
+    async def test_per_record_regex_extraction(self, config: LLMJudgeResourcesServerConfig) -> None:
+        """Test that template_metadata.output_regex extracts answer correctly."""
+        server_mock = MagicMock(spec=ServerClient)
+        cfg = config.model_copy(deep=True)
+        cfg.use_per_record_regex = True
+        rs = LLMJudgeResourcesServer(config=cfg, server_client=server_mock)
+
+        post_mock = MagicMock()
+        post_mock.json = AsyncMock(return_value=self._create_response("first", self._msg("[[A=B]]")))
+        server_mock.post = AsyncMock(return_value=post_mock)
+
+        model_create_params = NeMoGymResponseCreateParamsNonStreaming(
+            input=[{"role": "user", "content": "What is 2+2?"}]
+        )
+        # Model generates answer wrapped in \boxed{}
+        model_response = NeMoGymResponse(
+            id="resp",
+            created_at=0.0,
+            model="m",
+            object="response",
+            output=[self._msg("Let me explain: The answer is \\boxed{4} because 2+2=4.")],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        )
+
+        # Request with per-record regex in template_metadata
+        req = LLMJudgeVerifyRequest(
+            responses_create_params=deepcopy(model_create_params),
+            response=model_response.model_copy(deep=True),
+            expected_answer="4",
+            template_metadata={"output_regex": r"\\boxed\{(.*?)\}"},
+        )
+
+        res = await rs.verify(req)
+        assert res.reward == approx(1.0)
+        assert len(res.judge_evaluations) == 1
+        # Verify the regex extraction worked by checking judge was called once
+        assert server_mock.post.call_count == 1
+
+    async def test_full_generation_rescue_on_extraction_failure(self, config: LLMJudgeResourcesServerConfig) -> None:
+        """When regex-extracted answer fails, retry with full generation for partial credit."""
+        server_mock = MagicMock(spec=ServerClient)
+        cfg = config.model_copy(deep=True)
+        cfg.use_per_record_regex = True
+        cfg.check_full_generation_on_fail = True
+        cfg.reward_if_full_generation_succeeds = 0.5
+        rs = LLMJudgeResourcesServer(config=cfg, server_client=server_mock)
+
+        post_mock = MagicMock()
+        post_mock.json = AsyncMock()
+        server_mock.post = AsyncMock(return_value=post_mock)
+        # First call (extracted answer) fails, second call (full generation) succeeds
+        post_mock.json.side_effect = [
+            self._create_response("first", self._msg("[[A!=B]]")),
+            self._create_response("second", self._msg("[[A=B]]")),
+        ]
+
+        model_create_params = NeMoGymResponseCreateParamsNonStreaming(
+            input=[{"role": "user", "content": "What is 2+2?"}]
+        )
+        # Model output: correct answer is in full text but regex won't match properly
+        model_response = NeMoGymResponse(
+            id="resp",
+            created_at=0.0,
+            model="m",
+            object="response",
+            output=[self._msg("The final answer is clearly 4")],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        )
+
+        # Regex pattern that won't match the model output
+        req = LLMJudgeVerifyRequest(
+            responses_create_params=deepcopy(model_create_params),
+            response=model_response.model_copy(deep=True),
+            expected_answer="4",
+            template_metadata={"output_regex": r"ANSWER:\s*(.+)"},  # Won't match
+        )
+
+        res = await rs.verify(req)
+        assert res.reward == approx(0.5)  # Partial credit
+        assert len(res.judge_evaluations) == 2  # Both passes recorded
+        assert server_mock.post.call_count == 2
+
+    async def test_extraction_length_threshold_skips_regex(self, config: LLMJudgeResourcesServerConfig) -> None:
+        """Long expected answers skip regex extraction and use full generation."""
+        server_mock = MagicMock(spec=ServerClient)
+        cfg = config.model_copy(deep=True)
+        cfg.use_per_record_regex = True
+        cfg.extraction_length_threshold = 50  # 50 characters
+        rs = LLMJudgeResourcesServer(config=cfg, server_client=server_mock)
+
+        post_mock = MagicMock()
+        post_mock.json = AsyncMock(return_value=self._create_response("first", self._msg("[[A=B]]")))
+        server_mock.post = AsyncMock(return_value=post_mock)
+
+        model_create_params = NeMoGymResponseCreateParamsNonStreaming(
+            input=[{"role": "user", "content": "Explain photosynthesis."}]
+        )
+        # Long answer that exceeds threshold
+        long_answer = "Photosynthesis is the process by which plants convert light energy into chemical energy stored in glucose."
+        model_response = NeMoGymResponse(
+            id="resp",
+            created_at=0.0,
+            model="m",
+            object="response",
+            output=[self._msg(long_answer)],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        )
+
+        # Even though regex is provided, it should be ignored due to length threshold
+        req = LLMJudgeVerifyRequest(
+            responses_create_params=deepcopy(model_create_params),
+            response=model_response.model_copy(deep=True),
+            expected_answer=long_answer,  # >50 chars, will skip regex
+            template_metadata={"output_regex": r"\\boxed\{(.*?)\}"},  # Should be ignored
+        )
+
+        res = await rs.verify(req)
+        assert res.reward == approx(1.0)
+        assert len(res.judge_evaluations) == 1
+        # Verify only one judge call (no second pass due to length threshold)
+        assert server_mock.post.call_count == 1

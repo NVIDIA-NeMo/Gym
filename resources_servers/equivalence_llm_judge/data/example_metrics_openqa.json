@@ -1,0 +1,49 @@
+{
+    "name": "example_openqa",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/equivalence_llm_judge/data/example_openqa.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": null,
+    "license": "TBD",
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 41.2,
+        "Min": 32.0,
+        "Max": 53.0,
+        "Median": 40.0,
+        "Standard deviation": 7.73
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "expected_answer": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "uuid": {
+        "unique_count": 5,
+        "total_count": 5
+    }
+}
