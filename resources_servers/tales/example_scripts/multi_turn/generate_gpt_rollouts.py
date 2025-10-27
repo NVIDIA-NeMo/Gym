@@ -87,8 +87,8 @@ async def run_multi_turn_loop(frameworks, task_no: int, split: str, max_steps: i
             else:
                 reward_history.append(0)
 
-            message_history.append({"role": "developer", "content": action})
-            message_history_full_response.append({"role": "developer", "content": json.dumps(response)})
+            message_history.append({"role": "assistant", "content": action})
+            message_history_full_response.append({"role": "assistant", "content": json.dumps(response)})
 
             message_history.append({"role": "user", "content": observation})
             message_history_full_response.append({"role": "user", "content": observation})
@@ -96,27 +96,13 @@ async def run_multi_turn_loop(frameworks, task_no: int, split: str, max_steps: i
             if done:
                 break
 
-        corrected_message_history = [message_history[0]]
-        for turn in message_history[1:]:
-            if turn["role"] == "developer":
-                corrected_message_history.append({"role": "assistant", "content": turn["content"]})
-            else:
-                corrected_message_history.append(turn)
-
-        corrected_message_history_full_response = [message_history_full_response[0]]
-        for turn in message_history_full_response[1:]:
-            if turn["role"] == "developer":
-                corrected_message_history_full_response.append({"role": "assistant", "content": turn["content"]})
-            else:
-                corrected_message_history_full_response.append(turn)
-
         # Add the score to the conversation turns of the llm:
-        for i, message in enumerate(corrected_message_history[1:]):
+        for i, message in enumerate(message_history[1:]):
             if message["role"] == "assistant":
                 reward_at_turn = reward_history[i // 2]
                 message["reward"] = reward_at_turn
 
-        for i, message in enumerate(corrected_message_history_full_response[1:]):
+        for i, message in enumerate(message_history_full_response[1:]):
             if message["role"] == "assistant":
                 reward_at_turn = reward_history[i // 2]
                 message["reward"] = reward_at_turn
@@ -129,7 +115,7 @@ async def run_multi_turn_loop(frameworks, task_no: int, split: str, max_steps: i
 
         # 'cleaned up' message history:
         with open(output_file + framework + "_clean.jsonl", "w") as f:
-            for message in corrected_message_history:
+            for message in message_history:
                 f.write(json.dumps(message) + "\n")
 
         # # Full response message history:
