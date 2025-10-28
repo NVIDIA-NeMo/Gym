@@ -130,29 +130,6 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
 
         return server_client
 
-    async def run_examples(
-        self, examples: List[Dict], head_server_config: Optional[BaseServerConfig] = None
-    ) -> List[Dict]:
-        server_client = self.setup_server_client(head_server_config)
-
-        async def _post_subroutine(row: Dict) -> Dict:
-            res = await server_client.post(server_name=row.pop("agent_ref")["name"], url_path="/run", json=row)
-            await raise_for_status(res)
-            return await res.json()
-
-        return await tqdm.gather(*map(_post_subroutine, examples), desc="Collecting rollouts", miniters=10)
-
-    def setup_server_client(self, head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:
-        server_client = ServerClient.load_from_global_config(head_server_config)
-
-        # We set this rollout global aiohttp client to use the same max connections as the underlying head server global config.
-        if not is_global_aiohttp_client_setup():
-            set_global_aiohttp_client(
-                cfg=GlobalAIOHTTPAsyncClientConfig.model_validate(server_client.global_config_dict)
-            )
-
-        return server_client
-
 
 def collect_rollouts():  # pragma: no cover
     config = RolloutCollectionConfig.model_validate(get_global_config_dict())
