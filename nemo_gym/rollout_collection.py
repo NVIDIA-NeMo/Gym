@@ -92,7 +92,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
         if config.responses_create_params:
             print(f"Overriding responses_create_params fields with {config.responses_create_params}")
 
-        cache_key_set = {}
+        cache_key_set = set()
 
         if config.enable_cache:
             print("Reading cached rollouts...", flush=True)
@@ -101,8 +101,9 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
                     for line in f:
                         item = json.loads(line)
                         assert "_rollout_cache_key" in item
-                        row_idx = item["_rollout_cache_key"]["row_idx"]
-                        rep_idx = item["_rollout_cache_key"]["rep_idx"]
+                        item_cache_key = item["_rollout_cache_key"]
+                        row_idx = item_cache_key["row_idx"]
+                        rep_idx = item_cache_key["rep_idx"]
                         cache_key_set.add((row_idx, rep_idx))
             except OSError:
                 pass
