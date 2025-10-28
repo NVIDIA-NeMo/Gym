@@ -36,12 +36,14 @@ CONFIG_PATHS_KEY_NAME = "config_paths"
 ENTRYPOINT_KEY_NAME = "entrypoint"
 DEFAULT_HOST_KEY_NAME = "default_host"
 HEAD_SERVER_KEY_NAME = "head_server"
+DISALLOWED_PORTS_KEY_NAME = "disallowed_ports"
 HEAD_SERVER_DEPS_KEY_NAME = "head_server_deps"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
     DEFAULT_HOST_KEY_NAME,
     HEAD_SERVER_KEY_NAME,
+    DISALLOWED_PORTS_KEY_NAME,
     HEAD_SERVER_DEPS_KEY_NAME,
 ]
 
@@ -124,9 +126,15 @@ class GlobalConfigDictParser(BaseModel):
         return server_instance_configs
 
     def validate_and_populate_defaults(
-        self, server_instance_configs: List[ServerInstanceConfig], default_host: str
-    ) -> None:
+        self,
+        server_instance_configs: List[ServerInstanceConfig],
+        default_host: str,
+        initial_disallowed_ports: Optional[List[int]] = None,
+    ) -> List[int]:
         server_refs = [c.get_server_ref() for c in server_instance_configs]
+
+        disallowed_ports = initial_disallowed_ports.copy() if initial_disallowed_ports is not None else []
+
         for server_instance_config in server_instance_configs:
             run_server_config_dict = server_instance_config.get_inner_run_server_config_dict()
 
@@ -145,7 +153,16 @@ class GlobalConfigDictParser(BaseModel):
                 if not run_server_config_dict.get("host"):
                     run_server_config_dict["host"] = default_host
                 if not run_server_config_dict.get("port"):
-                    run_server_config_dict["port"] = find_open_port()
+                    port = find_open_port(
+                        disallowed_ports=disallowed_ports,
+                    )
+                    run_server_config_dict["port"] = port
+                    disallowed_ports.append(port)  # Disallow newly allocated port.
+                else:
+                    # Port already exists, add it to the disallowed list.
+                    disallowed_ports.append(run_server_config_dict["port"])
+
+        return disallowed_ports
 
     def parse(self, parse_config: Optional[GlobalConfigDictParserConfig] = None) -> DictConfig:
         if parse_config is None:
@@ -189,7 +206,13 @@ class GlobalConfigDictParser(BaseModel):
         # Do one pass through all the configs validate and populate various configs for our servers.
         default_host = global_config_dict.get(DEFAULT_HOST_KEY_NAME) or "127.0.0.1"
 
-        self.validate_and_populate_defaults(server_instance_configs, default_host)
+        head_server_config = global_config_dict.get(HEAD_SERVER_KEY_NAME, {})
+        head_server_port = head_server_config.get("port", DEFAULT_HEAD_SERVER_PORT)
+
+        initial_disallowed_ports = [head_server_port] if head_server_port is not None else []
+        disallowed_ports = self.validate_and_populate_defaults(
+            server_instance_configs, default_host, initial_disallowed_ports
+        )
 
         # Populate head server defaults
         if not global_config_dict.get(HEAD_SERVER_KEY_NAME):
@@ -198,6 +221,10 @@ class GlobalConfigDictParser(BaseModel):
                     "host": default_host,
                     "port": DEFAULT_HEAD_SERVER_PORT,
                 }
+
+        # Store final list of disallowed ports.
+        with open_dict(global_config_dict):
+            global_config_dict[DISALLOWED_PORTS_KEY_NAME] = disallowed_ports
 
         return global_config_dict
 
@@ -288,7 +315,23 @@ def get_first_server_config_dict(global_config_dict: DictConfig, top_level_path:
     return server_config_dict
 
 
-def find_open_port() -> int:  # pragma: no cover
-    with socket() as s:
-        s.bind(("", 0))  # Bind to a free port provided by the host.
-        return s.getsockname()[1]  # Return the port number assigned.
+def find_open_port(
+    disallowed_ports: Optional[List[int]] = None,
+    max_retries: int = 50,
+) -> int:  # pragma: no cover
+    if disallowed_ports is None:
+        disallowed_ports = []
+
+    # Find an open port that doesn't conflict with disallowed ports.
+    for _ in range(max_retries):
+        with socket() as s:
+            s.bind(("", 0))  # Bind to a free port provided by the host.
+            port = s.getsockname()[1]
+
+            if port not in disallowed_ports:
+                return port
+
+    raise RuntimeError(
+        f"Unable to find an open port that doesn't conflict with disallowed ports "
+        f"{disallowed_ports} after {max_retries} attempts"
+    )
