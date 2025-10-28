@@ -70,8 +70,16 @@ def _capture_head_server_dependencies(global_config_dict: DictConfig) -> None:  
         print(f"Warning: Could not capture head server dependencies: {e}")
         head_server_deps = None
 
+    relevant_head_server_deps_list = []
+    for dep_line in head_server_deps.splitlines():
+        if "ray" in dep_line:
+            # The ray version is very sensitive. The children ray versions must exactly match those of the parent ray.
+            relevant_head_server_deps_list.append(dep_line)
+
+    relevant_head_server_deps = "\n".join(relevant_head_server_deps_list)
+
     with open_dict(global_config_dict):
-        global_config_dict[HEAD_SERVER_DEPS_KEY_NAME] = head_server_deps
+        global_config_dict[HEAD_SERVER_DEPS_KEY_NAME] = relevant_head_server_deps
 
 
 def _setup_env_command(dir_path: Path, head_server_deps: Optional[str] = None) -> str:  # pragma: no cover

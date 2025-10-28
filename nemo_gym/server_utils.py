@@ -31,7 +31,15 @@ import ray
 import requests
 import uvicorn
 import yappi
-from aiohttp import ClientResponse, ClientSession, ClientTimeout, DummyCookieJar, ServerDisconnectedError, TCPConnector
+from aiohttp import (
+    ClientResponse,
+    ClientResponseError,
+    ClientSession,
+    ClientTimeout,
+    DummyCookieJar,
+    ServerDisconnectedError,
+    TCPConnector,
+)
 from aiohttp.client import _RequestOptions
 from fastapi import FastAPI, Request, Response
 from fastapi.exception_handlers import request_validation_exception_handler
@@ -155,7 +163,13 @@ async def raise_for_status(response: ClientResponse) -> None:  # pragma: no cove
         content = await response.content.read()
         print(f"""Request info: {response.request_info}
 Response content: {content}""")
-        response.raise_for_status()
+
+        try:
+            response.raise_for_status()
+        except ClientResponseError as e:
+            # Set the response content here so we have access to it down the line.
+            e.response_content = content
+            raise e
 
 
 DEFAULT_HEAD_SERVER_PORT = 11000
@@ -339,6 +353,7 @@ def initialize_ray() -> None:
     if not ray_head_node_address:
         with open_dict(global_config_dict):
             global_config_dict["ray_head_node_address"] = ray.get_runtime_context().gcs_address
+        print(f"Started Ray cluster at {global_config_dict['ray_head_node_address']}")
 
 
 class SimpleServer(BaseServer):
