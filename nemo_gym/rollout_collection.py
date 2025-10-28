@@ -13,7 +13,7 @@
 # limitations under the License.
 import asyncio
 import json
-from asyncio import Semaphore
+from asyncio import Lock, Semaphore
 from collections import Counter
 from contextlib import nullcontext
 from itertools import chain, repeat
@@ -89,18 +89,23 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
             print(f"Overriding responses_create_params fields with {config.responses_create_params}")
 
         metrics = Counter()
-        with open(config.output_jsonl_fpath, "a") as f:
+        write_lock = Lock()
+        write_file = open(config.output_jsonl_fpath, "a")
 
-            async def _post_coroutine(row: dict) -> None:
-                row["responses_create_params"] = row["responses_create_params"] | config.responses_create_params
-                async with semaphore:
-                    response = await server_client.post(server_name=config.agent_name, url_path="/run", json=row)
-                    response.raise_for_status()
-                    result = await response.json()
-                    f.write(json.dumps(result) + "\n")
-                    metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
+        async def _post_coroutine(row: dict) -> None:
+            row["responses_create_params"] = row["responses_create_params"] | config.responses_create_params
+            async with semaphore:
+                response = await server_client.post(server_name=config.agent_name, url_path="/run", json=row)
+                response.raise_for_status()
+                result = await response.json()
+                async with write_lock:
+                    print(json.dumps(result), file=write_file, flush=True)
+                metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
 
-            await tqdm.gather(*map(_post_coroutine, rows), desc="Collecting rollouts", miniters=tqdm_miniters)
+        await tqdm.gather(*map(_post_coroutine, rows), desc="Collecting rollouts", miniters=tqdm_miniters)
+
+        write_file.flush()
+        write_file.close()
 
         avg_metrics = {k: v / len(rows) for k, v in metrics.items()}
 

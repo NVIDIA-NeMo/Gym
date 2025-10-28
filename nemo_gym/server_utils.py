@@ -62,7 +62,7 @@ _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
 
 class GlobalAIOHTTPAsyncClientConfig(BaseModel):
     global_aiohttp_connector_limit: int = 100 * 1024
-    global_aiohttp_connector_limit_per_host: int = 2048
+    global_aiohttp_connector_limit_per_host: int = 4096
     global_aiohttp_timeout_total: Optional[float] = None
     global_aiohttp_timeout_connect: Optional[float] = None
     global_aiohttp_timeout_sock_connect: Optional[float] = None
