@@ -28,6 +28,7 @@ from responses_api_agents.mini_swe_agent.app import (
     MiniSWEAgentVerifyResponse,
 )
 
+
 class SWELocalizationAgentConfig(MiniSWEAgentConfig):
     pass
 

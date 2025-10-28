@@ -16,9 +16,10 @@ import json
 from asyncio import Semaphore
 from os import environ, getenv, makedirs
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Callable, Literal, Optional
 from uuid import uuid4
 
+import ray
 import yaml
 from fastapi import Body, FastAPI
 from minisweagent.config import builtin_config_dir, get_config_path
@@ -72,6 +73,10 @@ class MiniSWEAgentVerifyRequest(BaseVerifyRequest):
 class MiniSWEAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
+
+@ray.remote(scheduling_strategy="SPREAD")
+def runner_ray_remote(runner: Callable, params: dict[str, Any]) -> Any:
+    return runner(**params)
 
 class MiniSWEAgent(SimpleResponsesAPIAgent):
     config: MiniSWEAgentConfig
@@ -214,7 +219,8 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                     step_limit=step_limit,
                     collapse_limit=collapse_limit,
                 )
-                result = await asyncio.to_thread(runner, **params)
+                future = runner_ray_remote.remote(runner, params)
+                result = await asyncio.to_thread(ray.get, future)
                 result = result[instance_id]
                 messages = result["messages"]
                 responses = result["responses"]
