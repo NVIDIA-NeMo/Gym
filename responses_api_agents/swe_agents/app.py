@@ -75,7 +75,14 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         default=None, description="Path to JSON file containing tool definitions in OpenAI format (for SWE-agent)"
     )
     agent_max_turns: int = Field(default=100, description="Maximum iterations for the agent")
+    agent_framework_repo: Optional[str] = Field(
+        default=None,
+        description="URL of the SWE-agent/OpenHands repo to pass to git clone. If None, will use the official repo",
+    )
 
+    agent_framework_commit: str = Field(
+        default="HEAD", description="Which commit to use when cloning the SWE-agent/OpenHands repo"
+    )
     # Container configuration
     container_formatter: str = Field(
         default="docker://swebench/sweb.eval.x86_64.{instance_id}", description="Container path template"
@@ -158,6 +165,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 self.config.agent_max_turns,
                 self.config.swebench_tests_timeout,
                 self.config.nemo_skills_config,
+                self.config.agent_framework_repo,
+                self.config.agent_framework_commit,
             )
 
             # Extract trajectory and convert to proper NeMoGym format

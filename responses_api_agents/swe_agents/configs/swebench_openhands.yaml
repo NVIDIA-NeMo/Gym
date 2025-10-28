@@ -8,6 +8,8 @@ swe_agents:
       agent_framework: openhands
       agent_config: eval/swe-bench/openhands/default
       agent_max_turns: 100
+      agent_framework_repo: https://github.com/All-Hands-AI/OpenHands.git
+      agent_framework_commit: 9ee704a25a331d0d2eb9a8e87a4dcff1d948855b
       
       # Container configuration
       container_formatter: "docker://swebench/sweb.eval.x86_64.{instance_id}"
@@ -36,7 +38,7 @@ swe_agents:
             dataset_name: swegym_for_sweagent_and_openhands
             version: 0.0.1
             artifact_fpath: swegym_for_sweagent_and_openhands.jsonl
-          license: MIT
+          license: Apache 2.0
         
         # Validation dataset  
         - name: validation
