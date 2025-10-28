@@ -26,7 +26,9 @@ from pydantic import (
 )
 from rich.text import Text
 
-from nemo_gym.global_config import ENTRYPOINT_KEY_NAME
+
+# FIXME: circular import error
+# from nemo_gym.global_config import ENTRYPOINT_KEY_NAME
 
 
 ########################################
@@ -310,7 +312,6 @@ ServerInstanceConfig = Union[
 ServerInstanceConfigTypeAdapter = TypeAdapter(ServerInstanceConfig)
 
 
-# def maybe_get_server_instance_config(name: str, server_type_config_dict: Any) -> Optional[ServerInstanceConfig]:
 def maybe_get_server_instance_config(
     name: str, server_type_config_dict: Any, capture_errors: bool = False
 ) -> Union[Optional[ServerInstanceConfig], Tuple[Optional[ServerInstanceConfig], Optional[ValidationError]]]:
@@ -350,7 +351,9 @@ def is_almost_server(server_type_config_dict: Any) -> bool:
             inner_dict = server_type_config_dict[server_type_key]
             if isinstance(inner_dict, DictConfig):
                 for config in inner_dict.values():
-                    if isinstance(config, DictConfig) and ENTRYPOINT_KEY_NAME in config:
+                    # FIXME:
+                    # if isinstance(config, DictConfig) and ENTRYPOINT_KEY_NAME in config:
+                    if isinstance(config, DictConfig) and "entrypoint" in config:
                         return True
 
     return False

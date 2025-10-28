@@ -17,6 +17,7 @@ from socket import socket
 from typing import ClassVar, List, Optional, Tuple, Type
 
 import hydra
+import rich
 from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
@@ -61,6 +62,8 @@ class GlobalConfigDictParserConfig(BaseModel):
     initial_global_config_dict: Optional[DictConfig] = None
     skip_load_from_cli: bool = False
     skip_load_from_dotenv: bool = False
+    # FIXME:
+    error_on_almost_servers: bool = True
 
     NO_MODEL_GLOBAL_CONFIG_DICT: ClassVar[DictConfig] = DictConfig(
         {
@@ -201,6 +204,24 @@ class GlobalConfigDictParser(BaseModel):
             with open_dict(global_config_dict):
                 global_config_dict[CONFIG_PATHS_KEY_NAME] = config_paths
 
+        # Almost-server detection and reporting
+        almost_servers = self.detect_and_report_almost_servers(global_config_dict)
+
+        if almost_servers:
+            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]")
+            rich.print("[yellow]Configuration Warnings: Almost-Servers Detected[/yellow]")
+            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]")
+
+            for server_name, error in almost_servers:
+                rich.print(format_almost_server_warning(server_name, error))
+
+            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]\n")
+
+            if parse_config.error_on_almost_servers:
+                error_msg = f"Found {len(almost_servers)} almost-server(s) with validation errors. "
+                error_msg += "Fix the issues above or set error_on_almost_servers=false to continue."
+                raise ValueError(error_msg)
+
         server_instance_configs = self.filter_for_server_instance_configs(global_config_dict)
 
         # Do one pass through all the configs validate and populate various configs for our servers.
@@ -244,7 +265,6 @@ class GlobalConfigDictParser(BaseModel):
     def detect_and_report_almost_servers(
         self,
         global_config_dict: DictConfig,
-        error_on_almost_servers: bool = False,
     ) -> List[Tuple[str, ValidationError]]:
         non_reserved_items = [
             (key, v) for key, v in global_config_dict.items() if key not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
@@ -335,3 +355,22 @@ def find_open_port(
         f"Unable to find an open port that doesn't conflict with disallowed ports "
         f"{disallowed_ports} after {max_retries} attempts"
     )
+
+
+def format_almost_server_warning(server_name: str, error: ValidationError) -> str:
+    error_details = []
+    for err in error.errors():
+        loc = " -> ".join(str(item) for item in err["loc"])
+        msg = err["msg"]
+        error_details.append(f" - {loc}: {msg}")
+
+    error_str = "\n".join(error_details)
+
+    return f"""
+    Almost-Server Detected: '{server_name}'
+    This server configuration failed validation:
+
+{error_str}
+
+    This server will NOT be started.
+    """
