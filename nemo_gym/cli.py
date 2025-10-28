@@ -20,6 +20,7 @@ from glob import glob
 from os import environ, makedirs
 from os.path import exists
 from pathlib import Path
+from platform import python_version
 from subprocess import Popen
 from threading import Thread
 from time import sleep
@@ -87,8 +88,9 @@ def _setup_env_command(dir_path: Path, head_server_deps: Optional[str] = None) -
     if head_server_deps:
         install_cmd += f" --constraint <(cat << 'EOF'\n{head_server_deps}\nEOF\n)"
 
+    head_server_python_version = python_version()
     return f"""cd {dir_path} \\
-    && uv venv --allow-existing \\
+    && uv venv --allow-existing --python {head_server_python_version} \\
     && source .venv/bin/activate \\
     && {install_cmd} \\
    """
