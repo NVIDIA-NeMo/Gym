@@ -18,11 +18,12 @@ from typing import ClassVar, List, Optional, Tuple, Type
 
 import hydra
 from omegaconf import DictConfig, OmegaConf, open_dict
-from pydantic import BaseModel, ConfigDict, TypeAdapter
+from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.config_types import (
     ServerInstanceConfig,
+    is_almost_server,
     is_server_ref,
     maybe_get_server_instance_config,
 )
@@ -212,6 +213,30 @@ class GlobalConfigDictParser(BaseModel):
                 skip_load_from_dotenv=True,
             )
         )
+
+    def detect_and_report_almost_servers(
+        self,
+        global_config_dict: DictConfig,
+        error_on_almost_servers: bool = False,
+    ) -> List[Tuple[str, ValidationError]]:
+        non_reserved_items = [
+            (key, v) for key, v in global_config_dict.items() if key not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
+        ]
+
+        almost_servers = []
+
+        # Try to get config with error capture.
+        for server_name, server_type_config_dict in non_reserved_items:
+            result, error = maybe_get_server_instance_config(
+                name=server_name, server_type_config_dict=server_type_config_dict, capture_errors=True
+            )
+
+            # Failed validation but looks like a server = almost-server
+            if result is None and error is not None:
+                if is_almost_server(server_type_config_dict):
+                    almost_servers.append((server_name, error))
+
+        return almost_servers
 
 
 def get_global_config_dict(
