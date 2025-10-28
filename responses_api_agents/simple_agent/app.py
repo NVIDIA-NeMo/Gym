@@ -71,6 +71,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
+        body.max_output_tokens = 32768
+
         new_outputs = []
         step = 0
         model_server_cookies = None  # update the cookies on every model response
