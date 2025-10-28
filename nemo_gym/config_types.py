@@ -27,10 +27,6 @@ from pydantic import (
 from rich.text import Text
 
 
-# FIXME: circular import error
-# from nemo_gym.global_config import ENTRYPOINT_KEY_NAME
-
-
 ########################################
 # Base CLI configs
 ########################################
@@ -335,6 +331,8 @@ def maybe_get_server_instance_config(
 
 def is_almost_server(server_type_config_dict: Any) -> bool:
     """Detects if a config looks like a server but might fail validation."""
+    from nemo_gym.global_config import ENTRYPOINT_KEY_NAME
+
     if not isinstance(server_type_config_dict, DictConfig):
         return False
 
@@ -351,9 +349,7 @@ def is_almost_server(server_type_config_dict: Any) -> bool:
             inner_dict = server_type_config_dict[server_type_key]
             if isinstance(inner_dict, DictConfig):
                 for config in inner_dict.values():
-                    # FIXME:
-                    # if isinstance(config, DictConfig) and ENTRYPOINT_KEY_NAME in config:
-                    if isinstance(config, DictConfig) and "entrypoint" in config:
+                    if isinstance(config, DictConfig) and ENTRYPOINT_KEY_NAME in config:
                         return True
 
     return False

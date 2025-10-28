@@ -62,8 +62,6 @@ class GlobalConfigDictParserConfig(BaseModel):
     initial_global_config_dict: Optional[DictConfig] = None
     skip_load_from_cli: bool = False
     skip_load_from_dotenv: bool = False
-    # FIXME:
-    error_on_almost_servers: bool = True
 
     NO_MODEL_GLOBAL_CONFIG_DICT: ClassVar[DictConfig] = DictConfig(
         {
@@ -217,7 +215,8 @@ class GlobalConfigDictParser(BaseModel):
 
             rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]\n")
 
-            if parse_config.error_on_almost_servers:
+            error_on_almost_servers = global_config_dict.get("error_on_almost_servers", False)
+            if error_on_almost_servers:
                 error_msg = f"Found {len(almost_servers)} almost-server(s) with validation errors. "
                 error_msg += "Fix the issues above or set error_on_almost_servers=false to continue."
                 raise ValueError(error_msg)
