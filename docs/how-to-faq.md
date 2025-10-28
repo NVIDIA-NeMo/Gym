@@ -470,43 +470,105 @@ It's an analogous story for Responses-compatible APIs.
 # How To: Detailed anatony of a Gym config
 Let's break down the anatomy of a Gym config further and help clarify some things.
 
-TODO: bxyu-nvidia
-
 ```yaml
+# ============================================================================
+# RESOURCES SERVER DEFINITION
+# ============================================================================
+
 # `library_judge_math` here at the top most level is the unique name of your resources server. This must be unique across your config.
 # When you or other servers call this server, they will do so using the ServerClient and its name.
 library_judge_math:
-  # `resources_servers` here at the second level is the server type. There are 3 server types in gym: agent, model, or resources.
+  # `resources_servers` here at the second level is the server type. There are 3 server types in NeMo Gym:
+  #   - responses_api_agents
+  #   - responses_api_models
+  #   - responses_servers
   resources_servers:
     # This is the resources server type. This is not unique at runtime, and you can spin up multiple instances of this with different configs if you wish!
     library_judge_math:
+      # `entrypoint` specifies the file that contains your resource server implementation.
+      # It is relative to the implementation directory (resources_servers/library_judge_math/).
       entrypoint: app.py
+      # This is a server reference object that points to your model server.
+      # By default this would be called 'model_server', but it essentially must match your Resource Server Config in `app.py`.
       judge_model_server:
+        # `type` specifies what kind of server this points to.
+        # Must be one of: responses_api_agents, responses_api_models, or resources_servers.
         type: responses_api_models
+        # `name` is the exact server instance name (from level 1 above).
+        # The ??? is Hydra syntax for a required but missing field that must be provided at runtime.
+        # NeMo Gym will validate that a server with this name and type exists in your config.
         name: ???
+      # `domain` is required for categorizing the server for organization and documentation.
+      # Valid values: (see Domain class in nemo_gym.config_types).
+      domain: math
+      # Below are some custom parameters for this implementation.
       judge_responses_create_params: {
         input: []
       }
       should_use_judge: false
+
+# ============================================================================
+# AGENT SERVER DEFINITION
+# ============================================================================
+
+# `library_judge_math_simple_agent` is the Level 1 unique name for this agent instance.
 library_judge_math_simple_agent:
+  # `responses_api_agents` indicates this is an agent server that orchestrates models and resources.
   responses_api_agents:
+    # The name of the agent. This maps to the folder `responses_api_agents/simple_agent/`.
     simple_agent:
+      # `entrypoint` for the agent implementation.
       entrypoint: app.py
+
+      # Links the agent to a specific resource server instance.
       resources_server:
+        # `type` must be resources_servers.
         type: resources_servers
+        # `name` here must match the Level 1 name of resources_servers defined in this config.
         name: library_judge_math
+
+      # Links the agent to a specific model server instance.
       model_server:
+        # `type` must be responses_api_models.
         type: responses_api_models
+        # `name` points to the model server to use.
+        # `policy_model` is a special predefined placeholder referring to the policy model being trained.
+        # This is the default model for NeMo Gym agents.
         name: policy_model
+
+      # `datasets` is a required list parameter for agents that will be used in training.
+      # This defines all datasets (train, validation, example) associated with this agent.
       datasets:
+      # First dataset: training data.
+        # `name` can be any string.
       - name: train
+        # `type` is required and specifies the dataset's purpose.
+        # Valid values:
+        #   - train: Used for training.
+        #   - validation: Used for validation during training.
+        #   - example: Required for PRs for sanity checks.
         type: train
+        # `jsonl_fpath` is required and specifies the local file path to the JSONL dataset.
         jsonl_fpath: resources_servers/library_judge_math/data/dapo17k_bytedtsinghua_train.jsonl
+        # `gitlab_identifier` is required for train and validation datasets.
+        # It specifies the remote dataset location in Gitlab model artifact registry.
+        # Used by ng_download_dataset_from_gitlab to fetch remote data.
         gitlab_identifier:
+          # `dataset_name` is the name of the dataset in Gitlab model registry.
           dataset_name: bytedtsinghua_dapo17k
+          # `version` is the version string in x.x.x format.
+          # This was set when you uploaded the dataset.
           version: 0.0.1
+          # `artifact_fpath` is the path to the specific file within the dataset artifact.
           artifact_fpath: dapo17k_bytedtsinghua_train.jsonl
+
+        # `license` is required for train and validation datasets.
+        # Must accurately represent the data's licensing.
+        # Valid values: (see `license` property in the `DatasetConfig` class in nemo_gym.config_types).
         license: Apache 2.0
+
+      # Second dataset: validation data.
+      # Same structure as train dataset above.
       - name: validation
         type: validation
         jsonl_fpath: resources_servers/library_judge_math/data/aime24_bytedtsinghua_validation.jsonl
@@ -515,6 +577,90 @@ library_judge_math_simple_agent:
           version: 0.0.1
           artifact_fpath: aime24_bytedtsinghua_validation.jsonl
         license: Apache 2.0
+
+      # Third dataset: example data.
+        # `name` can be any string.
+      - name: example
+        # `type` must be example.
+        type: example
+        # `jsonl_fpath` - same as above.
+        # Note: This file must be committed to git.
+        jsonl_fpath: resources_servers/library_judge_math/data/example.jsonl
+
+# ============================================================================
+# MODEL SERVER DEFINITION
+# ============================================================================
+
+# `policy_model` is a special Level 1 name that refers to the policy model being trained.
+# This is the default model for NeMo Gym agents during training.
+# You can also define custom model server instances with unique names (e.g., `judge_model`, `teacher_model`).
+policy_model:
+  # `responses_api_models` indicates this is a model server
+  responses_api_models:
+    # The model server type. Common types include:
+    #   - openai_model: For OpenAI-compatible endpoints.
+    #   - azure_openai_model: For Azure OpenAI endpoints.
+    #   - vllm_model: For vLLM-hosted models.
+    # This maps to the folder `responses_api_models/<model-type>/`
+    openai_model:
+      # `entrypoint` specifies the file that contains your model server implementation.
+      # It is relative to the implementation directory (`responses_api_models/openai_model`).
+      entrypoint: app.py
+
+      # === COMMON PARAMETERS (all model types) ===
+
+      # API endpoint URL. Parameter name varies by model type:
+      #   - openai_model: `openai_base_url`
+      #   - azure_openai_model: `openai_base_url`
+      #   - vllm_model: `base_url`
+      # Examples:
+      #   - "https://api.openai.com/v1" (OpenAI)
+      #   - "http://localhost:8000/v1" (self-hosted vLLM)
+      #   - ["http://gpu-1:8000/v1", "http://gpu-2:8000/v1"] (vLLM only: list for load balancing)
+      openai_base_url: ${policy_base_url}
+
+      # API authentication key. Parameter name varies:
+      #   - openai_model: `openai_api_key`
+      #   - azure_openai_model: `openai_api_key`
+      #   - vllm_model: `api_key`
+      # Should be provided via Hydra variable for security (See Best Practices - Keep Secrets in env.yaml from docs/tutorials/09-configuration-guide.md).
+      openai_api_key: ${policy_api_key}
+
+      # Model identifier. Parameter name varies:
+      #   - openai_model: `openai_model`
+      #   - azure_openai_model: `openai_model`
+      #   - vllm_model: `model`
+      # Examples:
+      #   - "gpt-4o-2024-11-20" (OpenAI)
+      #   - "my-gpt4-deployment" (Azure OpenAI deployment name)
+      #   - "meta-llama/Llama-3.1-8B-Instruct" (vLLM)
+      openai_model: ${policy_model_name}
+
+      # === AZURE OPENAI SPECIFIC PARAMETERS ===
+      # Only used by `azure_openai_model` type.
+
+      # `default_query` contains Azure-specific query parameters.
+      # Required for Azure OpenAI to specify the API version.
+      default_query:
+        # Azure API version string. Updates frequently with new features.
+        # Check Azure OpenAI documentation for current supported versions.
+        api-version: "2024-10-21"
+
+      # `num_concurrent_requests` limits parallel requests to Azure OpenAI.
+      num_concurrent_requests: 8
+
+      # === VLLM SPECIFIC PARAMETERS ===
+      # Only used by `vllm_model` type.
+
+      # `return_token_id_information` controls whether to return token IDs and log probs.
+      # Required for training to calculate token-level rewards.
+      # Set to true for training, false for inference-only scenarios.
+      return_token_id_information: false
+
+      # `uses_reasoning_parser` controls extraction of reasoning traces from model output.
+      # Set to true for models that generate reasoning in <think> tags.
+      # Set to false for standard chat models without explicit reasoning tokens.
+      uses_reasoning_parser: true
 ```
 
 
