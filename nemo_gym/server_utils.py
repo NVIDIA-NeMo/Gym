@@ -62,7 +62,12 @@ _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
 
 class GlobalAIOHTTPAsyncClientConfig(BaseModel):
     global_aiohttp_connector_limit: int = 100 * 1024
-    global_aiohttp_connector_limit_per_host: int = 1024
+    global_aiohttp_connector_limit_per_host: int = 2048
+    global_aiohttp_timeout_total: Optional[float] = None
+    global_aiohttp_timeout_connect: Optional[float] = None
+    global_aiohttp_timeout_sock_connect: Optional[float] = None
+    global_aiohttp_timeout_sock_read: Optional[float] = None
+    global_aiohttp_max_num_tries: int = 3
 
 
 def get_global_aiohttp_client(
@@ -93,9 +98,16 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
             limit=cfg.global_aiohttp_connector_limit,
             limit_per_host=cfg.global_aiohttp_connector_limit_per_host,
         ),
-        timeout=ClientTimeout(),
+        timeout=ClientTimeout(
+            total=cfg.global_aiohttp_timeout_total,
+            connect=cfg.global_aiohttp_timeout_connect,
+            sock_connect=cfg.global_aiohttp_timeout_sock_connect,
+            sock_read=cfg.global_aiohttp_timeout_sock_read,
+        ),
         cookie_jar=DummyCookieJar(),
     )
+
+    client_session._x_nemo_gym_max_num_tries = cfg.global_aiohttp_max_num_tries
 
     global _GLOBAL_AIOHTTP_CLIENT
     _GLOBAL_AIOHTTP_CLIENT = client_session
@@ -142,7 +154,8 @@ async def request(
 Sleeping 0.5s and retrying...
 """
                 )
-                if num_tries >= MAX_NUM_TRIES:
+                # if num_tries >= MAX_NUM_TRIES:
+                if num_tries >= client._x_nemo_gym_max_num_tries:
                     raise e
 
                 num_tries += 1
