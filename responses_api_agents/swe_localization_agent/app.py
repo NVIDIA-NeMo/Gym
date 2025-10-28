@@ -11,213 +11,87 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import asyncio
 import json
-from asyncio import Semaphore
-from os import environ, getenv, makedirs
 from pathlib import Path
-from typing import Any, Literal, Optional
-from uuid import uuid4
+from typing import Any, Optional
 
-import yaml
-from fastapi import Body, FastAPI
-from minisweagent.config import builtin_config_dir, get_config_path
+from minisweagent.config import builtin_config_dir
 from minisweagent.run.extra.localization import LocalizationRunner
 from minisweagent.run.extra.runner_config import RunnerConfig
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import (
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
+from responses_api_agents.mini_swe_agent.app import (
+    MiniSWEAgent,
+    MiniSWEAgentConfig,
+    MiniSWEAgentRunRequest,
+    MiniSWEAgentVerifyRequest,
+    MiniSWEAgentVerifyResponse,
 )
-from nemo_gym.base_responses_api_agent import (
-    BaseResponsesAPIAgentConfig,
-    SimpleResponsesAPIAgent,
-)
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
-from nemo_gym.server_utils import (
-    ServerClient,
-    get_first_server_config_dict,
-)
-from responses_api_agents.swe_localization_agent.utils import SWELocalizationAgentUtils
+
+class SWELocalizationAgentConfig(MiniSWEAgentConfig):
+    pass
 
 
-class SWELocalizationAgentConfig(BaseResponsesAPIAgentConfig):
-    model_server: ModelServerRef
-    resources_server: ResourcesServerRef
-    env: Literal["docker", "singularity"]
-    concurrency: int
-    cache_dir_template: Optional[str] = None
-    step_timeout: int = 600
-    eval_timeout: int = 1800
-    skip_if_exists: bool = False
-    step_limit: int = 250,
-    collapse_limit: int = 3
-
-
-class SWELocalizationAgentRunRequest(BaseRunRequest):
+class SWELocalizationAgentRunRequest(MiniSWEAgentRunRequest):
     model_config = ConfigDict(extra="allow")
 
 
-class SWELocalizationAgentVerifyRequest(BaseVerifyRequest):
+class SWELocalizationAgentVerifyRequest(MiniSWEAgentVerifyRequest):
     model_config = ConfigDict(extra="allow")
 
 
-class SWELocalizationAgentVerifyResponse(BaseVerifyResponse):
+class SWELocalizationAgentVerifyResponse(MiniSWEAgentVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
 
-class SWELocalizationAgent(SimpleResponsesAPIAgent):
+class SWELocalizationAgent(MiniSWEAgent):
     config: SWELocalizationAgentConfig
-    sem: Semaphore = None
-    model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    def model_post_init(self, __context: Any) -> None:
-        self.sem = Semaphore(self.config.concurrency)
+    def get_config_path(self) -> Path:
+        return builtin_config_dir / "extra" / "localization.yaml"
 
-    def setup_webserver(self) -> FastAPI:
-        app = FastAPI()
-        app.post("/v1/responses")(self.responses)
-        app.post("/run")(self.run)
-        return app
+    def get_runner_and_params(
+        self,
+        subset: str,
+        split: str,
+        workers: int,
+        output_file_dir: str,
+        model_name: str,
+        dummy_key: str,
+        base_url: str,
+        cache_dir_template: Optional[str],
+        env: str,
+        instance_id: str,
+        body: MiniSWEAgentRunRequest,
+        responses_create_params_dict: dict[str, Any],
+        step_timeout: int,
+        eval_timeout: int,
+        step_limit: int,
+        collapse_limit: int,
+    ) -> tuple[Any, dict[str, Any]]:
+        cfg = RunnerConfig(
+            subset=subset,
+            split=split,
+            workers=workers,
+            output=output_file_dir,
+            model=model_name,
+            api_key=dummy_key,
+            base_url=base_url,
+            cache_dir_template=cache_dir_template,
+            env=env,
+            instance_id=instance_id,
+            instance_dict=body.model_dump_json(),
+            responses_create_params=json.dumps(responses_create_params_dict),
+            step_timeout=step_timeout,
+            eval_timeout=eval_timeout,
+            step_limit=step_limit,
+            collapse_limit=collapse_limit,
+            config=self.get_config_path(),
+        )
+        return LocalizationRunner().run, {"cfg": cfg}
 
-    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
-        raise NotImplementedError
-
-    async def run(self, body: SWELocalizationAgentRunRequest) -> SWELocalizationAgentVerifyResponse:
-        async with self.sem:
-            model_server_name = self.config.model_server.name
-            global_config_dict = ServerClient.load_from_global_config().global_config_dict
-
-            model_server_config = get_first_server_config_dict(
-                global_config_dict,
-                model_server_name,
-            )
-
-            policy_model_name = global_config_dict["policy_model_name"]
-
-            ##### MINI-SWE-AGENT CONFIG #####
-            subset = body.subset
-            split = body.split
-            workers = 1
-            cache_dir_template = self.config.cache_dir_template
-            base_url = f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
-            dummy_key = "dummy_key"
-            model_name = f"hosted_vllm/{policy_model_name}"
-            step_timeout = self.config.step_timeout
-            eval_timeout = self.config.eval_timeout
-            env = self.config.env
-            step_limit = self.config.step_limit
-            collapse_limit = self.config.collapse_limit
-
-            instance_id = body.instance_id
-
-            mini_swe_config_path = builtin_config_dir / "extra" / "localization.yaml"
-            config = yaml.safe_load(get_config_path(mini_swe_config_path).read_text())
-
-            default_model_kwargs = config["model"]["model_kwargs"]
-            temperature = body.responses_create_params.temperature or default_model_kwargs["temperature"]
-            top_p = body.responses_create_params.top_p or default_model_kwargs["top_p"]
-
-            output_file_dir = f"{Path.cwd()}/results/{subset}/{policy_model_name}"
-
-            if self.config.skip_if_exists:
-                if Path(f"{output_file_dir}/{instance_id}/{instance_id}.json").exists():
-                    with open(f"{output_file_dir}/{instance_id}/{instance_id}.json", "r") as f:
-                        print(f"Skipping {instance_id} because it already exists")
-                        verify_response = SWELocalizationAgentVerifyResponse.model_validate_json(f.read())
-                    return verify_response
-
-            env_vars = environ.copy()
-            if env == "singularity":
-                slurm_job_id = getenv("SLURM_JOB_ID", str(uuid4()))
-                env_vars.update(
-                    {
-                        "SINGULARITY_CACHEDIR": f"/tmp/singularity_cache_${slurm_job_id}_$$",
-                        "APPTAINER_CACHEDIR": f"/tmp/apptainer_cache_${slurm_job_id}_$$",
-                        "SINGULARITY_TMPDIR": f"/tmp/singularity_tmp_${slurm_job_id}_$$",
-                        "APPTAINER_TMPDIR": f"/tmp/apptainer_tmp_${slurm_job_id}_$$",
-                    }
-                )
-                for var in [
-                    "SINGULARITY_CACHEDIR",
-                    "APPTAINER_CACHEDIR",
-                    "SINGULARITY_TMPDIR",
-                    "APPTAINER_TMPDIR",
-                ]:
-                    makedirs(env_vars[var], exist_ok=True)
-
-            #### RUN MINI-SWE-AGENT #####
-            reseponses_create_params_dict = body.responses_create_params.model_dump()
-
-            cfg = RunnerConfig(
-                    subset=subset,
-                    split=split,
-                    workers=workers,
-                    output=output_file_dir,
-                    model=model_name,
-                    api_key=dummy_key,
-                    base_url=base_url,
-                    cache_dir_template=cache_dir_template,
-                    env=env,
-                    instance_id=instance_id,
-                    instance_dict=body.model_dump_json(),
-                    responses_create_params=json.dumps(reseponses_create_params_dict),
-                    step_timeout=step_timeout,
-                    eval_timeout=eval_timeout,
-                    step_limit=step_limit,
-                    collapse_limit=collapse_limit,
-                    config=mini_swe_config_path,
-            )
-            try:
-                result = await asyncio.to_thread(
-                    LocalizationRunner().run,
-                    cfg,
-                )
-                result = result[instance_id]
-                messages = result["messages"]
-                responses = result["responses"]
-                reward = result["eval_report"].get("eval_report", {}).get("overlap_score", 0.0)
-
-            except Exception as e:
-                print(f"Error running swegym: {e}")
-                result = None
-                messages = []
-                responses = []
-                reward = 0.0
-
-            # The first two messages are the system and user message generated by the harness
-            # TODO(sugam): what if the user only provides the system/user message
-            body.responses_create_params.input = messages[:2]
-
-            response = SWELocalizationAgentUtils.get_default_response_object()
-            response["model"] = policy_model_name
-            response["temperature"] = temperature
-            response["top_p"] = top_p
-
-            # Wrap output messages in responses format
-            response["output"] = SWELocalizationAgentUtils.chat_cmp_to_responses(messages[2:], responses)
-
-            verify_response = SWELocalizationAgentVerifyResponse(
-                responses_create_params=body.responses_create_params,
-                reward=reward,
-                response=response,
-                instance_id=instance_id,
-                metadata=result.get("eval_report", {}) if result else {},
-            )
-
-            output_path = Path(f"{output_file_dir}/{instance_id}")
-            output_path.mkdir(parents=True, exist_ok=True)
-
-            with open(f"{output_file_dir}/{instance_id}/{instance_id}.json", "w") as f:
-                json.dump(verify_response.model_dump(), f)
-
-            return verify_response
+    def calculate_reward(self, instance_id: str, result: dict[str, Any]) -> float:
+        return result["eval_report"].get("eval_report", {}).get("overlap_score", 0.0)
 
 
 if __name__ == "__main__":
