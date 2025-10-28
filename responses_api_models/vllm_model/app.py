@@ -11,11 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import re
 from time import time
 from typing import ClassVar, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
+from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request
 from pydantic import BaseModel, Field
 
@@ -32,6 +34,7 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionAssistantMessageParam,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionDeveloperMessageParam,
+    NeMoGymChatCompletionMessage,
     NeMoGymChatCompletionMessageParam,
     NeMoGymChatCompletionMessageToolCallFunctionParam,
     NeMoGymChatCompletionMessageToolCallParam,
@@ -189,7 +192,41 @@ class VLLMModel(SimpleResponsesAPIModel):
                 else:
                     raise NotImplementedError
 
-        chat_completion_dict = await client.create_chat_completion(**create_params)
+        try:
+            chat_completion_dict = await client.create_chat_completion(**create_params)
+        except ClientResponseError as e:
+            """
+            Example message for out of context length:
+            ```json
+            {"object":"error","message":"This model\'s maximum context length is 32768 tokens. However, you requested 32818 tokens in the messages, Please reduce the length of the messages. None","type":"BadRequestError","param":null,"code":400}
+            ```
+            """
+            try:
+                result = json.loads(e.response_content.decode())
+            except:
+                raise e
+
+            is_out_of_context_length = e.status == 400 and "context length" in result["message"]
+            if is_out_of_context_length:
+                return NeMoGymChatCompletion(
+                    id="chtcmpl-123",
+                    object="chat.completion",
+                    created=time(),
+                    model=self.config.model,
+                    choices=[
+                        NeMoGymChoice(
+                            index=0,
+                            finish_reason="stop",
+                            message=NeMoGymChatCompletionMessage(
+                                role="assistant",
+                                content=None,
+                                tool_calls=None,
+                            ),
+                        )
+                    ],
+                )
+            else:
+                raise e
 
         choice_dict = chat_completion_dict["choices"][0]
         if self.config.uses_reasoning_parser:
@@ -555,7 +592,9 @@ class VLLMConverter(BaseModel):
                 )
             )
 
-        if self.return_token_id_information:
+        # `"prompt_token_ids" in raw_message`: sometimes the model endpoint may go out of context length, in which case we return an empty response
+        # In these cases, there are no token id information provided.
+        if self.return_token_id_information and "prompt_token_ids" in raw_message:
             last_response_output_item = response_output[-1]
             train_cls = RESPONSES_TO_TRAIN[last_response_output_item.__class__]
             response_output[-1] = train_cls(
