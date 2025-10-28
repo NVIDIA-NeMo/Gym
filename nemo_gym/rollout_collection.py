@@ -79,6 +79,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
                     )
                 ]
                 print(f"Found {len(rows)} total rows ({config.num_repeats} repeats per original row)!")
+                print("(Repeating rows in an interleaved pattern from abc to aabbcc)")
             else:
                 rows = [(row_idx, 0, row) for row_idx, row in zip(range_iterator, map(json.loads, input_dataset))]
                 print(f"Found {len(rows)} rows!")
