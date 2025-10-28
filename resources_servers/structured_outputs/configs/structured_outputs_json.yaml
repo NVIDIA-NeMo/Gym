@@ -19,7 +19,7 @@ structured_outputs_simple_agent:
         jsonl_fpath: resources_servers/structured_outputs/data/structured_outputs_251027_nano_v3_sdg_json_train.jsonl
         gitlab_identifier:
           dataset_name: structured_outputs_251027_nano_v3_sdg_json_train
-          version: 0.0.1
+          version: 0.0.2
           artifact_fpath: structured_outputs_251027_nano_v3_sdg_json_train.jsonl
         license: Apache 2.0
       - name: validation
@@ -27,7 +27,7 @@ structured_outputs_simple_agent:
         jsonl_fpath: resources_servers/structured_outputs/data/structured_outputs_251027_nano_v3_sdg_json_val.jsonl
         gitlab_identifier:
           dataset_name: structured_outputs_251027_nano_v3_sdg_json_val
-          version: 0.0.1
+          version: 0.0.2
           artifact_fpath: structured_outputs_251027_nano_v3_sdg_json_val.jsonl
         license: Apache 2.0
       - name: example

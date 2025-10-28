@@ -150,11 +150,11 @@ def process_sample(sample):
 
         responses_create_params = {"input": messages}
         sample["responses_create_params"] = responses_create_params
-        sample["schema"] = json.dumps(schema)
+        sample["schema_str"] = json.dumps(schema)
         sample["schema_type"] = "json"
     except Exception:
         sample["responses_create_params"] = None
-        sample["schema"] = None
+        sample["schema_str"] = None
         sample["schema_type"] = None
 
     return sample
@@ -187,7 +187,7 @@ def main():
     ds = ds.map(process_sample, num_proc=num_processes)
     ds = ds.filter(lambda x: x["responses_create_params"] is not None, num_proc=num_processes)
 
-    ds = ds.select_columns(["responses_create_params", "schema", "schema_type", "schema_fields_count"])
+    ds = ds.select_columns(["responses_create_params", "schema_str", "schema_type", "schema_fields_count"])
 
     local_dir = os.path.dirname(os.path.abspath(__file__))
     os.makedirs(os.path.join(local_dir, "data"), exist_ok=True)

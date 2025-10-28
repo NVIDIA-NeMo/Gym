@@ -13,7 +13,7 @@
 # limitations under the License.
 import json
 from enum import StrEnum
-from typing import Dict
+from typing import Any, Dict
 
 from fastapi import FastAPI
 from openapi_schema_validator import validate as validate_against_schema_openapi
@@ -36,7 +36,7 @@ class SchemaType(StrEnum):
 
 class StructuredOutputsVerifyRequest(BaseVerifyRequest):
     # string representation of schema. For JSON, it is a json dictionary.
-    schema: str
+    schema_str: str
     schema_type: SchemaType
 
 
@@ -49,7 +49,7 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
 
     async def verify(self, body: StructuredOutputsVerifyRequest) -> BaseVerifyResponse:
         schema_type = body.schema_type
-        schema = body.schema
+        schema_str = body.schema_str
 
         # get model generation.
         assistant_responses = []
@@ -67,14 +67,14 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
         # verify based on schema type
         match schema_type:
             case SchemaType.JSON:
-                reward = self.evaluate_structured_output_response_json(schema, response_text)
+                reward = self.evaluate_structured_output_response_json(schema_str, response_text)
             case _:
                 raise NotImplementedError(f"SchemaType must be one of {list(SchemaType)}, got {schema_type} !")
 
         return BaseVerifyResponse(**body.model_dump(), reward=reward)
 
     # ----- JSON Helpers ----- #
-    def strictify_schema_json(self, schema):
+    def strictify_schema_json(self, schema: Dict[str, Any]):
         """Make a schema strict as per OpenAPI guidelines"""
         if isinstance(schema, Dict):
             if "properties" in schema:
@@ -83,9 +83,9 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
             for k, v in schema.items():
                 self.strictify_schema_json(v)
 
-    def evaluate_structured_output_response_json(self, schema: str, response_text: str) -> bool:
+    def evaluate_structured_output_response_json(self, schema_str: str, response_text: str) -> bool:
         try:
-            schema = json.loads(schema)
+            schema = json.loads(schema_str)
             self.strictify_schema_json(schema)
             response_obj = json.loads(response_text)
             validate_against_schema_openapi(response_obj, schema)

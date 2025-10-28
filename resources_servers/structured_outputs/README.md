@@ -1,5 +1,5 @@
 # Description
-> Keywords: Structured Outputs, Schema Adherence
+> Keywords: Instruction Following, Structured Outputs, Schema Adherence
 
 This is a resource server for verifying the ability of the model to follow output formatting instructions under schema constraints.
 
@@ -40,13 +40,13 @@ To download the Structured Outputs dataset, the following command can be run:
 ```bash
 ng_download_dataset_from_gitlab \
     +dataset_name=structured_outputs_251027_nano_v3_sdg_json_train \
-    +version=0.0.1 \
+    +version=0.0.2\
     +artifact_fpath=structured_outputs_251027_nano_v3_sdg_json_train.jsonl \
     +output_fpath=resources_servers/structured_outputs/data/structured_outputs_251027_nano_v3_sdg_json_train.jsonl
 
 ng_download_dataset_from_gitlab \
     +dataset_name=structured_outputs_251027_nano_v3_sdg_json_val \
-    +version=0.0.1 \
+    +version=0.0.2 \
     +artifact_fpath=structured_outputs_251027_nano_v3_sdg_json_val.jsonl \
     +output_fpath=resources_servers/structured_outputs/data/structured_outputs_251027_nano_v3_sdg_json_val.jsonl
 ```
@@ -60,10 +60,19 @@ ng_collect_rollouts \
     +limit=1
 ```
 
+You can prepare the data for training with:
+```bash
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/structured_outputs/configs/structured_outputs_json.yaml"
+ng_prepare_data "+config_paths=[${config_paths}]" \
+    +output_dirpath=data/structured_outputs \
+    +mode=train_preparation +should_download=true
+```
+
 # Licensing information
 Code: Apache 2.0<br>
 Data:
-- Structured Outputs: ?
+- Structured Outputs: Apache 2.0
   - [Train Dataset Seed 1](https://huggingface.co/datasets/nvidia/structured-dataset-nanov3)
   - [Train Dataset Seed 2](https://huggingface.co/datasets/nvidia/structured-dataset-nanov3-reasoning/viewer/default/train?row=20&views%5B%5D=train)
 
