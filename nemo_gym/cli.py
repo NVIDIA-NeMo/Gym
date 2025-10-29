@@ -57,11 +57,15 @@ def _capture_head_server_dependencies(global_config_dict: DictConfig) -> None:  
     """
 
     try:
+        env = environ.copy()
+        env.pop("VIRTUAL_ENV", None)
+
         result = subprocess.run(
             ["uv", "pip", "freeze", "--exclude-editable"],
             capture_output=True,
             text=True,
             check=True,
+            env=env,
         )
         head_server_deps = result.stdout
     except Exception as e:

@@ -1,2 +1,1 @@
 -e nemo-gym[dev] @ ../../
-numpy==2.2.6
