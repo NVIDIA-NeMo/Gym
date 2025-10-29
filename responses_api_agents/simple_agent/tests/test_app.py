@@ -154,6 +154,9 @@ class TestApp:
             "truncation": None,
             "usage": None,
             "user": None,
+            "conversation": None,
+            "prompt_cache_key": None,
+            "safety_identifier": None,
         }
         assert expected_responses_dict == actual_responses_dict
 
@@ -324,5 +327,8 @@ class TestApp:
             "truncation": None,
             "usage": None,
             "user": None,
+            "conversation": None,
+            "prompt_cache_key": None,
+            "safety_identifier": None,
         }
         assert expected_responses_dict == actual_responses_dict

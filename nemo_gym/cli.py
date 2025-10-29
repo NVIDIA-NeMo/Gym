@@ -14,13 +14,11 @@
 import asyncio
 import json
 import shlex
-import subprocess
 import tomllib
 from glob import glob
 from os import environ, makedirs
 from os.path import exists
 from pathlib import Path
-from platform import python_version
 from subprocess import Popen
 from threading import Thread
 from time import sleep
@@ -29,7 +27,7 @@ from typing import Dict, List, Optional
 import rich
 import uvicorn
 from devtools import pprint
-from omegaconf import DictConfig, OmegaConf, open_dict
+from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, Field
 from tqdm.auto import tqdm
 
@@ -40,6 +38,7 @@ from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
+    PYTHON_VERSION_KEY_NAME,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
@@ -52,45 +51,13 @@ from nemo_gym.server_utils import (
 )
 
 
-def _capture_head_server_dependencies(global_config_dict: DictConfig) -> None:  # pragma: no cover
-    """
-    Capture head server dependencies and store it in the global config dict.
-    These dependencies are used as constraints to ensure that other servers use the same dependency versions as the head server.
-    Note: This function will modify the global config dict - update `head_server_deps`
-    """
-
-    try:
-        result = subprocess.run(
-            ["uv", "pip", "freeze", "--exclude-editable"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        head_server_deps = result.stdout
-    except Exception as e:
-        print(f"Warning: Could not capture head server dependencies: {e}")
-        head_server_deps = None
-
-    relevant_head_server_deps_list = []
-    for dep_line in head_server_deps.splitlines():
-        if "ray" in dep_line:
-            # The ray version is very sensitive. The children ray versions must exactly match those of the parent ray.
-            relevant_head_server_deps_list.append(dep_line)
-
-    relevant_head_server_deps = "\n".join(relevant_head_server_deps_list)
-
-    with open_dict(global_config_dict):
-        global_config_dict[HEAD_SERVER_DEPS_KEY_NAME] = relevant_head_server_deps
-
-
-def _setup_env_command(dir_path: Path, head_server_deps: Optional[str] = None) -> str:  # pragma: no cover
+def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  # pragma: no cover
     install_cmd = "uv pip install -r requirements.txt"
-    if head_server_deps:
-        install_cmd += f" --constraint <(cat << 'EOF'\n{head_server_deps}\nEOF\n)"
+    head_server_deps = global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]
+    install_cmd += " " + " ".join(head_server_deps)
 
-    head_server_python_version = python_version()
     return f"""cd {dir_path} \\
-    && uv venv --allow-existing --python {head_server_python_version} \\
+    && uv venv --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} \\
     && source .venv/bin/activate \\
     && {install_cmd} \\
    """
@@ -153,10 +120,6 @@ class RunHelper:  # pragma: no cover
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
         global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
 
-        # Capture head server dependencies and store in global config dict
-        # Note: This function will modify the global config dict - update `head_server_deps`
-        _capture_head_server_dependencies(global_config_dict)
-
         # Initialize Ray cluster in the main process
         # Note: This function will modify the global config dict - update `ray_head_node_address`
         initialize_ray()
@@ -196,9 +159,7 @@ class RunHelper:  # pragma: no cover
 
             dir_path = PARENT_DIR / Path(first_key, second_key)
 
-            head_server_deps = global_config_dict.get(HEAD_SERVER_DEPS_KEY_NAME)
-
-            command = f"""{_setup_env_command(dir_path, head_server_deps)} \\
+            command = f"""{_setup_env_command(dir_path, global_config_dict)} \\
     && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
     {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(top_level_path)} \\
     python {str(entrypoint_fpath)}"""
@@ -423,17 +384,17 @@ ng_viewer +jsonl_fpath=resources_servers/multineedle/data/example_rollouts.jsonl
     print(f"The data for {test_config.dir_path} has been successfully validated!")
 
 
-def _test_single(test_config: TestConfig) -> Popen:  # pragma: no cover
+def _test_single(test_config: TestConfig, global_config_dict: DictConfig) -> Popen:  # pragma: no cover
     # Eventually we may want more sophisticated testing here, but this is sufficient for now.
-    command = f"""{_setup_env_command(test_config.dir_path)} && pytest"""
+    command = f"""{_setup_env_command(test_config.dir_path, global_config_dict)} && pytest"""
     return _run_command(command, test_config.dir_path)
 
 
 def test():  # pragma: no cover
-    config_dict = get_global_config_dict()
-    test_config = TestConfig.model_validate(config_dict)
+    global_config_dict = get_global_config_dict()
+    test_config = TestConfig.model_validate(global_config_dict)
 
-    proc = _test_single(test_config)
+    proc = _test_single(test_config, global_config_dict)
     return_code = proc.wait()
     if return_code != 0:
         print(f"You can run detailed tests via `cd {test_config.entrypoint} && source .venv/bin/activate && pytest`.")
@@ -482,7 +443,7 @@ def test_all():  # pragma: no cover
             entrypoint=str(dir_path),
             should_validate_data=True,  # Test all always validates data.
         )
-        proc = _test_single(test_config)
+        proc = _test_single(test_config, global_config_dict)
         return_code = proc.wait()
 
         match return_code:
