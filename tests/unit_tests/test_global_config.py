@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from typing import Dict
 from unittest.mock import MagicMock
 
 from pytest import MonkeyPatch, raises
@@ -30,7 +31,21 @@ from nemo_gym.server_utils import (
 
 
 class TestServerUtils:
+    def _mock_versions_for_testing(self, monkeypatch: MonkeyPatch) -> Dict[str, str]:
+        monkeypatch.setattr(nemo_gym.global_config, "openai_version", "test openai version")
+        monkeypatch.setattr(nemo_gym.global_config, "ray_version", "test ray version")
+
+        python_version_mock = MagicMock(return_value="test python version")
+        monkeypatch.setattr(nemo_gym.global_config, "python_version", python_version_mock)
+
+        return {
+            "head_server_deps": ["ray==test ray version", "openai==test openai version"],
+            "python_version": "test python version",
+        }
+
     def test_get_global_config_dict_sanity(self, monkeypatch: MonkeyPatch) -> None:
+        mock_versions_for_testing = self._mock_versions_for_testing(monkeypatch)
+
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
         monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
@@ -52,7 +67,11 @@ class TestServerUtils:
         monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
 
         global_config_dict = get_global_config_dict()
-        assert {"head_server": {"host": "127.0.0.1", "port": 11000}, "disallowed_ports": [11000]} == global_config_dict
+        assert {
+            "head_server": {"host": "127.0.0.1", "port": 11000},
+            "disallowed_ports": [11000],
+            **mock_versions_for_testing,
+        } == global_config_dict
 
     def test_get_global_config_dict_global_exists(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
@@ -70,6 +89,8 @@ class TestServerUtils:
         assert {"a": 2} == global_config_dict
 
     def test_get_global_config_dict_config_paths_sanity(self, monkeypatch: MonkeyPatch) -> None:
+        mock_versions_for_testing = self._mock_versions_for_testing(monkeypatch)
+
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
         monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
@@ -103,9 +124,12 @@ class TestServerUtils:
             "extra_dot_env_key": 2,
             "head_server": {"host": "127.0.0.1", "port": 11000},
             "disallowed_ports": [11000],
+            **mock_versions_for_testing,
         } == global_config_dict
 
     def test_get_global_config_dict_config_paths_recursive(self, monkeypatch: MonkeyPatch) -> None:
+        mock_versions_for_testing = self._mock_versions_for_testing(monkeypatch)
+
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
         monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
@@ -154,9 +178,12 @@ class TestServerUtils:
             "recursive_config_path_child_key": 3,
             "head_server": {"host": "127.0.0.1", "port": 11000},
             "disallowed_ports": [11000],
+            **mock_versions_for_testing,
         } == global_config_dict
 
     def test_get_global_config_dict_server_host_port_defaults(self, monkeypatch: MonkeyPatch) -> None:
+        mock_versions_for_testing = self._mock_versions_for_testing(monkeypatch)
+
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
         monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
@@ -195,9 +222,12 @@ class TestServerUtils:
             "c": 2,
             "head_server": {"host": "127.0.0.1", "port": 11000},
             "disallowed_ports": [11000, 12345],
+            **mock_versions_for_testing,
         } == global_config_dict
 
     def test_get_global_config_dict_server_refs_sanity(self, monkeypatch: MonkeyPatch) -> None:
+        mock_versions_for_testing = self._mock_versions_for_testing(monkeypatch)
+
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
         monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
@@ -266,6 +296,7 @@ class TestServerUtils:
             },
             "head_server": {"host": "127.0.0.1", "port": 11000},
             "disallowed_ports": [11000, 12345, 123456],
+            **mock_versions_for_testing,
         } == global_config_dict
 
     def test_get_global_config_dict_server_refs_errors_on_missing(self, monkeypatch: MonkeyPatch) -> None:
