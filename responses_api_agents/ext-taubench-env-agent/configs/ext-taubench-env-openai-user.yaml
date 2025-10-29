@@ -1,0 +1,18 @@
+ext-taubench-env_user_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${policy_base_url}
+      openai_api_key: ${policy_api_key}
+      openai_model: ${policy_model_name}
+ext-taubench-env-agent:
+  responses_api_agents:
+    ext-taubench-env-agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      user_model_server:
+        type: responses_api_models
+        name: ext-taubench-env_user_model
+      log_level: ERROR
