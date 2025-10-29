@@ -2,67 +2,49 @@
 orphan: true
 ---
 
-# Important Concepts for Working with NVIDIA NeMo Gym
+(concepts-index)=
+#  Understanding Concepts for {{product_name}}
 
-[Brief introduction paragraph explaining what this section covers and why it's important. 1-2 sentences.]
+<!-- intro about concepts that need to be understood to use nemo gym. what is unique to nemo gyms mental model that we may want to highlight at a high level here? -->
 
-::::{grid} 1 1 1 2
+:::{tip}
+New to Reinforcement Learning (RL) in general? Check out our RL Terms glossary.
+:::
+
+---
+
+## [header to introduce concept pages]
+
+::::{grid} 1 2 2 2
 :gutter: 1 1 1 2
 
-:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` [Topic 1 Title]
-:link: topic1-filename
-:link-type: doc
-[Brief description of what this topic covers.]
+:::{grid-item-card} {octicon}`file-code;1.5em;sd-mr-1` Core Abstractions
+:link: concepts-core-abstractions
+:link-type: ref
+Understand ...
 :::
 
-:::{grid-item-card} {octicon}`database;1.5em;sd-mr-1` [Topic 2 Title]
-:link: topic2-filename
-:link-type: doc
-[Brief description of what this topic covers.]
+:::{grid-item-card} {octicon}`file-code;1.5em;sd-mr-1` Rollout Collection Fundamentals
+:link: concepts-rc-fundamentals
+:link-type: ref
+Understand ...
 :::
 
-:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` [Topic 3 Title]
-:link: topic3-filename
-:link-type: doc
-[Brief description of what this topic covers.]
-:::
-
-:::{grid-item-card} {octicon}`graph;1.5em;sd-mr-1` [Topic 4 Title]
-:link: topic4-filename
-:link-type: doc
-[Brief description of what this topic covers.]
-:::
-
-:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` [Topic 5 Title]
-:link: topic5-filename
-:link-type: doc
-[Brief description of what this topic covers.]
-:::
-
-:::{grid-item-card} {octicon}`shield;1.5em;sd-mr-1` [Topic 6 Title]
-:link: topic6-filename
-:link-type: doc
-[Brief description of what this topic covers.]
-:::
-
-:::{grid-item-card} {octicon}`database;1.5em;sd-mr-1` [Topic 7 Title]
-:link: topic7-filename
-:link-type: doc
-[Brief description of what this topic covers.]
-:::
-
-:::{grid-item-card} {octicon}`shield-lock;1.5em;sd-mr-1` [Topic 8 Title]
-:link: topic8-filename
-:link-type: doc
-[Brief description of what this topic covers.]
+:::{grid-item-card} {octicon}`file-code;1.5em;sd-mr-1` Verifying Agent Results
+:link: concepts-verifying-results
+:link-type: ref
+Understand ...
 :::
 
 ::::
 
+---
+
 ```{toctree}
 :hidden:
-:maxdepth: 2
+:maxdepth: 1
 
-[Display Name] <concept-a>
-
+Core Abstractions <core-abstractions>
+Rollout Collection Fundamentals<rollout-collection-fundamentals>
+Verifying Agent Results <verifying-agent-results>
 ```

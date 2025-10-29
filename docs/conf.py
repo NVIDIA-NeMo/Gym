@@ -54,8 +54,14 @@ myst_enable_extensions = [
     "deflist",  # Supports definition lists with term: definition format
     "fieldlist",  # Enables field lists for metadata like :author: Name
     "tasklist",  # Adds support for GitHub-style task lists with [ ] and [x]
+    "substitution",  # Enables variable substitutions like {{product_name}}
 ]
 myst_heading_anchors = 5  # Generates anchor links for headings up to level 5
+
+# MyST substitutions - variables that can be used in markdown files
+myst_substitutions = {
+    "product_name": "NeMo Gym",
+}
 
 # -- Options for Autodoc2 ---------------------------------------------------
 sys.path.insert(0, os.path.abspath(".."))

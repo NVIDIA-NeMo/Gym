@@ -85,7 +85,7 @@ Each line in your input JSONL file should follow this schema:
 
 ## Hands-On: Generating Your First Rollouts
 
-Let's generate rollouts using the **MultiNeedle** resource server, which tests reading comprehension across long documents.
+Generate rollouts using the **MultiNeedle** resource server, which tests reading comprehension across long documents.
 
 ### Step 1: Start the MultiNeedle Agent
 
@@ -96,7 +96,7 @@ resources_servers/multineedle/configs/multineedle.yaml"
 ng_run "+config_paths=[${config_paths}]"
 ```
 
-**✅ Success Check**: You should see 3 servers running including the `multineedle_simple_agent`.
+**✅ Success Check**: You should see three servers running including the `multineedle_simple_agent`.
 
 ### Step 3: Generate Rollouts
 
@@ -115,9 +115,9 @@ ng_collect_rollouts +agent_name=multineedle_simple_agent \
 ```
 
 **What's happening**:
-- `limit=5`: Process only the first 5 examples (for quick testing)
-- `num_repeats=2`: Generate 2 rollouts per example (10 total rollouts)
-- `num_samples_in_parallel=3`: Process 3 requests simultaneously
+- `limit=5`: Process only the first five examples (for quick testing)
+- `num_repeats=2`: Generate two rollouts per example (10 total rollouts)
+- `num_samples_in_parallel=3`: Process three requests simultaneously
 - `max_output_tokens=8192`: Allow longer responses for complex reasoning
 
 ### Step 4: View Your Rollouts
@@ -351,7 +351,7 @@ Processing speed slower than expected
 - Process smaller batches during development
 - Consider local models for high-volume generation
 
-## What You've Learned
+## What You Have Learned
 
 You now understand NeMo Gym's rollout generation system:
 

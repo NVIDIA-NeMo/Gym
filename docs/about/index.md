@@ -4,87 +4,104 @@ orphan: true
 
 # About NVIDIA NeMo Gym
 
-[Brief introduction paragraph that describes what this product/service is and its primary purpose. 1-2 sentences maximum.]
+NeMo Gym standardizes scalable rollout collection for LLM and VLM training. It provides the infrastructure to systematically generate agent interaction data and a curated collection of high-quality RL environments, making it easy to produce large-scale training data for reinforcement learning workflows using the framework of your choice.
 
-[Longer description paragraph that provides more context about the product/service, its key capabilities, and how it fits into the broader ecosystem. Include links to relevant external resources using standard markdown syntax.]
+By offering unified interfaces to heterogeneous RL environments and integrations with popular RL training frameworks (VeRL, NeMo-RL, OpenRLHF), NeMo Gym lets you focus on research and model improvement rather than infrastructure and orchestration.
 
-[Optional: Third paragraph for categorization or classification of components.]
+---
 
-## [Main Category/Component Type 1]
+## The Challenge: Scaling RL Training Data
 
-[Brief introduction to this category of components/features.]
+Training AI agents through reinforcement learning requires massive amounts of high-quality interaction data. Teams face several obstacles:
 
-* **[Component Name]**: [Description of what this component does and its primary purpose.]
-* **[Component Name]**: [Description of what this component does and its primary purpose.]
-* **[Component Name]**: [Description of what this component does and its primary purpose.]
+* **Infrastructure overhead**: Building systems to coordinate models, tools, and verification logic at scale
+* **Inconsistent interfaces**: Each environment requires custom integration code and data formats
+* **Quality verification**: Ensuring agent responses are accurately evaluated for reward signals
+* **Framework fragmentation**: Difficulty connecting custom environments to different RL training frameworks
+* **Throughput bottlenecks**: Sequential processing cannot generate data fast enough for large-scale training
 
-## [Main Category/Component Type 2]
+These challenges slow research iteration and make it difficult to experiment with different environments and training approaches.
 
-[Brief introduction to this category of components/features.]
+---
 
-* **[Component Name]**: [Description of what this component does and its primary purpose.]
-* **[Component Name]**: [Description of what this component does and its primary purpose.]
-* **[Component Name]**: [Description of what this component does and its primary purpose.]
+## NeMo Gym's Approach
+
+NeMo Gym solves these problems through three core design principles:
+
+**Unified Interfaces**  
+Standard abstractions for models (LLM inference), resources (tools + verification), and agents (orchestration) enable mix-and-match composition. Connect any model to any environment using consistent APIs based on OpenAI's Responses format.
+
+**Curated Environments**  
+A growing collection of resource servers across domains (mathematics, coding, knowledge, instruction-following, agent workflows) provides both the tools agents can use and the verification logic to score their performance. Each environment includes training datasets, validation sets, and examples.
+
+**High-Throughput Architecture**  
+Async orchestration with configurable parallelism supports generating thousands of rollouts concurrently. The system handles complex coordination (model inference, tool calls, verification) while maximizing throughput for training workloads.
+
+---
+
+## Core Components
+
+NeMo Gym organizes around three core abstractions that work together:
+
+* **Models**: LLM inference endpoints that generate text and make tool-calling decisions. Models are stateless and handle single-turn generation. Configure using OpenAI-compatible APIs or local vLLM servers.
+
+* **Resources**: Servers that provide both tools (functions agents can call) and verifiers (logic to evaluate agent performance and assign reward signals). Examples include mathematical reasoning environments, code execution sandboxes, web search tools, and custom verification logic.
+
+* **Agents**: Orchestration layers that connect models to resources, handle multi-turn conversations, route tool calls, and format responses consistently. Agents coordinate the interaction loop and can be extended with custom logic.
+
+These components communicate via HTTP APIs and can run as separate services, enabling flexible deployment and scaling.
+
+:::{seealso}
+For detailed explanations of these abstractions, see {doc}`Concepts <concepts/index>`.
+:::
 
 ---
 
 ## Target Users
 
-This documentation serves [X] types of users.
+NeMo Gym serves three primary user journeys:
 
-- **[User Type 1]**: [Description of what they do and links to relevant documentation sections using {doc}`link text <../path/to/doc>`.]
-- **[User Type 2]**: [Description of what they do and links to relevant documentation sections.]
+### Model Training Researchers
+
+**Goal**: Train models using RL with my preferred training framework  
+**Use**: NeMo Gym + RL Frameworks (VeRL, NeMo-RL, OpenRLHF, etc.)
+
+You want to train a model to improve tool calling, reasoning, or task performance using reinforcement learning. NeMo Gym provides the infrastructure to generate training rollouts at scale from curated environments or your own custom verification logic, outputting data in formats compatible with your chosen RL framework.
+
+### Agentic Framework Users (NAT)
+
+**Goal**: Train models using data from my agent workflow built with NeMo Agent Toolkit  
+**Use**: NAT + NeMo Gym + RL Frameworks
+
+You have built an agent using NVIDIA NeMo Agent Toolkit (NAT) and want to improve your underlying model through RL. NAT handles trajectory collection and scoring from your agent workflow, then passes the data to NeMo Gym, which integrates with RL frameworks for model weight updates through backpropagation.
+
+### Other Framework Users
+
+**Goal**: Train models using data from my agent workflow built with LangChain, LangGraph, CrewAI, or other frameworks  
+**Use**: Your Framework + NeMo Gym + RL Frameworks
+
+Similar to the NAT journey, your existing agent framework collects trajectories and scores them via its evaluation system. NeMo Gym provides the bridge to RL training frameworks, handling data format conversion and training orchestration.
 
 ---
 
-## High-level Architecture Diagram
+## What You Can Build
 
-[Brief description of what the diagram shows and why it matters.]
+NeMo Gym enables several key use cases:
 
-<!-- ![Architecture diagram description.](./path/to/_images/architecture-diagram.png) -->
+**RL Training Pipelines**  
+Generate training data at scale for reinforcement learning algorithms. Collect rollouts with reward signals, export in RL-framework-compatible formats, and feed directly into training loops.
+
+**Benchmark Evaluation**  
+Systematically evaluate agent performance across tasks. Use curated datasets and verification logic to measure accuracy, reasoning quality, tool-use effectiveness, and instruction-following capabilities.
+
+**Custom Environments**  
+Build your own resource servers with domain-specific tools and verification logic. NeMo Gym's base classes and templates make it straightforward to add new environments that integrate seamlessly with the rest of the system.
+
+**Multi-Framework Experiments**  
+Compare different RL algorithms and training frameworks using the same environment and data. Swap VeRL for NeMo-RL or OpenRLHF by changing configuration without rewriting environment code.
 
 ---
 
-## [Key Concepts Section Title]
+## Navigating This Collection
 
-[Introduction paragraph explaining what users will find in this section.]
-
-::::{grid} 1 1 1 2
-:gutter: 1 1 1 2
-
-:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` [Card Title]
-:link: relative/path/to/doc
-:link-type: doc
-[Brief description of what users will learn in this section.]
-:::
-
-:::{grid-item-card} {octicon}`database;1.5em;sd-mr-1` [Card Title]
-:link: relative/path/to/doc
-:link-type: doc
-[Brief description of what users will learn in this section.]
-:::
-
-:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` [Card Title]
-:link: relative/path/to/doc
-:link-type: doc
-[Brief description of what users will learn in this section.]
-:::
-
-:::{grid-item-card} {octicon}`graph;1.5em;sd-mr-1` [Card Title]
-:link: relative/path/to/doc
-:link-type: doc
-[Brief description of what users will learn in this section.]
-:::
-
-:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` [Card Title]
-:link: relative/path/to/doc
-:link-type: doc
-[Brief description of what users will learn in this section.]
-:::
-
-:::{grid-item-card} {octicon}`shield;1.5em;sd-mr-1` [Card Title]
-:link: relative/path/to/doc
-:link-type: doc
-[Brief description of what users will learn in this section.]
-:::
-::::
+TBD.
