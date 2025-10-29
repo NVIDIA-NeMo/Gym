@@ -1,0 +1,72 @@
+{
+    "name": "validation",
+    "type": {
+        "unique_count": 1,
+        "total_count": 720
+    },
+    "jsonl_fpath": "resources_servers/servicenow_document_reasoning/data/validation.jsonl",
+    "num_repeats": 16,
+    "gitlab_identifier": {
+        "dataset_name": "servicenow_document_reasoning",
+        "version": "0.0.1",
+        "artifact_fpath": "validation.jsonl"
+    },
+    "license": "Apache 2.0",
+    "Number of examples": 720,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 720,
+        "Average": 952.53,
+        "Min": 720.0,
+        "Max": 1286.0,
+        "Median": 902.0,
+        "Standard deviation": 122.88
+    },
+    "Number of turns": {
+        "Total # non-null values": 720,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "id": {
+        "unique_count": 45,
+        "total_count": 720
+    },
+    "question": {
+        "unique_count": 45,
+        "total_count": 720
+    },
+    "unanswerable": {
+        "Total # non-null values": 720,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "subtype": {
+        "unique_count": 3,
+        "total_count": 720
+    },
+    "ground_truth": {
+        "unique_count": 36,
+        "total_count": 720
+    }
+}
