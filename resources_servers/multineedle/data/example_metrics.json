@@ -2,6 +2,7 @@
     "name": "example",
     "type": "example",
     "jsonl_fpath": "resources_servers/multineedle/data/example.jsonl",
+    "num_repeats": 1,
     "gitlab_identifier": null,
     "license": null,
     "Number of examples": 5,
@@ -19,7 +20,7 @@
         "Min": 1499.0,
         "Max": 1509.0,
         "Median": 1505.0,
-        "Standard deviation": 4.000000000000012
+        "Standard deviation": 4.0
     },
     "Number of turns": {
         "Total # non-null values": 5,
@@ -43,7 +44,11 @@
         "Min": 0.0,
         "Max": 4.0,
         "Median": 2.0,
-        "Standard deviation": 1.5811388300841898
+        "Standard deviation": 1.58
+    },
+    "expected_synonyms": {
+        "unique_count": 2,
+        "total_count": 10
     },
     "expected_synonym_values": {
         "Total # non-null values": 10,
@@ -51,7 +56,11 @@
         "Min": 407.0,
         "Max": 711.0,
         "Median": 559.0,
-        "Standard deviation": 160.22206811519789
+        "Standard deviation": 160.22
+    },
+    "minefield_label": {
+        "unique_count": 1,
+        "total_count": 5
     },
     "minefield_label_value": {
         "Total # non-null values": 5,
@@ -60,13 +69,5 @@
         "Max": 299.0,
         "Median": 299.0,
         "Standard deviation": 0.0
-    },
-    "expected_synonyms": {
-        "unique_count": 2,
-        "total_count": 10
-    },
-    "minefield_label": {
-        "unique_count": 1,
-        "total_count": 5
     }
 }

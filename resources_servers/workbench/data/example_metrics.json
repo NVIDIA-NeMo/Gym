@@ -15,11 +15,11 @@
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 5,
-        "Average": 1732.2,
-        "Min": 1726.0,
-        "Max": 1737.0,
-        "Median": 1731.0,
-        "Standard deviation": 4.764451699828638
+        "Average": 1730.2,
+        "Min": 1724.0,
+        "Max": 1735.0,
+        "Median": 1729.0,
+        "Standard deviation": 4.76
     },
     "Number of turns": {
         "Total # non-null values": 5,
@@ -43,7 +43,7 @@
         "Min": 0.0,
         "Max": 4.0,
         "Median": 2.0,
-        "Standard deviation": 1.5811388300841898
+        "Standard deviation": 1.58
     },
     "category": {
         "unique_count": 3,

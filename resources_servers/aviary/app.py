@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import logging
 import uuid
 from abc import ABC
 from collections import defaultdict
@@ -23,6 +24,7 @@ from pydantic import ConfigDict, Field
 
 from aviary.core import (
     Environment,
+    EnvStateMessage,
     Message,
     TaskDataset,
     Tool,
@@ -37,6 +39,7 @@ from nemo_gym.integrations.aviary import (
     AviaryAgentVerifyResponse,
     AviaryCloseRequest,
     AviaryCloseResponse,
+    AviaryEnvStateEasyInputMessage,
     AviaryResourcesServerConfig,
     AviarySeedSessionRequest,
     AviarySeedSessionResponse,
@@ -44,6 +47,9 @@ from nemo_gym.integrations.aviary import (
     AviaryStepResponse,
 )
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymFunctionCallOutput
+
+
+logger = logging.getLogger(__name__)
 
 
 TEnv = TypeVar("TEnv", bound=Environment)
@@ -56,24 +62,29 @@ def tool_to_function_tool_param(tool: Tool) -> FunctionToolParam:
     return FunctionToolParam(type="function", strict=True, **tool_dump)
 
 
-def obs_msg_to_nemo_gym(obs: Message) -> NeMoGymEasyInputMessage:
+def obs_msg_to_nemo_gym(obs: Message) -> list[NeMoGymEasyInputMessage]:
+    # This does some Qwen3-specific things:
+    # 1. if content is a JSON list, we flatten it to a list of messages. Qwen3's
+    #    chat template doesn't support messages with list contents
+    # 2. if content contains images (or really any other media), we drop it for now.
+    # Most of this is what we'd call a HACK.
+
+    is_env_state = isinstance(obs, EnvStateMessage) or (obs.info or {}).get("is_env_state", False)
+
     dump = obs.model_dump()
-    if isinstance(dump["content"], list):
-        type_remap = {k: f"input_{k}" for k in ("text", "image", "file", "audio")}
+    try:
+        content: str | list = json.loads(dump["content"])
+    except json.JSONDecodeError:
+        content = dump["content"]
 
-        def fix_content(c: dict) -> dict:
-            if c["type"] == "image_url":
-                return {
-                    "type": "input_image",
-                    "file_id": None,
-                    "detail": "auto",
-                    "image_url": c["image_url"]["url"],
-                }
-            else:
-                return {**c, "type": type_remap.get(c["type"], c["type"])}
+    flat_content: list[str] = []
+    if isinstance(content, list):
+        flat_content = [c["text"] for c in content if c["type"] == "text"]
+    else:
+        flat_content = [content]
 
-        dump["content"] = [fix_content(c) for c in dump["content"]]
-    return NeMoGymEasyInputMessage.model_validate(dump)
+    message_cls = AviaryEnvStateEasyInputMessage if is_env_state else NeMoGymEasyInputMessage
+    return [message_cls.model_validate(dump | {"content": c}) for c in flat_content]
 
 
 class AviaryResourcesServer(SimpleResourcesServer, Generic[TEnv, TDataset], ABC):
@@ -101,7 +112,7 @@ class AviaryResourcesServer(SimpleResourcesServer, Generic[TEnv, TDataset], ABC)
         obs, tools = await env.reset()
         return AviarySeedSessionResponse(
             env_id=env_id,
-            obs=[obs_msg_to_nemo_gym(o) for o in obs],
+            obs=[message for o in obs for message in obs_msg_to_nemo_gym(o)],
             tools=[tool_to_function_tool_param(t) for t in tools],
         )
 
@@ -109,25 +120,32 @@ class AviaryResourcesServer(SimpleResourcesServer, Generic[TEnv, TDataset], ABC)
         """
         Wraps calling step().
         """
-        env = self.env_id_to_env[body.env_id]
+        try:
+            env = self.env_id_to_env[body.env_id]
 
-        action = ToolRequestMessage(
-            content=None,
-            tool_calls=[
-                ToolCall(id=a.call_id, function=ToolCallFunction(name=a.name, arguments=json.loads(a.arguments)))
-                for a in body.action
-            ],
-        )
-        obs, reward, done, _ = await env.step(action)
+            action = ToolRequestMessage(
+                content=None,
+                tool_calls=[
+                    ToolCall(id=a.call_id, function=ToolCallFunction(name=a.name, arguments=json.loads(a.arguments)))
+                    for a in body.action
+                ],
+            )
+            obs, reward, done, _ = await env.step(action)
 
-        self.env_id_to_total_reward[body.env_id] += reward
+            self.env_id_to_total_reward[body.env_id] += reward
 
-        nemo_obs = [
-            NeMoGymFunctionCallOutput(call_id=o.tool_call_id, output=o.content)
-            if isinstance(o, ToolResponseMessage)
-            else obs_msg_to_nemo_gym(o)
-            for o in obs
-        ]
+            nemo_obs = [
+                message
+                for o in obs
+                for message in (
+                    [NeMoGymFunctionCallOutput(call_id=o.tool_call_id, output=o.content)]
+                    if isinstance(o, ToolResponseMessage)
+                    else obs_msg_to_nemo_gym(o)
+                )
+            ]
+        except Exception:
+            logger.exception("Error in step")
+            raise
 
         return AviaryStepResponse(obs=nemo_obs, reward=reward, done=done)
 

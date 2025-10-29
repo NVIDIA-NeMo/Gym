@@ -15,6 +15,8 @@
 Contains a set of schemas used by both the AviaryResourcesServer and the AviaryAgent.
 """
 
+from typing import Literal
+
 from openai.types.responses import FunctionToolParam
 from pydantic import BaseModel, ConfigDict
 
@@ -30,6 +32,7 @@ from nemo_gym.openai_utils import (
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseOutputItem,
 )
 
 
@@ -41,9 +44,15 @@ class AviarySeedSessionRequest(BaseSeedSessionRequest):
     task_idx: int
 
 
+class AviaryEnvStateEasyInputMessage(NeMoGymEasyInputMessage):
+    """Special subclass so we can identify messages representing environment state."""
+
+    is_env_state: Literal[True] = True
+
+
 class AviarySeedSessionResponse(BaseSeedSessionResponse):
     env_id: str
-    obs: list[NeMoGymEasyInputMessage]
+    obs: list[NeMoGymEasyInputMessage | AviaryEnvStateEasyInputMessage]
     tools: list[FunctionToolParam]
 
 
@@ -53,13 +62,16 @@ class AviaryStepRequest(BaseModel):
 
 
 class AviaryStepResponse(BaseModel):
-    obs: list[NeMoGymEasyInputMessage | NeMoGymFunctionCallOutput]
+    obs: list[NeMoGymFunctionCallOutput | NeMoGymEasyInputMessage | AviaryEnvStateEasyInputMessage]
     reward: float
     done: bool
 
 
 class AviaryNeMoGymResponse(NeMoGymResponse):
     env_id: str
+    group_id: str
+    contains_transitions: Literal[True] = True
+    output: list[list[NeMoGymResponseOutputItem]]
 
 
 class AviaryAgentVerifyRequest(BaseVerifyRequest):
@@ -67,7 +79,8 @@ class AviaryAgentVerifyRequest(BaseVerifyRequest):
     response: AviaryNeMoGymResponse
 
 
-class AviaryAgentVerifyResponse(BaseVerifyResponse):
+# Use this MRO so AviaryAgentVerifyRequest.response supersedes BaseVerifyResponse.response
+class AviaryAgentVerifyResponse(AviaryAgentVerifyRequest, BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
 

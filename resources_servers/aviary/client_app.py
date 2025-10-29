@@ -6,7 +6,7 @@ from aviary.core import TaskDatasetClient, TaskEnvironmentClient
 from resources_servers.aviary.app import AviaryResourcesServer, AviaryResourcesServerConfig
 
 
-class AviaryClientAppConfig(AviaryResourcesServerConfig):
+class AviaryClientResourcesServerConfig(AviaryResourcesServerConfig):
     server_url: str | None = None
     request_timeout: float | None = 300.0
     api_key: str | None = None
@@ -29,22 +29,23 @@ class AviaryClientAppConfig(AviaryResourcesServerConfig):
         return v
 
 
-class AviaryClientApp(AviaryResourcesServer[TaskEnvironmentClient, TaskDatasetClient]):
-    config: AviaryClientAppConfig
+class AviaryClientResourcesServer(AviaryResourcesServer[TaskEnvironmentClient, TaskDatasetClient]):
+    config: AviaryClientResourcesServerConfig
     dataset: TaskDatasetClient
 
     @model_validator(mode="before")
     @classmethod
     def load_dataset(cls, data: dict) -> dict:
         if "dataset" not in data:
-            config = data["config"] = AviaryClientAppConfig.model_validate(data.get("config", {}))
+            config = data["config"] = AviaryClientResourcesServerConfig.model_validate(data.get("config", {}))
             data["dataset"] = TaskDatasetClient(
                 server_url=config.server_url,
                 request_timeout=config.request_timeout,
                 api_key=config.api_key,
+                catch_http_errors=True,
             )
         return data
 
 
 if __name__ == "__main__":
-    AviaryClientApp.run_webserver()
+    AviaryClientResourcesServer.run_webserver()

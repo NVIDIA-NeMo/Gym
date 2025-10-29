@@ -15,11 +15,12 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, mock_open
 
+from pydantic import ValidationError
 from pytest import MonkeyPatch, raises
 
 import nemo_gym.global_config
 import nemo_gym.train_data_utils
-from nemo_gym.config_types import ResponsesAPIAgentServerInstanceConfig
+from nemo_gym.config_types import DatasetConfig, ResponsesAPIAgentServerInstanceConfig
 from nemo_gym.global_config import DictConfig, GlobalConfigDictParser
 from nemo_gym.train_data_utils import (
     AvgMinMax,
@@ -79,6 +80,7 @@ class TestLoadAndValidateServerInstanceConfigs:
                                 "name": "example",
                                 "type": "example",
                                 "jsonl_fpath": "resources_servers/multineedle/data/example.jsonl",
+                                "num_repeats": 1,
                                 "gitlab_identifier": None,
                                 "license": None,
                             }
@@ -121,6 +123,7 @@ class TestLoadDatasets:
                             "name": "example",
                             "type": "example",
                             "jsonl_fpath": "resources_servers/multineedle/data/example.jsonl",
+                            "num_repeats": 1,
                             "gitlab_identifier": None,
                             "license": None,
                         }
@@ -166,6 +169,7 @@ class TestLoadDatasets:
                             "name": "example",
                             "type": "example",
                             "jsonl_fpath": "resources_servers/multineedle/data/example_missing.jsonl",
+                            "num_repeats": 1,
                             "gitlab_identifier": None,
                             "license": None,
                         }
@@ -216,7 +220,7 @@ class TestLoadDatasets:
                         {
                             "name": "train",
                             "type": "train",
-                            "jsonl_fpath": "resources_servers/multineedle/data/train.jsonl",
+                            "jsonl_fpath": "some/nonexiststent/path",
                             "gitlab_identifier": {
                                 "dataset_name": "multineedle",
                                 "version": "0.0.1",
@@ -281,6 +285,7 @@ class TestValidateSamplesAndAggregateMetrics:
                             "name": "example",
                             "type": "example",
                             "jsonl_fpath": "resources_servers/multineedle/data/example.jsonl",
+                            "num_repeats": 1,
                             "gitlab_identifier": None,
                             "license": None,
                         }
@@ -353,7 +358,7 @@ class TestValidateSamplesAndAggregateMetrics:
                     min=0.0,
                     max=4.0,
                     median=2.0,
-                    stddev=1.5811388300841898,
+                    stddev=1.58,
                 ),
                 expected_synonym_values=AvgMinMax(
                     is_aggregated=True,
@@ -362,7 +367,7 @@ class TestValidateSamplesAndAggregateMetrics:
                     min=407.0,
                     max=711.0,
                     median=559.0,
-                    stddev=160.22206811519789,
+                    stddev=160.22,
                 ),
                 minefield_label_value=AvgMinMax(
                     is_aggregated=True,
@@ -421,6 +426,7 @@ class TestValidateSamplesAndAggregateMetrics:
                             "name": "example",
                             "type": "example",
                             "jsonl_fpath": "resources_servers/multineedle/data/example.jsonl",
+                            "num_repeats": 1,
                             "gitlab_identifier": None,
                             "license": None,
                         }
@@ -522,6 +528,168 @@ class TestValidateSamplesAndAggregateMetrics:
         assert expected_metrics.model_dump() == state.metrics.model_dump()
 
 
+class TestIterDatasetLines:
+    def test_iter_dataset_lines_num_repeats(self, tmp_path):
+        """Test _iter_dataset_lines with different num_repeats values"""
+        processor = TrainDataProcessor()
+
+        # Create a test dataset file
+        test_file = tmp_path / "test_data.jsonl"
+        test_data = ['{"id": 1, "content": "line1"}', '{"id": 2, "content": "line2"}']
+        test_file.write_text("\n".join(test_data) + "\n")
+
+        # Test default behavior (num_repeats defaults to 1 when not specified)
+        config = DatasetConfig(name="test", type="example", jsonl_fpath=str(test_file))
+        lines = list(processor._iter_dataset_lines(config))
+        expected = ['{"id": 1, "content": "line1"}\n', '{"id": 2, "content": "line2"}\n']
+        assert lines == expected
+
+        # Test num_repeats=1 (explicit)
+        config = DatasetConfig(name="test", type="example", jsonl_fpath=str(test_file), num_repeats=1)
+        lines = list(processor._iter_dataset_lines(config))
+        assert lines == expected
+
+        # Test num_repeats=3
+        config = DatasetConfig(name="test", type="example", jsonl_fpath=str(test_file), num_repeats=3)
+        lines = list(processor._iter_dataset_lines(config))
+        expected_repeated = [
+            '{"id": 1, "content": "line1"}\n',
+            '{"id": 1, "content": "line1"}\n',
+            '{"id": 1, "content": "line1"}\n',
+            '{"id": 2, "content": "line2"}\n',
+            '{"id": 2, "content": "line2"}\n',
+            '{"id": 2, "content": "line2"}\n',
+        ]
+        assert lines == expected_repeated
+
+
+class TestDatasetConfigNumRepeats:
+    def test_dataset_config_num_repeats_valid_values(self):
+        """Test DatasetConfig with valid num_repeats values"""
+
+        # Test default (when not specified, defaults to 1)
+        config = DatasetConfig(name="test", type="example", jsonl_fpath="test.jsonl")
+        assert config.num_repeats == 1
+
+        # Test valid positive integers
+        for repeats in [1, 2, 5, 10, 100]:
+            config = DatasetConfig(name="test", type="example", jsonl_fpath="test.jsonl", num_repeats=repeats)
+            assert config.num_repeats == repeats
+
+    def test_dataset_config_num_repeats_invalid_values(self):
+        """Test DatasetConfig with invalid num_repeats values"""
+
+        # Test zero
+        with raises(ValidationError, match="Input should be greater than or equal to 1"):
+            DatasetConfig(name="test", type="example", jsonl_fpath="test.jsonl", num_repeats=0)
+
+        # Test negative values
+        with raises(ValidationError, match="Input should be greater than or equal to 1"):
+            DatasetConfig(name="test", type="example", jsonl_fpath="test.jsonl", num_repeats=-1)
+
+
+class TestNumRepeatsMetricsAggregation:
+    def test_validate_samples_with_num_repeats(self, tmp_path):
+        """Test that metrics and sample enumeration work correctly with num_repeats"""
+        processor = TrainDataProcessor()
+
+        # Test with valid samples and num_repeats=2
+        test_file = tmp_path / "test_data.jsonl"
+        test_data = [
+            '{"responses_create_params": {"input": [{"role": "user", "content": "test1"}]}, "temperature": 0.5}',
+            '{"invalid": "sample"}',  # Invalid sample for testing enumeration
+        ]
+        test_file.write_text("\n".join(test_data) + "\n")
+
+        config = DatasetConfig(name="test", type="example", jsonl_fpath=str(test_file), num_repeats=2)
+        state = processor._validate_samples_and_aggregate_metrics_single_dataset(config)
+
+        # Should process 4 samples total (2 lines * 2 repeats), but only valid ones count in metrics
+        # The metrics count only tracks successful processing (only 2 successful out of 4 total)
+        assert state.metrics.number_of_examples == 2
+        # Indices 2,3 should be offending (both repeats of the invalid sample)
+        assert state.offending_example_idxs == [2, 3]
+
+
+class TestNumRepeatsDataPreparation:
+    def test_prepare_samples_with_num_repeats(self, tmp_path, monkeypatch: MonkeyPatch):
+        """Test that data preparation correctly repeats samples based on num_repeats"""
+        write_filenames_to_mock = dict()
+        original_open = open
+
+        def custom_open(filename, mode="r"):
+            if mode in ["w", "wb"]:
+                write_filenames_to_mock[filename] = mock_open()
+                return write_filenames_to_mock[filename]()
+            if filename in write_filenames_to_mock:
+                write_mock: MagicMock = write_filenames_to_mock[filename]
+                written_data = write_mock.return_value.write.call_args_list[0].args[0]
+                return mock_open(read_data=written_data)()
+            return original_open(filename, mode)
+
+        monkeypatch.setattr("builtins.open", custom_open)
+
+        processor = TrainDataProcessor()
+        test_file = tmp_path / "test_data.jsonl"
+        test_data = [
+            '{"responses_create_params": {"input": [{"role": "user", "content": "test1"}]}}',
+            '{"responses_create_params": {"input": [{"role": "user", "content": "test2"}]}}',
+        ]
+        test_file.write_text("\n".join(test_data) + "\n")
+
+        config = TrainDataProcessorConfig(output_dirpath="", mode="example_validation", should_download=False)
+        server_type_config_dict = {
+            "responses_api_agents": {
+                "simple_agent": {
+                    "host": "127.0.0.1",
+                    "port": 12345,
+                    "entrypoint": "app.py",
+                    "datasets": [
+                        {
+                            "name": "example",
+                            "type": "example",
+                            "jsonl_fpath": str(test_file),
+                            "num_repeats": 3,
+                            "gitlab_identifier": None,
+                            "license": None,
+                        }
+                    ],
+                    "resources_server": {"type": "resources_servers", "name": "test_resources_server"},
+                    "model_server": {"type": "responses_api_models", "name": "policy_model"},
+                }
+            }
+        }
+        server_config = ResponsesAPIAgentServerInstanceConfig(
+            name="test_agent",
+            server_type_config_dict=DictConfig(server_type_config_dict),
+            responses_api_agents=server_type_config_dict["responses_api_agents"],
+        )
+
+        processor.collate_samples(
+            config=config,
+            server_instance_configs=[server_config],
+            dataset_type_to_aggregate_metrics={
+                "example": DatasetMetrics(
+                    is_aggregated=False,
+                    number_of_examples=6,
+                    number_of_tools=AvgMinMax(is_aggregated=False, total=6, average=0.0, min=0.0, max=0.0),
+                    json_dumped_number_of_words=AvgMinMax(
+                        is_aggregated=False, total=6, average=100.0, min=50.0, max=150.0
+                    ),
+                    number_of_turns=AvgMinMax(is_aggregated=False, total=6, average=1.0, min=1.0, max=1.0),
+                    temperature=AvgMinMax(
+                        is_aggregated=False, total=0, average=0, min=float("inf"), max=float("-inf")
+                    ),
+                )
+            },
+        )
+
+        # Verify 6 writes occurred (2 lines * 3 repeats each)
+        expected_prepare_file = test_file.with_name(f"{test_file.stem}_prepare.jsonl")
+        prepare_mock = write_filenames_to_mock[expected_prepare_file]
+        assert len(prepare_mock.return_value.write.call_args_list) == 6
+
+
 class TestCollateSamples:
     def test_collate_samples_sanity(self, monkeypatch: MonkeyPatch) -> None:
         write_filenames_to_mock = dict()
@@ -559,6 +727,7 @@ class TestCollateSamples:
                             "name": "example",
                             "type": "example",
                             "jsonl_fpath": "resources_servers/multineedle/data/example.jsonl",
+                            "num_repeats": 1,
                             "gitlab_identifier": None,
                             "license": None,
                         }
@@ -608,7 +777,7 @@ class TestCollateSamples:
         )
 
         assert list(write_filenames_to_mock.keys()) == [
-            Path("example_metrics.jsonl"),
+            Path("example_metrics.json"),
             Path("resources_servers/multineedle/data/example_prepare.jsonl"),
             Path("example.jsonl"),
         ]
@@ -628,7 +797,7 @@ class TestCollateSamples:
                 written_data = write_mock.return_value.write.call_args_list[0].args[0]
                 return mock_open(read_data=written_data)()
 
-            if filename == Path("example_metrics.jsonl"):
+            if filename == Path("example_metrics.json"):
                 read_data = {"some extra field to cause a conflict": "lmao"}
                 return mock_open(read_data=json.dumps(read_data))()
             return original_open(filename, mode)
@@ -655,6 +824,7 @@ class TestCollateSamples:
                             "name": "example",
                             "type": "example",
                             "jsonl_fpath": "resources_servers/multineedle/data/example.jsonl",
+                            "num_repeats": 1,
                             "gitlab_identifier": None,
                             "license": None,
                         }

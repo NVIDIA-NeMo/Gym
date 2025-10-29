@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from enum import Enum
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
 
 from omegaconf import DictConfig, OmegaConf
@@ -86,10 +87,12 @@ class DatasetConfig(BaseModel):
     type: DatasetType
     jsonl_fpath: str
 
+    num_repeats: int = Field(default=1, ge=1)
     gitlab_identifier: Optional[JsonlDatasetGitlabIdentifer] = None
     license: Optional[
         Union[
             Literal["Apache 2.0"],
+            Literal["MIT"],
             Literal["Creative Commons Attribution 4.0 International"],
             Literal["Creative Commons Attribution-ShareAlike 4.0 International"],
             Literal["TBD"],
@@ -110,6 +113,18 @@ class DatasetConfig(BaseModel):
 ########################################
 
 
+class Domain(str, Enum):
+    MATH = "math"
+    CODING = "coding"
+    AGENT = "agent"
+    KNOWLEDGE = "knowledge"
+    INSTRUCTION_FOLLOWING = "instruction_following"
+    LONG_CONTEXT = "long_context"
+    SAFETY = "safety"
+    GAMES = "games"
+    OTHER = "other"
+
+
 class BaseServerConfig(BaseModel):
     host: str
     port: int
@@ -117,6 +132,18 @@ class BaseServerConfig(BaseModel):
 
 class BaseRunServerConfig(BaseServerConfig):
     entrypoint: str
+    domain: Optional[Domain] = None  # Only required for resource servers
+
+    @model_validator(mode="after")
+    def validate_domain(self) -> "BaseRunServerTypeConfig":
+        name = getattr(self, "name", None)
+        if name and self.name.endswith("_resources_server"):
+            assert self.domain is not None, "A domain is required for resource servers."
+        else:
+            if hasattr(self, "domain"):
+                del self.domain
+
+        return self
 
 
 class BaseRunServerInstanceConfig(BaseRunServerConfig):

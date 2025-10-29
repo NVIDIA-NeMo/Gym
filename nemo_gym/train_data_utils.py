@@ -14,7 +14,6 @@
 import json
 from abc import abstractmethod
 from collections import Counter, defaultdict
-from itertools import count, repeat
 from math import sqrt
 from pathlib import Path
 from shutil import copyfileobj
@@ -142,19 +141,28 @@ class AvgMinMax(Accumulator):
         self.tdigest = self.tdigest + other.tdigest
 
     def _aggregate(self: Self) -> Self:
+        def round_metric(x: float) -> float:
+            if x >= 1 or x <= -1:
+                return round(x, 2)
+            return round(x, 3)
+
         n = self.total
         mean = self.mean if n > 0 else 0.0
         stddev = sqrt(self.M2 / (n - 1)) if n > 1 else 0.0
         med = float(self.tdigest.percentile(50)) if n > 0 and self.tdigest.n > 0 else 0.0
 
-        return AvgMinMax(
-            total=self.total,
-            average=mean,
-            min=self.min if n > 0 else 0.0,
-            max=self.max if n > 0 else 0.0,
-            median=med,
-            stddev=stddev,
-        )
+        params = {
+            "total": self.total,
+            "average": mean,
+            "min": self.min if n > 0 else 0.0,
+            "max": self.max if n > 0 else 0.0,
+            "median": med,
+            "stddev": stddev,
+        }
+
+        final_params = {k: round_metric(v) if isinstance(v, float) else v for k, v in params.items()}
+
+        return AvgMinMax(**final_params)
 
 
 class StringMetrics(BaseModel):
@@ -451,20 +459,29 @@ class TrainDataProcessor(BaseModel):
 
         aggregate_other_metrics(state.other_metrics, sample_dict)
 
+    def _iter_dataset_lines(self, dataset_config: DatasetConfig):
+        repeats = dataset_config.num_repeats
+
+        # Print dataset repetition info
+        if repeats > 1:
+            print(
+                f"Dataset {dataset_config.name} repeating {repeats}x: each line repeated {repeats} times (e.g. pattern: abc -> aaaabbbbcccc)"
+            )
+
+        # Don't load everything into memory at once. Throw things away immediately.
+        with open(dataset_config.jsonl_fpath) as f:
+            for line in f:
+                for _ in range(repeats):
+                    yield line
+
     def _validate_samples_and_aggregate_metrics_single_dataset(
         self, dataset_config: DatasetConfig
     ) -> DatasetValidatorState:
         state = DatasetValidatorState()
 
         map_fn = self._validate_samples_and_aggregate_metrics_single_sample
-        with open(dataset_config.jsonl_fpath) as f:
-            # Don't load everything into memory at once. Throw things away immediately.
-            any(
-                tqdm(
-                    map(map_fn, repeat(state), count(), f),
-                    desc=f"Process {dataset_config.jsonl_fpath}",
-                )
-            )
+        for sample_idx, sample_dict_str in enumerate(self._iter_dataset_lines(dataset_config)):
+            map_fn(state, sample_idx, sample_dict_str)
 
         postprocess_other_metrics(state.metrics, state.other_metrics)
 
@@ -518,7 +535,14 @@ class TrainDataProcessor(BaseModel):
 
         if conflicting_fpaths:
             conflicting_fpaths_str = "\n- ".join([""] + conflicting_fpaths)
-            raise ValueError(f"Found conflicting aggregate metrics that need to be corrected:{conflicting_fpaths_str}")
+            target_fpaths_str = "\n- ".join(
+                [""] + [fp.replace("_conflict.json", ".json") for fp in conflicting_fpaths]
+            )
+            raise ValueError(f"""
+Found conflicting aggregate metrics that need to be corrected:{conflicting_fpaths_str}
+
+This could be due to a change in how metrics are calculated, leading to outdated metrics. Try deleting the below file(s) and rerunning data preparation:{target_fpaths_str}
+""")
 
         return dict(dataset_type_to_aggregate_metrics)
 
@@ -539,8 +563,8 @@ class TrainDataProcessor(BaseModel):
 
                 data_path = Path(d.jsonl_fpath)
                 prepare_path = data_path.with_name(f"{data_path.stem}_prepare.jsonl")
-                with open(data_path) as source, open(prepare_path, "w") as target:
-                    for line in tqdm(source, desc=f"Preparing data at {data_path}"):
+                with open(prepare_path, "w") as target:
+                    for line in self._iter_dataset_lines(d):
                         d = json.loads(line)
                         d[AGENT_REF_KEY] = AgentServerRef(type="responses_api_agents", name=c.name).model_dump()
                         target.write(f"{json.dumps(d)}\n")
@@ -568,7 +592,7 @@ class TrainDataProcessor(BaseModel):
 
             parent = Path(config.output_dirpath)
             parent.mkdir(exist_ok=True)
-            metrics_fpath = parent / f"{type}_metrics.jsonl"
+            metrics_fpath = parent / f"{type}_metrics.json"
             maybe_conflicting_metrics_fpath = self._validate_aggregate_metrics(
                 aggregate_metrics_dict=aggregate_metrics_dict,
                 metrics_fpath=metrics_fpath,
@@ -597,7 +621,14 @@ class TrainDataProcessor(BaseModel):
 
         if conflicting_fpaths:
             conflicting_fpaths_str = "\n- ".join([""] + conflicting_fpaths)
-            raise ValueError(f"Found conflicting aggregate metrics that need to be corrected:{conflicting_fpaths_str}")
+            target_fpaths_str = "\n- ".join(
+                [""] + [fp.replace("_conflict.json", ".json") for fp in conflicting_fpaths]
+            )
+            raise ValueError(f"""
+Found conflicting aggregate metrics that need to be corrected:{conflicting_fpaths_str}
+
+This could be due to a change in how metrics are calculated, leading to outdated metrics. Try deleting the below file(s) and rerunning data preparation:{target_fpaths_str}
+""")
 
         final_fpaths_str = "\n- ".join([""] + [f"{type}: {fpath}" for type, fpath in final_fpaths.items()])
         print(f"View your final data!{final_fpaths_str}")

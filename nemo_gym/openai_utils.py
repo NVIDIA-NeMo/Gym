@@ -11,7 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
+from asyncio import sleep
 from typing import (
+    Any,
     Dict,
     List,
     Literal,
@@ -21,7 +24,6 @@ from typing import (
     Union,
 )
 
-from openai import AsyncOpenAI
 from openai.types.chat import (
     ChatCompletion,
     ChatCompletionAssistantMessageParam,
@@ -75,7 +77,7 @@ from openai.types.shared_params import FunctionDefinition
 from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import TypedDict
 
-from nemo_gym.server_utils import get_global_httpx_client
+from nemo_gym.server_utils import MAX_NUM_TRIES, ClientResponse, raise_for_status, request
 
 
 ########################################
@@ -420,11 +422,67 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
 ########################################
 
 
-class NeMoGymAsyncOpenAI(AsyncOpenAI):
-    def __init__(self, **kwargs) -> None:
-        # TODO: this setup is take from https://github.com/NVIDIA/NeMo-Skills/blob/80dc78ac758c4cac81c83a43a729e7ca1280857b/nemo_skills/inference/model/base.py#L318
-        # However, there may still be a lingering issue regarding saturating at 100 max connections
-        kwargs["http_client"] = get_global_httpx_client()
-        kwargs["timeout"] = None  # Enforce no timeout
+class NeMoGymAsyncOpenAI(BaseModel):
+    """This is just a stub class that wraps around aiohttp"""
 
-        super().__init__(**kwargs)
+    base_url: str
+    api_key: str
+
+    async def _request(self, **request_kwargs: Dict) -> ClientResponse:
+        tries = 0
+        while tries < MAX_NUM_TRIES:
+            tries += 1
+            response = await request(**request_kwargs)
+            # See https://platform.openai.com/docs/guides/error-codes/api-errors
+            if response.status in (429, 500, 503):
+                content = (await response.content.read()).decode()
+                print(
+                    f"Hit a {response.status} trying to query an OpenAI endpoint (try {tries}). Sleeping 0.5s. Error message: {content}"
+                )
+                await sleep(0.5)
+                continue
+            else:
+                return response
+
+        # We've exited the loop
+        response.raise_for_status()
+
+    async def _raise_for_status(self, response: ClientResponse, request_kwargs: Dict[str, Any]) -> None:
+        if not response.ok:
+            print(f"Request kwargs: {json.dumps(request_kwargs)}")
+
+        await raise_for_status(response)
+
+    async def create_chat_completion(self, **kwargs):
+        request_kwargs = dict(
+            url=f"{self.base_url}/chat/completions",
+            json=kwargs,
+            headers={"Authorization": f"Bearer {self.api_key}"},
+        )
+        response = await self._request(method="POST", **request_kwargs)
+
+        await self._raise_for_status(response, request_kwargs)
+        return await response.json()
+
+    async def create_response(self, **kwargs):
+        request_kwargs = dict(
+            url=f"{self.base_url}/responses",
+            json=kwargs,
+            headers={"Authorization": f"Bearer {self.api_key}"},
+        )
+        response = await self._request(method="POST", **request_kwargs)
+
+        await self._raise_for_status(response, request_kwargs)
+        return await response.json()
+
+    async def create_tokenize(self, **kwargs):
+        base_url = self.base_url.removesuffix("/v1")
+        request_kwargs = dict(
+            url=f"{base_url}/tokenize",
+            json=kwargs,
+            headers={"Authorization": f"Bearer {self.api_key}"},
+        )
+        response = await self._request(method="POST", **request_kwargs)
+
+        await self._raise_for_status(response, request_kwargs)
+        return await response.json()
