@@ -366,9 +366,9 @@ def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover
     assert (
         example_metrics_fpath.exists()
     ), f"""You must run the example data validation for the example data found at {example_fpath}.
-Your command should look something like:
+Your command should look something like the following (you should update this command with your actual server config path):
 ```bash
-ng_prepare_data "+config_paths=[configs/{server_type_name}.yaml]" \\
+ng_prepare_data "+config_paths=[responses_api_models/openai_model/configs/openai_model.yaml,configs/{server_type_name}.yaml]" \\
     +output_dirpath=data/{server_type_name} \\
     +mode=example_validation
 ```

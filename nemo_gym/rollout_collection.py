@@ -77,6 +77,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
 
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
+            print(f"Querying with {config.num_samples_in_parallel} concurrent requests")
             semaphore = Semaphore(config.num_samples_in_parallel)
 
         server_client = self.setup_server_client()
