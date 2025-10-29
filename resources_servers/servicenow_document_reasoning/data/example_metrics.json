@@ -1,0 +1,68 @@
+{
+    "name": "example",
+    "type": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "jsonl_fpath": "resources_servers/servicenow_document_reasoning/data/example.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": null,
+    "license": null,
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 909.4,
+        "Min": 720.0,
+        "Max": 1083.0,
+        "Median": 902.0,
+        "Standard deviation": 135.37
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "id": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "question": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "unanswerable": {
+        "Total # non-null values": 5,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "subtype": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "ground_truth": {
+        "unique_count": 5,
+        "total_count": 5
+    }
+}

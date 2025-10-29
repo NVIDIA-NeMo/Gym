@@ -1,0 +1,61 @@
+{
+    "name": "validation",
+    "type": "validation",
+    "jsonl_fpath": "resources_servers/cohesity_netbackup_rag/data/validation.jsonl",
+    "num_repeats": 4,
+    "gitlab_identifier": {
+        "dataset_name": "cohesity_netbackup_rag",
+        "version": "0.0.1",
+        "artifact_fpath": "validation.jsonl"
+    },
+    "license": "Apache 2.0",
+    "Number of examples": 108,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 108,
+        "Average": 1044.07,
+        "Min": 500.0,
+        "Max": 2611.0,
+        "Median": 857.0,
+        "Standard deviation": 474.58
+    },
+    "Number of turns": {
+        "Total # non-null values": 108,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "id": {
+        "unique_count": 27,
+        "total_count": 108
+    },
+    "question": {
+        "unique_count": 27,
+        "total_count": 108
+    },
+    "reference_answer": {
+        "unique_count": 27,
+        "total_count": 108
+    },
+    "context": {
+        "unique_count": 27,
+        "total_count": 108
+    }
+}
