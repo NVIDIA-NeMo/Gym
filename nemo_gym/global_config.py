@@ -274,11 +274,22 @@ def get_global_config_dict(
 
         return global_config_dict
 
+    set_global_config_dict(
+        global_config_dict_parser_config=global_config_dict_parser_config,
+        global_config_dict_parser_cls=global_config_dict_parser_cls,
+    )
+
+    return _GLOBAL_CONFIG_DICT
+
+
+def set_global_config_dict(
+    global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
+    global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,
+) -> None:
+    global _GLOBAL_CONFIG_DICT
     global_config_dict = global_config_dict_parser_cls().parse(global_config_dict_parser_config)
 
     _GLOBAL_CONFIG_DICT = global_config_dict
-
-    return global_config_dict
 
 
 def get_first_server_config_dict(global_config_dict: DictConfig, top_level_path: str) -> DictConfig:
