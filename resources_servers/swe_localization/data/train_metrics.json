@@ -1,0 +1,97 @@
+{
+    "name": "train",
+    "type": "train",
+    "jsonl_fpath": "resources_servers/swe_localization/data/train.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": {
+        "dataset_name": "mini_swe_agent",
+        "version": "0.0.1",
+        "artifact_fpath": "train.jsonl"
+    },
+    "license": "MIT",
+    "Number of examples": 2401,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 2401,
+        "Average": 2.0,
+        "Min": 2.0,
+        "Max": 2.0,
+        "Median": 2.0,
+        "Standard deviation": 0.0
+    },
+    "Number of turns": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "instance_id": {
+        "unique_count": 2401,
+        "total_count": 2401
+    },
+    "hints_text": {
+        "unique_count": 1489,
+        "total_count": 2401
+    },
+    "patch": {
+        "unique_count": 2401,
+        "total_count": 2401
+    },
+    "test_patch": {
+        "unique_count": 2400,
+        "total_count": 2401
+    },
+    "created_at": {
+        "unique_count": 2401,
+        "total_count": 2401
+    },
+    "problem_statement": {
+        "unique_count": 2374,
+        "total_count": 2401
+    },
+    "repo": {
+        "unique_count": 11,
+        "total_count": 2401
+    },
+    "base_commit": {
+        "unique_count": 2132,
+        "total_count": 2401
+    },
+    "version": {
+        "unique_count": 160,
+        "total_count": 2401
+    },
+    "PASS_TO_PASS": {
+        "unique_count": 303293,
+        "total_count": 1780305
+    },
+    "FAIL_TO_PASS": {
+        "unique_count": 22310,
+        "total_count": 23840
+    },
+    "subset": {
+        "unique_count": 1,
+        "total_count": 2401
+    },
+    "split": {
+        "unique_count": 1,
+        "total_count": 2401
+    }
+}

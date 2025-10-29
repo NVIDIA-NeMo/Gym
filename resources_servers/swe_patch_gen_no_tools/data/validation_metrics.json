@@ -1,0 +1,105 @@
+{
+    "name": "validation",
+    "type": "validation",
+    "jsonl_fpath": "resources_servers/swe_localization/data/validation.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": {
+        "dataset_name": "mini_swe_agent",
+        "version": "0.0.1",
+        "artifact_fpath": "validation.jsonl"
+    },
+    "license": "MIT",
+    "Number of examples": 500,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 500,
+        "Average": 2.0,
+        "Min": 2.0,
+        "Max": 2.0,
+        "Median": 2.0,
+        "Standard deviation": 0.0
+    },
+    "Number of turns": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "repo": {
+        "unique_count": 12,
+        "total_count": 500
+    },
+    "instance_id": {
+        "unique_count": 500,
+        "total_count": 500
+    },
+    "base_commit": {
+        "unique_count": 499,
+        "total_count": 500
+    },
+    "patch": {
+        "unique_count": 500,
+        "total_count": 500
+    },
+    "test_patch": {
+        "unique_count": 500,
+        "total_count": 500
+    },
+    "problem_statement": {
+        "unique_count": 500,
+        "total_count": 500
+    },
+    "hints_text": {
+        "unique_count": 338,
+        "total_count": 500
+    },
+    "created_at": {
+        "unique_count": 500,
+        "total_count": 500
+    },
+    "version": {
+        "unique_count": 53,
+        "total_count": 500
+    },
+    "FAIL_TO_PASS": {
+        "unique_count": 494,
+        "total_count": 500
+    },
+    "PASS_TO_PASS": {
+        "unique_count": 489,
+        "total_count": 500
+    },
+    "environment_setup_commit": {
+        "unique_count": 80,
+        "total_count": 500
+    },
+    "difficulty": {
+        "unique_count": 4,
+        "total_count": 500
+    },
+    "subset": {
+        "unique_count": 1,
+        "total_count": 500
+    },
+    "split": {
+        "unique_count": 1,
+        "total_count": 500
+    }
+}

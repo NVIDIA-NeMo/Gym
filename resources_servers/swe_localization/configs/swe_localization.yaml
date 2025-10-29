@@ -1,0 +1,43 @@
+swe_localization_resources_server:
+  resources_servers:
+    swe_localization:
+      entrypoint: app.py
+      domain: coding
+swe_localization_simple_agent:
+  responses_api_agents:
+    swe_localization_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: swe_localization_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/swe_localization/data/train.jsonl
+        gitlab_identifier:
+          dataset_name: mini_swe_agent
+          version: 0.0.1
+          artifact_fpath: train.jsonl
+        license: MIT
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/swe_localization/data/validation.jsonl
+        gitlab_identifier:
+          dataset_name: mini_swe_agent
+          version: 0.0.1
+          artifact_fpath: validation.jsonl
+        license: MIT
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/swe_localization/data/example.jsonl
+      concurrency: 16
+      env: singularity
+      cache_dir_template: "/lustre/fsw/portfolios/llmservice/users/igitman/images/swe-bench/xingyaoww_sweb.eval.x86_64.{instance_id}.sif"
+      step_timeout: 600
+      eval_timeout: 1800
+      skip_if_exists: False
+      step_limit: 150
+      collapse_limit: 3
