@@ -13,13 +13,16 @@
 # limitations under the License.
 from os import getenv
 from pathlib import Path
+from platform import python_version
 from socket import socket
 from typing import ClassVar, List, Optional, Tuple, Type
 
 import hydra
 import rich
 from omegaconf import DictConfig, OmegaConf, open_dict
+from openai import __version__ as openai_version
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
+from ray import __version__ as ray_version
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.config_types import (
@@ -39,6 +42,7 @@ DEFAULT_HOST_KEY_NAME = "default_host"
 HEAD_SERVER_KEY_NAME = "head_server"
 DISALLOWED_PORTS_KEY_NAME = "disallowed_ports"
 HEAD_SERVER_DEPS_KEY_NAME = "head_server_deps"
+PYTHON_VERSION_KEY_NAME = "python_version"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -46,6 +50,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     HEAD_SERVER_KEY_NAME,
     DISALLOWED_PORTS_KEY_NAME,
     HEAD_SERVER_DEPS_KEY_NAME,
+    PYTHON_VERSION_KEY_NAME,
 ]
 
 POLICY_BASE_URL_KEY_NAME = "policy_base_url"
@@ -234,17 +239,27 @@ class GlobalConfigDictParser(BaseModel):
             server_instance_configs, default_host, initial_disallowed_ports
         )
 
-        # Populate head server defaults
-        if not global_config_dict.get(HEAD_SERVER_KEY_NAME):
-            with open_dict(global_config_dict):
+        with open_dict(global_config_dict):
+            # Populate head server defaults
+            if not global_config_dict.get(HEAD_SERVER_KEY_NAME):
                 global_config_dict[HEAD_SERVER_KEY_NAME] = {
                     "host": default_host,
                     "port": DEFAULT_HEAD_SERVER_PORT,
                 }
 
-        # Store final list of disallowed ports.
-        with open_dict(global_config_dict):
+            # Store final list of disallowed ports.
             global_config_dict[DISALLOWED_PORTS_KEY_NAME] = disallowed_ports
+
+            # Constrain sensitive package versions
+            global_config_dict[HEAD_SERVER_DEPS_KEY_NAME] = [
+                # The ray version is very sensitive. The children ray versions must exactly match those of the parent ray.
+                f"ray=={ray_version}",
+                # OpenAI version is also sensitive since it changes so often and may introduce subtle incompatibilities.
+                f"openai=={openai_version}",
+            ]
+
+            # Constrain python version since ray is sensitive to this.
+            global_config_dict[PYTHON_VERSION_KEY_NAME] = python_version()
 
         return global_config_dict
 
@@ -318,11 +333,22 @@ def get_global_config_dict(
 
         return global_config_dict
 
+    set_global_config_dict(
+        global_config_dict_parser_config=global_config_dict_parser_config,
+        global_config_dict_parser_cls=global_config_dict_parser_cls,
+    )
+
+    return _GLOBAL_CONFIG_DICT
+
+
+def set_global_config_dict(
+    global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
+    global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,
+) -> None:
+    global _GLOBAL_CONFIG_DICT
     global_config_dict = global_config_dict_parser_cls().parse(global_config_dict_parser_config)
 
     _GLOBAL_CONFIG_DICT = global_config_dict
-
-    return global_config_dict
 
 
 def get_first_server_config_dict(global_config_dict: DictConfig, top_level_path: str) -> DictConfig:
