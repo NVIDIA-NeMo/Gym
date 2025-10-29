@@ -64,6 +64,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     return_token_id_information: bool
 
     uses_reasoning_parser: bool
+    replace_developer_role_with_system: bool = False
 
     def model_post_init(self, context):
         if isinstance(self.base_url, str):
@@ -136,6 +137,11 @@ class VLLMModel(SimpleResponsesAPIModel):
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
+        if self.config.replace_developer_role_with_system:
+            for message in body.messages:
+                if message["role"] == "developer":
+                    message["role"] = "system"
+
         body_dict = body.model_dump(exclude_unset=True)
         body_dict["model"] = self.config.model
 
@@ -211,7 +217,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 return NeMoGymChatCompletion(
                     id="chtcmpl-123",
                     object="chat.completion",
-                    created=time(),
+                    created=int(time()),
                     model=self.config.model,
                     choices=[
                         NeMoGymChoice(
