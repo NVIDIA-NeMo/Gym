@@ -61,6 +61,7 @@ class MiniSWEAgentConfig(BaseResponsesAPIAgentConfig):
     skip_if_exists: bool = False
     step_limit: int = 250
     collapse_limit: int = 3
+    partial_reward: bool = False
 
 
 class MiniSWEAgentRunRequest(BaseRunRequest):
@@ -145,7 +146,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
         )
         return TestRunner().run, {"cfg": cfg}
 
-    def calculate_reward(self, instance_id: str, result: dict[str, Any]) -> float:
+    def calculate_reward(self, instance_id: str, result: dict[str, Any], partial_reward: bool = False) -> float:
         return 1.0 if MiniSWEAgentUtils.is_resolved(instance_id, result["eval_report"]) else 0.0
 
     def get_utils_class(self):
@@ -231,7 +232,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 result = result[instance_id]
                 messages = result["messages"]
                 responses = result["responses"]
-                reward = self.calculate_reward(instance_id, result)
+                reward = self.calculate_reward(instance_id, result, self.config.partial_reward)
 
             except Exception as e:
                 print(f"Error running swegym: {e}")

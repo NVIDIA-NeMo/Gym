@@ -92,5 +92,37 @@ class SWEPatchGenNoToolsAgent(MiniSWEAgent):
         return PatchGenerationRunner().run, {"cfg": cfg}
 
 
+    #TODO: refactor this to use the MiniSWEAgentUtils class
+    def get_reward(self,instance_id: str, eval_report: dict[str, Any], partial_reward: bool = False) -> float:
+        try:
+            if not eval_report:
+                return 0.0
+            eval_report = eval_report["eval_report"][instance_id]
+            resolved = eval_report["resolved"]
+            if not eval_report.get("tests_status"):
+                return 0.0
+
+            tests_status = eval_report["tests_status"]
+            f2f = tests_status.get("FAIL_TO_PASS", {})
+            p2p = tests_status.get("PASS_TO_PASS", {})
+            f2f_success = len(f2f.get("success", []))
+            f2f_failure = len(f2f.get("failure", []))
+            p2p_success = len(p2p.get("success", []))
+            p2p_failure = len(p2p.get("failure", []))
+
+            if f2f_success == 0 and f2f_failure == 0 and p2p_success == 0 and p2p_failure == 0:
+                return 0.0
+
+            if partial_reward:
+                return 0.5 if p2p_success > 0 and p2p_failure == 0 else 0.0
+            return 1.0 if resolved else 0.0
+        except Exception as e:
+            print(f"Error in get_reward: {e}")
+            return 0.0
+
+    def calculate_reward(self, instance_id: str, result: dict[str, Any], partial_reward: bool = False) -> float:
+        return self.get_reward(instance_id, result["eval_report"], partial_reward)
+
+
 if __name__ == "__main__":
     SWEPatchGenNoToolsAgent.run_webserver()
