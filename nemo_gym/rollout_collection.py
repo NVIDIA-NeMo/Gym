@@ -57,6 +57,10 @@ class RolloutCollectionConfig(BaseNeMoGymCLIConfig):
         default_factory=dict,
         description="Overrides for the responses_create_params e.g. temperature, max_output_tokens, etc.",
     )
+    remove_reward: Optional[bool] = Field(
+        default=None,
+        description="todo",
+    )
     enable_cache: Optional[bool] = Field(
         default=None,
         description="Enable caching for robust rollout collection.",
@@ -138,6 +142,8 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
                 else:
                     await raise_for_status(response)
                 result = await response.json()
+                if config.remove_reward:
+                    result.pop("reward", None)
                 if config.enable_cache:
                     assert "_rollout_cache_key" not in result
                     result["_rollout_cache_key"] = {
