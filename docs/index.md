@@ -8,6 +8,7 @@
 :maxdepth: 2
 
 Overview <about/index>
+Ecosystem <about/ecosystem>
 Key Features <about/features>
 Concepts <about/concepts/index>
 Release Notes <about/release-notes/index>
