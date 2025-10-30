@@ -1,0 +1,26 @@
+grl_sokoban_resources_server:
+  resources_servers:
+    grl_sokoban:
+      entrypoint: app.py
+      domain: games
+grl_sokoban_game_agent:
+  responses_api_agents:
+    game_agent:
+      entrypoint: app.py
+      max_steps: 10
+      resources_server:
+        type: resources_servers
+        name: grl_sokoban_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/grl_sokoban/data/example.jsonl
+        num_repeats: 1
+        gitlab_identifier:
+          dataset_name: grl_sokoban
+          version: 0.0.1
+          artifact_fpath: example.jsonl
+        license: Apache 2.0

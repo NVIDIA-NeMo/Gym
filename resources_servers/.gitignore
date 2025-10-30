@@ -6,3 +6,5 @@
 */data/*train_prepare.jsonl
 */data/*validation_prepare.jsonl
 */data/*example_prepare.jsonl
+*/data/*rollouts*.jsonl
+*/data/**/rollouts*.jsonl
