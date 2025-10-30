@@ -220,10 +220,10 @@ class GlobalConfigDictParser(BaseModel):
 
             rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]\n")
 
-            error_on_almost_servers = global_config_dict.get("error_on_almost_servers", False)
+            error_on_almost_servers = global_config_dict.get("error_on_almost_servers", True)
             if error_on_almost_servers:
                 error_msg = f"Found {len(almost_servers)} almost-server(s) with validation errors. "
-                error_msg += "Fix the issues above or set error_on_almost_servers=false to continue."
+                error_msg += "Fix the issues above or set error_on_almost_servers=false to bypass this error."
                 raise ValueError(error_msg)
 
         server_instance_configs = self.filter_for_server_instance_configs(global_config_dict)
