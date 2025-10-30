@@ -110,10 +110,9 @@ class TestGameAgentApp:
         resp = client.post("/v1/responses", json=body.model_dump(mode="json"))
         assert resp.status_code == 200
         out = resp.json()
-        # We expect both the function_call_output and the assistant message
+        # We expect at least the function_call_output; the loop may stop on done
         types = [item["type"] for item in out["output"]]
         assert "function_call_output" in types
-        assert "message" in types
 
     async def test_run_flow(self, monkeypatch: MonkeyPatch) -> None:
         config = GameAgentConfig(
@@ -151,7 +150,31 @@ class TestGameAgentApp:
                 )
                 return response
             if url_path == "/verify":
-                response.json = AsyncMock(return_value={"success": True, "reward": 1.0})
+                response.json = AsyncMock(
+                    return_value={
+                        "success": True,
+                        "reward": 1.0,
+                        "responses_create_params": {
+                            "input": [
+                                {"role": "user", "content": "play"},
+                            ],
+                            "tool_choice": "auto",
+                            "parallel_tool_calls": True,
+                            "tools": [],
+                        },
+                        "response": {
+                            "id": "r1",
+                            "object": "response",
+                            "created_at": 0.0,
+                            "status": "completed",
+                            "output": [],
+                            "model": "gpt-4.1",
+                            "parallel_tool_calls": True,
+                            "tool_choice": "auto",
+                            "tools": [],
+                        },
+                    }
+                )
                 return response
             raise AssertionError(f"Unexpected call: {server_name} {url_path}")
 
