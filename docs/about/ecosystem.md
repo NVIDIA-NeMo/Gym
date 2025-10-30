@@ -8,9 +8,11 @@ infrastructure to generate agent interaction data and curated environments with
 verification logic, making it practical to produce large-scale, high-quality
 data for RL workflows using the training framework of your choice.
 
+:::{tip}
 For details on NeMo Gym capabilities, refer to the
-[Overview](index.md) and [Key Features](features.md). For internal design and
-boundaries, see [Architecture](architecture.md).
+{ref}`Overview <about-overview>` and {ref}`Key Features <features>`. For internal design and
+boundaries, see {ref}`Architecture <architecture>`.
+:::
 
 ---
 

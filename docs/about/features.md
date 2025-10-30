@@ -1,7 +1,7 @@
 ---
 orphan: true
 ---
-
+(features)=
 # Key Features of NVIDIA NeMo Gym
 
 This page provides a comprehensive list of NeMo Gym's capabilities. For conceptual understanding of how these features work together, see the {doc}`Overview <index>`.
