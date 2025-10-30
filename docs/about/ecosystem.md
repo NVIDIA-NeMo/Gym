@@ -11,7 +11,7 @@ data for RL workflows using the training framework of your choice.
 :::{tip}
 For details on NeMo Gym capabilities, refer to the
 {ref}`Overview <about-overview>` and {ref}`Key Features <features>`. For internal design and
-boundaries, see {ref}`Architecture <architecture>`.
+boundaries, refer to {ref}`Architecture <architecture>`.
 :::
 
 ---
