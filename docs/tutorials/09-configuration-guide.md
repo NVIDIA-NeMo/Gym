@@ -273,7 +273,7 @@ ng_run "+config_paths=[config.yaml]" +error_on_almost_servers=false
 **When disabled** (`error_on_almost_servers=false`):
 - All configuration issues are still detected and warnings are printed
 - NeMo Gym continues execution despite the invalid configurations
-- Invalid servers are skipped, but valid servers will start
+- Invalid servers are skipped, and valid servers will attempt to start
 
 ## Best Practices
 
