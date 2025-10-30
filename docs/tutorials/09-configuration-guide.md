@@ -230,16 +230,17 @@ OSError: [Errno 48] Address already in use
 
 ### Problem: Almost-Server Detected (Configuration Validation)
 Example:
-```yaml
-⚠️  Configuration Warnings: Almost-Servers Detected
+```bash
+═══════════════════════════════════════════════════
+Configuration Warnings: Almost-Servers Detected
 ═══════════════════════════════════════════════════
 
-⚠️  Almost-Server: 'multineedle_simple_agent'
-   This configuration looks like a valid server but failed validation:
+  Almost-Server Detected: 'example_simple_agent'
+  This server configuration failed validation:
 
-  - datasets -> 0 -> license: Must be one of: 'Apache 2.0', 'MIT', 'Creative Commons Attribution 4.0 International', 'Creative Commons Attribution-ShareAlike 4.0 International', 'TBD'
+- ResourcesServerInstanceConfig -> resources_servers -> example_server -> domain: Input should be 'math', 'coding', 'agent', 'knowledge', 'instruction_following', 'long_context', 'safety', 'games', 'e2e' or 'other'
 
-   This server will NOT be started.
+  This server will NOT be started.
 ```
 **What this means**: Your server configuration has the correct structure (entrypoint, server type, etc.) but contains invalid values that prevent it from starting.
 
