@@ -74,7 +74,7 @@ Three-tier configuration with Hydra integration enables environment-specific set
 
 ## Curated Resource Servers
 
-NeMo Gym includes 12+ production-ready resource servers across eight domains:
+NeMo Gym includes 12 production-ready resource servers across eight domains:
 
 ### Mathematics
 
@@ -163,7 +163,7 @@ Version, share, and prepare training datasets with GitLab integration and licens
 
 Comprehensive CLI utilities, testing framework, and debugging tools accelerate development workflows.
 
-**Comprehensive CLI** — 10+ command-line utilities for common workflows:
+**Comprehensive CLI** — 8 command-line utilities for common workflows:
 
 * `ng_run` - Launch server infrastructure
 * `ng_test` - Run server-specific tests
@@ -192,20 +192,20 @@ Comprehensive CLI utilities, testing framework, and debugging tools accelerate d
 
 ## RL Framework Integration
 
-Export training data in formats compatible with VeRL, NeMo-RL, OpenRLHF, and custom frameworks.
+NeMo Gym passes trajectory data to popular RL training frameworks for backpropagation and model weight updates.
 
 ```{list-table}
 :header-rows: 0
 :widths: 30 70
 
-* - **VeRL Support**
-  - Verified integration with VeRL (Versatile Reinforcement Learning). Export rollouts in VeRL-compatible format for PPO, DPO, and other RL algorithms.
-* - **NeMo-RL Compatible**
-  - Native integration with NVIDIA's NeMo-RL framework. Designed together for seamless data exchange and training orchestration.
-* - **OpenRLHF Support**
-  - Export formats compatible with OpenRLHF framework. Use same environments across different RL training implementations.
+* - **VeRL Compatible**
+  - Outputs trajectory data that VeRL (Versatile Reinforcement Learning) consumes for PPO, DPO, and other RL algorithms. Users commonly train with VeRL.
+* - **NeMo-RL Integration**
+  - Designed as part of the NeMo Framework ecosystem. Passes data directly to NeMo-RL for training orchestration and model updates.
+* - **OpenRLHF Compatible**
+  - Trajectory format works with OpenRLHF framework. Use same environments across different RL training implementations.
 * - **Framework-Agnostic Data**
-  - Core rollout format is JSON-based and framework-independent. Write converters for any RL framework without modifying environments.
+  - Core rollout format is JSON-based and framework-independent. NeMo Gym handles collection and verification; RL frameworks handle training.
 ```
 
 ---
@@ -228,8 +228,6 @@ Build custom environments with base classes, templates, and plugin architecture 
   - Implement domain-specific reward functions by subclassing `BaseResourcesServer` and overriding the `verify()` method.
 * - **Bring Your Own Tools**
   - Add custom tools by defining OpenAI function schemas. NeMo Gym handles orchestration while you focus on tool implementation.
-* - **MCP Client Capability**
-  - Connect to Model Context Protocol (MCP) servers as tool providers. Train agents on tools provided by external MCP-compatible services.
 ```
 
 ---

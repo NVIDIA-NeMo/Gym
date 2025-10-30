@@ -1,12 +1,7 @@
 (nemo-gym-ecosystem)=
 # NeMo Gym in the NVIDIA Ecosystem
 
-NeMo Gym standardizes scalable rollout collection for LLM and VLM training with
-unified interfaces to heterogeneous reinforcement learning (RL) environments and
-integrations with popular RL training frameworks. It provides the
-infrastructure to generate agent interaction data and curated environments with
-verification logic, making it practical to produce large-scale, high-quality
-data for RL workflows using the training framework of your choice.
+NeMo Gym is a component of the [NVIDIA NeMo Framework](https://github.com/NVIDIA-NeMo), an end-to-end platform for building and training generative AI models. Within the NeMo Framework suite, NeMo Gym provides scalable rollout collection and RL environment infrastructure for model training.
 
 :::{tip}
 For details on NeMo Gym capabilities, refer to the
@@ -16,28 +11,43 @@ boundaries, refer to {ref}`Architecture <architecture>`.
 
 ---
 
-## Understanding the NVIDIA NeMo Agentic Product Family
+## NeMo Gym Within the NeMo Framework
 
-Two complementary offerings serve adjacent but distinct needs in agentic AI
-workflows.
+The [NeMo Framework](https://github.com/NVIDIA-NeMo) is NVIDIA's GPU-accelerated platform for training large language models (LLMs), multimodal models, and speech models. It includes multiple specialized components:
 
-### NeMo Gym
+* **NeMo Megatron-Bridge**: Pretraining and fine-tuning with Megatron-Core
+* **NeMo AutoModel**: PyTorch native training for Hugging Face models
+* **NeMo RL**: Scalable reinforcement learning toolkit
+* **NeMo Gym**: RL environment infrastructure and rollout collection (this project)
+* **NeMo Curator**: Data preprocessing and curation
+* **NeMo Evaluator**: Model evaluation and benchmarking
+* **NeMo Guardrails**: Programmable safety guardrails
+* And more...
 
-A toolkit focused on scalable rollout collection and integration with RL
-training frameworks.
+**NeMo Gym's Role**: Within this ecosystem, Gym focuses specifically on standardizing scalable rollout collection for RL training. It provides unified interfaces to heterogeneous RL environments and curated resource servers with verification logic, making it practical to generate large-scale, high-quality training data that feeds into NeMo RL and other training frameworks.
+
+---
+
+## Comparing NeMo Gym with NeMo Agent Toolkit
+
+While NeMo Gym is part of the NeMo Framework for **training**, the [NeMo Agent Toolkit](https://github.com/NVIDIA/NeMo-Agent-Toolkit) is a separate open-source framework focused on **inference** and building production agent workflows.
+
+### NeMo Gym (Training-Focused)
+
+Part of the NeMo Framework. Provides RL environments and rollout collection for model training.
 
 **Best for**: Teams training models with RL and needing high-throughput data
 collection with verification.
 
 **Key characteristics**:
 * Unified interfaces to heterogeneous RL environments
-* Integrations with multiple RL training frameworks
+* Passes trajectory data to RL training frameworks
 * Curated environments with verification logic for reward signals
 * Parallel and asynchronous rollout collection for scale
 
 ---
 
-### NeMo Agent Toolkit (Open Source)
+### NeMo Agent Toolkit (Inference-Focused)
 
 An open-source framework that is interoperable with other ecosystems and
 supports end-to-end profiling and optimization of complex agentic systems.
@@ -53,10 +63,9 @@ needing observability, profiling, and evaluation.
 ---
 
 (ecosystem-comparison)=
-## Choosing the Right Option
+## Choosing Between NeMo Gym and NeMo Agent Toolkit
 
-The right choice depends on whether you are optimizing agentic inference
-workflows, training models with RL, or combining both.
+The right choice depends on whether you are training models with RL (use NeMo Gym within NeMo Framework) or building production agent workflows (use NeMo Agent Toolkit).
 
 ### Feature Comparison
 
@@ -101,7 +110,7 @@ workflows, training models with RL, or combining both.
   - Interfaces to inference-only LLM endpoints
   - Bridge training and inference paths
 * - **Framework Connections**
-  - RL frameworks (e.g., VeRL, NeMo RL, OpenRLHF)
+  - Passes trajectory data to RL frameworks (VeRL, NeMo-RL, OpenRLHF)
   - Agent frameworks (e.g., LangChain, LlamaIndex, LangGraph)
   - Connect agent and RL frameworks through shared data
 * - **UI**
@@ -109,9 +118,9 @@ workflows, training models with RL, or combining both.
   - Available
   - Use NAT UI while training with Gym
 * - **MCP (Model Context Protocol)**
-  - Acts as a client to train on tools from MCP servers
+  - Planned: MCP client support for training on external tools
   - Acts as client or server to use or publish tools
-  - Combine to train on MCP-powered tool use
+  - Future: Combine to train on MCP-powered tool use
 ```
 
 ### Decision Guide
@@ -175,7 +184,9 @@ Applies to users of LangChain, LangGraph, CrewAI, or similar frameworks.
 
 ## Related NVIDIA Components
 
-* **VeRL**, **NeMo RL**, **OpenRLHF**: RL frameworks commonly used with Gym
-* **NVIDIA NIM**: Inference microservices that can be paired with agent
-  workflows and training pipelines
+* **[NeMo Framework](https://github.com/NVIDIA-NeMo)**: The parent ecosystem containing NeMo Gym, NeMo RL, NeMo Curator, and other training components
+* **[NeMo Agent Toolkit](https://github.com/NVIDIA/NeMo-Agent-Toolkit)**: Separate framework for building production agent workflows with observability and profiling
+* **NeMo-RL**: Training framework within NeMo Framework that consumes trajectory data from NeMo Gym
+* **VeRL**, **OpenRLHF**: External RL training frameworks compatible with NeMo Gym data formats
+* **NVIDIA NIM**: Inference microservices that can be paired with agent workflows and training pipelines
 
