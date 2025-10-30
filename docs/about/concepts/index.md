@@ -3,40 +3,58 @@ orphan: true
 ---
 
 (concepts-index)=
-#  Understanding Concepts for {{product_name}}
+# Understanding Concepts for {{product_name}}
 
-<!-- intro about concepts that need to be understood to use nemo gym. what is unique to nemo gyms mental model that we may want to highlight at a high level here? -->
+NeMo Gym concepts explain the mental model behind building reliable agent systems: how services collaborate, how teams capture interaction data, and how verification signals drive learning. Use this page as a compass to decide which explanation to read next.
 
-:::{tip}
-New to Reinforcement Learning (RL) in general? Check out our RL Terms glossary.
-:::
+::::{tip}
+Need a refresher on reinforcement learning language? Refer to the {doc}`../../tutorials/00-terminology` glossary before diving in.
+::::
 
 ---
 
-## [header to introduce concept pages]
+## How to Navigate This Section
 
-::::{grid} 1 2 2 2
+- Read these explanations when your team needs shared vocabulary for configuring Models, Resources, and Agents together.
+- Pair each concept page with its related tutorials when you are ready to practice tasks such as assembling interaction datasets or scoring agent behavior.
+- Return here whenever you add a new teammate so that they can orient and choose the depth that fits their role.
+
+---
+
+## Concept Highlights
+
+Each explainer below covers one foundational idea and links to deeper material.
+
+::::{grid} 1 1 1 2
 :gutter: 1 1 1 2
 
 :::{grid-item-card} {octicon}`file-code;1.5em;sd-mr-1` Core Abstractions
 :link: concepts-core-abstractions
 :link-type: ref
-Understand ...
+Understand how Models, Resources, and Agents remain decoupled yet coordinated as independent HTTP services, including which endpoints each abstraction exposes.
 :::
 
 :::{grid-item-card} {octicon}`file-code;1.5em;sd-mr-1` Rollout Collection Fundamentals
 :link: concepts-rc-fundamentals
 :link-type: ref
-Understand ...
+Learn why complete interaction transcripts matter for reinforcement learning, how they enable evaluation, and how collection orchestrators stream results to JSONL datasets.
 :::
 
 :::{grid-item-card} {octicon}`file-code;1.5em;sd-mr-1` Verifying Agent Results
 :link: concepts-verifying-results
 :link-type: ref
-Understand ...
+Explore how resource servers score agent outputs with `verify()` implementations that transform correctness, quality, and efficiency checks into reward signals.
 :::
 
 ::::
+
+---
+
+## Continue Learning
+
+- Reinforce the architecture concepts by stepping through {doc}`../../tutorials/03-your-first-agent` before exploring large-scale collection.
+- Apply the verification patterns in practice with the {doc}`../../tutorials/04-verifying-results` tutorial, then move on to high-volume data generation in {doc}`../../tutorials/05-rollout-collection`.
+- Catalog the services you plan to deploy by referencing {doc}`../features` once the core concepts are familiar.
 
 ---
 
@@ -45,6 +63,6 @@ Understand ...
 :maxdepth: 1
 
 Core Abstractions <core-abstractions>
-Rollout Collection Fundamentals<rollout-collection-fundamentals>
+Rollout Collection Fundamentals <rollout-collection-fundamentals>
 Verifying Agent Results <verifying-agent-results>
 ```
