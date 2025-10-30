@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
+from tqdm import tqdm as sync_tqdm
 
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig
 from nemo_gym.server_utils import (
@@ -104,7 +105,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
             print("Reading cached rollouts...", flush=True)
             try:
                 with open(config.output_jsonl_fpath, "r") as f:
-                    for line in f:
+                    for line in sync_tqdm(f, total=len(rows)):
                         item = json.loads(line)
                         assert "_rollout_cache_key" in item
                         item_cache_key = item["_rollout_cache_key"]
@@ -113,7 +114,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
                         cache_key_set.add((row_idx, rep_idx))
             except OSError:
                 pass
-            print(f"Found {len(cache_key_set)} cached.", flush=True)
+            print(f"Found {len(cache_key_set)} cached rollouts.", flush=True)
 
         print("Starting rollout collection...", flush=True)
 
