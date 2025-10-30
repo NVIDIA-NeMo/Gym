@@ -28,7 +28,7 @@ from nemo_gym.base_resources_server import (
 class TranslationCometResourcesServerConfig(BaseResourcesServerConfig):
     use_reference: bool = True  # Must match model set in comet_model_name
     comet_model_name: str = "Unbabel/wmt22-comet-da"
-    comet_gpu_count: int = 0  # CPU only
+    comet_gpu_count: int = None  # CPU only
     comet_gpu_devices: Union[List[int], str, int] = "auto"
     model_cache_dir: Optional[str] = None
 
