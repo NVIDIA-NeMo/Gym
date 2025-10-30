@@ -27,6 +27,7 @@ from traceback import print_exc
 from typing import Literal, Optional, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
+import ray
 import requests
 import uvicorn
 import yappi
@@ -34,7 +35,7 @@ from aiohttp import ClientResponse, ClientSession, ClientTimeout, DummyCookieJar
 from aiohttp.client import _RequestOptions
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import BaseModel, ConfigDict
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
@@ -309,6 +310,35 @@ class UvicornLoggingConfig(BaseModel):
     uvicorn_logging_show_200_ok: bool = False
 
 
+def initialize_ray() -> None:
+    """
+    Initialize ray cluster in a process.
+    We store the Ray address in the global config dict so that child processes can connect to it.
+    This avoids the need to start a new Ray cluster in each child process.
+    Note: This function will modify the global config dict - update `ray_head_node_address`
+    """
+
+    if ray.is_initialized():
+        print("Ray already initialized")
+        return
+
+    global_config_dict = get_global_config_dict()
+    ray_head_node_address = global_config_dict.get("ray_head_node_address")
+    ray_init_kwargs = dict(ignore_reinit_error=True)
+
+    if ray_head_node_address:
+        print(f"Connecting to Ray cluster at specified address: {ray_head_node_address}")
+        ray_init_kwargs["address"] = ray_head_node_address
+    else:
+        print("Starting Ray cluster...")
+
+    ray.init(**ray_init_kwargs)
+
+    if not ray_head_node_address:
+        with open_dict(global_config_dict):
+            global_config_dict["ray_head_node_address"] = ray.get_runtime_context().gcs_address
+
+
 class SimpleServer(BaseServer):
     server_client: ServerClient
 
@@ -433,6 +463,8 @@ class SimpleServer(BaseServer):
     @classmethod
     def run_webserver(cls) -> None:  # pragma: no cover
         global_config_dict = get_global_config_dict()
+
+        initialize_ray()
 
         server_config = cls.load_config_from_global_config()
         server_client = ServerClient(
