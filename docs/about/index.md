@@ -7,7 +7,7 @@ orphan: true
 
 NeMo Gym standardizes scalable rollout collection for LLM and VLM training. It provides the infrastructure to systematically generate agent interaction data and a curated collection of high-quality RL environments, making it easy to produce large-scale training data for reinforcement learning workflows using the framework of your choice.
 
-By offering unified interfaces to heterogeneous RL environments and integrations with popular RL training frameworks (VeRL, NeMo-RL, OpenRLHF), NeMo Gym lets you focus on research and model improvement rather than infrastructure and orchestration.
+By offering unified interfaces to heterogeneous RL environments and seamless data handoff to popular RL training frameworks (VeRL, NeMo-RL, OpenRLHF), NeMo Gym lets you focus on research and model improvement rather than infrastructure and orchestration.
 
 ---
 
@@ -99,7 +99,7 @@ Systematically evaluate agent performance across tasks. Use curated datasets and
 Build your own resource servers with domain-specific tools and verification logic. NeMo Gym's base classes and templates make it straightforward to add new environments that integrate seamlessly with the rest of the system.
 
 **Multi-Framework Experiments**  
-Compare different RL algorithms and training frameworks using the same environment and data. Swap VeRL for NeMo-RL or OpenRLHF by changing configuration without rewriting environment code.
+Compare different RL algorithms and training frameworks using the same environment and data. NeMo Gym collects trajectories and passes data to your choice of RL framework (VeRL, NeMo-RL, OpenRLHF) without rewriting environment code.
 
 ---
 

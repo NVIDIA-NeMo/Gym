@@ -31,45 +31,57 @@ data and evaluation signals.
 
 Functional servers expose HTTP endpoints that your workflows call directly.
 
-- Resources server: provides tools and verification to compute rewards
-  - Endpoints: `POST /seed_session`, `POST /verify`
-  - Code:
-    ```54:72:/Users/llane/Documents/github/nemo/framework/Gym/nemo_gym/base_resources_server.py
-    class SimpleResourcesServer(BaseResourcesServer, SimpleServer):
-        def setup_webserver(self) -> FastAPI:
-            app = FastAPI()
-            self.setup_session_middleware(app)
-            app.post("/seed_session")(self.seed_session)
-            app.post("/verify")(self.verify)
-            return app
-    ```
+::::{tab-set}
 
-- Responses API model server: wraps model endpoints with OpenAI-compatible
-  routes
-  - Endpoints: `POST /v1/chat/completions`, `POST /v1/responses`
-  - Code:
-    ```35:45:/Users/llane/Documents/github/nemo/framework/Gym/nemo_gym/base_responses_api_model.py
-    class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
-        def setup_webserver(self) -> FastAPI:
-            app = FastAPI()
-            self.setup_session_middleware(app)
-            app.post("/v1/chat/completions")(self.chat_completions)
-            app.post("/v1/responses")(self.responses)
-            return app
-    ```
+:::{tab-item} Resources Server
+Provides tools and verification to compute rewards.
 
-- Responses API agent server: runs the minimal agent loop and returns metrics
-  - Endpoints: `POST /v1/responses`, `POST /run`
-  - Code:
-    ```34:45:/Users/llane/Documents/github/nemo/framework/Gym/nemo_gym/base_responses_api_agent.py
-    class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, SimpleServer):
-        def setup_webserver(self) -> FastAPI:
-            app = FastAPI()
-            self.setup_session_middleware(app)
-            app.post("/v1/responses")(self.responses)
-            app.post("/run")(self.run)
-            return app
-    ```
+**Endpoints**: `POST /seed_session`, `POST /verify`
+
+```py
+class SimpleResourcesServer(BaseResourcesServer, SimpleServer):
+    def setup_webserver(self) -> FastAPI:
+        app = FastAPI()
+        self.setup_session_middleware(app)
+        app.post("/seed_session")(self.seed_session)
+        app.post("/verify")(self.verify)
+        return app
+```
+:::
+
+:::{tab-item} Responses API Model Server
+Wraps model endpoints with OpenAI-compatible routes.
+
+**Endpoints**: `POST /v1/chat/completions`, `POST /v1/responses`
+
+```py
+class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
+    def setup_webserver(self) -> FastAPI:
+        app = FastAPI()
+        self.setup_session_middleware(app)
+        app.post("/v1/chat/completions")(self.chat_completions)
+        app.post("/v1/responses")(self.responses)
+        return app
+```
+:::
+
+:::{tab-item} Responses API Agent Server
+Runs the minimal agent loop and returns metrics.
+
+**Endpoints**: `POST /v1/responses`, `POST /run`
+
+```py
+class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, SimpleServer):
+    def setup_webserver(self) -> FastAPI:
+        app = FastAPI()
+        self.setup_session_middleware(app)
+        app.post("/v1/responses")(self.responses)
+        app.post("/run")(self.run)
+        return app
+```
+:::
+
+::::
 
 ---
 
@@ -84,9 +96,7 @@ Common runtime behavior is provided by shared utilities:
 
 The head server serves the resolved global configuration for other processes.
 
-Code:
-
-```493:504:/Users/llane/Documents/github/nemo/framework/Gym/nemo_gym/server_utils.py
+```py
 class HeadServer(BaseServer):
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
@@ -109,29 +119,49 @@ Key points:
 
 Code:
 
-```52:67:/Users/llane/Documents/github/nemo/framework/Gym/nemo_gym/global_config.py
+```py
 class GlobalConfigDictParserConfig(BaseModel):
     ...
 ```
 
-```169:199:/Users/llane/Documents/github/nemo/framework/Gym/nemo_gym/global_config.py
+```py
 config_paths, extra_configs = self.load_extra_config_paths(config_paths)
 # validation and default population
 ```
 
 Schemas for servers and datasets:
 
-```116:146:/Users/llane/Documents/github/nemo/framework/Gym/nemo_gym/config_types.py
+::::{tab-set}
+
+:::{tab-item} Base
+Base configuration inherited by all server types.
+
+```py
 class BaseRunServerConfig(BaseServerConfig):
     entrypoint: str
     domain: Optional[Domain] = None
 ```
+:::
 
-```167:205:/Users/llane/Documents/github/nemo/framework/Gym/nemo_gym/config_types.py
+:::{tab-item} Responses API Model
+```py
 class ResponsesAPIModelServerTypeConfig(...)
+```
+:::
+
+:::{tab-item} Resources
+```py
 class ResourcesServerTypeConfig(...)
+```
+:::
+
+:::{tab-item} Responses API Agent
+```py
 class ResponsesAPIAgentServerTypeConfig(...)
 ```
+:::
+
+::::
 
 ---
 
@@ -150,22 +180,33 @@ Flow:
 Concurrency uses an optional semaphore to cap the number of in-flight
 requests.
 
-Code:
+::::{tab-set}
 
-```35:43:/Users/llane/Documents/github/nemo/framework/Gym/nemo_gym/rollout_collection.py
+:::{tab-item} Configuration
+Schema for rollout collection settings.
+
+```py
 class RolloutCollectionConfig(BaseModel):
     agent_name: str
     input_jsonl_fpath: str
     output_jsonl_fpath: str
 ```
+:::
 
-```61:69:/Users/llane/Documents/github/nemo/framework/Gym/nemo_gym/rollout_collection.py
+:::{tab-item} Concurrency Control
+Optional semaphore to limit parallel requests.
+
+```py
 semaphore = nullcontext()
 if config.num_samples_in_parallel:
     semaphore = Semaphore(config.num_samples_in_parallel)
 ```
+:::
 
-```72:87:/Users/llane/Documents/github/nemo/framework/Gym/nemo_gym/rollout_collection.py
+:::{tab-item} Request Handler
+Async coroutine that posts to the agent server and writes results.
+
+```py
 with open(config.output_jsonl_fpath, "a") as f:
     async def _post_coroutine(row: dict) -> None:
         row["responses_create_params"] = row["responses_create_params"] | config.responses_create_params
@@ -175,6 +216,9 @@ with open(config.output_jsonl_fpath, "a") as f:
             result = await response.json()
             f.write(json.dumps(result) + "\n")
 ```
+:::
+
+::::
 
 ---
 
@@ -183,9 +227,7 @@ with open(config.output_jsonl_fpath, "a") as f:
 NeMo Gym runs locally or connects to an existing Ray cluster depending on
 configuration.
 
-Code:
-
-```313:327:/Users/llane/Documents/github/nemo/framework/Gym/nemo_gym/server_utils.py
+```py
 def initialize_ray() -> None:
     if ray_head_node_address is not None:
         ray.init(address=ray_head_node_address, ignore_reinit_error=True)
