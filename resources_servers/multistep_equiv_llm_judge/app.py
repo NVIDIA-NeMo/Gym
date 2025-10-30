@@ -67,7 +67,7 @@ class MultistepEquivLLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     # Default logical name for this resources server
     name: str = "multistep_equiv_llm_judge"
     judge_default_model_server: ModelServerRef
-    judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+    judge_default_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     judge_compare_model_server: Optional[ModelServerRef] = None
 
     judge_endpoint_max_concurrency: Optional[int] = 128
@@ -368,7 +368,7 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
         assert self.config.quorum_max_samples >= 1
         assert self.config.quorum_type == "majority", f"unsupported quorum_type: {self.config.quorum_type!r}"
 
-        self._default_judge_params_dict = self.config.judge_responses_create_params.model_dump()
+        self._default_judge_params_dict = self.config.judge_default_responses_create_params.model_dump()
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -639,7 +639,7 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
             )
         )
 
-        classify_params = cfg.judge_responses_create_params.model_copy(deep=True)
+        classify_params = cfg.judge_default_responses_create_params.model_copy(deep=True)
         classify_params.input = classify_messages
         classify_response = await self._post_judge_response(classify_params)
         if self.config.debug:
@@ -743,7 +743,7 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
             )
         )
 
-        distill_params = cfg.judge_responses_create_params.model_copy(deep=True)
+        distill_params = cfg.judge_default_responses_create_params.model_copy(deep=True)
         distill_params.input = distill_messages
         distill_response = await self._post_judge_response(distill_params)
         if self.config.debug:
@@ -835,7 +835,7 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
             )
         )
 
-        quorum_params = self.config.judge_responses_create_params.model_copy(deep=True)
+        quorum_params = self.config.judge_default_responses_create_params.model_copy(deep=True)
         quorum_params.input = quorum_messages
         quorum_response = await self._post_judge_response(quorum_params)
         quorum_text = _get_response_last_assistant_content_text(quorum_response) or ""
@@ -894,7 +894,7 @@ class MultistepEquivLLMJudgeResourcesServer(SimpleResourcesServer):
             )
         )
 
-        compare_params = cfg.judge_responses_create_params.model_copy(deep=True)
+        compare_params = cfg.judge_default_responses_create_params.model_copy(deep=True)
         compare_params.input = compare_messages
         compare_response = await self._post_judge_response(compare_params, server="compare")
         if self.config.debug:
