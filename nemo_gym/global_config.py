@@ -123,7 +123,7 @@ class GlobalConfigDictParser(BaseModel):
         # Do one pass to get the server instance configs
         server_instance_configs: List[ServerInstanceConfig] = []
         for server_name, server_type_config_dict in non_reserved_items:
-            maybe_server_instance_config = maybe_get_server_instance_config(
+            maybe_server_instance_config, _ = maybe_get_server_instance_config(
                 name=server_name, server_type_config_dict=server_type_config_dict
             )
             if maybe_server_instance_config is not None:
@@ -288,12 +288,12 @@ class GlobalConfigDictParser(BaseModel):
 
         # Try to get config with error capture.
         for server_name, server_type_config_dict in non_reserved_items:
-            result, error = maybe_get_server_instance_config(
-                name=server_name, server_type_config_dict=server_type_config_dict, capture_errors=True
+            config, error = maybe_get_server_instance_config(
+                name=server_name, server_type_config_dict=server_type_config_dict
             )
 
             # Failed validation but looks like a server = almost-server
-            if result is None and error is not None:
+            if config is None and error is not None:
                 if is_almost_server(server_type_config_dict):
                     almost_servers.append((server_name, error))
 

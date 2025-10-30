@@ -310,11 +310,11 @@ ServerInstanceConfigTypeAdapter = TypeAdapter(ServerInstanceConfig)
 
 
 def maybe_get_server_instance_config(
-    name: str, server_type_config_dict: Any, capture_errors: bool = False
-) -> Union[Optional[ServerInstanceConfig], Tuple[Optional[ServerInstanceConfig], Optional[ValidationError]]]:
-    """Returns ServerInstanceConfig if a valid server, otherwise None; error capture is optional."""
+    name: str, server_type_config_dict: Any
+) -> Tuple[Optional[ServerInstanceConfig], Optional[ValidationError]]:
+    """Returns ServerInstanceConfig if a valid server, otherwise None with error details"""
     if not isinstance(server_type_config_dict, DictConfig):
-        return (None, None) if capture_errors else None
+        return None, None
 
     maybe_server_instance_config_dict = {
         "name": name,
@@ -323,11 +323,9 @@ def maybe_get_server_instance_config(
     }
     try:
         config = ServerInstanceConfigTypeAdapter.validate_python(maybe_server_instance_config_dict)
-        return (config, None) if capture_errors else config
+        return config, None
     except ValidationError as e:
-        if capture_errors:
-            return (None, e)
-        return None
+        return None, e
 
 
 def is_almost_server(server_type_config_dict: Any) -> bool:
