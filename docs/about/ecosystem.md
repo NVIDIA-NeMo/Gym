@@ -1,7 +1,7 @@
 (nemo-gym-ecosystem)=
 # NeMo Gym in the NVIDIA Ecosystem
 
-NeMo Gym is a component of the [NVIDIA NeMo Framework](https://github.com/NVIDIA-NeMo), an end-to-end platform for building and training generative AI models. Within the NeMo Framework suite, NeMo Gym provides scalable rollout collection and RL environment infrastructure for model training.
+NeMo Gym is a component of the [NVIDIA NeMo Framework](https://github.com/NVIDIA-NeMo), NVIDIA's GPU-accelerated platform for building and training generative AI models.
 
 :::{tip}
 For details on NeMo Gym capabilities, refer to the
