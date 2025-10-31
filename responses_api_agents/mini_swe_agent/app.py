@@ -13,12 +13,14 @@
 # limitations under the License.
 import asyncio
 import json
+import sys
 from asyncio import Semaphore
 from os import environ, getenv, makedirs
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Callable, Literal, Optional
 from uuid import uuid4
 
+import ray
 import yaml
 from fastapi import Body, FastAPI
 from minisweagent.config import builtin_config_dir, get_config_path
@@ -71,6 +73,16 @@ class MiniSWEAgentVerifyRequest(BaseVerifyRequest):
 class MiniSWEAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
+
+
+@ray.remote(
+    scheduling_strategy="SPREAD",
+    runtime_env={
+        "py_executable": sys.executable,
+    },
+)
+def runner_ray_remote(runner: Callable, params: dict[str, Any]) -> Any:
+    return runner(**params)
 
 class MiniSWEAgent(SimpleResponsesAPIAgent):
     config: MiniSWEAgentConfig
@@ -156,8 +168,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             #### RUN MINI-SWE-AGENT #####
             reseponses_create_params_dict = body.responses_create_params.model_dump()
             try:
-                result = await asyncio.to_thread(
-                    run_swegym,
+                params = dict(
                     subset=subset,
                     split=split,
                     workers=workers,
@@ -177,6 +188,8 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                     step_limit=step_limit,
                     collapse_limit=collapse_limit,
                 )
+                future = runner_ray_remote.remote(run_swegym, params)
+                result = await asyncio.to_thread(ray.get,future)
                 result = result[instance_id]
                 messages = result["messages"]
                 responses = result["responses"]
