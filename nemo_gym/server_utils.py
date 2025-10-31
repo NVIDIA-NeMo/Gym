@@ -66,11 +66,14 @@ from nemo_gym.global_config import (
 
 
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
+_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
 
 
 class GlobalAIOHTTPAsyncClientConfig(BaseModel):
     global_aiohttp_connector_limit: int = 100 * 1024
     global_aiohttp_connector_limit_per_host: int = 1024
+
+    global_aiohttp_client_request_debug: bool = False
 
 
 def get_global_aiohttp_client(
@@ -108,6 +111,9 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
     global _GLOBAL_AIOHTTP_CLIENT
     _GLOBAL_AIOHTTP_CLIENT = client_session
 
+    global _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG
+    _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG = cfg.global_aiohttp_client_request_debug
+
     return _GLOBAL_AIOHTTP_CLIENT
 
 
@@ -143,6 +149,9 @@ async def request(
         except ServerDisconnectedError:
             await asyncio.sleep(0.5)
         except Exception as e:
+            if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
+                print_exc()
+
             # Don't increment internal since we know we are ok. If we are not, the head server will shut everything down anyways.
             if not _internal:
                 print(
@@ -526,6 +535,8 @@ Full body: {json.dumps(exc.body, indent=4)}
             app,
             host=server.config.host,
             port=server.config.port,
+            # We add a very small graceful shutdown timeout so when we shutdown we cancel all inflight requests and there are no lingering requests (requests are cancelled)
+            timeout_graceful_shutdown=0.5,
         )
 
 
