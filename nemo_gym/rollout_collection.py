@@ -20,8 +20,8 @@ from itertools import count, product
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
-from tqdm.asyncio import tqdm
-from tqdm import tqdm as sync_tqdm
+from tqdm.asyncio import tqdm as tqdm_asyncio
+from tqdm import tqdm
 
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig
 from nemo_gym.server_utils import (
@@ -111,7 +111,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
             print("Reading cached rollouts...", flush=True)
             try:
                 with open(config.output_jsonl_fpath, "r") as f:
-                    for line in sync_tqdm(f, total=len(rows)):
+                    for line in tqdm(f, total=len(rows)):
                         item = json.loads(line)
                         assert "_rollout_cache_key" in item
                         item_cache_key = item["_rollout_cache_key"]
@@ -161,7 +161,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
                     print(json.dumps(result), file=write_file, flush=True)
                 metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
 
-        await tqdm.gather(*filter(_post_coroutine, filter(_filter_row, rows)), desc="Collecting rollouts", miniters=tqdm_miniters)
+        await tqdm_asyncio.gather(*map(_post_coroutine, filter(_filter_row, rows)), desc="Collecting rollouts", miniters=tqdm_miniters)
 
         write_file.flush()
         write_file.close()
