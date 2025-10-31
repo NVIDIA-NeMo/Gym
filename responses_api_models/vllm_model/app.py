@@ -212,7 +212,9 @@ class VLLMModel(SimpleResponsesAPIModel):
             except:
                 raise e
 
-            is_out_of_context_length = e.status == 400 and "context length" in result["message"]
+            is_out_of_context_length = (
+                e.status == 400 and "message" in result and "context length" in result["message"]
+            )
             if is_out_of_context_length:
                 return NeMoGymChatCompletion(
                     id="chtcmpl-123",
