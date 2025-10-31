@@ -23,7 +23,7 @@ python scripts/run_customer_evals.py \
 
 from asyncio import run
 from copy import deepcopy
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel
@@ -37,6 +37,7 @@ from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollecti
 
 class RunCustomerEvalConfig(BaseModel):
     model_short_name_for_upload: str
+    skip_upload: bool = False
 
 
 class CustomerEval(BaseModel):
@@ -79,9 +80,32 @@ CUSTOMER_EVALS: List[CustomerEval] = [
 class ModelEvalConfig(BaseModel):
     model_short_name_for_upload: str
     initial_global_config_dict: Dict[str, Any]
+    spinup_command: Optional[str] = None
 
 
 MODEL_EVAL_CONFIGS: List[ModelEvalConfig] = [
+    ModelEvalConfig(
+        model_short_name_for_upload="gpt-4.1-2025-04-14",
+        initial_global_config_dict={
+            "policy_base_url": "https://api.openai.com/v1",
+            "policy_api_key": "???",
+            "policy_model_name": "gpt-4.1-2025-04-14",
+            "config_paths": [
+                "responses_api_models/openai_model/configs/openai_model.yaml",
+            ],
+        },
+    ),
+    ModelEvalConfig(
+        model_short_name_for_upload="gpt-5-2025-08-07",
+        initial_global_config_dict={
+            "policy_base_url": "https://api.openai.com/v1",
+            "policy_api_key": "???",
+            "policy_model_name": "gpt-5-2025-08-07",
+            "config_paths": [
+                "responses_api_models/openai_model/configs/openai_model.yaml",
+            ],
+        },
+    ),
     ModelEvalConfig(
         model_short_name_for_upload="nemotron-nano-9b-v2",
         initial_global_config_dict={
@@ -91,6 +115,14 @@ MODEL_EVAL_CONFIGS: List[ModelEvalConfig] = [
             "config_paths": [
                 "responses_api_models/vllm_model/configs/vllm_model.yaml",
             ],
+            "policy_model": {
+                "responses_api_models": {
+                    "vllm_model": {
+                        "replace_developer_role_with_system": False,
+                        "uses_reasoning_parser": True,
+                    },
+                },
+            },
             "num_samples_in_parallel": 8,
             "responses_create_params": {
                 "temperature": 0.6,
@@ -108,6 +140,14 @@ MODEL_EVAL_CONFIGS: List[ModelEvalConfig] = [
             "config_paths": [
                 "responses_api_models/vllm_model/configs/vllm_model.yaml",
             ],
+            "policy_model": {
+                "responses_api_models": {
+                    "vllm_model": {
+                        "replace_developer_role_with_system": False,
+                        "uses_reasoning_parser": True,
+                    },
+                },
+            },
             "num_samples_in_parallel": 8,
             "responses_create_params": {
                 "temperature": 0.6,
@@ -129,6 +169,7 @@ MODEL_EVAL_CONFIGS: List[ModelEvalConfig] = [
                 "responses_api_models": {
                     "vllm_model": {
                         "replace_developer_role_with_system": True,
+                        "uses_reasoning_parser": True,
                     },
                 },
             },
@@ -154,6 +195,7 @@ MODEL_EVAL_CONFIGS: List[ModelEvalConfig] = [
                 "responses_api_models": {
                     "vllm_model": {
                         "replace_developer_role_with_system": True,
+                        "uses_reasoning_parser": True,
                     },
                 },
             },
@@ -175,6 +217,7 @@ MODEL_EVAL_CONFIGS: List[ModelEvalConfig] = [
                 "responses_api_models": {
                     "vllm_model": {
                         "replace_developer_role_with_system": True,
+                        "uses_reasoning_parser": True,
                     },
                 },
             },
@@ -189,6 +232,237 @@ MODEL_EVAL_CONFIGS: List[ModelEvalConfig] = [
             },
         },
     ),
+    ModelEvalConfig(
+        model_short_name_for_upload="qwen3-30b-a3b-thinking-2507",
+        initial_global_config_dict={
+            "policy_base_url": "???",
+            "policy_api_key": "???",
+            "policy_model_name": "Qwen/Qwen3-30B-A3B-Thinking-2507",
+            "config_paths": [
+                "responses_api_models/vllm_model/configs/vllm_model.yaml",
+            ],
+            "policy_model": {
+                "responses_api_models": {
+                    "vllm_model": {
+                        "replace_developer_role_with_system": False,
+                        "uses_reasoning_parser": True,
+                    },
+                },
+            },
+            "num_samples_in_parallel": 128,
+            # Recommended in https://huggingface.co/Qwen/Qwen3-30B-A3B-Thinking-2507#best-practices
+            "responses_create_params": {
+                "temperature": 0.6,
+                "max_output_tokens": 32768,
+                "top_p": 0.95,
+            },
+        },
+        spinup_command=r"""HF_HOME=.cache/ \
+HOME=. \
+vllm serve \
+    Qwen/Qwen3-30B-A3B-Thinking-2507 \
+    --dtype auto \
+    --tensor-parallel-size 8 \
+    --gpu-memory-utilization 0.9 \
+    --enable-auto-tool-choice --tool-call-parser hermes \
+    --reasoning-parser deepseek_r1 \
+    --host 0.0.0.0 \
+    --port 10240""",
+    ),
+    ModelEvalConfig(
+        model_short_name_for_upload="qwen3-30b-a3b-instruct-2507",
+        initial_global_config_dict={
+            "policy_base_url": "???",
+            "policy_api_key": "???",
+            "policy_model_name": "Qwen/Qwen3-30B-A3B-Instruct-2507",
+            "config_paths": [
+                "responses_api_models/vllm_model/configs/vllm_model.yaml",
+            ],
+            "policy_model": {
+                "responses_api_models": {
+                    "vllm_model": {
+                        "replace_developer_role_with_system": False,
+                        "uses_reasoning_parser": False,
+                    },
+                },
+            },
+            "num_samples_in_parallel": 128,
+            # Recommended in https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507#best-practices
+            "responses_create_params": {
+                "temperature": 0.7,
+                "max_output_tokens": 16384,
+                "top_p": 0.8,
+            },
+        },
+        spinup_command=r"""HF_HOME=.cache/ \
+HOME=. \
+vllm serve \
+    Qwen/Qwen3-30B-A3B-Instruct-2507 \
+    --dtype auto \
+    --tensor-parallel-size 8 \
+    --gpu-memory-utilization 0.9 \
+    --enable-auto-tool-choice --tool-call-parser hermes \
+    --host 0.0.0.0 \
+    --port 10240""",
+    ),
+    ModelEvalConfig(
+        model_short_name_for_upload="gpt-oss-20b-reasoning-high",
+        initial_global_config_dict={
+            "policy_base_url": "???",
+            "policy_api_key": "???",
+            "policy_model_name": "openai/gpt-oss-20b",
+            "config_paths": [
+                "responses_api_models/openai_model/configs/openai_model.yaml",
+            ],
+            "num_samples_in_parallel": 128,
+            "responses_create_params": {
+                "reasoning": {
+                    "effort": "high",
+                },
+            },
+        },
+        spinup_command=r"""HF_HUB_OFFLINE=1 \
+HF_HOME=.cache/ \
+HOME=. \
+vllm serve \
+    openai/gpt-oss-20b \
+    --dtype auto \
+    --tensor-parallel-size 8 \
+    --gpu-memory-utilization 0.9 \
+    --enable-auto-tool-choice --tool-call-parser openai \
+    --host 0.0.0.0 \
+    --port 10240""",
+    ),
+    ModelEvalConfig(
+        model_short_name_for_upload="nano-v3-30b-a3.5b-dev-1016",
+        initial_global_config_dict={
+            "policy_base_url": "???",
+            "policy_api_key": "???",
+            "policy_model_name": "nvidia/Nemotron-Nano-3-30B-A3.5B-dev-1016",
+            "config_paths": [
+                "responses_api_models/vllm_model/configs/vllm_model.yaml",
+            ],
+            "policy_model": {
+                "responses_api_models": {
+                    "vllm_model": {
+                        "replace_developer_role_with_system": False,
+                        "uses_reasoning_parser": True,
+                    },
+                },
+            },
+            "num_samples_in_parallel": 128,
+            "responses_create_params": {
+                "temperature": 1.0,
+                "max_output_tokens": 32768,
+                "top_p": 1.0,
+            },
+        },
+        spinup_command=r"""vllm serve \
+nvidia/Nemotron-Nano-3-30B-A3.5B-dev-1016 \
+--tensor-parallel-size 8 \
+--max-model-len 147456 \
+--trust-remote-code \
+--async-scheduling \
+--mamba_ssm_cache_dtype float32 \
+--reasoning-parser deepseek_r1 \
+--enable-auto-tool-choice \
+--tool-call-parser qwen3_coder \
+--no-enable-prefix-caching""",
+    ),
+    ModelEvalConfig(
+        model_short_name_for_upload="nano-v3-30b-a3.5b-dev-1024",
+        initial_global_config_dict={
+            "policy_base_url": "???",
+            "policy_api_key": "???",
+            "policy_model_name": "nvidia/Nemotron-Nano-3-30B-A3.5B-dev-1024",
+            "config_paths": [
+                "responses_api_models/vllm_model/configs/vllm_model.yaml",
+            ],
+            "policy_model": {
+                "responses_api_models": {
+                    "vllm_model": {
+                        "replace_developer_role_with_system": False,
+                        "uses_reasoning_parser": True,
+                    },
+                },
+            },
+            "num_samples_in_parallel": 128,
+            "responses_create_params": {
+                "temperature": 1.0,
+                "max_output_tokens": 32768,
+                "top_p": 1.0,
+            },
+        },
+        spinup_command=r"""vllm serve \
+nvidia/Nemotron-Nano-3-30B-A3.5B-dev-1024 \
+--tensor-parallel-size 8 \
+--max-model-len 147456 \
+--trust-remote-code \
+--async-scheduling \
+--mamba_ssm_cache_dtype float32 \
+--reasoning-parser deepseek_r1 \
+--enable-auto-tool-choice \
+--tool-call-parser qwen3_coder \
+--no-enable-prefix-caching""",
+    ),
+    ModelEvalConfig(
+        model_short_name_for_upload="nano-v3-30b-a3.5b-dev-1024-nim-parallel-low",
+        initial_global_config_dict={
+            "policy_base_url": "???",
+            "policy_api_key": "???",
+            "policy_model_name": "nvidia/nemotron-nano-v3",
+            "config_paths": [
+                "responses_api_models/vllm_model/configs/vllm_model.yaml",
+            ],
+            "policy_model": {
+                "responses_api_models": {
+                    "vllm_model": {
+                        "replace_developer_role_with_system": False,
+                        "uses_reasoning_parser": True,
+                        "chat_template_kwargs": {
+                            "parallel_reasoning_mode": "low",
+                        },
+                    },
+                },
+            },
+            "num_samples_in_parallel": 128,
+            "responses_create_params": {
+                "temperature": 1.0,
+                "max_output_tokens": 32768,
+                "top_p": 1.0,
+            },
+        },
+        spinup_command=r"""""",
+    ),
+    ModelEvalConfig(
+        model_short_name_for_upload="nano-v3-30b-a3.5b-dev-1024-nim-parallel-medium",
+        initial_global_config_dict={
+            "policy_base_url": "???",
+            "policy_api_key": "???",
+            "policy_model_name": "nvidia/nemotron-nano-v3",
+            "config_paths": [
+                "responses_api_models/vllm_model/configs/vllm_model.yaml",
+            ],
+            "policy_model": {
+                "responses_api_models": {
+                    "vllm_model": {
+                        "replace_developer_role_with_system": False,
+                        "uses_reasoning_parser": True,
+                        "chat_template_kwargs": {
+                            "parallel_reasoning_mode": "medium",
+                        },
+                    },
+                },
+            },
+            "num_samples_in_parallel": 128,
+            "responses_create_params": {
+                "temperature": 1.0,
+                "max_output_tokens": 32768,
+                "top_p": 1.0,
+            },
+        },
+        spinup_command=r"""""",
+    ),
 ]
 
 
@@ -201,7 +475,7 @@ async def main():
         for c in MODEL_EVAL_CONFIGS
         if c.model_short_name_for_upload == customer_eval_config.model_short_name_for_upload
     ]
-    assert len(model_eval_config) == 1
+    assert len(model_eval_config) == 1, len(model_eval_config)
     model_eval_config = model_eval_config[0]
 
     customer_eval_config_paths = [ce.config_path for ce in CUSTOMER_EVALS]
@@ -233,15 +507,19 @@ async def main():
                     )
                 },
             )
+            rollout_collection_config_dict = OmegaConf.to_container(rollout_collection_config_dict)
             rollout_collection_config = RolloutCollectionConfig.model_validate(rollout_collection_config_dict)
             await rch.run_from_config(rollout_collection_config)
 
-            upload_jsonl_dataset_config = UploadJsonlDatasetGitlabConfig(
-                dataset_name=customer_eval.eval_name,
-                version="0.0.1",
-                input_jsonl_fpath=rollout_collection_config.output_jsonl_fpath,
-            )
-            upload_jsonl_dataset(config=upload_jsonl_dataset_config)
+            if not customer_eval_config.skip_upload:
+                upload_jsonl_dataset_config = UploadJsonlDatasetGitlabConfig(
+                    dataset_name=customer_eval.eval_name,
+                    version="0.0.1",
+                    input_jsonl_fpath=rollout_collection_config.output_jsonl_fpath,
+                )
+                upload_jsonl_dataset(config=upload_jsonl_dataset_config)
+    except KeyboardInterrupt:
+        pass
     finally:
         rh.shutdown()
 

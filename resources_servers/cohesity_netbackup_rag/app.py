@@ -42,7 +42,7 @@ class CohesityNetbackupRagVerifyRequest(BaseVerifyRequest):
 class CohesityNetbackupRagVerifyResponse(BaseVerifyResponse, CohesityNetbackupRagVerifyRequest):
     judge_response: NeMoGymResponse
     matches_reference_content: bool
-    contains_additional_content_not_in_context: bool
+    doesnt_contain_additional_content_not_in_context: bool
 
 
 class CohesityNetbackupRagResourcesServer(SimpleResourcesServer):
@@ -73,7 +73,7 @@ class CohesityNetbackupRagResourcesServer(SimpleResourcesServer):
             reward=1.0 if matches_reference_content and not contains_additional_content_not_in_context else 0.0,
             judge_response=judge_response,
             matches_reference_content=matches_reference_content,
-            contains_additional_content_not_in_context=contains_additional_content_not_in_context,
+            doesnt_contain_additional_content_not_in_context=not contains_additional_content_not_in_context,
         )
 
 
