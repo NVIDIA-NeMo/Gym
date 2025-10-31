@@ -74,7 +74,6 @@ class MiniSWEAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
 
-
 @ray.remote(
     scheduling_strategy="SPREAD",
     runtime_env={
@@ -83,6 +82,7 @@ class MiniSWEAgentVerifyResponse(BaseVerifyResponse):
 )
 def runner_ray_remote(runner: Callable, params: dict[str, Any]) -> Any:
     return runner(**params)
+
 
 class MiniSWEAgent(SimpleResponsesAPIAgent):
     config: MiniSWEAgentConfig
@@ -189,7 +189,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                     collapse_limit=collapse_limit,
                 )
                 future = runner_ray_remote.remote(run_swegym, params)
-                result = await asyncio.to_thread(ray.get,future)
+                result = await asyncio.to_thread(ray.get, future)
                 result = result[instance_id]
                 messages = result["messages"]
                 responses = result["responses"]

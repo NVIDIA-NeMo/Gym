@@ -144,7 +144,7 @@ def setup_run_swegym_mock(
     # Mock the Ray remote function to return a future-like object
     mock_future = MagicMock()
     mock_runner_ray_remote.remote.return_value = mock_future
-    
+
     # Mock asyncio.to_thread (which calls ray.get) to return the result
     mock_to_thread.return_value = run_swegym_result
 
@@ -278,7 +278,7 @@ class TestApp:
         # Mock Ray remote function
         mock_future = MagicMock()
         mock_runner_ray_remote.remote.return_value = mock_future
-        
+
         # Mock asyncio.to_thread (ray.get) to raise an exception
         mock_to_thread.side_effect = Exception("run_swegym failed")
 
@@ -319,7 +319,7 @@ class TestApp:
         # Mock Ray remote function
         mock_future = MagicMock()
         mock_runner_ray_remote.remote.return_value = mock_future
-        
+
         # Mock asyncio.to_thread (ray.get) to raise FileNotFoundError
         mock_to_thread.side_effect = FileNotFoundError("run_swegym not found")
 
