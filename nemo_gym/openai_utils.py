@@ -425,7 +425,7 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
 # 500 is internal server error, which may sporadically occur
 # 502 is Bad gateway (when the endpoint is overloaded)
 # 504 is Gateway timeout (when the endpoint config has too low of a gateway timeout setting for the model to finish generating)
-RATE_LIMIT_ERROR_CODES = [429, 502, 503, 504]
+RATE_LIMIT_ERROR_CODES = [429, 502, 503, 504, 520]
 RETRY_ERROR_CODES = RATE_LIMIT_ERROR_CODES + [500]
 
 
