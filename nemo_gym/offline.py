@@ -174,7 +174,7 @@ class VerifyOfflineHelper(BaseModel):  # pragma: no cover
                 metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
 
         await tqdm_asyncio.gather(
-            *filter(_post_coroutine, filter(_filter_row, rows)),
+            *map(_post_coroutine, filter(_filter_row, rows)),
             desc="Collecting rollouts",
             miniters=tqdm_miniters,
         )
