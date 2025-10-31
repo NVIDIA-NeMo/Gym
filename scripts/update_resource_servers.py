@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import re
+import sys
 import unicodedata
 from pathlib import Path
 
@@ -137,15 +138,15 @@ def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:
 def generate_example_only_table(servers: list[dict]) -> str:
     """Generate table for example-only resource servers."""
     if not servers:
-        return "| Name | What It Demonstrates | Config Path | README |\n| ---- | ------------------- | ----------- | ------ |\n"
+        return "| Name | Demonstrates | Config | README |\n| ---- | ------------------- | ----------- | ------ |\n"
 
-    # TODO: temporary descriptions
+    # TODO: these are temporary descriptions. we should add a field to the yamls
     descriptions = {
         "simple_weather": "Basic single-step tool calling",
         "stateful_counter": "Session state management (in-memory)",
     }
 
-    col_names = ["Name", "What It Demonstrates", "Config Path", "README"]
+    col_names = ["Name", "Demonstrates", "Config", "README"]
     rows = []
 
     for server in servers:
@@ -153,7 +154,7 @@ def generate_example_only_table(servers: list[dict]) -> str:
 
         description = descriptions.get(server["name"], "")
 
-        config_link = f"<a href='{server['config_path']}'>{server['config_path']}</a>"
+        config_link = f"<a href='{server['config_path']}'>config</a>"
         readme_link = f"<a href='{server['readme_path']}'>README</a>"
 
         rows.append([name, description, config_link, readme_link])
@@ -174,9 +175,9 @@ def generate_example_only_table(servers: list[dict]) -> str:
 def generate_training_table(servers: list[dict]) -> str:
     """Generate table for training resource servers."""
     if not servers:
-        return "| Domain | Resource Server | Train | Val | Config | License |\n| ------ | --------------- | ----- | --- | ------ | ------- |\n"
+        return "| Domain | Resource Server | Train | Validation | Config | License |\n| ------ | --------------- | ----- | ---------- | ------ | ------- |\n"
 
-    col_names = ["Domain", "Resource Server", "Train", "Val", "Config", "License"]
+    col_names = ["Domain", "Resource Server", "Train", "Validation", "Config", "License"]
     rows = []
 
     for server in servers:
@@ -219,62 +220,6 @@ def normalize_str(s: str) -> str:
     return unicodedata.normalize("NFKD", s).casefold().strip()
 
 
-# def generate_table() -> str:
-#     """
-#     Outputs a grid with table data. Raw html <a> tags are used for the links instead of markdown
-#     to avoid cross-reference warnings in the 'build-docs' CI/CD run (15+ warnings == fail)
-#     """
-#     col_names = ["Domain", "Resource Server", "Config Path", "License", "Usage"]
-
-#     rows = []
-#     for subdir in TARGET_FOLDER.iterdir():
-#         if subdir.is_dir():
-#             path = f"{TARGET_FOLDER.name}/{subdir.name}"
-#             server_name = subdir.name.replace("_", " ").title()
-
-#             configs_folder = subdir / "configs"
-#             if configs_folder.exists() and configs_folder.is_dir():
-#                 yaml_files = configs_folder.glob("*.yaml")
-#                 if yaml_files:
-#                     for yaml_file in yaml_files:
-#                         config_path = path + "/configs/" + yaml_file.name
-#                         config_path_link = f"<a href='{config_path}'>config</a>"
-#                         extraction = extract_config_metadata(yaml_file)
-#                         if extraction:
-#                             domain, license, usages = extraction
-#                             rows.append(
-#                                 [
-#                                     domain,
-#                                     server_name,
-#                                     config_path_link,
-#                                     license,
-#                                     ", ".join([u.title() for u in usages]),
-#                                 ]
-#                             )
-
-#     def normalize_str(s: str) -> str:
-#         """
-#         Rows with identical domain values may get reordered differently
-#         between local and CI runs. We normalize text and
-#         use all columns as tie-breakers to ensure deterministic sorting.
-#         """
-#         if not s:
-#             return ""
-#         return unicodedata.normalize("NFKD", s).casefold().strip()
-
-#     rows.sort(
-#         key=lambda r: (
-#             normalize_str(r[0]),
-#             normalize_str(r[1]),
-#             normalize_str(r[2]),
-#             normalize_str(r[3]),
-#         )
-#     )
-
-#     table = [col_names, ["-" for _ in col_names]] + rows
-#     return format_table(table)
-
-
 def format_table(table: list[list[str]]) -> str:
     """Format grid of data into markdown table."""
     col_widths = []
@@ -314,30 +259,32 @@ def main():
     training_table_str = generate_training_table(training_servers)
 
     example_pattern = re.compile(
-        r"(<!-- START_EXAMPLE_ONLY_TABLE -->)(.*?)(<!-- END_EXAMPLE_ONLY_TABLE -->)",
+        r"(<!-- START_EXAMPLE_ONLY_SERVERS_TABLE -->)(.*?)(<!-- END_EXAMPLE_ONLY_SERVERS_TABLE -->)",
         flags=re.DOTALL,
     )
-    example_text = example_pattern.sub(lambda m: f"{m.group(1)}\n{example_table_str}\n{m.group(3)}", text)
+
+    if not example_pattern.search(text):
+        sys.stderr.write(
+            "Error: README.md does not contain <!-- START_EXAMPLE_ONLY_SERVERS_TABLE --> and <!-- END_EXAMPLE_ONLY_SERVERS_TABLE --> markers.\n"
+        )
+        sys.exit(1)
+
+    text = example_pattern.sub(lambda m: f"{m.group(1)}\n{example_table_str}\n{m.group(3)}", text)
 
     training_pattern = re.compile(
         r"(<!-- START_TRAINING_SERVERS_TABLE -->)(.*?)(<!-- END_TRAINING_SERVERS_TABLE -->)",
         flags=re.DOTALL,
     )
-    training_text = training_pattern.sub(lambda m: f"{m.group(1)}\n{training_table_str}\n{m.group(3)}", text)
 
-    README_PATH.write_text(example_text)
-    README_PATH.write_text(training_text)
+    if not training_pattern.search(text):
+        sys.stderr.write(
+            "Error: README.md does not contain <!-- START_TRAINING_SERVERS_TABLE --> and <!-- END_TRAINING_SERVERS_TABLE --> markers.\n"
+        )
+        sys.exit(1)
 
-    # if not example_pattern.search(text):
-    #     sys.stderr.write(
-    #         "Error: README.md does not contain <!-- START_RESOURCE_TABLE --> and <!-- END_RESOURCE_TABLE --> markers.\n"
-    #     )
-    #     sys.exit(1)
+    text = training_pattern.sub(lambda m: f"{m.group(1)}\n{training_table_str}\n{m.group(3)}", text)
 
-    # table_str = generate_table()
-
-    # new_text = pattern.sub(lambda m: f"{m.group(1)}\n{table_str}\n{m.group(3)}", text)
-    # README_PATH.write_text(new_text)
+    README_PATH.write_text(text)
 
 
 if __name__ == "__main__":

@@ -77,52 +77,35 @@ NeMo Gym includes a curated collection of resource servers for training and eval
 
 Purpose: Demonstrate NeMo Gym patterns and concepts.
 
-<!-- START_EXAMPLE_ONLY_TABLE -->
-<!-- END_EXAMPLE_ONLY_TABLE -->
+<!-- START_EXAMPLE_ONLY_SERVERS_TABLE -->
+| Name                  | Demonstrates                   | Config                                                                                          | README                                                                 |
+| --------------------- | ------------------------------ | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| Equivalence Llm Judge |                                | <a href='resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml'>config</a> | <a href='resources_servers/equivalence_llm_judge/README.md'>README</a> |
+| Simple Weather        | Basic single-step tool calling | <a href='resources_servers/simple_weather/configs/simple_weather.yaml'>config</a>               | <a href='resources_servers/simple_weather/README.md'>README</a>        |
+<!-- END_EXAMPLE_ONLY_SERVERS_TABLE -->
 
 ### Table 2: Resource Servers for Training
 
-<!-- START_TRAINING_SERVERS_TABLE -->
-| Domain                | Resource Server       | Train | Val | Config                                                                                          | License                                                   |
-| --------------------- | --------------------- | ----- | --- | ----------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| agent                 | Google Search         | ✓     | -   | <a href='resources_servers/google_search/configs/google_search.yaml'>config</a>                 | Apache 2.0                                                |
-| agent                 | Multiverse Math Hard  | ✓     | -   | <a href='resources_servers/multiverse_math_hard/configs/multiverse_math_hard.yaml'>config</a>   | Apache 2.0                                                |
-| agent                 | Stateful Counter      | ✓     | ✓   | <a href='resources_servers/stateful_counter/configs/stateful_counter.yaml'>config</a>           | Apache 2.0                                                |
-| agent                 | Workbench             | ✓     | ✓   | <a href='resources_servers/workbench/configs/workbench.yaml'>config</a>                         | Apache 2.0                                                |
-| coding                | Comp Coding           | ✓     | ✓   | <a href='resources_servers/comp_coding/configs/comp_coding.yaml'>config</a>                     | Apache 2.0                                                |
-| instruction_following | Instruction Following | ✓     | -   | <a href='resources_servers/instruction_following/configs/instruction_following.yaml'>config</a> | Apache 2.0                                                |
-| instruction_following | Multineedle           | ✓     | ✓   | <a href='resources_servers/multineedle/configs/multineedle.yaml'>config</a>                     | Apache 2.0                                                |
-| instruction_following | Structured Outputs    | ✓     | ✓   | <a href='resources_servers/structured_outputs/configs/structured_outputs_json.yaml'>config</a>  | Apache 2.0                                                |
-| knowledge             | Mcqa                  | ✓     | -   | <a href='resources_servers/mcqa/configs/mcqa.yaml'>config</a>                                   | Apache 2.0                                                |
-| math                  | Library Judge Math    | ✓     | ✓   | <a href='resources_servers/library_judge_math/configs/bytedtsinghua_dapo17k.yaml'>config</a>    | Apache 2.0                                                |
-| math                  | Library Judge Math    | ✓     | ✓   | <a href='resources_servers/library_judge_math/configs/dapo17k.yaml'>config</a>                  | Apache 2.0                                                |
-| math                  | Library Judge Math    | ✓     | ✓   | <a href='resources_servers/library_judge_math/configs/library_judge_math.yaml'>config</a>       | Creative Commons Attribution 4.0 International            |
-| math                  | Library Judge Math    | ✓     | ✓   | <a href='resources_servers/library_judge_math/configs/math_stack_overflow.yaml'>config</a>      | Creative Commons Attribution-ShareAlike 4.0 International |
-| math                  | Python Math Exec      | ✓     | -   | <a href='resources_servers/python_math_exec/configs/python_math_exec.yaml'>config</a>           | Apache 2.0                                                |
-<!-- END_TRAINING_SERVERS_TABLE -->
-
 Purpose: Training-ready environments with curated datasets.
 
-<!-- START_RESOURCE_TABLE -->
-| Domain                   | Resource Server Name  | Config Path                                                                                     | License                                                   | Usage                      |
-| ------------------------ | --------------------- | ----------------------------------------------------------------------------------------------- | --------------------------------------------------------- | -------------------------- |
-| agent                    | Google Search         | <a href='resources_servers/google_search/configs/google_search.yaml'>config</a>                 | Apache 2.0                                                | Train, Example             |
-| agent                    | Multiverse Math Hard  | <a href='resources_servers/multiverse_math_hard/configs/multiverse_math_hard.yaml'>config</a>   | Apache 2.0                                                | Train, Example             |
-| agent                    | Simple Weather        | <a href='resources_servers/simple_weather/configs/simple_weather.yaml'>config</a>               | None                                                      | Example                    |
-| agent                    | Stateful Counter      | <a href='resources_servers/stateful_counter/configs/stateful_counter.yaml'>config</a>           | Apache 2.0                                                | Train, Validation, Example |
-| agent                    | Workbench             | <a href='resources_servers/workbench/configs/workbench.yaml'>config</a>                         | Apache 2.0                                                | Train, Validation, Example |
-| coding                   | Comp Coding           | <a href='resources_servers/comp_coding/configs/comp_coding.yaml'>config</a>                     | Apache 2.0                                                | Train, Validation, Example |
-| instruction_following    | Instruction Following | <a href='resources_servers/instruction_following/configs/instruction_following.yaml'>config</a> | Apache 2.0                                                | Train, Example             |
-| instruction_following    | Structured Outputs    | <a href='resources_servers/structured_outputs/configs/structured_outputs_json.yaml'>config</a>  | Apache 2.0                                                | Train, Validation, Example |
-| instruction_followingggg | Multineedle           | <a href='resources_servers/multineedle/configs/multineedle.yaml'>config</a>                     | Apache 2.0                                                | Train, Validation, Example |
-| knowledge                | Equivalence Llm Judge | <a href='resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml'>config</a> | None                                                      | Example, Example           |
-| knowledge                | Mcqa                  | <a href='resources_servers/mcqa/configs/mcqa.yaml'>config</a>                                   | Apache 2.0                                                | Train, Example, Example    |
-| math                     | Library Judge Math    | <a href='resources_servers/library_judge_math/configs/bytedtsinghua_dapo17k.yaml'>config</a>    | Apache 2.0                                                | Train, Validation          |
-| math                     | Library Judge Math    | <a href='resources_servers/library_judge_math/configs/dapo17k.yaml'>config</a>                  | Apache 2.0                                                | Train, Validation          |
-| math                     | Library Judge Math    | <a href='resources_servers/library_judge_math/configs/library_judge_math.yaml'>config</a>       | Creative Commons Attribution 4.0 International            | Train, Validation, Example |
-| math                     | Library Judge Math    | <a href='resources_servers/library_judge_math/configs/math_stack_overflow.yaml'>config</a>      | Creative Commons Attribution-ShareAlike 4.0 International | Train, Validation          |
-| math                     | Python Math Exec      | <a href='resources_servers/python_math_exec/configs/python_math_exec.yaml'>config</a>           | Apache 2.0                                                | Train, Example             |
-<!-- END_RESOURCE_TABLE -->
+<!-- START_TRAINING_SERVERS_TABLE -->
+| Domain                | Resource Server       | Train | Validation | Config                                                                                          | License                                                   |
+| --------------------- | --------------------- | ----- | ---------- | ----------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| agent                 | Google Search         | ✓     | -          | <a href='resources_servers/google_search/configs/google_search.yaml'>config</a>                 | Apache 2.0                                                |
+| agent                 | Multiverse Math Hard  | ✓     | -          | <a href='resources_servers/multiverse_math_hard/configs/multiverse_math_hard.yaml'>config</a>   | Apache 2.0                                                |
+| agent                 | Stateful Counter      | ✓     | ✓          | <a href='resources_servers/stateful_counter/configs/stateful_counter.yaml'>config</a>           | Apache 2.0                                                |
+| agent                 | Workbench             | ✓     | ✓          | <a href='resources_servers/workbench/configs/workbench.yaml'>config</a>                         | Apache 2.0                                                |
+| coding                | Comp Coding           | ✓     | ✓          | <a href='resources_servers/comp_coding/configs/comp_coding.yaml'>config</a>                     | Apache 2.0                                                |
+| instruction_following | Instruction Following | ✓     | -          | <a href='resources_servers/instruction_following/configs/instruction_following.yaml'>config</a> | Apache 2.0                                                |
+| instruction_following | Multineedle           | ✓     | ✓          | <a href='resources_servers/multineedle/configs/multineedle.yaml'>config</a>                     | Apache 2.0                                                |
+| instruction_following | Structured Outputs    | ✓     | ✓          | <a href='resources_servers/structured_outputs/configs/structured_outputs_json.yaml'>config</a>  | Apache 2.0                                                |
+| knowledge             | Mcqa                  | ✓     | -          | <a href='resources_servers/mcqa/configs/mcqa.yaml'>config</a>                                   | Apache 2.0                                                |
+| math                  | Library Judge Math    | ✓     | ✓          | <a href='resources_servers/library_judge_math/configs/bytedtsinghua_dapo17k.yaml'>config</a>    | Apache 2.0                                                |
+| math                  | Library Judge Math    | ✓     | ✓          | <a href='resources_servers/library_judge_math/configs/dapo17k.yaml'>config</a>                  | Apache 2.0                                                |
+| math                  | Library Judge Math    | ✓     | ✓          | <a href='resources_servers/library_judge_math/configs/library_judge_math.yaml'>config</a>       | Creative Commons Attribution 4.0 International            |
+| math                  | Library Judge Math    | ✓     | ✓          | <a href='resources_servers/library_judge_math/configs/math_stack_overflow.yaml'>config</a>      | Creative Commons Attribution-ShareAlike 4.0 International |
+| math                  | Python Math Exec      | ✓     | -          | <a href='resources_servers/python_math_exec/configs/python_math_exec.yaml'>config</a>           | Apache 2.0                                                |
+<!-- END_TRAINING_SERVERS_TABLE -->
 
 > [!TIP]
 > Each resource server includes example data, configuration files, and tests. See each server's README for details.
