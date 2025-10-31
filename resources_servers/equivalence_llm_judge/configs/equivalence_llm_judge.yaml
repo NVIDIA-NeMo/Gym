@@ -65,6 +65,7 @@ equivalence_llm_judge_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
+      max_steps: 1
       datasets:
       - name: example
         type: example
