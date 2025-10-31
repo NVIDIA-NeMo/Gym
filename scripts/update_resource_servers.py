@@ -83,12 +83,64 @@ def extract_config_metadata(yaml_path: Path) -> tuple[str, str, list[str]]:
     return domain, license, types
 
 
+def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:
+    """Categorize servers into example-only and training-ready."""
+    example_only_servers = []
+    training_servers = []
+
+    for subdir in TARGET_FOLDER.iterdir():
+        if not subdir.is_dir():
+            continue
+
+        configs_folder = subdir / "configs"
+        if not (configs_folder.exists() and configs_folder.is_dir()):
+            continue
+
+        yaml_files = list(configs_folder.glob("*.yaml"))
+        if not yaml_files:
+            continue
+
+        for yaml_file in yaml_files:
+            domain, license, types = extract_config_metadata(yaml_file)
+
+            server_name = subdir.name
+            display_name = server_name.replace("_", " ").title()
+            config_path = f"{TARGET_FOLDER.name}/{server_name}/configs/{yaml_file.name}"
+            readme_path = f"{TARGET_FOLDER.name}/{server_name}/README.md"
+
+            server_info = {
+                "name": server_name,
+                "display_name": display_name,
+                "domain": domain,
+                "config_path": config_path,
+                "readme_path": readme_path,
+                "types": types,
+                "license": license,
+                "yaml_file": yaml_file,
+            }
+
+            # TODO: verify this logic
+            # Example-only: only has "example" type
+            # Training-ready: has "train" or "validation" type
+            types_set = set(types) if types else set()
+
+            has_train_or_val = "train" in types_set or "validation" in types_set
+
+            if has_train_or_val:
+                training_servers.append(server_info)
+            elif types_set == {"example"}:
+                example_only_servers.append(server_info)
+            # Exclude a server that has neither example nor train/val
+
+    return example_only_servers, training_servers
+
+
 def generate_table() -> str:
     """
     Outputs a grid with table data. Raw html <a> tags are used for the links instead of markdown
     to avoid cross-reference warnings in the 'build-docs' CI/CD run (15+ warnings == fail)
     """
-    col_names = ["Domain", "Resource Server Name", "Config Path", "License", "Usage"]
+    col_names = ["Domain", "Resource Server", "Config Path", "License", "Usage"]
 
     rows = []
     for subdir in TARGET_FOLDER.iterdir():
@@ -102,7 +154,7 @@ def generate_table() -> str:
                 if yaml_files:
                     for yaml_file in yaml_files:
                         config_path = path + "/configs/" + yaml_file.name
-                        config_path_link = f"<a href='{config_path}'>{config_path}</a>"
+                        config_path_link = f"<a href='{config_path}'>config</a>"
                         extraction = extract_config_metadata(yaml_file)
                         if extraction:
                             domain, license, usages = extraction
