@@ -18,7 +18,6 @@ from sacrebleu.metrics import BLEU
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
-    BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
@@ -29,13 +28,9 @@ class TranslationBleuResourcesServerConfig(BaseResourcesServerConfig):
     pass
 
 
-class TranslationBleuRequest(BaseRunRequest):
+class TranslationBleuVerifyRequest(BaseVerifyRequest):
     trg_txt: str
     trg_lang: str
-
-
-class TranslationBleuVerifyRequest(TranslationBleuRequest, BaseVerifyRequest):
-    pass
 
 
 class TranslationBleuVerifyResponse(BaseVerifyResponse):

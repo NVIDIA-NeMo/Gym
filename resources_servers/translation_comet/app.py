@@ -18,7 +18,6 @@ from fastapi import FastAPI
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
-    BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
@@ -33,13 +32,9 @@ class TranslationCometResourcesServerConfig(BaseResourcesServerConfig):
     model_cache_dir: Optional[str] = None
 
 
-class TranslationCometRequest(BaseRunRequest):
+class TranslationCometVerifyRequest(BaseVerifyRequest):
     src_txt: str
     trg_txt: Optional[str] = None
-
-
-class TranslationCometVerifyRequest(TranslationCometRequest, BaseVerifyRequest):
-    pass
 
 
 class TranslationCometVerifyResponse(BaseVerifyResponse):
