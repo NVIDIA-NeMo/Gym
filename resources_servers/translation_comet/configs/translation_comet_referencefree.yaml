@@ -1,4 +1,4 @@
-translation_comet_resources_server:
+translation_comet:
   resources_servers:
     translation_comet:
       entrypoint: app.py
@@ -11,7 +11,7 @@ translation_comet_simple_agent:
       entrypoint: app.py
       resources_server:
         type: resources_servers
-        name: translation_comet_resources_server
+        name: translation_comet
       model_server:
         type: responses_api_models
         name: policy_model

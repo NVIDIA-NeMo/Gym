@@ -1,0 +1,61 @@
+{
+    "name": "train",
+    "type": "train",
+    "jsonl_fpath": "resources_servers/translation_bleu/data/riva_mt_v3_nothinkInSys_train.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": {
+        "dataset_name": "riva_mt_v3_nothinkInSys_train",
+        "version": "0.0.3",
+        "artifact_fpath": "riva_mt_v3_nothinkInSys_train.jsonl"
+    },
+    "license": "NVIDIA Internal Use Only, Do Not Distribute",
+    "Number of examples": 770000,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 770000,
+        "Average": 26.18,
+        "Min": 10.0,
+        "Max": 267.0,
+        "Median": 24.44,
+        "Standard deviation": 9.86
+    },
+    "Number of turns": {
+        "Total # non-null values": 770000,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "src_txt": {
+        "unique_count": 767619,
+        "total_count": 770000
+    },
+    "trg_txt": {
+        "unique_count": 767567,
+        "total_count": 770000
+    },
+    "src_lang": {
+        "unique_count": 12,
+        "total_count": 770000
+    },
+    "trg_lang": {
+        "unique_count": 12,
+        "total_count": 770000
+    }
+}

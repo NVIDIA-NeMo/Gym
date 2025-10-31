@@ -1,4 +1,4 @@
-translation_bleu_resources_server:
+translation_bleu:
   resources_servers:
     translation_bleu:
       entrypoint: app.py
@@ -9,7 +9,7 @@ translation_bleu_simple_agent:
       entrypoint: app.py
       resources_server:
         type: resources_servers
-        name: translation_bleu_resources_server
+        name: translation_bleu
       model_server:
         type: responses_api_models
         name: policy_model
