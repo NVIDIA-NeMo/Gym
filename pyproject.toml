@@ -233,6 +233,7 @@ ng_init_resources_server = "nemo_gym.cli:init_resources_server"
 # Rollout collection
 nemo_gym_collect_rollouts = "nemo_gym.rollout_collection:collect_rollouts"
 ng_collect_rollouts = "nemo_gym.rollout_collection:collect_rollouts"
+ng_verify_offline = "nemo_gym.offline:verify_offline"
 
 # Dataset management
 nemo_gym_upload_dataset_to_gitlab = "nemo_gym.gitlab_utils:upload_jsonl_dataset_cli"

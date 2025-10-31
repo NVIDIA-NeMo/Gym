@@ -20,6 +20,7 @@ from glob import glob
 from os import environ, makedirs
 from os.path import exists
 from pathlib import Path
+from platform import python_version
 from subprocess import Popen
 from threading import Thread
 from time import sleep
@@ -70,8 +71,16 @@ def _capture_head_server_dependencies(global_config_dict: DictConfig) -> None:  
         print(f"Warning: Could not capture head server dependencies: {e}")
         head_server_deps = None
 
+    relevant_head_server_deps_list = []
+    for dep_line in head_server_deps.splitlines():
+        if "ray" in dep_line:
+            # The ray version is very sensitive. The children ray versions must exactly match those of the parent ray.
+            relevant_head_server_deps_list.append(dep_line)
+
+    relevant_head_server_deps = "\n".join(relevant_head_server_deps_list)
+
     with open_dict(global_config_dict):
-        global_config_dict[HEAD_SERVER_DEPS_KEY_NAME] = head_server_deps
+        global_config_dict[HEAD_SERVER_DEPS_KEY_NAME] = relevant_head_server_deps
 
 
 def _setup_env_command(dir_path: Path, head_server_deps: Optional[str] = None) -> str:  # pragma: no cover
@@ -79,8 +88,9 @@ def _setup_env_command(dir_path: Path, head_server_deps: Optional[str] = None) -
     if head_server_deps:
         install_cmd += f" --constraint <(cat << 'EOF'\n{head_server_deps}\nEOF\n)"
 
+    head_server_python_version = python_version()
     return f"""cd {dir_path} \\
-    && uv venv --allow-existing \\
+    && uv venv --allow-existing --python {head_server_python_version} \\
     && source .venv/bin/activate \\
     && {install_cmd} \\
    """
