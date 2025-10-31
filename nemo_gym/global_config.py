@@ -308,7 +308,6 @@ def set_global_config_dict(
 
 
 def get_first_server_config_dict(global_config_dict: DictConfig, top_level_path: str) -> DictConfig:
-    # Traverse three levels deep total
     server_config_dict = global_config_dict[top_level_path]
     server_config_dict = list(server_config_dict.values())[0]
     server_config_dict = list(server_config_dict.values())[0]

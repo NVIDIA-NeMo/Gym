@@ -1,0 +1,52 @@
+{"role": "developer", "content": "You are playing a text-based game and your goal is to finish it with the highest score. Upon reading the text observation, provide a *single* short phrase to interact with the game, e.g. `get lamp` (without the backticks). When stuck, try using the `help` command to see what commands are available."}
+{"role": "user", "content": "-= Welcome to TextWorld, ALFRED! =-\n\nYou are in the middle of a room. Looking quickly around you, you see a bed 1, a diningtable 1, a drawer 4, a drawer 3, a drawer 2, a drawer 1, a garbagecan 1, a sidetable 2, and a sidetable 1.\n\nYour task is to: put some book on sidetable."}
+{"role": "assistant", "content": "look around", "reward": 0}
+{"role": "user", "content": "Nothing happens."}
+{"role": "assistant", "content": "open drawer 1", "reward": 0}
+{"role": "user", "content": "Nothing happens."}
+{"role": "assistant", "content": "open drawer 2", "reward": 0}
+{"role": "user", "content": "Nothing happens."}
+{"role": "assistant", "content": "open drawer 3", "reward": 0}
+{"role": "user", "content": "Nothing happens."}
+{"role": "assistant", "content": "open drawer 4", "reward": 0}
+{"role": "user", "content": "Nothing happens."}
+{"role": "assistant", "content": "look under bed", "reward": 0}
+{"role": "user", "content": "Nothing happens."}
+{"role": "assistant", "content": "open garbagecan 1", "reward": 0}
+{"role": "user", "content": "Nothing happens."}
+{"role": "assistant", "content": "open sidetable 1", "reward": 0}
+{"role": "user", "content": "Nothing happens."}
+{"role": "assistant", "content": "examine bed", "reward": 0}
+{"role": "user", "content": "Nothing happens."}
+{"role": "assistant", "content": "help", "reward": 0}
+{"role": "user", "content": "Available commands:\n  look:                             look around your current location\n  inventory:                        check your current inventory\n  go to (receptacle):               move to a receptacle\n  open (receptacle):                open a receptacle\n  close (receptacle):               close a receptacle\n  take (object) from (receptacle):  take an object from a receptacle\n  move (object) to (receptacle):  place an object in or on a receptacle\n  examine (something):              examine a receptacle or an object\n  use (object):                     use an object\n  heat (object) with (receptacle):  heat an object using a receptacle\n  clean (object) with (receptacle): clean an object using a receptacle\n  cool (object) with (receptacle):  cool an object using a receptacle\n  slice (object) with (object):     slice an object using a sharp object\n"}
+{"role": "assistant", "content": "look", "reward": 0}
+{"role": "user", "content": "You are in the middle of a room. Looking quickly around you, you see nothing."}
+{"role": "assistant", "content": "go to drawer 1", "reward": 0}
+{"role": "user", "content": "You arrive at drawer 1. The drawer 1 is closed."}
+{"role": "assistant", "content": "open drawer 1", "reward": 0}
+{"role": "user", "content": "You open the drawer 1. The drawer 1 is open. In it, you see a cellphone 1."}
+{"role": "assistant", "content": "examine drawer 1", "reward": 0}
+{"role": "user", "content": "The drawer 1 is open. In it, you see a cellphone 1."}
+{"role": "assistant", "content": "go to drawer 2", "reward": 0}
+{"role": "user", "content": "You arrive at drawer 2. The drawer 2 is closed."}
+{"role": "assistant", "content": "open drawer 2", "reward": 0}
+{"role": "user", "content": "You open the drawer 2. The drawer 2 is open. In it, you see a creditcard 1."}
+{"role": "assistant", "content": "go to drawer 3", "reward": 0}
+{"role": "user", "content": "You arrive at drawer 3. On the drawer 3, you see a keychain 2."}
+{"role": "assistant", "content": "open drawer 3", "reward": 0}
+{"role": "user", "content": "Nothing happens."}
+{"role": "assistant", "content": "examine drawer 3", "reward": 0}
+{"role": "user", "content": "On the drawer 3, you see a keychain 2."}
+{"role": "assistant", "content": "go to drawer 4", "reward": 0}
+{"role": "user", "content": "You arrive at drawer 4. On the drawer 4, you see a cd 2."}
+{"role": "assistant", "content": "examine drawer 4", "reward": 0}
+{"role": "user", "content": "On the drawer 4, you see a cd 2."}
+{"role": "assistant", "content": "go to sidetable 1", "reward": 0}
+{"role": "user", "content": "You arrive at sidetable 1. On the sidetable 1, you see nothing."}
+{"role": "assistant", "content": "go to sidetable 2", "reward": 0}
+{"role": "user", "content": "You arrive at sidetable 2. On the sidetable 2, you see nothing."}
+{"role": "assistant", "content": "go to diningtable 1", "reward": 0}
+{"role": "user", "content": "You arrive at diningtable 1. On the diningtable 1, you see a alarmclock 1, a book 3, a cd 3, a cd 1, a creditcard 2, a keychain 3, a keychain 1, a laptop 1, a mug 3, a mug 2, a mug 1, a pen 1, and a pencil 1."}
+{"role": "assistant", "content": "take book 3 from diningtable 1", "reward": 0}
+{"role": "user", "content": "You pick up the book 3 from the diningtable 1."}

@@ -1,0 +1,42 @@
+tales:
+  resources_servers:
+    tales:
+      entrypoint: app.py
+      expose_admissible_commands: false 
+      framework: textworld
+      task_no: 0
+      seed: 0
+      steps: 100
+      split: train
+tales_multi_turn_agent:
+  responses_api_agents:
+    multi_turn_agent:
+      entrypoint: app.py
+      max_steps: 15
+      seed: 1234
+      resources_server:
+        type: resources_servers
+        name: tales
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/tales/data/example.jsonl
+tales_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 15
+      seed: 1234
+      resources_server:
+        type: resources_servers
+        name: tales
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/tales/data/example.jsonl

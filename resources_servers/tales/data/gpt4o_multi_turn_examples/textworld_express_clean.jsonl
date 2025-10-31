@@ -1,0 +1,52 @@
+{"role": "developer", "content": "You are playing a text-based game and your goal is to finish it with the highest score. Upon reading the text observation, provide a *single* short phrase to interact with the game, e.g. `get lamp` (without the backticks). When stuck, try using the `help` command to see what commands are available."}
+{"role": "user", "content": "You are hungry! Let's cook a delicious meal. Check the cookbook in the kitchen for the recipe. Once done, enjoy your meal!\n\nYou are in the kitchen. In one part of the room you see a stove. There is also an oven. You also see a toaster. In another part of the room you see a fridge that is closed. In one part of the room you see a counter that has a knife, a red hot pepper, a banana, and a cookbook on it. There is also a dining table, that has nothing on it. You also see a cutlery drawer that is closed. In another part of the room you see a trash can that is closed. In one part of the room you see a dishwasher that is closed. There is also a dining chair, that has nothing on it. \n"}
+{"role": "assistant", "content": "read cookbook", "reward": 0}
+{"role": "user", "content": "Gather all following ingredients and follow the directions to prepare this tasty meal.\n\nIngredients:\n  pork chop\n  block of cheese\n\nDirections:\n  chop the pork chop\n  grill the pork chop\n  roast the block of cheese\n  prepare meal\n\n"}
+{"role": "assistant", "content": "open fridge", "reward": 0}
+{"role": "user", "content": "You open the fridge. The fridge contains a raw pork chop, a block of cheese, a raw chicken leg, some raw white tuna, some lettuce."}
+{"role": "assistant", "content": "get pork chop and block of cheese", "reward": 0}
+{"role": "user", "content": "Unknown action: I'm not sure what you mean."}
+{"role": "assistant", "content": "take pork chop", "reward": 0.14285714285714285}
+{"role": "user", "content": "You take the pork chop."}
+{"role": "assistant", "content": "take block of cheese", "reward": 0}
+{"role": "user", "content": "You take the block of cheese."}
+{"role": "assistant", "content": "chop pork chop", "reward": -0.14285714285714285}
+{"role": "user", "content": "Unknown action: I'm not sure what you mean."}
+{"role": "assistant", "content": "use knife on pork chop", "reward": 0}
+{"role": "user", "content": "Unknown action: I'm not sure what you mean."}
+{"role": "assistant", "content": "cut pork chop", "reward": 0}
+{"role": "user", "content": "Unknown action: I'm not sure what you mean."}
+{"role": "assistant", "content": "help", "reward": 0}
+{"role": "user", "content": "You are hungry! Let's cook a delicious meal. Check the cookbook in the kitchen for the recipe. Once done, enjoy your meal!"}
+{"role": "assistant", "content": "grill pork chop", "reward": 0}
+{"role": "user", "content": "Unknown action: I'm not sure what you mean."}
+{"role": "assistant", "content": "put pork chop on stove", "reward": 0}
+{"role": "user", "content": "Unknown action: I'm not sure what you mean."}
+{"role": "assistant", "content": "use pork chop with knife", "reward": 0}
+{"role": "user", "content": "Unknown action: I'm not sure what you mean."}
+{"role": "assistant", "content": "use knife", "reward": 0}
+{"role": "user", "content": "Unknown action: I'm not sure what you mean."}
+{"role": "assistant", "content": "get knife", "reward": 0}
+{"role": "user", "content": "Unknown action: I'm not sure what you mean."}
+{"role": "assistant", "content": "take knife", "reward": 0}
+{"role": "user", "content": "You take the knife."}
+{"role": "assistant", "content": "cut pork chop with knife", "reward": 0}
+{"role": "user", "content": "Unknown action: I'm not sure what you mean."}
+{"role": "assistant", "content": "chop pork chop with knife", "reward": 0}
+{"role": "user", "content": "Unknown action: I'm not sure what you mean."}
+{"role": "assistant", "content": "put pork chop on counter", "reward": 0}
+{"role": "user", "content": "Unknown action: I'm not sure what you mean."}
+{"role": "assistant", "content": "put pork chop on cutting board", "reward": 0}
+{"role": "user", "content": "Unknown action: I'm not sure what you mean."}
+{"role": "assistant", "content": "examine counter", "reward": 0}
+{"role": "user", "content": "a counter that has a red hot pepper, a banana, and a cookbook on it"}
+{"role": "assistant", "content": "look for cutting board", "reward": 0}
+{"role": "user", "content": "Unknown action: I'm not sure what you mean."}
+{"role": "assistant", "content": "put pork chop on counter", "reward": 0}
+{"role": "user", "content": "Unknown action: I'm not sure what you mean."}
+{"role": "assistant", "content": "open cutlery drawer", "reward": 0}
+{"role": "user", "content": "You open the cutlery drawer. It's empty inside."}
+{"role": "assistant", "content": "open oven", "reward": 0}
+{"role": "user", "content": "Unknown action: I'm not sure what you mean."}
+{"role": "assistant", "content": "open stove", "reward": 0}
+{"role": "user", "content": "Unknown action: I'm not sure what you mean."}

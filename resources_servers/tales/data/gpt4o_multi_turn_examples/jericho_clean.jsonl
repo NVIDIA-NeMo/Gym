@@ -1,0 +1,52 @@
+{"role": "developer", "content": "You are playing a text-based game and your goal is to finish it with the highest score. Upon reading the text observation, provide a *single* short phrase to interact with the game, e.g. `get lamp` (without the backticks). When stuck, try using the `help` command to see what commands are available."}
+{"role": "user", "content": "\n\n\nThe phone rings.\n\nOh, no - how long have you been asleep? Sure, it was a tough night, but... This is bad. This is very bad.\n\nThe phone rings.\n\n  -----\n9:05 by Adam Cadre\nv1.11 (2012.0724) / Original release 2000.0103\n  -----\n\nBedroom (in bed)\nThis bedroom is extremely spare, with dirty laundry scattered haphazardly all over the floor. Cleaner clothing can be found in the dresser. A bathroom lies to the south, while a door to the east leads to the living room.\n\nOn the end table are a telephone, a wallet and some keys.\n\nThe phone rings."}
+{"role": "assistant", "content": "answer phone", "reward": 0}
+{"role": "user", "content": "You pick up the phone. \"Hadley!\" a shrill voice cries. \"Hadley, haven't you even left yet?? You knew that our presentation was at nine o'clock sharp! First the thing with the printers, now this - there won't even be enough left of you for Bowman to fire once he's done with you. Now get the hell down here!!\"\n\nClick."}
+{"role": "assistant", "content": "get out of bed", "reward": 0}
+{"role": "user", "content": "You get out of bed."}
+{"role": "assistant", "content": "get wallet", "reward": 0}
+{"role": "user", "content": "Taken."}
+{"role": "assistant", "content": "get keys", "reward": 0}
+{"role": "user", "content": "Taken."}
+{"role": "assistant", "content": "open dresser", "reward": 0}
+{"role": "user", "content": "You open the dresser, revealing some clean clothing."}
+{"role": "assistant", "content": "get clothing", "reward": 0}
+{"role": "user", "content": "(the clean clothing)\nTaken."}
+{"role": "assistant", "content": "wear clothing", "reward": 0}
+{"role": "user", "content": "[Which do you mean, the clean clothing or the soiled clothing?]"}
+{"role": "assistant", "content": "wear clean clothing", "reward": 0}
+{"role": "user", "content": "You'll have to take off the soiled clothes you're wearing first."}
+{"role": "assistant", "content": "remove soiled clothing", "reward": 0}
+{"role": "user", "content": "You take off the soiled clothing."}
+{"role": "assistant", "content": "wear clean clothing", "reward": 0}
+{"role": "user", "content": "It seems ridiculous to put on fresh, clean clothes when you yourself are covered with mud and dried sweat."}
+{"role": "assistant", "content": "go south", "reward": 0}
+{"role": "user", "content": "\nBathroom\nThis is a far from luxurious but still quite functional bathroom, with a sink, toilet and shower. The bedroom lies to the north."}
+{"role": "assistant", "content": "shower", "reward": 0}
+{"role": "user", "content": "You don't think the watch you're wearing is waterproof."}
+{"role": "assistant", "content": "remove watch", "reward": 0}
+{"role": "user", "content": "You take off the gold watch."}
+{"role": "assistant", "content": "shower", "reward": 0}
+{"role": "user", "content": "Carrying your possessions into the shower is a bad idea."}
+{"role": "assistant", "content": "drop wallet and keys", "reward": 0}
+{"role": "user", "content": "wallet: Dropped.\nkeys: Dropped."}
+{"role": "assistant", "content": "shower", "reward": 0}
+{"role": "user", "content": "Carrying your possessions into the shower is a bad idea."}
+{"role": "assistant", "content": "drop clean clothing and soiled clothing and watch", "reward": 0}
+{"role": "user", "content": "clean clothing: Dropped.\nsoiled clothing: Dropped.\ngold watch: Dropped."}
+{"role": "assistant", "content": "shower", "reward": 0}
+{"role": "user", "content": "You step into the shower, turn on the water, and within a few moments you feel like a new man. But no time to dawdle - you hop back out again and dry off in record time."}
+{"role": "assistant", "content": "wear clean clothing", "reward": 0}
+{"role": "user", "content": "(first taking the clean clothing)\nYou put on the clean clothing."}
+{"role": "assistant", "content": "get wallet, keys, and watch", "reward": 0}
+{"role": "user", "content": "[!: Noun error. (This could mean a number of things: a noun used in your command may not be present, or it may be present but not visible; it may be scenery you can't interact with; you may have specified too many indirect objects; you may have misspelled something; the list goes on.)]"}
+{"role": "assistant", "content": "get wallet", "reward": 0}
+{"role": "user", "content": "Taken."}
+{"role": "assistant", "content": "get keys", "reward": 0}
+{"role": "user", "content": "Taken."}
+{"role": "assistant", "content": "get watch", "reward": 0}
+{"role": "user", "content": "Taken."}
+{"role": "assistant", "content": "go north", "reward": 0}
+{"role": "user", "content": "\nBedroom\nThis bedroom is extremely spare, with dirty laundry scattered haphazardly all over the floor. A bathroom lies to the south, while a door to the east leads to the living room.\n\nOn the end table is a telephone."}
+{"role": "assistant", "content": "go east", "reward": 0}
+{"role": "user", "content": "\nLiving room\nThe furniture isn't as carefully arranged as one might like, and it's a bit lacking in the luxuries that might make this a more pleasant place to spend an evening - no stereo, no TV, no DVD, none of that - but this living room is still nicer than most of those in this neighborhood. A kitchenette lies to the east, the bedroom to the west and the front door to the south."}
