@@ -28,6 +28,7 @@ from nemo_gym.server_utils import (
     ServerClient,
     get_global_config_dict,
     is_global_aiohttp_client_setup,
+    raise_for_status,
     set_global_aiohttp_client,
 )
 
@@ -76,6 +77,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
 
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
+            print(f"Querying with {config.num_samples_in_parallel} concurrent requests")
             semaphore = Semaphore(config.num_samples_in_parallel)
 
         server_client = self.setup_server_client()
@@ -95,7 +97,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
                 row["responses_create_params"] = row["responses_create_params"] | config.responses_create_params
                 async with semaphore:
                     response = await server_client.post(server_name=config.agent_name, url_path="/run", json=row)
-                    response.raise_for_status()
+                    await raise_for_status(response)
                     result = await response.json()
                     f.write(json.dumps(result) + "\n")
                     metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
@@ -113,7 +115,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
 
         async def _post_subroutine(row: Dict) -> Dict:
             res = await server_client.post(server_name=row.pop("agent_ref")["name"], url_path="/run", json=row)
-            res.raise_for_status()
+            await raise_for_status(res)
             return await res.json()
 
         return await tqdm.gather(*map(_post_subroutine, examples), desc="Collecting rollouts", miniters=10)

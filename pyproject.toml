@@ -72,9 +72,10 @@ dependencies = [
     ########################################
 
     # OpenAI: We leverage OpenAI Responses, Chat Completions, and Completions schemas for Nemo Gym abstractions. It may also be used to directly query endpoints.
-    # Updated Fri Jul 25, 2025 with openai==1.97.1
+    # We specifically upper bound this OpenAI dependency since the version bumps so frequently.
+    # Updated Wed Oct 29, 2025 with openai==2.6.1
     # License: Apache 2.0 https://github.com/openai/openai-python/blob/a8258744cbecf51321587fc870e8920bd2c07809/LICENSE
-    "openai<=1.97.1",
+    "openai<=2.6.1",
 
     # tqdm: Use for progress tracking on batch operations.
     # Updated Fri Jul 25, 2025 with tqdm==4.67.1

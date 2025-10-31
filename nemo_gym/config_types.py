@@ -185,6 +185,7 @@ class Domain(str, Enum):
     LONG_CONTEXT = "long_context"
     SAFETY = "safety"
     GAMES = "games"
+    E2E = "e2e"
     OTHER = "other"
 
 

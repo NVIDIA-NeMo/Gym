@@ -31,7 +31,15 @@ import ray
 import requests
 import uvicorn
 import yappi
-from aiohttp import ClientResponse, ClientSession, ClientTimeout, DummyCookieJar, ServerDisconnectedError, TCPConnector
+from aiohttp import (
+    ClientResponse,
+    ClientResponseError,
+    ClientSession,
+    ClientTimeout,
+    DummyCookieJar,
+    ServerDisconnectedError,
+    TCPConnector,
+)
 from aiohttp.client import _RequestOptions
 from fastapi import FastAPI, Request, Response
 from fastapi.exception_handlers import request_validation_exception_handler
@@ -58,11 +66,14 @@ from nemo_gym.global_config import (
 
 
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
+_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
 
 
 class GlobalAIOHTTPAsyncClientConfig(BaseModel):
     global_aiohttp_connector_limit: int = 100 * 1024
     global_aiohttp_connector_limit_per_host: int = 1024
+
+    global_aiohttp_client_request_debug: bool = False
 
 
 def get_global_aiohttp_client(
@@ -100,6 +111,9 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
     global _GLOBAL_AIOHTTP_CLIENT
     _GLOBAL_AIOHTTP_CLIENT = client_session
 
+    global _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG
+    _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG = cfg.global_aiohttp_client_request_debug
+
     return _GLOBAL_AIOHTTP_CLIENT
 
 
@@ -135,6 +149,9 @@ async def request(
         except ServerDisconnectedError:
             await asyncio.sleep(0.5)
         except Exception as e:
+            if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
+                print_exc()
+
             # Don't increment internal since we know we are ok. If we are not, the head server will shut everything down anyways.
             if not _internal:
                 print(
@@ -155,7 +172,13 @@ async def raise_for_status(response: ClientResponse) -> None:  # pragma: no cove
         content = await response.content.read()
         print(f"""Request info: {response.request_info}
 Response content: {content}""")
-        response.raise_for_status()
+
+        try:
+            response.raise_for_status()
+        except ClientResponseError as e:
+            # Set the response content here so we have access to it down the line.
+            e.response_content = content
+            raise e
 
 
 DEFAULT_HEAD_SERVER_PORT = 11000
@@ -339,6 +362,7 @@ def initialize_ray() -> None:
     if not ray_head_node_address:
         with open_dict(global_config_dict):
             global_config_dict["ray_head_node_address"] = ray.get_runtime_context().gcs_address
+        print(f"Started Ray cluster at {global_config_dict['ray_head_node_address']}")
 
 
 class SimpleServer(BaseServer):
@@ -511,6 +535,8 @@ Full body: {json.dumps(exc.body, indent=4)}
             app,
             host=server.config.host,
             port=server.config.port,
+            # We add a very small graceful shutdown timeout so when we shutdown we cancel all inflight requests and there are no lingering requests (requests are cancelled)
+            timeout_graceful_shutdown=0.5,
         )
 
 
