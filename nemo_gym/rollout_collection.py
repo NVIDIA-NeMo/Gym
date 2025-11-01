@@ -108,7 +108,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
 
         print(json.dumps(avg_metrics, indent=4))
 
-    async def run_examples(
+    def run_examples(
         self, examples: List[Dict], head_server_config: Optional[BaseServerConfig] = None
     ) -> Iterator[Future]:
         """
