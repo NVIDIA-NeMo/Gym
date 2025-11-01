@@ -155,7 +155,9 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
                     print(json.dumps(result), file=write_file, flush=True)
                 metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
 
-        await tqdm.gather(*filter(_post_coroutine, filter(_filter_row, rows)), desc="Collecting rollouts", miniters=tqdm_miniters)
+        await tqdm.gather(
+            *map(_post_coroutine, filter(_filter_row, rows)), desc="Collecting rollouts", miniters=tqdm_miniters
+        )
 
         write_file.flush()
         write_file.close()
