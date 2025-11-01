@@ -13,11 +13,11 @@
 # limitations under the License.
 import asyncio
 import json
-from asyncio import Semaphore
+from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
 from itertools import chain, repeat
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
@@ -110,7 +110,10 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
 
     async def run_examples(
         self, examples: List[Dict], head_server_config: Optional[BaseServerConfig] = None
-    ) -> List[Dict]:
+    ) -> Iterator[Future]:
+        """
+        We provide this function as a lower level interface for running rollout collection.
+        """
         server_client = self.setup_server_client(head_server_config)
 
         async def _post_subroutine(row: Dict) -> Dict:
@@ -118,7 +121,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
             await raise_for_status(res)
             return await res.json()
 
-        return await tqdm.gather(*map(_post_subroutine, examples), desc="Collecting rollouts", miniters=10)
+        return tqdm.as_completed(map(_post_subroutine, examples), desc="Collecting rollouts", miniters=10)
 
     def setup_server_client(self, head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:
         server_client = ServerClient.load_from_global_config(head_server_config)
