@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import uuid
 from contextlib import nullcontext
 from typing import Any, Optional
 
@@ -461,6 +462,13 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
             )
             response = NeMoGymResponse.model_validate(
                 {
+                    "id": f"resp_{uuid.uuid4()}",
+                    "object": "response",
+                    "created_at": 0,
+                    "model": "dummy",
+                    "parallel_tool_calls": True,
+                    "tool_choice": "auto",
+                    "tools": [],
                     "output": [
                         {
                             "role": "assistant",
