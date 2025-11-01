@@ -99,7 +99,14 @@ def _setup_env_command(dir_path: Path, head_server_deps: Optional[str] = None) -
 def _run_command(command: str, working_directory: Path) -> Popen:  # pragma: no cover
     custom_env = environ.copy()
     custom_env["PYTHONPATH"] = f"{working_directory.absolute()}:{custom_env.get('PYTHONPATH', '')}"
-    return Popen(command, executable="/bin/bash", shell=True, env=custom_env)
+    return Popen(
+        command,
+        executable="/bin/bash",
+        shell=True,
+        env=custom_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
 
 
 class RunConfig(BaseNeMoGymCLIConfig):
@@ -153,12 +160,12 @@ class RunHelper:  # pragma: no cover
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
         debug = environ.get("NG_DEBUG", None)
         if debug is None:
-            debug = -1
+            debug = 0
         else:
             try:
                 debug = int(debug)
             except ValueError:
-                debug = -1
+                debug = 0
         if debug:
             print("DEBUG: RunHelper.start: ...", flush=True)
 
@@ -284,8 +291,23 @@ class RunHelper:  # pragma: no cover
         if not self._head_server_thread.is_alive():
             raise RuntimeError("Head server finished unexpectedly!")
 
+        debug = environ.get("NG_DEBUG", None)
+
         for process_name, process in self._processes.items():
             if process.poll() is not None:
+                if debug:
+                    proc_out, proc_err = process.communicate()
+                    print(f"DEBUG: Process `{process_name}` finished unexpectedly!", flush=True)
+                    print(f"DEBUG: Process `{process_name}` stdout:", flush=True)
+                    if isinstance(proc_out, str):
+                        print(proc_out, flush=True)
+                    else:
+                        print(proc_out.decode("utf-8"), flush=True)
+                    print(f"DEBUG: Process `{process_name}` stderr:", flush=True)
+                    if isinstance(proc_err, str):
+                        print(proc_err, flush=True)
+                    else:
+                        print(proc_err.decode("utf-8"), flush=True)
                 raise RuntimeError(f"Process `{process_name}` finished unexpectedly!")
 
     def wait_for_spinup(self) -> None:
