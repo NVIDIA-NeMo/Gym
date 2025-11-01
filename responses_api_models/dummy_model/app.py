@@ -24,14 +24,14 @@ from nemo_gym.openai_utils import (
 )
 
 
-class DummyModelConfig(BaseResponsesAPIModelConfig):  # pragma: no cover
+class DummyModelConfig(BaseResponsesAPIModelConfig):
     pass
 
     def model_post_init(self, context):
         return super().model_post_init(context)
 
 
-class DummyModel(SimpleResponsesAPIModel):  # pragma: no cover
+class DummyModel(SimpleResponsesAPIModel):
     config: DummyModelConfig
 
     def model_post_init(self, context):
