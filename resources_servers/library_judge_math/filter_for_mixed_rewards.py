@@ -11,14 +11,26 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""
+Run:
+```bash
+python resources_servers/library_judge_math/filter_for_mixed_rewards.py \
+    --input_fpath <> \
+    --output_fpath <>
+```
+"""
+
 import json
+from argparse import ArgumentParser
 from collections import Counter
 
 from tqdm.auto import tqdm
 
 
-input_fpath = ""
-output_fpath = ""
+parser = ArgumentParser()
+parser.add_argument("--input_fpath", type=str, required=True)
+parser.add_argument("--output_fpath", type=str, required=True)
+args = parser.parse_args()
 
 # These are inclusive, for total of 16 rollouts per prompt
 minimum_pass_at_k = 0
@@ -26,7 +38,7 @@ maximum_pass_at_k = 14
 
 counter = Counter()
 question_to_example = dict()
-with open(input_fpath) as f:
+with open(args.input_fpath) as f:
     for line in tqdm(f):
         row = json.loads(line)
         question = row["responses_create_params"]["input"][0]["content"]
@@ -40,7 +52,7 @@ with open(input_fpath) as f:
 
 
 filtered_out = 0
-with open(output_fpath, "w") as f:
+with open(args.output_fpath, "w") as f:
     for question, count in tqdm(counter.items(), total=len(counter)):
         if not (minimum_pass_at_k <= count <= maximum_pass_at_k):
             filtered_out += 1
