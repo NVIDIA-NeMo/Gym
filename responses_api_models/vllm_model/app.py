@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import json
 import re
 from time import time
 from typing import ClassVar, Dict, List, Optional, Tuple, Union
@@ -212,15 +211,10 @@ class VLLMModel(SimpleResponsesAPIModel):
             3. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L948
             4. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/sampling_params.py#L463
             """
-            try:
-                result = json.loads(e.response_content.decode())
-            except:
-                raise e
+            result_content_str = e.response_content.decode()
 
-            is_out_of_context_length = (
-                e.status == 400
-                and "message" in result
-                and ("context length" in result["message"] or "max_tokens" in result["message"])
+            is_out_of_context_length = e.status == 400 and (
+                "context length" in result_content_str or "max_tokens" in result_content_str
             )
             if is_out_of_context_length:
                 return NeMoGymChatCompletion(
