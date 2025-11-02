@@ -21,18 +21,9 @@ library_judge_math_simple_agent:
         type: responses_api_models
         name: policy_model
       datasets:
-      - name: train
-        type: train
-        jsonl_fpath: resources_servers/library_judge_math/data/dapo17k_train.jsonl
-        # From YouJiacheng/DAPO-Math-17k-dedup
-        gitlab_identifier:
-          dataset_name: dapo17k
-          version: 0.0.1
-          artifact_fpath: dapo17k_train.jsonl
-        license: Apache 2.0
       - name: validation
         type: validation
-        jsonl_fpath: resources_servers/library_judge_math/data/dapo17k_train.jsonl
+        jsonl_fpath: resources_servers/library_judge_math/data/dapo17k_trajectory_collection_train.jsonl
         gitlab_identifier:
           dataset_name: dapo17k
           version: 0.0.1
