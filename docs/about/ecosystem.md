@@ -32,33 +32,36 @@ The [NeMo Framework](https://github.com/NVIDIA-NeMo) is NVIDIA's GPU-accelerated
 
 While NeMo Gym is part of the NeMo Framework for **training**, the [NeMo Agent Toolkit](https://github.com/NVIDIA/NeMo-Agent-Toolkit) is a separate open-source framework focused on **inference** and building production agent workflows.
 
-### NeMo Gym (Training-Focused)
+::::{tab-set}
+
+:::{tab-item} NeMo Gym
+**Focus**: Training
 
 Part of the NeMo Framework. Provides RL environments and rollout collection for model training.
 
-**Best for**: Teams training models with RL and needing high-throughput data
-collection with verification.
+**Best for**: Teams training models with RL and needing high-throughput data collection with verification.
 
 **Key characteristics**:
 * Unified interfaces to heterogeneous RL environments
 * Passes trajectory data to RL training frameworks
 * Curated environments with verification logic for reward signals
 * Parallel and asynchronous rollout collection for scale
+:::
 
----
+:::{tab-item} NeMo Agent Toolkit
+**Focus**: Inference
 
-### NeMo Agent Toolkit (Inference-Focused)
+An open-source framework that is interoperable with other ecosystems and supports end-to-end profiling and optimization of complex agentic systems.
 
-An open-source framework that is interoperable with other ecosystems and
-supports end-to-end profiling and optimization of complex agentic systems.
-
-**Best for**: Teams building and operating agent workflows for inference,
-needing observability, profiling, and evaluation.
+**Best for**: Teams building and operating agent workflows for inference, needing observability, profiling, and evaluation.
 
 **Key characteristics**:
 * Interoperable with other frameworks
 * End-to-end profiling and optimization for agent pipelines
 * Helps expose bottlenecks and costs to scale agent systems reliably
+:::
+
+::::
 
 ---
 
@@ -125,44 +128,52 @@ The right choice depends on whether you are training models with RL (use NeMo Gy
 
 ### Decision Guide
 
-**Use NeMo Gym when**:
-* You want to train a model with your preferred RL framework
-* You need scalable rollout collection with verification for reward signals
-* You prefer minimal agent orchestration tailored for RL research and training
+```{list-table}
+:header-rows: 1
+:widths: 30 70
 
-**Use NeMo Agent Toolkit when**:
-* You are building agent workflows with observability, profiling, and
-  evaluation
-* You need inference-first instrumentation and cost visibility
-* You want to work within an open and interoperable agent framework
-
-**Use NeMo Agent Toolkit + NeMo Gym when**:
-* You want to train models using data from agent workflows
-* Your agent framework (NAT or another) collects trajectories and scores them,
-  then Gym consumes that data for RL with frameworks such as VeRL or NeMo RL
+* - Scenario
+  - When to Use
+* - **Use NeMo Gym**
+  - • You want to train a model with your preferred RL framework <br>
+    • You need scalable rollout collection with verification for reward signals <br>
+    • You prefer minimal agent orchestration tailored for RL research and training
+* - **Use NeMo Agent Toolkit**
+  - • You are building agent workflows with observability, profiling, and evaluation <br>
+    • You need inference-first instrumentation and cost visibility <br>
+    • You want to work within an open and interoperable agent framework
+* - **Use Both (NAT + Gym)**
+  - • You want to train models using data from agent workflows <br>
+    • Your agent framework (NAT or another) collects trajectories and scores them, then Gym consumes that data for RL with frameworks such as VeRL or NeMo RL
+```
 
 ---
 
 ## Integration Points
 
-NeMo Gym and NeMo Agent Toolkit can be composed in several ways to support RL
-training using agent-generated data.
+NeMo Gym and NeMo Agent Toolkit can be composed in several ways to support RL training using agent-generated data. Choose the integration pattern that matches your setup:
 
-### NAT Workflow as an Endpoint → Gym for RL
+::::{tab-set}
+
+:::{tab-item} NAT → Gym
+**Pattern**: NAT Workflow as an Endpoint → Gym for RL
+
+Use this when you have NeMo Agent Toolkit workflows and want to use them for RL training.
 
 **Workflow**:
 1. Serve a NAT agent workflow as an endpoint
 2. Gym triggers runs and requests trajectory collection
 3. NAT executes the workflow and collects trajectories
 4. NAT evaluates and assigns scores/rewards
-5. Gym forwards trajectories and rewards to the chosen RL framework for
-   backpropagation and checkpoint updates
+5. Gym forwards trajectories and rewards to the chosen RL framework for backpropagation and checkpoint updates
 
----
+**Best for**: Teams already using NAT who want to leverage agent workflows for model training
+:::
 
-### Other Agent Frameworks → Gym for RL
+:::{tab-item} Other Frameworks → Gym
+**Pattern**: Agent Frameworks → Gym for RL
 
-Applies to users of LangChain, LangGraph, CrewAI, or similar frameworks.
+Use this when you have existing agent workflows in LangChain, LangGraph, CrewAI, or similar frameworks.
 
 **Workflow**:
 1. Serve the existing agent workflow as an endpoint
@@ -171,14 +182,23 @@ Applies to users of LangChain, LangGraph, CrewAI, or similar frameworks.
 4. Scores and trajectories are passed to Gym
 5. Gym hands data to the RL framework for training
 
----
+**Best for**: Teams with established agent frameworks who want to add RL training capabilities
+:::
 
-### Model-Only Training Inside Gym
+:::{tab-item} Gym Only
+**Pattern**: Model-Only Training Inside Gym
+
+Use this when you want to train models directly against resource servers without external agent frameworks.
 
 **Workflow**:
 1. Run the model within Gym against resource servers (tools and verification)
 2. Gym captures trajectories produced during interactions
 3. Gym sends trajectories to the RL framework for training
+
+**Best for**: Teams focused on RL research and training without complex agent orchestration requirements
+:::
+
+::::
 
 ---
 
