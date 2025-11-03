@@ -42,7 +42,7 @@ key_to_example = dict()
 with open(args.source_fpath) as f:
     for line in tqdm(f, "Loading source dataset"):
         row = json.loads(line)
-        key = json.dumps(row["responses_create_params"])
+        key = json.dumps(row["responses_create_params"]["input"])
         key_to_example[key] = line
 
 
@@ -50,7 +50,7 @@ counter = Counter()
 with open(args.input_fpath) as f:
     for line in tqdm(f, desc="Loading responses"):
         row = json.loads(line)
-        key = json.dumps(row["responses_create_params"])
+        key = json.dumps(row["responses_create_params"]["input"])
         counter[key] += row["reward"]
 
 
