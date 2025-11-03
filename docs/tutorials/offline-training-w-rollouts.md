@@ -568,7 +568,7 @@ You now have hands-on experience with:
 
 You've completed offline training data preparation! Continue with:
 
-- **[Configuration Management](configuration-management.md)**: Master NeMo Gym's flexible configuration system
+- **[Separate Policy and Judge Models](separate-policy-and-judge-models.md)**: Learn advanced multi-model configuration patterns
 - **[Rollout Collection Fundamentals](../about/concepts/rollout-collection-fundamentals.md)**: Deep dive into advanced collection strategies
 
 Or explore the [Concepts](../about/concepts/index.md) section for deeper understanding of the framework.
