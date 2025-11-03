@@ -130,71 +130,72 @@ global_config_dict = OmegaConf.merge(*extra_configs, global_config_dict)
 
 ## Configuration Resolution Process
 
-When you run `ng_run`, NeMo Gym resolves configuration through this process:
-
-### 1. Parse Command Line
-
-Hydra extracts command-line arguments into a configuration dictionary:
+Let's trace what happens when you run this command:
 
 ```bash
 ng_run "+config_paths=[model.yaml]" +policy_model_name=gpt-4o-mini
 ```
 
-Creates: `{config_paths: ["model.yaml"], policy_model_name: "gpt-4o-mini"}`
-
-### 2. Load env.yaml
-
-If `env.yaml` exists in the project root, it's loaded:
+With an `env.yaml` file containing secrets:
 
 ```yaml
 policy_api_key: sk-real-key
-policy_model_name: gpt-4o-2024-11-20  # Will be overridden by CLI
+policy_model_name: gpt-4o-2024-11-20
 ```
 
-### 3. Resolve config_paths
+1. **Parse Command Line → Configuration Dictionary**
+   
+   Hydra extracts arguments:
+   > `{config_paths: ["model.yaml"], policy_model_name: "gpt-4o-mini"}`
 
-The system merges env.yaml with CLI args to resolve `config_paths`:
+2. **Load env.yaml → Secrets Layer**
+   
+   If `env.yaml` exists, it's loaded into a separate dictionary:
+   > `{policy_api_key: "sk-real-key", policy_model_name: "gpt-4o-2024-11-20"}`
 
-```python
-# From global_config.py:189
-merged_config_for_config_paths = OmegaConf.merge(dotenv_extra_config, global_config_dict)
-config_paths = merged_config_for_config_paths.get(CONFIG_PATHS_KEY_NAME) or []
-```
+3. **Resolve config_paths → Determine Which Files to Load**
+   
+   System merges CLI and env.yaml to resolve any variable references in config paths:
+   ```python
+   # From global_config.py:189
+   merged_config_for_config_paths = OmegaConf.merge(dotenv_extra_config, global_config_dict)
+   config_paths = merged_config_for_config_paths.get(CONFIG_PATHS_KEY_NAME) or []
+   ```
+   
+   This enables using config collections: `ng_run '+config_paths=${weather_config_paths}'`
 
-This allows using config path collections from env.yaml:
-```bash
-ng_run '+config_paths=${simple_weather_config_paths}'
-```
+4. **Load YAML Files → Server Configurations**
+   
+   Each file in `config_paths` is loaded in order:
+   > First file: `{policy_model: {openai_model: {...}}}`
+   >
+   > Second file overrides/extends: `{simple_weather: {resources_servers: {...}}}`
 
-### 4. Load YAML Files
+5. **Final Merge → Single Configuration**
+   
+   All layers merge with priority order:
+   ```python
+   # From global_config.py:201
+   global_config_dict = OmegaConf.merge(
+       *extra_configs,        # YAML files (lowest priority)
+       dotenv_extra_config,   # env.yaml (middle priority)
+       global_config_dict     # CLI args (highest priority)
+   )
+   ```
+   
+   **Result**: `policy_model_name` from CLI (`gpt-4o-mini`) overrides env.yaml's value (`gpt-4o-2024-11-20`), while `policy_api_key` from env.yaml is preserved.
 
-Each YAML file in `config_paths` is loaded in order. Later files override earlier ones.
+6. **Validate and Populate Defaults → Ready to Run**
+   
+   Final validation ensures the configuration is complete:
+   - Verify all server references exist
+   - Populate missing host values (default: `127.0.0.1`)
+   - Assign available ports if not specified
+   - Cache for the session
+   
+   Configuration is now ready for `ng_run` to start servers.
 
-### 5. Final Merge (Priority Order)
-
-The system merges all layers with this priority:
-
-```python
-# From global_config.py:201
-global_config_dict = OmegaConf.merge(
-    *extra_configs,        # YAML files (lowest priority)
-    dotenv_extra_config,   # env.yaml (middle priority)
-    global_config_dict     # CLI args (highest priority)
-)
-```
-
-**Result**: A single configuration dictionary where later layers override earlier ones.
-
-### 6. Validation and Defaults
-
-The system validates and populates defaults:
-
-1. **Server references**: Verifies all server references exist
-2. **Host defaults**: Populates missing host values (default: `127.0.0.1`)
-3. **Port allocation**: Assigns available ports if not specified
-4. **Caching**: Configuration is resolved once and cached for the session
-
-**Evidence**: Validation in `nemo_gym/global_config.py:132-169`
+**Evidence**: Complete resolution logic in `nemo_gym/global_config.py:132-201`
 
 ---
 
