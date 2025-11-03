@@ -21,10 +21,10 @@ Master rollout generation and training data preparation for RL, SFT, and DPO.
 ::::{grid} 1 1 1 1
 :gutter: 1 1 1 2
 
-:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` SFT and DPO Training
-:link: 07-sft-dpo-rollout-collection
+:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` Offline Training with Rollouts
+:link: offline-training-w-rollouts
 :link-type: doc
-Use generated rollouts to create training data for supervised fine-tuning and direct preference optimization.
+Transform rollouts into training data for supervised fine-tuning (SFT) and direct preference optimization (DPO).
 +++
 {bdg-secondary}`sft` {bdg-secondary}`dpo`
 :::

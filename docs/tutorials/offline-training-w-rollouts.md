@@ -1,4 +1,4 @@
-(tutorial-sft-dpo)=
+(tutorial-offline-training)=
 
 # Offline Training with Rollouts (SFT/DPO)
 
