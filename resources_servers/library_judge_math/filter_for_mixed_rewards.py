@@ -60,7 +60,7 @@ total_prompts = len(counter)
 print("Pass@k distribution")
 for k, v in sorted(bucketed_counts.items()):
     pct = 100 * v / total_rollouts
-    print(f"{k: 3}: {v:<8} ({pct:.2f}%)")
+    print(f"{k:>3}: {v:<8} ({pct:.2f}%)")
 
 
 filtered_out = 0

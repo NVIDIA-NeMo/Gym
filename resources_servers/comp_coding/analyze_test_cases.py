@@ -33,4 +33,4 @@ cumulative_count = 0
 for key, value in sorted(c.items(), key=lambda p: p[0]):
     cumulative_count += value
     cumulative_pct = 100 * cumulative_count / total_count
-    print(f"{key:>3}: {value:<6} (cumulative {cumulative_pct:.0f}%)")
+    print(f"{key:>3}: {value:>6} (cumulative {cumulative_pct:.0f}%)")
