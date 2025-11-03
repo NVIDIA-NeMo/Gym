@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import json
 import re
 from copy import deepcopy
 from time import time
@@ -207,18 +206,20 @@ class VLLMModel(SimpleResponsesAPIModel):
             chat_completion_dict = await client.create_chat_completion(**create_params)
         except ClientResponseError as e:
             """
-            Example message for out of context length:
+            Example messages for out of context length:
+
+            1. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L914
             ```json
             {"object":"error","message":"This model\'s maximum context length is 32768 tokens. However, you requested 32818 tokens in the messages, Please reduce the length of the messages. None","type":"BadRequestError","param":null,"code":400}
             ```
+            2. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L940
+            3. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L948
+            4. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/sampling_params.py#L463
             """
-            try:
-                result = json.loads(e.response_content.decode())
-            except:
-                raise e
+            result_content_str = e.response_content.decode()
 
-            is_out_of_context_length = (
-                e.status == 400 and "message" in result and "context length" in result["message"]
+            is_out_of_context_length = e.status == 400 and (
+                "context length" in result_content_str or "max_tokens" in result_content_str
             )
             if is_out_of_context_length:
                 return NeMoGymChatCompletion(
