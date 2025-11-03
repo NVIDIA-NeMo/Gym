@@ -291,68 +291,48 @@ Here's how the layers stack:
 └─────────────────────────────────────────────────────────┘
 ```
 
-### Resolution Steps
+**Key insight**: When a variable like `policy_model_name` appears in multiple layers, the highest-priority layer wins. CLI's `gpt-4o-mini` overrides env.yaml's `gpt-4o-2024-11-20`.
 
-1. **Parse command-line arguments**
-   
-   Hydra extracts `config_paths` and any overrides like `+policy_model_name=gpt-4o-mini`
+:::{dropdown} See the Final Merged Result
+:icon: code-square
 
-2. **Load env.yaml**
-   
-   If `env.yaml` exists, load secrets and environment-specific values
-
-3. **Merge CLI and env.yaml to resolve config_paths**
-   
-   ```python
-   # From global_config.py:189
-   merged_config_for_config_paths = OmegaConf.merge(dotenv_extra_config, global_config_dict)
-   config_paths = merged_config_for_config_paths.get(CONFIG_PATHS_KEY_NAME) or []
-   ```
-   
-   This enables using config collections: `ng_run '+config_paths=${weather_config_paths}'`
-
-4. **Load YAML files**
-   
-   Load each file in `config_paths` in order. Variable references like `${policy_model_name}` are resolved using the merged CLI + env.yaml values.
-
-5. **Final merge with priority**
-   
-   ```python
-   # From global_config.py:201
-   global_config_dict = OmegaConf.merge(
-       *extra_configs,        # YAML files (lowest priority)
-       dotenv_extra_config,   # env.yaml (middle priority)
-       global_config_dict     # CLI args (highest priority)
-   )
-   ```
-
-6. **Validate and populate defaults**
-   
-   - Verify all server references exist
-   - Populate missing host values (default: `127.0.0.1`)
-   - Assign available ports if not specified
-   - Cache configuration for the session
-
-### Final Merged Configuration
-
-After all layers merge, the result is:
+After all layers merge:
 
 ```yaml
-policy_model_name: gpt-4o-mini                     # From CLI (overrode env.yaml)
+policy_model_name: gpt-4o-mini                     # CLI overrode env.yaml
 policy_api_key: sk-real-key                        # From env.yaml
 policy_base_url: https://api.openai.com/v1         # From env.yaml
 policy_model:
   responses_api_models:
     openai_model:
       entrypoint: app.py                           # From YAML
-      openai_base_url: https://api.openai.com/v1   # Variable resolved from env.yaml
-      openai_api_key: sk-real-key                  # Variable resolved from env.yaml
-      openai_model: gpt-4o-mini                    # Variable resolved with CLI override
+      openai_base_url: https://api.openai.com/v1   # Variable resolved
+      openai_api_key: sk-real-key                  # Variable resolved
+      openai_model: gpt-4o-mini                    # Variable resolved with override
 ```
 
-**Key insight**: `policy_model_name` appears in both env.yaml (`gpt-4o-2024-11-20`) and CLI (`gpt-4o-mini`). CLI wins because it has highest priority. Variable interpolation happens during YAML loading, so `${policy_model_name}` already sees the CLI value.
+Variable interpolation (`${...}`) happens during YAML loading, so references already see the merged CLI + env.yaml values.
 
-**Evidence**: Complete resolution logic in `nemo_gym/global_config.py:132-201`
+:::
+
+:::{dropdown} Resolution Implementation Details
+:icon: tools
+
+The merge happens in this order:
+
+```python
+# From global_config.py:201
+global_config_dict = OmegaConf.merge(
+    *extra_configs,        # YAML files (lowest priority)
+    dotenv_extra_config,   # env.yaml (middle priority)
+    global_config_dict     # CLI args (highest priority)
+)
+```
+
+Complete resolution logic: `nemo_gym/global_config.py:132-201`
+
+:::
+
 
 ---
 
