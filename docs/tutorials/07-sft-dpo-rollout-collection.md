@@ -1,6 +1,37 @@
+(tutorial-sft-dpo)=
+
 # Offline Training with Rollouts (SFT/DPO)
 
-**Goal**: Transform your generated rollouts into high-quality training data for supervised fine-tuning (SFT) and direct preference optimization (DPO).
+You've generated rollouts in the get-started series—now learn how to transform them into training data that can improve your AI models through supervised fine-tuning (SFT) and direct preference optimization (DPO).
+
+:::{card}
+
+**Goal**: Transform generated rollouts into high-quality training data for supervised fine-tuning and preference optimization.
+
+^^^
+
+**In this tutorial, you will**:
+
+1. Understand SFT and DPO training data formats
+2. Filter rollouts for quality
+3. Process rollouts into training formats
+4. Validate and evaluate your training data
+
+:::
+
+:::{button-ref} /get-started/index
+:color: secondary
+:outline:
+:ref-type: doc
+
+← New to NeMo Gym? Start with Get Started
+:::
+
+:::{tip}
+**Prerequisites**: This tutorial assumes you've completed the [Get Started](../get-started/index.md) series and understand how to [collect rollouts](../get-started/collecting-rollouts.md). If you need a deeper understanding of rollout collection strategies, refer to [Rollout Collection Fundamentals](../about/concepts/rollout-collection-fundamentals.md).
+:::
+
+---
 
 ## Why Offline Training?
 
@@ -13,6 +44,8 @@
 - You have limited compute - more efficient than reinforcement learning
 
 **The offline training pipeline**: Generate rollouts → Filter and process → Train models → Deploy improved agents
+
+---
 
 ## Training Data Types
 
@@ -51,17 +84,19 @@
 }
 ```
 
+---
+
 ## Data Preparation Overview
 
 The offline training pipeline follows this logical flow:
 
-1. Collect rollouts using strategies from the {doc}`../get-started/collecting-rollouts` guide and {doc}`../about/concepts/rollout-collection-fundamentals` reference
-- **SFT data**: Use consistent generation (low temperature, single rollout per task)
-- **DPO data**: Use diverse generation (higher temperature, 2 rollouts per task for comparison)
-2. Filter for quality - Remove poor rollouts before processing
-3. Format for training - Convert to SFT or DPO format based on your goals
+1. **Collect rollouts** using strategies from the {doc}`../get-started/collecting-rollouts` guide and {doc}`../about/concepts/rollout-collection-fundamentals` reference
+   - **SFT data**: Use consistent generation (low temperature, single rollout per task)
+   - **DPO data**: Use diverse generation (higher temperature, 2 rollouts per task for comparison)
+2. **Filter for quality** - Remove poor rollouts before processing
+3. **Format for training** - Convert to SFT or DPO format based on your goals
 
-
+---
 
 ## Step 1: Quality Filtering and Curation
 
@@ -99,6 +134,8 @@ filter_rollouts('raw_rollouts.jsonl', 'filtered_rollouts.jsonl', {
 })
 ```
 
+**✅ Success Check**: You should see output like `Kept 847/1203 rollouts (70.4%)` showing how many rollouts passed your quality filters.
+
 ### Manual Curation (Optional)
 
 For critical applications, sample and manually review:
@@ -125,7 +162,11 @@ def sample_for_review(input_file: str, sample_size: int = 50):
             out.write(json.dumps(rollout) + '\n')
 ```
 
-**Note**: These are example filtering approaches. Customize the criteria, thresholds, and sampling strategies based on your specific domain and quality requirements.
+:::{note}
+These are example filtering approaches. Customize the criteria, thresholds, and sampling strategies based on your specific domain and quality requirements.
+:::
+
+---
 
 ## Step 2: Format for Training
 
@@ -154,6 +195,8 @@ def process_sft_data(filtered_rollout_file: str, output_file: str):
 # Process filtered rollouts (no additional filtering needed)
 process_sft_data('filtered_rollouts.jsonl', 'sft_data.jsonl')
 ```
+
+**✅ Success Check**: Your `sft_data.jsonl` file should now contain one training example per rollout, each with the conversation history and reward score.
 
 ### DPO Data Processing
 
@@ -207,6 +250,10 @@ def create_dpo_pairs(filtered_rollout_file: str, output_file: str):
 create_dpo_pairs('filtered_rollouts.jsonl', 'dpo_pairs.jsonl')
 ```
 
+**✅ Success Check**: You should see output like `Created 423 preference pairs` showing how many comparison pairs were generated from your rollouts.
+
+---
+
 ## Training Integration
 
 Once you have your processed data (`sft_data.jsonl` or `dpo_pairs.jsonl`), you can use any post-training framework for SFT or DPO:
@@ -214,21 +261,25 @@ Once you have your processed data (`sft_data.jsonl` or `dpo_pairs.jsonl`), you c
 ### Standard Data Formats
 
 SFT data follows the conversation format used by most training libraries:
+
 ```json
 {"messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}
 ```
 
 DPO data follows the preference pair format:
+
 ```json
 {"prompt": ["..."], "chosen": ["..."], "rejected": ["..."]}
 ```
 
+---
 
 ## Validation and Evaluation
 
 ### Pre-Training Validation
 
 Before training, validate your data quality by checking:
+
 - **Dataset size**: Sufficient examples for training objectives
 - **Reward distribution**: Reasonable range and average quality scores  
 - **Length distribution**: Appropriate conversation lengths
@@ -246,6 +297,8 @@ ng_collect_rollouts +agent_name=improved_agent \
 ```
 
 Compare key metrics like average reward, success rate, and task-specific performance against your baseline to measure improvement.
+
+---
 
 ## Best Practices
 
@@ -306,15 +359,20 @@ mkdir -p models/agent_v1.0/
 cp -r ./results/* models/agent_v1.0/
 ```
 
+---
+
 ## Troubleshooting
 
 ### Problem: Poor Training Data Quality
 
-```
+**Symptoms:**
+
+```text
 Low average rewards, inconsistent behaviors
 ```
 
 **Solutions**:
+
 - Increase `min_reward` threshold for filtering
 - Generate rollouts with lower temperature (more consistent)
 - Add manual curation step
@@ -322,11 +380,14 @@ Low average rewards, inconsistent behaviors
 
 ### Problem: Insufficient Data Diversity
 
-```
+**Symptoms:**
+
+```text
 Model overfits to limited patterns
 ```
 
 **Solutions**:
+
 - Generate rollouts with higher temperature
 - Use more diverse input tasks
 - Collect data from multiple agent configurations
@@ -334,28 +395,39 @@ Model overfits to limited patterns
 
 ### Problem: Training Instability
 
-```
+**Symptoms:**
+
+```text
 Loss doesn't converge, model performance degrades
 ```
 
 **Solutions**:
+
 - Check data format compatibility with training framework
 - Reduce learning rate
 - Add regularization
 - Filter out extremely long or short conversations
 
+---
+
 ## What You've Learned
 
-You now know how to transform rollouts into training data:
+You now have hands-on experience with:
 
-- **Data preparation strategies** for SFT and DPO
-- **Quality filtering and curation** techniques  
-- **Evaluation methods** to measure improvement
-- **Best practices** for sustainable offline training workflows
+- ✓ Understanding SFT and DPO training data formats
+- ✓ Filtering rollouts for quality before processing
+- ✓ Converting rollouts into training-ready formats
+- ✓ Validating and evaluating training data quality
 
-**Next steps**: 
-<!-- TODO: Add link [Online Training with Rollouts (RL)](07-online-training.md) -->
-<!-- - **Online Training with Rollouts (RL) (Coming soon!)** - Learn real-time training approaches -->
-<!-- TODO: Add link [Building Custom Resource Servers](08-building-custom-resources.md) -->
-<!-- - **Building Custom Resource Servers (Coming soon!)** - Create domain-specific training data -->
-- **[Configuration Management](09-configuration-guide.md)**
+**Key insight**: High-quality training data comes from careful filtering and processing of rollouts. Start with good data, and your models will learn better behaviors.
+
+---
+
+## Next Steps
+
+You've completed offline training data preparation! Continue with:
+
+- **[Configuration Management](09-configuration-guide.md)**: Master NeMo Gym's flexible configuration system
+- **[Rollout Collection Fundamentals](../about/concepts/rollout-collection-fundamentals.md)**: Deep dive into advanced collection strategies
+
+Or explore the [Concepts](../about/concepts/index.md) section for deeper understanding of the framework.
