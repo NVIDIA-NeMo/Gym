@@ -18,7 +18,7 @@ python -c "import ray; ray.shutdown()"
 EXP_NAME="$(date +%Y%m%d)/workbench/qwen3_4binstruct/workbench-test"
 CONFIG_PATH=examples/penguin/grpo_workbench_qwen3_4binstruct.yaml
 HF_HOME=.cache/ \
-WANDB_API_KEY=ac17639e76dcbd0dbb3aea36aec1ae8286de56bc \
+WANDB_API_KEY=<wandb api key> \
 NRL_FORCE_REBUILD_VENVS=true \
 uv run python examples/penguin/run_grpo_penguin.py \
     --config=$CONFIG_PATH \
