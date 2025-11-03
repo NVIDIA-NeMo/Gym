@@ -1,5 +1,11 @@
 # NeMo Gym Tutorials
 
+Hands-on learning experiences that guide you through building, training, and deploying AI agents with NeMo Gym.
+
+> **Need a quick definition?** Check the [Glossary](../resources/glossary.md) for essential terminology.
+
+---
+
 ## Tutorial Structure
 
 - **Getting Started**: Learn core concepts and run your first agent in NeMo Gym
@@ -7,11 +13,9 @@
 - **Resource Servers**: Build custom environments, tools, and verification systems
 - **Advanced Operations**: Master configuration, testing, deployment, and scaling
 
+---
 
 ## Getting Started
-
-### **[00 - Key Terminology](00-terminology.md)**
-Essential vocabulary and definitions for building RL workflows with NeMo Gym. Quick reference for terms you'll encounter when generating rollouts, training agents, and working with the platform. 
 
 ### **[02 - Setup and Installation](02-setup.md)** 
 Get NeMo Gym installed and servers running with your first successful agent interaction.

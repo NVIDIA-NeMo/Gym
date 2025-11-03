@@ -1,166 +1,343 @@
 # Verifying Agent Results
 
-**Goal**: Understand how NeMo Gym evaluates agent performance and what verification means for training
+In the last tutorial, you ran your weather agent and saw it call the `get_weather` tool and generate responses. But how do you know if those responses were *good*? That's what verification solves.
 
-## What is Verification?
+**Goal**: Build and test verification logic that scores your weather agent's performance.
 
-Every resource server in NeMo Gym has a `verify()` function that **scores agent performance**. The purpose of this function is to define how to measure how well agents accomplish their goals.
+**In this tutorial, you will**:
 
-**The Problem**: When you ran your weather agent, it successfully called the tool and gave a response. But was that response *good*? Should the agent be rewarded or penalized for that behavior? Without verification, there's no way to measure improvement.
+1. Examine the current `verify()` function in the weather resource server
+2. Build quality scoring based on tool usage and response content
+3. Create a test script to observe different reward scores
+4. Experiment with stricter verification criteria
 
-**The Solution**: Each resource server must define exactly what "good performance" means for its domain.
+:::{tip}
+**Going deeper**: For comprehensive coverage of verification patterns, design considerations, and the theory behind reward signals, refer to [Verifying Agent Results (Concepts)](../about/concepts/verifying-agent-results.md).
+:::
 
-## Why Verification Matters
+:::{button-ref} 03-your-first-agent
+:color: secondary
+:outline:
+:ref-type: doc
 
-**Tool Execution ≠ Good Performance**
+← Previous: Your First Agent
+:::
 
-- Your weather agent successfully called `get_weather("San Francisco")`
-- But did it give helpful advice? Was the response accurate? Was it efficient?
-- Verification answers these questions with numerical scores
+---
 
-**Training Signal**
+## Examine the Current Verification Function
 
-Verification scores become the **reward signals** that drive reinforcement learning:
-- High scores → "Do more of this behavior"  
-- Low scores → "Avoid this behavior"
-- No verification = No way to improve the agent
+Your weather agent's resource server already has a `verify()` function, but it doesn't actually check anything—it just returns a fixed reward of 1.0 regardless of performance.
 
-## Common Verification Patterns
+Open `resources_servers/simple_weather/app.py` and locate the verify function:
 
-Let's look at real examples from NeMo Gym's resource servers:
-
-### **Correctness Verification**
-
-**Simple Correctness** (`mcqa` - Multiple Choice Questions):
 ```python
-# Extract agent's answer (A, B, C, or D)
-pred = extract_answer_from_response(agent_response)
-gold = expected_answer  # e.g., "C"
-
-# Binary scoring: right or wrong
-is_correct = (pred == gold)
-reward = 1.0 if is_correct else 0.0
+async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+    return BaseVerifyResponse(**body.model_dump(), reward=1.0)
 ```
 
-**Sophisticated Correctness** (`library_judge_math` - Math Problems):
-```python
-# Uses math-verify library for mathematical equivalence
-library_reward = math_metric.compute(predicted_answer, expected_answer)
+**What this does**:
 
-# PLUS an LLM judge for edge cases
-judge_prompt = f"Are these answers equivalent? {predicted_answer} vs {expected_answer}"
-judge_score = await llm_judge(judge_prompt)
+- Receives the agent's complete response in `body.response`
+- Returns a reward of 1.0 (perfect score) no matter what
 
-# Combines both signals
-final_reward = combine_scores(library_reward, judge_score)
-```
+**The problem**: Every response gets the same score, so there's no signal about quality. The agent can't learn what "good" looks like.
 
-### **Quality Verification** 
+---
 
-**Instruction Following** (`instruction_following`):
-```python
-# Check if response follows specific instructions
-instructions = ["Use exactly 3 sentences", "Include the word 'banana'", "End with a question"]
-follow_list = []
+## Build Quality Verification
 
-for instruction in instructions:
-    follows = instruction_checker.verify(agent_response, instruction)
-    follow_list.append(follows)
+Let's create verification logic that actually measures performance. You'll check whether the agent used the weather data meaningfully.
 
-# Only reward if ALL instructions followed
-reward = 1.0 if all(follow_list) else 0.0
-```
+1. Replace the `verify()` function in `resources_servers/simple_weather/app.py`:
 
-### **Efficiency Verification**
+   ```python
+   async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+       """
+       Score agent performance based on whether it:
+       1. Called the weather tool
+       2. Mentioned the weather in its response
+       """
+       response_output = body.response.output
+       
+       # Check 1: Did agent call the weather tool?
+       tool_called = any(
+           item.get("type") == "function_call" and item.get("name") == "get_weather"
+           for item in response_output
+       )
+       
+       # Check 2: Did agent mention weather in final response?
+       final_message = ""
+       for item in response_output:
+           if item.get("type") == "message":
+               content = item.get("content", [])
+               if content and isinstance(content, list):
+                   final_message = content[0].get("text", "")
+       
+       mentioned_weather = "weather" in final_message.lower() or "cold" in final_message.lower()
+       
+       # Scoring logic
+       if tool_called and mentioned_weather:
+           reward = 1.0  # Perfect: used tool AND incorporated results
+       elif tool_called:
+           reward = 0.5  # Partial: called tool but didn't use data
+       elif mentioned_weather:
+           reward = 0.3  # Weak: mentioned weather without checking
+       else:
+           reward = 0.0  # Failed: didn't address weather at all
+       
+       return BaseVerifyResponse(**body.model_dump(), reward=reward)
+   ```
 
-**Tool Usage Patterns**:
-```python
-# Count unnecessary tool calls
-tool_calls = count_tool_calls(agent_response)
-expected_calls = 1  # Should only need one weather call
+2. **Save the file** and restart your NeMo Gym servers for the changes to take effect.
 
-# Penalize inefficiency  
-efficiency_score = 1.0 - abs(tool_calls - expected_calls) * 0.2
-reward = max(0.0, efficiency_score)
-```
+---
 
-**Response Length**:
-```python
-# Prefer concise but complete responses
-response_length = len(agent_response.split())
-optimal_length = 50  # words
+## Test Your Verification Logic
 
-if response_length <= optimal_length:
-    reward = 1.0
-else:
-    # Penalize verbosity
-    reward = max(0.5, 1.0 - (response_length - optimal_length) * 0.01)
-```
+1. Create a test script (`responses_api_agents/simple_agent/test_verification.py`) to see different reward scores in action.
 
-## From Verification to Training
+   ```python
+   import json
+   from asyncio import run
+   from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+   from nemo_gym.server_utils import ServerClient
 
-### **How Rewards Drive Learning**
+   server_client = ServerClient.load_from_global_config()
 
-1. Agent generates response → Gets verification score
-2. RL algorithm uses score to update model parameters  
-3. Higher-scoring behaviors become more likely
-4. Lower-scoring behaviors become less likely
-5. Agent improves over many training iterations
+   # Test cases designed to trigger different rewards
+   test_cases = [
+       {
+           "message": "What's the weather in Seattle?",
+           "expected_reward": 1.0,
+           "reason": "Should call tool AND use weather data"
+       },
+       {
+           "message": "Tell me about Seattle",
+           "expected_reward": 0.0,
+           "reason": "No weather mentioned, tool might not be called"
+       },
+       {
+           "message": "Is it cold in Boston?",
+           "expected_reward": 1.0,
+           "reason": "Should call tool AND mention weather"
+       },
+   ]
 
-### **What Makes Good Verification**
+   async def test_verification():
+       for test in test_cases:
+           print(f"\n{'='*60}")
+           print(f"Testing: '{test['message']}'")
+           print(f"Expected reward: {test['expected_reward']} ({test['reason']})")
+           print('='*60)
+           
+           # Get agent response
+           task = server_client.post(
+               server_name="simple_weather_simple_agent",
+               url_path="/v1/responses",
+               json=NeMoGymResponseCreateParamsNonStreaming(
+                   input=[
+                       {
+                           "role": "developer",
+                           "content": "You are a helpful personal assistant.",
+                       },
+                       {"role": "user", "content": test["message"]},
+                   ],
+                   tools=[
+                       {
+                           "type": "function",
+                           "name": "get_weather",
+                           "description": "Get weather information for a city",
+                           "parameters": {
+                               "type": "object",
+                               "properties": {
+                                   "city": {"type": "string", "description": "City name"},
+                               },
+                               "required": ["city"],
+                               "additionalProperties": False,
+                           },
+                           "strict": True,
+                       }
+                   ],
+               ),
+           )
+           
+           result = await task
+           response_data = await result.json()
+           
+           # Call verify endpoint
+           verify_task = server_client.post(
+               server_name="simple_weather",
+               url_path="/verify",
+               json={
+                   "responses_create_params": response_data["responses_create_params"],
+                   "response": {
+                       "output": response_data["output"],
+                       "model": response_data.get("model", ""),
+                   },
+               },
+           )
+           
+           verify_result = await verify_task
+           verify_data = await verify_result.json()
+           
+           print(f"\nAgent response: {response_data['output'][-1]}")
+           print(f"\n✓ REWARD RECEIVED: {verify_data['reward']}")
 
-**Reliable**: Same response should get same score consistently
-```python
-# Good: Deterministic scoring
-reward = 1.0 if predicted_answer == expected_answer else 0.0
+   run(test_verification())
+   ```
 
-# Bad: Random or inconsistent scoring  
-reward = random.uniform(0.8, 1.0) if correct else random.uniform(0.0, 0.2)
-```
+2. **Save the file**.
 
-**Meaningful**: Scores should reflect actual task performance
-```python
-# Good: Measures what you care about
-reward = accuracy_score + helpfulness_score + efficiency_score
+---
 
-# Bad: Measures irrelevant details
-reward = 1.0 if response.startswith("Hello") else 0.0
-```
+## Run the Tests
 
-**Scalable**: Can handle thousands of evaluations per second during training
-```python
-# Good: Fast, local computation
-reward = simple_string_match(predicted, expected)
+1. Start your NeMo Gym servers (if not already running):
 
-# Bad: Expensive API calls for every verification
-reward = await expensive_api_call(predicted, expected)
-```
+    ```bash
+    config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+    resources_servers/simple_weather/configs/simple_weather.yaml"
 
-## Real-World Verification Examples
+    ng_run "+config_paths=[${config_paths}]"
+    ```
 
-**Math Tutoring Agent**:
-- Correctness: Did the agent solve the problem correctly?
-- Pedagogy: Did it explain the steps clearly?
-- Efficiency: Did it use the simplest method?
+2. In a new terminal, activate your environment and run the test:
 
-**Customer Service Agent**:
-- Accuracy: Did it answer the customer's question?
-- Politeness: Was the tone appropriate?
-- Resolution: Did it solve the customer's problem?
+   ```bash
+   cd /path/to/Gym
+   source .venv/bin/activate
+   python responses_api_agents/simple_agent/test_verification.py
+   ```
 
-**Code Generation Agent**:
-- Functionality: Does the code run correctly?
-- Quality: Is it well-structured and readable?
-- Security: Does it avoid common vulnerabilities?
+---
+
+## What You'll Observe
+
+Watch how different agent behaviors produce different rewards:
+
+::::{tab-set}
+
+:::{tab-item} High Reward (1.0)
+
+- **Message**: "What's the weather in Seattle?"
+- **Agent behavior**: Calls `get_weather`, mentions weather in response
+- **Reward**: 1.0 ✓ (Perfect score)
+
+:::
+
+:::{tab-item} Partial Reward (0.5)
+
+- **Message**: "Tell me about Seattle"
+- **Agent behavior**: Might call tool but focus on non-weather facts
+- **Reward**: 0.5 (Called tool but didn't emphasize weather)
+
+:::
+
+:::{tab-item} Low/Zero Reward (0.0-0.3)
+
+- **Message**: Non-weather questions
+- **Agent behavior**: Responds without using weather tool
+- **Reward**: 0.0-0.3 (Didn't use weather data)
+
+:::
+
+::::
+
+:::{note}
+GPT-4 is quite capable, so you might see high scores across most tests. This demonstrates that the base model already performs well on simple tasks. During RL training, verification becomes critical for more challenging domains where the base model struggles.
+:::
+
+---
+
+## Experiment: Make Verification Stricter
+
+Try modifying the verification logic to require more from the agent.
+
+1. Edit `verify()` in `resources_servers/simple_weather/app.py`:
+
+   ```python
+   async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+       """Check if agent provides actionable advice based on weather"""
+       response_output = body.response.output
+       
+       # Extract final response text
+       final_message = ""
+       for item in response_output:
+           if item.get("type") == "message":
+               content = item.get("content", [])
+               if content and isinstance(content, list):
+                   final_message = content[0].get("text", "").lower()
+       
+       # Check if tool was called
+       tool_called = any(
+           item.get("type") == "function_call" and item.get("name") == "get_weather"
+           for item in response_output
+       )
+       
+       # Check for actionable advice keywords
+       actionable_advice = any(word in final_message for word in [
+           "wear", "bring", "jacket", "umbrella", "layers", "coat"
+       ])
+       
+       # Stricter scoring
+       if tool_called and actionable_advice:
+           reward = 1.0  # Perfect: used weather data AND gave advice
+       elif tool_called and "weather" in final_message:
+           reward = 0.6  # Good: mentioned weather but advice not clear
+       elif tool_called:
+           reward = 0.3  # Weak: called tool but didn't leverage it
+       else:
+           reward = 0.0  # Failed: no tool use
+       
+       return BaseVerifyResponse(**body.model_dump(), reward=reward)
+   ```
+
+2. **Restart servers** and **rerun the test script** to see how rewards change with stricter criteria.
+
+---
+
+## Understanding the Verification Workflow
+
+What you just implemented mirrors real RL training workflows:
+
+1. **Agent generates response** → Your test script sends a message
+2. **Response captured** → Complete output with tool calls
+3. **Verification called** → `/verify` endpoint scores the response
+4. **Reward assigned** → Numerical score (0.0–1.0) returned
+5. **In RL training** → This reward would update model parameters
+
+The verification logic you wrote defines what the agent should learn to optimize for.
+
+:::{tip}
+For production verification patterns including correctness checking, LLM judges, hybrid scoring, and design considerations, refer to the [Verification Concepts](../about/concepts/verifying-agent-results.md) guide.
+:::
+
+---
 
 ## What You've Learned
 
-This verification system is what makes NeMo Gym powerful for agent training:
-- **Resource servers** provide both tools AND scoring systems
-- **Verification patterns** vary by domain but follow common principles  
-- **Reward signals** from verification drive agent improvement through RL
-- **Good verification** is reliable, meaningful, and scalable
+You now have hands-on experience with:
 
-Now that you understand how agent performance is measured, the next step is learning how to systematically collect this verification data at scale through rollout generation.
+- ✓ How `verify()` functions score agent performance
+- ✓ Building verification logic with scoring criteria
+- ✓ Testing verification and observing reward signals
+- ✓ The connection between verification and training
 
-→ **[Next: Rollout Collection Fundamentals](05-rollout-collection.md)**
+**Key insight**: The verification function defines what the agent learns to optimize. Design it to reflect true task success.
+
+---
+
+## Next Steps
+
+Now that you can score individual agent responses, the next challenge is generating these responses at scale for training.
+
+:::{button-ref} 05-rollout-collection
+:color: primary
+:outline:
+:ref-type: doc
+
+Next: Rollout Collection →
+:::
+
+Learn how to systematically collect thousands of agent responses with verification scores—the foundation of RL training data.
