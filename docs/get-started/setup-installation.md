@@ -89,7 +89,12 @@ INFO:     Uvicorn running on http://127.0.0.1:62920 (Press CTRL+C to quit)
 ...
 ```
 
+:::{note}
+The head server always uses port **11000**. Other servers get automatically assigned ports (like 62920, 52341, etc.) - your port numbers will differ from the example above.
+:::
+
 This means **4 servers are now running**:
+
 1. **Head server** (coordinates everything)
 2. 3 Gym servers. These 3 servers and their high level config should be printed to terminal!
    1. **Simple weather resource** (provides weather tool)

@@ -55,32 +55,63 @@ async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
 
 ## Build Quality Verification
 
-Let's create verification logic that actually measures performance. You'll check whether the agent used the weather data meaningfully.
+Let's create verification logic that actually measures performance. You'll build this up in three stages, from simple to sophisticated.
+
+### Stage 1: Check Tool Usage
+
+Start by verifying the most basic requirement: did the agent call the weather tool?
 
 1. Replace the `verify()` function in `resources_servers/simple_weather/app.py`:
 
    ```python
    async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+       """Check if agent called the weather tool"""
+       response_output = body.response.output
+       
+       # Did agent call the weather tool?
+       tool_called = any(
+           item.type == "function_call" and item.name == "get_weather"
+           for item in response_output
+       )
+       
+       reward = 1.0 if tool_called else 0.0
+       return BaseVerifyResponse(**body.model_dump(), reward=reward)
+   ```
+
+2. **Save the file** and restart your NeMo Gym servers for the changes to take effect.
+
+**What this checks**: Binary verification—either the agent used the tool (1.0) or didn't (0.0).
+
+---
+
+### Stage 2: Add Response Quality
+
+Now verify that the agent not only called the tool, but also used the weather data in its response.
+
+1. Update the `verify()` function:
+
+   ```python
+   async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
        """
-       Score agent performance based on whether it:
-       1. Called the weather tool
-       2. Mentioned the weather in its response
+       Score agent performance based on:
+       1. Tool usage
+       2. Whether weather data appears in the response
        """
        response_output = body.response.output
        
        # Check 1: Did agent call the weather tool?
        tool_called = any(
-           item.get("type") == "function_call" and item.get("name") == "get_weather"
+           item.type == "function_call" and item.name == "get_weather"
            for item in response_output
        )
        
        # Check 2: Did agent mention weather in final response?
        final_message = ""
        for item in response_output:
-           if item.get("type") == "message":
-               content = item.get("content", [])
+           if item.type == "message":
+               content = item.content
                if content and isinstance(content, list):
-                   final_message = content[0].get("text", "")
+                   final_message = content[0].text
        
        mentioned_weather = "weather" in final_message.lower() or "cold" in final_message.lower()
        
@@ -97,13 +128,68 @@ Let's create verification logic that actually measures performance. You'll check
        return BaseVerifyResponse(**body.model_dump(), reward=reward)
    ```
 
-2. **Save the file** and restart your NeMo Gym servers for the changes to take effect.
+2. **Save and restart servers** to test the enhanced verification.
+
+**What this adds**: Nuanced scoring that checks if the agent actually incorporated the weather data into its response.
+
+---
+
+### Stage 3: Enforce Quality Standards
+
+Finally, make verification even more demanding by requiring actionable advice, not just weather mentions.
+
+**Goal**: Agent must provide practical recommendations (like "bring a jacket") based on the weather data.
+
+1. Update the `verify()` function one more time:
+
+   ```python
+   async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+       """Check if agent provides actionable advice based on weather"""
+       response_output = body.response.output
+       
+       # Extract final response text
+       final_message = ""
+       for item in response_output:
+           if item.type == "message":
+               content = item.content
+               if content and isinstance(content, list):
+                   final_message = content[0].text.lower()
+       
+       # Check if tool was called
+       tool_called = any(
+           item.type == "function_call" and item.name == "get_weather"
+           for item in response_output
+       )
+       
+       # Check for actionable advice keywords
+       actionable_advice = any(word in final_message for word in [
+           "wear", "bring", "jacket", "umbrella", "layers", "coat"
+       ])
+       
+       # Stricter scoring
+       if tool_called and actionable_advice:
+           reward = 1.0  # Perfect: used weather data AND gave advice
+       elif tool_called and "weather" in final_message:
+           reward = 0.6  # Good: mentioned weather but advice not clear
+       elif tool_called:
+           reward = 0.3  # Weak: called tool but didn't leverage it
+       else:
+           reward = 0.0  # Failed: no tool use
+       
+       return BaseVerifyResponse(**body.model_dump(), reward=reward)
+   ```
+
+2. **Save and restart servers**.
+
+**What this adds**: Domain-specific quality requirements. This pattern is how you'd design verification for real applications—define what "good" means for your specific use case.
 
 ---
 
 ## Test Your Verification Logic
 
-1. Create a test script (`responses_api_agents/simple_agent/test_verification.py`) to see different reward scores in action.
+Now test whichever verification stage you've implemented to see how different agent behaviors produce different reward scores.
+
+1. Create a test script (`responses_api_agents/simple_agent/test_verification.py`):
 
    ```python
    import json
@@ -255,53 +341,6 @@ Watch how different agent behaviors produce different rewards:
 :::{note}
 GPT-4 is quite capable, so you might see high scores across most tests. This demonstrates that the base model already performs well on simple tasks. During RL training, verification becomes critical for more challenging domains where the base model struggles.
 :::
-
----
-
-## Experiment: Make Verification Stricter
-
-Try modifying the verification logic to require more from the agent.
-
-1. Edit `verify()` in `resources_servers/simple_weather/app.py`:
-
-   ```python
-   async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
-       """Check if agent provides actionable advice based on weather"""
-       response_output = body.response.output
-       
-       # Extract final response text
-       final_message = ""
-       for item in response_output:
-           if item.get("type") == "message":
-               content = item.get("content", [])
-               if content and isinstance(content, list):
-                   final_message = content[0].get("text", "").lower()
-       
-       # Check if tool was called
-       tool_called = any(
-           item.get("type") == "function_call" and item.get("name") == "get_weather"
-           for item in response_output
-       )
-       
-       # Check for actionable advice keywords
-       actionable_advice = any(word in final_message for word in [
-           "wear", "bring", "jacket", "umbrella", "layers", "coat"
-       ])
-       
-       # Stricter scoring
-       if tool_called and actionable_advice:
-           reward = 1.0  # Perfect: used weather data AND gave advice
-       elif tool_called and "weather" in final_message:
-           reward = 0.6  # Good: mentioned weather but advice not clear
-       elif tool_called:
-           reward = 0.3  # Weak: called tool but didn't leverage it
-       else:
-           reward = 0.0  # Failed: no tool use
-       
-       return BaseVerifyResponse(**body.model_dump(), reward=reward)
-   ```
-
-2. **Restart servers** and **rerun the test script** to see how rewards change with stricter criteria.
 
 ---
 
