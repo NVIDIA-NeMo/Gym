@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from collections import defaultdict
 from os import getenv
 from pathlib import Path
 from platform import python_version
@@ -383,11 +384,44 @@ def find_open_port(
 
 
 def format_almost_server_warning(server_name: str, error: ValidationError) -> str:
+    """Format user-friendly warning. Union literal errors are consolidated."""
+    errors = error.errors()
+
+    error_groups = defaultdict(list)
+
+    for err in errors:
+        loc = err["loc"]
+
+        # Check if literal union error (starts with "literal[").
+        if loc and isinstance(loc[-1], str) and loc[-1].startswith("literal["):
+            # Group without the literal type prefix.
+            base_loc = loc[:-1]
+            error_groups[base_loc].append(err)
+        else:
+            error_groups[loc].append(err)
+
     error_details = []
-    for err in error.errors():
-        loc = " -> ".join(str(item) for item in err["loc"])
-        msg = err["msg"]
-        error_details.append(f" - {loc}: {msg}")
+    for loc, errs in error_groups.items():
+        if len(errs) > 1 and all(isinstance(e["loc"][-1], str) and e["loc"][-1].startswith("literal[") for e in errs):
+            # Consolidate errors for literals.
+            loc_str = " -> ".join(str(item) for item in loc)
+            valid_options = []
+            for e in errs:
+                literal_str = e["loc"][-1]
+                if literal_str.startswith("literal["):
+                    value = literal_str[8:-2]  # Remove "literal['" and "']"
+                    valid_options.append(value)
+
+            if valid_options:
+                options_str = "', ".join(valid_options)
+                error_details.append(f"  - {loc_str}: Must be one of: {options_str}'")
+            else:
+                error_details.append(f"  - {loc_str}: {errs[0]['msg']}")
+
+        else:
+            err = errs[0]
+            loc_str = " -> ".join(str(item) for item in err["loc"])
+            error_details.append(f"  - {loc_str}: {err['msg']}")
 
     error_str = "\n".join(error_details)
 
