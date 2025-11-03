@@ -49,11 +49,21 @@ You've generated rollouts in the get-started series—now learn how to transform
 
 ## Training Data Types
 
-### Supervised Fine-Tuning (SFT) Data
+Choose the training approach that matches your goal:
+
+::::{tab-set}
+
+:::{tab-item} SFT (Supervised Fine-Tuning)
 
 **Purpose**: Train models to follow successful agent interaction patterns
 
+**When to use**:
+- You have high-quality examples of desired behavior
+- Want the model to imitate specific interaction patterns
+- Need consistent, predictable responses
+
 **Data structure**: Input-output pairs showing complete agent conversations
+
 ```json
 {
   "messages": [
@@ -66,11 +76,21 @@ You've generated rollouts in the get-started series—now learn how to transform
 }
 ```
 
-### Direct Preference Optimization (DPO) Data
+**Collection strategy**: Low temperature (0.1-0.3), single rollout per task
+
+:::
+
+:::{tab-item} DPO (Direct Preference Optimization)
 
 **Purpose**: Train models to prefer better responses over worse ones
 
+**When to use**:
+- You can generate multiple responses with varying quality
+- Want to teach the model to distinguish good from bad
+- Need to improve response quality through comparison
+
 **Data structure**: Preference pairs with chosen vs rejected responses
+
 ```json
 {
   "prompt": [{"role": "user", "content": "Solve this math problem: 2x + 5 = 13"}],
@@ -84,6 +104,12 @@ You've generated rollouts in the get-started series—now learn how to transform
 }
 ```
 
+**Collection strategy**: Higher temperature (0.6-0.8), 2+ rollouts per task for comparison
+
+:::
+
+::::
+
 ---
 
 ## Data Preparation Overview
@@ -91,14 +117,38 @@ You've generated rollouts in the get-started series—now learn how to transform
 The offline training pipeline follows this logical flow:
 
 1. **Collect rollouts** using strategies from the {doc}`../get-started/collecting-rollouts` guide and {doc}`../about/concepts/rollout-collection-fundamentals` reference
-   - **SFT data**: Use consistent generation (low temperature, single rollout per task)
-   - **DPO data**: Use diverse generation (higher temperature, 2 rollouts per task for comparison)
 2. **Filter for quality** - Remove poor rollouts before processing
 3. **Format for training** - Convert to SFT or DPO format based on your goals
 
+### Quick Reference: SFT vs DPO Data Requirements
+
+```{list-table}
+:header-rows: 1
+:widths: 25 35 40
+
+* - Aspect
+  - SFT
+  - DPO
+* - **Rollouts per task**
+  - 1 rollout per task
+  - 2+ rollouts per task
+* - **Temperature**
+  - Low (0.1-0.3)
+  - Higher (0.6-0.8)
+* - **Quality filter**
+  - Keep only high-quality (reward ≥ 0.8)
+  - Keep pairs with quality difference ≥ 0.1
+* - **Output format**
+  - Conversation history
+  - Preference pairs (chosen vs rejected)
+* - **Best for**
+  - Imitating expert behavior
+  - Learning preferences between responses
+```
+
 ---
 
-## Step 1: Quality Filtering and Curation
+## 1. Quality Filtering and Curation
 
 Always filter your rollouts first before formatting them for training. Here are example approaches you can customize for your needs:
 
@@ -168,7 +218,7 @@ These are example filtering approaches. Customize the criteria, thresholds, and 
 
 ---
 
-## Step 2: Format for Training
+## 2. Format for Training
 
 Once you have filtered, high-quality rollouts, format them for your chosen training method:
 
@@ -302,7 +352,12 @@ Compare key metrics like average reward, success rate, and task-specific perform
 
 ## Best Practices
 
-### 1. Data Quality Over Quantity
+:::{dropdown} 1. Data Quality Over Quantity
+:icon: shield-check
+
+**Principle**: Better to train on fewer high-quality examples than many noisy ones.
+
+**Implementation**:
 
 ```python
 # Prefer high-quality filtered data over large noisy datasets
@@ -313,7 +368,16 @@ filter_criteria = {
 }
 ```
 
-### 2. Balanced Datasets
+**Why it matters**: Training on low-quality data can teach the model bad behaviors that are difficult to unlearn.
+
+:::
+
+:::{dropdown} 2. Balanced Datasets
+:icon: scale
+
+**Principle**: Ensure diverse task representation to prevent overfitting to common patterns.
+
+**Implementation**:
 
 ```python
 # Ensure diverse task representation
@@ -335,18 +399,33 @@ def balance_dataset(input_file: str, output_file: str, max_per_category: int = 1
             out.write(json.dumps(data) + '\n')
 ```
 
-### 3. Iterative Improvement
+**Why it matters**: Imbalanced datasets lead to models that perform well on common tasks but fail on less frequent ones.
 
-```bash
-# Iteration cycle
+:::
+
+:::{dropdown} 3. Iterative Improvement
+:icon: iterations
+
+**Principle**: Use a continuous improvement cycle to progressively enhance agent quality.
+
+**The cycle**:
+
 1. Generate rollouts with current agent
 2. Filter and prepare training data  
 3. Train improved model
 4. Deploy and evaluate
 5. Use improved agent to generate better rollouts
-```
 
-### 4. Version Control
+**Why it matters**: Each iteration builds on previous improvements, creating a virtuous cycle of enhancement.
+
+:::
+
+:::{dropdown} 4. Version Control
+:icon: versions
+
+**Principle**: Track data and model versions for reproducibility and debugging.
+
+**Implementation**:
 
 ```bash
 # Track data versions
@@ -359,54 +438,84 @@ mkdir -p models/agent_v1.0/
 cp -r ./results/* models/agent_v1.0/
 ```
 
+**Why it matters**: Version control enables you to reproduce results, compare different approaches, and roll back if needed.
+
+:::
+
+
 ---
 
 ## Troubleshooting
 
-### Problem: Poor Training Data Quality
+:::{dropdown} Problem: Poor Training Data Quality
+:icon: alert
+:color: warning
 
 **Symptoms:**
+- Low average rewards (< 0.5)
+- Inconsistent behaviors across similar tasks
+- Model produces irrelevant or incorrect responses after training
 
-```text
-Low average rewards, inconsistent behaviors
-```
+**Root causes:**
+- Base agent needs improvement
+- Filtering thresholds too permissive
+- Verification function not aligned with quality goals
 
-**Solutions**:
+**Solutions:**
 
-- Increase `min_reward` threshold for filtering
-- Generate rollouts with lower temperature (more consistent)
-- Add manual curation step
-- Improve base agent before data collection
+1. **Tighten filters**: Increase `min_reward` threshold from 0.7 to 0.8 or higher
+2. **Lower temperature**: Generate rollouts with temperature 0.1-0.3 for more consistent behavior
+3. **Manual curation**: Sample and review rollouts before training
+4. **Improve base agent**: Fix obvious issues before generating training data
 
-### Problem: Insufficient Data Diversity
+:::
 
-**Symptoms:**
-
-```text
-Model overfits to limited patterns
-```
-
-**Solutions**:
-
-- Generate rollouts with higher temperature
-- Use more diverse input tasks
-- Collect data from multiple agent configurations
-- Balance dataset across task types
-
-### Problem: Training Instability
+:::{dropdown} Problem: Insufficient Data Diversity
+:icon: git-branch
+:color: warning
 
 **Symptoms:**
+- Model performs well on training tasks but fails on variations
+- Overfitting to specific patterns or phrasings
+- Poor generalization to new task types
 
-```text
-Loss doesn't converge, model performance degrades
-```
+**Root causes:**
+- Input dataset too narrow
+- Temperature too low during generation
+- Imbalanced task distribution
 
-**Solutions**:
+**Solutions:**
 
-- Check data format compatibility with training framework
-- Reduce learning rate
-- Add regularization
-- Filter out extremely long or short conversations
+1. **Increase diversity**: Generate rollouts with higher temperature (0.6-0.8)
+2. **Expand input tasks**: Use more diverse prompts and task variations
+3. **Multiple configurations**: Collect data from different agent setups or system prompts
+4. **Balance dataset**: Use the balancing script to ensure even task representation
+
+:::
+
+:::{dropdown} Problem: Training Instability
+:icon: flame
+:color: danger
+
+**Symptoms:**
+- Loss doesn't converge or oscillates wildly
+- Model performance degrades after training
+- Gradient explosions or NaN values
+
+**Root causes:**
+- Data format incompatibility
+- Extreme outliers in conversation length
+- Learning rate too high
+
+**Solutions:**
+
+1. **Verify format**: Check that data matches your training framework's expected format exactly
+2. **Filter outliers**: Remove conversations that are too long (> 20 turns) or too short (< 2 turns)
+3. **Reduce learning rate**: Start with a lower learning rate (e.g., 1e-5 instead of 1e-4)
+4. **Add regularization**: Use gradient clipping and weight decay
+
+:::
+
 
 ---
 
