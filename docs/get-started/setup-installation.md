@@ -26,7 +26,7 @@ Make sure you have these prerequisites ready before beginning:
 
 - **Python 3.12+** (check with `python3 --version`)
 - **Git** (for cloning the repository)
-- **OpenAI API key** (for the tutorial agent)
+- **OpenAI API key with available credits** (for the tutorial agent)
 
 ---
 
@@ -67,7 +67,49 @@ EOF
 :::{important}
 Replace `sk-your-actual-openai-api-key-here` with your real OpenAI API key. This file keeps secrets out of version control while making them available to NeMo Gym.
 
-You can use any OpenAI model that supports function calling. Refer to [OpenAI's models documentation](https://platform.openai.com/docs/models) to see currently available models.
+**Requirements**:
+
+- Your API key must have available credits (check [OpenAI billing](https://platform.openai.com/account/billing))
+- The model must support function calling (most GPT-4 models do)
+- Refer to [OpenAI's models documentation](https://platform.openai.com/docs/models) for available models
+
+:::
+
+:::{dropdown} Optional: Validate your API key before proceeding
+
+Want to catch configuration issues early? Test your API key before starting servers:
+
+```bash
+python -c "
+import openai
+import yaml
+
+# Load your configuration
+with open('env.yaml') as f:
+    config = yaml.safe_load(f)
+
+# Test API access
+client = openai.OpenAI(
+    api_key=config['policy_api_key'],
+    base_url=config['policy_base_url']
+)
+
+# Try a simple request
+response = client.chat.completions.create(
+    model=config['policy_model_name'],
+    messages=[{'role': 'user', 'content': 'Say hello'}],
+    max_tokens=10
+)
+print('✅ API key validated successfully!')
+print(f'Model: {config[\"policy_model_name\"]}')
+print(f'Response: {response.choices[0].message.content}')
+"
+```
+
+**✅ Success Check**: You should see "API key validated successfully!" and a response from the model.
+
+If this step fails, you'll see a clear error message (like quota exceeded or invalid key) before investing time in server setup.
+
 :::
 
 ## 3. Start the Servers
@@ -181,11 +223,48 @@ Try `python3` instead of `python`, or check your virtual environment.
 Make sure the servers are still running in the other terminal.
 :::
 
-:::{dropdown} OpenAI API errors
+:::{dropdown} OpenAI API errors or "500 Internal Server Error"
 
-- Verify your API key is valid
-- Check you have sufficient credits
-- Ensure the model name is correct
+If you see errors when running the client, check these common causes:
+
+**Quota/billing errors** (most common):
+
+```text
+Error code: 429 - You exceeded your current quota
+```
+
+- **Solution**: Add credits to your OpenAI account at [platform.openai.com/account/billing](https://platform.openai.com/account/billing)
+- The tutorial requires minimal credits (~$0.01-0.05 per run)
+
+**Invalid API key**:
+
+```text
+Error code: 401 - Incorrect API key provided
+```
+
+- **Solution**: Verify your API key in `env.yaml` matches your [OpenAI API keys](https://platform.openai.com/api-keys)
+- Ensure no extra quotes or spaces around the key
+
+**Model access errors**:
+
+```text
+Error code: 404 - Model not found
+```
+
+- **Solution**: Ensure your account has access to the model specified in `policy_model_name`
+- Try using `gpt-4o` or `gpt-4-turbo` if `gpt-4.1-2025-04-14` isn't available
+
+**Testing your API key**:
+
+```bash
+# Quick test to verify API access
+python -c "
+import openai
+client = openai.OpenAI()
+print(client.models.list().data[0])
+"
+```
+
 :::
 
 ## File Structure After Setup

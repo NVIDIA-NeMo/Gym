@@ -207,15 +207,30 @@ Let's try different inputs to see how the agent behaves.
 
 ## What You'll Observe
 
-**Weather questions** → Agent calls the tool:
-- "What's the weather like in New York?" → Calls `get_weather`
-- "Should I bring an umbrella to Chicago?" → Calls `get_weather` 
+You might notice that running the same query multiple times can produce different behaviors:
 
-**Non-weather questions** → Agent responds directly:
-- "Tell me a joke" → No tool call, just responds with humor
+```{list-table}
+:header-rows: 1
+:widths: 25 40 35
 
-**Ambiguous questions** → Agent makes intelligent decisions:
-- "I'm planning a picnic in Seattle tomorrow" → Likely calls weather tool
+* - Question Type
+  - Example
+  - Agent Behavior
+* - **Weather questions**
+  - "What's the weather like in New York?"
+  - Calls `get_weather` tool
+* - 
+  - "Should I bring an umbrella to Chicago?"
+  - Calls `get_weather` tool
+* - **Non-weather questions**
+  - "Tell me a joke"
+  - Responds directly, no tool call
+* - **Ambiguous questions**
+  - "I'm planning a picnic in Seattle tomorrow"
+  - May or may not call weather tool
+```
+
+This non-deterministic behavior is normal for language models—and it's exactly why we need **verification and scoring** (covered in the next tutorial) to measure and improve agent quality consistently.
 
 
 ## About This Implementation

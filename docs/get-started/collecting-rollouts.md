@@ -33,6 +33,21 @@ In the previous tutorials, you ran individual agent interactions and learned how
 
 ---
 
+## Before You Begin
+
+Make sure you have:
+
+- ✅ Completed tutorials 1-3
+- ✅ Servers still running (or ready to restart them)
+- ✅ `env.yaml` configured with your OpenAI API key
+- ✅ Virtual environment activated
+
+:::{tip}
+If your servers have been running for a while, you might want to restart them to ensure they're using the latest verification logic from Tutorial 3.
+:::
+
+---
+
 ## What Are Rollouts?
 
 **Rollouts are complete records of agent interactions**—from the user's question through the agent's reasoning, tool calls, and final response, all the way to the verification score.
@@ -63,7 +78,13 @@ NeMo Gym's rollout collection automates this process—you provide the inputs, a
 
 ## Create Your Input Dataset
 
-Let's create a simple dataset of weather-related queries. Create a file called `weather_queries.jsonl` in your Gym directory:
+Let's create a simple dataset of weather-related queries. Choose either method:
+
+::::{tab-set}
+
+:::{tab-item} Bash (Quick)
+
+Quick one-liner for small datasets:
 
 ```bash
 cd /path/to/Gym
@@ -76,6 +97,61 @@ cat > weather_queries.jsonl << 'EOF'
 {"responses_create_params": {"input": [{"role": "developer", "content": "You are a helpful personal assistant that aims to be helpful and reduce any pain points the user has."}, {"role": "user", "content": "What should I wear in San Francisco today?"}], "tools": [{"type": "function", "name": "get_weather", "description": "Get weather information for a city", "parameters": {"type": "object", "properties": {"city": {"type": "string", "description": "City name"}}, "required": ["city"], "additionalProperties": false}, "strict": true}]}}
 EOF
 ```
+
+:::
+
+:::{tab-item} Python (Readable)
+
+More maintainable for larger datasets:
+
+```python
+import json
+
+# Define your queries
+queries = [
+    "What's the weather like in Seattle?",
+    "I'm going out in Boston tonight",
+    "Should I bring an umbrella in Chicago?",
+    "How's the weather in New York?",
+    "What should I wear in San Francisco today?"
+]
+
+# Create JSONL file
+with open('weather_queries.jsonl', 'w') as f:
+    for query in queries:
+        entry = {
+            "responses_create_params": {
+                "input": [
+                    {
+                        "role": "developer",
+                        "content": "You are a helpful personal assistant that aims to be helpful and reduce any pain points the user has."
+                    },
+                    {"role": "user", "content": query}
+                ],
+                "tools": [{
+                    "type": "function",
+                    "name": "get_weather",
+                    "description": "Get weather information for a city",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string", "description": "City name"}},
+                        "required": ["city"],
+                        "additionalProperties": False
+                    },
+                    "strict": True
+                }]
+            }
+        }
+        f.write(json.dumps(entry) + '\n')
+
+print("✅ Created weather_queries.jsonl with 5 queries!")
+```
+
+Save as `create_dataset.py` and run: `python create_dataset.py`
+
+:::
+
+::::
 
 **What this dataset contains**:
 - **5 weather-related queries** (Seattle, Boston, Chicago, New York, San Francisco)
@@ -136,9 +212,24 @@ Collecting rollouts: 100%|████████████████| 5/5 
 
 This means all 5 queries were processed successfully!
 
+:::{important}
+**Where Do Reward Scores Come From?**
+
+Notice the output shows an average reward (e.g., `{"reward": 0.56}`). These scores come from the `verify()` function you worked with in Tutorial 3!
+
+Each rollout is automatically sent to your weather resource server's `/verify` endpoint, which scores it based on whatever verification logic you implemented:
+
+- **Default verify** (returns 1.0): All rollouts get reward=1.0
+- **Stage 1** (tool usage check): Scores will be 0.0 or 1.0
+- **Stage 2** (tool + weather mention): Range of scores (0.0-1.0)
+- **Stage 3** (actionable advice): Varied scores based on advice quality
+
+This is the magic of NeMo Gym: verification happens automatically during rollout collection!
+:::
+
 ---
 
-## Understand the Output
+## Understanding the Output
 
 Let's examine what was captured. Open `weather_rollouts.jsonl` or view it in the terminal:
 

@@ -57,7 +57,7 @@ async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
 
 Let's create verification logic that actually measures performance. You'll build this up in three stages, from simple to sophisticated.
 
-### Stage 1: Check Tool Usage
+### 1. Check Tool Usage
 
 Start by verifying the most basic requirement: did the agent call the weather tool?
 
@@ -84,7 +84,7 @@ Start by verifying the most basic requirement: did the agent call the weather to
 
 ---
 
-### Stage 2: Add Response Quality
+### 2. Add Response Quality
 
 Now verify that the agent not only called the tool, but also used the weather data in its response.
 
@@ -134,7 +134,7 @@ Now verify that the agent not only called the tool, but also used the weather da
 
 ---
 
-### Stage 3: Enforce Quality Standards
+### 3. Enforce Quality Standards
 
 Finally, make verification even more demanding by requiring actionable advice, not just weather mentions.
 
@@ -225,50 +225,50 @@ Now test whichever verification stage you've implemented to see how different ag
            print(f"Expected reward: {test['expected_reward']} ({test['reason']})")
            print('='*60)
            
+           # Create request params
+           request_params = NeMoGymResponseCreateParamsNonStreaming(
+               input=[
+                   {
+                       "role": "developer",
+                       "content": "You are a helpful personal assistant.",
+                   },
+                   {"role": "user", "content": test["message"]},
+               ],
+               tools=[
+                   {
+                       "type": "function",
+                       "name": "get_weather",
+                       "description": "Get weather information for a city",
+                       "parameters": {
+                           "type": "object",
+                           "properties": {
+                               "city": {"type": "string", "description": "City name"},
+                           },
+                           "required": ["city"],
+                           "additionalProperties": False,
+                       },
+                       "strict": True,
+                   }
+               ],
+           )
+           
            # Get agent response
            task = server_client.post(
                server_name="simple_weather_simple_agent",
                url_path="/v1/responses",
-               json=NeMoGymResponseCreateParamsNonStreaming(
-                   input=[
-                       {
-                           "role": "developer",
-                           "content": "You are a helpful personal assistant.",
-                       },
-                       {"role": "user", "content": test["message"]},
-                   ],
-                   tools=[
-                       {
-                           "type": "function",
-                           "name": "get_weather",
-                           "description": "Get weather information for a city",
-                           "parameters": {
-                               "type": "object",
-                               "properties": {
-                                   "city": {"type": "string", "description": "City name"},
-                               },
-                               "required": ["city"],
-                               "additionalProperties": False,
-                           },
-                           "strict": True,
-                       }
-                   ],
-               ),
+               json=request_params,
            )
            
            result = await task
            response_data = await result.json()
            
-           # Call verify endpoint
+           # Call verify endpoint with original request params
            verify_task = server_client.post(
                server_name="simple_weather",
                url_path="/verify",
                json={
-                   "responses_create_params": response_data["responses_create_params"],
-                   "response": {
-                       "output": response_data["output"],
-                       "model": response_data.get("model", ""),
-                   },
+                   "responses_create_params": request_params.model_dump(),
+                   "response": response_data,
                },
            )
            
@@ -337,6 +337,20 @@ Watch how different agent behaviors produce different rewards:
 :::
 
 ::::
+
+:::{note}
+**About Expected Rewards**: The reward scores you see depend on which verification stage you implemented:
+
+- **Stage 1** (tool usage): Only 0.0 or 1.0
+- **Stage 2** (tool + weather mention): 0.0, 0.3, 0.5, or 1.0  
+- **Stage 3** (actionable advice): 0.0, 0.3, 0.6, or 1.0
+
+The examples above assume **Stage 2** verification. With Stage 3, you'll need actionable advice keywords ("wear", "bring", "jacket") to get a perfect 1.0 score.
+:::
+
+:::{tip}
+**Model Variability Matters Here Too**: Remember from Tutorial 2 that GPT-4's behavior varies between runs. You might see different reward scores for the same query across multiple runs—this is normal and demonstrates why collecting many rollouts (Tutorial 4) gives you a more complete picture of agent performance.
+:::
 
 :::{note}
 GPT-4 is quite capable, so you might see high scores across most tests. This demonstrates that the base model already performs well on simple tasks. During RL training, verification becomes critical for more challenging domains where the base model struggles.
