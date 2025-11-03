@@ -69,7 +69,7 @@ with open(args.output_fpath, "w") as f:
             filtered_out += 1
             continue
 
-        f.write(key_to_example[key] + "\n")
+        f.write(key_to_example[key])
 
 filtered_out_pct = 100 * filtered_out / total_prompts
 remaining = total_prompts - filtered_out
