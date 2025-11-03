@@ -3,6 +3,7 @@ stateful_counter_resources_server:
     stateful_counter:
       entrypoint: app.py
       domain: agent
+      example_description: Session state management (in-memory)
 stateful_counter_simple_agent:
   responses_api_agents:
     simple_agent:

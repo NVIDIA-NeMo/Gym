@@ -46,19 +46,21 @@ def extract_config_metadata(yaml_path: Path) -> tuple[str, str, list[str]]:
         data = yaml.safe_load(f)
 
     domain = None
+    example_description = None
     license = None
     types = []
 
-    def visit_domain(data, level=1):
-        nonlocal domain
+    def visit_domain_and_example_description(data, level=1):
+        nonlocal domain, example_description
         if level == 4:
             domain = data.get("domain")
+            example_description = data.get("example_description")
             return
         else:
             for k, v in data.items():
                 if level == 2 and k != "resources_servers":
                     continue
-                visit_domain(v, level + 1)
+                visit_domain_and_example_description(v, level + 1)
 
     def visit_license_and_types(data):
         nonlocal license
@@ -77,10 +79,10 @@ def extract_config_metadata(yaml_path: Path) -> tuple[str, str, list[str]]:
                                         license = entry.get("license")
                             return
 
-    visit_domain(data)
+    visit_domain_and_example_description(data)
     visit_license_and_types(data)
 
-    return domain, license, types
+    return domain, example_description, license, types
 
 
 def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:
@@ -101,7 +103,7 @@ def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:
             continue
 
         for yaml_file in yaml_files:
-            domain, license, types = extract_config_metadata(yaml_file)
+            domain, example_description, license, types = extract_config_metadata(yaml_file)
 
             server_name = subdir.name
             display_name = server_name.replace("_", " ").title()
@@ -112,6 +114,7 @@ def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:
                 "name": server_name,
                 "display_name": display_name,
                 "domain": domain,
+                "example_description": example_description,
                 "config_path": config_path,
                 "readme_path": readme_path,
                 "types": types,
@@ -122,14 +125,20 @@ def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:
             # TODO: verify this logic
             # Example-only: only has "example" type
             # Training-ready: has "train" or "validation" type
-            types_set = set(types) if types else set()
+            # types_set = set(types) if types else set()
 
-            has_train_or_val = "train" in types_set or "validation" in types_set
+            # has_train_or_val = "train" in types_set or "validation" in types_set
 
-            if has_train_or_val:
-                training_servers.append(server_info)
-            elif types_set == {"example"}:
+            is_example_only = server_info.get("example_description", False)
+
+            # if has_train_or_val:
+            #     training_servers.append(server_info)
+            # elif types_set == {"example"}:
+            #     example_only_servers.append(server_info)
+            if is_example_only:
                 example_only_servers.append(server_info)
+            else:
+                training_servers.append(server_info)
             # Exclude a server that has neither example nor train/val
 
     return example_only_servers, training_servers
@@ -140,24 +149,23 @@ def generate_example_only_table(servers: list[dict]) -> str:
     if not servers:
         return "| Name | Demonstrates | Config | README |\n| ---- | ------------------- | ----------- | ------ |\n"
 
-    # TODO: these are temporary descriptions. we should add a field to the yamls
-    descriptions = {
-        "simple_weather": "Basic single-step tool calling",
-        "stateful_counter": "Session state management (in-memory)",
-    }
-
     col_names = ["Name", "Demonstrates", "Config", "README"]
     rows = []
 
     for server in servers:
         name = server["display_name"]
 
-        description = descriptions.get(server["name"], "")
+        # Optional {example_description} -> Required '{domain} example' -> Fallback: 'Example resource server'
+        example_description = (
+            server["example_description"] or f"{server.get('domain').title()} example"
+            if server.get("domain")
+            else "Example resource server"
+        )
 
         config_link = f"<a href='{server['config_path']}'>config</a>"
         readme_link = f"<a href='{server['readme_path']}'>README</a>"
 
-        rows.append([name, description, config_link, readme_link])
+        rows.append([name, example_description, config_link, readme_link])
 
     rows.sort(
         key=lambda r: (
