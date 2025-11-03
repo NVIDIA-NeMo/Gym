@@ -2,6 +2,7 @@
     "name": "example",
     "type": "example",
     "jsonl_fpath": "resources_servers/library_judge_math/data/example.jsonl",
+    "num_repeats": 1,
     "gitlab_identifier": null,
     "license": null,
     "Number of examples": 5,
@@ -15,10 +16,10 @@
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 5,
-        "Average": 69.0,
-        "Min": 45.0,
-        "Max": 120.0,
-        "Median": 63.0,
+        "Average": 61.0,
+        "Min": 37.0,
+        "Max": 112.0,
+        "Median": 55.0,
         "Standard deviation": 30.41
     },
     "Number of turns": {
