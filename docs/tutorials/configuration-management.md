@@ -109,8 +109,15 @@ simple_weather_simple_agent:
 
 Your `env.yaml` file contains **secrets and environment-specific values** that should never be committed to version control.
 
-### Basic env.yaml
+Choose your setup complexity:
 
+::::{tab-set}
+
+:::{tab-item} Basic env.yaml
+
+**Use case**: Simple deployments with minimal configuration needs
+
+**Essential secrets only**:
 ```yaml
 # API credentials (never commit these!)
 policy_base_url: https://api.openai.com/v1
@@ -118,8 +125,18 @@ policy_api_key: sk-your-actual-api-key-here
 policy_model_name: gpt-4o-2024-11-20
 ```
 
-### Advanced env.yaml with Config Paths
+**When to use**: 
+- Single environment deployments
+- Getting started with NeMo Gym
+- Simple testing scenarios
 
+:::
+
+:::{tab-item} Advanced env.yaml
+
+**Use case**: Complex deployments with multiple environments and reusable configurations
+
+**Organized configuration collections**:
 ```yaml
 # Store complex config paths for convenience
 simple_weather_config_paths:
@@ -139,6 +156,15 @@ custom_port: 8080
 ```bash
 ng_run '+config_paths=${simple_weather_config_paths}'
 ```
+
+**When to use**:
+- Multi-environment setups (dev/staging/prod)
+- Frequently switching between different configurations
+- Team environments with shared conventions
+
+:::
+
+::::
 
 ---
 
