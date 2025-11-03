@@ -1,12 +1,24 @@
 # Setup and Installation
 
-**Goal**: Get NeMo Gym installed and servers running with your first successful agent interaction
+Welcome to NeMo Gym! In this tutorial, you'll install NeMo Gym, configure your environment, and run your first agent interaction—a simple weather agent that uses tools to answer questions.
 
-## Prerequisites
+**Goal**: Get NeMo Gym installed and servers running with your first successful agent interaction.
+
+**In this tutorial, you will**:
+
+1. Clone the repository and install dependencies
+2. Configure your OpenAI API key
+3. Start the NeMo Gym servers
+4. Run your first agent interaction
+5. Verify everything works correctly
+
+**Prerequisites**:
 
 - **Python 3.12+** (check with `python3 --version`)
 - **Git** (for cloning the repository)
 - **OpenAI API key** (for the tutorial agent)
+
+---
 
 ## Step 1: Clone and Install
 
@@ -174,4 +186,12 @@ When you ran `ng_run`, you started a complete AI agent system:
 
 Now that everything is working, let's understand what just happened and how to interact with your agent.
 
-→ **[Next: Your First Agent](03-your-first-agent.md)**
+:::{button-ref} 03-your-first-agent
+:color: primary
+:outline:
+:ref-type: doc
+
+Next: Your First Agent →
+:::
+
+Learn how your weather agent works and explore the complete workflow from request to response.

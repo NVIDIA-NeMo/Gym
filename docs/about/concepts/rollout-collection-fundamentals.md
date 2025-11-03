@@ -44,25 +44,37 @@ A rollout is a complete record of a single agent interaction, from start to fini
 
 ## Why Rollouts Matter
 
-Rollouts serve multiple critical purposes in the agent development lifecycle:
+Rollouts serve multiple critical purposes in the agent development lifecycle. Choose the perspective most relevant to your current work:
 
-### For Reinforcement Learning
+::::{tab-set}
 
+:::{tab-item} Reinforcement Learning
 Rollouts provide the reward signals needed for RL algorithms like PPO and DPO. Each rollout includes a verification score that tells the training algorithm whether the agent's behavior should be reinforced or corrected.
 
 Without rollouts, you have no way to train agents to improve their performance on specific tasks.
 
-### For Evaluation
+**Key value**: Reward signals for training algorithms
+:::
 
+:::{tab-item} Evaluation
 Rollouts let you benchmark agent performance systematically. Generate rollouts across a test set, analyze success rates, compare different agent configurations, and track improvement over time.
 
-### For Debugging
+**Key value**: Systematic performance measurement and comparison
+:::
 
+:::{tab-item} Debugging
 When an agent fails, rollouts show you exactly where things went wrong. Did it call the wrong tool? Use incorrect arguments? Misinterpret the tool's response? The complete interaction trace makes debugging straightforward.
 
-### For Research
+**Key value**: Complete interaction traces for root cause analysis
+:::
 
+:::{tab-item} Research
 Rollouts enable analysis of agent behavior patterns: which tools do agents prefer, how do they combine tools, what reasoning strategies emerge, how does performance vary across task types.
+
+**Key value**: Data for behavioral analysis and insights
+:::
+
+::::
 
 ---
 
@@ -158,59 +170,107 @@ This structure is framework-agnostic—it's just JSON that any RL training libra
 
 Here's how rollout collection fits into the bigger picture:
 
-**Step 1: Prepare Input**
-- Create or download a dataset of tasks (JSONL format)
-- Each line contains a task with `responses_create_params.input`
+```{list-table}
+:header-rows: 1
+:widths: 15 45 40
 
-**Step 2: Configure System**
-- Start your agent server (which connects to model and resource servers)
-- Configure which agent to use, where input comes from, where output goes
-
-**Step 3: Generate Rollouts**
-- Run `ng_collect_rollouts` with your configuration
-- System processes tasks in parallel with progress tracking
-- Each task → agent interaction → verified rollout → saved to file
-
-**Step 4: Analyze Results**
-- View rollouts interactively with `ng_viewer`
-- Compute aggregate metrics (success rate, avg reward, etc.)
-- Filter, analyze, or prepare data for RL training
-
-**Step 5: Iterate**
-- Use rollouts for training
-- Evaluate on new tasks
-- Debug failures
-- Refine and repeat
+* - Step
+  - Action
+  - Details
+* - **1. Prepare Input**
+  - Create or download task dataset
+  - • JSONL format (one task per line) <br>
+    • Each task includes `responses_create_params.input`
+* - **2. Configure System**
+  - Start servers and set parameters
+  - • Launch agent server (connects to model and resource) <br>
+    • Specify agent, input path, output path
+* - **3. Generate Rollouts**
+  - Run collection command
+  - • Execute `ng_collect_rollouts` with config <br>
+    • Parallel processing with progress tracking <br>
+    • Each task → interaction → verification → save
+* - **4. Analyze Results**
+  - Review and evaluate rollouts
+  - • View interactively with `ng_viewer` <br>
+    • Compute metrics (success rate, avg reward) <br>
+    • Prepare data for RL training
+* - **5. Iterate**
+  - Improve and repeat
+  - • Use rollouts for training <br>
+    • Evaluate on new tasks <br>
+    • Debug failures and refine
+```
 
 ---
 
 ## Generation Strategies
 
-Different research goals require different collection strategies:
+Different research goals require different collection strategies. Choose the approach that matches your objective:
 
-### High-Throughput Collection
+::::{tab-set}
 
-For large-scale training data generation:
+:::{tab-item} High-Throughput
+**Goal**: Large-scale training data generation
+
+**Configuration**:
 - Process full datasets (no limit)
 - High parallelism (10-20 concurrent requests)
 - Single sample per task (num_repeats=1)
-- **Use case**: Creating training datasets
 
-### Behavioral Exploration
+**Best for**: Creating training datasets for RL algorithms
 
-For understanding agent capabilities:
+**Example**:
+```bash
+ng_collect_rollouts \
+    +agent_name=my_agent \
+    +input_jsonl_fpath=full_dataset.jsonl \
+    +num_samples_in_parallel=20
+```
+:::
+
+:::{tab-item} Behavioral Exploration
+**Goal**: Understanding agent capabilities and behavior patterns
+
+**Configuration**:
 - Limited samples for quick iteration (limit=100)
 - Multiple attempts per task (num_repeats=3-5)
 - Higher temperature for diversity
-- **Use case**: Research and analysis
 
-### Precise Evaluation
+**Best for**: Research and analysis of agent strategies
 
-For benchmark measurement:
+**Example**:
+```bash
+ng_collect_rollouts \
+    +agent_name=my_agent \
+    +input_jsonl_fpath=tasks.jsonl \
+    +limit=100 \
+    +num_repeats=5 \
+    +responses_create_params.temperature=0.8
+```
+:::
+
+:::{tab-item} Precise Evaluation
+**Goal**: Benchmark measurement with reproducible results
+
+**Configuration**:
 - Full test set (no limit)
 - Single deterministic sample (temperature=0.1)
 - Lower parallelism for consistency
-- **Use case**: Performance evaluation
+
+**Best for**: Performance evaluation and benchmarking
+
+**Example**:
+```bash
+ng_collect_rollouts \
+    +agent_name=my_agent \
+    +input_jsonl_fpath=benchmark.jsonl \
+    +responses_create_params.temperature=0.1 \
+    +num_samples_in_parallel=5
+```
+:::
+
+::::
 
 ---
 
@@ -302,27 +362,3 @@ After collection completes, see aggregate statistics:
 **Metric Computation**:
 The system automatically aggregates any numeric fields returned by the resource server's verification, giving you instant feedback on agent performance.
 :::
-
----
-
-## Best Practices
-
-**Start Small**: Use `limit=10` during development to iterate quickly, then scale to full datasets for production.
-
-**Monitor Performance**: Watch success rates and rewards during generation—if they're unexpectedly low, stop and investigate rather than generating large amounts of low-quality data.
-
-**Version Control**: Include version info and dates in output filenames for reproducibility.
-
-**Resource Management**: Match parallelism to your infrastructure—respect API rate limits for cloud models, maximize throughput for local models.
-
----
-
-## Next Steps
-
-Now that you understand rollout collection conceptually:
-
-- **{doc}`core-abstractions`** — Review how Models, Resources, and Agents work together
-- **{doc}`verifying-agent-results`** — Deep dive into how Resources score performance
-- **{doc}`../features`** — See available resource servers and their capabilities
-
-**Ready for hands-on practice?** Check out the {doc}`../../tutorials/05-rollout-collection` tutorial for step-by-step instructions on generating your first rollouts.

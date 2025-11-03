@@ -10,7 +10,7 @@ Think of it like building a research assistant:
 
 This separation makes your system modular, testable, and easy to customize.
 
-![NeMo Gym architecture showing the relationship between Models, Resources, and Agents, with downstream outputs to RL frameworks, offline training, and evaluation](../../public/assets/product_overview.png)
+![NeMo Gym architecture showing the relationship between Models, Resources, and Agents, with downstream outputs to RL frameworks, offline training, and evaluation](../../_images/product_overview.png)
 
 ---
 
@@ -102,21 +102,23 @@ The Agent coordinates everything, but the Model makes decisions and generates te
 
 ## Why This Design?
 
-### Reusable Components
+This modular architecture provides four key benefits:
 
-The same model can work with different tools. The same tools can work with different models. Mix and match without rewriting code.
+```{list-table}
+:header-rows: 1
+:widths: 25 75
 
-### Test in Isolation
-
-Debug your math verifier without touching the model. Test your agent logic without deploying infrastructure. Each piece works independently.
-
-### Deploy Flexibly
-
-Run everything locally on your laptop, or distribute across multiple servers. Each component is an independent HTTP service.
-
-### Swap via Configuration
-
-Want to try a different model? Change one line in your YAML config. Need a different set of tools? Update the resource server reference. No code changes required.
+* - Benefit
+  - What It Enables
+* - **Reusable Components**
+  - The same model can work with different tools. The same tools can work with different models. Mix and match without rewriting code.
+* - **Test in Isolation**
+  - Debug your math verifier without touching the model. Test your agent logic without deploying infrastructure. Each piece works independently.
+* - **Deploy Flexibly**
+  - Run everything locally on your laptop, or distribute across multiple servers. Each component is an independent HTTP service.
+* - **Swap via Configuration**
+  - Want to try a different model? Change one line in your YAML config. Need a different set of tools? Update the resource server reference. No code changes required.
+```
 
 ---
 

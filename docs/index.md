@@ -53,21 +53,12 @@ Core concepts behind models, resources, agents, and verification.
 
 ::::
 
-
 ## Tutorial Highlights
 
 Start with these tutorials to learn NeMo Gym fundamentals and build your first agent.
 
-::::{grid} 1 2 2 2
+::::{grid} 1 1 1 1
 :gutter: 1 1 1 2
-
-:::{grid-item-card} {octicon}`book;1.5em;sd-mr-1` Key Terminology
-:link: tutorials/00-terminology
-:link-type: doc
-Essential vocabulary for agent training and RL workflows.
-+++
-{bdg-secondary}`glossary` {bdg-secondary}`concepts`
-:::
 
 :::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Setup and Installation
 :link: tutorials/02-setup
@@ -95,6 +86,26 @@ Master rollout collection for training data and evaluation.
 
 ::::
 
+---
+
+## Resources
+
+Quick reference materials to support your work with NeMo Gym.
+
+::::{grid} 1 2 2 2
+:gutter: 1 1 1 2
+
+:::{grid-item-card} {octicon}`book;1.5em;sd-mr-1` Glossary
+:link: resources/glossary
+:link-type: doc
+Essential terminology for agent training and RL workflows.
++++
+{bdg-secondary}`reference` {bdg-secondary}`terminology`
+:::
+
+::::
+
+---
 
 ```{toctree}
 :caption: About
@@ -115,7 +126,6 @@ Release Notes <about/release-notes/index>
 :maxdepth: 1
 
 tutorials/README
-tutorials/00-terminology
 tutorials/02-setup
 tutorials/03-your-first-agent
 tutorials/04-verifying-results
@@ -132,3 +142,13 @@ tutorials/09-configuration-guide
 apidocs/index.rst
 README
 ```
+
+```{toctree}
+:caption: Resources
+:hidden:
+:maxdepth: 1
+
+Overview <resources/index>
+resources/glossary
+```
+

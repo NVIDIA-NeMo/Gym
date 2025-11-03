@@ -1,10 +1,34 @@
 # Your First Agent
 
-**Goal**: Understand how your weather agent works and learn to interact with it
+In the setup tutorial, you ran a command and saw JSON output from a weather agent. But what actually happened? Let's break down the agent workflow and learn to interact with it directly.
+
+**Goal**: Understand how your weather agent works and learn to interact with it.
+
+**In this tutorial, you will**:
+
+1. Trace the complete agent workflow from request to response
+2. Understand the role of models, tools, and resource servers
+3. Modify the agent request to test different behaviors
+4. Explore the Responses API output format
+
+:::{tip}
+**Going deeper**: For conceptual understanding of how agents, models, and resource servers work together, refer to [Core Abstractions (Concepts)](../about/concepts/core-abstractions.md).
+:::
+
+:::{button-ref} 02-setup
+:color: secondary
+:outline:
+:ref-type: doc
+
+← Previous: Setup and Installation
+:::
+
+---
 
 ## What Just Happened?
 
 In the setup tutorial, you ran this command and saw JSON output:
+
 ```bash
 python responses_api_agents/simple_agent/client.py
 ```
@@ -205,10 +229,25 @@ This is a simplified example to help you understand the agent workflow. In produ
 ## What You've Learned
 
 This weather agent demonstrates patterns you'll see throughout NeMo Gym:
-- **Agent workflow**: Request → Analysis → Tool calls → Integration → Response  
+
+- **Agent workflow**: Request → Analysis → Tool calls → Integration → Response
 - **Models** handle the reasoning and decision-making
-- **Resource servers** provide tools and verification  
+- **Resource servers** provide tools and verification
 - **Agents** orchestrate between models and resources
 - Everything is configurable via YAML files
 
-→ **[Next: Verifying Agent Results](04-verifying-results.md)**
+---
+
+## Next Steps
+
+Now that you understand how agents work, the next question is: how do you measure if an agent's response is *good*? That's where verification comes in.
+
+:::{button-ref} 04-verifying-results
+:color: primary
+:outline:
+:ref-type: doc
+
+Next: Verifying Agent Results →
+:::
+
+Learn how to score agent performance and create the reward signals that drive reinforcement learning.

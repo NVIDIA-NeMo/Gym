@@ -8,7 +8,7 @@ orphan: true
 NeMo Gym concepts explain the mental model behind building reliable agent systems: how services collaborate, how teams capture interaction data, and how verification signals drive learning. Use this page as a compass to decide which explanation to read next.
 
 ::::{tip}
-Need a refresher on reinforcement learning language? Refer to the {doc}`../../tutorials/00-terminology` glossary before diving in.
+Need a refresher on reinforcement learning language? Refer to the {doc}`../../resources/glossary` before diving in.
 ::::
 
 ---
