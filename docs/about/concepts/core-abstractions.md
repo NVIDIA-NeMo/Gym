@@ -10,6 +10,8 @@ Think of it like building a research assistant:
 
 This separation makes your system modular, testable, and easy to customize.
 
+![NeMo Gym architecture showing the relationship between Models, Resources, and Agents, with downstream outputs to RL frameworks, offline training, and evaluation](../../public/assets/product_overview.png)
+
 ---
 
 ## The Three Abstractions

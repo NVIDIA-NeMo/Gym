@@ -89,7 +89,8 @@ High-performance inference server for running open-source language models locall
 
 ## What's Next?
 
-Now that you're familiar with the key terminology, let's understand how the core components work together.
+Now that you're familiar with the key terminology, you can dive into hands-on setup or explore conceptual explanations in the About section.
 
-→ **[Next: Understanding Core Concepts](01-concepts.md)**
+→ **Next: [Setup and Installation](02-setup.md)** (hands-on)  
+→ **Or: [About > Core Abstractions](../about/concepts/core-abstractions.md)** (concepts)
 

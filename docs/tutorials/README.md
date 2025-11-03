@@ -13,9 +13,6 @@
 ### **[00 - Key Terminology](00-terminology.md)**
 Essential vocabulary and definitions for building RL workflows with NeMo Gym. Quick reference for terms you'll encounter when generating rollouts, training agents, and working with the platform. 
 
-### **[01 - Understanding Core Concepts](01-concepts.md)**
-Learn NeMo Gym's core abstractions: Models, Resources, and Agents. Understand how they work together.
-
 ### **[02 - Setup and Installation](02-setup.md)** 
 Get NeMo Gym installed and servers running with your first successful agent interaction.
 
