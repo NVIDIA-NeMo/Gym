@@ -54,6 +54,7 @@ Choose the training approach that matches your goal:
 ::::{tab-set}
 
 :::{tab-item} SFT (Supervised Fine-Tuning)
+:sync: sft
 
 **Purpose**: Train models to follow successful agent interaction patterns
 
@@ -81,6 +82,7 @@ Choose the training approach that matches your goal:
 :::
 
 :::{tab-item} DPO (Direct Preference Optimization)
+:sync: dpo
 
 **Purpose**: Train models to prefer better responses over worse ones
 
@@ -222,7 +224,10 @@ These are example filtering approaches. Customize the criteria, thresholds, and 
 
 Once you have filtered, high-quality rollouts, format them for your chosen training method:
 
-### SFT Data Processing
+::::{tab-set}
+
+:::{tab-item} SFT Data Processing
+:sync: sft
 
 Transform filtered rollouts into conversation format:
 
@@ -248,7 +253,10 @@ process_sft_data('filtered_rollouts.jsonl', 'sft_data.jsonl')
 
 **✅ Success Check**: Your `sft_data.jsonl` file should now contain one training example per rollout, each with the conversation history and reward score.
 
-### DPO Data Processing
+:::
+
+:::{tab-item} DPO Data Processing
+:sync: dpo
 
 Create preference pairs from filtered rollouts (requires 2 rollouts per task):
 
@@ -301,6 +309,10 @@ create_dpo_pairs('filtered_rollouts.jsonl', 'dpo_pairs.jsonl')
 ```
 
 **✅ Success Check**: You should see output like `Created 423 preference pairs` showing how many comparison pairs were generated from your rollouts.
+
+:::
+
+::::
 
 ---
 
