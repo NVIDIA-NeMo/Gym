@@ -1,6 +1,37 @@
+(tutorial-configuration)=
+
 # Configuration Management
 
-**Goal**: Master NeMo Gym's flexible configuration system to handle different environments, secrets, and deployment scenarios.
+Master NeMo Gym's flexible configuration system to handle different environments, secrets, and deployment scenarios—essential for moving from development to production.
+
+:::{card}
+
+**Goal**: Understand and apply NeMo Gym's three-tier configuration system for flexible deployments.
+
+^^^
+
+**In this tutorial, you will**:
+
+1. Understand the three configuration sources and their priority
+2. Set up environment-specific configurations
+3. Use command-line overrides for runtime customization
+4. Apply best practices for secrets management
+
+:::
+
+:::{button-ref} /get-started/index
+:color: secondary
+:outline:
+:ref-type: doc
+
+← New to NeMo Gym? Start with Get Started
+:::
+
+:::{tip}
+**Prerequisites**: This tutorial assumes you've completed the [Get Started](../get-started/index.md) series and understand how to run basic NeMo Gym commands. For hands-on practice, work through [Setup and Installation](../get-started/setup-installation.md) first.
+:::
+
+---
 
 ## The Three Configuration Sources
 
@@ -15,6 +46,8 @@ This allows you to:
 - Base configuration in YAML files (shared settings)
 - Secrets and environment-specific values in `env.yaml` 
 - Runtime overrides via command line arguments
+
+---
 
 ## 1. Server Configuration Files
 
@@ -54,6 +87,8 @@ simple_weather_simple_agent:
         name: policy_model                    # References the model server
 ```
 
+---
+
 ## 2. Environment Configuration (env.yaml)
 
 Your `env.yaml` file contains **secrets and environment-specific values** that should never be committed to version control.
@@ -89,6 +124,8 @@ custom_port: 8080
 ng_run '+config_paths=${simple_weather_config_paths}'
 ```
 
+---
+
 ## 3. Command Line Arguments
 
 **Runtime overrides** using Hydra syntax for maximum flexibility.
@@ -115,6 +152,8 @@ ng_run "+config_paths=[${config_paths}]" \
     +simple_weather.resources_servers.simple_weather.port=9090
 ```
 
+---
+
 ## Special Policy Model Variables
 
 NeMo Gym provides standard placeholders for the model being trained:
@@ -137,6 +176,8 @@ policy_model:
       openai_api_key: ${policy_api_key}       # Resolves from env.yaml
       openai_model: ${policy_model_name}      # Resolves from env.yaml
 ```
+
+---
 
 ## Configuration Resolution Process
 
@@ -164,6 +205,8 @@ ng_run "+config_paths=[...]" +policy_model_name=different-model
 - Command line has highest priority
 - Can override any previous setting
 - Perfect for runtime customization
+
+---
 
 ## Practical Configuration Scenarios
 
@@ -205,6 +248,8 @@ ng_run "+config_paths=[config.yaml]" \
     +policy_model.responses_api_models.openai_model.port=8002
 ```
 
+---
+
 ## Troubleshooting
 
 NeMo Gym validates your configuration and provides helpful error messages:
@@ -227,6 +272,8 @@ in the list of available servers: [simple_weather, library_judge_math, ...]
 OSError: [Errno 48] Address already in use
 ```
 **Fix**: Override ports via command line or use `+port=0` for auto-assignment.
+
+---
 
 ## Best Practices
 
@@ -288,14 +335,26 @@ cp env.dev.yaml env.yaml    # Development settings
 cp env.prod.yaml env.yaml   # Production settings
 ```
 
+---
+
 ## What You've Learned
 
-NeMo Gym's configuration system provides:
+You now have hands-on experience with:
 
-- **Flexible deployment** - same code, different configurations
-- **Secure secrets** - keep sensitive data out of version control  
-- **Runtime customization** - override anything from command line
-- **Easy testing** - swap components without code changes
-- **Validation** - helpful error messages when something's wrong
+- ✓ Understanding the three-tier configuration system and priority order
+- ✓ Using env.yaml for secrets and environment-specific values
+- ✓ Applying command-line overrides for runtime customization
+- ✓ Following best practices for secure configuration management
 
-This configuration mastery enables you to handle complex deployment scenarios, multi-environment setups, and rapid experimentation.
+**Key insight**: NeMo Gym's layered configuration system gives you flexibility without complexity—base settings in YAML, secrets in env.yaml, and runtime tweaks via command line.
+
+---
+
+## Next Steps
+
+You've mastered configuration management! Continue exploring:
+
+- **[Offline Training with Rollouts](offline-training-w-rollouts.md)**: Apply your configuration skills to training workflows
+- **[Concepts](../about/concepts/index.md)**: Deep dive into NeMo Gym architecture
+
+Or return to the [Tutorials Overview](index.md) to explore other topics.

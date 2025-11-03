@@ -59,9 +59,9 @@ Master configuration, testing, deployment, and scaling.
 :gutter: 1 1 1 2
 
 :::{grid-item-card} {octicon}`gear;1.5em;sd-mr-1` Configuration Management
-:link: 09-configuration-guide
+:link: configuration-management
 :link-type: doc
-Master NeMo Gym's flexible configuration system to handle different environments, secrets, and deployment scenarios.
+Master NeMo Gym's three-tier configuration system for flexible environments, secrets management, and deployment scenarios.
 +++
 {bdg-secondary}`configuration` {bdg-secondary}`deployment`
 :::

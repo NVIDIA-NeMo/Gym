@@ -147,7 +147,7 @@ get-started/collecting-rollouts
 
 Overview <tutorials/index>
 tutorials/offline-training-w-rollouts
-tutorials/09-configuration-guide
+tutorials/configuration-management
 ```
 
 
