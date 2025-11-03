@@ -41,9 +41,9 @@ Without verification, agents can execute tools perfectly but have no signal abou
 
 An agent can successfully call tools without producing good results:
 
-- Weather agent calls `get_weather("San Francisco")` ✓ Tool executed
-- But gives generic advice ignoring temperature data ✗ Poor performance
-- Or recommends winter clothing for 75°F weather ✗ Incorrect application
+- Weather agent calls `get_weather("San Francisco")` _✓ Tool executed_
+- But gives generic advice ignoring temperature data _✗ Poor performance_
+- Or recommends winter clothing for 75°F weather _✗ Incorrect application_
 
 **Verification measures the quality of outcomes, not just successful tool execution.**
 
@@ -85,10 +85,11 @@ Each resource server encapsulates domain expertise about what constitutes succes
 
 ## Verification Patterns
 
-Resource servers follow common patterns when implementing verification, though each adapts the pattern to its domain.
+Resource servers follow common patterns when implementing verification, though each adapts the pattern to its domain. Choose the pattern that best matches your task requirements:
 
-### Correctness Verification
+::::{tab-set}
 
+:::{tab-item} Correctness
 **Concept**: Compare agent output against ground truth for exact or semantic equivalence.
 
 **Simple Correctness**:
@@ -104,9 +105,9 @@ Resource servers follow common patterns when implementing verification, though e
 - Handle multiple acceptable answer formats
 
 **Example domains**: Math problems with different notation, open-ended questions
+:::
 
-### Quality Verification
-
+:::{tab-item} Quality
 **Concept**: Measure adherence to task requirements beyond correctness.
 
 **Instruction Following**:
@@ -123,9 +124,9 @@ Resource servers follow common patterns when implementing verification, though e
 - LLM-as-judge evaluation for subjective criteria
 - Multiple aspects scored independently (politeness, clarity, completeness)
 - Combined into composite reward signal
+:::
 
-### Efficiency Verification
-
+:::{tab-item} Efficiency
 **Concept**: Reward economical use of resources and concise communication.
 
 **Tool Usage Efficiency**:
@@ -137,9 +138,9 @@ Resource servers follow common patterns when implementing verification, though e
 - Measure response length against optimal range
 - Penalize both insufficient detail and excessive verbosity
 - Balance completeness with conciseness
+:::
 
-### Hybrid Verification
-
+:::{tab-item} Hybrid
 **Concept**: Combine multiple verification dimensions into a composite score.
 
 **Common combinations**:
@@ -148,6 +149,9 @@ Resource servers follow common patterns when implementing verification, though e
 - Test pass rate (0.6) + Code quality (0.4)
 
 **Design consideration**: Weight the most critical dimension highest, use secondary dimensions to break ties or encourage good practices beyond minimum requirements.
+:::
+
+::::
 
 ---
 
@@ -167,94 +171,101 @@ The verification score becomes the reward signal in reinforcement learning:
 
 ### Properties of Good Verification
 
-**Reliable**: Deterministic and consistent scoring
+Effective verification functions share three critical properties:
 
-- Same response should receive same score every time
-- Avoid randomness in verification logic
-- Minimize dependence on external factors (network latency, API variability)
+```{list-table}
+:header-rows: 1
+:widths: 20 40 40
 
-**Why it matters**: Inconsistent scoring creates noisy training signals that slow learning.
-
-**Meaningful**: Measures what you actually care about
-
-- Score should reflect true task performance
-- Avoid proxy metrics that can be gamed
-- Align verification with real-world success criteria
-
-**Why it matters**: Agents optimize for the verification function, not your unstated intentions.
-
-**Scalable**: Fast enough for thousands of evaluations
-
-- Verification runs once per training example
-- Large-scale RL training may require millions of verifications
-- Prefer local computation over expensive API calls when possible
-
-**Why it matters**: Verification becomes a bottleneck if it cannot scale with training demands.
+* - Property
+  - Implementation Guidelines
+  - Why It Matters
+* - **Reliable**
+  - • Same response → same score every time <br>
+    • Avoid randomness in verification logic <br>
+    • Minimize external dependencies 
+  - Inconsistent scoring creates noisy training signals that slow learning
+* - **Meaningful**
+  - • Score reflects true task performance <br>
+    • Avoid proxy metrics that can be gamed <br>
+    • Align with real-world success criteria
+  - Agents optimize for the verification function, not your unstated intentions
+* - **Scalable**
+  - • Fast enough for thousands of evaluations <br>
+    • Runs once per training example <br>
+    • Prefer local computation over API calls
+  - Verification becomes a bottleneck if it cannot scale with training demands
+```
 
 ---
 
 ## Real-World Verification Examples
 
-### Math Tutoring Agent
+These examples demonstrate how verification combines multiple criteria with weighted priorities:
 
-**What verification measures**:
-- **Correctness** (0.5 weight): Is the final answer mathematically correct?
-- **Pedagogy** (0.3 weight): Are steps clearly explained?
-- **Efficiency** (0.2 weight): Is the simplest method used?
+```{list-table}
+:header-rows: 1
+:widths: 25 50 25
 
-**Why this works**: Weights reflect that correct answers matter most, but teaching quality is also important.
-
-### Customer Service Agent
-
-**What verification measures**:
-- **Accuracy** (0.4 weight): Does response address the customer question?
-- **Tone** (0.3 weight): Is language appropriate and professional?
-- **Resolution** (0.3 weight): Does response solve the problem or provide next steps?
-
-**Why this works**: Balances multiple dimensions of service quality, no single aspect dominates.
-
-### Code Generation Agent
-
-**What verification measures**:
-- **Functionality** (0.6 weight): Do all test cases pass?
-- **Quality** (0.3 weight): Is code readable with good structure?
-- **Security** (0.1 weight): Avoids common vulnerabilities?
-
-**Why this works**: Functional correctness is primary, but code quality matters for maintainability.
+* - Agent Type
+  - Verification Criteria (with weights)
+  - Design Rationale
+* - **Math Tutoring**
+  - • **Correctness** (0.5): Final answer mathematically correct? <br>
+    • **Pedagogy** (0.3): Steps clearly explained?<br>
+    • **Efficiency** (0.2): Simplest method used?
+  - Correct answers matter most, but teaching quality is also important
+* - **Customer Service**
+  - • **Accuracy** (0.4): Addresses customer question? <br>
+    • **Tone** (0.3): Appropriate and professional? <br>
+    • **Resolution** (0.3): Solves problem or provides next steps? 
+  - Balances multiple dimensions of service quality—no single aspect dominates
+* - **Code Generation**
+  - • **Functionality** (0.6): All test cases pass? <br>
+    • **Quality** (0.3): Readable with good structure? <br>
+    • **Security** (0.1): Avoids vulnerabilities?
+  - Functional correctness is primary, but code quality matters for maintainability
+```
 
 ---
 
 ## Design Considerations
 
-### When to Use Binary vs Continuous Rewards
+When designing verification logic for your resource server, these patterns address common design decisions:
 
-**Binary rewards (0.0 or 1.0)**:
+::::{tab-set}
+
+:::{tab-item} Binary vs Continuous
+**When to Use Binary Rewards (0.0 or 1.0)**:
 - Clear success/failure criteria exist
 - Partial credit is not meaningful
 - Simplifies interpretation of results
 
-**Continuous rewards (0.0–1.0 range)**:
+**When to Use Continuous Rewards (0.0–1.0 range)**:
 - Degrees of success exist (partial correctness)
 - Want to reward progress toward full solution
 - Multiple criteria combined into composite score
+:::
 
-### Balancing Multiple Criteria
-
-When verification measures multiple aspects:
+:::{tab-item} Multiple Criteria
+**Process for Balancing Multiple Aspects**:
 
 1. **Identify primary goal**: What is non-negotiable?
 2. **Add secondary criteria**: What improves quality beyond minimum?
 3. **Weight appropriately**: Primary 0.5–0.7, secondary split remaining
 4. **Test edge cases**: Ensure weights produce sensible rankings
+:::
 
-### Handling Ambiguity
-
-When ground truth is unclear or multiple answers are valid:
+:::{tab-item} Handling Ambiguity
+**When Ground Truth Is Unclear or Multiple Answers Are Valid**:
 
 - Use LLM-as-judge with clear evaluation criteria
 - Implement swap checks to reduce bias
 - Provide partial credit for partially correct answers
 - Document edge cases and verification decisions
+:::
+
+::::
 
 ---
 
@@ -366,29 +377,3 @@ Each rollout includes the verification reward:
 
 This format is directly consumable by RL training frameworks.
 :::
-
----
-
-## Best Practices
-
-**Design verification before collecting data**: Verification logic defines what your agent learns. Get it right before scaling collection.
-
-**Test verification edge cases**: Run verification on known good/bad examples to ensure scoring matches intuition.
-
-**Monitor verification distributions**: If most rewards are 0.0 or 1.0, consider whether continuous scoring would provide better learning signals.
-
-**Version verification logic**: When updating verification, version your logic and datasets to enable reproducible experiments.
-
-**Balance speed and accuracy**: Expensive verification (API calls) slows collection. Consider caching, batching, or approximations for large-scale training.
-
----
-
-## Next Steps
-
-Now that you understand how verification transforms agent behavior into training signals:
-
-- **{doc}`core-abstractions`** — Review how resource servers provide both tools and verification
-- **{doc}`rollout-collection-fundamentals`** — See how verification scores flow into training datasets
-- **{doc}`../features`** — Explore verification approaches in available resource servers
-
-**Ready to implement verification?** Check out the {doc}`../../tutorials/04-verifying-results` tutorial for hands-on practice creating custom verification logic.
