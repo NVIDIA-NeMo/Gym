@@ -37,32 +37,43 @@ minimum_pass_at_k = 0
 maximum_pass_at_k = 14
 
 counter = Counter()
-question_to_example = dict()
+key_to_example = dict()
 with open(args.input_fpath) as f:
     for line in tqdm(f):
         row = json.loads(line)
-        question = row["responses_create_params"]["input"][0]["content"]
-        counter[question] += row["reward"]
+        key = json.dumps(row["responses_create_params"])
+        counter[key] += row["reward"]
 
-        question_to_example[question] = {
+        # TODO this part is not generic. We should try to figure out how to make this generic.
+        # Maybe some parameter?
+        key_to_example[key] = {
             "responses_create_params": row["responses_create_params"],
             "question": row["question"],
             "expected_answer": row["expected_answer"],
         }
 
 
+bucketed_counts = Counter(counter)
+total_rollouts = sum(bucketed_counts.values())
+total_prompts = len(counter)
+print("Pass@k distribution")
+for k, v in sorted(bucketed_counts.items()):
+    pct = 100 * v / total_rollouts
+    print(f"{k: 3}: {v:<8} ({pct:.2f}%)")
+
+
 filtered_out = 0
 with open(args.output_fpath, "w") as f:
-    for question, count in tqdm(counter.items(), total=len(counter)):
+    for key, count in tqdm(counter.items(), total=total_prompts):
         if not (minimum_pass_at_k <= count <= maximum_pass_at_k):
             filtered_out += 1
             continue
 
-        example = question_to_example[question]
+        example = key_to_example[key]
         f.write(json.dumps(example, separators=(",", ":")) + "\n")
 
-filtered_out_pct = 100 * filtered_out / len(counter)
-remaining = len(counter) - filtered_out
-remaining_pct = 100 * remaining / len(counter)
+filtered_out_pct = 100 * filtered_out / total_prompts
+remaining = total_prompts - filtered_out
+remaining_pct = 100 * remaining / total_prompts
 print(f"""Filtered out {filtered_out} examples ({filtered_out_pct:.2f}%)
 Remaining: {remaining} examples ({remaining_pct:.2f}%)""")
