@@ -234,36 +234,3 @@ def initialize_ray() -> None:
     else:
         ray.init(ignore_reinit_error=True)
 ```
-
----
-
-## Next Steps
-
-::::{grid} 1 1 1 2
-:gutter: 1 1 1 2
-
-:::{grid-item-card} {octicon}`squirrel;1.2em;sd-mr-1` Concepts
-:link: concepts/index
-:link-type: doc
-Understand models, resources, and agents.
-:::
-
-:::{grid-item-card} {octicon}`rocket;1.2em;sd-mr-1` Tutorials
-:link: ../tutorials/README
-:link-type: doc
-Hands-on guides for running servers and collecting data.
-:::
-
-:::{grid-item-card} {octicon}`list-unordered;1.2em;sd-mr-1` Key Features
-:link: about-features
-:link-type: ref
-Comprehensive capability reference.
-:::
-
-:::{grid-item-card} {octicon}`repo;1.2em;sd-mr-1` Ecosystem
-:link: about-ecosystem
-:link-type: ref
-How NeMo Gym fits with related projects.
-:::
-
-::::

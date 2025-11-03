@@ -28,19 +28,19 @@ Each explainer below covers one foundational idea and links to deeper material.
 ::::{grid} 1 1 1 2
 :gutter: 1 1 1 2
 
-:::{grid-item-card} {octicon}`file-code;1.5em;sd-mr-1` Core Abstractions
+:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Core Abstractions
 :link: concepts-core-abstractions
 :link-type: ref
 Understand how Models, Resources, and Agents remain decoupled yet coordinated as independent HTTP services, including which endpoints each abstraction exposes.
 :::
 
-:::{grid-item-card} {octicon}`file-code;1.5em;sd-mr-1` Rollout Collection Fundamentals
+:::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` Rollout Collection Fundamentals
 :link: concepts-rc-fundamentals
 :link-type: ref
 Learn why complete interaction transcripts matter for reinforcement learning, how they enable evaluation, and how collection orchestrators stream results to JSONL datasets.
 :::
 
-:::{grid-item-card} {octicon}`file-code;1.5em;sd-mr-1` Verifying Agent Results
+:::{grid-item-card} {octicon}`check-circle;1.5em;sd-mr-1` Verifying Agent Results
 :link: concepts-verifying-results
 :link-type: ref
 Explore how resource servers score agent outputs with `verify()` implementations that transform correctness, quality, and efficiency checks into reward signals.
