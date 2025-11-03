@@ -230,68 +230,17 @@ global_config_dict = OmegaConf.merge(*extra_configs, global_config_dict)
 
 ## How Configuration Gets Resolved
 
-Configuration resolution works like layers stacking on top of each other, with each higher layer overriding values from below.
+When you run `ng_run`, NeMo Gym merges configuration in this order:
 
-### The Layers Stack and Override
+1. **Parse command-line arguments** — Extract `config_paths` and any overrides
+2. **Load env.yaml** — Load secrets and environment-specific values
+3. **Load YAML files** — Load each file in `config_paths`, resolving variables like `${policy_api_key}`
+4. **Merge with priority** — Combine all layers: YAML files → env.yaml → CLI (highest priority)
+5. **Validate and cache** — Verify server references exist, populate defaults, cache for session
 
-When you run this command:
+**Priority order**: CLI overrides env.yaml, which overrides YAML files.
 
-```bash
-ng_run "+config_paths=[model.yaml]" +policy_model_name=gpt-4o-mini
-```
-
-With `model.yaml` containing:
-```yaml
-policy_model:
-  responses_api_models:
-    openai_model:
-      entrypoint: app.py
-      openai_base_url: ${policy_base_url}
-      openai_api_key: ${policy_api_key}
-      openai_model: ${policy_model_name}
-```
-
-And `env.yaml` containing:
-```yaml
-policy_base_url: https://api.openai.com/v1
-policy_api_key: sk-real-key
-policy_model_name: gpt-4o-2024-11-20
-```
-
-Here's how the layers stack:
-
-```
-┌─────────────────────────────────────────────────────────┐
-│  Command Line (Highest Priority)                        │
-├─────────────────────────────────────────────────────────┤
-│  policy_model_name: gpt-4o-mini  ← Overrides env.yaml  │
-│  config_paths: [model.yaml]                             │
-└─────────────────────────────────────────────────────────┘
-                      ⬇ OVERRIDES ⬇
-┌─────────────────────────────────────────────────────────┐
-│  env.yaml (Middle Priority)                             │
-├─────────────────────────────────────────────────────────┤
-│  policy_base_url: https://api.openai.com/v1             │
-│  policy_api_key: sk-real-key                            │
-│  policy_model_name: gpt-4o-2024-11-20  ← Gets overridden│
-└─────────────────────────────────────────────────────────┘
-                      ⬇ OVERRIDES ⬇
-┌─────────────────────────────────────────────────────────┐
-│  YAML Files (Foundation)                                │
-├─────────────────────────────────────────────────────────┤
-│  policy_model:                                          │
-│    responses_api_models:                                │
-│      openai_model:                                      │
-│        openai_base_url: ${policy_base_url}              │
-│          ↳ Resolved from env.yaml                       │
-│        openai_api_key: ${policy_api_key}                │
-│          ↳ Resolved from env.yaml                       │
-│        openai_model: ${policy_model_name}               │
-│          ↳ Resolved from CLI (after override)           │
-└─────────────────────────────────────────────────────────┘
-```
-
-**Key insight**: When a variable like `policy_model_name` appears in multiple layers, the highest-priority layer wins. CLI's `gpt-4o-mini` overrides env.yaml's `gpt-4o-2024-11-20`.
+**Example**: If `policy_model_name` is defined in both env.yaml (`gpt-4o-2024-11-20`) and CLI (`+policy_model_name=gpt-4o-mini`), the CLI value wins.
 
 :::{dropdown} See the Final Merged Result
 :icon: code-square
