@@ -53,7 +53,7 @@ with open(args.input_fpath) as f:
         key = json.dumps(row["responses_create_params"]["input"][0]["content"])
         counter[key] += row["reward"]
 
-bucketed_counts = Counter(counter)
+bucketed_counts = Counter(counter.values())
 total_rollouts = sum(bucketed_counts.values())
 total_prompts = len(counter)
 print("Pass@k distribution")
