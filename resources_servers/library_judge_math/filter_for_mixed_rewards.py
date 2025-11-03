@@ -39,7 +39,7 @@ minimum_pass_at_k = 0
 maximum_pass_at_k = 14
 
 key_to_example = dict()
-with open(args.input_fpath) as f:
+with open(args.source_fpath) as f:
     for line in tqdm(f, "Loading source dataset"):
         row = json.loads(line)
         key = json.dumps(row["responses_create_params"])
