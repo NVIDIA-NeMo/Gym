@@ -42,17 +42,16 @@ key_to_example = dict()
 with open(args.source_fpath) as f:
     for line in tqdm(f, "Loading source dataset"):
         row = json.loads(line)
-        key = json.dumps(row["responses_create_params"]["input"])
+        # TODO this key is not generic. Eventually this filtering for mixed rewards will probably be integrated somehow into rollout collection
+        key = json.dumps(row["responses_create_params"]["input"][0]["content"])
         key_to_example[key] = line
-
 
 counter = Counter()
 with open(args.input_fpath) as f:
     for line in tqdm(f, desc="Loading responses"):
         row = json.loads(line)
-        key = json.dumps(row["responses_create_params"]["input"])
+        key = json.dumps(row["responses_create_params"]["input"][0]["content"])
         counter[key] += row["reward"]
-
 
 bucketed_counts = Counter(counter)
 total_rollouts = sum(bucketed_counts.values())
