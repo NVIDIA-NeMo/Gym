@@ -66,6 +66,8 @@ EOF
 
 :::{important}
 Replace `sk-your-actual-openai-api-key-here` with your real OpenAI API key. This file keeps secrets out of version control while making them available to NeMo Gym.
+
+You can use any OpenAI model that supports function calling. Refer to [OpenAI's models documentation](https://platform.openai.com/docs/models) to see currently available models.
 :::
 
 ## 3. Start the Servers
