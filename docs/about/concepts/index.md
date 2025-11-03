@@ -2,7 +2,7 @@
 orphan: true
 ---
 
-(concepts-index)=
+(about-concepts)=
 # Understanding Concepts for {{product_name}}
 
 NeMo Gym concepts explain the mental model behind building reliable agent systems: how services collaborate, how teams capture interaction data, and how verification signals drive learning. Use this page as a compass to decide which explanation to read next.

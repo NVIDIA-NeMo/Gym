@@ -1,4 +1,4 @@
-(architecture)=
+(about-architecture)=
 # NeMo Gym Architecture
 
 This page explains how NeMo Gym components work together. Understanding the
@@ -7,7 +7,7 @@ integrate servers and workflows correctly.
 
 :::{tip}
 For the product's place in the broader NVIDIA ecosystem, refer to
-{ref}`nemo-gym-ecosystem`.
+{ref}`about-ecosystem`.
 :::
 
 ---
@@ -255,13 +255,13 @@ Hands-on guides for running servers and collecting data.
 :::
 
 :::{grid-item-card} {octicon}`list-unordered;1.2em;sd-mr-1` Key Features
-:link: features
+:link: about-features
 :link-type: ref
 Comprehensive capability reference.
 :::
 
 :::{grid-item-card} {octicon}`repo;1.2em;sd-mr-1` Ecosystem
-:link: nemo-gym-ecosystem
+:link: about-ecosystem
 :link-type: ref
 How NeMo Gym fits with related projects.
 :::
