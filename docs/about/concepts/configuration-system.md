@@ -29,11 +29,64 @@ Different parts of your configuration have different needs:
   - Quick testing without editing files; temporary overrides
 ```
 
-This separation enables:
-- **Version control** for shared configurations without exposing secrets
-- **Environment-specific** settings (dev/staging/prod) with the same code
-- **Rapid iteration** via command-line overrides during development
-- **Secure deployment** with proper secrets management
+This separation enables secure, flexible deployments. Choose the perspective most relevant to your role:
+
+::::{tab-set}
+
+:::{tab-item} Developer Perspective
+**What it means for you**:
+
+- **Rapid iteration**: Test different models or configurations with a single command-line override—no file editing required
+- **Safe experimentation**: Try changes without affecting your team's shared configs
+- **Easy rollback**: Command-line experiments don't persist; just remove the override
+
+**Example workflow**:
+```bash
+# Quick test with cheaper model
+ng_run "+config_paths=[${config}]" +policy_model_name=gpt-4o-mini
+
+# Back to normal - just remove the override
+ng_run "+config_paths=[${config}]"
+```
+:::
+
+:::{tab-item} DevOps Perspective
+**What it means for you**:
+
+- **Environment-specific deployments**: Same codebase, different env.yaml for dev/staging/prod
+- **Secrets management**: API keys never in version control, different credentials per environment
+- **CI/CD integration**: Override configurations via environment variables in pipelines
+- **Infrastructure as code**: YAML configs define server architecture in version control
+
+**Example deployment**:
+```bash
+# CI/CD pipeline with environment-specific overrides
+ng_run "+config_paths=[${base_config}]" \
+    +policy_api_key=${PROD_API_KEY} \
+    +policy_model_name=${MODEL_VERSION}
+```
+:::
+
+:::{tab-item} Security Perspective
+**What it means for you**:
+
+- **Zero secrets in git**: All sensitive values go in git-ignored env.yaml
+- **Variable interpolation**: YAML files reference variables, never hardcode keys
+- **Environment isolation**: Each environment has its own credentials
+- **Audit trail**: Configuration changes tracked in git (structure) without exposing secrets (values)
+
+**Security model**:
+```yaml
+# In git (public)
+openai_api_key: ${policy_api_key}  # Variable reference
+
+# In env.yaml (git-ignored, private)
+policy_api_key: sk-actual-secret-key
+```
+:::
+
+::::
+
 
 ---
 
@@ -201,7 +254,8 @@ policy_model_name: gpt-4o-2024-11-20
 
 ## Configuration Structure
 
-### Server Instance Config Format
+:::{dropdown} Server Instance Config Format
+:icon: code
 
 Every server in NeMo Gym follows this hierarchy:
 
@@ -230,7 +284,16 @@ simple_weather_simple_agent:
         name: policy_model
 ```
 
-### Server References
+**Key points**:
+- Server ID must be unique across all servers
+- Server type determines which directory to look in
+- Implementation matches a folder name under that type
+- Entrypoint specifies which Python file to run
+
+:::
+
+:::{dropdown} Server References
+:icon: link
 
 Agents and resources reference each other using this format:
 
@@ -240,11 +303,20 @@ resources_server:
   name: simple_weather         # Server ID to connect to
 ```
 
-The system validates these references during configuration resolution to ensure all referenced servers exist.
+**Validation**: The system validates these references during configuration resolution to ensure all referenced servers exist.
+
+**Example error** (if reference is invalid):
+```text
+AssertionError: Could not find type='resources_servers' name='typo_weather' 
+in the list of available servers: [simple_weather, library_judge_math, ...]
+```
 
 **Evidence**: Reference validation in `nemo_gym/global_config.py:145-153`
 
-### Policy Model Variables
+:::
+
+:::{dropdown} Policy Model Variables
+:icon: gear
 
 NeMo Gym provides three standard variables for the model being trained:
 
@@ -256,32 +328,62 @@ policy_model_name: gpt-4o-2024-11-20          # Model identifier
 
 **Why they exist**: When training agents, you need consistent references to "the model being trained" across different components. These variables provide a standard way to specify the policy model regardless of which resource servers or agents are being used.
 
+**Usage pattern**:
+- Define once in env.yaml (the actual values)
+- Reference everywhere with `${policy_model_name}`, `${policy_api_key}`, etc.
+- Override via command line for experiments
+
 **Evidence**: Variable definitions in `nemo_gym/global_config.py:54-56`
+
+:::
+
 
 ---
 
 ## Environment-Specific Deployments
 
-### Approach 1: Multiple env.yaml Files
+Different deployment scenarios call for different configuration strategies. Choose the approach that best fits your workflow:
 
-Maintain separate environment files:
+::::{tab-set}
 
+:::{tab-item} Multiple env.yaml Files
+**Best for**: Teams with distinct environments and different deployment processes
+
+**Structure**:
 ```bash
 env.dev.yaml      # Development: gpt-4o-mini, test keys
 env.staging.yaml  # Staging: gpt-4o, staging keys
 env.prod.yaml     # Production: gpt-4o, production keys
 ```
 
-Switch environments by copying:
+**Usage**:
 ```bash
+# Switch environments by copying
 cp env.prod.yaml env.yaml
 ng_run "+config_paths=[${config}]"
 ```
 
-### Approach 2: Environment-Specific YAML Configs
+**Advantages**:
+- Clear separation between environments
+- Easy to see what differs per environment
+- Each file can have environment-specific collections
 
-Use different YAML configs per environment:
+**Considerations**:
+- Need to remember to copy before running
+- Can accidentally run wrong environment if you forget
+:::
 
+:::{tab-item} Environment-Specific YAML Configs
+**Best for**: Infrastructure-as-code workflows where configs are managed separately per environment
+
+**Structure**:
+```bash
+configs/dev.yaml      # Dev server configurations
+configs/staging.yaml  # Staging configurations
+configs/prod.yaml     # Production configurations
+```
+
+**Usage**:
 ```bash
 # Development
 ng_run "+config_paths=[configs/dev.yaml]" +policy_model_name=gpt-4o-mini
@@ -290,10 +392,24 @@ ng_run "+config_paths=[configs/dev.yaml]" +policy_model_name=gpt-4o-mini
 ng_run "+config_paths=[configs/prod.yaml]" +policy_model_name=gpt-4o-2024-11-20
 ```
 
-### Approach 3: Command-Line Overrides
+**Advantages**:
+- Explicit environment selection in command
+- Configs can be version controlled (except secrets)
+- Works well with container orchestration
 
-Keep a single config and override at runtime:
+**Considerations**:
+- Secrets still need env.yaml or environment variables
+- More files to maintain
+:::
 
+:::{tab-item} Command-Line Overrides
+**Best for**: CI/CD pipelines and automated deployments with environment variables
+
+**Structure**:
+- Single base configuration
+- Environment-specific values passed at runtime
+
+**Usage**:
 ```bash
 # CI/CD pipeline
 ng_run "+config_paths=[${base_config}]" \
@@ -302,11 +418,26 @@ ng_run "+config_paths=[${base_config}]" \
     +limit=${LIMIT}
 ```
 
+**Advantages**:
+- No environment-specific files to manage
+- Secrets injected from CI/CD secrets manager
+- Single source of truth for structure
+
+**Considerations**:
+- Longer command lines
+- Need to pass all environment-specific values explicitly
+- Best combined with scripting or CI/CD tools
+:::
+
+::::
+
+
 ---
 
 ## Technical Implementation
 
-### Configuration Caching
+:::{dropdown} Configuration Caching
+:icon: cache
 
 The configuration is resolved once per process and cached:
 
@@ -317,9 +448,16 @@ if _GLOBAL_CONFIG_DICT is not None:
     return _GLOBAL_CONFIG_DICT
 ```
 
-This ensures consistent configuration throughout the process lifetime.
+**Why**: Configuration resolution involves parsing command-line args, loading multiple YAML files, merging layers, and validation. This is expensive to do repeatedly.
 
-### Child Process Configuration
+**Implication**: Once resolved, configuration is immutable for the process lifetime. To change configuration, restart the process.
+
+**Benefit**: Consistent configuration across all components; no surprises from configuration changing mid-execution.
+
+:::
+
+:::{dropdown} Child Process Configuration
+:icon: versions
 
 When NeMo Gym spawns child processes (for individual servers), the parent passes configuration via environment variable:
 
@@ -330,15 +468,44 @@ if nemo_gym_config_dict_str_from_env:
     global_config_dict = OmegaConf.create(nemo_gym_config_dict_str_from_env)
 ```
 
-This avoids re-parsing configuration in every subprocess.
+**Why**: Each server runs in its own process. Without this optimization, every subprocess would need to re-parse command-line args, load YAML files, and perform resolution.
 
-### OmegaConf Integration
+**How it works**:
+1. Parent process resolves configuration once
+2. Serializes configuration to string
+3. Passes to child via `NEMO_GYM_CONFIG_DICT` environment variable
+4. Child deserializes and uses directly
+
+**Benefit**: Fast subprocess startup; no redundant file I/O or parsing.
+
+:::
+
+:::{dropdown} OmegaConf Integration
+:icon: tools
 
 NeMo Gym uses [OmegaConf](https://omegaconf.readthedocs.io/) for configuration management, which provides:
-- Variable interpolation: `${variable_name}`
-- Type validation
-- Hierarchical merging
-- Structured configs
+
+**Core features**:
+- **Variable interpolation**: `${variable_name}` references
+- **Hierarchical merging**: Later configs override earlier ones
+- **Type validation**: Ensures configuration values have correct types
+- **Structured configs**: Supports nested dictionaries and lists
+- **Dot notation**: Access nested values with `key.nested.value`
+
+**Example of interpolation**:
+```yaml
+# Define once
+policy_model_name: gpt-4o-2024-11-20
+
+# Reference everywhere
+model_1: ${policy_model_name}
+model_2: ${policy_model_name}
+```
+
+**Hydra integration**: NeMo Gym uses Hydra (built on OmegaConf) for command-line parsing, enabling the `+key=value` override syntax.
+
+:::
+
 
 ---
 
