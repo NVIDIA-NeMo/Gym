@@ -1,22 +1,26 @@
-(tutorial-dual-model-math)=
+(tutorial-separate-policy-judge)=
 
-# Configure Dual-Model Math Evaluation
+# Separate Policy and Judge Models
 
-Set up a math training system with separate policy and judge models for accurate evaluation—a realistic configuration pattern demonstrating multi-server orchestration.
+Configure multiple model servers for different roles—a production pattern for training AI systems where the model being trained needs reliable verification from a stable judge model.
+
+**Example use case**: Math problem evaluation with separate policy (solver) and judge (verifier) models.
 
 :::{card}
 
-**Goal**: Configure a two-model system with a policy model for problem-solving and a judge model for evaluation.
+**Goal**: Configure separate models for policy (generation) and evaluation (verification) roles.
 
 ^^^
 
-**In this tutorial, you will**:
+**What you'll learn**:
 
-1. Understand why policy and judge models should be separate
-2. Configure the judge model placeholder in library_judge_math
-3. Set up environment variables for two models
-4. Use command-line overrides to connect the judge
-5. Toggle judge evaluation on and off
+1. Why and when to use separate policy and judge models
+2. How to configure multiple model server instances
+3. How to connect server references via command-line overrides
+4. How to implement conditional evaluation strategies
+5. Cost optimization with two-stage verification
+
+**Time**: 15-20 minutes | **Cost**: ~$0.03-0.10 for testing
 
 :::
 
@@ -30,18 +34,38 @@ Set up a math training system with separate policy and judge models for accurate
 
 ## Before You Start
 
-This tutorial assumes you've completed the [Get Started](../get-started/index.md) series and understand basic configuration concepts. For deeper configuration understanding, refer to [Configuration System](../about/concepts/configuration-system.md).
-
 **Prerequisites**:
-- Completed [Setup and Installation](../get-started/setup-installation.md)
-- Understand how to run `ng_run` and `ng_collect_rollouts`
-- Familiar with env.yaml for secrets management
+- ✅ Completed [Get Started](../get-started/index.md) series
+- ✅ OpenAI API key with available credits
+- ✅ Understand how to run `ng_run` and `ng_collect_rollouts`
+
+**Estimated cost**: $0.03-0.10 for 5-10 test examples (using gpt-4o-mini for policy, gpt-4o or gpt-4.1 for judge)
+
+---
+
+## When to Use This Pattern
+
+Separate policy and judge models are useful when:
+
+**🎯 Model Training**
+- **Policy**: Your model being fine-tuned (experimental, may regress)
+- **Judge**: Stable, frozen model for consistent evaluation over time
+
+**💰 Cost Optimization**
+- **Policy**: Fast, cheap model for generation (e.g., gpt-4o-mini)
+- **Judge**: Expensive, accurate model only when needed (e.g., gpt-4o)
+
+**🔧 Specialized Roles**
+- **Policy**: Creative generation or task execution
+- **Judge**: Factuality verification, safety filtering, or quality assessment
+
+**Example domains**: Math verification, code generation evaluation, creative writing critique, safety filtering
 
 ---
 
 ## Why Separate Policy and Judge Models?
 
-When training AI models to solve math problems, you need two distinct roles:
+This tutorial uses **math problem solving** as a concrete example. The policy model solves problems, and the judge model verifies correctness when the fast library verification is uncertain.
 
 **Policy Model** (the model being trained):
 - Solves math problems
@@ -421,9 +445,13 @@ ng_collect_rollouts \
     +agent_name=library_judge_math_simple_agent \
     +input_jsonl_fpath=data/math_problems.jsonl \
     +output_jsonl_fpath=results/math_rollouts_dual_model.jsonl \
-    +limit=20 \
-    +num_samples_in_parallel=5
+    +limit=5 \
+    +num_samples_in_parallel=1
 ```
+
+:::note
+Using `limit=5` keeps costs low (~$0.03-0.10) for initial testing. Increase once you've verified the setup works.
+:::
 
 ### 5.3: Examine Judge Evaluations
 
@@ -555,6 +583,41 @@ async def _verify_answer_with_judge(
 ## Troubleshooting
 
 Common issues when configuring dual models:
+
+:::{dropdown} Problem: Port already in use
+:icon: alert
+:color: danger
+
+**Error message**:
+```text
+ERROR: [Errno 48] error while attempting to bind on address ('127.0.0.1', 11000): address already in use
+```
+
+**What this means**: Previous server processes didn't shut down cleanly, leaving zombie processes holding ports.
+
+**Solution**:
+
+```bash
+# Kill all NeMo Gym and Ray processes
+pkill -9 -f "ng_run"
+pkill -9 -f "python app.py"
+pkill -9 -f "ray::"
+
+# Verify ports are free
+lsof -nP -iTCP:8000,11000 | grep LISTEN
+
+# Should return nothing. If ports are free, restart:
+ng_run '+config_paths=${math_training_with_judge}' \
+    +library_judge_math.resources_servers.library_judge_math.judge_model_server.name=judge_model
+```
+
+**Prevention**: 
+- Always stop servers gracefully with `Ctrl+C` rather than killing terminal windows
+- If servers hang, use `pkill` commands above before restarting
+
+**Why this happens**: Ray's distributed architecture makes process cleanup challenging when servers crash or are interrupted.
+
+:::
 
 :::{dropdown} Problem: Server 'judge_model' not found
 :icon: search
