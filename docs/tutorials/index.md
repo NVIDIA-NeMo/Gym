@@ -14,7 +14,7 @@ Hands-on learning experiences that guide you through building, training, and dep
 
 Learn core concepts and run your first agent in NeMo Gym.
 
-::::{grid} 1 2 2 2
+::::{grid} 1 1 1 1
 :gutter: 1 1 1 2
 
 :::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Setup and Installation
@@ -41,7 +41,7 @@ Break down the agent workflow step-by-step and experiment with different inputs.
 
 Understand verification and collect rollouts for RL, SFT, and DPO.
 
-::::{grid} 1 2 2 2
+::::{grid} 1 1 1 1
 :gutter: 1 1 1 2
 
 :::{grid-item-card} {octicon}`checklist;1.5em;sd-mr-1` Verifying Agent Results
@@ -60,13 +60,6 @@ Master rollout generation - the foundation for understanding agent behavior and 
 {bdg-secondary}`data-generation` {bdg-secondary}`rollouts`
 :::
 
-:::{grid-item-card} {octicon}`infinity;1.5em;sd-mr-1` RL Rollout Collection
-:class-card: sd-border-0 sd-bg-light
-*Coming soon* - Generate rollouts for real-time RL training with online collection and continuous improvement.
-+++
-{bdg-warning}`coming-soon` {bdg-secondary}`reinforcement-learning`
-:::
-
 :::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` SFT and DPO Training
 :link: 07-sft-dpo-rollout-collection
 :link-type: doc
@@ -79,7 +72,7 @@ Use generated rollouts to create training data for supervised fine-tuning and di
 
 ---
 
-## Resource Servers
+<!-- ## Resource Servers
 
 Build custom environments, tools, and verification systems.
 
@@ -93,7 +86,7 @@ Build custom environments, tools, and verification systems.
 {bdg-warning}`coming-soon` {bdg-secondary}`custom-environments`
 :::
 
-::::
+:::: -->
 
 ---
 
