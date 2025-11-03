@@ -1,8 +1,14 @@
+(gs-setup-installation)=
+
 # Setup and Installation
 
 Welcome to NeMo Gym! In this tutorial, you'll install NeMo Gym, configure your environment, and run your first agent interaction—a simple weather agent that uses tools to answer questions.
 
+:::{card}
+
 **Goal**: Get NeMo Gym installed and servers running with your first successful agent interaction.
+
+^^^
 
 **In this tutorial, you will**:
 
@@ -12,7 +18,11 @@ Welcome to NeMo Gym! In this tutorial, you'll install NeMo Gym, configure your e
 4. Run your first agent interaction
 5. Verify everything works correctly
 
-**Prerequisites**:
+:::
+
+## Before You Start
+
+Make sure you have these prerequisites ready before beginning:
 
 - **Python 3.12+** (check with `python3 --version`)
 - **Git** (for cloning the repository)
@@ -20,7 +30,7 @@ Welcome to NeMo Gym! In this tutorial, you'll install NeMo Gym, configure your e
 
 ---
 
-## Step 1: Clone and Install
+## 1. Clone and Install
 
 ```bash
 # Clone the repository
@@ -39,9 +49,9 @@ source .venv/bin/activate
 uv sync --extra dev --group docs
 ```
 
-**✅ Success Check**: You should see something that indicates a newly activated environment e.g. `(.venv)` or `(NeMo-Gym)` in your terminal prompt.
+**✅ Success Check**: You should see something that indicates a newly activated environment such as `(.venv)` or `(NeMo-Gym)` in your terminal prompt.
 
-## Step 2: Configure Your API Key
+## 2. Configure Your API Key
 
 Create an `env.yaml` file in the project root:
 
@@ -54,10 +64,11 @@ policy_model_name: gpt-4.1-2025-04-14
 EOF
 ```
 
-> [!IMPORTANT]
-> Replace `sk-your-actual-openai-api-key-here` with your real OpenAI API key. This file keeps secrets out of version control while making them available to NeMo Gym.
+:::{important}
+Replace `sk-your-actual-openai-api-key-here` with your real OpenAI API key. This file keeps secrets out of version control while making them available to NeMo Gym.
+:::
 
-## Step 3: Start the Servers
+## 3. Start the Servers
 
 ```bash
 # Define which servers to start
@@ -83,7 +94,7 @@ This means **4 servers are now running**:
    2. **OpenAI model server** (connects to GPT-4)
    3. **Simple agent** (orchestrates model + resources)
 
-## Step 4: Test the Setup
+## 4. Test the Setup
 
 Open a **new terminal** (keep servers running in the first one):
 
@@ -140,30 +151,41 @@ Example output:
 
 ## Troubleshooting
 
-### Problem: "command not found: ng_run"
+Stuck? Review some of the common gotchas.
+
+:::{dropdown} "command not found: ng_run"
 Make sure you activated the virtual environment:
+
 ```bash
 source .venv/bin/activate
 ```
 
-### Problem: "Missing mandatory value: policy_api_key"
+:::
+
+:::{dropdown} "Missing mandatory value: policy_api_key"
 Check your `env.yaml` file has the correct API key format. Do not surround your API key with quotes.
+:::
 
-### Problem: "python: command not found"
+:::{dropdown} "python: command not found"
 Try `python3` instead of `python`, or check your virtual environment.
+:::
 
-### Problem: No output from client script
+:::{dropdown} No output from client script
 Make sure the servers are still running in the other terminal.
+:::
 
-### Problem: OpenAI API errors
+:::{dropdown} OpenAI API errors
+
 - Verify your API key is valid
 - Check you have sufficient credits
 - Ensure the model name is correct
+:::
 
 ## File Structure After Setup
 
 Your directory should look like this:
-```
+
+```bash
 Gym/
 ├── env.yaml                    # Your API credentials (git-ignored)
 ├── .venv/                      # Virtual environment (git-ignored)
@@ -171,7 +193,7 @@ Gym/
 ├── resources_servers/          # Tools and environments
 ├── responses_api_models/       # Model integrations  
 ├── responses_api_agents/       # Agent implementations
-└── tutorials/                  # These tutorial files
+└── docs/                       # Documentation files
 ```
 
 ## What's Running?
@@ -187,7 +209,7 @@ When you ran `ng_run`, you started a complete AI agent system:
 
 Now that everything is working, let's understand what just happened and how to interact with your agent.
 
-:::{button-ref} 03-your-first-agent
+:::{button-ref} first-agent
 :color: primary
 :outline:
 :ref-type: doc
@@ -196,3 +218,4 @@ Next: Your First Agent →
 :::
 
 Learn how your weather agent works and explore the complete workflow from request to response.
+

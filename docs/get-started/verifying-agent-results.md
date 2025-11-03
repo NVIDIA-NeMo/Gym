@@ -1,8 +1,14 @@
+(gs-verifying-agent-results)=
+
 # Verifying Agent Results
 
 In the last tutorial, you ran your weather agent and saw it call the `get_weather` tool and generate responses. But how do you know if those responses were *good*? That's what verification solves.
 
+:::{card}
+
 **Goal**: Build and test verification logic that scores your weather agent's performance.
+
+^^^
 
 **In this tutorial, you will**:
 
@@ -11,11 +17,9 @@ In the last tutorial, you ran your weather agent and saw it call the `get_weathe
 3. Create a test script to observe different reward scores
 4. Experiment with stricter verification criteria
 
-:::{tip}
-**Going deeper**: For comprehensive coverage of verification patterns, design considerations, and the theory behind reward signals, refer to [Verifying Agent Results (Concepts)](../about/concepts/verifying-agent-results.md).
 :::
 
-:::{button-ref} 03-your-first-agent
+:::{button-ref} first-agent
 :color: secondary
 :outline:
 :ref-type: doc
@@ -23,11 +27,15 @@ In the last tutorial, you ran your weather agent and saw it call the `get_weathe
 ← Previous: Your First Agent
 :::
 
+:::{tip}
+**Going deeper**: For comprehensive coverage of **verification patterns**, **design considerations**, and the theory behind **reward signals**, refer to [Verifying Agent Results (Concepts)](../about/concepts/verifying-agent-results.md).
+:::
+
 ---
 
 ## Examine the Current Verification Function
 
-Your weather agent's resource server already has a `verify()` function, but it doesn't actually check anything—it just returns a fixed reward of 1.0 regardless of performance.
+Your weather agent's resource server already has a `verify()` function, but it doesn't actually check anything—it just returns a fixed [reward](../resources/glossary.md#reward) of 1.0 regardless of performance.
 
 Open `resources_servers/simple_weather/app.py` and locate the verify function:
 
@@ -307,7 +315,7 @@ What you just implemented mirrors real RL training workflows:
 4. **Reward assigned** → Numerical score (0.0–1.0) returned
 5. **In RL training** → This reward would update model parameters
 
-The verification logic you wrote defines what the agent should learn to optimize for.
+The verification logic you wrote defines what the agent should learn to optimize for. This connection between verification scores and model improvement is at the heart of [reinforcement learning](../resources/glossary.md#reinforcement-learning-rl)—the agent learns to take actions that maximize the [reward signal](../resources/glossary.md#reward) provided by verification.
 
 :::{tip}
 For production verification patterns including correctness checking, LLM judges, hybrid scoring, and design considerations, refer to the [Verification Concepts](../about/concepts/verifying-agent-results.md) guide.
@@ -330,9 +338,9 @@ You now have hands-on experience with:
 
 ## Next Steps
 
-Now that you can score individual agent responses, the next challenge is generating these responses at scale for training.
+Now that you can score individual agent responses, the next challenge is generating these responses at scale for training. This process is called **rollout collection**—systematically gathering agent interactions with verification scores to create the training data that powers RL.
 
-:::{button-ref} 05-rollout-collection
+:::{button-ref} /tutorials/05-rollout-collection
 :color: primary
 :outline:
 :ref-type: doc
@@ -341,3 +349,4 @@ Next: Rollout Collection →
 :::
 
 Learn how to systematically collect thousands of agent responses with verification scores—the foundation of RL training data.
+

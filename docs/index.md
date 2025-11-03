@@ -53,15 +53,15 @@ Core concepts behind models, resources, agents, and verification.
 
 ::::
 
-## Tutorial Highlights
+## Get Started
 
-Start with these tutorials to learn NeMo Gym fundamentals and build your first agent.
+New to NeMo Gym? Follow our guided tutorial path to build your first agent.
 
 ::::{grid} 1 1 1 1
 :gutter: 1 1 1 2
 
 :::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Setup and Installation
-:link: tutorials/02-setup
+:link: get-started/setup-installation
 :link-type: doc
 Get NeMo Gym installed and servers running.
 +++
@@ -69,7 +69,7 @@ Get NeMo Gym installed and servers running.
 :::
 
 :::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` Your First Agent
-:link: tutorials/03-your-first-agent
+:link: get-started/first-agent
 :link-type: doc
 Understand how your weather agent works and learn to interact with it.
 +++
@@ -121,14 +121,23 @@ Release Notes <about/release-notes/index>
 ```
 
 ```{toctree}
+:caption: Get Started
+:hidden:
+:maxdepth: 1
+
+get-started/index
+get-started/setup-installation
+get-started/first-agent
+get-started/verifying-agent-results
+get-started/collecting-rollouts
+```
+
+```{toctree}
 :caption: Tutorials
 :hidden:
 :maxdepth: 1
 
 Overview <tutorials/index>
-tutorials/02-setup
-tutorials/03-your-first-agent
-tutorials/04-verifying-results
 tutorials/05-rollout-collection
 tutorials/07-sft-dpo-rollout-collection
 tutorials/09-configuration-guide

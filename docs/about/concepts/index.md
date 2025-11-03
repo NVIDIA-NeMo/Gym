@@ -52,8 +52,8 @@ Explore how resource servers score agent outputs with `verify()` implementations
 
 ## Continue Learning
 
-- Reinforce the architecture concepts by stepping through {doc}`../../tutorials/03-your-first-agent` before exploring large-scale collection.
-- Apply the verification patterns in practice with the {doc}`../../tutorials/04-verifying-results` tutorial, then move on to high-volume data generation in {doc}`../../tutorials/05-rollout-collection`.
+- Reinforce the architecture concepts by stepping through {doc}`../../get-started/first-agent` before exploring large-scale collection.
+- Apply the verification patterns in practice with the {doc}`../../get-started/verifying-agent-results` tutorial, then move on to high-volume data generation in {doc}`../../tutorials/05-rollout-collection`.
 - Catalog the services you plan to deploy by referencing {doc}`../features` once the core concepts are familiar.
 
 ---
