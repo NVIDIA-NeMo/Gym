@@ -125,7 +125,7 @@ Release Notes <about/release-notes/index>
 :hidden:
 :maxdepth: 1
 
-tutorials/README
+Overview <tutorials/index>
 tutorials/02-setup
 tutorials/03-your-first-agent
 tutorials/04-verifying-results
