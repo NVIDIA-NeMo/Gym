@@ -116,50 +116,50 @@ If you already have a vLLM server running elsewhere, skip to [Configure NeMo Gym
 (vllm-quickstart-configure)=
 ## Configure NeMo Gym
 
-Choose your configuration based on where your vLLM server is running:
+1. Choose your configuration based on where your vLLM server is running:
 
-::::{tab-set}
+   ::::{tab-set}
 
-:::{tab-item} Local vLLM Server
-If you completed steps 1-3 above and started vLLM on localhost:
+   :::{tab-item} Local vLLM Server
+   If you completed steps 1-3 above and started vLLM on localhost:
 
-**Create `env.yaml`** in your NeMo Gym repository root:
+   **Create `env.yaml`** in your NeMo Gym repository root:
 
-```yaml
-policy_base_url: http://localhost:10240/v1  # Your local vLLM server
-policy_api_key: EMPTY                       # No auth for local server
-policy_model_name: Qwen/Qwen3-30B-A3B       # Must match model you started
-```
-:::
+   ```yaml
+   policy_base_url: http://localhost:10240/v1  # Your local vLLM server
+   policy_api_key: EMPTY                       # No auth for local server
+   policy_model_name: Qwen/Qwen3-30B-A3B       # Must match model you started
+   ```
+   :::
 
-:::{tab-item} Existing vLLM Server
-If you have a vLLM server already running elsewhere:
+   :::{tab-item} Existing vLLM Server
+   If you have a vLLM server already running elsewhere:
 
-**Create or update `env.yaml`** in your NeMo Gym repository root:
+   **Create or update `env.yaml`** in your NeMo Gym repository root:
 
-```yaml
-policy_base_url: http://your-vllm-server:8000/v1  # Your vLLM server URL
-policy_api_key: EMPTY                              # Or your API key if configured
-policy_model_name: meta-llama/Llama-3.1-8B-Instruct  # Must match loaded model
-```
+   ```yaml
+   policy_base_url: http://your-vllm-server:8000/v1  # Your vLLM server URL
+   policy_api_key: EMPTY                              # Or your API key if configured
+   policy_model_name: meta-llama/Llama-3.1-8B-Instruct  # Must match loaded model
+   ```
 
-**Verify server accessibility**:
-```bash
-# Check server is reachable
-curl http://your-vllm-server:8000/v1/models
-```
+   **Verify server accessibility**:
+   ```bash
+   # Check server is reachable
+   curl http://your-vllm-server:8000/v1/models
+   ```
 
-You should see a JSON response listing the available models.
-:::
+   You should see a JSON response listing the available models.
+   :::
 
-::::
+   ::::
 
-**Next: Validate your configuration** (optional but recommended):
+2. Validate your configuration** (optional but recommended):
 
    :::{dropdown} Test vLLM connection before starting NeMo Gym
-   
+
    Catch configuration issues early by testing your vLLM server:
-   
+
    ```bash
    python -c "
    import openai
@@ -199,14 +199,14 @@ You should see a JSON response listing the available models.
    print(f'\n✨ All checks passed! Your vLLM configuration is ready.')
    "
    ```
-   
+
    **✅ Success check**: You should see three green checkmarks confirming health, model availability, and successful completion.
-   
+
    **Common errors**:
    - `Connection refused`: vLLM server not running or wrong port
    - `Model not found`: Model name in `env.yaml` doesn't match vLLM
    - `404 Not Found`: Check that `base_url` includes `/v1` path
-   
+
    :::
 
 ---
@@ -215,32 +215,29 @@ You should see a JSON response listing the available models.
 
 1. Start NeMo Gym Servers
 
-```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-resources_servers/simple_weather/configs/simple_weather.yaml"
+   ```bash
+   config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
+   resources_servers/simple_weather/configs/simple_weather.yaml"
 
-ng_run "+config_paths=[${config_paths}]"
-```
+   ng_run "+config_paths=[${config_paths}]"
+   ```
 
-**✅ Success check**: You should see multiple servers starting, including the head server on port 11000.
+    **✅ Success check**: You should see multiple servers starting, including the head server on port 11000.
 
----
+2. Test with a simple agent interaction:
 
-### Test the Integration
+   ```bash
+   # Run a single rollout to verify the full stack works
+   ng_collect_rollouts \
+     +agent_name=simple_weather_simple_agent \
+     +input_jsonl_fpath=resources_servers/simple_weather/data/example.jsonl \
+     +output_jsonl_fpath=results/vllm_test.jsonl \
+     +limit=1
+   ```
 
-```bash
-ng_test +entrypoint=responses_api_models/vllm_model
-```
-
-**✅ Success check**: All tests should pass.
-
----
-
-## Next Steps
-
-Now that vLLM is configured, you can:
-
-- **[Collect rollouts](../../get-started/collecting-rollouts.md)** for training data generation
-- **[Configure additional parameters](configuration.md)** like token IDs for training
-- **[Set up load balancing](optimization.md)** for production throughput
+   **✅ Success check**: You should see the agent complete one interaction and write to `results/vllm_test.jsonl`. This confirms vLLM is responding through NeMo Gym.
+   
+   :::{tip}
+   This tests the complete flow: NeMo Gym servers → vLLM adapter → vLLM inference → agent response. If this works, you're ready for production rollout collection!
+   :::
 
