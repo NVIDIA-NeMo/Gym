@@ -10,15 +10,29 @@ Enterprise-grade model serving with production reliability, NVIDIA optimization,
 
 NVIDIA NIM (NVIDIA Inference Microservices) delivers production-ready AI model inference with enterprise features. NeMo Gym's NIM integration enables reliable, scalable model serving for training workflows requiring enterprise-grade reliability and support.
 
-| Why use NVIDIA NIM with NeMo Gym? | |
-|------------------------------------|-------------|
-| **Enterprise reliability** | Production SLAs, support, and uptime guarantees |
-| **Optimized performance** | NVIDIA-tuned inference engines for maximum GPU utilization |
-| **Enterprise security** | Compliance certifications, audit logging, and secure deployment |
-| **Scalable infrastructure** | Kubernetes-native deployment with auto-scaling |
-| **Simplified operations** | Managed microservices reduce operational overhead |
+::::{tab-set}
 
-**When to use NVIDIA NIM**: Production deployments requiring SLAs and support • Enterprise environments with compliance requirements • Teams wanting optimized performance without infrastructure expertise • Organizations already using NVIDIA infrastructure
+:::{tab-item} When to use
+:selected:
+
+- Production deployments requiring SLAs and support
+- Enterprise environments with compliance requirements
+- Teams wanting optimized performance without infrastructure expertise
+- Organizations already using NVIDIA infrastructure
+
+:::
+
+:::{tab-item} Why NVIDIA NIM
+
+**Enterprise reliability**: Production SLAs, support, and uptime guarantees  
+**Optimized performance**: NVIDIA-tuned inference engines for maximum GPU utilization  
+**Enterprise security**: Compliance certifications, audit logging, and secure deployment  
+**Scalable infrastructure**: Kubernetes-native deployment with auto-scaling  
+**Simplified operations**: Managed microservices reduce operational overhead
+
+:::
+
+::::
 
 :::{seealso}
 **Not sure which model serving method to use?** See the [Models Overview](../index.md#choosing-a-model-serving-method) for a comparison.
