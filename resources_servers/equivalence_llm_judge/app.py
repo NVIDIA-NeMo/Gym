@@ -63,7 +63,7 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     judge_endpoint_max_concurrency: Optional[int] = None
 
     judge_system_message: Optional[str] = None
-    judge_prompt_template_fpath: str
+    judge_prompt_template_fpath: str = "prompt_templates/equivalence_llm_judge.txt"
     judge_equal_label: str = "[[A=B]]"
     judge_not_equal_label: str = "[[A!=B]]"
     # Optional regex to extract the question from the last user message.
