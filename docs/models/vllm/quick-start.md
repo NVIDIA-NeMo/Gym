@@ -144,10 +144,21 @@ If you already have a vLLM server running elsewhere, skip to [Configure NeMo Gym
    ```yaml
    policy_base_url: http://your-vllm-server:8000/v1  # Your vLLM server URL
    policy_api_key: EMPTY                              # Or your API key if configured
-   policy_model_name: meta-llama/Llama-3.1-8B-Instruct  # Must match loaded model
+   policy_model_name: meta-llama/Llama-3.1-8B-Instruct  # Must exactly match loaded model
    ```
 
+   :::{tip}
+   **Load balancing**: For high-throughput scenarios, you can configure multiple vLLM servers:
+  
+   ```yaml
+   policy_base_url: http://vllm-1:8000/v1,http://vllm-2:8000/v1,http://vllm-3:8000/v1
+   ```
+  
+   NeMo Gym will distribute requests across servers automatically. See [Optimization Guide](optimization.md) for details.
+   :::
+
    **Verify server accessibility**:
+  
    ```bash
    # Check server is reachable
    curl http://your-vllm-server:8000/v1/models

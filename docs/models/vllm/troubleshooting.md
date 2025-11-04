@@ -55,11 +55,17 @@ Problems that prevent basic connectivity or server communication.
    ```
    Check that your model name appears in the response.
 
-2. **Match model identifier exactly**:
+2. **Match model identifier exactly** (case-sensitive):
    ```yaml
    # If vLLM shows: meta-llama/Llama-3.1-8B-Instruct
    # Use exactly that:
    policy_model_name: meta-llama/Llama-3.1-8B-Instruct
+   
+   # ❌ Wrong - case mismatch
+   policy_model_name: meta-llama/llama-3.1-8b-instruct
+   
+   # ❌ Wrong - missing namespace
+   policy_model_name: Llama-3.1-8B-Instruct
    ```
 
 3. **Check vLLM logs**: Look for model loading errors or warnings.
@@ -93,6 +99,33 @@ Settings that need to be configured correctly for specific features.
    ```
 
 3. **Model generates reasoning**: Not all models produce reasoning tokens. Check model documentation.
+
+:::
+
+:::{dropdown} Reasoning content assertion error
+:icon: alert
+:color: danger
+
+**Error message**: `AssertionError: Please do not use a reasoning parser in vLLM!`
+
+**Cause**: You started vLLM with `--reasoning-parser` flag, but NeMo Gym handles reasoning parsing internally.
+
+**Solution**:
+1. **Remove vLLM reasoning parser**:
+   ```bash
+   # ❌ Incorrect - causes conflict
+   vllm serve model --reasoning-parser qwen3
+   
+   # ✅ Correct - let NeMo Gym handle reasoning
+   vllm serve model --tool-call-parser hermes
+   ```
+
+2. **Verify NeMo Gym config**:
+   ```yaml
+   uses_reasoning_parser: true  # NeMo Gym handles it
+   ```
+
+**Why**: NeMo Gym's vLLM adapter transparently parses reasoning tokens using `<think>` tags to maintain format consistency across all model adapters. vLLM's native reasoning parser conflicts with this.
 
 :::
 
