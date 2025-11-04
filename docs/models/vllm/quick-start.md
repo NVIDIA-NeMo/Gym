@@ -8,10 +8,6 @@ Get vLLM running with NeMo Gym in under 5 minutes.
 
 ## Before You Start
 
-:::{tip}
-**New to NeMo Gym?** Start with the [Get Started tutorials](../../get-started/index.md) using OpenAI first. Once you understand the workflow, return here to deploy your own models with vLLM.
-:::
-
 Ensure you have these prerequisites before deploying vLLM with NeMo Gym:
 
 ```{list-table}
@@ -36,9 +32,17 @@ Ensure you have these prerequisites before deploying vLLM with NeMo Gym:
   - Required for initial model download from Hugging Face
 ```
 
+:::{button-ref} /get-started/index
+:color: secondary
+:outline:
+:ref-type: doc
+
+← New to NeMo Gym? Start with Get Started
+:::
+
 ---
 
-## Set Up
+## Set Up vLLM Server
 
 :::{admonition} Already have a vLLM server running?
 :class: tip
@@ -110,7 +114,7 @@ Skip to [Step 4: Configure NeMo Gym](vllm-quickstart-configure) if you already h
 ---
 
 (vllm-quickstart-configure)=
-## Configure
+## Configure NeMo Gym
 
 1. Create or update `env.yaml` in your NeMo Gym repository root:
 
