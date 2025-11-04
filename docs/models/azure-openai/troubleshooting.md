@@ -124,18 +124,18 @@ Settings specific to Azure OpenAI deployment.
 1. Verify URL format:
    ```yaml
    # Correct format
-   policy_base_url: https://your-resource.openai.azure.com/v1/azure
+   policy_base_url: https://your-resource.openai.azure.com
    
    # Common mistakes
-   policy_base_url: https://your-resource.openai.azure.com        # Missing /v1/azure
-   policy_base_url: https://api.openai.com/v1                     # OpenAI, not Azure
-   policy_base_url: https://your-resource.azure.com/v1/azure      # Missing .openai
+   policy_base_url: https://api.openai.com/v1                # OpenAI, not Azure
+   policy_base_url: https://your-resource.azure.com          # Missing .openai
+   policy_base_url: https://your-resource.openai.azure.com/  # Trailing slash
    ```
 
 2. Find correct endpoint:
    - Azure portal → Your resource → Keys and Endpoint
-   - Copy "Endpoint" URL
-   - Add `/v1/azure` to the end
+   - Copy "Endpoint" URL exactly as shown
+   - Should end with `.openai.azure.com`
 
 3. Check resource name:
    - Must match your Azure OpenAI resource name
@@ -218,7 +218,7 @@ Problems during rollout collection.
 3. Optimize usage:
    ```bash
    # Reduce concurrency
-   ng_collect_rollouts +concurrency=5  # Lower value
+   ng_collect_rollouts +num_samples_in_parallel=5  # Lower value
    ```
 
 4. Monitor usage:
@@ -230,7 +230,7 @@ Problems during rollout collection.
 
 :::{dropdown} {octicon}`x;1em;sd-text-danger` Context length exceeded
 
-**How NeMo Gym handles this**: The Azure OpenAI adapter automatically catches context length errors and returns an empty response.
+**How Azure OpenAI handles this**: Azure OpenAI returns a 400 error when the context length is exceeded. This error propagates through NeMo Gym's exception handling and is returned as a 500 status code.
 
 **To prevent**:
 - Use deployments with appropriate context lengths

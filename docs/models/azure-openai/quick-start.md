@@ -81,13 +81,13 @@ If you don't have an Azure OpenAI resource yet:
 
    ```yaml
    # env.yaml
-   policy_base_url: https://your-resource.openai.azure.com/v1/azure
+   policy_base_url: https://your-resource.openai.azure.com
    policy_api_key: your-azure-api-key
    policy_model_name: my-gpt-4-deployment
    ```
 
    :::{tip}
-   **Endpoint format**: The URL should include `/v1/azure` at the end. Example: `https://myresource.openai.azure.com/v1/azure`
+   **Endpoint format**: Use the base Azure OpenAI resource URL without any path suffix. Example: `https://myresource.openai.azure.com`
    :::
 
 2. Validate Configuration (optional but recommended):
@@ -110,7 +110,7 @@ If you don't have an Azure OpenAI resource yet:
    client = openai.AzureOpenAI(
        api_key=config['policy_api_key'],
        api_version='2024-10-21',  # Use latest from Azure docs
-       azure_endpoint=config['policy_base_url'].replace('/v1/azure', '')
+       azure_endpoint=config['policy_base_url']
    )
    
    try:

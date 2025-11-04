@@ -16,11 +16,12 @@ policy_model:
   responses_api_models:
     azure_openai_model:
       entrypoint: app.py
-      base_url: ${policy_base_url}
-      api_key: ${policy_api_key}
-      model: ${policy_model_name}
+      openai_base_url: ${policy_base_url}
+      openai_api_key: ${policy_api_key}
+      openai_model: ${policy_model_name}
       default_query:
         api-version: 2024-10-21
+      num_concurrent_requests: 8
 ```
 
 Configuration values resolve through **three layers** with increasing precedence.
@@ -33,7 +34,7 @@ Configuration values resolve through **three layers** with increasing precedence
 
 ```yaml
 # env.yaml
-policy_base_url: https://your-resource.openai.azure.com/v1/azure
+policy_base_url: https://your-resource.openai.azure.com
 policy_api_key: your-azure-api-key
 policy_model_name: my-gpt-4-deployment
 ```
@@ -55,11 +56,12 @@ policy_model_name: my-gpt-4-deployment
 policy_model:
   responses_api_models:
     azure_openai_model:
-      base_url: ${policy_base_url}      # ← substitutes from Layer 1
-      api_key: ${policy_api_key}
-      model: ${policy_model_name}
+      openai_base_url: ${policy_base_url}      # ← substitutes from Layer 1
+      openai_api_key: ${policy_api_key}
+      openai_model: ${policy_model_name}
       default_query:
-        api-version: 2024-10-21          # Azure-specific requirement
+        api-version: 2024-10-21          # Azure-specific requirement (example - check Azure docs)
+      num_concurrent_requests: 8
 ```
 
 **Azure-specific**: Requires `api-version` parameter in `default_query`.
@@ -105,18 +107,21 @@ All available parameters for the Azure OpenAI adapter:
 * - Parameter
   - Type
   - Description
-* - `base_url`
+* - `openai_base_url`
   - `str`
-  - Azure OpenAI endpoint URL (format: `https://RESOURCE.openai.azure.com/v1/azure`)
-* - `api_key`
+  - Azure OpenAI endpoint URL (format: `https://RESOURCE.openai.azure.com`)
+* - `openai_api_key`
   - `str`
   - Azure OpenAI API key from Azure portal
-* - `model`
+* - `openai_model`
   - `str`
   - Your deployment name (not base model name like `gpt-4`)
 * - `default_query.api-version`
   - `str`
   - Azure API version (format: `YYYY-MM-DD`, e.g., `2024-10-21`)
+* - `num_concurrent_requests`
+  - `int`
+  - Maximum number of concurrent requests to Azure API (default: 8, controls rate limiting)
 ```
 
 ---
@@ -132,7 +137,7 @@ Define these in `env.yaml` at your repository root:
 * - Variable
   - Description
 * - `policy_base_url`
-  - Azure OpenAI endpoint including `/v1/azure` path
+  - Azure OpenAI endpoint URL (e.g., `https://your-resource.openai.azure.com`)
 * - `policy_api_key`
   - API key from Azure portal (Keys and Endpoint section)
 * - `policy_model_name`
@@ -234,7 +239,7 @@ policy_model:
   responses_api_models:
     azure_openai_model:
       default_query:
-        api-version: 2024-10-21
+        api-version: 2024-10-21  # Check Azure docs for current stable version
 ```
 
 ---
@@ -272,9 +277,9 @@ The Azure OpenAI adapter exposes Azure-compatible endpoints:
 * - Endpoint
   - Description
 * - `/v1/chat/completions`
-  - Main inference endpoint (Azure format with api-version)
-* - `/v1/completions`
-  - Legacy completions endpoint
+  - OpenAI-compatible chat completions endpoint
+* - `/v1/responses`
+  - NeMo Gym responses API endpoint
 ```
 
 :::{dropdown} Example request using ServerClient
@@ -284,11 +289,11 @@ from nemo_gym.server_utils import ServerClient
 
 server_client = ServerClient.load_from_global_config()
 
+# The model parameter is not needed - uses deployment from config
 response = await server_client.post(
     server_name="policy_model",
     url_path="/v1/chat/completions",
     json={
-        "model": "my-gpt-4-deployment",
         "messages": [
             {"role": "user", "content": "What's the weather in San Francisco?"}
         ],
