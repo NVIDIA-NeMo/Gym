@@ -58,180 +58,173 @@ Use the generated test set for reward profiling (see next section).
 
 ## Running with vLLM for Reward Profiling
 
-For reward profiling and RL training (as per CONTRIBUTING.md), use vLLM with local models like Qwen3-30B-A3B.
+For reward profiling and RL training (as per CONTRIBUTING.md), use vLLM with local models. We support both **Qwen3-4B** and **Qwen3-30B-A3B** models.
 
 **Choose your setup:**
-- **Single GPU?** → Follow the "Quick Start (Single GPU)" section below
-- **Multi-GPU (2+ GPUs)?** → Follow the "Multi-GPU Setup" section below
+- **Using bash scripts (recommended)?** → Follow the "Automated Bash Scripts" section below
+- **Manual step-by-step?** → Follow the "Manual Setup" section below
 
 ---
 
-## Quick Start (Single GPU)
+## Automated Bash Scripts
 
-### 1. Start vLLM Server
+### Prerequisites
 
-**Prerequisites:**
 ```bash
 uv pip install vllm hf_transfer
 ```
 
+### Qwen3-4B Model
+
+**For single GPU or multi-GPU evaluation (recommended: auto-retry loop):**
+
 ```bash
-HF_HOME=.cache/ \
-vllm serve Qwen/Qwen3-30B-A3B \
-    --dtype auto \
-    --tensor-parallel-size 1 \
-    --gpu-memory-utilization 0.85 \
-    --enable-auto-tool-choice --tool-call-parser hermes \
-    --host 0.0.0.0 \
-    --port 10240 \
-    --max-model-len 8192 \
-    --trust-remote-code
+cd resources_servers/grl_sokoban
+
+# Edit the script to configure:
+# - TENSOR_PARALLEL_SIZE (1 for single GPU, 2+ for multi-GPU)
+# Then run:
+./run_qwen3_4b_eval_loop.sh
 ```
 
-**Wait 2-5 minutes for model loading.** Verify server is ready:
+This auto-retry loop script:
+- Collects 3,200 rollouts (200 prompts × 16 repeats)
+- Supports automatic checkpoint/resume
+- Automatically retries if Ray crashes or timeouts occur
+- Continues until all rollouts are collected
+- Stops after 20 attempts or successful completion
+- Generates reward analysis report
+- Works with both single GPU and multi-GPU setups
+
+**Alternative (single run):**
 ```bash
-curl http://localhost:10240/v1/models
+./run_qwen3_4b_eval.sh
 ```
 
-### 2. Start NeMo Gym Servers
+See [`data/qwen3_4b_eval/README.md`](data/qwen3_4b_eval/README.md) for detailed documentation.
 
-In a new terminal:
+### Qwen3-30B-A3B Model
+
+**For single GPU or multi-GPU evaluation (recommended: auto-retry loop):**
+
 ```bash
-# Set environment variables
-export policy_base_url="http://localhost:10240/v1"
-export policy_api_key="dummy"
-export policy_model_name="Qwen/Qwen3-30B-A3B"
+cd resources_servers/grl_sokoban
 
-# Start servers (no Ray cluster needed for single GPU)
-ng_run "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml,resources_servers/grl_sokoban/configs/grl_sokoban.yaml]"
+# First, create the 200 prompts file (if not exists):
+# head -n 200 data/test_examples.jsonl > data/qwen3_30b_eval/test_examples_200.jsonl
+
+# Edit the script to configure:
+# - TENSOR_PARALLEL_SIZE (1 for single GPU, 4 for multi-GPU)
+# Then run:
+./run_qwen3_30b_eval_loop.sh
 ```
 
-**Wait until you see:** `All 3 / 3 servers ready!` before proceeding.
+This auto-retry loop script:
+- Collects 3,200 rollouts (200 prompts × 16 repeats) - matching 4B setup
+- Supports automatic checkpoint/resume
+- Automatically retries if Ray crashes or timeouts occur
+- Continues until all rollouts are collected
+- Stops after 20 attempts or successful completion
+- Generates reward analysis report
+- Works with both single GPU and multi-GPU setups
 
-### 3. Collect Rollouts
-
-**In a new terminal** (keep servers running):
+**Alternative (single run):**
 ```bash
-ng_collect_rollouts +agent_name=grl_sokoban_game_agent \
-    +input_jsonl_fpath=resources_servers/grl_sokoban/data/test_examples.jsonl \
-    +output_jsonl_fpath=resources_servers/grl_sokoban/data/test_rollouts.jsonl \
-    +limit=null \
-    +num_repeats=4 \
-    +num_samples_in_parallel=32 \
-    +responses_create_params.temperature=0.8 \
-    +responses_create_params.max_output_tokens=3000
+./run_qwen3_30b_eval.sh
 ```
+
+The scripts automatically handle cleanup, model loading, server startup, and rollout collection.
 
 ---
 
-## Multi-GPU Setup (4+ GPUs)
+## Manual Setup
 
-### 1. Start vLLM Server with Multi-GPU
+### Qwen3-4B Model
+
+#### Single GPU Setup
+
+**1. Start vLLM Server:**
 ```bash
+cd resources_servers/grl_sokoban
+HF_HOME=.cache/ \
+vllm serve Qwen/Qwen3-4B \
+    --dtype auto \
+    --tensor-parallel-size 1 \
+    --gpu-memory-utilization 0.85 \
+    --enable-auto-tool-choice \
+    --tool-call-parser hermes \
+    --host 0.0.0.0 \
+    --port 10240 \
+    --max-model-len 32768 \
+    --trust-remote-code
+```
+
+**2. Start NeMo Gym Servers (in a new terminal):**
+```bash
+export policy_base_url="http://localhost:10240/v1"
+export policy_api_key="dummy"
+export policy_model_name="Qwen/Qwen3-4B"
+
+ng_run "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml,resources_servers/grl_sokoban/configs/grl_sokoban.yaml]"
+```
+
+**3. Collect Rollouts (in a new terminal):**
+```bash
+ng_collect_rollouts +agent_name=grl_sokoban_game_agent \
+    +input_jsonl_fpath=resources_servers/grl_sokoban/data/qwen3_4b_eval/test_examples_200.jsonl \
+    +output_jsonl_fpath=resources_servers/grl_sokoban/data/qwen3_4b_eval/rollouts.jsonl \
+    +limit=null \
+    +num_repeats=16 \
+    +num_samples_in_parallel=16 \
+    +responses_create_params.temperature=0.6 \
+    +responses_create_params.max_output_tokens=4096
+```
+
+### Qwen3-30B-A3B Model
+
+
+#### Multi-GPU Setup (4+ GPUs)
+
+**1. Start vLLM Server:**
+```bash
+cd resources_servers/grl_sokoban
 HF_HOME=.cache/ \
 vllm serve Qwen/Qwen3-30B-A3B \
     --dtype auto \
     --tensor-parallel-size 4 \
-    --gpu-memory-utilization 0.9 \
-    --enable-auto-tool-choice --tool-call-parser hermes \
+    --gpu-memory-utilization 0.85 \
+    --enable-auto-tool-choice \
+    --tool-call-parser hermes \
     --host 0.0.0.0 \
     --port 10240 \
-    --max-model-len 8192 \
+    --max-model-len 32768 \
     --trust-remote-code
 ```
 
-**Wait 2-5 minutes for model loading.** Verify server is ready:
+**2. Start NeMo Gym Servers (in a new terminal):**
 ```bash
-curl http://localhost:10240/v1/models
-```
-
-### 2. Start Shared Ray Cluster
-
-**Important for multi-GPU setups:** To avoid slow startup and port conflicts, start a shared Ray cluster first:
-
-```bash
-# Clean up any existing Ray sessions
-ray stop --force
-
-# Start a shared Ray cluster
-ray start --head --port=6379 --dashboard-host=0.0.0.0 --disable-usage-stats
-
-# Wait a few seconds for cluster to be ready
-sleep 3
-```
-
-### 3. Start NeMo Gym Servers
-
-In a new terminal (or the same terminal after Ray starts):
-```bash
-# Set environment variables
 export policy_base_url="http://localhost:10240/v1"
 export policy_api_key="dummy"
 export policy_model_name="Qwen/Qwen3-30B-A3B"
 
-# Start servers with shared Ray cluster
-ng_run "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml,resources_servers/grl_sokoban/configs/grl_sokoban.yaml]" \
-"+ray_head_node_address=127.0.0.1:6379"
+ng_run "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml,resources_servers/grl_sokoban/configs/grl_sokoban.yaml]"
 ```
 
-**Wait until you see:** `All 3 / 3 servers ready!` before proceeding.
-
-### 4. Collect Rollouts
-
-**In a new terminal** (keep servers running):
-
-**Using the test examples dataset (500 diverse puzzles, with high parallelism):**
+**3. Collect Rollouts (in a new terminal):**
 ```bash
 ng_collect_rollouts +agent_name=grl_sokoban_game_agent \
-    +input_jsonl_fpath=resources_servers/grl_sokoban/data/test_examples.jsonl \
-    +output_jsonl_fpath=resources_servers/grl_sokoban/data/test_rollouts.jsonl \
+    +input_jsonl_fpath=resources_servers/grl_sokoban/data/qwen3_30b_eval/test_examples_200.jsonl \
+    +output_jsonl_fpath=resources_servers/grl_sokoban/data/qwen3_30b_eval/rollouts.jsonl \
     +limit=null \
-    +num_repeats=1 \
-    +num_samples_in_parallel=128 \
+    +num_repeats=16 \
+    +num_samples_in_parallel=16 \
     +responses_create_params.temperature=0.8 \
-    +responses_create_params.max_output_tokens=3000
+    +responses_create_params.max_output_tokens=4096
 ```
 
 ---
 
 ## Analyze Reward Distribution (Both Setups)
-
-### Automated Analysis (Recommended)
-
-**Generate comprehensive reward profiling report** (required for CONTRIBUTING.md):
-
-```bash
-cd resources_servers/grl_sokoban
-
-# Install pandas if not already installed
-pip install pandas
-
-# Generate report for Qwen3-30B-A3B
-python analyze_rewards.py \
-    --rollouts-path data/test_rollouts.jsonl \
-    --model-name "Qwen3-30B-A3B" \
-    --output data/reward_analysis_qwen3_30b.md
-
-# View the report
-cat data/reward_analysis_qwen3_30b.md
-```
-
-This generates a complete report including:
-- Reward distribution statistics (min, max, mean, median)
-- Success rate analysis
-- Reward histogram
-- Tool call metrics and correlation with rewards
-- Per-prompt performance breakdown
-- Top/bottom performing prompts
-
-**For Qwen3-235B-Instruct** (second required model):
-```bash
-# After collecting rollouts with 235B model, run:
-python analyze_rewards.py \
-    --rollouts-path data/test_rollouts_qwen3_235b.jsonl \
-    --model-name "Qwen3-235B-Instruct" \
-    --output data/reward_analysis_qwen3_235b.md
-```
 
 ### Results Summary (Qwen3-4B)
 
@@ -265,40 +258,6 @@ See [`data/qwen3_4b_eval/reward-analysis.md`](data/qwen3_4b_eval/reward-analysis
 ```bash
 ng_viewer +jsonl_fpath=resources_servers/grl_sokoban/data/test_rollouts.jsonl
 ```
-
-### Manual Command-Line Analysis
-
-**Quick stats** (if you prefer manual analysis):
-```bash
-# Reward distribution
-jq '.reward' resources_servers/grl_sokoban/data/test_rollouts.jsonl | sort -n | uniq -c
-
-# Statistics (min, max, avg)
-jq -s 'map(.reward) | {
-    min: min,
-    max: max,
-    avg: (add / length),
-    count: length
-}' resources_servers/grl_sokoban/data/test_rollouts.jsonl
-
-# Success rate
-jq -s 'map(select(.success == true)) | length' \
-    resources_servers/grl_sokoban/data/test_rollouts.jsonl
-
-# Tool call metrics (average per rollout)
-jq -s 'map([.output[] | select(.type == "function_call")] | length) | add / length' \
-    resources_servers/grl_sokoban/data/test_rollouts.jsonl
-```
-
-### Other Recommended Models
-
-**For math/coding tasks:** `Qwen/Qwen3-235B-Thinking`  
-**For agents/instruction following:** `Qwen/Qwen3-235B-Instruct`
-
-Adjust `--tensor-parallel-size` based on available GPUs (235B models typically need 8 GPUs).
-
-## Dataset artifacts
-Placeholder files live under `data/` (`example.jsonl`, `example_metrics.json`, `example_rollouts.jsonl`). Replace them with generated rollouts and metrics when integrating into training pipelines.
 
 ## Tests
 ```bash
