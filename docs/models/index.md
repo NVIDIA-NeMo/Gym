@@ -119,6 +119,14 @@ policy_model_name: <model_identifier>
 
 Each model type has specific configuration options and usage patterns—refer to the individual guides for details.
 
+:::{button-ref} concepts-configuration-system
+:color: secondary
+:outline:
+:ref-type: ref
+
+← Learn Configuration System
+:::
+
 ---
 
 ## Next Steps
