@@ -508,9 +508,10 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
 
 def empty_response() -> NeMoGymResponse:
+    uid = str(uuid.uuid4().hex)
     return NeMoGymResponse.model_validate(
         {
-            "id": f"resp_{uuid.uuid4()}",
+            "id": f"resp_{uid}",
             "object": "response",
             "created_at": datetime.utcnow().timestamp(),
             "model": "dummy/model",
