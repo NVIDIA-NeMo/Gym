@@ -10,8 +10,45 @@ Complete reference for all vLLM adapter configuration options in NeMo Gym.
 
 The vLLM adapter uses a standard [Hydra configuration file](https://hydra.cc/docs/tutorials/basic/your_first_app/config_file/) with environment variable substitution:
 
-:::{tip}
-Configuration values resolve through three layers: `env.yaml` → config YAML → command-line overrides. See [Configuration System](../../about/concepts/configuration-system.md) for details on how this works.
+:::{dropdown} How configuration layers work
+
+Configuration values resolve through **three layers** with increasing precedence:
+
+**Layer 1: `env.yaml` (base values)**
+```yaml
+# env.yaml - git-ignored, contains secrets
+policy_base_url: http://localhost:10240/v1
+policy_api_key: EMPTY
+policy_model_name: Qwen/Qwen3-30B-A3B
+```
+
+**Layer 2: Config YAML (structure with variable substitution)**
+```yaml
+# responses_api_models/vllm_model/configs/vllm_model.yaml
+policy_model:
+  responses_api_models:
+    vllm_model:
+      base_url: ${policy_base_url}      # ← substitutes from env.yaml
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}
+      return_token_id_information: false
+```
+
+**Layer 3: Command-line overrides (highest precedence)**
+```bash
+# Override specific values at runtime
+ng_run "+config_paths=[${config_paths}]" \
+    +policy_model_name=meta-llama/Llama-3.1-8B-Instruct \
+    +policy_model.responses_api_models.vllm_model.return_token_id_information=true
+```
+
+**Common use cases**:
+- **env.yaml**: Secrets, environment-specific URLs (dev/staging/prod)
+- **Config YAML**: Structure, defaults, relationships between components
+- **CLI overrides**: Quick experiments, CI/CD deployments, one-off changes
+
+See [Configuration System](../../about/concepts/configuration-system.md) for complete details on precedence and composition.
+
 :::
 
 ```yaml
