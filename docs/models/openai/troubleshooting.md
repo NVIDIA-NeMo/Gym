@@ -17,9 +17,10 @@ Problems with API keys and access.
 **Solution**:
 
 1. Verify API key format:
-   - OpenAI API keys start with `sk-`
+   - OpenAI API keys typically start with `sk-`
    - Check for extra spaces or newlines in `env.yaml`
    - Ensure key is copied completely
+   - Note: NeMo Gym passes the key as-is to OpenAI without format validation
 
 2. Check API key status:
    ```bash
@@ -190,17 +191,21 @@ Problems that occur during rollout collection.
 :icon: x
 :color: danger
 
-**How NeMo Gym handles this**: The OpenAI adapter automatically catches context length errors and returns an empty response, allowing rollout collection to continue.
+**How NeMo Gym handles this**: When OpenAI returns a context length error, it will propagate through NeMo Gym's error handling and cause the individual rollout to fail. The rollout collection will continue processing remaining samples.
 
 **To prevent**:
 - Use models with appropriate context lengths
 - Monitor conversation history length
 - Implement truncation in your resource server logic
-- Consider context window sizes:
+- Consider context window sizes (as of November 2024):
   - `gpt-3.5-turbo`: 16K tokens
-  - `gpt-4`: 8K tokens
+  - `gpt-4`: 8K tokens (base model)
   - `gpt-4-32k`: 32K tokens
   - `gpt-4-turbo`: 128K tokens
+  - `gpt-4o`: 128K tokens
+  - See [OpenAI Models documentation](https://platform.openai.com/docs/models) for current limits
+
+**Note**: If you need automatic fallback behavior for context length errors (returning empty responses to continue rollouts), consider implementing custom error handling in your resource server or agent logic.
 
 :::
 
