@@ -10,6 +10,10 @@ Complete reference for all vLLM adapter configuration options in NeMo Gym.
 
 The vLLM adapter uses a standard [Hydra configuration file](https://hydra.cc/docs/tutorials/basic/your_first_app/config_file/) with environment variable substitution:
 
+:::{tip}
+Configuration values resolve through three layers: `env.yaml` → config YAML → command-line overrides. See [Configuration System](../../about/concepts/configuration-system.md) for details on how this works.
+:::
+
 ```yaml
 # responses_api_models/vllm_model/configs/vllm_model.yaml
 policy_model:
@@ -132,7 +136,6 @@ response = await server_client.post(
 ```
 
 :::
-
 
 ---
 
