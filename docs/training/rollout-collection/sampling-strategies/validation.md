@@ -118,7 +118,7 @@ echo "Success rate: $success / $total = $(python -c "print(f'{$success/$total:.1
 
 ---
 
-## Check for Issues
+## Troubleshooting
 
 **All rewards identical**:
 ```bash
