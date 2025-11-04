@@ -115,28 +115,34 @@ jq '.output[] | select(.type=="function_call") | .name' successes.jsonl | \
 
 ## Research Questions
 
-### Question: What tools does the agent prefer?
+```{dropdown} What tools does the agent prefer?
+:icon: tools
+:color: info
 
-```bash
+~~~bash
 jq '.output[] | select(.type=="function_call") | .name' research_exploration.jsonl | \
   sort | uniq -c | sort -rn
-```
+~~~
 
 **Example output**:
-```
+~~~
     187 calculator
      43 search
      12 code_interpreter
       8 browser
-```
+~~~
 
 **Insight**: Agent heavily prefers calculator, underutilizes other tools.
 
-### Question: What reasoning patterns emerge?
+```
+
+```{dropdown} What reasoning patterns emerge?
+:icon: comment-discussion
+:color: info
 
 Manually review rollouts to identify patterns:
 
-```bash
+~~~bash
 # Sample 10 random high-reward rollouts
 jq 'select(.reward >= 0.8)' research_exploration.jsonl | shuf -n 10 > sample_good.jsonl
 
@@ -146,13 +152,17 @@ for i in {1..10}; do
     head -n $i sample_good.jsonl | tail -n 1 | jq '.output[] | select(.type=="message") | .content'
     echo ""
 done
+~~~
+
 ```
 
 ---
 
 ## Use Cases
 
-### Debugging Agent Prompts
+::::{tab-set}
+
+:::{tab-item} Debugging Agent Prompts
 
 Test prompt variations with high diversity:
 
@@ -170,7 +180,9 @@ jq -r '.prompt_variant + "," + (.reward | tostring)' prompt_exploration.jsonl | 
   awk -F',' '{sum[$1]+=$2; count[$1]++} END {for (v in sum) print v, sum[v]/count[v]}'
 ```
 
-### Capability Discovery
+:::
+
+:::{tab-item} Capability Discovery
 
 Test on diverse, challenging tasks:
 
@@ -189,7 +201,9 @@ jq -r '.task_type + "," + (.reward | tostring)' capability_test.jsonl | \
   awk -F',' '{sum[$1]+=$2; count[$1]++} END {for (type in sum) print type, sum[type]/count[type]}'
 ```
 
-### Failure Analysis
+:::
+
+:::{tab-item} Failure Analysis
 
 Deep dive into specific failure mode:
 
@@ -203,3 +217,7 @@ echo "Tasks where agent failed to use any tool: $(wc -l < no_tool_failures.jsonl
 # Examine first few
 head -3 no_tool_failures.jsonl | jq '.responses_create_params.input[1].content'
 ```
+
+:::
+
+::::

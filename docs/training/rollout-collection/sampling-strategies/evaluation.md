@@ -75,7 +75,7 @@ ng_collect_rollouts \
 
 ## Model Comparison Workflow
 
-### Step 1: Evaluate Multiple Models
+### 1. Evaluate Multiple Models
 
 ```bash
 #!/bin/bash
@@ -104,7 +104,7 @@ for model in "${MODELS[@]}"; do
 done
 ```
 
-### Step 2: Compare Results
+### 2. Compare Results
 
 ```bash
 # Simple comparison
