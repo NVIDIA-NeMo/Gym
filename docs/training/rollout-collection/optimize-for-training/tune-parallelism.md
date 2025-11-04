@@ -114,7 +114,6 @@ Run a longer test to ensure stability at scale
 
 ## Default Behavior
 
-```{important}
 When `num_samples_in_parallel` is **not specified**, NeMo Gym submits **all tasks concurrently** with no limit. This can:
 
 - Overwhelm model servers
@@ -122,7 +121,6 @@ When `num_samples_in_parallel` is **not specified**, NeMo Gym submits **all task
 - Cause OOM errors
 
 Always set this parameter for production workloads.
-```
 
 ---
 

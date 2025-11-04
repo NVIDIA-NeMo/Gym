@@ -86,7 +86,7 @@ After collection completes, NeMo Gym automatically displays aggregated metrics:
 }
 ```
 
-```{dropdown} How Metric Aggregation Works
+:::{dropdown} How Metric Aggregation Works
 :icon: gear
 
 From `rollout_collection.py:103-109`:
@@ -99,7 +99,7 @@ print(json.dumps(avg_metrics, indent=4))
 ```
 
 Any numeric field returned by verification is automatically averaged across all rollouts.
-```
+:::
 
 ### Tracking Over Time
 
@@ -147,7 +147,6 @@ ng_collect_rollouts \
 ```{dropdown} Why This Works
 :icon: code
 
-From `rollout_collection.py:94`:
 ```python
 with open(config.output_jsonl_fpath, "a") as f:
 ```
@@ -297,7 +296,6 @@ ng_collect_rollouts \
 ```{dropdown} How Parameter Override Works
 :icon: code
 
-From `rollout_collection.py:97`:
 ```python
 row["responses_create_params"] = row["responses_create_params"] | config.responses_create_params
 ```
