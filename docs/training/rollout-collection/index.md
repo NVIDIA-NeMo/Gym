@@ -53,15 +53,6 @@ For deep understanding of rollout fundamentals, see {doc}`../../about/concepts/r
 {bdg-secondary}`reference` {bdg-secondary}`patterns` {bdg-secondary}`examples`
 :::
 
-:::{grid-item-card} {octicon}`gear;1.5em;sd-mr-1` Configuration Reference
-:link: configuration-reference
-:link-type: doc
-
-**Reference** of all `ng_collect_rollouts` parameters with descriptions, types, defaults, and examples.
-+++
-{bdg-secondary}`reference` {bdg-secondary}`parameters` {bdg-secondary}`config`
-:::
-
 ::::
 
 

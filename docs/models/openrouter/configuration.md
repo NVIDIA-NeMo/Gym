@@ -336,9 +336,9 @@ if __name__ == "__main__":
     run(main())
 ```
 
-:::{note}
+```{note}
 **Model parameter behavior**: The `model` parameter in the request JSON is **ignored**. The model specified in your configuration (`openai_model` in the YAML) always takes precedence. This ensures consistent model usage across all requests.
-:::
+```
 
 :::
 

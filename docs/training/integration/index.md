@@ -238,7 +238,6 @@ See framework-specific guides for complete workflows.
 ### Configuration
 
 * **Configuration Management** *(coming soon)* - System configuration for training pipelines
-* {doc}`../rollout-collection/configuration-reference` - Collection parameters
 
 
 ## Next Steps
@@ -252,63 +251,3 @@ Not sure which framework to use?
 
 Start with Framework Comparison →
 :::
-
-Already know your framework? Jump directly to the integration guide:
-
-::::{grid} 1 1 2 2
-:gutter: 2
-
-:::{grid-item}
-:::{button-ref} nemo-rl
-:color: secondary
-:outline:
-:ref-type: doc
-
-NeMo-RL Guide →
-:::
-:::
-
-:::{grid-item}
-:::{button-ref} verl
-:color: secondary
-:outline:
-:ref-type: doc
-
-VeRL Guide →
-:::
-:::
-
-:::{grid-item}
-:::{button-ref} openrlhf
-:color: secondary
-:outline:
-:ref-type: doc
-
-OpenRLHF Guide →
-:::
-:::
-
-:::{grid-item}
-:::{button-ref} trl
-:color: secondary
-:outline:
-:ref-type: doc
-
-TRL Guide →
-:::
-:::
-
-::::
-
-```{toctree}
-:hidden:
-:maxdepth: 1
-
-framework-comparison
-nemo-rl
-verl
-openrlhf
-trl
-custom-frameworks
-```
-

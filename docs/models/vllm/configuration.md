@@ -39,9 +39,9 @@ policy_api_key: EMPTY
 policy_model_name: Qwen/Qwen3-30B-A3B
 ```
 
-:::{note}
+```{note}
 The default vLLM port is `8000`. Use the port where your vLLM server is running.
-:::
+```
 
 **When to use**:
 - Secrets and API keys

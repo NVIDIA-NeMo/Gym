@@ -96,8 +96,6 @@ Not sure where to start? Choose based on your current need:
   - {doc}`Integration / Framework Comparison <integration/framework-comparison>` then select your framework
 * - Understand verification approaches
   - {doc}`Verification / Verification Patterns <verification/verification-patterns>` (reference)
-* - Look up configuration parameters
-  - {doc}`Rollout Collection / Configuration Reference <rollout-collection/configuration-reference>` (reference)
 ```
 
 ## Training Workflow Patterns
