@@ -47,7 +47,7 @@ policy_api_key: your-openai-api-key
 policy_model_name: gpt-4.1-2025-04-14" > env.yaml
 
 # Start servers and run agent
-config_paths="resources_servers/simple_weather/configs/simple_weather.yaml,responses_api_models/openai_model/configs/openai_model.yaml"
+config_paths="resources_servers/examples/simple_weather/configs/simple_weather.yaml,responses_api_models/openai_model/configs/openai_model.yaml"
 ng_run "+config_paths=[${config_paths}]"
 
 python responses_api_agents/simple_agent/client.py
@@ -80,8 +80,8 @@ Purpose: Demonstrate NeMo Gym patterns and concepts.
 <!-- START_EXAMPLE_ONLY_SERVERS_TABLE -->
 | Name             | Demonstrates                         | Config                                                                                | README                                                            |
 | ---------------- | ------------------------------------ | ------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| Simple Weather   | Basic single-step tool calling       | <a href='resources_servers/simple_weather/configs/simple_weather.yaml'>config</a>     | <a href='resources_servers/simple_weather/README.md'>README</a>   |
-| Stateful Counter | Session state management (in-memory) | <a href='resources_servers/stateful_counter/configs/stateful_counter.yaml'>config</a> | <a href='resources_servers/stateful_counter/README.md'>README</a> |
+| Simple Weather   | Basic single-step tool calling       | <a href='resources_servers/examples/simple_weather/configs/simple_weather.yaml'>config</a>     | <a href='resources_servers/examples/simple_weather/README.md'>README</a>   |
+| Stateful Counter | Session state management (in-memory) | <a href='resources_servers/examples/stateful_counter/configs/stateful_counter.yaml'>config</a> | <a href='resources_servers/examples/stateful_counter/README.md'>README</a> |
 <!-- END_EXAMPLE_ONLY_SERVERS_TABLE -->
 
 ### Table 2: Resource Servers for Training

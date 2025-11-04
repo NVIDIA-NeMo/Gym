@@ -254,7 +254,7 @@ ng_help = "nemo_gym.cli:display_help"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["resources_servers", "responses_api_agents", "responses_api_models", "nemo_gym", "penguin"]
+include = ["resources_servers", "resources_servers.examples","responses_api_agents", "responses_api_models", "nemo_gym", "penguin"]
 
 ################################################
 # Testing

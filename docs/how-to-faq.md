@@ -99,13 +99,13 @@ Register your new `get_weather` function as a FastAPI route.
 ...
 ```
 
-You can see a complete example of `app.py` in `resources_servers/simple_weather/app.py`!
+You can see a complete example of `app.py` in `resources_servers/examples/simple_weather/app.py`!
 
 Run an agent with your new server!
 ```bash
 config_paths="responses_api_agents/simple_agent/configs/simple_agent.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/simple_weather/configs/simple_weather.yaml"
+resources_servers/examples/simple_weather/configs/simple_weather.yaml"
 ng_run "+config_paths=[$config_paths]" \
     +simple_agent.responses_api_agents.simple_agent.resources_server.name=test_weather
 ```
@@ -120,13 +120,13 @@ After you implement your server, please make sure to update the README.md with a
 
 Run the tests for your server
 ```bash
-ng_test +entrypoint=resources_servers/simple_weather
+ng_test +entrypoint=resources_servers/examples/simple_weather
 ```
 
 
 You can also run detailed tests after running tests the first time
 ```bash
-cd resources_servers/simple_weather
+cd resources_servers/examples/simple_weather
 source .venv/bin/activate
 pytest
 ```
@@ -134,7 +134,7 @@ pytest
 At some point, you will want to actually add data that can be used to query your server. Please follow the instructions for [How To: Prepare and validate data for PR submission or RL training](#how-to-prepare-and-validate-data-for-pr-submission-or-rl-training).
 
 
-If you need some dataset preprocessing or formatting scripts, please place them your resources server directory e.g. `resources_servers/simple_weather/my_preprocess_script.py`.
+If you need some dataset preprocessing or formatting scripts, please place them your resources server directory e.g. `resources_servers/examples/simple_weather/my_preprocess_script.py`.
 
 
 You are required to have the following 3 files in your resources server data folder:
