@@ -8,6 +8,8 @@ Complete reference for all vLLM adapter configuration options in NeMo Gym.
 
 ## Configuration File Structure
 
+The vLLM adapter uses a standard Hydra configuration file with environment variable substitution:
+
 ```yaml
 # responses_api_models/vllm_model/configs/vllm_model.yaml
 policy_model:
@@ -25,6 +27,8 @@ policy_model:
 ---
 
 ## Configuration Parameters
+
+All available parameters for the vLLM adapter:
 
 ```{list-table}
 :header-rows: 1
@@ -83,6 +87,8 @@ Define these in `env.yaml` at your repository root:
 ---
 
 ## Common Configuration Patterns
+
+Pre-configured examples for typical use cases:
 
 :::{dropdown} Training mode (with token IDs and log probabilities)
 
@@ -208,7 +214,7 @@ The vLLM adapter exposes these endpoints:
   - Health check endpoint
 ```
 
-### Example Request
+:::{dropdown} Example request using ServerClient
 
 ```python
 from nemo_gym.server_utils import ServerClient
@@ -235,6 +241,9 @@ response = await server_client.post(
 )
 ```
 
+:::
+
+
 ---
 
 ## Tool Calling Support
@@ -250,12 +259,3 @@ vllm serve model --enable-auto-tool-choice --tool-call-parser mistral
 ```
 
 Refer to [vLLM tool calling documentation](https://docs.vllm.ai/) for supported models and parsers.
-
----
-
-## Next Steps
-
-- **[Optimize for production](optimization.md)** - Load balancing and performance tuning
-- **[Troubleshoot issues](troubleshooting.md)** - Common problems and solutions
-- **[Collect rollouts](../../get-started/collecting-rollouts.md)** - Generate training data
-

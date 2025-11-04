@@ -222,7 +222,7 @@ If you already have a vLLM server running elsewhere, skip to [Configure NeMo Gym
    ng_run "+config_paths=[${config_paths}]"
    ```
 
-    **✅ Success check**: You should see multiple servers starting, including the head server (default port 11000).
+    **✅ Success check**: You should see multiple servers starting, including the head server (default port `11000`).
 
 2. Test with a simple agent interaction:
 
