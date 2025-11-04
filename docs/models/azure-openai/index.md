@@ -10,7 +10,20 @@ Enterprise-grade OpenAI models through Microsoft Azure with compliance, regional
 
 Azure OpenAI Service provides OpenAI models through Microsoft Azure infrastructure, enabling enterprise deployments with Azure's security, compliance, and regional availability. NeMo Gym integrates with Azure OpenAI endpoints for agent training workflows in Azure-native environments.
 
-**Why use Azure OpenAI with NeMo Gym?**
+::::{tab-set}
+
+:::{tab-item} When to use
+:selected:
+
+- Already using Azure infrastructure
+- Need compliance certifications (HIPAA, SOC 2, etc.)
+- Regional data residency requirements
+- Microsoft enterprise support needed
+- Azure ecosystem integration (Key Vault, Monitor, etc.)
+
+:::
+
+:::{tab-item} Why Azure OpenAI
 
 - **Azure integration**: Native integration with Azure services and infrastructure
 - **Enterprise compliance**: SOC 2, HIPAA, ISO 27001, and regional data residency
@@ -18,13 +31,9 @@ Azure OpenAI Service provides OpenAI models through Microsoft Azure infrastructu
 - **Regional deployment**: Deploy in specific Azure regions for data residency
 - **Familiar pricing**: Azure billing and cost management
 
-**When to use Azure OpenAI**:
+:::
 
-- Already using Azure infrastructure
-- Need compliance certifications (HIPAA, SOC 2, etc.)
-- Regional data residency requirements
-- Microsoft enterprise support needed
-- Azure ecosystem integration (Key Vault, Monitor, etc.)
+::::
 
 :::{seealso}
 **Not sure which model serving method to use?** See the [Models Overview](../index.md#choosing-a-model-serving-method) for a comparison.
