@@ -255,35 +255,48 @@ Start with Framework Comparison →
 
 Already know your framework? Jump directly to the integration guide:
 
-::::{button-ref} nemo-rl
-:color: primary
+::::{grid} 1 1 2 2
+:gutter: 2
+
+:::{grid-item}
+:::{button-ref} nemo-rl
+:color: secondary
 :outline:
 :ref-type: doc
 
 NeMo-RL Guide →
-::::
+:::
+:::
 
-::::{button-ref} verl
-:color: primary
+:::{grid-item}
+:::{button-ref} verl
+:color: secondary
 :outline:
 :ref-type: doc
 
 VeRL Guide →
-::::
+:::
+:::
 
-::::{button-ref} openrlhf
-:color: primary
+:::{grid-item}
+:::{button-ref} openrlhf
+:color: secondary
 :outline:
 :ref-type: doc
 
 OpenRLHF Guide →
-::::
+:::
+:::
 
-::::{button-ref} trl
-:color: primary
+:::{grid-item}
+:::{button-ref} trl
+:color: secondary
 :outline:
 :ref-type: doc
 
 TRL Guide →
+:::
+:::
+
 ::::
 
