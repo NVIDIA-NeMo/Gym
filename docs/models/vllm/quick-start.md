@@ -19,7 +19,7 @@ Ensure you have these prerequisites before deploying vLLM with NeMo Gym:
 * - **NeMo Gym installed**
   - Complete [Setup and Installation](../../get-started/setup-installation.md) first
 * - **Python 3.10+**
-  - Required by vLLM (check with `python3 --version`)
+  - Required by vLLM and NeMo Gym (check with `python3 --version`)
 * - **CUDA-capable GPU**
   - NVIDIA GPU with CUDA support for inference
 * - **Hugging Face account**
@@ -128,8 +128,12 @@ If you already have a vLLM server running elsewhere, skip to [Configure NeMo Gym
    ```yaml
    policy_base_url: http://localhost:10240/v1  # Your local vLLM server
    policy_api_key: EMPTY                       # No auth for local server
-   policy_model_name: Qwen/Qwen3-30B-A3B       # Must match model you started
+   policy_model_name: Qwen/Qwen3-30B-A3B       # Must exactly match model identifier
    ```
+
+   :::{important}
+   **Model name must be exact match**: The `policy_model_name` must exactly match the model identifier shown by vLLM (case-sensitive, including slashes). Test with `curl http://localhost:10240/v1/models` to verify.
+   :::
    :::
 
    :::{tab-item} Existing vLLM Server

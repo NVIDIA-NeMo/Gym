@@ -18,9 +18,10 @@ Problems that prevent basic connectivity or server communication.
 
 1. **vLLM server is running**:
    ```bash
+   # Check vLLM server health (vLLM native endpoint)
    curl http://localhost:10240/health
    ```
-   Should return `{"status": "ok"}` or similar.
+   Should return health status from the vLLM server.
 
 2. **Correct URL in configuration**:
    ```yaml
@@ -33,11 +34,11 @@ Problems that prevent basic connectivity or server communication.
 
 3. **Network connectivity**:
    ```bash
-   # Test basic connectivity
+   # Test vLLM server API (vLLM native endpoint)
    curl http://your-vllm-server:8000/v1/models
    ```
 
-4. **Firewall rules**: Ensure the port is accessible from the machine running NeMo Gym.
+4. **Firewall rules**: Ensure the vLLM server port is accessible from the machine running NeMo Gym.
 
 :::
 
@@ -47,8 +48,9 @@ Problems that prevent basic connectivity or server communication.
 
 **Solution**:
 
-1. **Verify model loaded in vLLM**:
+1. **Verify model loaded in vLLM server**:
    ```bash
+   # Query vLLM server models endpoint
    curl http://localhost:10240/v1/models
    ```
    Check that your model name appears in the response.
@@ -128,12 +130,12 @@ policy_model:
       return_token_id_information: true  # Enable this
 ```
 
-**Verify config loaded**:
+**Verify configuration loaded correctly**:
 ```bash
-ng_dump_config "+config_paths=[...]"  # Check configuration
+ng_dump_config "+config_paths=[...]"  # View resolved configuration
 ```
 
-See [Configuration Reference](configuration.md) for details on training mode configuration.
+See [Configuration Reference](configuration.md#configuration-parameters) for all training mode parameters.
 
 :::
 
@@ -147,12 +149,12 @@ Problems that occur during execution or affect throughput and speed.
 :icon: stop
 :color: danger
 
-**How NeMo Gym handles this**: The vLLM adapter automatically catches context length errors and returns an empty response, allowing rollout collection to continue.
+**How NeMo Gym handles this**: The vLLM adapter automatically catches context length errors (HTTP 400 with "context length" message) and returns an empty response, allowing rollout collection to continue without crashing.
 
 **To fix**:
 - Use models with larger context windows
 - Reduce conversation history length in your resource server
-- Configure vLLM with `--max-model-len 16384` to match your needs (adjust value based on your model)
+- Configure vLLM server with `--max-model-len 16384` to match your needs (adjust based on your model's capabilities)
 
 :::
 
@@ -162,7 +164,7 @@ Problems that occur during execution or affect throughput and speed.
 
 **Optimize**:
 
-1. **vLLM server parameters**:
+1. **vLLM server parameters** (at server startup):
    ```bash
    vllm serve model \
        --tensor-parallel-size 4 \          # Use multiple GPUs
@@ -171,7 +173,7 @@ Problems that occur during execution or affect throughput and speed.
        --enable-prefix-caching              # Cache common prefixes
    ```
 
-2. **Load balancing**:
+2. **Load balancing** (NeMo Gym configuration):
    ```yaml
    base_url:
      - http://vllm-1:8000/v1
@@ -179,12 +181,12 @@ Problems that occur during execution or affect throughput and speed.
      - http://vllm-3:8000/v1  # More servers = higher throughput
    ```
 
-3. **NeMo Gym concurrency**:
+3. **NeMo Gym concurrency** (at rollout collection):
    ```bash
    ng_collect_rollouts +num_samples_in_parallel=100  # Increase concurrent requests
    ```
 
-4. **Monitor vLLM metrics**: Check GPU utilization, batch sizes, and queue lengths.
+4. **Monitor vLLM server metrics**: Check GPU utilization, batch sizes, and queue lengths using vLLM's metrics endpoint.
 
 See [Optimization Guide](optimization.md) for detailed performance tuning.
 
@@ -196,10 +198,10 @@ See [Optimization Guide](optimization.md) for detailed performance tuning.
 
 If you're still experiencing issues:
 
-1. **Check vLLM logs**: Look for errors or warnings from the vLLM server
-2. **Test vLLM directly**: Use vLLM's API directly to isolate NeMo Gym vs vLLM issues
-3. **Verify configuration**: Use `ng_dump_config` to see resolved configuration values
-4. **Run tests**: Execute `ng_test +entrypoint=responses_api_models/vllm_model`
+1. **Check vLLM server logs**: Look for errors or warnings from the vLLM server process
+2. **Test vLLM directly**: Use vLLM's API endpoints directly (via `curl` or OpenAI client) to isolate NeMo Gym adapter vs vLLM server issues
+3. **Verify configuration**: Use `ng_dump_config` to inspect all resolved configuration values
+4. **Run adapter tests**: Execute `ng_test +entrypoint=responses_api_models/vllm_model` to verify the adapter is working correctly
 
 :::{seealso}
 - **[Configuration Reference](configuration.md)** - Verify your settings

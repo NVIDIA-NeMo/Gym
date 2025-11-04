@@ -34,10 +34,14 @@ Configuration values resolve through **three layers** with increasing precedence
 
 ```yaml
 # env.yaml
-policy_base_url: http://localhost:10240/v1
+policy_base_url: http://localhost:8000/v1
 policy_api_key: EMPTY
 policy_model_name: Qwen/Qwen3-30B-A3B
 ```
+
+:::{note}
+The default vLLM port is `8000`. Use the port where your vLLM server is running.
+:::
 
 **When to use**:
 - Secrets and API keys
@@ -107,6 +111,10 @@ All available parameters for the vLLM adapter:
   - Type
   - Default
   - Description
+* - `entrypoint`
+  - `str`
+  - `app.py`
+  - Python module containing the vLLM model server. Standard NeMo Gym configuration (usually no need to change).
 * - `base_url`
   - `str` or `list[str]`
   - Required
@@ -168,9 +176,7 @@ The vLLM adapter exposes these endpoints:
 * - `/v1/responses`
   - Main inference endpoint using Responses API format
 * - `/v1/chat/completions`
-  - Direct Chat Completions API access (for debugging)
-* - `/health`
-  - Health check endpoint
+  - OpenAI-compatible Chat Completions API (for debugging or direct integration)
 ```
 
 :::{dropdown} Example request using ServerClient
