@@ -24,11 +24,11 @@ OpenAI provides state-of-the-art language models through a managed API service. 
 
 :::{tab-item} Why OpenAI
 
-**Rapid prototyping**: Get started in minutes without infrastructure setup  
-**Latest models**: Access to GPT-4, GPT-4 Turbo, and other cutting-edge models  
-**Managed service**: High availability with no server maintenance  
-**Pay-per-use**: Cost-effective for experimentation and small-scale projects  
-**Easy migration**: Simple switch to self-hosted options when ready to scale
+- **Rapid prototyping**: Get started in minutes without infrastructure setup
+- **Latest models**: Access to GPT-4, GPT-4 Turbo, and other cutting-edge models
+- **Managed service**: High availability with no server maintenance
+- **Pay-per-use**: Cost-effective for experimentation and small-scale projects
+- **Easy migration**: Simple switch to self-hosted options when ready to scale
 
 :::
 

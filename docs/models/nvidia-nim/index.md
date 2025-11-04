@@ -24,11 +24,11 @@ NVIDIA NIM (NVIDIA Inference Microservices) delivers production-ready AI model i
 
 :::{tab-item} Why NVIDIA NIM
 
-**Enterprise reliability**: Production SLAs, support, and uptime guarantees  
-**Optimized performance**: NVIDIA-tuned inference engines for maximum GPU utilization  
-**Enterprise security**: Compliance certifications, audit logging, and secure deployment  
-**Scalable infrastructure**: Kubernetes-native deployment with auto-scaling  
-**Simplified operations**: Managed microservices reduce operational overhead
+- **Enterprise reliability**: Production SLAs, support, and uptime guarantees
+- **Optimized performance**: NVIDIA-tuned inference engines for maximum GPU utilization
+- **Enterprise security**: Compliance certifications, audit logging, and secure deployment
+- **Scalable infrastructure**: Kubernetes-native deployment with auto-scaling
+- **Simplified operations**: Managed microservices reduce operational overhead
 
 :::
 

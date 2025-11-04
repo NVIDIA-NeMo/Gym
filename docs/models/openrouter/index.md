@@ -10,7 +10,20 @@ Unified access to multiple LLM providers through a single API for flexible model
 
 OpenRouter provides a unified API gateway to access models from multiple providers including OpenAI, Anthropic, Google, and others. NeMo Gym integrates with OpenRouter to enable flexible model selection and cost optimization across providers.
 
-**Why use OpenRouter with NeMo Gym?**
+::::{tab-set}
+
+:::{tab-item} When to use
+:selected:
+
+- Want to experiment with models from different providers
+- Need cost optimization across multiple providers
+- Require provider fallback for reliability
+- Prefer unified billing for multiple services
+- Evaluating which model/provider works best for your use case
+
+:::
+
+:::{tab-item} Why OpenRouter
 
 - **Unified API**: Single integration for multiple model providers
 - **Cost optimization**: Compare pricing and switch between providers
@@ -18,13 +31,9 @@ OpenRouter provides a unified API gateway to access models from multiple provide
 - **Simplified billing**: One bill for all providers
 - **Easy experimentation**: Test different models without changing code
 
-**When to use OpenRouter**:
+:::
 
-- Want to experiment with models from different providers
-- Need cost optimization across multiple providers
-- Require provider fallback for reliability
-- Prefer unified billing for multiple services
-- Evaluating which model/provider works best for your use case
+::::
 
 :::{seealso}
 **Not sure which model serving method to use?** See the [Models Overview](../index.md#choosing-a-model-serving-method) for a comparison.

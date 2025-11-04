@@ -24,11 +24,11 @@ vLLM is a fast and memory-efficient inference engine for large language models. 
 
 :::{tab-item} Why vLLM
 
-**High throughput**: Optimized batch processing generates thousands of rollouts concurrently  
-**Full control**: Deploy any open-source model on your infrastructure  
-**Cost-effective**: No per-token API costs for large-scale training workloads  
-**Training-ready**: Built-in support for token IDs and log probabilities required by RL frameworks  
-**Reasoning support**: Automatic parsing and extraction of reasoning tokens using `<think>` tags
+- **High throughput**: Optimized batch processing generates thousands of rollouts concurrently  
+- **Full control**: Deploy any open-source model on your infrastructure  
+- **Cost-effective**: No per-token API costs for large-scale training workloads  
+- **Training-ready**: Built-in support for token IDs and log probabilities required by RL frameworks  
+- **Reasoning support**: Automatic parsing and extraction of reasoning tokens using `<think>` tags
 
 :::
 
