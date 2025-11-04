@@ -19,6 +19,7 @@ from glob import glob
 from os import environ, makedirs
 from os.path import exists
 from pathlib import Path
+from signal import SIGINT
 from subprocess import Popen
 from threading import Thread
 from time import sleep
@@ -250,10 +251,12 @@ Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
             sleep(sleep_interval)
 
     def shutdown(self) -> None:
-        # TODO there is possibly a better way to handle the server shutdowns.
-        for process_name, process in self._processes.items():
-            print(f"Killing `{process_name}`")
-            process.kill()
+        print("Sending interrupt signals to servers...")
+        for process in self._processes.values():
+            process.send_signal(SIGINT)
+
+        print("Waiting for processes to finish...")
+        for process in self._processes.values():
             process.wait()
 
         self._processes = dict()
