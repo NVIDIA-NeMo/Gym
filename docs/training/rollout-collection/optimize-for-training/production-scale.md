@@ -2,7 +2,22 @@
 
 # Production Scale
 
-Monitor metrics, handle interruptions, and deploy production patterns for million-scale generation.
+Monitor throughput, handle interruptions, and distribute workloads for large-scale rollout generation.
+
+:::{card}
+
+**Task**: Apply production patterns to scale rollout generation: resume interrupted runs, distribute across machines, and optimize verification.
+
+^^^
+
+**This guide shows you how to**:
+
+1. Monitor throughput with built-in progress metrics
+2. Resume interrupted collections using append mode
+3. Distribute processing with chunked datasets
+4. Optimize verification for high-throughput scenarios
+
+:::
 
 ---
 
@@ -51,7 +66,7 @@ print(f"Tokens/sec: {total_tokens / elapsed_seconds:.2f}")
 
 ### Aggregate Metrics
 
-After collection completes, review automatic metrics:
+After collection completes, NeMo Gym automatically displays aggregated metrics:
 
 ```json
 {
@@ -61,7 +76,20 @@ After collection completes, review automatic metrics:
 }
 ```
 
-These aggregate any numeric fields returned by verification.
+```{dropdown} How Metric Aggregation Works
+:icon: gear
+
+From `rollout_collection.py:103-109`:
+```python
+metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
+
+# After collection:
+avg_metrics = {k: v / len(rows) for k, v in metrics.items()}
+print(json.dumps(avg_metrics, indent=4))
+```
+
+Any numeric field returned by verification is automatically averaged across all rollouts.
+```
 
 ### Tracking Over Time
 
@@ -106,7 +134,16 @@ ng_collect_rollouts \
     +limit=4568  # 10000 - 5432
 ```
 
-**Note**: Output file opens in append mode by default.
+```{dropdown} Why This Works
+:icon: code
+
+From `rollout_collection.py:94`:
+```python
+with open(config.output_jsonl_fpath, "a") as f:
+```
+
+Output file opens in **append mode** by default, so you can safely resume by processing remaining tasks.
+```
 
 ### Chunked Processing
 
@@ -164,62 +201,106 @@ watch -n 5 nvidia-smi
 
 ---
 
-## Troubleshooting
+## Verification Optimization
 
-Common issues and solutions when optimizing throughput.
+Verification runs during collection—if it's slow, it becomes a bottleneck.
 
-### Out of Memory Errors
+### Detecting Verification Bottleneck
 
-**Symptoms**: CUDA OOM, process killed, server crashes
+```{list-table}
+:header-rows: 1
+:widths: 50 50
 
-**Solutions**:
-1. **Reduce parallelism**: Lower `num_samples_in_parallel`
-2. **Reduce context length**: Lower `max_model_len` in vLLM config
-3. **Reduce GPU memory**: Lower `gpu_memory_utilization` to 0.85-0.90
-4. **Use smaller model**: Switch to 8B instead of 70B if acceptable
+* - Sign
+  - Interpretation
+* - Model responds fast, but `it/s` is slow
+  - Verification likely bottleneck
+* - High CPU usage during collection
+  - Compute-heavy verification
+* - Progress bar stalls between samples
+  - Verification waiting on external call
+```
 
-### Timeouts
+### Optimization Approaches
 
-**Symptoms**: Requests timing out, partial responses
+::::{tab-set}
 
-**Solutions**:
-1. **Increase client timeout**: Update `GlobalAIOHTTPAsyncClientConfig` in config
-2. **Reduce output length**: Lower `max_output_tokens`
-3. **Check verification time**: Profile verification function
-4. **Increase model server timeout**: Update vLLM or API timeout settings
+:::{tab-item} Cache Lookups
+If verification repeats expensive operations:
 
-### Inconsistent Speeds
+```python
+# In your resource server's verify() function
+from functools import lru_cache
 
-**Symptoms**: Throughput varies significantly between runs
+@lru_cache(maxsize=1000)
+def expensive_lookup(key):
+    return result
 
-**Solutions**:
-1. **Check resource contention**: Other processes using GPU/CPU
-2. **Monitor thermal throttling**: GPU temperatures causing slowdowns
-3. **Check network stability**: For hosted APIs
-4. **Use dedicated resources**: Avoid shared infrastructure for benchmarking
+def verify(self, task, response):
+    data = expensive_lookup(task['key'])
+    return compute_reward(data, response)
+```
+:::
 
-### Low GPU Utilization
+:::{tab-item} Fast Mode
+Implement approximate verification for training data:
 
-**Symptoms**: GPU usage <50%, but collection is slow
+```python
+def verify(self, task, response):
+    if self.config.get('fast_mode', False):
+        return quick_heuristic(response)
+    else:
+        return precise_verification(response)
+```
 
-**Solutions**:
-1. **Increase parallelism**: More concurrent requests to fill batches
-2. **Check verification bottleneck**: CPU-bound verification limiting throughput
-3. **Reduce batch waiting time**: Adjust vLLM batching parameters
-4. **Pre-warm model**: Send dummy requests before starting
+Use fast mode for training collection, precise mode for evaluation.
+:::
+
+:::{tab-item} Defer Verification
+Collect rollouts without verification, verify in batch later:
+
+1. Modify resource server to return placeholder reward
+2. Collect at full speed
+3. Run separate verification pass with higher parallelism
+
+**Trade-off**: No real-time quality feedback during collection
+:::
+
+::::
+
+---
+
+## Parameter Overrides
+
+NeMo Gym allows overriding model parameters via CLI to reduce latency:
+
+```bash
+ng_collect_rollouts \
+    +agent_name=my_agent \
+    +input_jsonl_fpath=tasks.jsonl \
+    +output_jsonl_fpath=rollouts.jsonl \
+    +responses_create_params.max_output_tokens=512
+```
+
+**Why this helps**: Shorter outputs = faster generation = higher throughput
+
+```{dropdown} How Parameter Override Works
+:icon: code
+
+From `rollout_collection.py:97`:
+```python
+row["responses_create_params"] = row["responses_create_params"] | config.responses_create_params
+```
+
+CLI overrides merge with per-task parameters. CLI values take precedence.
+```
 
 ---
 
 ## Next Steps
 
-Now that you are generating rollouts efficiently:
+Now that you understand production-scale patterns:
 
-**Tune data characteristics**: {doc}`../sampling-strategies/index`  
-Learn how to configure temperature and sampling for different training objectives.
-
-**See complete patterns**: {doc}`../collection-patterns/index`  
-Reference guide with copy-paste commands for common scenarios.
-
-**Filter and curate**: {doc}`../../data-quality/index`  
-Improve training data quality through systematic filtering.
+**Tune data characteristics** → {doc}`../sampling-strategies/index` for temperature and sampling strategies  
+**See complete patterns** → {doc}`../collection-patterns/index` for copy-paste commands
 

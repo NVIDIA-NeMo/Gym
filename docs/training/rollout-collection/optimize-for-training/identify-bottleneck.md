@@ -2,74 +2,50 @@
 
 # Identify Your Bottleneck
 
-Before optimizing, determine what limits your throughput.
+Run diagnostic tests to understand what limits your rollout generation throughput.
+
+:::{card}
+
+**Task**: Identify whether parallelism settings, model server configuration, or verification logic are limiting throughput.
+
+^^^
+
+**This guide shows you how to**:
+
+1. Run diagnostic tests with varying parallelism levels
+2. Interpret throughput results
+3. Determine next optimization steps
+
+:::
 
 ---
 
-## The Three Common Bottlenecks
+## Diagnostic Test
+
+Run the same collection task with different parallelism settings to see how throughput responds:
 
 ::::{tab-set}
 
-:::{tab-item} Model Inference (Most Common)
-**Symptoms**:
-- GPU utilization near 100%
-- CPU idle during collection
-- Increasing parallelism barely helps
-
-**When this happens**:
-- Local models (vLLM, TensorRT-LLM)
-- Large models (70B+)
-- Long output sequences
-
-**Solution path**: {doc}`optimize-infrastructure` (Optimize Model Server)
-:::
-
-:::{tab-item} Verification Complexity
-**Symptoms**:
-- Model inference fast, but overall throughput slow
-- CPU usage high during collection
-- Verification logic is compute-intensive
-
-**When this happens**:
-- Code execution verification
-- Complex LLM-as-judge verification
-- External API calls in verification
-
-**Solution path**: {doc}`optimize-infrastructure` (Reduce Verification Overhead)
-:::
-
-:::{tab-item} Network/API Rate Limits
-**Symptoms**:
-- 429 rate limit errors
-- Slow responses from hosted API
-- Parallelism capped at low numbers
-
-**When this happens**:
-- Hosted APIs (OpenAI, Azure, etc.)
-- Self-hosted with rate limiting
-- Network bandwidth constraints
-
-**Solution path**: {doc}`tune-parallelism` (respect rate limits)
-:::
-
-::::
-
----
-
-## Quick Diagnostic
-
-Run a small test to identify your bottleneck:
-
+:::{tab-item} Low Parallelism Baseline
 ```bash
-# Test with low parallelism
 time ng_collect_rollouts \
     +agent_name=my_agent \
     +input_jsonl_fpath=test_100.jsonl \
     +output_jsonl_fpath=/tmp/test_p5.jsonl \
     +limit=100 \
     +num_samples_in_parallel=5
+```
 
-# Test with high parallelism
+Watch the progress bar for `it/s` (iterations per second) metric:
+```
+Collecting rollouts: 100%|████| 100/100 [02:30<00:00, 0.67it/s]
+```
+
+Note the **total time** and **it/s** rate.
+:::
+
+:::{tab-item} Higher Parallelism Test
+```bash
 time ng_collect_rollouts \
     +agent_name=my_agent \
     +input_jsonl_fpath=test_100.jsonl \
@@ -78,18 +54,46 @@ time ng_collect_rollouts \
     +num_samples_in_parallel=20
 ```
 
-**Interpret results**:
-- **Time reduced significantly**: Model was bottleneck → {doc}`tune-parallelism`
-- **Time similar**: Verification or network is bottleneck → {doc}`optimize-infrastructure`
-- **Errors or crashes**: Infrastructure overloaded → {doc}`tune-parallelism` (reduce parallelism)
+Compare the new `it/s` rate:
+```
+Collecting rollouts: 100%|████| 100/100 [01:10<00:00, 1.43it/s]
+```
+
+If throughput **doubled or more** → parallelism was limiting factor  
+If throughput **barely changed** → model server or verification is limiting factor
+:::
+
+::::
+
+---
+
+## Interpret Results
+
+```{list-table}
+:header-rows: 1
+:widths: 40 60
+
+* - Observation
+  - Next Step
+* - **Throughput increased significantly** (2x+)
+  - {doc}`tune-parallelism` - Find your optimal parallelism value
+* - **Throughput barely changed** (<20% improvement)
+  - Check model server docs or simplify verification logic
+* - **Errors or OOM crashes**
+  - {doc}`tune-parallelism` - Reduce parallelism to stable level
+```
 
 ---
 
 ## Next Step
 
-Based on your diagnostic results:
+Most users should proceed to {doc}`tune-parallelism` to find optimal concurrency settings.
 
-**Model bottleneck** → {doc}`tune-parallelism` to increase concurrency  
-**Verification bottleneck** → {doc}`optimize-infrastructure` to optimize verification  
-**Network bottleneck** → {doc}`tune-parallelism` to respect rate limits
+:::{button-ref} tune-parallelism
+:color: primary
+:outline:
+:ref-type: doc
+
+Tune Parallelism →
+:::
 

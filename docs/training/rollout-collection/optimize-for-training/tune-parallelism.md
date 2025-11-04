@@ -2,31 +2,63 @@
 
 # Tune Parallelism
 
-The `num_samples_in_parallel` parameter controls concurrent requests to your agent server.
+Find the optimal `num_samples_in_parallel` value that maximizes throughput for your setup.
+
+:::{card}
+
+**Task**: Systematically test different parallelism values to find the setting that maximizes throughput without overwhelming your infrastructure.
+
+^^^
+
+**This guide shows you how to**:
+
+1. Understand how NeMo Gym limits concurrent requests
+2. Find optimal parallelism systematically
+3. Validate stability under load
+
+:::
+
+:::{seealso}
+Not sure if parallelism is your bottleneck? Start with {doc}`identify-bottleneck` to diagnose what's limiting throughput.
+:::
 
 ---
 
-## How It Works
+## How Parallelism Works
 
-NeMo Gym uses asyncio with semaphores to manage concurrency:
+NeMo Gym uses `asyncio.Semaphore` to limit concurrent requests:
+
+:::{dropdown} Implementation Details
+:icon: code
+
+From `rollout_collection.py`:
 
 ```python
-# Conceptual implementation
-semaphore = Semaphore(num_samples_in_parallel)
+semaphore = nullcontext()
+if config.num_samples_in_parallel:
+    semaphore = Semaphore(config.num_samples_in_parallel)
+
 async with semaphore:
-    response = await agent_server.post("/run", task)
+    response = await server_client.post("/run", task)
     save_rollout(response)
 ```
 
-This limits in-flight requests while maximizing throughput.
+**Behavior**:
+- **When set**: Limits to N concurrent requests
+- **When omitted**: No limit (all tasks submitted concurrently)
+:::
+
+**Why this matters**: Setting parallelism prevents overwhelming your model server or hitting rate limits while maximizing throughput.
 
 ---
 
-## Finding Your Sweet Spot
+## Finding Optimal Value
 
-Use a systematic approach to find optimal parallelism:
+Use a systematic doubling approach to find your throughput ceiling:
 
-**Step 1: Establish Baseline**
+::::{tab-set}
+
+:::{tab-item} Step 1: Baseline
 ```bash
 ng_collect_rollouts \
     +agent_name=my_agent \
@@ -34,10 +66,17 @@ ng_collect_rollouts \
     +output_jsonl_fpath=/tmp/baseline.jsonl \
     +limit=200 \
     +num_samples_in_parallel=5
-# Note the time: e.g., 120 seconds = 1.67 samples/sec
 ```
 
-**Step 2: Double and Measure**
+Watch the progress bar for throughput:
+```
+Collecting rollouts: 100%|████| 200/200 [02:00<00:00, 1.67it/s]
+```
+
+**Record**: 1.67 samples/sec
+:::
+
+:::{tab-item} Step 2: Double
 ```bash
 ng_collect_rollouts \
     +agent_name=my_agent \
@@ -45,63 +84,66 @@ ng_collect_rollouts \
     +output_jsonl_fpath=/tmp/test_p10.jsonl \
     +limit=200 \
     +num_samples_in_parallel=10
-# Note improvement: e.g., 75 seconds = 2.67 samples/sec
 ```
 
-**Step 3: Continue Until Plateau**
-- Keep doubling: 20, 40, 80
-- Stop when throughput plateaus or degrades
-- Back off 20% from peak for stability
+**Expect**: ~3.0 samples/sec (if parallelism was limiting)
+:::
 
-**Step 4: Long-Term Stability**
+:::{tab-item} Step 3: Repeat
+Continue doubling (20, 40, 80) until:
+
+```{list-table}
+:header-rows: 1
+:widths: 50 50
+
+* - Stop When...
+  - Action
+* - **Throughput plateaus**
+  - Found ceiling
+* - **Throughput degrades**
+  - Exceeded capacity
+* - **Errors appear**
+  - Reduce parallelism
+```
+
+**Optimal value**: 80% of peak to leave headroom
+:::
+
+:::{tab-item} Step 4: Validate
 ```bash
-# Test with larger sample to ensure stability
 ng_collect_rollouts \
     +agent_name=my_agent \
     +input_jsonl_fpath=larger_dataset.jsonl \
     +output_jsonl_fpath=/tmp/stability_test.jsonl \
     +limit=1000 \
-    +num_samples_in_parallel=[your_optimal_value]
+    +num_samples_in_parallel=[your_value]
+```
+
+Run longer test to ensure stability at scale.
+:::
+
+::::
+
+---
+
+## Default Behavior
+
+```{important}
+When `num_samples_in_parallel` is **not specified**, NeMo Gym submits **all tasks concurrently** with no limit. This can:
+
+- Overwhelm model servers
+- Exceed API rate limits  
+- Cause OOM errors
+
+Always set this parameter for production workloads.
 ```
 
 ---
 
-## Guidelines by Infrastructure
+## Next Steps
 
-Starting points for different setups:
+After finding optimal parallelism:
 
-```{list-table}
-:header-rows: 1
-:widths: 40 20 40
-
-* - Infrastructure
-  - Starting Value
-  - Notes
-* - **Local vLLM (single GPU)**
-  - 10-15
-  - Monitor GPU memory
-* - **Local vLLM (multi-GPU)**
-  - 20-40
-  - Scale with GPU count
-* - **Hosted API (OpenAI, Azure)**
-  - 5-10
-  - Check rate limit tier
-* - **NVIDIA NIM**
-  - 15-30
-  - Depends on instance size
-* - **Self-hosted cluster**
-  - 30-100
-  - Tune based on cluster size
-```
-
-**Default behavior**: When `num_samples_in_parallel` is not specified, no limit is applied (processes all samples concurrently). This can overwhelm resources.
-
----
-
-## Next Step
-
-After tuning parallelism:
-
-**Optimize infrastructure** → {doc}`optimize-infrastructure` for model server and verification tuning  
-**Production patterns** → {doc}`production-scale` for monitoring and scale strategies
+**Production patterns** → {doc}`production-scale` for monitoring and scale strategies  
+**Sampling strategies** → {doc}`../sampling-strategies/index` for temperature and diversity tuning
 

@@ -99,5 +99,5 @@ Start with Optimize for Training →
 
 optimize-for-training/index
 sampling-strategies/index
-collection-patterns
+collection-patterns/index
 ```

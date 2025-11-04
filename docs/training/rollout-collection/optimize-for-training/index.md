@@ -2,167 +2,87 @@
 
 # Optimize for Training
 
-Maximize rollout generation throughput to build large-scale training datasets efficiently.
+Maximize rollout generation throughput when building large-scale training datasets.
 
-:::{card}
+Three key optimization levers: diagnose bottlenecks, tune parallelism, and apply production patterns for scale.
 
-**Task**: Generate thousands of rollouts per hour by identifying bottlenecks and tuning your infrastructure for maximum throughput.
-
-^^^
-
-**This guide shows you how to**:
-
-1. Identify your bottleneck (model, verification, or network)
-2. Tune parallelism for your infrastructure
-3. Optimize model server configuration
-4. Monitor and scale to production
-
-:::
-
----
-
-## Before You Start
-
-Ensure you have these prerequisites before optimizing your rollout collection:
-
-```{list-table}
-:header-rows: 1
-:widths: 30 70
-
-* - Requirement
-  - Details
-* - **Get Started completed**
-  - Complete {doc}`../../../get-started/collecting-rollouts` first
-* - **Servers running**
-  - Agent and model servers collecting rollouts successfully
-* - **Infrastructure access**
-  - Ability to configure parallelism and model server settings
-* - **Basic metrics**
-  - Know your current throughput (samples/sec or time per 100 samples)
-* - **Infrastructure type**
-  - Local GPU (vLLM/TensorRT-LLM) OR hosted API (OpenAI/Azure) OR NVIDIA NIM
-```
-
-:::{button-ref} /get-started/index
-:color: secondary
-:outline:
-:ref-type: doc
-
-← New? Try Get Started
+:::{seealso}
+New to rollout collection? Complete {doc}`../../../get-started/collecting-rollouts` first to get servers running.
 :::
 
 ---
 
 ## Optimization Workflow
 
-Follow this workflow to systematically improve throughput:
-
-::::{grid} 1 1 2 2
+::::{grid} 1 1 2 3
 :gutter: 3
 
 :::{grid-item-card} {octicon}`search;1.5em;sd-mr-1` 1. Identify Bottleneck
 :link: identify-bottleneck
 :link-type: doc
 
-Diagnose what's limiting your throughput: model inference, verification complexity, or network/API limits.
-
-**Start here** if you don't know what's slowing you down.
+Run diagnostic tests to determine if parallelism, model server, or verification is limiting throughput.
++++
+{bdg-primary}`Start here`
 :::
 
 :::{grid-item-card} {octicon}`gear;1.5em;sd-mr-1` 2. Tune Parallelism
 :link: tune-parallelism
 :link-type: doc
 
-Optimize `num_samples_in_parallel` to maximize concurrent requests without overwhelming infrastructure.
-
-**Use this** after identifying your bottleneck.
+Find optimal `num_samples_in_parallel` value using NeMo Gym's semaphore-based concurrency control.
++++
+{bdg-secondary}`Most impactful`
 :::
 
-:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` 3. Optimize Infrastructure
-:link: optimize-infrastructure
-:link-type: doc
-
-Configure model servers (vLLM) and verification logic for maximum performance.
-
-**Apply these** for model or verification bottlenecks.
-:::
-
-:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` 4. Production Scale
+:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` 3. Production Scale
 :link: production-scale
 :link-type: doc
 
-Monitor metrics, handle interruptions, and deploy production patterns for million-scale generation.
-
-**Use this** when ready for production workloads.
+Apply resume patterns, verification optimization, and parameter overrides for million-scale generation.
++++
+{bdg-secondary}`Advanced`
 :::
 
 ::::
 
 ---
 
-## Quick Decision Guide
-
-Jump directly to the right section based on your current need:
+## Quick Reference
 
 ```{list-table}
 :header-rows: 1
-:widths: 40 60
+:widths: 50 50
 
-* - If You Need To...
-  - Go To
-* - **Diagnose why collection is slow**
-  - {doc}`identify-bottleneck` - Run diagnostic tests
-* - **Configure parallelism settings**
-  - {doc}`tune-parallelism` - Find your optimal value
-* - **Speed up vLLM inference**
-  - {doc}`optimize-infrastructure` (Model Server section)
-* - **Fix slow verification**
-  - {doc}`optimize-infrastructure` (Verification section)
-* - **Scale to millions of rollouts**
-  - {doc}`production-scale` - Production patterns
-* - **Debug OOM or timeout errors**
-  - {doc}`production-scale` (Troubleshooting section)
+* - Goal
+  - Guide
+* - **Diagnose slow collection**
+  - {doc}`identify-bottleneck` → Run throughput tests
+* - **Configure concurrency**
+  - {doc}`tune-parallelism` → Find optimal value
+* - **Optimize verification**
+  - {doc}`production-scale` → Caching and fast mode
+* - **Resume interrupted runs**
+  - {doc}`production-scale` → Append mode behavior
+* - **Distribute across machines**
+  - {doc}`production-scale` → Chunking patterns
 ```
-
----
-
-## Quick Reference
-
-### Parallelism by Infrastructure
-
-| Infrastructure | Recommended `num_samples_in_parallel` |
-|----------------|---------------------------------------|
-| Local vLLM (1 GPU) | 10-15 |
-| Local vLLM (4 GPU) | 20-40 |
-| OpenAI API | 5-10 |
-| Azure OpenAI Scale | 8-15 |
-| Self-hosted cluster | 30-100 |
-
-### Optimization Checklist
-
-- [ ] Identified bottleneck (model, verification, or network)
-- [ ] Tuned `num_samples_in_parallel` for infrastructure
-- [ ] Reduced `max_output_tokens` to minimum needed
-- [ ] Optimized model server configuration (if local)
-- [ ] Cached expensive verification computations
-- [ ] Benchmarked throughput (samples/sec)
-- [ ] Tested stability with larger dataset
-- [ ] Set up monitoring for production runs
 
 ---
 
 ## Next Steps
 
-After optimizing throughput:
+Start with **{doc}`identify-bottleneck`** to diagnose what's limiting your throughput, then proceed to **{doc}`tune-parallelism`** for systematic optimization.
 
-**Tune data characteristics**: {doc}`../sampling-strategies`  
-Learn how to configure temperature and sampling for different training objectives.
+After maximizing throughput, tune data characteristics with **{doc}`../sampling-strategies/index`** (temperature, diversity, num_repeats).
 
-**See complete patterns**: {doc}`../collection-patterns`  
-Reference guide with copy-paste commands for common scenarios.
+:::{button-ref} identify-bottleneck
+:color: primary
+:outline:
+:ref-type: doc
 
-**Filter and curate**: {doc}`../../data-quality/index`  
-Improve training data quality through systematic filtering.
+Start with Identify Bottleneck →
+:::
 
 ---
 
@@ -172,7 +92,5 @@ Improve training data quality through systematic filtering.
 
 identify-bottleneck
 tune-parallelism
-optimize-infrastructure
 production-scale
 ```
-
