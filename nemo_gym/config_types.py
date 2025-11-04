@@ -265,9 +265,13 @@ class BaseServerInstanceConfig(BaseServerTypeConfig):
 
     @model_validator(mode="after")
     def validate_domain_for_resource_server(self) -> "BaseServerInstanceConfig":
+        config = self.get_inner_run_server_config()
         if self.SERVER_TYPE == "resources_servers":
-            config = self.get_inner_run_server_config()
             assert config.domain is not None, "A domain is required for resource servers."
+        else:
+            # Remove domain field from Model and Agent servers.
+            if hasattr(config, "domain"):
+                del config.domain
         return self
 
     def get_server_ref(self) -> ServerRef:

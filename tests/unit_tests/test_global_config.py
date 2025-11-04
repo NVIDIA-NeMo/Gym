@@ -266,6 +266,7 @@ class TestServerUtils:
                         "resources_servers": {
                             "c": {
                                 "entrypoint": "app.py",
+                                "domain": "other",
                             }
                         }
                     },
@@ -293,7 +294,14 @@ class TestServerUtils:
                 }
             },
             "resources_name": {
-                "resources_servers": {"c": {"entrypoint": "app.py", "host": "127.0.0.1", "port": 123456}}
+                "resources_servers": {
+                    "c": {
+                        "entrypoint": "app.py",
+                        "host": "127.0.0.1",
+                        "port": 123456,
+                        "domain": "other",
+                    }
+                }
             },
             "head_server": {"host": "127.0.0.1", "port": 11000},
             "disallowed_ports": [11000, 12345, 123456],
@@ -467,7 +475,7 @@ class TestServerUtils:
         def hydra_main_wrapper(fn):
             """Trigger find_open_port by excluding port from the config"""
             config_dict = DictConfig(
-                {"test_resource": {"resources_servers": {"test_server": {"entrypoint": "app.py"}}}}
+                {"test_resource": {"resources_servers": {"test_server": {"entrypoint": "app.py", "domain": "other"}}}}
             )
             return lambda: fn(config_dict)
 
