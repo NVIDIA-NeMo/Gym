@@ -513,7 +513,7 @@ def empty_response() -> NeMoGymResponse:
             "id": f"resp_{uuid.uuid4()}",
             "object": "response",
             "created_at": datetime.utcnow().timestamp(),
-            "model": "dummy",
+            "model": "dummy/model",
             "parallel_tool_calls": True,
             "tool_choice": "auto",
             "tools": [],
