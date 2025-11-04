@@ -192,19 +192,6 @@ get-started/collecting-rollouts
 ```
 
 ```{toctree}
-:caption: Models
-:hidden:
-:maxdepth: 2
-
-Overview <models/index>
-models/vllm/index
-models/nvidia-nim
-models/openai
-models/azure-openai
-models/openrouter
-```
-
-```{toctree}
 :caption: Tutorials
 :hidden:
 :maxdepth: 1
@@ -212,6 +199,19 @@ models/openrouter
 Overview <tutorials/index>
 tutorials/offline-training-w-rollouts
 tutorials/separate-policy-and-judge-models
+```
+
+```{toctree}
+:caption: Models
+:hidden:
+:maxdepth: 2
+
+Overview <models/index>
+vLLM <models/vllm/index>
+NVIDIA NIM <models/nvidia-nim/index>
+OpenAI <models/openai/index>
+Azure OpenAI <models/azure-openai/index>
+OpenRouter <models/openrouter/index>
 ```
 
 ```{toctree}

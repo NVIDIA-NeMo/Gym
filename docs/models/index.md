@@ -25,7 +25,7 @@ Self-hosted open models with high-throughput inference using vLLM.
 :::
 
 :::{grid-item-card} {octicon}`shield-check;1.5em;sd-mr-1` NVIDIA NIM
-:link: nvidia-nim
+:link: nvidia-nim/index
 :link-type: doc
 
 Enterprise-grade model deployment with NVIDIA NIM microservices.
@@ -34,7 +34,7 @@ Enterprise-grade model deployment with NVIDIA NIM microservices.
 :::
 
 :::{grid-item-card} {octicon}`cloud;1.5em;sd-mr-1` OpenAI Responses API
-:link: openai
+:link: openai/index
 :link-type: doc
 
 Use OpenAI models through the Responses API format.
@@ -43,7 +43,7 @@ Use OpenAI models through the Responses API format.
 :::
 
 :::{grid-item-card} {octicon}`cloud;1.5em;sd-mr-1` Azure OpenAI Responses API
-:link: azure-openai
+:link: azure-openai/index
 :link-type: doc
 
 Access Azure OpenAI endpoints for LLM inference.
@@ -52,7 +52,7 @@ Access Azure OpenAI endpoints for LLM inference.
 :::
 
 :::{grid-item-card} {octicon}`globe;1.5em;sd-mr-1` OpenRouter API
-:link: openrouter
+:link: openrouter/index
 :link-type: doc
 
 Unified access to multiple model providers through OpenRouter.
