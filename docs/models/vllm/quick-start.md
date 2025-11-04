@@ -8,6 +8,30 @@ Get vLLM running with NeMo Gym in under 5 minutes.
 
 ## Before You Start
 
+Ensure you have these prerequisites before deploying vLLM with NeMo Gym:
+
+**Software Requirements**:
+- **NeMo Gym installed** - Complete [Setup and Installation](../../get-started/setup-installation.md) first
+- **Python 3.10+** - Required by vLLM (check with `python3 --version`)
+- **CUDA-capable GPU** - NVIDIA GPU with CUDA support for inference
+- **Hugging Face account** (optional) - Only required for gated models like Llama
+
+**Hardware Requirements**:
+- **GPU Memory**: Varies by model size
+  - 8B parameter models: ~16GB VRAM minimum
+  - 30B parameter models: ~60GB VRAM (2-4 GPUs with tensor parallelism)
+  - 70B parameter models: ~140GB VRAM (4-8 GPUs)
+- **Disk Space**: 10-100GB+ depending on model (weights are stored locally)
+- **Network Bandwidth**: For initial model download from Hugging Face
+
+:::{tip}
+**New to NeMo Gym?** Start with the [Get Started tutorials](../../get-started/index.md) using OpenAI first. Once you understand the workflow, return here to deploy your own models with vLLM.
+:::
+
+---
+
+## Choose a Path
+
 Choose your path based on whether you need to start a vLLM server or already have one running.
 
 ::::{tab-set}

@@ -100,40 +100,13 @@ Common issues and solutions for vLLM integration.
 
 ::::
 
----
+```{toctree}
+:caption: Models
+:hidden:
+:maxdepth: 2
 
-## Next Steps
-
-::::{grid} 1 1 2 2
-:gutter: 3
-
-:::{grid-item-card} {octicon}`checklist;1.5em;sd-mr-1` Collect Rollouts
-:link: ../../get-started/collecting-rollouts
-:link-type: doc
-
-Generate training data at scale using your vLLM deployment.
-:::
-
-:::{grid-item-card} {octicon}`people;1.5em;sd-mr-1` Separate Judge Models
-:link: ../../tutorials/separate-policy-and-judge-models
-:link-type: doc
-
-Deploy different models for policy and verification.
-:::
-
-:::{grid-item-card} {octicon}`stack;1.5em;sd-mr-1` Configure Resources
-:link: ../../how-to-faq
-:link-type: doc
-
-Add tools and verification logic for your use case.
-:::
-
-:::{grid-item-card} {octicon}`book;1.5em;sd-mr-1` Model Abstractions
-:link: ../../about/concepts/core-abstractions
-:link-type: doc
-
-Learn how models fit into NeMo Gym's architecture.
-:::
-
-::::
-
+quick-start
+configuration
+optimization
+troubleshooting
+```
