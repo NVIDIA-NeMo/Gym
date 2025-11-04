@@ -13,12 +13,46 @@
 # limitations under the License.
 
 """
-Run example
+# Gym setup
+1. https://github.com/NVIDIA-NeMo/Gym?tab=readme-ov-file#-quick-start
+2. https://github.com/NVIDIA-NeMo/Gym/blob/main/docs/how-to-faq.md#how-to-upload-and-download-a-dataset-from-gitlab
+
+# Data setup
+```bash
+config_paths="resources_servers/cohesity_netbackup_rag/configs/cohesity_netbackup_rag.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml"
+ng_prepare_data "+config_paths=[$config_paths]" \
+    +output_dirpath=data/cohesity_netbackup_rag \
+    +mode=train_preparation \
+    +should_download=true
+
+config_paths="resources_servers/crowdstrike_logscale_syntax/configs/crowdstrike_logscale_syntax.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml"
+ng_prepare_data "+config_paths=[$config_paths]" \
+    +output_dirpath=data/crowdstrike_logscale_syntax \
+    +mode=train_preparation \
+    +should_download=true
+
+config_paths="resources_servers/servicenow_document_reasoning/configs/servicenow_document_reasoning.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml"
+ng_prepare_data "+config_paths=[$config_paths]" \
+    +output_dirpath=data/servicenow_document_reasoning \
+    +mode=train_preparation \
+    +should_download=true
+```
+
+# Run
+Different models require different CLI argument overrides. You can figure out which overrides are necessary either by running the command without them and adding the keys present in the error or you can look through the model configs below and identify the ??? fields.
+
+Example run:
 ```bash
 python scripts/run_customer_evals.py \
     ++model_short_name_for_upload=nemotron-nano-9b-v2 \
     ++policy_api_key={endpoint API key}
 ```
+
+# View results
+All the results for a single run will be output to disk. There is also an upload option, but please do not use this unless you are submitting a new official model benchmarking result.
 """
 
 from asyncio import run
@@ -37,7 +71,7 @@ from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollecti
 
 class RunCustomerEvalConfig(BaseModel):
     model_short_name_for_upload: str
-    skip_upload: bool = False
+    upload: bool = False
 
 
 class CustomerEval(BaseModel):
@@ -511,13 +545,15 @@ async def main():
             rollout_collection_config = RolloutCollectionConfig.model_validate(rollout_collection_config_dict)
             await rch.run_from_config(rollout_collection_config)
 
-            if not customer_eval_config.skip_upload:
+            if customer_eval_config.upload:
                 upload_jsonl_dataset_config = UploadJsonlDatasetGitlabConfig(
                     dataset_name=customer_eval.eval_name,
                     version="0.0.1",
                     input_jsonl_fpath=rollout_collection_config.output_jsonl_fpath,
                 )
                 upload_jsonl_dataset(config=upload_jsonl_dataset_config)
+            else:
+                print("Skipping dataset upload!")
     except KeyboardInterrupt:
         pass
     finally:
