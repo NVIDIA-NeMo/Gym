@@ -14,15 +14,29 @@ Distribute inference requests across multiple vLLM servers for higher throughput
 
 Specify multiple vLLM endpoints using either comma-separated values or YAML list syntax:
 
-**Option 1: Comma-separated in env.yaml**
+::::{tab-set}
+
+:::{tab-item} Comma-separated (env.yaml)
+
+Simple comma-separated URLs in your environment file:
+
 ```yaml
+# env.yaml
 policy_base_url: http://vllm-1:8000/v1,http://vllm-2:8000/v1,http://vllm-3:8000/v1
 policy_api_key: EMPTY
 policy_model_name: meta-llama/Llama-3.1-8B-Instruct
 ```
 
-**Option 2: YAML list in config file**
+**When to use**: Quick setup with standard config files.
+
+:::
+
+:::{tab-item} YAML list (config file)
+
+Explicit list syntax in your config file:
+
 ```yaml
+# responses_api_models/vllm_model/configs/vllm_model.yaml
 policy_model:
   responses_api_models:
     vllm_model:
@@ -34,6 +48,12 @@ policy_model:
       api_key: ${policy_api_key}
       model: ${policy_model_name}
 ```
+
+**When to use**: Custom config files or when you prefer explicit list formatting.
+
+:::
+
+::::
 
 ### How It Works
 
