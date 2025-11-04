@@ -87,7 +87,7 @@ class TestConfig(RunConfig):
         # TODO: This currently only handles relative entrypoints. Later on we can resolve the absolute path.
         self._dir_path = Path(self.entrypoint)
         assert not self.dir_path.is_absolute()
-        assert len(self.dir_path.parts) == 2
+        assert len(self.dir_path.parts) >= 2
 
         return super().model_post_init(context)
 
@@ -322,7 +322,7 @@ def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover
         count = sum(1 for _ in f)
     assert count == 5, f"Expected 5 examples at {example_fpath} but got {count}."
 
-    server_type_name = test_config.dir_path.parts[1]
+    server_type_name = test_config.dir_path.parts[-1]
     example_metrics_fpath = test_config.dir_path / "data/example_metrics.json"
     assert (
         example_metrics_fpath.exists()
@@ -425,6 +425,7 @@ def test_all():  # pragma: no cover
 
     candidate_dir_paths = [
         *glob("resources_servers/*"),
+        *glob("resources_servers.examples/*"),
         *glob("responses_api_agents/*"),
         *glob("responses_api_models/*"),
     ]
@@ -520,12 +521,12 @@ def init_resources_server():  # pragma: no cover
         exit()
 
     dirpath = Path(run_config.entrypoint)
-    assert len(dirpath.parts) == 2
+    assert len(dirpath.parts) >= 2
     makedirs(dirpath)
 
     server_type = dirpath.parts[0]
     assert server_type == "resources_servers"
-    server_type_name = dirpath.parts[1].lower()
+    server_type_name = dirpath.parts[-1].lower()
     server_type_title = "".join(x.capitalize() for x in server_type_name.split("_"))
 
     configs_dirpath = dirpath / "configs"
