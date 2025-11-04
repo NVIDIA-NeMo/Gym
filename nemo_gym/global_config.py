@@ -384,12 +384,51 @@ def find_open_port(
 
 
 def format_almost_server_warning(server_name: str, error: ValidationError) -> str:
-    """Format user-friendly warning. Union literal errors are consolidated."""
+    """Format user-friendly warning. Union literal errors are consolidated.
+    Union discriminator noise is filtered out. Explanation:
+    Pydantic validation is quirky- it will report all failures in the union if any union member fails. Example:
+    If an agent server contains an invalid license, it will not only show the error for the invalid license in ResponsesAPIAgentServerInstanceConfig, but also missing values for ResponsesAPIModelServerInstanceConfig `responses_api_models` and ResourcesServerInstanceConfig `resources_servers`.
+    """
+
     errors = error.errors()
+
+    server_type_keys = ["responses_api_models", "resources_servers", "responses_api_agents"]
+    actual_server_type = None
+
+    for err in errors:
+        loc = err["loc"]
+        if len(loc) > 1 and loc[1] in server_type_keys and err["type"] != "missing":
+            actual_server_type = loc[1]
+            break
+
+    if not actual_server_type:
+        for err in errors:
+            if "input" in err and isinstance(err["input"], dict):
+                for key in server_type_keys:
+                    if key in err["input"]:
+                        actual_server_type = key
+                        break
+                if actual_server_type:
+                    break
+
+    filtered_errors = []
+    for err in errors:
+        loc = err["loc"]
+
+        if (
+            err["type"] == "missing"
+            and len(loc) > 1
+            and loc[1] in server_type_keys
+            and actual_server_type
+            and loc[1] != actual_server_type
+        ):
+            continue
+
+        filtered_errors.append(err)
 
     error_groups = defaultdict(list)
 
-    for err in errors:
+    for err in filtered_errors:
         loc = err["loc"]
 
         # Check if literal union error (starts with "literal[").
