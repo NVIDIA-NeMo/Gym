@@ -182,7 +182,7 @@ If you don't have an Azure OpenAI resource yet:
      +input_jsonl_fpath=resources_servers/simple_weather/data/example.jsonl \
      +output_jsonl_fpath=results/azure_rollouts.jsonl \
      +limit=100 \
-     +concurrency=10
+     +num_samples_in_parallel=10
    ```
 
    :::{tip}
