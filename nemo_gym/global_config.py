@@ -392,18 +392,20 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
 
     errors = error.errors()
 
+    # Identify the actual server type from the error (excluding Union discriminator noise)
     server_type_keys = ["responses_api_models", "resources_servers", "responses_api_agents"]
     actual_server_type = None
 
-    # Detect which server is actually present.
-    # Error structure: (UnionVariantClassName, server_type_key, ...)
+    # Example error structure: ('ResponsesAPIAgentServerInstanceConfig', 'responses_api_agents', 'simple_agent', 'datasets', 0, 'license')
     for err in errors:
         loc = err["loc"]
-        # loc[1] is the server type key.
+        # loc[1] is the actual server type key.
+        # Skip "missing" errors from the irrelevant Union variants.
         if len(loc) > 1 and loc[1] in server_type_keys and err["type"] != "missing":
             actual_server_type = loc[1]
             break
 
+    # Fallback: if all errors are "missing", check the input dict for the actual server type.
     if not actual_server_type:
         for err in errors:
             if "input" in err and isinstance(err["input"], dict):
@@ -414,6 +416,7 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
                 if actual_server_type:
                     break
 
+    # Filter out Union discriminator false positives.
     filtered_errors = []
     for err in errors:
         loc = err["loc"]
@@ -430,6 +433,7 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
 
         filtered_errors.append(err)
 
+    # Group errors by location to consolidate Union literals.
     error_groups = defaultdict(list)
 
     for err in filtered_errors:
@@ -446,7 +450,7 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
     error_details = []
     for loc, errs in error_groups.items():
         if len(errs) > 1 and all(isinstance(e["loc"][-1], str) and e["loc"][-1].startswith("literal[") for e in errs):
-            # Consolidate errors for literals.
+            # Consolidate errors for literals into "Must be one of: X, Y, Z" format.
             loc_str = " -> ".join(str(item) for item in loc)
             valid_options = []
             for e in errs:
