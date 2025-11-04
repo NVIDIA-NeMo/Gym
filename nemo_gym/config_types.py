@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from enum import Enum
-from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple, Union
 
 import rich
 from omegaconf import DictConfig, OmegaConf
@@ -197,17 +197,6 @@ class BaseRunServerConfig(BaseServerConfig):
     entrypoint: str
     domain: Optional[Domain] = None  # Only required for resource servers
 
-    @model_validator(mode="after")
-    def validate_domain(self) -> "BaseRunServerTypeConfig":
-        name = getattr(self, "name", None)
-        if name and self.name.endswith("_resources_server"):
-            assert self.domain is not None, "A domain is required for resource servers."
-        else:
-            if hasattr(self, "domain"):
-                del self.domain
-
-        return self
-
 
 class BaseRunServerInstanceConfig(BaseRunServerConfig):
     name: str  # This name is unique at runtime.
@@ -274,6 +263,17 @@ class BaseServerInstanceConfig(BaseServerTypeConfig):
     name: str
     server_type_config_dict: DictConfig = Field(exclude=True)
 
+    @model_validator(mode="after")
+    def validate_domain_for_resource_server(self) -> "BaseServerInstanceConfig":
+        config = self.get_inner_run_server_config()
+        if self.SERVER_TYPE == "resources_servers":
+            assert config.domain is not None, "A domain is required for resource servers."
+        else:
+            # Remove domain field from Model and Agent servers.
+            if hasattr(config, "domain"):
+                del config.domain
+        return self
+
     def get_server_ref(self) -> ServerRef:
         return is_server_ref({"type": self.SERVER_TYPE, "name": self.name})
 
@@ -309,9 +309,12 @@ ServerInstanceConfig = Union[
 ServerInstanceConfigTypeAdapter = TypeAdapter(ServerInstanceConfig)
 
 
-def maybe_get_server_instance_config(name: str, server_type_config_dict: Any) -> Optional[ServerInstanceConfig]:
+def maybe_get_server_instance_config(
+    name: str, server_type_config_dict: Any
+) -> Tuple[Optional[ServerInstanceConfig], Optional[ValidationError]]:
+    """Returns ServerInstanceConfig if a valid server, otherwise None with error details"""
     if not isinstance(server_type_config_dict, DictConfig):
-        return None
+        return None, None
 
     maybe_server_instance_config_dict = {
         "name": name,
@@ -319,9 +322,36 @@ def maybe_get_server_instance_config(name: str, server_type_config_dict: Any) ->
         **OmegaConf.to_container(server_type_config_dict),
     }
     try:
-        return ServerInstanceConfigTypeAdapter.validate_python(maybe_server_instance_config_dict)
-    except ValidationError:
-        return None
+        config = ServerInstanceConfigTypeAdapter.validate_python(maybe_server_instance_config_dict)
+        return config, None
+    except ValidationError as e:
+        return None, e
+
+
+def is_almost_server(server_type_config_dict: Any) -> bool:
+    """Detects if a config looks like a server but might fail validation."""
+    from nemo_gym.global_config import ENTRYPOINT_KEY_NAME
+
+    if not isinstance(server_type_config_dict, DictConfig):
+        return False
+
+    # Check for server type.
+    server_type_keys = ["responses_api_models", "resources_servers", "responses_api_agents"]
+    has_server_type = any(key in server_type_config_dict for key in server_type_keys)
+
+    if not has_server_type:
+        return False
+
+    # Check for entrypoint presence.
+    for server_type_key in server_type_keys:
+        if server_type_key in server_type_config_dict:
+            inner_dict = server_type_config_dict[server_type_key]
+            if isinstance(inner_dict, DictConfig):
+                for config in inner_dict.values():
+                    if isinstance(config, DictConfig) and ENTRYPOINT_KEY_NAME in config:
+                        return True
+
+    return False
 
 
 ########################################

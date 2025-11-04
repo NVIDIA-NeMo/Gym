@@ -228,6 +228,54 @@ OSError: [Errno 48] Address already in use
 ```
 **Fix**: Override ports via command line or use `+port=0` for auto-assignment.
 
+### Problem: Almost-Server Detected (Configuration Validation)
+Example:
+```bash
+═══════════════════════════════════════════════════
+Configuration Warnings: Almost-Servers Detected
+═══════════════════════════════════════════════════
+
+  Almost-Server Detected: 'example_simple_agent'
+  This server configuration failed validation:
+
+- ResourcesServerInstanceConfig -> resources_servers -> example_server -> domain: Input should be 'math', 'coding', 'agent', 'knowledge', 'instruction_following', 'long_context', 'safety', 'games', 'e2e' or 'other'
+
+  This server will NOT be started.
+```
+**What this means**: Your server configuration has the correct structure (entrypoint, server type, etc.) but contains invalid values that prevent it from starting.
+
+**Common causes**:
+- Invalid `license` enum values in datasets (must be one of the allowed options).
+  - see the `license` field in `DatasetConfig` in `config_types.py`.
+- Missing or invalid `domain` field for resources servers (math, coding, agent, knowledge, etc.)
+  - see the `Domain` class in `config_types.py`.
+- Malformed server references (wrong type or name)
+
+**Fix**: Update the configuration based on the validation errors shown. The warning will detail exactly which fields are problematic.
+
+### Strict Validation Mode
+
+By default, invalid servers will throw an error. You can bypass strict validation and just show a warning:
+
+**In env.yaml:**
+```yaml
+error_on_almost_servers: false  # Will not error on invalid config
+```
+
+**Via command line:**
+```bash
+ng_run "+config_paths=[config.yaml]" +error_on_almost_servers=false
+```
+
+**Default behavior** (`error_on_almost_servers=true`):
+- All configuration issues are detected and warnings are printed
+- NeMo Gym exits with an error, preventing servers from starting with invalid configs
+
+**When disabled** (`error_on_almost_servers=false`):
+- All configuration issues are still detected and warnings are printed
+- NeMo Gym continues execution despite the invalid configurations
+- Invalid servers are skipped, and valid servers will attempt to start
+
 ## Best Practices
 
 ### 1. Keep Secrets in env.yaml
