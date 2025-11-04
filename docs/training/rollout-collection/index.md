@@ -135,3 +135,12 @@ Start with Optimize for Training →
 **First time scaling up?** Start with {doc}`optimize-for-training` to understand parallelization and throughput, then move to {doc}`sampling-strategies` to tune data characteristics.
 :::
 
+```{toctree}
+:hidden:
+:maxdepth: 1
+
+optimize-for-training
+sampling-strategies
+collection-patterns
+```
+

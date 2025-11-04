@@ -300,3 +300,15 @@ TRL Guide →
 
 ::::
 
+```{toctree}
+:hidden:
+:maxdepth: 1
+
+framework-comparison
+nemo-rl
+verl
+openrlhf
+trl
+custom-frameworks
+```
+

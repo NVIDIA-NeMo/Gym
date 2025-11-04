@@ -189,3 +189,12 @@ Start with Filtering Strategies →
 **Unsure about quality thresholds?** Start with {doc}`quality-metrics` to understand your data distribution, then apply filters based on observed quality patterns.
 :::
 
+```{toctree}
+:hidden:
+:maxdepth: 1
+
+filtering-strategies
+quality-metrics
+dataset-balancing
+```
+

@@ -199,3 +199,12 @@ Start with Prepare for Training →
 **Not sure which format you need?** Start with {doc}`../integration/framework-comparison` to understand your framework's requirements, then return here for conversion guidance.
 :::
 
+```{toctree}
+:hidden:
+:maxdepth: 1
+
+prepare-for-training
+validate-format
+format-specification
+```
+

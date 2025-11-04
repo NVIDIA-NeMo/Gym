@@ -182,3 +182,12 @@ Start with Reward Shaping →
 **Not sure which verification pattern to use?** Check {doc}`verification-patterns` reference for a decision guide based on your domain and training objective.
 :::
 
+```{toctree}
+:hidden:
+:maxdepth: 1
+
+reward-shaping
+verification-patterns
+multi-objective-scoring
+```
+
