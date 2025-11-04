@@ -197,17 +197,6 @@ class BaseRunServerConfig(BaseServerConfig):
     entrypoint: str
     domain: Optional[Domain] = None  # Only required for resource servers
 
-    @model_validator(mode="after")
-    def validate_domain(self) -> "BaseRunServerTypeConfig":
-        name = getattr(self, "name", None)
-        if name and self.name.endswith("_resources_server"):
-            assert self.domain is not None, "A domain is required for resource servers."
-        else:
-            if hasattr(self, "domain"):
-                del self.domain
-
-        return self
-
 
 class BaseRunServerInstanceConfig(BaseRunServerConfig):
     name: str  # This name is unique at runtime.
@@ -273,6 +262,13 @@ class BaseServerInstanceConfig(BaseServerTypeConfig):
 
     name: str
     server_type_config_dict: DictConfig = Field(exclude=True)
+
+    @model_validator(mode="after")
+    def validate_domain_for_resource_server(self) -> "BaseServerInstanceConfig":
+        if self.SERVER_TYPE == "resources_servers":
+            config = self.get_inner_run_server_config()
+            assert config.domain is not None, "A domain is required for resource servers."
+        return self
 
     def get_server_ref(self) -> ServerRef:
         return is_server_ref({"type": self.SERVER_TYPE, "name": self.name})
