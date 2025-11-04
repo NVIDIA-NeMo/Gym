@@ -436,14 +436,15 @@ Resource servers verify rollouts using different approaches with distinct perfor
 :color: info
 
 **For Execution-Based Verification**:
-- Run resource server on separate machine from model server
-- Use parallelism tuning: {doc}`../optimize-for-training/tune-parallelism`
+- Tune parallelism: {doc}`../optimize-for-training/tune-parallelism`
+- Consider running resource server on dedicated hardware
 
 **For LLM Judge Verification**:
-- Cache judge results for repeated comparisons
-- Consider async judge calls with result batching
-- Use faster judge models (e.g., smaller reasoning models)
-- For high-volume RL: Consider hybrid approach (fast pre-filter + judge sample)
+- **Hybrid verification**: Use fast pre-filter before calling judge (see `library_judge_math` for pattern)
+  - Example: Try symbolic math verification first, only call judge on failures
+  - Reduces judge API calls by 50-80% for mathematical equivalence tasks
+- **Judge model selection**: Configure faster judge model via `judge_model_server` in resource server config
+- **RL-specific**: For iterative RL with high-volume collection, fast verification is critical—consider execution-based or pattern-matching verification instead
 
 **Diagnosis**:
 - Check {doc}`../optimize-for-training/identify-bottleneck` to confirm verification is limiting factor
