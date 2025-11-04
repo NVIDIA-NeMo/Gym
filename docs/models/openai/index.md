@@ -72,7 +72,7 @@ For a complete walkthrough of rollout collection, see [Collecting Rollouts](../.
 
 ## Topics
 
-Get started with OpenAI in minutes, explore available models and configuration options, or troubleshoot API-related issues.
+Connect to OpenAI and configure it for rapid prototyping and experimentation.
 
 ::::{grid} 1 1 2 2
 :gutter: 3

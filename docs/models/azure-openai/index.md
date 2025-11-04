@@ -74,7 +74,7 @@ For a complete walkthrough of rollout collection, see [Collecting Rollouts](../.
 
 ## Topics
 
-Integrate Azure OpenAI into your enterprise workflows. Connect your Azure resources, configure deployments and authentication, or troubleshoot Azure-specific issues.
+Connect to Azure OpenAI and configure it for enterprise deployments.
 
 ::::{grid} 1 1 2 2
 :gutter: 3

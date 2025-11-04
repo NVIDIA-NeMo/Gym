@@ -72,7 +72,7 @@ For a complete walkthrough of rollout collection, see [Collecting Rollouts](../.
 
 ## Topics
 
-Deploy NVIDIA NIM for enterprise agent training. Configure your NIM endpoints, explore deployment options, or resolve integration issues.
+Deploy NVIDIA NIM and configure it for enterprise-grade model serving.
 
 ::::{grid} 1 1 2 2
 :gutter: 3

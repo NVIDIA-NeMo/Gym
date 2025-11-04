@@ -73,7 +73,7 @@ For a complete walkthrough of rollout collection, see [Collecting Rollouts](../.
 
 ## Topics
 
-Connect OpenRouter to experiment with models from multiple providers. Set up your API gateway, configure provider preferences, or troubleshoot connectivity issues.
+Connect to OpenRouter and configure it for multi-provider model access.
 
 ::::{grid} 1 1 2 2
 :gutter: 3
