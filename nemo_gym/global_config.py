@@ -395,8 +395,11 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
     server_type_keys = ["responses_api_models", "resources_servers", "responses_api_agents"]
     actual_server_type = None
 
+    # Detect which server is actually present.
+    # Error structure: (UnionVariantClassName, server_type_key, ...)
     for err in errors:
         loc = err["loc"]
+        # loc[1] is the server type key.
         if len(loc) > 1 and loc[1] in server_type_keys and err["type"] != "missing":
             actual_server_type = loc[1]
             break
@@ -415,6 +418,7 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
     for err in errors:
         loc = err["loc"]
 
+        # Filter out "Field required" errors from wrong Union variants.
         if (
             err["type"] == "missing"
             and len(loc) > 1
