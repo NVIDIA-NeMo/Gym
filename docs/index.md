@@ -104,7 +104,7 @@ Configure model serving methods for generating agent responses and tool-calling 
 :gutter: 1 1 1 2
 
 :::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` vLLM
-:link: models/vllm
+:link: models/vllm/index
 :link-type: doc
 Self-hosted open models with high-throughput inference.
 +++
@@ -194,10 +194,10 @@ get-started/collecting-rollouts
 ```{toctree}
 :caption: Models
 :hidden:
-:maxdepth: 1
+:maxdepth: 2
 
 Overview <models/index>
-models/vllm
+models/vllm/index
 models/nvidia-nim
 models/openai
 models/azure-openai

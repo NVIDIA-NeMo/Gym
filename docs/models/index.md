@@ -16,7 +16,7 @@ Choose the model serving approach that best matches your infrastructure and requ
 :gutter: 3
 
 :::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` vLLM
-:link: vllm
+:link: vllm/index
 :link-type: doc
 
 Self-hosted open models with high-throughput inference using vLLM.
@@ -124,7 +124,7 @@ Each model type has specific configuration options and usage patterns—refer to
 
 Select the model serving method that fits your needs and follow the configuration guide:
 
-:::{button-ref} vllm
+:::{button-ref} vllm/index
 :color: primary
 :outline:
 :ref-type: doc
