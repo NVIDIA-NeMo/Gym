@@ -31,8 +31,6 @@ NeMo Gym uses `asyncio.Semaphore` to limit concurrent requests:
 :::{dropdown} Implementation Details
 :icon: code
 
-From `rollout_collection.py`:
-
 ```python
 semaphore = nullcontext()
 if config.num_samples_in_parallel:

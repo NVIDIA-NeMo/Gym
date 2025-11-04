@@ -89,7 +89,6 @@ After collection completes, NeMo Gym automatically displays aggregated metrics:
 :::{dropdown} How Metric Aggregation Works
 :icon: gear
 
-From `rollout_collection.py:103-109`:
 ```python
 metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
 
