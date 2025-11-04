@@ -102,13 +102,13 @@ All available parameters for the OpenAI adapter:
   - Description
 * - `openai_base_url`
   - `str`
-  - OpenAI API endpoint URL (default: `https://api.openai.com/v1`)
+  - **Required**. OpenAI API endpoint URL (typically `https://api.openai.com/v1`)
 * - `openai_api_key`
   - `str`
-  - Your OpenAI API key (starts with `sk-`)
+  - **Required**. Your OpenAI API key (starts with `sk-`)
 * - `openai_model`
   - `str`
-  - OpenAI model identifier (e.g., `gpt-4-turbo`, `gpt-3.5-turbo`)
+  - **Required**. OpenAI model identifier (e.g., `gpt-4-turbo`, `gpt-3.5-turbo`)
 ```
 
 ---
@@ -201,7 +201,7 @@ Visit the [OpenAI Model Documentation](https://platform.openai.com/docs/models) 
 
 ## API Endpoints
 
-The OpenAI adapter exposes standard OpenAI-compatible endpoints:
+The OpenAI adapter exposes two OpenAI-compatible endpoints:
 
 ```{list-table}
 :header-rows: 1
@@ -210,12 +210,14 @@ The OpenAI adapter exposes standard OpenAI-compatible endpoints:
 * - Endpoint
   - Description
 * - `/v1/chat/completions`
-  - Main inference endpoint using Chat Completions API format
-* - `/v1/completions`
-  - Legacy completions endpoint (less commonly used)
-* - `/v1/models`
-  - List available models (requires valid API key)
+  - Chat Completions API for conversational inference (messages format)
+* - `/v1/responses`
+  - OpenAI Responses API for structured multi-turn conversations with tool calling
 ```
+
+:::{note}
+The OpenAI adapter proxies requests to OpenAI's actual endpoints. It does **not** implement `/v1/completions` (legacy) or `/v1/models` (model listing) endpoints. Use `/v1/chat/completions` for most use cases.
+:::
 
 :::{dropdown} Example request using ServerClient
 
