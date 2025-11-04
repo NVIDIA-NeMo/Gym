@@ -90,25 +90,34 @@ def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:
     example_only_servers = []
     training_servers = []
 
-    for subdir in TARGET_FOLDER.iterdir():
-        if not subdir.is_dir():
-            continue
+    # Search subdirectories and nested examples folder
+    search_paths = [TARGET_FOLDER]
+    examples_folder = TARGET_FOLDER / "examples"
+    if examples_folder.exists():
+        search_paths.append(examples_folder)
 
-        configs_folder = subdir / "configs"
-        if not (configs_folder.exists() and configs_folder.is_dir()):
-            continue
+    for search_path in search_paths:
+        for subdir in search_path.iterdir():
+            if not subdir.is_dir() or subdir.name == "examples":
+                continue
 
-        yaml_files = list(configs_folder.glob("*.yaml"))
-        if not yaml_files:
-            continue
+            configs_folder = subdir / "configs"
+            if not (configs_folder.exists() and configs_folder.is_dir()):
+                continue
 
-        for yaml_file in yaml_files:
-            domain, example_description, license, types = extract_config_metadata(yaml_file)
+            yaml_files = list(configs_folder.glob("*.yaml"))
+            if not yaml_files:
+                continue
 
-            server_name = subdir.name
-            display_name = server_name.replace("_", " ").title()
-            config_path = f"{TARGET_FOLDER.name}/{server_name}/configs/{yaml_file.name}"
-            readme_path = f"{TARGET_FOLDER.name}/{server_name}/README.md"
+            for yaml_file in yaml_files:
+                domain, example_description, license, types = extract_config_metadata(yaml_file)
+
+                server_name = subdir.name
+                display_name = server_name.replace("_", " ").title()
+                # Handles nested examples folder structure
+                relative_path = subdir.relative_to(TARGET_FOLDER)
+                config_path = f"{TARGET_FOLDER.name}/{relative_path}/configs/{yaml_file.name}"
+                readme_path = f"{TARGET_FOLDER.name}/{relative_path}/README.md"
 
             server_info = {
                 "name": server_name,
