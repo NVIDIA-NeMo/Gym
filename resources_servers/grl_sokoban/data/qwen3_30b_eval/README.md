@@ -288,7 +288,49 @@ jq -s 'map([.output[] | select(.type == "function_call")] | length) | {
 
 Results from running Qwen3-30B-A3B on 3,200 rollouts (200 prompts × 16 rollouts):
 
-*Results will be populated after running the evaluation.*
+### Overall Metrics
+- **Total Rollouts**: 3,200
+- **Success Rate**: 38.56% (1,234 / 3,200)
+- **Mean Reward**: 4.0007
+- **Median Reward**: 0.0000
+- **Min Reward**: -5.4000
+- **Max Reward**: 10.9000
+
+### Tool Call Statistics
+- **Average Tool Calls**: 2.10 per rollout
+- **Min Tool Calls**: 1
+- **Max Tool Calls**: 10
+- **Correlation (tool calls ↔ reward)**: 0.2199 (positive correlation)
+
+### Reward Distribution
+- **0.0 reward**: 1,405 occurrences (43.9%) - immediate failures
+- **10.8 reward**: 477 occurrences (14.9%)
+- **10.6 reward**: 183 occurrences (5.7%)
+- **10.7 reward**: 172 occurrences (5.4%)
+- **10.9 reward**: 157 occurrences (4.9%)
+- **10.5 reward**: 128 occurrences (4.0%)
+- **Negative rewards**: ~400 occurrences (12.5%) - invalid moves/failures
+
+### Performance by Tool Call Count
+| Tool Calls | Mean Reward | Rollout Count | Notes |
+|------------|-------------|---------------|-------|
+| 1          | 0.0000      | 1,405         | Immediate failures (43.9%) |
+| 2          | 9.0177      | 1,020         | Best average performance - quick successes |
+| 3          | 5.1853      | 340           | Moderate success rate |
+| 4          | 4.5873      | 204           | Moderate attempts |
+| 5          | 5.1724      | 98            | Stable performance |
+| 6          | 3.9942      | 69            | Declining performance |
+| 7          | 5.0667      | 24            | Small sample |
+| 8          | 2.0474      | 19            | Further decline |
+| 9          | -1.4750     | 4             | Getting stuck |
+| 10         | -1.8706     | 17            | Getting stuck in loops |
+
+### Key Observations
+1. **Higher Success Rate**: 38.56% success rate is nearly 3× higher than Qwen3-4B (13.47%), demonstrating significantly better spatial planning and box-pushing understanding
+2. **Positive Correlation**: More tool calls correlate with better outcomes (0.2199), indicating the model can effectively use longer action sequences to solve puzzles
+3. **Sweet Spot**: Rollouts with 2 tool calls perform best (mean reward ~9.0), with 1,020 successful rollouts in this category
+4. **Success Pattern**: The model achieves higher success rates across all tool call counts compared to the 4B variant, with consistent performance even with longer sequences
+5. **Lower Failure Rate**: Only 43.9% of rollouts fail immediately (vs 66.7% for 4B), showing better task engagement
 
 ## Manual Checkpoint/Resume
 

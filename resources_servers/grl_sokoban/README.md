@@ -252,6 +252,33 @@ The moderate success rate (13.47%) indicates that Sokoban puzzle-solving require
 
 See [`data/qwen3_4b_eval/reward-analysis.md`](data/qwen3_4b_eval/reward-analysis.md) for complete analysis.
 
+### Results Summary (Qwen3-30B-A3B)
+
+**Dataset**: 3,200 rollouts (200 prompts × 16 repeats)
+
+**Performance Metrics**:
+- **Success Rate**: 38.56% (1,234/3,200 rollouts)
+- **Mean Reward**: 4.00 (range: -5.40 to 10.90)
+- **Median Reward**: 0.00
+
+**Key Findings**:
+- Most rollouts (43.9%) received reward of 0.00 (no valid actions taken)
+- Successful puzzle solutions achieved rewards of ~10.5-10.9
+- Average 2.10 tool calls per rollout
+- Moderate positive correlation between tool calls and reward (0.22)
+
+**Top Reward Distribution**:
+- `0.0`: 1,405 rollouts (43.9%) - no valid actions or early termination
+- `10.8`: 477 rollouts (14.9%) - successful puzzle completion
+- `10.6`: 183 rollouts (5.7%) - successful puzzle completion
+- `10.7`: 172 rollouts (5.4%) - successful puzzle completion
+- `10.9`: 157 rollouts (4.9%) - successful puzzle completion
+- Negative rewards: Invalid moves or non-optimal solutions
+
+The higher success rate (38.56%) compared to Qwen3-4B indicates that the larger model performs significantly better at spatial planning and understanding box-pushing mechanics. While the majority of failures still result from not taking valid actions (reward 0.0), the model achieves nearly 3x the success rate of the 4B variant. The positive correlation between tool calls and reward suggests that the model can effectively use longer action sequences to solve puzzles.
+
+See [`data/qwen3_30b_eval/reward-analysis.md`](data/qwen3_30b_eval/reward-analysis.md) for complete analysis.
+
 ### Interactive Viewer
 
 **Visual exploration of rollouts:**
