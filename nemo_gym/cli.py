@@ -427,8 +427,8 @@ def test_all():  # pragma: no cover
     test_all_config = TestAllConfig.model_validate(global_config_dict)
 
     candidate_dir_paths = [
-        *glob("resources_servers/*"),
-        *glob("resources_servers.examples/*"),
+        *[p for p in glob("resources_servers/*") if not p.endswith("resources_servers/examples")],
+        *glob("resources_servers/examples/*"),
         *glob("responses_api_agents/*"),
         *glob("responses_api_models/*"),
     ]
