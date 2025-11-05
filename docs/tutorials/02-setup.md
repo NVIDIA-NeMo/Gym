@@ -49,7 +49,7 @@ EOF
 
 ```bash
 # Define which servers to start
-config_paths="resources_servers/examples/simple_weather/configs/simple_weather.yaml,responses_api_models/openai_model/configs/openai_model.yaml"
+config_paths="resources_servers/example_simple_weather/configs/simple_weather.yaml,responses_api_models/openai_model/configs/openai_model.yaml"
 
 # Start all servers
 ng_run "+config_paths=[${config_paths}]"

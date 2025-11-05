@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from httpx import Cookies
 
 from nemo_gym.server_utils import ServerClient
-from resources_servers.examples.stateful_counter.app import (
+from resources_servers.example_stateful_counter.app import (
     StatefulCounterResourcesServer,
     StatefulCounterResourcesServerConfig,
 )
