@@ -2,98 +2,32 @@
 
 # Prepare for Training
 
-Transform rollouts with reward scores into training-ready datasets for your RL framework.
+Transform rollouts with reward scores into training-ready datasets for SFT, DPO, or PPO.
 
-:::{card}
+Convert `rollouts.jsonl` with reward scores into the specific format required by your training algorithm.
 
-**Goal**: Convert `rollouts.jsonl` into format required by your training algorithm.
+## Before You Start
 
-^^^
+```{list-table}
+:header-rows: 1
+:widths: 30 70
 
-**You'll learn how to**:
-
-1. Filter rollouts for SFT training
-2. Create preference pairs for DPO
-3. Validate reward distributions for PPO
-4. Handle different reward patterns from resource servers
-
-:::
-
-**Prerequisites**: Collected rollouts using {doc}`../rollout-collection/index`.
-
----
-
-## The Training Data Pipeline
-
-After rollout collection, you have `rollouts.jsonl` with reward scores from your resource server. This guide shows you how to prepare that data for different training algorithms.
-
-**The workflow**:
-
-```
-[Rollout Collection]
-    ↓
-rollouts.jsonl (with rewards)
-    ↓
-[Data Preparation] ← You are here
-    ↓
-Training dataset (SFT/DPO/PPO format)
-    ↓
-[RL Training Framework]
+* - Prerequisite
+  - Description
+* - **Collected rollouts**
+  - You have `rollouts.jsonl` with reward scores from {doc}`../rollout-collection/index`
+* - **Understand reward signals**
+  - Familiar with how your resource server scores responses (see {doc}`../verification/index`)
+* - **Know your training algorithm**
+  - SFT, DPO, or PPO—each needs different data preparation
+* - **Understand reward patterns**
+  - Binary (0/1), continuous (0.0-1.0), or multi-metric rewards (see {doc}`../verification/reward-shaping`)
 ```
 
-**Key insight**: Different algorithms need different preparation strategies. The resource server provides rewards—you transform those into the right format.
-
----
-
-## Understanding Reward Patterns
-
-Resource servers return different reward patterns. Understanding what you have helps you prepare data correctly.
-
-### Binary Rewards (0.0 or 1.0)
-
-**Characteristics**: Clear pass/fail, no partial credit
-
-**Resource servers**: `mcqa`, `comp_coding`, `instruction_following`, `python_math_exec`
-
-**Best for**: SFT data filtering
-
-**Example**:
-```json
-{"reward": 1.0, "accuracy": 1.0}  // Correct
-{"reward": 0.0, "accuracy": 0.0}  // Incorrect
-```
-
-### Continuous Rewards (0.0–1.0 range)
-
-**Characteristics**: Nuanced quality, partial credit, rich gradients
-
-**Resource servers**: `library_judge_math`, `equivalence_llm_judge`, `multineedle`
-
-**Best for**: DPO pairs, PPO training
-
-**Example**:
-```json
-{"reward": 0.85, "set_overlap": 0.92}   // High quality
-{"reward": 0.42, "set_overlap": 0.55}   // Medium quality
-{"reward": 0.12, "set_overlap": 0.20}   // Low quality
-```
-
-### Multi-Metric Rewards
-
-**Characteristics**: Primary reward + tracking metrics
-
-**Resource servers**: `multineedle`, `library_judge_math`
-
-**Best for**: Multi-objective optimization, analysis
-
-**Example**:
-```json
-{
-  "reward": 0.82,          // Primary training signal
-  "accuracy": 0.82,        // Binary correctness
-  "set_overlap": 0.95      // Partial credit metric
-}
-```
+**Related concepts**:
+- {doc}`index` - Overview of dataset formats and pipeline
+- {doc}`../data-quality/index` - For filtering and curation before preparation
+- {doc}`../verification/multi-objective-scoring` - For handling multi-metric rollouts
 
 ---
 
