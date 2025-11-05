@@ -29,18 +29,9 @@ It leverages the SWE-Gym dataset of GitHub issues and uses containerized environ
 ### Model - Qwen/Qwen3-Coder-30B-A3B-Instruct
 ```md
 Accuracy: 0.10
-Resolved: 241
+Resolved: 276
 Total Instances: 2401
-Average Turns: 34.45
-Median Turns: 27
-FAIL_TO_PASS_SUCCESS: 1675
-FAIL_TO_PASS_FAILURE: 21706
-PASS_TO_PASS_SUCCESS: 798361
-PASS_TO_PASS_FAILURE: 919090
-Average Tokens: 14181.87
-Median Tokens: 12249
-Max Tokens: 91690
-Min Tokens: 2198
+Average Turns: 88
 ```
 ## Dataset Information
 
@@ -95,6 +86,7 @@ mini_swe_simple_agent:
       step_timeout: 600 # Timeout for each agent step
       eval_timeout: 1800 # Timeout for running the evaluation (unit tests)
       skip_if_exists: False # If set to true, skip all instances already processed for the model
+      collapse_limit: 3 # Warn the agent if the same command if repeated collapse_limit times
 ```
 
 
@@ -117,7 +109,7 @@ ng_download_dataset_from_gitlab \
 # Start server
 CONFIG_PATHS="resources_servers/mini_swe_resource/configs/mini_swe_resource.yaml,responses_api_models/openai_model/configs/openai_model.yaml"
 ng_run +config_paths=[$CONFIG_PATHS] \
-        '+mini_swe_simple_agent.responses_api_agents.mini_swe_agent.cache_dir_template=/lustre/fsw/portfolios/llmservice/users/igitman/images/swe-bench/xingyaoww_sweb.eval.x86_64.\{instance_id\}.sif' \
+        '+mini_swe_simple_agent.responses_api_agents.mini_swe_agent.cache_dir_template=/path/to/images/xingyaoww_sweb.eval.x86_64.\{instance_id\}.sif' \
         +mini_swe_simple_agent.responses_api_agents.mini_swe_agent.run_golden=False \
         +mini_swe_simple_agent.responses_api_agents.mini_swe_agent.skip_if_exists=True \
         +mini_swe_simple_agent.responses_api_agents.mini_swe_agent.concurrency=16 \
@@ -136,6 +128,73 @@ ng_viewer +jsonl_fpath=results/mini_swe_agent_swe_gym.jsonl
 ### Trajectory Collection Script
 ```bash
 sbatch scripts/mini_swe_agent/trajectory_collection.slurm
+```
+
+### Training Setup and Results
+
+**Model:** Qwen/Qwen3-Coder-30B-A3B-Instruct  
+**Framework:** [NemoRL](https://github.com/NVIDIA-NeMo/RL) \
+**Num nodes:** 16  
+**Num prompts per step:** 32  
+**Num rollouts per step:** 16 \
+**Validation** - SWEBench Verified on Mini-SWE-Agent
+
+![Training Results](assets/miniswe_qwen_coder.png)
+
+**Note - NemoRL changes for installing Singularity on all nodes.**
+
+```bash
+read -r -d '' SETUP_COMMAND <<EOF
+apt-get update && apt-get install -y git build-essential gcc
+apt install -y wget && \
+cd /tmp && \
+wget https://github.com/apptainer/apptainer/releases/download/v1.3.1/apptainer_1.3.1_amd64.deb && \
+apt install -y ./apptainer_1.3.1_amd64.deb && \
+ln -sf /usr/bin/apptainer /usr/bin/singularity
+cd ${REPO_LOCATION}
+EOF
+
+export SETUP_COMMAND
+```
+
+```diff
+diff --git a/ray.sub b/ray.sub
+index 9b4feb11..f765a609 100644
+--- a/ray.sub
++++ b/ray.sub
+@@ -50,6 +50,7 @@ maybe_gres_arg() {
+ CONTAINER=$CONTAINER
+ MOUNTS=$MOUNTS
+ COMMAND=${COMMAND:-}  # This is a script relative to the SLURM_SUBMIT_DIR. If left empty, it will leave the cluster idle after it's brought up.
++SETUP_COMMAND=${SETUP_COMMAND:-}  # Setup commands to run on all nodes before starting Ray
+ ########################################################
+ # Ports for all nodes (should be odd numbers since we place head/worker[0] on the same node) so all workers get the odd ports, but the head will get +1 the ports
+ NODE_MANAGER_PORT=${NODE_MANAGER_PORT:-53001}
+@@ -293,6 +294,7 @@ chmod +x /launch-head.sh
+ 
+ count=0
+ while [[ \$count -lt $num_retries ]]; do
++  $SETUP_COMMAND
+   bash /launch-head.sh
+   count=\$((count+1))
+   echo "Head node failed \$count/$num_retries times, restarting in 5 seconds..."
+@@ -305,6 +307,7 @@ EOF
+ srun $COMMON_SRUN_ARGS --container-name=ray-head --nodes=1 --ntasks=1 --cpus-per-task=$CPUS_PER_WORKER -w "$head_node" -o $LOG_DIR/ray-head.log bash -x -c "$head_cmd" &
+ SRUN_PIDS["ray-head"]=$!
+ 
++sleep 100s
+ NUM_ACTORS=$((GPUS_PER_NODE * SLURM_JOB_NUM_NODES))
+ 
+ # Start Ray worker nodes
+@@ -392,6 +395,7 @@ EOFINNER
+ 
+ count=0
+ while [[ \$count -lt $num_retries ]]; do
++  $SETUP_COMMAND
+   bash /launch-worker.sh
+   count=\$((count+1))
+   echo "Worker failed \$count/$num_retries times, restarting in 5 seconds..."
+
 ```
 
 ## Contributing
