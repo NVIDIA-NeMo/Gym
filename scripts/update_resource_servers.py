@@ -30,6 +30,7 @@ def extract_config_metadata(yaml_path: Path) -> tuple[str, str, list[str]]:
             resources_servers:
                 {name}:
                     domain: {example_domain}
+                    verified: {true/false}
                     ...
         {something}_simple_agent:
             responses_api_agents:
@@ -49,20 +50,22 @@ def extract_config_metadata(yaml_path: Path) -> tuple[str, str, list[str]]:
     description = None
     license = None
     types = []
+    verified = False
 
-    def visit_domain_and_description(data, level=1):
-        nonlocal domain, description
+    def visit_resource_server(data, level=1):
+        nonlocal domain, description, verified
         if level == 4:
             domain = data.get("domain")
             description = data.get("description")
+            verified = data.get("verified")
             return
         else:
             for k, v in data.items():
                 if level == 2 and k != "resources_servers":
                     continue
-                visit_domain_and_description(v, level + 1)
+                visit_resource_server(v, level + 1)
 
-    def visit_license_and_types(data):
+    def visit_agent_datasets(data):
         nonlocal license
         for k1, v1 in data.items():
             if k1.endswith("_simple_agent") and isinstance(v1, dict):
@@ -80,10 +83,10 @@ def extract_config_metadata(yaml_path: Path) -> tuple[str, str, list[str]]:
                                             license = entry.get("license")
                                 return
 
-    visit_domain_and_description(data)
-    visit_license_and_types(data)
+    visit_resource_server(data)
+    visit_agent_datasets(data)
 
-    return domain, description, license, types
+    return domain, description, license, types, verified
 
 
 def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:
@@ -104,7 +107,7 @@ def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:
             continue
 
         for yaml_file in yaml_files:
-            domain, description, license, types = extract_config_metadata(yaml_file)
+            domain, description, license, types, verified = extract_config_metadata(yaml_file)
 
             server_name = subdir.name
             example_only_prefix = "example_"
@@ -123,6 +126,7 @@ def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:
                 "name": server_name,
                 "display_name": display_name,
                 "domain": domain,
+                "verified": verified,
                 "description": description,
                 "config_path": config_path,
                 "readme_path": readme_path,
@@ -177,9 +181,9 @@ def generate_example_only_table(servers: list[dict]) -> str:
 def generate_training_table(servers: list[dict]) -> str:
     """Generate table for training resource servers."""
     if not servers:
-        return "| Domain | Resource Server | Train | Validation | Config | License |\n| ------ | --------------- | ----- | ---------- | ------ | ------- |\n"
+        return "| Domain | Resource Server | Train | Validation | Verified | Config | License |\n| ------ | --------------- | ----- | ---------- | --------| ------ | ------- |\n"
 
-    col_names = ["Domain", "Resource Server", "Train", "Validation", "Config", "License"]
+    col_names = ["Domain", "Resource Server", "Train", "Validation", "Verified", "Config", "License"]
     rows = []
 
     for server in servers:
@@ -190,11 +194,13 @@ def generate_training_table(servers: list[dict]) -> str:
         train_mark = "✓" if "train" in types_set else "-"
         val_mark = "✓" if "validation" in types_set else "-"
 
+        verified_mark = "✓" if server.get("verified") else "-"
+
         config_link = f"<a href='{server['config_path']}'>config</a>"
 
         license_str = server["license"] if server["license"] else "-"
 
-        rows.append([domain, name, train_mark, val_mark, config_link, license_str])
+        rows.append([domain, name, train_mark, val_mark, verified_mark, config_link, license_str])
 
     rows.sort(
         key=lambda r: (
@@ -204,6 +210,7 @@ def generate_training_table(servers: list[dict]) -> str:
             normalize_str(r[3]),
             normalize_str(r[4]),
             normalize_str(r[5]),
+            normalize_str(r[6]),
         )
     )
 
