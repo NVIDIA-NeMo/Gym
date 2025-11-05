@@ -68,16 +68,17 @@ def extract_config_metadata(yaml_path: Path) -> tuple[str, str, list[str]]:
             if k1.endswith("_simple_agent") and isinstance(v1, dict):
                 v2 = v1.get("responses_api_agents")
                 if isinstance(v2, dict):
-                    v3 = v2.get("simple_agent")
-                    if isinstance(v3, dict):
-                        datasets = v3.get("datasets")
-                        if isinstance(datasets, list):
-                            for entry in datasets:
-                                if isinstance(entry, dict):
-                                    types.append(entry.get("type"))
-                                    if entry.get("type") == "train":
-                                        license = entry.get("license")
-                            return
+                    # Look for any agent key
+                    for agent_key, v3 in v2.items():
+                        if isinstance(v3, dict):
+                            datasets = v3.get("datasets")
+                            if isinstance(datasets, list):
+                                for entry in datasets:
+                                    if isinstance(entry, dict):
+                                        types.append(entry.get("type"))
+                                        if entry.get("type") == "train":
+                                            license = entry.get("license")
+                                return
 
     visit_domain_and_description(data)
     visit_license_and_types(data)

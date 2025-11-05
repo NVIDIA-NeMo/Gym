@@ -1,0 +1,44 @@
+mini_swe_resource_resources_server:
+  resources_servers:
+    mini_swe_resource:
+      entrypoint: app.py
+      domain: coding
+mini_swe_simple_agent:
+  responses_api_agents:
+    mini_swe_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: mini_swe_resource_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/mini_swe_resource/data/train.jsonl
+        gitlab_identifier:
+          dataset_name: mini_swe_agent
+          version: 0.0.1
+          artifact_fpath: train.jsonl
+        license: MIT
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/mini_swe_resource/data/validation.jsonl
+        gitlab_identifier:
+          dataset_name: mini_swe_agent
+          version: 0.0.1
+          artifact_fpath: validation.jsonl
+        license: MIT
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/mini_swe_resource/data/example.jsonl
+      concurrency: 16
+      env: singularity
+      cache_dir_template: ???
+      run_golden: False
+      step_timeout: 600
+      eval_timeout: 1800
+      skip_if_exists: False
+      step_limit: 250
+      collapse_limit: 3
