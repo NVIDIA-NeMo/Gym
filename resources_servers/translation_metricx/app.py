@@ -29,7 +29,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.ray_utils import (
-    spinup_ray_gpu_workers,
+    spinup_single_ray_gpu_node_worker,
 )
 
 
@@ -123,7 +123,7 @@ class TranslationMetricxResourcesServer(SimpleResourcesServer):
         # Ensure output directory exists (following predict.py lines 167-169)
         os.makedirs(self.config.output_dir, exist_ok=True)
 
-        model_workers = spinup_ray_gpu_workers(TranslationMetricxModelWorker)
+        model_workers = [spinup_single_ray_gpu_node_worker(TranslationMetricxModelWorker)]
         inputs_device = None
         for model_worker in model_workers:
             # Load model with device placement
