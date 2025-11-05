@@ -125,11 +125,6 @@ ng_collect_rollouts +agent_name=mini_swe_simple_agent \
 ng_viewer +jsonl_fpath=results/mini_swe_agent_swe_gym.jsonl
 ```
 
-### Trajectory Collection Script
-```bash
-sbatch scripts/mini_swe_agent/trajectory_collection.slurm
-```
-
 ### Training Setup and Results
 
 **Model:** Qwen/Qwen3-Coder-30B-A3B-Instruct  
