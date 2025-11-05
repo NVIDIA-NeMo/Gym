@@ -119,36 +119,35 @@ def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:
                 config_path = f"{TARGET_FOLDER.name}/{relative_path}/configs/{yaml_file.name}"
                 readme_path = f"{TARGET_FOLDER.name}/{relative_path}/README.md"
 
-            server_info = {
-                "name": server_name,
-                "display_name": display_name,
-                "domain": domain,
-                "example_description": example_description,
-                "config_path": config_path,
-                "readme_path": readme_path,
-                "types": types,
-                "license": license,
-                "yaml_file": yaml_file,
-            }
+                server_info = {
+                    "name": server_name,
+                    "display_name": display_name,
+                    "domain": domain,
+                    "example_description": example_description,
+                    "config_path": config_path,
+                    "readme_path": readme_path,
+                    "types": types,
+                    "license": license,
+                    "yaml_file": yaml_file,
+                }
 
-            # TODO: verify this logic
-            # Example-only: only has "example" type
-            # Training-ready: has "train" or "validation" type
-            # types_set = set(types) if types else set()
+                # TODO: verify this logic
+                # Example-only: only has "example" type
+                # Training-ready: has "train" or "validation" type
+                # types_set = set(types) if types else set()
 
-            # has_train_or_val = "train" in types_set or "validation" in types_set
+                # has_train_or_val = "train" in types_set or "validation" in types_set
 
-            is_example_only = server_info.get("example_description", False)
-
-            # if has_train_or_val:
-            #     training_servers.append(server_info)
-            # elif types_set == {"example"}:
-            #     example_only_servers.append(server_info)
-            if is_example_only:
-                example_only_servers.append(server_info)
-            else:
-                training_servers.append(server_info)
-            # Exclude a server that has neither example nor train/val
+                # if has_train_or_val:
+                #     training_servers.append(server_info)
+                # elif types_set == {"example"}:
+                #     example_only_servers.append(server_info)
+                is_example_only = server_info.get("example_description", False)
+                if is_example_only:
+                    example_only_servers.append(server_info)
+                else:
+                    training_servers.append(server_info)
+                # Note: Excludes a server that has neither example nor train/val
 
     return example_only_servers, training_servers
 
