@@ -44,33 +44,19 @@ Use this to spot bottlenecks in real time—if throughput drops or stalls, see {
 
 ### Automatic Metrics
 
-After collection completes, NeMo Gym automatically aggregates and displays summary metrics:
+NeMo Gym automatically displays aggregated metrics after collection completes:
 
-```bash
-ng_collect_rollouts \
-    +input_jsonl_fpath=tasks.jsonl \
-    +output_jsonl_fpath=rollouts.jsonl
-
-# After completion, displays:
-# {
-#   "reward": 0.73,
-#   "accuracy": 0.68,
-#   "avg_tool_calls": 2.1
-# }
+```json
+{
+  "reward": 0.73,
+  "accuracy": 0.68,
+  "avg_tool_calls": 2.1
+}
 ```
 
-These metrics are computed from your resource server's verification results—any numeric field is automatically averaged across all rollouts.
+Any numeric field from your resource server's verification is automatically averaged.
 
-:::{dropdown} How This Works
-:icon: gear
-
-```python
-metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
-avg_metrics = {k: v / len(rows) for k, v in metrics.items()}
-```
-
-Any numeric field from verification is automatically averaged.
-:::
+See {doc}`../../about/concepts/rollout-collection-fundamentals` for detailed explanation of how automatic metric aggregation works.
 
 ### Resume Interrupted Runs
 
@@ -262,23 +248,16 @@ Catch obvious data issues during collection with fast smoke tests.
 **These are quick sanity checks**, not comprehensive quality analysis. For full filtering, curation, and balancing strategies, see {doc}`../../data-quality/index`.
 :::
 
-### Spot Check Automatic Metrics
+### Spot Check Metrics
 
-Use NeMo Gym's automatic metrics as a quick sanity check after collection:
+Use NeMo Gym's automatic metrics (see after collection completes) as a quick sanity check:
 
-```json
-{
-  "reward": 0.73,
-  "accuracy": 0.68,
-  "avg_tool_calls": 2.1
-}
-```
-
-**Red flags to watch for**:
-
+**Red flags**:
 - **All rewards identical** (0.0 or 1.0): Verification logic may be broken
-- **Accuracy far from baseline**: Check if verification criteria are too strict/loose
-- **Unexpected metric values**: Review resource server implementation
+- **Accuracy far from baseline**: Verification criteria may be too strict/loose
+- **Unexpected values**: Review resource server implementation
+
+See {doc}`../../data-quality/index` for comprehensive quality validation.
 
 ### Quick Reward Distribution Check
 

@@ -345,20 +345,50 @@ Real-time progress bar shows completion, speed, and running metrics as rollouts 
 :::
 
 :::{dropdown} Output Data and Metrics
+:open:
+
 **Output File Format**:
 JSONL (one rollout per line) for easy streaming and processing.
 
-**Automatic Metrics**:
-After collection completes, see aggregate statistics:
-```json
-{
-  "avg_reward": 0.73,
-  "accuracy": 0.68,
-  "avg_tool_calls": 2.1,
-  "success_rate": 0.71
-}
+**Automatic Metric Aggregation**:
+
+After `ng_collect_rollouts` completes, NeMo Gym automatically aggregates all numeric fields from verification:
+
+```bash
+ng_collect_rollouts +input_jsonl_fpath=tasks.jsonl +output_jsonl_fpath=rollouts.jsonl
+
+# Displays after collection:
+# {
+#   "reward": 0.73,
+#   "accuracy": 0.68,
+#   "avg_tool_calls": 2.1
+# }
 ```
 
-**Metric Computation**:
-The system automatically aggregates any numeric fields returned by the resource server's verification, giving you instant feedback on agent performance.
+**How It Works**:
+
+Any numeric field returned by your resource server's `verify()` method is automatically averaged across all rollouts:
+
+```python
+# In your resource server
+def verify(self, task, response):
+    return {
+        "reward": 0.85,           # ← automatically averaged
+        "accuracy": 1.0,          # ← automatically averaged
+        "custom_metric": 42       # ← any numeric field is averaged
+    }
+```
+
+**Quick Analysis**:
+
+Use the built-in aggregation script for quick summaries:
+
+```bash
+python scripts/print_aggregate_results.py +jsonl_fpath=rollouts.jsonl
+```
+
+**See Also**:
+- {doc}`../../training/data-quality/index` - Validate quality before training
+- {doc}`../../training/rollout-collection/optimize-for-training/production-scale` - Monitor during collection
+
 :::

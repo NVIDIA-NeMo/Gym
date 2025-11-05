@@ -53,28 +53,19 @@ Ensure you have these prerequisites before validating rollouts:
 
 ## Automatic Metrics
 
-After collection completes, NeMo Gym displays aggregated metrics:
+NeMo Gym automatically aggregates metrics after collection:
 
 ```json
 {
   "reward": 0.734,
   "accuracy": 0.689,
-  "avg_tool_calls": 2.3,
-  "execution_time_ms": 1247.5
+  "avg_tool_calls": 2.3
 }
 ```
 
-**How it works**: The system automatically averages any numeric field returned by your resource server's verification. This means you can track custom metrics without extra processing—just return them from verification and they appear in the summary.
+Use these instant metrics to validate sampling strategy effectiveness before detailed analysis.
 
-**Common metrics** (depending on your resource server):
-
-- `reward` - Quality score (0.0-1.0)
-- `accuracy` - Binary correctness
-- `avg_tool_calls` - Tool usage count
-- `execution_time_ms` - Performance timing
-- Custom domain metrics (code execution time, token count, etc.)
-
-Use these instant metrics to validate collection quality before diving into detailed analysis.
+See {doc}`../../about/concepts/rollout-collection-fundamentals` for how automatic metric aggregation works.
 
 ---
 
