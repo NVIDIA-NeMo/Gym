@@ -129,6 +129,7 @@ def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:
                 "verified": verified,
                 "description": description,
                 "config_path": config_path,
+                "config_filename": yaml_file.name,
                 "readme_path": readme_path,
                 "types": types,
                 "license": license,
@@ -160,7 +161,7 @@ def generate_example_only_table(servers: list[dict]) -> str:
             else "Example resource server"
         )
 
-        config_link = f"<a href='{server['config_path']}'>config</a>"
+        config_link = f"<a href='{server['config_path']}'>{server['config_filename']}</a>"
         readme_link = f"<a href='{server['readme_path']}'>README</a>"
 
         rows.append([name, description, config_link, readme_link])
@@ -196,7 +197,7 @@ def generate_training_table(servers: list[dict]) -> str:
 
         verified_mark = "✓" if server.get("verified") else "-"
 
-        config_link = f"<a href='{server['config_path']}'>config</a>"
+        config_link = f"<a href='{server['config_path']}'>{server['config_filename']}</a>"
 
         license_str = server["license"] if server["license"] else "-"
 
