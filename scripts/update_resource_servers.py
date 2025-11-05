@@ -46,21 +46,21 @@ def extract_config_metadata(yaml_path: Path) -> tuple[str, str, list[str]]:
         data = yaml.safe_load(f)
 
     domain = None
-    example_description = None
+    description = None
     license = None
     types = []
 
-    def visit_domain_and_example_description(data, level=1):
-        nonlocal domain, example_description
+    def visit_domain_and_description(data, level=1):
+        nonlocal domain, description
         if level == 4:
             domain = data.get("domain")
-            example_description = data.get("example_description")
+            description = data.get("description")
             return
         else:
             for k, v in data.items():
                 if level == 2 and k != "resources_servers":
                     continue
-                visit_domain_and_example_description(v, level + 1)
+                visit_domain_and_description(v, level + 1)
 
     def visit_license_and_types(data):
         nonlocal license
@@ -79,10 +79,10 @@ def extract_config_metadata(yaml_path: Path) -> tuple[str, str, list[str]]:
                                         license = entry.get("license")
                             return
 
-    visit_domain_and_example_description(data)
+    visit_domain_and_description(data)
     visit_license_and_types(data)
 
-    return domain, example_description, license, types
+    return domain, description, license, types
 
 
 def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:
@@ -90,64 +90,49 @@ def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:
     example_only_servers = []
     training_servers = []
 
-    # Search subdirectories and nested examples folder
-    search_paths = [TARGET_FOLDER]
-    examples_folder = TARGET_FOLDER / "examples"
-    if examples_folder.exists():
-        search_paths.append(examples_folder)
+    for subdir in TARGET_FOLDER.iterdir():
+        if not subdir.is_dir():
+            continue
 
-    for search_path in search_paths:
-        for subdir in search_path.iterdir():
-            if not subdir.is_dir() or subdir.name == "examples":
-                continue
+        configs_folder = subdir / "configs"
+        if not (configs_folder.exists() and configs_folder.is_dir()):
+            continue
 
-            configs_folder = subdir / "configs"
-            if not (configs_folder.exists() and configs_folder.is_dir()):
-                continue
+        yaml_files = list(configs_folder.glob("*.yaml"))
+        if not yaml_files:
+            continue
 
-            yaml_files = list(configs_folder.glob("*.yaml"))
-            if not yaml_files:
-                continue
+        for yaml_file in yaml_files:
+            domain, description, license, types = extract_config_metadata(yaml_file)
 
-            for yaml_file in yaml_files:
-                domain, example_description, license, types = extract_config_metadata(yaml_file)
+            server_name = subdir.name
+            example_only_prefix = "example_"
+            is_example_only_prefix = server_name.startswith(example_only_prefix)
 
-                server_name = subdir.name
-                display_name = server_name.replace("_", " ").title()
-                # Handles nested examples folder structure
-                relative_path = subdir.relative_to(TARGET_FOLDER)
-                config_path = f"{TARGET_FOLDER.name}/{relative_path}/configs/{yaml_file.name}"
-                readme_path = f"{TARGET_FOLDER.name}/{relative_path}/README.md"
+            display_name = (
+                (server_name[len(example_only_prefix) :] if is_example_only_prefix else server_name)
+                .replace("_", " ")
+                .title()
+            )
 
-                server_info = {
-                    "name": server_name,
-                    "display_name": display_name,
-                    "domain": domain,
-                    "example_description": example_description,
-                    "config_path": config_path,
-                    "readme_path": readme_path,
-                    "types": types,
-                    "license": license,
-                    "yaml_file": yaml_file,
-                }
+            config_path = f"{TARGET_FOLDER.name}/{server_name}/configs/{yaml_file.name}"
+            readme_path = f"{TARGET_FOLDER.name}/{server_name}/README.md"
 
-                # TODO: verify this logic
-                # Example-only: only has "example" type
-                # Training-ready: has "train" or "validation" type
-                types_set = set(types) if types else set()
+            server_info = {
+                "name": server_name,
+                "display_name": display_name,
+                "domain": domain,
+                "description": description,
+                "config_path": config_path,
+                "readme_path": readme_path,
+                "types": types,
+                "license": license,
+                "yaml_file": yaml_file,
+            }
 
-                has_train_or_val = "train" in types_set or "validation" in types_set
-
-                if has_train_or_val:
-                    training_servers.append(server_info)
-                elif types_set == {"example"}:
-                    example_only_servers.append(server_info)
-                # is_example_only = server_info.get("example_description", False)
-                # if is_example_only:
-                #     example_only_servers.append(server_info)
-                # else:
-                #     training_servers.append(server_info)
-                # Note: Excludes a server that has neither example nor train/val
+            example_only_servers.append(server_info) if is_example_only_prefix else training_servers.append(
+                server_info
+            )
 
     return example_only_servers, training_servers
 
@@ -163,9 +148,9 @@ def generate_example_only_table(servers: list[dict]) -> str:
     for server in servers:
         name = server["display_name"]
 
-        # Optional {example_description} -> Required '{domain} example' -> Fallback: 'Example resource server'
-        example_description = (
-            server["example_description"] or f"{server.get('domain').title()} example"
+        # Optional {description} -> Required '{domain} example' -> Fallback: 'Example resource server'
+        description = (
+            server["description"] or f"{server.get('domain').title()} example"
             if server.get("domain")
             else "Example resource server"
         )
@@ -173,7 +158,7 @@ def generate_example_only_table(servers: list[dict]) -> str:
         config_link = f"<a href='{server['config_path']}'>config</a>"
         readme_link = f"<a href='{server['readme_path']}'>README</a>"
 
-        rows.append([name, example_description, config_link, readme_link])
+        rows.append([name, description, config_link, readme_link])
 
     rows.sort(
         key=lambda r: (
