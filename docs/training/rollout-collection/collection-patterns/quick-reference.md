@@ -155,20 +155,3 @@ cat file1.jsonl file2.jsonl file3.jsonl > merged.jsonl
 ```bash
 shuf -n 1000 large_dataset.jsonl > sample.jsonl
 ```
-
----
-
-## Common Patterns Links
-
-**Training preparation**: {ref}`training-rollout-patterns-training-prep`  
-SFT demonstrations, DPO pairs, RL buffers, evaluation benchmarks.
-
-**Infrastructure**: {ref}`training-rollout-patterns-infrastructure`  
-Local vLLM, hosted APIs, distributed generation, cost optimization.
-
-**Development**: {ref}`training-rollout-patterns-development`  
-Quick debugging, parameter sweeps, behavioral exploration, verification testing.
-
-**Scale**: {ref}`training-rollout-patterns-scale`  
-Resume interrupted runs, million-scale generation, continuous collection, multi-dataset workflows.
-

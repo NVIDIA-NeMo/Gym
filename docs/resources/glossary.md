@@ -80,7 +80,6 @@ DPO
 Direct Preference Optimization
   Training approach using pairs of rollouts where one is preferred over another. Teaches better vs worse responses.
 
-(reinforcement-learning-rl)=
 RL
 Reinforcement Learning
   Training approach where agents learn through trial-and-error interaction with environments using reward signals.

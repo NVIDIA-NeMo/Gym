@@ -2,107 +2,59 @@
 
 # Multi-Objective Scoring
 
-Balance multiple objectives or combine several reward signals using NeMo Gym's automatic metric aggregation and composite scoring patterns.
+Advanced guide for combining multiple reward signals in custom resource servers.
 
 :::{card}
 
-**Goal**: Effectively combine multiple verification signals.
+**Audience**: Building custom resource servers with multiple objectives
 
 ^^^
 
 **You'll learn how to**:
 
-1. Use NeMo Gym's automatic metric aggregation
-2. Combine metrics in `verify()` method
-3. Design weighted composite rewards
-4. Monitor multiple objectives during training
+1. Combine metrics with weighted combinations
+2. Design hierarchical objectives
+3. Monitor multiple metrics during training
+4. Handle trade-offs between objectives
 
 :::
 
-**Prerequisites**: Understanding of basic verification from {doc}`../../get-started/verifying-agent-results` and {doc}`reward-shaping`.
+**Prerequisites**: Basic verification from {doc}`../../get-started/verifying-agent-results` and {doc}`custom-patterns-cookbook`.
+
+:::{tip}
+**Using existing servers?** Most built-in servers (mcqa, comp_coding) use single objectives. Only multineedle and library_judge_math use multi-objective patterns—you likely don't need this guide.
+:::
 
 ---
 
 ## When You Need Multi-Objective Scoring
 
-Use multi-objective scoring when:
+Use multi-objective scoring when building custom verification for tasks with:
 
-* **Multiple success criteria** - Task has several independent quality dimensions
-* **Conflicting objectives** - Improving one metric may hurt another (accuracy vs speed)
-* **Hierarchical goals** - Primary objective must be met, then optimize secondary goals
-* **Rich training signal** - Want to track multiple metrics beyond single reward
+* **Multiple success criteria** - Correctness + efficiency + style
+* **Conflicting objectives** - Speed vs thoroughness trade-offs
+* **Hierarchical goals** - Must-have requirements + nice-to-have optimizations
+* **Rich training signal** - Track multiple dimensions for analysis
 
-**Examples**:
-
-* **Code generation** - Correctness + efficiency + style
-* **Search tasks** - Relevance + coverage + conciseness
-* **Tool use** - Accuracy + minimal tool calls + response quality
+**Built-in examples**: `multineedle` (accuracy + set_overlap), `library_judge_math` (library + judge)
 
 ---
 
-## NeMo Gym's Automatic Aggregation
+## Automatic Metric Aggregation
 
-NeMo Gym automatically aggregates any numeric field returned from `verify()` across all rollouts—no additional code required.
-
-### How It Works
-
-**In your resource server**:
+NeMo Gym automatically aggregates **any numeric field** returned from `verify()`:
 
 ```python
 async def verify(self, body: YourVerifyRequest) -> YourVerifyResponse:
-    # Calculate multiple metrics
-    correctness = 1.0 if is_correct else 0.0
-    efficiency = calculate_efficiency_score(response)
-    
     return YourVerifyResponse(
         **body.model_dump(),
-        reward=correctness * 0.7 + efficiency * 0.3,  # Composite
-        correctness=correctness,  # ← Automatically aggregated
-        efficiency=efficiency      # ← Automatically aggregated
+        reward=0.85,         # Automatically aggregated
+        correctness=0.90,    # Automatically aggregated
+        efficiency=0.75      # Automatically aggregated
     )
 ```
 
-**After collection**:
-
-```bash
-ng_collect_rollouts +input_jsonl_fpath=tasks.jsonl +output_jsonl_fpath=rollouts.jsonl
-
-# Automatic output:
-# {
-#   "reward": 0.73,
-#   "correctness": 0.85,
-#   "efficiency": 0.64
-# }
-```
-
-**Source**: Automatic aggregation from `nemo_gym/train_data_utils.py:224-238`
-
-### What Gets Aggregated
-
-**Automatically averaged**:
-
-* `reward` - Primary training signal
-* Any numeric field (int, float, bool converted to int)
-* Custom metrics you define
-
-**Not aggregated**:
-
-* String fields
-* `responses_create_params` and `response` (full rollout data)
-
-**Source**: Logic in `nemo_gym/train_data_utils.py:224-238`
-
-### Built-in Analysis
-
-View aggregated metrics:
-
-```bash
-python scripts/print_aggregate_results.py +jsonl_fpath=rollouts.jsonl
-```
-
-Shows averages, min, max for all numeric fields.
-
-**Source**: Utility at `scripts/print_aggregate_results.py`
+After collection, all numeric fields are averaged across rollouts. See {doc}`../datasets/prepare-for-training` for using these metrics.
 
 ---
 
@@ -282,82 +234,25 @@ else:
 
 ---
 
-## Common Multi-Objective Patterns
+## Common Patterns
 
-### Correctness + Efficiency
+See {doc}`custom-patterns-cookbook` Pattern 5 for complete multi-objective implementation.
 
-**Goal**: Balance accuracy with resource usage.
+### Quick Examples
 
+**Correctness + Efficiency**:
 ```python
-# Measure efficiency
-optimal_tool_calls = 2
-actual_tool_calls = count_tool_calls(response.output)
-tool_call_penalty = max(0, actual_tool_calls - optimal_tool_calls) * 0.1
-
-# Combine
-correctness = 1.0 if is_correct else 0.0
-efficiency = max(0.0, 1.0 - tool_call_penalty)
-
 reward = 0.7 * correctness + 0.3 * efficiency
 ```
 
-**Weight guideline**: Correctness should dominate (0.6–0.8).
-
-### Accuracy + Completeness
-
-**Goal**: Reward both correct and comprehensive responses.
-
+**Accuracy + Completeness**:
 ```python
-# Accuracy: how much is correct
-accuracy = correct_items / total_items_attempted
-
-# Completeness: how much was attempted
-completeness = total_items_attempted / total_items_required
-
-# Combine
 reward = 0.6 * accuracy + 0.4 * completeness
 ```
 
-**Use case**: Information extraction, multi-part questions.
-
-### Precision + Recall
-
-**Goal**: Balance false positives vs false negatives.
-
+**Precision + Recall** (F1-score):
 ```python
-# Calculate metrics
-true_positives = len(set(predicted) & set(actual))
-precision = true_positives / len(predicted) if predicted else 0.0
-recall = true_positives / len(actual) if actual else 0.0
-
-# Combine (F1-like)
-if precision + recall > 0:
-    reward = 2 * (precision * recall) / (precision + recall)
-else:
-    reward = 0.0
-```
-
-**Use case**: Classification, extraction tasks.
-
-**Alternative**: F-beta score with custom beta to weight precision vs recall differently.
-
-### Speed + Quality
-
-**Goal**: Reward fast responses without sacrificing quality.
-
-```python
-# Quality check (binary)
-quality = 1.0 if meets_quality_threshold(response) else 0.0
-
-# Speed score (normalized)
-max_acceptable_time = 10.0  # seconds
-time_score = max(0.0, 1.0 - (response_time / max_acceptable_time))
-
-# Hierarchical: quality gates speed reward
-if quality > 0:
-    reward = 0.8 * quality + 0.2 * time_score
-else:
-    reward = 0.0  # No credit for fast but wrong answers
+reward = 2 * (precision * recall) / (precision + recall)
 ```
 
 ---
@@ -446,56 +341,6 @@ Before deploying multi-objective scoring:
 - [ ] **Tested on sample data** - Reward distribution makes sense
 - [ ] **Monitoring plan** - Track all metrics during training
 
----
-
-## Examples by Training Algorithm
-
-### SFT (Supervised Fine-Tuning)
-
-**Goal**: Filter for high-quality examples.
-
-**Pattern**: Use multiple metrics to define quality threshold.
-
-```python
-# Return multiple metrics
-reward = correctness  # Primary for filtering
-correctness = ...
-efficiency = ...
-
-# Later, filter rollouts:
-sft_data = [r for r in rollouts 
-            if r['correctness'] == 1.0 and r['efficiency'] > 0.7]
-```
-
-### DPO (Direct Preference Optimization)
-
-**Goal**: Create preference pairs with clear winner.
-
-**Pattern**: Composite reward should separate chosen/rejected clearly.
-
-```python
-# Composite reward
-reward = 0.6 * correctness + 0.4 * quality
-
-# When creating pairs, ensure gap:
-# chosen: reward=0.85, rejected: reward=0.45
-# Gap = 0.40 (good separation)
-```
-
-**Recommendation**: Aim for minimum 0.2 reward gap between chosen and rejected.
-
-### PPO (Proximal Policy Optimization)
-
-**Goal**: On-policy RL with rich signal.
-
-**Pattern**: Shaped composite rewards with partial credit.
-
-```python
-# All objectives contribute to gradient
-reward = 0.5 * partial_correctness + 0.3 * progress + 0.2 * efficiency
-
-# Even failed attempts get some reward for progress
-```
 
 ---
 
@@ -549,98 +394,58 @@ else:
 
 ## Common Pitfalls
 
-### Pitfall 1: Conflicting Objectives
+:::{dropdown} Conflicting Objectives
+**Problem**: Optimizing one metric hurts another (e.g., speed vs thoroughness)
 
-**Problem**: Optimizing one metric hurts another.
+**Solution**: Use hierarchical gating or adjust weights to prioritize
+:::
 
-**Example**:
-
-```python
-# Reward both speed and thoroughness
-reward = 0.5 * speed + 0.5 * thoroughness
-
-# But: being thorough requires being slow!
-```
-
-**Solution**: Use hierarchical gating or adjust weights to prioritize.
-
-### Pitfall 2: Unbalanced Scales
-
-**Problem**: Metrics on different scales (0-100 vs 0.0-1.0).
+:::{dropdown} Unbalanced Scales
+**Problem**: Metrics on different scales (0-100 vs 0.0-1.0)
 
 **Example**:
-
 ```python
 # Bug: metrics on different scales
 reward = 0.5 * accuracy + 0.5 * response_length  # Wrong!
 # accuracy ∈ [0, 1], response_length ∈ [0, 500]
 ```
 
-**Solution**: Normalize all metrics to [0.0, 1.0]:
+**Solution**: Normalize all metrics to [0.0, 1.0]
+:::
 
-```python
-max_length = 500
-normalized_length = min(response_length / max_length, 1.0)
-reward = 0.5 * accuracy + 0.5 * normalized_length
-```
+:::{dropdown} Correlation Masking
+**Problem**: Two metrics highly correlated—combined weight too high
 
-### Pitfall 3: Correlation Masking
+**Example**: `reward = 0.5 * accuracy + 0.5 * correctness` (same metric, doubled weight!)
 
-**Problem**: Two metrics are highly correlated—combined weight is too high.
+**Solution**: Use orthogonal metrics (independent dimensions)
+:::
 
-**Example**:
+:::{dropdown} Ignoring Primary Objective
+**Problem**: Secondary objectives dominate because primary is too hard
 
-```python
-# accuracy and correctness are essentially the same metric
-reward = 0.5 * accuracy + 0.5 * correctness
-# Effectively: 1.0 * correctness (doubled weight!)
-```
-
-**Solution**: Use orthogonal metrics (independent dimensions).
-
-### Pitfall 4: Ignoring Primary Objective
-
-**Problem**: Secondary objectives dominate because primary is too hard.
-
-**Example**:
-
-```python
-reward = 0.7 * correctness + 0.3 * style
-
-# If correctness always near 0.0, agent optimizes style only
-```
-
-**Solution**: Use hierarchical gating or adjust task difficulty.
+**Solution**: Use hierarchical gating or adjust task difficulty
+:::
 
 ---
 
 ## Related Topics
 
-### Reward Design
-
-* {doc}`reward-shaping` - Design effective single-objective rewards first
-* {doc}`verification-patterns` - Choose verification approach for each objective
-
-### Validation
-
+* {doc}`custom-patterns-cookbook` - Complete multi-objective implementation (Pattern 5)
+* {doc}`../datasets/prepare-for-training` - Using multi-metric rollouts for training
 * {doc}`../data-quality/index` - Validate multi-objective reward distributions
 * {doc}`../rollout-collection/optimize-for-training/production-scale` - Monitor metrics during collection
-
-### Training Integration
-
-* {doc}`../datasets/index` - Multi-metric rollouts in training formats
-* {doc}`../rollout-collection/sampling-strategies/index` - Sampling by training algorithm
 
 ---
 
 ## Next Steps
 
-:::{button-ref} ../data-quality/index
+:::{button-ref} ../datasets/prepare-for-training
 :color: primary
 :outline:
 :ref-type: doc
 
-Validate Data Quality →
+Prepare Multi-Metric Data →
 :::
 
 Or return to {doc}`index` for verification overview.

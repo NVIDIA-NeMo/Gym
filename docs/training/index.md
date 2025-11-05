@@ -78,8 +78,8 @@ Not sure where to start? Choose based on your current need:
   - {doc}`Datasets / Prepare for Training <datasets/prepare-for-training>`
 * - Connect to your RL framework
   - {doc}`Integration / Framework Comparison <integration/framework-comparison>` then select your framework
-* - Understand verification approaches
-  - {doc}`Verification / Verification Patterns <verification/verification-patterns>` (reference)
+* - Build custom verification
+  - {doc}`Verification / Custom Patterns <verification/custom-patterns-cookbook>` (cookbook)
 ```
 
 ## Training Workflow Patterns
