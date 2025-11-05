@@ -387,7 +387,7 @@ Use the built-in aggregation script for quick summaries:
 python scripts/print_aggregate_results.py +jsonl_fpath=rollouts.jsonl
 ```
 
-**See Also**:
+**Related Topics**:
 - {doc}`../../training/data-quality/index` - Validate quality before training
 - {doc}`../../training/rollout-collection/optimize-for-training/production-scale` - Monitor during collection
 

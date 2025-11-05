@@ -56,7 +56,7 @@ NeMo Gym automatically displays aggregated metrics after collection completes:
 
 Any numeric field from your resource server's verification is automatically averaged.
 
-See {doc}`../../about/concepts/rollout-collection-fundamentals` for detailed explanation of how automatic metric aggregation works.
+Refer to {doc}`../../about/concepts/rollout-collection-fundamentals` for detailed explanation of how automatic metric aggregation works.
 
 ### Resume Interrupted Runs
 
@@ -257,7 +257,7 @@ Use NeMo Gym's automatic metrics (see after collection completes) as a quick san
 - **Accuracy far from baseline**: Verification criteria may be too strict/loose
 - **Unexpected values**: Review resource server implementation
 
-See {doc}`../../data-quality/index` for comprehensive quality validation.
+Refer to {doc}`../../data-quality/index` for comprehensive quality validation.
 
 ### Quick Reward Distribution Check
 

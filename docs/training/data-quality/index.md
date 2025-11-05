@@ -22,7 +22,7 @@ Validate training data quality using NeMo Gym's automatic metrics before passing
 
 ## Automatic Metrics
 
-NeMo Gym automatically aggregates metrics after collection. See {doc}`../about/concepts/rollout-collection-fundamentals` for detailed explanation of how automatic metric aggregation works.
+NeMo Gym automatically aggregates metrics after collection. Refer to {doc}`../about/concepts/rollout-collection-fundamentals` for detailed explanation of how automatic metric aggregation works.
 
 **Quick summary**: Any numeric field from your resource server's `verify()` is averaged across all rollouts.
 
@@ -139,7 +139,7 @@ Before passing rollouts to RL frameworks:
 
 **Format**:
 - Use `ng_prepare_data` to validate JSONL format before training
-- See {doc}`../datasets/validate-format` for format requirements
+- Refer to {doc}`../datasets/validate-format` for format requirements
 
 ---
 
@@ -151,7 +151,7 @@ If your RL framework or training objectives require custom filtering or balancin
 
 1. **Implement based on your RL framework's requirements**
    - Each framework (VeRL, NeMo-RL, OpenRLHF, TRL) has different preferences
-   - See your framework's documentation for recommended preprocessing
+   - Refer to your framework's documentation for recommended preprocessing
 
 2. **Use NeMo Gym metrics to guide thresholds**
    - Automatic metrics help identify appropriate quality thresholds

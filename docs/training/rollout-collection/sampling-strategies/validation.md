@@ -65,7 +65,7 @@ NeMo Gym automatically aggregates metrics after collection:
 
 Use these instant metrics to validate sampling strategy effectiveness before detailed analysis.
 
-See {doc}`../../about/concepts/rollout-collection-fundamentals` for how automatic metric aggregation works.
+Refer to {doc}`../../about/concepts/rollout-collection-fundamentals` for how automatic metric aggregation works.
 
 ---
 
