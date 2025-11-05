@@ -88,7 +88,7 @@ class TestConfig(RunConfig):
         # TODO: This currently only handles relative entrypoints. Later on we can resolve the absolute path.
         self._dir_path = Path(self.entrypoint)
         assert not self.dir_path.is_absolute()
-        assert len(self.dir_path.parts) >= 2
+        assert len(self.dir_path.parts) == 2
 
         return super().model_post_init(context)
 
@@ -523,7 +523,7 @@ def init_resources_server():  # pragma: no cover
         exit()
 
     dirpath = Path(run_config.entrypoint)
-    assert len(dirpath.parts) >= 2
+    assert len(dirpath.parts) == 2
     makedirs(dirpath)
 
     server_type = dirpath.parts[0]
