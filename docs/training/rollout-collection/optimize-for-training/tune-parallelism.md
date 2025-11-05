@@ -28,9 +28,6 @@ Not sure if parallelism is your bottleneck? Start with {doc}`identify-bottleneck
 
 NeMo Gym uses `asyncio.Semaphore` to limit concurrent requests:
 
-:::{dropdown} Implementation Details
-:icon: code
-
 ```python
 semaphore = nullcontext()
 if config.num_samples_in_parallel:
@@ -44,7 +41,6 @@ async with semaphore:
 **Behavior**:
 - **When set**: Limits to N concurrent requests
 - **When omitted**: No limit (all tasks submitted concurrently)
-:::
 
 **Why this matters**: Setting parallelism prevents overwhelming your model server or hitting rate limits while maximizing throughput.
 

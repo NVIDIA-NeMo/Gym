@@ -35,11 +35,11 @@ Find optimal `num_samples_in_parallel` value using NeMo Gym's semaphore-based co
 {bdg-secondary}`Most impactful`
 :::
 
-:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` 3. Production Scale
+:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` 3. Training Throughput at Scale
 :link: production-scale
 :link-type: doc
 
-Apply resume patterns, verification optimization, and parameter overrides for million-scale generation.
+Use NeMo Gym's built-in features for large-scale generation: resume, verification optimization, throughput tracking, and data quality validation.
 +++
 {bdg-secondary}`Advanced`
 :::
@@ -66,8 +66,10 @@ Use this table to quickly navigate to the optimization guide that matches your s
   - {doc}`production-scale` → Caching and fast mode
 * - **Resume interrupted runs**
   - {doc}`production-scale` → Append mode behavior
-* - **Distribute across machines**
-  - {doc}`production-scale` → Chunking patterns
+* - **Track throughput**
+  - {doc}`production-scale` → Samples/sec and tokens/sec
+* - **Quick quality checks**
+  - {doc}`production-scale` → Smoke tests for broken verification
 ```
 
 ---
