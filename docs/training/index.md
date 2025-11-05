@@ -2,7 +2,7 @@
 
 # Training
 
-Scale up your training data generation workflows and integrate with RL frameworks. This section focuses on practical guidance for generating high-quality training data at production scale.
+Generate high-quality training data at scale with optimized rollout collection, verification, and formatting.
 
 ## Training Data Pipeline
 
@@ -47,13 +47,13 @@ Organize, validate, and prepare datasets in formats for RL training frameworks.
 {bdg-secondary}`formats` {bdg-secondary}`validation` {bdg-secondary}`sft-dpo`
 :::
 
-:::{grid-item-card} {octicon}`plug;1.5em;sd-mr-1` Integration
-:link: integration/index
+:::{grid-item-card} {octicon}`plug;1.5em;sd-mr-1` Handoff to Training
+:link: handoff-to-training
 :link-type: doc
 
-Connect your training data to NeMo-RL, VeRL, OpenRLHF, TRL, and custom frameworks.
+Pass your rollouts to RL training frameworks like NeMo-RL, VeRL, OpenRLHF, or TRL.
 +++
-{bdg-secondary}`rl-frameworks` {bdg-secondary}`nemo-rl` {bdg-secondary}`verl`
+{bdg-secondary}`training` {bdg-secondary}`frameworks` {bdg-secondary}`handoff`
 :::
 
 ::::
@@ -78,8 +78,8 @@ Not sure where to start? Choose based on your current need:
   - {doc}`Data Quality <data-quality/index>`
 * - Prepare data for SFT or DPO
   - {doc}`Datasets / Prepare for Training <datasets/prepare-for-training>`
-* - Connect to your RL framework
-  - {doc}`Integration / Framework Comparison <integration/framework-comparison>` then select your framework
+* - Pass data to your training framework
+  - {doc}`Handoff to Training <handoff-to-training>` (NeMo-RL, VeRL, OpenRLHF, TRL)
 * - Build custom verification
   - {doc}`Verification / Custom Patterns <verification/custom-patterns-cookbook>` (advanced)
 ```
@@ -104,7 +104,7 @@ responses_create_params:
 min_reward_threshold: 0.8
 ```
 
-**Guides**: {doc}`rollout-collection/sampling-strategies/sft` → {doc}`data-quality/index` → {doc}`datasets/prepare-for-training`
+**Guides**: {doc}`rollout-collection/optimize-for-training/index` → {doc}`data-quality/index` → {doc}`datasets/prepare-for-training`
 
 :::
 
@@ -122,25 +122,22 @@ responses_create_params:
 min_quality_difference: 0.1
 ```
 
-**Guides**: {doc}`rollout-collection/sampling-strategies/dpo` → {doc}`data-quality/index` → {doc}`datasets/prepare-for-training`
+**Guides**: {doc}`rollout-collection/optimize-for-training/index` → {doc}`data-quality/index` → {doc}`datasets/prepare-for-training`
 
 :::
 
-:::{tab-item} RL Training Data
+:::{tab-item} PPO Training Data
 
-Generate rollouts with shaped rewards for reinforcement learning:
+Generate rollouts with continuous rewards for reinforcement learning:
 
 ```yaml
 # Balanced approach
 num_samples_in_parallel: 10
 responses_create_params:
   temperature: 0.5  # Moderate exploration
-  
-# Use shaped rewards
-reward_shaping: continuous  # 0.0-1.0 range
 ```
 
-**Guides**: {doc}`verification/reward-shaping` → {doc}`rollout-collection/optimize-for-training/index` → {doc}`integration/nemo-rl` (or your framework)
+**Guides**: {doc}`rollout-collection/optimize-for-training/index` → {doc}`data-quality/index` → {doc}`handoff-to-training`
 
 :::
 

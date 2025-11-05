@@ -21,7 +21,7 @@ Convert `rollouts.jsonl` with reward scores into the specific format required by
 * - **Know your training algorithm**
   - SFT, DPO, or PPO—each needs different data preparation
 * - **Understand reward patterns**
-  - Binary (0/1), continuous (0.0-1.0), or multi-metric rewards (see {doc}`../verification/reward-shaping`)
+  - Binary (0/1), continuous (0.0-1.0), or multi-metric rewards
 ```
 
 **Related concepts**:
@@ -139,63 +139,22 @@ with open('dpo_pairs.jsonl', 'w') as f:
 - **Preferred gap**: 0.3–0.5 (clear quality difference)
 - **Avoid**: Pairs with gap < 0.1 (ambiguous preference)
 
-### Same-Prompt Pairing
-
-For better DPO training, pair responses to the same prompt:
+**Same-prompt pairing**: For best results, group rollouts by prompt and pair responses to the same prompt:
 
 ```python
 from collections import defaultdict
 
-# Group by prompt
 by_prompt = defaultdict(list)
-for rollout in rollouts:
-    prompt = rollout['responses_create_params']['input']
-    prompt_key = json.dumps(prompt)  # Use serialized prompt as key
-    by_prompt[prompt_key].append(rollout)
+for r in rollouts:
+    by_prompt[json.dumps(r['responses_create_params']['input'])].append(r)
 
-# Create pairs within each prompt
+# Pair best with worst from same prompt
 pairs = []
-for prompt_key, prompt_rollouts in by_prompt.items():
-    # Sort by reward
+for prompt_rollouts in by_prompt.values():
     prompt_rollouts.sort(key=lambda r: r['reward'], reverse=True)
-    
-    # Pair best with worst from same prompt
-    if len(prompt_rollouts) >= 2:
-        for i in range(len(prompt_rollouts) // 2):
-            chosen = prompt_rollouts[i]
-            rejected = prompt_rollouts[-(i+1)]
-            gap = chosen['reward'] - rejected['reward']
-            
-            if gap >= 0.2:
-                pairs.append({
-                    'chosen': chosen,
-                    'rejected': rejected,
-                    'reward_gap': gap
-                })
-
-print(f"Same-prompt pairs: {len(pairs)}")
+    if len(prompt_rollouts) >= 2 and prompt_rollouts[0]['reward'] - prompt_rollouts[-1]['reward'] >= 0.2:
+        pairs.append({'chosen': prompt_rollouts[0], 'rejected': prompt_rollouts[-1]})
 ```
-
-### Validation
-
-```python
-import statistics
-
-gaps = [p['reward_gap'] for p in pairs]
-
-print(f"DPO Dataset: {len(pairs)} pairs")
-print(f"Mean gap: {statistics.mean(gaps):.3f}")
-print(f"Min gap: {min(gaps):.3f}")
-print(f"Max gap: {max(gaps):.3f}")
-
-# Check distribution
-print(f"Gaps >= 0.3: {sum(1 for g in gaps if g >= 0.3)}/{len(gaps)}")
-```
-
-**Red flags**:
-- Mean gap < 0.2: Pairs too similar
-- Many gaps < 0.1: Insufficient separation
-- All gaps near 1.0: May be too easy (binary rewards only)
 
 ---
 
@@ -238,94 +197,30 @@ for i in range(len(bins)-1):
 - Std dev < 0.1: Rewards not discriminative enough
 - Single peak at 0.5: Verification may be noisy
 
-### Advanced: Reward Shaping
-
-If distribution is too binary, consider intermediate resource server:
-
-```python
-# Binary server (mcqa) might give:
-# [0.0, 0.0, 1.0, 0.0, 1.0, 1.0] - only two values
-
-# Consider using continuous server (equivalence_llm_judge) for:
-# [0.12, 0.35, 0.88, 0.41, 0.92, 0.87] - rich signal
-```
-
-See {doc}`../resource-servers/index` for resource server selection guidance.
+**Tip**: If rewards are too binary (only 0.0 and 1.0), consider switching to a continuous reward server like `equivalence_llm_judge` for richer signal. See {doc}`../resource-servers/index` for options.
 
 ---
 
-## Handling Different Training Algorithms
-
-### Quick Reference
+## Algorithm-Specific Guidance
 
 ```{list-table}
 :header-rows: 1
 :widths: 20 40 40
 
 * - Algorithm
-  - Reward Needs
+  - Preparation
   - Recommended Servers
 * - **SFT**
-  - Binary or high-threshold continuous
+  - Filter by high threshold (≥0.95)
   - mcqa, comp_coding, instruction_following
 * - **DPO**
-  - Continuous with clear separation (≥0.2 gap)
+  - Create pairs with ≥0.2 gap, same-prompt preferred
   - library_judge_math, equivalence_llm_judge
 * - **PPO/RL**
-  - Continuous with rich signal (varied distribution)
+  - Use rollouts as-is, validate varied distribution
   - multineedle, library_judge_math
 ```
 
-### Algorithm-Specific Tips
-
-::::{tab-set}
-
-:::{tab-item} SFT
-**Focus**: High-quality examples only
-
-**Preparation**:
-- Filter by high threshold (≥0.95)
-- Validate all kept examples are correct
-- Volume matters less than quality
-
-**Code**:
-```python
-sft_data = [r for r in rollouts if r['reward'] >= 0.95]
-```
-:::
-
-:::{tab-item} DPO
-**Focus**: Clear preference signals
-
-**Preparation**:
-- Ensure reward gap ≥0.2 between chosen/rejected
-- Prefer same-prompt pairs when possible
-- Balance dataset (equal chosen/rejected distribution)
-
-**Code**:
-```python
-# Same-prompt pairing with gap check
-pairs = create_pairs(rollouts, min_gap=0.2, same_prompt=True)
-```
-:::
-
-:::{tab-item} PPO
-**Focus**: Rich continuous signal
-
-**Preparation**:
-- Use rewards directly from rollouts
-- Validate varied distribution (not clustered)
-- Monitor std dev (should be > 0.15)
-
-**Code**:
-```python
-# PPO uses rollouts as-is
-# Just validate distribution
-assert statistics.stdev(rewards) > 0.15
-```
-:::
-
-::::
 
 ---
 

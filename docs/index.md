@@ -116,7 +116,7 @@ Generate training rollouts at scale with optimized sampling and parallelization.
 :link-type: doc
 Design reward signals and verification strategies that drive effective training.
 +++
-{bdg-secondary}`rewards` {bdg-secondary}`reward-shaping`
+{bdg-secondary}`rewards` {bdg-secondary}`scoring` {bdg-secondary}`verification`
 :::
 
 :::{grid-item-card} {octicon}`filter;1.5em;sd-mr-1` Data Quality
@@ -258,11 +258,11 @@ tutorials/separate-policy-and-judge-models
 :maxdepth: 2
 
 Overview <training/index>
+Resource Servers <training/resource-servers/index>
 Rollout Collection <training/rollout-collection/index>
 Verification <training/verification/index>
 Data Quality <training/data-quality/index>
 Datasets <training/datasets/index>
-Integration <training/integration/index>
 ```
 
 ```{toctree}

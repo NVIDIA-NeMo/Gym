@@ -17,7 +17,7 @@ Use this section when you need to:
 * **Understand format specifications** - Learn rollout JSON schema and requirements
 
 :::{seealso}
-For training framework integration, see {doc}`../integration/index` after preparing your datasets.
+For passing datasets to your training framework, see {doc}`../handoff-to-training` after preparing your datasets.
 :::
 
 
@@ -90,11 +90,11 @@ Curated Rollouts (JSONL)
     ↓
 [3. Validate]            ← ng_prepare_data command
     ↓
-Training-Ready Data      → to RL framework integration
+Training-Ready Data      → pass to training framework
 ```
 
 **Previous**: {doc}`../data-quality/index` for curation  
-**Next**: {doc}`../integration/index` for framework integration
+**Next**: {doc}`../handoff-to-training` for passing to training frameworks
 
 
 ## Common Dataset Operations
@@ -175,14 +175,7 @@ training_data/
 
 * {doc}`../data-quality/index` - Filter and curate before formatting
 * {doc}`../rollout-collection/index` - Generate raw rollouts
-* {doc}`../integration/index` - Use formatted data with frameworks
-
-### Framework-Specific Formats
-
-* {doc}`../integration/nemo-rl` - NeMo-RL format requirements
-* {doc}`../integration/verl` - VeRL format requirements
-* {doc}`../integration/openrlhf` - OpenRLHF format requirements
-* {doc}`../integration/trl` - TRL format requirements
+* {doc}`../handoff-to-training` - Pass data to training frameworks
 
 
 ## Next Steps
@@ -195,9 +188,6 @@ training_data/
 Start with Prepare for Training →
 :::
 
-:::{tip}
-**Not sure which format you need?** Start with {doc}`../integration/framework-comparison` to understand your framework's requirements, then return here for conversion guidance.
-:::
 
 ```{toctree}
 :hidden:

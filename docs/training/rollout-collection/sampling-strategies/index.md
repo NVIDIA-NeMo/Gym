@@ -36,16 +36,6 @@ Different training algorithms need different data characteristics—learn how to
   - 1
   - Medium-High
   - Balance exploration and exploitation
-* - **Evaluation**
-  - Very low
-  - 1
-  - Low
-  - Reproducible, deterministic results
-* - **Research**
-  - High
-  - 5+
-  - Medium
-  - Maximum diversity for discovery
 ```
 
 ---
@@ -91,32 +81,6 @@ Different training algorithms need different data characteristics—learn how to
 {bdg-secondary}`how-to` {bdg-secondary}`rl` {bdg-secondary}`exploration`
 :::
 
-:::{grid-item-card} {octicon}`beaker;1.5em;sd-mr-1` Evaluation Sampling Strategy
-:link: evaluation
-:link-type: doc
-
-**How-to guide** for benchmarking: reproducible, deterministic evaluation with minimal variance.
-+++
-{bdg-secondary}`how-to` {bdg-secondary}`evaluation` {bdg-secondary}`reproducibility`
-:::
-
-:::{grid-item-card} {octicon}`telescope;1.5em;sd-mr-1` Research Sampling Strategy
-:link: research
-:link-type: doc
-
-**How-to guide** for behavioral exploration: discovering capabilities, failure modes, and edge cases.
-+++
-{bdg-secondary}`how-to` {bdg-secondary}`research` {bdg-secondary}`analysis`
-:::
-
-:::{grid-item-card} {octicon}`graph;1.5em;sd-mr-1` Measuring Success
-:link: validation
-:link-type: doc
-
-**Reference** for validating your sampling strategy through reward distributions and diversity metrics.
-+++
-{bdg-secondary}`reference` {bdg-secondary}`validation` {bdg-secondary}`metrics`
-:::
 
 ::::
 
@@ -131,18 +95,14 @@ flowchart TD
     Start[What is your goal?] --> Training{Training or<br/>Evaluation?}
     
     Training -->|Training| Algorithm{Which algorithm?}
-    Training -->|Evaluation| Eval[Use Evaluation Strategy<br/>deterministic, repeatable]
     
     Algorithm -->|SFT| SFT[Use SFT Strategy<br/>low temp, single sample]
     Algorithm -->|DPO| DPO[Use DPO Strategy<br/>higher temp, multiple repeats]
     Algorithm -->|RL| RL[Use RL Strategy<br/>moderate temp, iterative]
-    Algorithm -->|Research/Debug| Research[Use Research Strategy<br/>high temp, many repeats]
     
     SFT --> Filter[Filter for high rewards]
     DPO --> Pair[Create preference pairs]
     RL --> Iterate[Iterative collection<br/>+ policy updates]
-    Eval --> Compare[Compare models<br/>fixed seed]
-    Research --> Analyze[Analyze variance<br/>+ failure modes]
 ~~~
 
 ---
@@ -199,21 +159,6 @@ ng_collect_rollouts \
 
 :::
 
-:::{tab-item} Evaluation
-
-```bash
-ng_collect_rollouts \
-    +agent_name=<agent_name> \
-    +input_jsonl_fpath=<input_file> \
-    +output_jsonl_fpath=<output_file> \
-    +responses_create_params.temperature=0.1 \
-    +responses_create_params.seed=42 \
-    +num_samples_in_parallel=5
-```
-
-**Typical settings**: Very low temperature (0.0-0.1) for determinism, fixed seed for reproducibility, low parallelism. Always set parameters explicitly rather than relying on model server defaults.
-
-:::
 
 ::::
 
@@ -237,7 +182,4 @@ Sampling Parameters <parameters>
 SFT <sft>
 DPO <dpo>
 RL <rl>
-Evaluation <evaluation>
-Research <research>
-Validation <validation>
 ```
