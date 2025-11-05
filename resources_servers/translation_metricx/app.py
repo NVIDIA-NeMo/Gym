@@ -20,9 +20,6 @@ import ray
 import transformers
 from fastapi import FastAPI
 from metricx24.models import MT5ForRegression
-from ray.util.scheduling_strategies import (
-    NodeAffinitySchedulingStrategy,
-)
 
 from nemo_gym import CACHE_DIR
 from nemo_gym.base_resources_server import (
@@ -31,8 +28,8 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.server_utils import (
-    get_global_config_dict,
+from nemo_gym.ray_utils import (
+    spinup_ray_gpu_workers,
 )
 
 
@@ -119,13 +116,6 @@ class TranslationMetricxResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
 
-        cfg = get_global_config_dict()
-        assert cfg["ray_nodes"], (
-            "No ray GPU nodes were provided."
-        )
-        if len(cfg["ray_nodes"]) > 1:
-            print("Multiple GPU nodes were provided, but only 1 will be used for the model worker.", flush=True)
-
         # Load tokenizer (MetricX models use MT5 tokenizers, separate from the model name)
         tokenizer = transformers.AutoTokenizer.from_pretrained(self.config.tokenizer_name)
         self._tokenizer = tokenizer
@@ -133,20 +123,16 @@ class TranslationMetricxResourcesServer(SimpleResourcesServer):
         # Ensure output directory exists (following predict.py lines 167-169)
         os.makedirs(self.config.output_dir, exist_ok=True)
 
-        model_worker_options = {}
-        model_worker_options["num_gpus"] = cfg["ray_num_gpus_per_node"]
-        model_worker_options["scheduling_strategy"] = NodeAffinitySchedulingStrategy(
-            node_id=cfg["ray_nodes"][0]["node_id"],
-            soft=False,
-        )
-        model_worker = TranslationMetricxModelWorker.options(**model_worker_options).remote()
-        # Load model with device placement
-        inputs_device = ray.get(model_worker._load_model.remote(
-            self.config.metricx_model_name,
-            self.config.device_map,
-            self.config.output_dir,
-        ))
-        self._model_workers = [model_worker]
+        model_workers = spinup_ray_gpu_workers(TranslationMetricxModelWorker)
+        inputs_device = None
+        for model_worker in model_workers:
+            # Load model with device placement
+            inputs_device = ray.get(model_worker._load_model.remote(
+                self.config.metricx_model_name,
+                self.config.device_map,
+                self.config.output_dir,
+            ))
+        self._model_workers = model_workers
         self._inputs_device = inputs_device
 
     def setup_webserver(self) -> FastAPI:
