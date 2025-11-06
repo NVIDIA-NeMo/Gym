@@ -86,8 +86,8 @@ A maintainer will:
 
 ### Default Status
 
-- All resource servers **start as `verified: true`** by default
-- If a server's verification is later disputed or training runs cannot be reproduced, maintainers may update it to `verified: false`
+- All resource servers should **start as `verified: true`** by default
+- If a server's verification is later disputed or training runs cannot be accessed or reproduced, maintainers may update it to `verified: false`
 - The verified flag is reflected in the README resource server tables
 
 
