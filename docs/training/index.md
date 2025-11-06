@@ -4,6 +4,166 @@
 
 Generate high-quality training data at scale with optimized rollout collection, verification, and formatting.
 
+## Why NeMo Gym for Training
+
+NeMo Gym decouples training data generation from your training framework. Your RL framework (VeRL, NeMo-RL, OpenRLHF) sends tasks to NeMo Gym and receives trajectories with reward signals—NeMo Gym handles the complexity of multi-turn agent coordination, tool calling, and async processing so your framework can focus on training.
+
+:::{dropdown} **Architecture: How It Works**
+:open:
+
+**Training Framework Responsibility**:
+- Sends tasks to NeMo Gym
+- Receives completed trajectories with rewards
+- Handles backpropagation and model weight updates
+
+**NeMo Gym Responsibility**:
+- Multi-turn agent coordination (tool calling loops)
+- Model-environment interaction (interleaved calls)
+- Async parallel task processing
+- Reward computation
+
+**Data Flow**:
+
+```python
+# Training framework → NeMo Gym
+response = await server_client.post("/run", task)
+
+# NeMo Gym → Training framework  
+result = await response.json()  # Contains trajectory + reward
+```
+
+**Source**: `nemo_gym/rollout_collection.py:99-102`
+
+:::
+
+:::{dropdown} **Key Architectural Benefits**
+
+**1. Multi-Turn Coordination**
+
+NeMo Gym's agent layer manages complex multi-turn tool-calling independently from your training loop:
+
+```python
+while True:
+    # Call model
+    model_response = await self.server_client.post(
+        server_name=self.config.model_server.name,
+        url_path="/v1/responses"
+    )
+    
+    # Execute tool calls
+    for tool_call in all_fn_calls:
+        await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path=f"/{tool_call.name}"
+        )
+```
+
+**Source**: `responses_api_agents/simple_agent/app.py:79-125`
+
+---
+
+**2. HTTP-Based Integration**
+
+All components (Models, Resources, Agents) are independent HTTP services, enabling integration with existing agent systems:
+
+```python
+class SimpleResponsesAPIAgent(BaseResponsesAPIAgent):
+    def setup_webserver(self) -> FastAPI:
+        app = FastAPI()
+        app.post("/v1/responses")(self.responses)
+        app.post("/run")(self.run)
+        return app
+```
+
+**Source**: `nemo_gym/base_responses_api_agent.py:34-45`
+
+---
+
+**3. Interleaved Processing**
+
+Model and environment calls happen within each step—no batch waiting:
+
+```python
+# 1. Model generates
+model_response = await self.server_client.post(...)
+
+# 2. Execute tools immediately  
+api_response = await self.server_client.post(...)
+
+# 3. Feed results back to model
+new_body = body.model_copy(update={"input": body.input + new_outputs})
+```
+
+**Source**: `responses_api_agents/simple_agent/app.py:79-130`
+
+---
+
+**4. Standardized Output Format**
+
+All models return structured `NeMoGymResponse` objects—no model-specific parsing:
+
+```python
+# Works across OpenAI, Azure, vLLM
+return NeMoGymResponse(
+    id=f"resp_{uuid4().hex}",
+    model=model_name,
+    output=response_output_dicts,
+    ...
+)
+```
+
+**Source**: `responses_api_models/azure_openai_model/app.py:68`, `responses_api_models/vllm_model/app.py:110`
+
+---
+
+**5. Independent Testing**
+
+Test resource servers without full training infrastructure using `ng_test`:
+
+```bash
+ng_test +entrypoint=resources_servers/simple_weather
+```
+
+Each server includes independent test suite:
+
+```python
+class TestApp:
+    def test_sanity(self) -> None:
+        config = SimpleWeatherResourcesServerConfig(...)
+        SimpleWeatherResourcesServer(config=config, ...)
+```
+
+**Source**: `resources_servers/simple_weather/tests/test_app.py:23-31`
+
+---
+
+**6. Async Parallelism**
+
+Configurable concurrency with semaphore control for high-throughput generation:
+
+```python
+semaphore = Semaphore(config.num_samples_in_parallel)
+
+async def _post_coroutine(row: dict) -> None:
+    async with semaphore:
+        response = await server_client.post("/run", json=row)
+        result = await response.json()
+
+await tqdm.gather(*map(_post_coroutine, rows))
+```
+
+**Source**: `nemo_gym/rollout_collection.py:86-105`
+
+**Configuration**: Set `num_samples_in_parallel=10` to control concurrent rollouts
+
+:::
+
+:::{seealso}
+For deeper architectural understanding, see {doc}`../about/architecture` and {doc}`../about/concepts/index`.
+:::
+
+---
+
 ## Training Data Pipeline
 
 Follow the training data pipeline from resource server selection to framework integration:
