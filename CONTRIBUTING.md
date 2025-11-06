@@ -58,8 +58,37 @@ We're excited about contributions that expand NeMo Gym's capabilities and improv
 
 
 
+## Resource Server Verification Process
 
+### What is the "Verified" flag?
 
+The `verified` flag in resource server configs indicates that the environment has demonstrated value through training runs and/or shows meaningful improvement on target benchmarks. This quality signal helps identify production-ready environments.
+
+### Verification Process
+
+1. **Submit PR** with `verified: true` in your resource server config YAML:
+```yaml
+your_server:
+   resources_servers:
+      your_server:
+         entrypoint: app.py
+         domain: coding
+         verified: true  # Set to true by default when submitting environment for review
+```
+
+2. **Include W&B Links** in the PR description.
+
+3. Reviewer Approval
+A maintainer will:
+- Review the W&B training run
+- Verify the improvement claims
+- Approve the PR if verification evidence is sufficient
+
+### Default Status
+
+- All resource servers **start as `verified: true`** by default
+- If a server's verification is later disputed or training runs cannot be reproduced, maintainers may update it to `verified: false`
+- The verified flag is reflected in the README resource server tables
 
 
 
