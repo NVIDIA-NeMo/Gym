@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -29,6 +30,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
 )
 
@@ -246,15 +248,28 @@ def convert_trajectory_to_output_items(
                     # Handle assistant messages which may have tool calls
                     tool_calls = item.get("tool_calls", [])
 
+                    prompt_token_ids = item.get("provider_specific_fields", {}).get("prompt_token_ids", [])
+                    generation_token_ids = item.get("provider_specific_fields", {}).get("generation_token_ids", [])
+                    generation_log_probs = item.get("provider_specific_fields", {}).get("generation_log_probs", [])
                     # Add assistant message if there's content (even if there are also tool calls)
                     if content:
                         output_items.append(
-                            NeMoGymResponseOutputMessage(
+                            NeMoGymResponseOutputMessageForTraining(
                                 id=f"msg-{len(output_items)}",
-                                content=[NeMoGymResponseOutputText(type="output_text", text=content, annotations=[])],
+                                content=[
+                                    NeMoGymResponseOutputText(
+                                        type="output_text",
+                                        text=content,
+                                        annotations=[],
+                                        logprobs=None,
+                                    )
+                                ],
                                 role="assistant",
                                 status="completed",
                                 type="message",
+                                prompt_token_ids=prompt_token_ids,
+                                generation_token_ids=generation_token_ids,
+                                generation_log_probs=generation_log_probs,
                             )
                         )
 
@@ -329,6 +344,8 @@ async def run_swebench_evaluation(
     agent_max_turns: int,
     swebench_tests_timeout: int,
     nemo_skills_config: Dict[str, Any],
+    agent_framework_repo: Optional[str] = None,
+    agent_framework_commit: str = "HEAD",
 ) -> Dict:
     """Run SWE-bench evaluation using NeMo-Skills.
 
@@ -342,6 +359,8 @@ async def run_swebench_evaluation(
         agent_max_turns: Maximum iterations for the agent
         swebench_tests_timeout: Timeout for running tests
         nemo_skills_config: Additional NeMo-Skills configuration
+        agent_framework_repo: URL of the agent framework repo to clone (optional)
+        agent_framework_commit: Commit/branch to use when cloning (default: HEAD)
 
     Returns:
         Evaluation results dictionary
@@ -375,6 +394,8 @@ async def run_swebench_evaluation(
         agent_max_turns,
         swebench_tests_timeout,
         nemo_skills_config,
+        agent_framework_repo,
+        agent_framework_commit,
     )
 
     LOG.info(f"Running NeMo-Skills command: {' '.join(cmd)}")
@@ -440,6 +461,8 @@ def build_nemo_skills_command(
     agent_max_turns: int,
     swebench_tests_timeout: int,
     nemo_skills_config: Dict[str, Any],
+    agent_framework_repo: Optional[str] = None,
+    agent_framework_commit: str = "HEAD",
 ) -> list:
     """Build command to run NeMo-Skills SWE-bench evaluation.
 
@@ -453,6 +476,8 @@ def build_nemo_skills_command(
         agent_max_turns: Maximum iterations
         swebench_tests_timeout: Test timeout
         nemo_skills_config: Additional configuration
+        agent_framework_repo: URL of the agent framework repo to clone (optional)
+        agent_framework_commit: Commit/branch to use when cloning (default: HEAD)
 
     Returns:
         Command as list of strings
@@ -478,6 +503,12 @@ def build_nemo_skills_command(
     if agent_config:
         cmd.append(f"++agent_config={agent_config}")
 
+    # Add agent framework repo and commit if specified
+    if agent_framework_repo:
+        cmd.append(f"++agent_framework_repo={agent_framework_repo}")
+    if agent_framework_commit:
+        cmd.append(f"++agent_framework_commit={agent_framework_commit}")
+
     # Add inference parameters
     inference_params = getattr(body, "inference", {})
     if hasattr(body, "temperature") and body.temperature is not None:
@@ -495,6 +526,63 @@ def build_nemo_skills_command(
         cmd.append(f"++{key}={value}")
 
     return cmd
+
+
+def extract_messages(trajectory_item) -> List[Dict]:
+    """
+    Trajectory might have failed assistant messages, hence we take trajectory as ground truth instead of history.
+    Convert a trajectory item into assistant and tool messages.
+    Returns a list of messages.
+    """
+    tool_calls = trajectory_item.get("tool_calls")
+    final_message = []
+    # Create assistant message
+    assistant_msg = {
+        "role": "assistant",
+        "content": trajectory_item.get("response", ""),
+        "thought": trajectory_item.get("thought", ""),
+        "action": trajectory_item.get("action", ""),
+        "agent": "main",
+        "tool_calls": tool_calls,
+        "message_type": "action",
+        "thinking_blocks": [],
+        "provider_specific_fields": trajectory_item.get("extra_info", {}).get("provider_specific_fields", {}),
+    }
+    final_message.append(assistant_msg)
+    if tool_calls is not None:
+        # Create tool message
+        tool_msg = {
+            "role": "tool",
+            "content": trajectory_item.get("observation", ""),
+            "agent": "main",
+            "message_type": "observation",
+            "tool_call_ids": trajectory_item.get("tool_call_ids", [""]),
+        }
+        final_message.append(tool_msg)
+
+    return final_message
+
+
+def extract_data_from_trajectory(
+    trajectory_data: List[Dict], history: List[Dict]
+) -> Tuple[List[Dict], Dict[int, Dict]]:
+    """
+    Extract final trajectory from trajectory and history.
+    """
+    final_trajectory = []
+    history_copy = copy.deepcopy(history)
+    trajectories_copy = copy.deepcopy(trajectory_data)
+    if len(trajectories_copy[-1]["query"][0]) == 0:  # error case
+        final_trajectory = trajectories_copy[-2]["query"].copy()
+        final_trajectory.extend(extract_messages(trajectories_copy[-2]))
+        user_message = history_copy.pop()
+        assistant_message = history_copy.pop()
+        user_message["content"] = user_message["content"] + "." + assistant_message["content"]
+        final_trajectory.append(user_message)
+    else:
+        final_trajectory = trajectories_copy[-1]["query"].copy()
+        final_trajectory.extend(extract_messages(trajectories_copy[-1]))
+    return final_trajectory
 
 
 def get_trajectory_and_tools(
@@ -532,7 +620,10 @@ def get_trajectory_and_tools(
                 # Read the first trajectory file found
                 try:
                     with open(traj_files[0], "r") as f:
-                        trajectory_data = json.load(f)["history"]
+                        traj_content = json.load(f)
+                        history = traj_content["history"]
+                        trajectory_steps = traj_content["trajectory"]
+                        trajectory_data = extract_data_from_trajectory(trajectory_steps, history)
                     LOG.info(f"Found and loaded SWE-agent trajectory file: {traj_files[0]}")
                 except Exception as e:
                     LOG.warning(f"Failed to read trajectory file {traj_files[0]}: {e}")

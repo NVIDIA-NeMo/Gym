@@ -85,6 +85,25 @@ def test_build_nemo_skills_command():
     assert "++inference.tokens_to_generate=2048" in cmd_str
     print("✓ test_build_nemo_skills_command")
 
+    # Test with agent framework repo and commit
+    cmd_with_repo = build_nemo_skills_command(
+        input_file,
+        output_file,
+        model_endpoint,
+        body,
+        "swe_agent",
+        None,
+        100,
+        1800,
+        {},
+        agent_framework_repo="https://github.com/custom/repo.git",
+        agent_framework_commit="main",
+    )
+    cmd_with_repo_str = " ".join(cmd_with_repo)
+    assert "++agent_framework_repo=https://github.com/custom/repo.git" in cmd_with_repo_str
+    assert "++agent_framework_commit=main" in cmd_with_repo_str
+    print("✓ test_build_nemo_skills_command (with repo/commit)")
+
 
 def test_get_openhands_trajectory_from_completions():
     """Test getting OpenHands trajectory from completion files."""

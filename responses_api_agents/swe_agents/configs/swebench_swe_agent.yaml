@@ -9,6 +9,9 @@ swe_agents:
       agent_config: eval/swe-bench/swe-agent/default_one_tool
       agent_max_turns: 100
       agent_tools_file: configs/swe_agent_tools_openai_format.json
+      agent_framework_repo: https://github.com/slikhite-1/nv-SWE-agent.git
+      agent_framework_commit: HEAD
+      max_retries: 1
       
       # Container configuration
       container_formatter: "docker://swebench/sweb.eval.x86_64.{instance_id}"
@@ -26,6 +29,7 @@ swe_agents:
         skip_filled: false
         dry_run: false
         max_concurrent_requests: 1  # SWE-bench is resource intensive
+        inference.top_logprobs: 10  # Request logprobs to get token IDs for training
       
       # Dataset configurations
       datasets:

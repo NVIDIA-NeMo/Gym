@@ -133,7 +133,7 @@ class VLLMModel(SimpleResponsesAPIModel):
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
-        body_dict = body.model_dump(exclude_unset=True)
+        body_dict = body.model_dump(exclude_unset=True, mode="json")
         body_dict["model"] = self.config.model
 
         session_id = request.session[SESSION_ID_KEY]
@@ -316,7 +316,7 @@ class VLLMConverter(BaseModel):
         self,
         responses_create_params: NeMoGymResponseCreateParamsNonStreaming,
     ) -> NeMoGymChatCompletionCreateParamsNonStreaming:
-        responses_create_params = responses_create_params.model_dump(exclude_unset=True)
+        responses_create_params = responses_create_params.model_dump(exclude_unset=True, mode="json")
 
         # Tracks messages including reasoning for each respective message type helper function
         state = VLLMConverterResponsesToChatCompletionsState(
