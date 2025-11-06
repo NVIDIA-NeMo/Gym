@@ -142,17 +142,7 @@ class TranslationMetricxResourcesServer(SimpleResourcesServer):
 
         model_workers = [spinup_single_ray_gpu_node_worker(TranslationMetricxModelWorker)]
         self._model_workers = model_workers
-
-        inputs_device = None
-        if False:
-        # for model_worker in model_workers:
-            # Load model with device placement
-            inputs_device = ray.get(model_worker._load_model.remote(
-                self.config.metricx_model_name,
-                self.config.device_map,
-                self.config.output_dir,
-            ))
-        self._inputs_device = inputs_device
+        self._inputs_device = None
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
