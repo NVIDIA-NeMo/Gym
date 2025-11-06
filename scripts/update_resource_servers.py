@@ -89,6 +89,36 @@ def extract_config_metadata(yaml_path: Path) -> tuple[str, str, list[str]]:
     return domain, description, license, types, verified
 
 
+def ensure_verified_flag(yaml_path: Path) -> bool:
+    """
+    Adds verified: true flag to config if it doesn't exist.
+    Returns whether the config was modified.
+    """
+    with yaml_path.open() as f:
+        content = f.read()
+        data = yaml.safe_load(content)
+
+    if not data:
+        return False
+
+    modified = False
+    for v in data.values():
+        if isinstance(v, dict) and "resources_servers" in v:
+            resources_servers_dict = v["resources_servers"]
+            if isinstance(resources_servers_dict, dict):
+                for server_config in resources_servers_dict.values():
+                    if isinstance(server_config, dict) and "verified" not in server_config:
+                        server_config["verified"] = True
+                        modified = True
+
+    if modified:
+        with yaml_path.open("w") as f:
+            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+        return True
+
+    return False
+
+
 def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:
     """Categorize servers into example-only and training-ready with metadata."""
     example_only_servers = []
@@ -107,6 +137,9 @@ def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:
             continue
 
         for yaml_file in yaml_files:
+            # Add verified: true flag to config if it doesn't exist.
+            ensure_verified_flag(yaml_file)
+
             domain, description, license, types, verified = extract_config_metadata(yaml_file)
 
             server_name = subdir.name
