@@ -60,6 +60,7 @@ class TranslationLLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     judge_score_extract_regex: str
     judge_max_score: int
     use_reference: bool = True  # If True, judge_prompt_template should include {trg_text}
+    reasoning_split_word: str = "</think>"
 
 
 class TranslationLLMJudgeRunRequest(BaseRunRequest):
@@ -88,40 +89,6 @@ class TranslationLLMJudgeVerifyResponse(BaseVerifyResponse):
     judge_evaluation: TranslationLLMJudgeEvaluation
 
 
-def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
-    """Extract the last assistant message text from the response.
-
-    - If the assistant message has multiple text blocks, they are joined with newlines.
-    - If ``extract_regex`` is provided, the last regex match is used; if capture
-      groups exist, the first non-empty group is returned, otherwise the full match.
-    - Returns an empty string when no assistant text is available.
-    """
-    # Return only the last assistant message's text content.
-    for o in reversed(body.response.output):
-        if getattr(o, "type", None) == "message" and getattr(o, "role", None) == "assistant":
-            content = getattr(o, "content", None)
-            if isinstance(content, list):
-                # Some providers split a single assistant message into multiple text blocks.
-                # Join all text blocks to reconstruct the full message text.
-                texts: list[str] = []
-                for c in content:
-                    t = getattr(c, "text", None)
-                    if isinstance(t, str):
-                        texts.append(t)
-                text = "\n".join(texts).strip()
-                if not text:
-                    return text
-                return text
-            elif isinstance(content, str):
-                text = content.strip()
-                if not text:
-                    return text
-
-                return text
-            break
-    return ""
-
-
 class TranslationLLMJudgeResourcesServer(SimpleResourcesServer):
     """Judge-only verifier using an LLM to evaluate translation quality."""
 
@@ -131,8 +98,43 @@ class TranslationLLMJudgeResourcesServer(SimpleResourcesServer):
         app = super().setup_webserver()
         return app
 
+    def _extract_last_assistant_text(self, body: BaseVerifyRequest) -> str:
+        """Extract the last assistant message text from the response.
+
+        - If the assistant message has multiple text blocks, they are joined with newlines.
+        - If ``extract_regex`` is provided, the last regex match is used; if capture
+        groups exist, the first non-empty group is returned, otherwise the full match.
+        - Returns an empty string when no assistant text is available.
+        """
+        # Return only the last assistant message's text content.
+        for o in reversed(body.response.output):
+            text = ""
+            if getattr(o, "type", None) == "message" and getattr(o, "role", None) == "assistant":
+                content = getattr(o, "content", None)
+                if isinstance(content, list):
+                    # Some providers split a single assistant message into multiple text blocks.
+                    # Join all text blocks to reconstruct the full message text.
+                    texts: list[str] = []
+                    for c in content:
+                        t = getattr(c, "text", None)
+                        if isinstance(t, str):
+                            texts.append(t)
+                    text = "\n".join(texts).strip()
+                elif isinstance(content, str):
+                    text = content.strip()
+
+        # Strip thinking if not already removed by reasoning parser
+        text = self._strip_thinking(text)
+        return text
+
+    def _strip_thinking(self, model_response: str) -> str:
+        # Strip any thinking
+        no_think_response = model_response.split(self.config.reasoning_split_word)[-1]
+        no_think_response = no_think_response.strip()
+        return no_think_response
+
     async def verify(self, body: TranslationLLMJudgeVerifyRequest) -> TranslationLLMJudgeVerifyResponse:
-        generated = _extract_last_assistant_text(body)
+        generated = self._extract_last_assistant_text(body)
 
         eval = await self._generate_judge_evaluation(
             generated_text=generated,
