@@ -278,6 +278,17 @@ get-started/collecting-rollouts
 ```
 
 ```{toctree}
+:caption: Setup & Deployment
+:hidden:
+:maxdepth: 2
+
+Overview <setup-deployment/index>
+Configuration <setup-deployment/configuration/index>
+Deployment <setup-deployment/deployment/index>
+Operations <setup-deployment/operations/index>
+```
+
+```{toctree}
 :caption: Tutorials
 :hidden:
 :maxdepth: 1
