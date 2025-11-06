@@ -2,7 +2,8 @@ translation_metricx:
   resources_servers:
     translation_metricx:
       entrypoint: app.py
-      domain: translation
+      domain: other
+      # domain: translation
       use_reference: true
       metricx_model_name: google/metricx-24-hybrid-xl-v2p6
       tokenizer_name: google/mt5-large
@@ -26,7 +27,8 @@ translation_metricx_simple_agent:
           dataset_name: riva_mt_v3_nothinkInSys_train
           version: 0.0.1
           artifact_fpath: riva_mt_v3_nothinkInSys_train.jsonl
-        license: NVIDIA Internal Use Only, Do Not Distribute
+        license: TBD
+        # license: NVIDIA Internal Use Only, Do Not Distribute
       - name: validation
         type: validation
         jsonl_fpath: resources_servers/translation_metricx/data/riva_mt_v3_nothinkInSys_validation.jsonl
@@ -35,7 +37,8 @@ translation_metricx_simple_agent:
           dataset_name: riva_mt_v3_nothinkInSys_validation
           version: 0.0.1
           artifact_fpath: riva_mt_v3_nothinkInSys_validation.jsonl
-        license: NVIDIA Internal Use Only, Do Not Distribute
+        license: TBD
+        # license: NVIDIA Internal Use Only, Do Not Distribute
       - name: example
         type: example
         jsonl_fpath: resources_servers/translation_metricx/data/example.jsonl
