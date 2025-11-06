@@ -96,6 +96,41 @@ Generate your first batch of rollouts and understand how they become training da
 
 ---
 
+## Setup & Deployment
+
+Configure NeMo Gym for your project. Manage environments, secure secrets, and deploy in development, testing, or production scenarios.
+
+::::{grid} 1 2 2 2
+:gutter: 1 1 1 2
+
+:::{grid-item-card} {octicon}`gear;1.5em;sd-mr-1` Configuration
+:link: setup-deployment/configuration/index
+:link-type: doc
+Master the three-tier configuration system for managing dev/test/prod environments and secrets.
++++
+{bdg-secondary}`how-to` {bdg-secondary}`config` {bdg-secondary}`secrets`
+:::
+
+:::{grid-item-card} {octicon}`cloud;1.5em;sd-mr-1` Deployment
+:link: setup-deployment/deployment/index
+:link-type: doc
+Deploy NeMo Gym locally, on remote servers, or in containerized infrastructure.
++++
+{bdg-secondary}`how-to` {bdg-secondary}`deployment` {bdg-secondary}`docker`
+:::
+
+:::{grid-item-card} {octicon}`pulse;1.5em;sd-mr-1` Operations
+:link: setup-deployment/operations/index
+:link-type: doc
+Monitor, test, and debug your NeMo Gym deployment for reliable operation.
++++
+{bdg-secondary}`how-to` {bdg-secondary}`monitoring` {bdg-secondary}`debugging`
+:::
+
+::::
+
+---
+
 ## Training
 
 Scale up training data generation and integrate with RL frameworks. Master rollout collection, data quality, and framework integration for production workflows.
