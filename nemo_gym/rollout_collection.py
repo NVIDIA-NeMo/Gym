@@ -105,7 +105,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
             await tqdm.gather(*map(_post_coroutine, rows), desc="Collecting rollouts", miniters=tqdm_miniters)
 
         avg_metrics = {k: v / len(rows) for k, v in metrics.items()}
-
+        avg_metrics.setdefault("reward", 0.0)
         print(json.dumps(avg_metrics, indent=4))
 
     def run_examples(

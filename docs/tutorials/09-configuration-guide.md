@@ -25,7 +25,7 @@ These are your base configurations that define server structures and default val
 ```bash
 # Define which config files to load
 config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/simple_weather/configs/simple_weather.yaml,\
+resources_servers/example_simple_weather/configs/simple_weather.yaml,\
 responses_api_agents/simple_agent/configs/simple_agent.yaml"
 
 ng_run "+config_paths=[${config_paths}]"
@@ -73,7 +73,7 @@ policy_model_name: gpt-4o-2024-11-20
 # Store complex config paths for convenience
 simple_weather_config_paths:
   - responses_api_models/openai_model/configs/openai_model.yaml
-  - resources_servers/simple_weather/configs/simple_weather.yaml
+  - resources_servers/example_simple_weather/configs/simple_weather.yaml
 
 # Different environments
 dev_model_name: gpt-4o-mini
@@ -317,7 +317,7 @@ math_training_config_paths:
 
 weather_demo_config_paths:
   - responses_api_models/openai_model/configs/openai_model.yaml  
-  - resources_servers/simple_weather/configs/simple_weather.yaml
+  - resources_servers/example_simple_weather/configs/simple_weather.yaml
 ```
 
 ### 3. Document Your Overrides
