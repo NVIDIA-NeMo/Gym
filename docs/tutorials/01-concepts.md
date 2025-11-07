@@ -1,6 +1,6 @@
 # Understanding Core Concepts
 
-Before diving into code, let's understand the three core abstrctions in NeMo Gym.
+Before diving into code, let's understand the three core abstractions in NeMo Gym.
 
 > [!TIP]
 > If you are new to reinforcement learning for LLMs, we recommend you review **[Key Terminology](00-terminology.md)** first.
@@ -110,4 +110,4 @@ Let's trace through a weather request:
 
 Now that you understand the concepts, let's get everything installed and running.
 
-→ **Next: [Next: Setup and Installation](02-setup.md)**
+→ **Next: [Setup and Installation](02-setup.md)**
