@@ -452,8 +452,10 @@ vllm serve Qwen/Qwen3-30B-A3B \
 
 ## Next Steps
 
-<div class="sd-d-flex-row sd-align-minor-center">
+::::{grid} 1 1 3 3
+:gutter: 2
 
+:::{grid-item}
 ```{button-ref} local-development
 :color: primary
 :outline:
@@ -461,7 +463,9 @@ vllm serve Qwen/Qwen3-30B-A3B \
 
 Set Up Locally First
 ```
+:::
 
+:::{grid-item}
 ```{button-ref} distributed-computing
 :color: primary
 :outline:
@@ -469,7 +473,9 @@ Set Up Locally First
 
 Scale with Ray
 ```
+:::
 
+:::{grid-item}
 ```{button-ref} ../../models/index
 :color: primary
 :outline:
@@ -477,8 +483,9 @@ Scale with Ray
 
 Browse Tested Models
 ```
+:::
 
-</div>
+::::
 
 :::{seealso}
 - **vLLM Documentation**: [docs.vllm.ai](https://docs.vllm.ai/)

@@ -277,8 +277,10 @@ Recommended `.vscode/settings.json`:
 
 ## Next Steps
 
-<div class="sd-d-flex-row sd-align-minor-center">
+::::{grid} 1 1 3 3
+:gutter: 2
 
+:::{grid-item}
 ```{button-ref} ../configuration/index
 :color: primary
 :outline:
@@ -286,7 +288,9 @@ Recommended `.vscode/settings.json`:
 
 Configure Your Setup
 ```
+:::
 
+:::{grid-item}
 ```{button-ref} vllm-integration
 :color: primary
 :outline:
@@ -294,7 +298,9 @@ Configure Your Setup
 
 Use Local Models with vLLM
 ```
+:::
 
+:::{grid-item}
 ```{button-ref} ../../tutorials/index
 :color: primary
 :outline:
@@ -302,8 +308,9 @@ Use Local Models with vLLM
 
 Follow Tutorials
 ```
+:::
 
-</div>
+::::
 
 :::{seealso}
 - **Debugging**: {doc}`../configuration/debugging`

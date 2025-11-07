@@ -573,8 +573,10 @@ futures = [
 
 ## Next Steps
 
-<div class="sd-d-flex-row sd-align-minor-center">
+::::{grid} 1 1 3 3
+:gutter: 2
 
+:::{grid-item}
 ```{button-ref} local-development
 :color: primary
 :outline:
@@ -582,7 +584,9 @@ futures = [
 
 Start Locally
 ```
+:::
 
+:::{grid-item}
 ```{button-ref} ../../training/index
 :color: primary
 :outline:
@@ -590,7 +594,9 @@ Start Locally
 
 Train with NeMo-RL
 ```
+:::
 
+:::{grid-item}
 ```{button-ref} ../configuration/multi-server
 :color: primary
 :outline:
@@ -598,8 +604,9 @@ Train with NeMo-RL
 
 Multi-Server Setup
 ```
+:::
 
-</div>
+::::
 
 :::{seealso}
 - **Ray Documentation**: [docs.ray.io](https://docs.ray.io/)

@@ -242,7 +242,10 @@ api_key = secrets.get_secret_value(SecretId='nemo-gym-api-key')
 
 ## Next Steps
 
-<div class="sd-d-flex-row sd-align-minor-center">
+::::{grid} 1 1 3 3
+:gutter: 2
+
+:::{grid-item}
 
 ```{button-ref} local-development
 :color: primary
@@ -252,6 +255,10 @@ api_key = secrets.get_secret_value(SecretId='nemo-gym-api-key')
 Get Started Locally
 ```
 
+:::
+
+:::{grid-item}
+
 ```{button-ref} vllm-integration
 :color: primary
 :outline:
@@ -259,6 +266,10 @@ Get Started Locally
 
 Connect to vLLM
 ```
+
+:::
+
+:::{grid-item}
 
 ```{button-ref} distributed-computing
 :color: primary
@@ -268,7 +279,9 @@ Connect to vLLM
 Scale with Ray
 ```
 
-</div>
+:::
+
+::::
 
 :::{seealso}
 **Configuration Reference**: {doc}`../configuration/index`  
