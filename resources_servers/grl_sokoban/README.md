@@ -1,6 +1,6 @@
 # GRL Sokoban Resource Server
 
-Single-box Sokoban puzzle environment served via FastAPI with NeMo Gym conventions. The environment is implemented locally under `resources_servers/grl_sokoban/env`, mirroring GRL’s behaviour without requiring the external repository.
+Single-box Sokoban puzzle environment served via FastAPI with NeMo Gym conventions. The environment is implemented locally under `resources_servers/grl_sokoban/env`, mirroring the sokoban implementation in GRL repo (https://github.com/lmgame-org/GRL). The implementation uses gym-sokoban package (https://github.com/mpSchrader/gym-sokoban) which implements DeepMind's paper Imagination Augmented Agents for Deep Reinforcement Learning following the standard of https://gymnasium.farama.org.
 
 ## Why it exists
 - **Domain**: Deterministic Sokoban puzzles.
@@ -8,16 +8,8 @@ Single-box Sokoban puzzle environment served via FastAPI with NeMo Gym conventio
 - **Verifier**: `/verify` rewards the cumulative Sokoban score only when `success` is reported by the environment.
 
 ## Setup
-1. **Install NeMo Gym locally (one-time)**
-   ```bash
-   uv pip install -e ".[dev]"
-   ```
-   This makes the `ng_*` CLI available in your active environment.
-2. **Install Sokoban-specific dependencies**
-   ```bash
-   uv pip install -r resources_servers/grl_sokoban/requirements.txt
-   ```
-3. (Optional) prepare datasets using `ng_collect_rollouts` once custom rollouts are available.
+
+Please follow the setup instructions as outlined in: https://github.com/NVIDIA-NeMo/Gym/blob/main/docs/tutorials/02-setup.md#step-1-clone-and-install. 
 
 ## Running
 Spin up the server alongside a compatible agent:
