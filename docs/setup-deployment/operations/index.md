@@ -6,7 +6,7 @@ Monitor, test, profile, and debug NeMo Gym deployments to ensure reliable, high-
 
 ---
 
-## Operations Topics
+## Topics
 
 Choose the operational task that matches your current need:
 
@@ -247,43 +247,6 @@ Set up automated alerts for health check failures and error rate spikes to catch
 3. **Log**: Enable debug logging for detailed output
 4. **Validate**: Check configuration with `ng_dump_config`
 5. **Fix**: Apply fix and verify with tests
-
----
-
-## Next Steps
-
-Start with the operational task most relevant to your current need:
-
-::::{grid} 1 1 2 2
-:gutter: 2
-
-:::{grid-item-card} {octicon}`pulse;1.5em;sd-mr-1` Set Up Monitoring
-:link: monitoring
-:link-type: doc
-
-Configure health checks and log monitoring
-:::
-
-:::{grid-item-card} {octicon}`beaker;1.5em;sd-mr-1` Run Tests
-:link: testing
-:link-type: doc
-
-Validate your deployment with comprehensive tests
-:::
-
-:::{grid-item-card} {octicon}`meter;1.5em;sd-mr-1` Profile Performance
-:link: profiling
-:link-type: doc
-
-Identify and optimize bottlenecks for production
-:::
-
-:::{grid-item-card} {octicon}`bug;1.5em;sd-mr-1` Debug Issues
-:link: debugging
-:link-type: doc
-
-Troubleshoot configuration and runtime problems
-:::
 
 ::::
 

@@ -2,475 +2,611 @@
 
 # Debugging
 
-Debug and troubleshoot NeMo Gym deployments to quickly resolve configuration, connectivity, and runtime issues.
+Systematically diagnose and resolve configuration, server, and runtime issues in NeMo Gym deployments.
 
----
-
-## Enable Debug Logging
-
-Increase logging verbosity to diagnose issues:
-
-```bash
-# Standard logging
-ng_run "+config_paths=[config.yaml]"
-
-# Debug-level logging
-ng_run "+config_paths=[config.yaml]" --log-level DEBUG
-
-# Save debug logs to file
-ng_run "+config_paths=[config.yaml]" --log-level DEBUG > debug.log 2>&1
-```
-
-**Log levels**:
-
-```{list-table}
-:header-rows: 1
-:widths: 20 30 50
-
-* - Level
-  - When to Use
-  - Information Shown
-* - `INFO`
-  - Normal operation
-  - Server startup, request counts, basic status
-* - `DEBUG`
-  - Troubleshooting
-  - Configuration values, request details, function calls
-* - `WARNING`
-  - Production monitoring
-  - Deprecations, potential issues, recoverable errors
-* - `ERROR`
-  - Critical issues
-  - Failures, exceptions, unrecoverable errors
-```
-
-:::{tip}
-Use `DEBUG` logging when troubleshooting, but return to `INFO` or `WARNING` for production to reduce log volume.
+:::{admonition} Target Audience
+:class: tip
+ML engineers and researchers debugging local development environments or distributed deployments.
 :::
 
 ---
 
-## Configuration Debugging
+## Quick Diagnosis
 
-Debug configuration issues using `ng_dump_config`:
+Start here to identify the issue category:
 
-### Validate Configuration
+::::{tab-set}
 
+:::{tab-item} Configuration Issues
+**Symptoms**: Missing variables, unresolved `${VAR}`, KeyError
+
+**Quick check**:
 ```bash
-# Dump full resolved configuration
 ng_dump_config "+config_paths=[config.yaml]"
-
-# Check specific section
-ng_dump_config "+config_paths=[config.yaml]" | grep policy_model
-
-# Validate environment variable substitution
-ng_dump_config "+config_paths=[config.yaml]" | grep '\${'
-# If this shows results, those variables are missing from env.yaml
 ```
 
-### Common Configuration Issues
-
-**Issue**: `KeyError: 'policy_api_key'`
-
-```bash
-# Diagnose: Check if variable exists in configuration
-ng_dump_config "+config_paths=[config.yaml]" | grep policy_api_key
-
-# Solution: Add to env.yaml
-echo "policy_api_key: sk-your-key" >> env.yaml
-```
-
-**Issue**: Variable not being substituted (`${VAR}` appears in config)
-
-```bash
-# Diagnose: Find unsubstituted variables
-ng_dump_config "+config_paths=[config.yaml]" | grep '\${'
-
-# Solution: Ensure variable is in env.yaml or dotenv file
-ng_dump_config "+config_paths=[config.yaml]" "+dotenv_path=env.yaml"
-```
-
-**Issue**: Configuration file not found
-
-```bash
-# Diagnose: Check path and working directory
-pwd
-ls config.yaml
-
-# Solution: Use absolute path or correct relative path
-ng_run "+config_paths=[/absolute/path/to/config.yaml]"
-```
-
-:::{seealso}
-For detailed configuration debugging techniques, refer to {doc}`../configuration/debugging`.
+→ Jump to {ref}`debug-configuration`
 :::
 
----
+:::{tab-item} Server Connectivity
+**Symptoms**: Connection refused, timeout, port conflicts
 
-## Server Connectivity Debugging
-
-Debug server communication and network issues:
-
-### Check Server Health
-
+**Quick check**:
 ```bash
-# Test if server is running
-curl http://localhost:8000/health
-
-# Test all servers
-for port in 8000 8001 8002 8003; do
-  echo "Testing port $port..."
-  curl -s http://localhost:$port/health || echo "Port $port not responding"
-done
-```
-
-### Identify Port Conflicts
-
-```bash
-# Check which process is using a port
-lsof -i :8000
-
-# Check all NeMo Gym server ports
-lsof -i :8000-8010
-
-# Network statistics
-netstat -an | grep 8000
-```
-
-**Resolve port conflicts**:
-
-```bash
-# Option 1: Kill conflicting process
-kill <PID>
-
-# Option 2: Use different port
-ng_run "+config_paths=[config.yaml]" +default_port=9000
-
-# Option 3: Specify port per server
-ng_run "+config_paths=[config.yaml]" \
-    +head_server.port=8000 \
-    +policy_model.port=8001
-```
-
-### Test Network Connectivity
-
-```bash
-# Test basic connectivity
-ping localhost
-
-# Test TCP connection
-telnet localhost 8000
-
-# Test HTTP endpoint
-curl -v http://localhost:8000/health
-```
-
-**Firewall issues**:
-
-```bash
-# Check if firewall is blocking ports (macOS)
-sudo pfctl -sr | grep 8000
-
-# Check firewall status (Linux)
-sudo ufw status
-sudo iptables -L
-```
-
----
-
-## Common Issues and Solutions
-
-### Connection Refused
-
-**Symptoms**: `Connection refused` error when making requests
-
-**Diagnose**:
-
-```bash
-# Check if server is running
+# Check if servers are running
 ps aux | grep ng_run
 
-# Check if port is listening
+# Check port availability
 lsof -i :8000
-
-# Check server logs for startup errors
-grep ERROR ng_gym.log
 ```
 
-**Solutions**:
+→ Jump to {ref}`debug-connectivity`
+:::
 
-1. **Server not started**: Run `ng_run "+config_paths=[config.yaml]"`
-2. **Wrong port**: Verify port in configuration matches request
-3. **Server crashed**: Check logs for errors, fix issue, restart
+:::{tab-item} Ray/Distributed
+**Symptoms**: Ray connection errors, worker failures
+
+**Quick check**:
+```bash
+ray status
+```
+
+→ Jump to {ref}`debug-ray`
+:::
+
+:::{tab-item} Runtime Errors
+**Symptoms**: Python exceptions, verification failures
+
+**Quick check**:
+```bash
+# Check server output for errors
+grep -i error logs/*.log
+```
+
+→ Jump to {ref}`debug-runtime`
+:::
+
+::::
 
 ---
 
-### API Key Invalid
+(debug-configuration)=
+## Configuration Debugging
 
-**Symptoms**: `401 Unauthorized` or `API key invalid`
+### Inspect Resolved Configuration
 
-**Diagnose**:
+Use `ng_dump_config` to view the final configuration after variable substitution:
 
+::::{tab-set}
+
+:::{tab-item} Full Config
 ```bash
-# Check if API key is set
-ng_dump_config "+config_paths=[config.yaml]" | grep api_key
+ng_dump_config "+config_paths=[config.yaml]"
+```
+:::
 
-# Verify env.yaml contains key
-cat env.yaml | grep api_key
+:::{tab-item} Specific Section
+```bash
+ng_dump_config "+config_paths=[config.yaml]" | grep -A 10 policy_model
+```
+:::
+
+:::{tab-item} Find Unresolved Variables
+```bash
+# Look for ${VAR} patterns that weren't substituted
+ng_dump_config "+config_paths=[config.yaml]" | grep '\${'
 ```
 
-**Solutions**:
+If this returns results, those variables are missing from `env.yaml`.
+:::
 
-1. **Missing key**: Add to `env.yaml`:
+::::
+
+### Common Configuration Problems
+
+::::{tab-set}
+
+:::{tab-item} Missing API Key
+**Error**: `KeyError: 'policy_api_key'`
+
+**Solution**:
+
+1. Check current configuration:
+   ```bash
+   ng_dump_config "+config_paths=[config.yaml]" | grep api_key
+   ```
+
+2. Add to `env.yaml`:
    ```yaml
    policy_api_key: sk-your-actual-key
    ```
 
-2. **Wrong variable name**: Ensure variable name in config matches env.yaml:
-   ```yaml
-   # config.yaml
-   api_key: ${policy_api_key}
-   
-   # env.yaml
-   policy_api_key: sk-...
+3. Verify substitution:
+   ```bash
+   ng_dump_config "+config_paths=[config.yaml]" | grep policy_api_key
    ```
+:::
 
-3. **Invalid key**: Verify key is correct and has proper permissions
+:::{tab-item} Unsubstituted Variable
+**Symptom**: `${VAR_NAME}` appears in dumped config
 
----
+**Solution**:
 
-### Module Not Found
+Ensure the variable exists in your environment file:
 
-**Symptoms**: `ModuleNotFoundError: No module named 'nemo_gym'`
-
-**Diagnose**:
-
-```bash
-# Check if NeMo Gym is installed
-pip list | grep nemo-gym
-
-# Check Python path
-python -c "import sys; print('\n'.join(sys.path))"
+```yaml
+# env.yaml
+policy_api_key: sk-...
+policy_model_name: gpt-4
 ```
 
-**Solutions**:
+Verify it's being loaded:
+```bash
+ng_dump_config "+config_paths=[config.yaml]" "+dotenv_path=env.yaml"
+```
+:::
 
-1. **Not installed**: Install in editable mode:
+:::{tab-item} Config File Not Found
+**Error**: `FileNotFoundError: config.yaml`
+
+**Solution**:
+
+1. Check working directory:
    ```bash
-   pip install -e .
+   pwd
+   ls -la config.yaml
    ```
 
-2. **Wrong environment**: Activate correct virtual environment:
+2. Use absolute path:
    ```bash
-   source .venv/bin/activate
+   ng_run "+config_paths=[$(pwd)/config.yaml]"
    ```
 
-3. **Wrong Python**: Verify using correct Python:
+3. Or verify relative path:
    ```bash
-   which python
-   python --version
+   # Config should be relative to where you run ng_run
+   ng_run "+config_paths=[./configs/my_config.yaml]"
    ```
+:::
+
+::::
 
 ---
 
-### Server Timeout
+(debug-connectivity)=
+## Server Connectivity Debugging
 
-**Symptoms**: Requests timeout after 30-60 seconds
+### Verify Servers Are Running
 
-**Diagnose**:
+::::{tab-set}
+
+:::{tab-item} Check Processes
+```bash
+# List all NeMo Gym server processes
+ps aux | grep ng_run
+
+# Check specific server by port
+lsof -i :8000
+```
+:::
+
+:::{tab-item} Test Server Endpoints
+NeMo Gym servers do not have built-in health endpoints. To verify a server is running:
 
 ```bash
-# Check if server is processing requests
-curl http://localhost:8003/stats
+# Check if port is listening
+nc -zv localhost 8000
 
-# Monitor server logs in real-time
-tail -f ng_gym.log | grep ERROR
+# Or use telnet
+telnet localhost 8000
 ```
 
-**Solutions**:
+For servers with profiling enabled, you can test the `/stats` endpoint:
+```bash
+# Only works if profiling_enabled=true
+curl http://localhost:8000/stats
+```
+:::
 
-1. **Slow verification**: Profile to identify bottlenecks (see {doc}`profiling`)
-2. **External API timeout**: Increase timeout or use async calls
-3. **Resource exhaustion**: Check CPU/memory usage with `top` or `htop`
+:::{tab-item} View Server Output
+```bash
+# Run servers in foreground to see output
+ng_run "+config_paths=[config.yaml]"
+
+# Or capture to file
+ng_run "+config_paths=[config.yaml]" 2>&1 | tee server.log
+```
+:::
+
+::::
+
+### Resolve Port Conflicts
+
+::::{tab-set}
+
+:::{tab-item} Identify Conflict
+```bash
+# Find process using the port
+lsof -i :8000
+
+# On Linux, also try
+netstat -tulpn | grep 8000
+```
+:::
+
+:::{tab-item} Change Port
+```bash
+# Use different default port
+ng_run "+config_paths=[config.yaml]" +default_port=9000
+
+# Or configure specific server ports
+ng_run "+config_paths=[config.yaml]" \
+    +head_server.port=8000 \
+    +policy_model.port=8001 \
+    +resource_server.port=8002
+```
+:::
+
+:::{tab-item} Kill Conflicting Process
+```bash
+# Find PID from lsof output
+lsof -i :8000
+
+# Kill the process
+kill <PID>
+
+# Force kill if needed
+kill -9 <PID>
+```
+:::
+
+::::
 
 ---
 
-### Ray Connection Issues
+(debug-ray)=
+## Ray Distributed Debugging
 
-**Symptoms**: `ray.exceptions.RaySystemError: Failed to connect to Ray`
+### Check Ray Cluster Status
 
-**Diagnose**:
+::::{tab-set}
 
+:::{tab-item} Cluster Status
 ```bash
-# Check Ray status
+# Check if Ray is running and view cluster info
 ray status
 
-# Check Ray logs
+# Expected output shows nodes, CPUs, GPUs
+```
+:::
+
+:::{tab-item} Ray Logs
+```bash
+# View Ray head node logs
 cat /tmp/ray/session_latest/logs/raylet.out
+
+# View most recent errors
+grep -i error /tmp/ray/session_latest/logs/*.log
+```
+:::
+
+:::{tab-item} Ray Dashboard
+```bash
+# Ray dashboard runs on port 8265 by default
+# Open in browser: http://localhost:8265
+```
+:::
+
+::::
+
+### Common Ray Issues
+
+```{list-table}
+:header-rows: 1
+:widths: 30 35 35
+
+* - Problem
+  - Diagnosis
+  - Solution
+* - Ray not started
+  - `ray status` returns error
+  - Run `ray start --head`
+* - Wrong Ray address
+  - Connection timeout
+  - Verify `ray_address` in config or set `RAY_ADDRESS` env var
+* - Worker out of memory
+  - Check Ray dashboard
+  - Reduce batch size or increase worker memory
+* - Worker crashed
+  - Check `ray status` for failed workers
+  - Check Ray logs for exceptions
 ```
 
-**Solutions**:
-
-1. **Ray not started**: Start Ray cluster:
-   ```bash
-   ray start --head
-   ```
-
-2. **Wrong Ray address**: Verify Ray address in configuration:
-   ```bash
-   ng_dump_config "+config_paths=[config.yaml]" | grep ray_address
-   ```
-
-3. **Ray cluster shutdown**: Restart Ray and NeMo Gym servers
-
 :::{seealso}
-For Ray deployment patterns, refer to {doc}`../deployment/distributed-computing`.
+For distributed deployment patterns, refer to {doc}`../deployment/distributed-computing`.
 :::
 
 ---
 
-## Interactive Debugging
+(debug-runtime)=
+## Runtime Debugging
 
-### Python Debugger (pdb)
+### Interactive Debugging with pdb
 
-**Add breakpoint in code**:
+Add breakpoints directly in your resource server code:
 
 ```python
-# In resource server code
-def verify(self, question, answer):
-    import pdb; pdb.set_trace()  # Debugger will stop here
-    # ... verification logic
+# In your resource server's verify method
+async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+    # Add breakpoint
+    import pdb; pdb.set_trace()
+    
+    # Your verification logic
+    result = self._check_answer(body.question, body.answer)
+    return BaseVerifyResponse(is_correct=result)
 ```
 
-**Run and debug**:
-
-```bash
-# Server will pause at breakpoint
-ng_run "+config_paths=[config.yaml]"
-
-# Use debugger commands:
-# (Pdb) n        - next line
-# (Pdb) s        - step into function
-# (Pdb) c        - continue execution
-# (Pdb) p var    - print variable
-# (Pdb) l        - show code context
-# (Pdb) q        - quit debugger
+:::{dropdown} pdb Commands Reference
 ```
+n (next)       - Execute current line, move to next
+s (step)       - Step into function call
+c (continue)   - Continue execution until next breakpoint
+p <var>        - Print variable value
+pp <var>       - Pretty-print variable
+l (list)       - Show code context
+w (where)      - Print stack trace
+q (quit)       - Quit debugger
+```
+:::
 
 ### Test-Driven Debugging
 
-**Isolate issue in test**:
+Isolate issues in unit tests for faster iteration:
 
 ```python
-# tests/test_app.py
-def test_specific_failure():
-    """Reproduce specific issue."""
-    server = ResourceServer()
+# tests/test_resource_server.py
+import pytest
+from your_server import YourResourceServer
+
+def test_specific_failing_case():
+    """Reproduce the exact failure."""
+    server = YourResourceServer()
     
-    # Exact input that causes issue
-    result = server.verify(
-        question="problematic input",
-        answer="expected output"
+    # Use the exact input that fails
+    result = await server.verify(
+        question="What is 2+2?",
+        answer="5"  # Intentionally wrong to test error handling
     )
     
-    assert result["is_correct"] == True  # Will fail, showing actual result
+    assert result.is_correct == False
+    assert "incorrect" in result.feedback.lower()
 ```
 
-**Run test with debugger**:
+Run with pytest debugger:
 
+::::{tab-set}
+
+:::{tab-item} Drop to pdb on Failure
 ```bash
-# Drop into debugger on failure
-pytest --pdb tests/test_app.py::test_specific_failure
+pytest --pdb tests/test_resource_server.py::test_specific_failing_case
+```
+:::
 
-# Run with verbose output
-pytest -vv -s tests/test_app.py::test_specific_failure
+:::{tab-item} Verbose Output
+```bash
+pytest -vv -s tests/test_resource_server.py
+```
+:::
+
+:::{tab-item} Run Single Test
+```bash
+pytest tests/test_resource_server.py::test_specific_failing_case
+```
+:::
+
+::::
+
+### Common Runtime Errors
+
+::::{dropdown} ModuleNotFoundError: No module named 'nemo_gym'
+**Cause**: NeMo Gym not installed or wrong Python environment
+
+**Solution**:
+```bash
+# Check installation
+pip list | grep nemo-gym
+
+# Install in editable mode
+pip install -e .
+
+# Verify correct environment
+which python
+source .venv/bin/activate
+```
+::::
+
+::::{dropdown} API Authentication Errors (401 Unauthorized)
+**Cause**: Missing or invalid API key
+
+**Solution**:
+1. Check if key is in `env.yaml`:
+   ```bash
+   grep api_key env.yaml
+   ```
+
+2. Verify it's being loaded:
+   ```bash
+   ng_dump_config "+config_paths=[config.yaml]" | grep api_key
+   ```
+
+3. Ensure variable name matches:
+   ```yaml
+   # config.yaml
+   api_key: ${OPENAI_API_KEY}
+   
+   # env.yaml
+   OPENAI_API_KEY: sk-...
+   ```
+::::
+
+::::{dropdown} Request Timeouts
+**Cause**: Slow verification logic or external API delays
+
+**Diagnosis**:
+```bash
+# Enable profiling to identify bottlenecks
+ng_run "+config_paths=[config.yaml]" +profiling_enabled=true
+
+# Query stats endpoint while servers are running
+curl http://localhost:8000/stats
 ```
 
----
-
-## Debugging Checklist
-
-When encountering an issue, follow this systematic approach:
-
-### Step 1: Gather Information
-
-- [ ] Read complete error message
-- [ ] Check server logs for errors: `grep ERROR ng_gym.log`
-- [ ] Verify server is running: `curl http://localhost:8000/health`
-- [ ] Note exact command that triggered issue
-
-### Step 2: Validate Configuration
-
-- [ ] Dump configuration: `ng_dump_config "+config_paths=[config.yaml]"`
-- [ ] Check for unresolved variables: `ng_dump_config ... | grep '\${'`
-- [ ] Verify API keys are set: `ng_dump_config ... | grep api_key`
-
-### Step 3: Test Components Individually
-
-- [ ] Test server in isolation: `ng_test +entrypoint=...`
-- [ ] Test health endpoints: `curl http://localhost:<port>/health`
-- [ ] Run with debug logging: `--log-level DEBUG`
-
-### Step 4: Search and Document
-
-- [ ] Search error message in documentation
-- [ ] Check GitHub issues for similar problems
-- [ ] Document solution for future reference
+**Solutions**:
+- Optimize verification logic (see {doc}`profiling`)
+- Increase timeout in configuration
+- Use async calls for external APIs
+- Check resource usage: `htop` or `top`
+::::
 
 ---
 
-## Getting Help
+## Systematic Debugging Workflow
 
-### Provide Debugging Information
+Follow this checklist for any issue:
 
+::::{tab-set}
+
+:::{tab-item} 1. Capture Information
+```bash
+# Capture full error output
+ng_run "+config_paths=[config.yaml]" 2>&1 | tee debug.log
+
+# Note the exact error message
+grep -i error debug.log
+
+# Check system resources
+df -h  # Disk space
+free -h  # Memory (Linux)
+top  # CPU usage
+```
+:::
+
+:::{tab-item} 2. Verify Configuration
+```bash
+# Dump and review configuration
+ng_dump_config "+config_paths=[config.yaml]" > config_dump.yaml
+
+# Check for unresolved variables
+grep '\${' config_dump.yaml
+
+# Verify file paths exist
+# (check paths in config_dump.yaml)
+```
+:::
+
+:::{tab-item} 3. Isolate Component
+```bash
+# Test resource server in isolation
+ng_test +entrypoint=resources_servers/your_server
+
+# Run with minimal configuration
+ng_run "+config_paths=[minimal_config.yaml]"
+
+# Test external dependencies separately
+# (e.g., API endpoints, databases)
+```
+:::
+
+:::{tab-item} 4. Document & Report
 When reporting issues, include:
 
-1. **Error message** (complete stack trace)
-2. **Configuration** (sanitized, no API keys)
-3. **Environment**: OS, Python version, NeMo Gym version
-4. **Steps to reproduce**
+1. **Error message**: Complete stack trace
+2. **Configuration**: Sanitized (remove API keys)
+3. **Environment**:
+   ```bash
+   echo "OS: $(uname -a)"
+   echo "Python: $(python --version)"
+   pip show nemo-gym
+   ```
+4. **Steps to reproduce**: Exact commands
 5. **Expected vs actual behavior**
+:::
 
-**Example bug report**:
+::::
 
+---
+
+## Logging Best Practices
+
+### Capture Logs Effectively
+
+::::{tab-set}
+
+:::{tab-item} Standard Output
+```bash
+# Capture stdout and stderr
+ng_run "+config_paths=[config.yaml]" 2>&1 | tee run.log
 ```
-Issue: Connection refused when starting servers
+:::
 
-Environment:
-- OS: macOS 14.0
-- Python: 3.10.12
-- NeMo Gym: 0.1.0
+:::{tab-item} Filter Noise
+```bash
+# NeMo Gym automatically filters 200 OK messages
+# This is enabled by default via uvicorn_logging_show_200_ok=false
 
-Configuration:
-<paste sanitized config>
-
-Steps to reproduce:
-1. ng_run "+config_paths=[config.yaml]"
-2. curl http://localhost:8000/health
-
-Error:
-<paste error message>
+# To show all requests (noisy):
+ng_run "+config_paths=[config.yaml]" +uvicorn_logging_show_200_ok=true
 ```
+:::
+
+:::{tab-item} Monitor in Real-Time
+```bash
+# Run in background
+ng_run "+config_paths=[config.yaml]" > server.log 2>&1 &
+
+# Tail and filter errors
+tail -f server.log | grep -i error
+
+# Or warnings
+tail -f server.log | grep -i warn
+```
+:::
+
+::::
 
 ---
 
 ## Next Steps
 
-::::{grid} 1 1 2 2
-:gutter: 2
+::::{grid} 1 2 2 2
+:gutter: 3
 
-:::{grid-item-card} {octicon}`pulse;1.5em;sd-mr-1` Monitor Health
+:::{grid-item-card} {octicon}`meter;1.5em` Performance Profiling
+:link: profiling
+:link-type: doc
+
+Profile slow verification logic
+:::
+
+:::{grid-item-card} {octicon}`pulse;1.5em` System Monitoring
 :link: monitoring
 :link-type: doc
 
-Set up monitoring to catch issues early
+Set up continuous monitoring
 :::
 
-:::{grid-item-card} {octicon}`beaker;1.5em;sd-mr-1` Validate with Tests
+:::{grid-item-card} {octicon}`beaker;1.5em` Testing Guide
 :link: testing
 :link-type: doc
 
-Run comprehensive tests to verify fixes
+Write tests to prevent regressions
+:::
+
+:::{grid-item-card} {octicon}`question;1.5em` Configuration Reference
+:link: ../configuration/reference
+:link-type: doc
+
+Full configuration options
 :::
 
 ::::

@@ -12,7 +12,6 @@ Manage NeMo Gym's three-tier configuration system for different environments, se
 ← Review Configuration System Concepts
 :::
 
-
 ## Quick Configuration Patterns
 
 Common configuration patterns for different deployment scenarios:

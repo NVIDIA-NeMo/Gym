@@ -39,6 +39,8 @@ All servers follow this hierarchy:
 
 ## Server Configurations
 
+Each server type has specific required and optional fields:
+
 ::::{tab-set}
 
 :::{tab-item} Model Servers
@@ -470,6 +472,8 @@ policy_model:
 
 ## Best Practices
 
+Follow these conventions to maintain clear and consistent configurations:
+
 ::::{dropdown} Naming Conventions
 
 **Resource servers**: `<name>_resources_server`
@@ -551,12 +555,3 @@ resources_servers/my_server/data/
 ```
 
 ::::
-
----
-
-## Related
-
-- {doc}`index` - Configuration system overview
-- {doc}`debugging` - Debug configuration issues
-- {doc}`multi-server` - Multi-server deployment patterns
-- {doc}`../../about/concepts/configuration-system` - Configuration system concepts

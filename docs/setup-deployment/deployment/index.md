@@ -125,13 +125,13 @@ head_server:
   port: 8000
 ```
 
-:::{warning}
+```{warning}
 Binding to `0.0.0.0` exposes servers to network. Ensure:
 
 - Configure firewall rules
 - Secure API keys properly
 - Use TLS/SSL for production traffic
-:::
+```
 
 **Use when**:
 
@@ -139,55 +139,6 @@ Binding to `0.0.0.0` exposes servers to network. Ensure:
 - Container orchestration
 - Multi-machine setups
 - External API access required
-
-:::
-
-::::
-
----
-
-## Credentials and Secrets
-
-### Development: `env.yaml`
-
-```yaml
-# env.yaml (automatically gitignored)
-policy_api_key: sk-your-openai-key
-policy_base_url: https://api.openai.com/v1
-judge_api_key: sk-your-judge-key
-```
-
-### Production Options
-
-::::{tab-set}
-
-:::{tab-item} Environment Variables
-
-```bash
-export POLICY_API_KEY=sk-prod-key
-ng_run "+config_paths=[config.yaml]"
-```
-
-:::
-
-:::{tab-item} Mounted Configuration
-
-```bash
-# Docker with mounted secrets
-docker run -v /secure/env.yaml:/app/env.yaml nemo-gym
-```
-
-:::
-
-:::{tab-item} Secret Management
-
-```python
-# Integration with secret managers
-import boto3
-
-secrets = boto3.client('secretsmanager')
-api_key = secrets.get_secret_value(SecretId='nemo-gym-api-key')
-```
 
 :::
 

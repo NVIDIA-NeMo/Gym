@@ -171,6 +171,8 @@ See {doc}`../../tutorials/separate-policy-and-judge-models` for complete guide.
 
 ## Common Use Cases
 
+Apply multi-server configurations to these typical deployment scenarios.
+
 ### Multi-Task Training
 
 Train a single agent across diverse capabilities:
@@ -200,8 +202,6 @@ ng_collect_rollouts +agent_name=multi_task_agent \
 ```
 
 **Benefits**: Comprehensive capability assessment, identify domain-specific strengths/weaknesses.
-
----
 
 ### Environment-Based Configuration
 
@@ -260,6 +260,8 @@ Each YAML can reference other files using the `config_paths` key. NeMo Gym recur
 
 ## Validation and Debugging
 
+Debug multi-server configurations by verifying merged settings and identifying conflicts.
+
 ### Verify Merged Configuration
 
 View the final merged configuration:
@@ -270,11 +272,11 @@ ng_dump_config "+config_paths=[$config_paths]"
 
 This shows the complete configuration after merging all files, with all references resolved.
 
----
-
 ### Common Issues
 
-::::{dropdown} **Issue: Server name conflicts**
+Watch out for these problems when merging multiple configuration files:
+
+::::{dropdown} Server name conflicts
 
 **Symptom**: Later configuration file overwrites earlier server unintentionally.
 
@@ -306,7 +308,7 @@ search_agent:
 
 ::::
 
-::::{dropdown} **Issue: Server reference not found**
+::::{dropdown} Server reference not found
 
 **Symptom**: Error saying a referenced server doesn't exist.
 
@@ -330,7 +332,7 @@ math_agent:
 
 ::::
 
-::::{dropdown} **Issue: Configuration not loading in expected order**
+::::{dropdown} Configuration not loading in expected order
 
 **Symptom**: Wrong values after merge.
 
@@ -345,19 +347,3 @@ config_paths="dev_overrides.yaml,base_model.yaml"
 ```
 
 ::::
-
----
-
-## Next Steps
-
-```{list-table}
-:header-rows: 0
-:widths: 30 70
-
-* - {doc}`debugging`
-  - Debug multi-server deployments with logging and profiling
-* - {doc}`../../tutorials/separate-policy-and-judge-models`
-  - Complete example of policy/judge pattern
-* - {doc}`../../training/handoff-to-training`
-  - Use multi-server rollouts in training frameworks
-```

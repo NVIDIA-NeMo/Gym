@@ -28,6 +28,8 @@ Always run `ng_dump_config` before `ng_run` to validate configuration. It uses i
 
 ## Core Debugging Workflows
 
+Use these workflows to diagnose the most common configuration issues:
+
 ::::{tab-set}
 
 :::{tab-item} Variable Resolution
@@ -151,6 +153,8 @@ ng_dump_config "+config_paths=[$config_paths]"
 
 ### Compare Configs
 
+Compare configurations across files to identify differences:
+
 ```bash
 # Dump each config separately
 ng_dump_config "+config_paths=[base.yaml]" > /tmp/base.yaml
@@ -190,6 +194,8 @@ grep "jsonl_fpath:" /tmp/config.yaml
 ---
 
 ## Common Errors
+
+These are the most frequent configuration errors and how to resolve them:
 
 ::::{dropdown} Server reference not found
 
@@ -290,7 +296,9 @@ Remember: Later files override earlier ones.
 
 ---
 
-## Advanced Techniques
+## Production & Automation
+
+Use these patterns for validating configurations in production environments and CI/CD pipelines.
 
 ### Environment-Specific Validation
 
@@ -307,9 +315,9 @@ ng_dump_config "+dotenv_path=env.prod.yaml" > /tmp/prod.yaml
 diff /tmp/dev.yaml /tmp/prod.yaml
 ```
 
----
-
 ### Extract Specific Server Config
+
+Extract configuration for individual servers to isolate troubleshooting:
 
 ```bash
 # View single server configuration
@@ -319,9 +327,9 @@ ng_dump_config "+config_paths=[config.yaml]" | grep -A 20 "^policy_model:"
 ng_dump_config "+config_paths=[config.yaml]" | grep -A 10 "responses_api_models:"
 ```
 
----
-
 ### CI/CD Validation
+
+Integrate configuration validation into your deployment pipeline:
 
 ```bash
 # Validate in pipeline before deployment
@@ -336,11 +344,3 @@ if ! grep -q "policy_api_key" resolved.yaml; then
     exit 1
 fi
 ```
-
----
-
-## Next Steps
-
-- **{doc}`index`** - Configuration system overview
-- **{doc}`multi-server`** - Multi-server configuration patterns
-- **{doc}`../operations/index`** - Debug running servers with logging and profiling

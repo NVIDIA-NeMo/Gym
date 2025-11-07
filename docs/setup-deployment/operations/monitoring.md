@@ -2,69 +2,93 @@
 
 # Monitoring
 
-Monitor NeMo Gym deployments to ensure reliable operation through health checks, log analysis, and resource tracking.
+Monitor NeMo Gym training runs and server deployments through built-in progress tracking, log analysis, and system resource monitoring.
 
 ---
 
-## Health Checks
+## Built-In Monitoring Features
 
-Each server exposes a health endpoint for availability monitoring:
+NeMo Gym provides automatic monitoring during training data collection.
+
+### Real-Time Progress Tracking
+
+`ng_collect_rollouts` displays live progress with throughput metrics:
 
 ```bash
-# Check server health
-curl http://localhost:8000/health
+ng_collect_rollouts \
+    +input_jsonl_fpath=tasks.jsonl \
+    +output_jsonl_fpath=rollouts.jsonl
 
-# Check specific server
-curl http://localhost:8001/health  # Agent
-curl http://localhost:8002/health  # Policy model
-curl http://localhost:8003/health  # Resource server
+# Displays:
+# Collecting rollouts: 45%|████▌     | 450/1000 [02:15<02:45, 3.33it/s]
 ```
 
-**Use health checks to**:
-- Verify server is running and accepting requests
-- Monitor uptime in production deployments
-- Integrate with load balancers and orchestration tools
-- Validate server startup in automation scripts
+**Key metric**: `it/s` (items per second) shows current throughput. Use this to identify bottlenecks during collection.
 
-:::{tip}
-Health checks return HTTP 200 status when the server is healthy. Use these endpoints in Kubernetes liveness probes, Docker healthchecks, or monitoring dashboards.
+### Automatic Metric Aggregation
+
+After collection completes, NeMo Gym displays aggregated metrics for all numeric fields from your resource server:
+
+```json
+{
+  "reward": 0.73,
+  "accuracy": 0.68,
+  "avg_tool_calls": 2.1
+}
+```
+
+:::{seealso}
+For details on metric aggregation, refer to {ref}`concepts-rc-fundamentals`.
 :::
 
 ---
 
 ## Log Monitoring
 
-Monitor logs to track server activity and diagnose issues:
+Monitor server activity and diagnose issues through log analysis.
 
-### Enable Logging
+### Enable Debug Logging
 
+:::::{tab-set}
+
+::::{tab-item} Standard Logging
 ```bash
-# Standard logging
 ng_run "+config_paths=[config.yaml]"
-
-# Debug-level logging
-ng_run "+config_paths=[config.yaml]" --log-level DEBUG
-
-# Save logs to file
-ng_run "+config_paths=[config.yaml]" > ng_gym.log 2>&1
 ```
+::::
+
+::::{tab-item} Debug Logging
+```bash
+ng_run "+config_paths=[config.yaml]" --log-level DEBUG
+```
+::::
+
+::::{tab-item} Save to File
+```bash
+ng_run "+config_paths=[config.yaml]" > logs/ng_gym.log 2>&1
+```
+::::
+
+:::::
 
 ### Analyze Logs
 
-**Search for errors**:
+:::::{tab-set}
 
+::::{tab-item} Search for Errors
 ```bash
-# Find errors in logs
+# Find errors
 grep ERROR ng_gym.log
 
 # Find warnings
 grep WARN ng_gym.log
 
-# Follow logs in real-time
+# Follow in real-time
 tail -f ng_gym.log | grep ERROR
 ```
+::::
 
-**Common log patterns**:
+::::{tab-item} Common Patterns
 
 ```{list-table}
 :header-rows: 1
@@ -74,46 +98,65 @@ tail -f ng_gym.log | grep ERROR
   - Meaning
   - Action
 * - `Server started on port 8000`
-  - Server initialized successfully
+  - Server initialized
   - Normal operation
 * - `Connection refused`
-  - Cannot reach dependent server
-  - Verify server is running
+  - Cannot reach server
+  - Verify server running
 * - `API key invalid`
   - Authentication failure
-  - Check env.yaml credentials
+  - Check `env.yaml`
 * - `Timeout after 30s`
-  - Request taking too long
-  - Investigate performance
+  - Request too slow
+  - Check {doc}`profiling`
 ```
 
+::::
+
+::::{tab-item} Multi-Server Logs
+```bash
+# Timestamped log files
+ng_run "+config_paths=[config.yaml]" \
+    > logs/ng_gym_$(date +%Y%m%d_%H%M%S).log 2>&1
+
+# Aggregate errors
+cat logs/*.log | grep ERROR | sort
+```
+::::
+
+:::::
+
 :::{seealso}
-For debugging specific configuration issues, refer to {doc}`debugging`.
+For troubleshooting configuration issues, refer to {doc}`debugging`.
 :::
 
 ---
 
-## Resource Usage Monitoring
+## System Resource Monitoring
 
-Track system resources to optimize deployment and prevent bottlenecks:
+Track CPU, memory, network, and GPU resources to optimize deployments.
 
-### CPU and Memory Monitoring
+::::{dropdown} CPU and Memory Monitoring
+:icon: cpu
 
 ```bash
 # Real-time process monitoring
 top
 
-# Enhanced interactive monitoring
+# Enhanced monitoring (install: brew install htop / apt install htop)
 htop
 
-# Monitor specific process
+# Monitor NeMo Gym processes
 ps aux | grep ng_run
 ```
 
-### Network Monitoring
+::::
+
+::::{dropdown} Network Monitoring
+:icon: broadcast
 
 ```bash
-# Check which ports are in use
+# Check ports in use
 lsof -i :8000
 lsof -i :8001-8010
 
@@ -124,7 +167,10 @@ netstat -an | grep 8000
 tcpdump -i lo0 port 8000
 ```
 
-### GPU Monitoring
+::::
+
+::::{dropdown} GPU Monitoring
+:icon: device-desktop
 
 For deployments using GPU inference (vLLM, NVIDIA NIM):
 
@@ -139,102 +185,166 @@ watch -n 1 nvidia-smi
 nvidia-smi -i 0
 ```
 
+**Key metrics**:
+- **GPU utilization**: Should be 90-95% during inference
+- **Memory usage**: Track to avoid OOM errors
+- **Temperature**: Monitor for thermal throttling
+
+::::
+
 ---
 
-## Production Monitoring Patterns
+## Server Availability Checks
 
-### Multi-Server Health Monitoring
+Verify servers are running by testing their API endpoints.
 
-**Check all servers at once**:
+### Check Individual Servers
+
+NeMo Gym servers expose these endpoints:
+
+:::::{tab-set}
+
+::::{tab-item} Resource Server
+```bash
+# Test verification endpoint
+curl -X POST http://localhost:8003/verify \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+**Endpoints**: `/seed_session`, `/verify`
+::::
+
+::::{tab-item} Agent Server
+```bash
+# Test agent endpoint
+curl -X POST http://localhost:8001/run \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+**Endpoints**: `/v1/responses`, `/run`
+::::
+
+::::{tab-item} Model Server
+```bash
+# Test model endpoint (OpenAI-compatible)
+curl -X POST http://localhost:8002/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+**Endpoints**: `/v1/chat/completions`, `/v1/responses`
+::::
+
+:::::
+
+### Multi-Server Availability Script
+
+Check all configured servers:
 
 ```bash
-# Create health check script
-cat > check_health.sh << 'EOF'
 #!/bin/bash
-servers=(8000 8001 8002 8003)
-for port in "${servers[@]}"; do
-  status=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$port/health)
-  if [ $status -eq 200 ]; then
-    echo "✓ Port $port: healthy"
-  else
-    echo "✗ Port $port: unhealthy (status: $status)"
-  fi
-done
-EOF
+# check_servers.sh
 
-chmod +x check_health.sh
-./check_health.sh
+# Resource server
+curl -sf http://localhost:8003/seed_session -X POST \
+  -H "Content-Type: application/json" -d '{}' > /dev/null \
+  && echo "✓ Resource server (8003): running" \
+  || echo "✗ Resource server (8003): not responding"
+
+# Agent server  
+curl -sf http://localhost:8001/v1/responses -X POST \
+  -H "Content-Type: application/json" -d '{}' > /dev/null \
+  && echo "✓ Agent server (8001): running" \
+  || echo "✗ Agent server (8001): not responding"
+
+# Model server
+curl -sf http://localhost:8002/v1/chat/completions -X POST \
+  -H "Content-Type: application/json" -d '{}' > /dev/null \
+  && echo "✓ Model server (8002): running" \
+  || echo "✗ Model server (8002): not responding"
 ```
 
-### Log Aggregation
-
-**For multi-server deployments**:
-
-```bash
-# Run with separate log files per server
-ng_run "+config_paths=[config.yaml]" \
-    > logs/nemo_gym_$(date +%Y%m%d_%H%M%S).log 2>&1
-
-# Aggregate and analyze
-cat logs/*.log | grep ERROR | sort
-```
-
-### Metrics Collection
-
-**Track request counts and response times**:
-
-Most resource servers log metrics to help track performance:
-
-```bash
-# View metrics from logs
-grep "Request processed" ng_gym.log | \
-  awk '{print $NF}' | \
-  datamash mean 1 median 1 max 1
-```
-
-:::{seealso}
-For detailed performance analysis, refer to {doc}`profiling`.
+:::{tip}
+For Kubernetes deployments, use these endpoint checks in liveness and readiness probes.
 :::
 
 ---
 
-## Integration with External Tools
+## External Monitoring Integration
 
-### Prometheus Metrics
+### vLLM Prometheus Metrics
 
-Some NeMo Gym servers expose metrics endpoints compatible with Prometheus:
+If using vLLM as a model server, vLLM exposes Prometheus-compatible metrics:
 
 ```bash
-# Check if metrics endpoint exists
+# Check vLLM metrics endpoint
 curl http://localhost:8000/metrics
 ```
 
-### Grafana Dashboards
+**Available metrics**:
+- Request throughput
+- Batch sizes
+- Queue lengths
+- Token generation rates
 
-Create custom dashboards to visualize:
+:::{seealso}
+Refer to {doc}`../../models/vllm/optimization` for vLLM-specific monitoring guidance.
+:::
+
+### Custom Monitoring Integration
+
+For production deployments, integrate with your existing monitoring stack:
+
+::::{dropdown} Example: Prometheus + Grafana
+:icon: graph
+
+**1. Expose custom metrics** from your resource server:
+
+```python
+from prometheus_client import Counter, Histogram
+
+request_count = Counter('requests_total', 'Total requests')
+response_time = Histogram('response_seconds', 'Response time')
+
+async def verify(self, body: BaseVerifyRequest):
+    request_count.inc()
+    with response_time.time():
+        # Your verification logic
+        pass
+```
+
+**2. Configure Prometheus** to scrape vLLM and custom metrics
+
+**3. Create Grafana dashboards** to visualize:
 - Request throughput per server
-- Response latencies
+- Response latencies (p50, p95, p99)
 - Error rates
-- Resource utilization
+- GPU utilization
 
-### Alert Configuration
+::::
 
-**Example alert rules** (adapt to your monitoring system):
+::::{dropdown} Example: Alert Configuration
+:icon: alert
 
 ```yaml
+# Example alert rules (adapt to your monitoring system)
 alerts:
   - name: HighErrorRate
-    condition: error_rate > 0.05
+    expr: rate(requests_failed[5m]) > 0.05
     action: notify_on_call
   
-  - name: SlowResponseTime
-    condition: p95_latency > 5000ms
+  - name: SlowVerification
+    expr: histogram_quantile(0.95, response_seconds) > 5.0
     action: investigate
   
-  - name: ServerDown
-    condition: health_check_failed
-    action: restart_server
+  - name: GPUMemoryHigh
+    expr: gpu_memory_usage_percent > 90
+    action: scale_up
 ```
+
+::::
 
 ---
 
@@ -258,4 +368,3 @@ Identify and optimize performance bottlenecks
 :::
 
 ::::
-
