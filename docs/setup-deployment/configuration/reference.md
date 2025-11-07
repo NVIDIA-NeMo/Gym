@@ -223,7 +223,7 @@ Training data for model optimization.
   - Dataset license (e.g., `Apache 2.0`, `MIT`, `Creative Commons Attribution 4.0 International`)
 ```
 
-**Optional**: `num_repeats` (default: 1), `start_idx`, `end_idx`
+**Optional**: `num_repeats` (default: 1)
 
 **Example**:
 
