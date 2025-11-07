@@ -217,7 +217,7 @@ def generate_training_table(servers: list[dict]) -> str:
     rows.sort(
         key=lambda r: (
             0 if "✓" in r[4] else 1,  # verified (reverse order for checkmarks first)
-            normalize_str(r[0]),  # domain second
+            normalize_str(r[0]),  # domain
             normalize_str(r[1]),  # name
             normalize_str(r[2]),  # train
             normalize_str(r[3]),  # val
