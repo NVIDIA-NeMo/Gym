@@ -3,7 +3,7 @@ mcqa:
     mcqa:
       entrypoint: app.py
       domain: knowledge
-      verified: true
+      verified: false
 mcqa_simple_agent:
   responses_api_agents:
     simple_agent:

@@ -19,12 +19,11 @@ import yaml
 
 def ensure_verified_flag(yaml_path: Path) -> bool:
     """
-    Adds verified: true flag to config if it doesn't exist.
+    Adds verified: false flag to config if it doesn't exist.
     Returns whether the config was modified.
     """
     with yaml_path.open() as f:
-        content = f.read()
-        data = yaml.safe_load(content)
+        data = yaml.safe_load(f)
 
     if not data:
         return False
@@ -36,7 +35,7 @@ def ensure_verified_flag(yaml_path: Path) -> bool:
             if isinstance(resources_servers_dict, dict):
                 for server_config in resources_servers_dict.values():
                     if isinstance(server_config, dict) and "verified" not in server_config:
-                        server_config["verified"] = True
+                        server_config["verified"] = False
                         modified = True
 
     if modified:
@@ -57,7 +56,7 @@ def main():
     modified_count = 0
     for filepath in changed_files:
         yaml_file = Path(filepath)
-        # Add verified: true flag to config if it doesn't exist.
+        # Add verified: false flag to config if it doesn't exist.
         if ensure_verified_flag(yaml_file):
             modified_count += 1
 

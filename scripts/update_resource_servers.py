@@ -50,14 +50,16 @@ def extract_config_metadata(yaml_path: Path) -> tuple[str, str, list[str]]:
     description = None
     license = None
     types = []
-    verified = False
+    verified = None
+    verified_url = None
 
     def visit_resource_server(data, level=1):
-        nonlocal domain, description, verified
+        nonlocal domain, description, verified, verified_url
         if level == 4:
             domain = data.get("domain")
             description = data.get("description")
-            verified = data.get("verified")
+            verified = data.get("verified", False)
+            verified_url = data.get("verified_url")
             return
         else:
             for k, v in data.items():
@@ -86,7 +88,7 @@ def extract_config_metadata(yaml_path: Path) -> tuple[str, str, list[str]]:
     visit_resource_server(data)
     visit_agent_datasets(data)
 
-    return domain, description, license, types, verified
+    return domain, description, license, types, verified, verified_url
 
 
 def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:
@@ -107,7 +109,7 @@ def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:
             continue
 
         for yaml_file in yaml_files:
-            domain, description, license, types, verified = extract_config_metadata(yaml_file)
+            domain, description, license, types, verified, verified_url = extract_config_metadata(yaml_file)
 
             server_name = subdir.name
             example_only_prefix = "example_"
@@ -127,6 +129,7 @@ def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:
                 "display_name": display_name,
                 "domain": domain,
                 "verified": verified,
+                "verified_url": verified_url,
                 "description": description,
                 "config_path": config_path,
                 "config_filename": yaml_file.name,
@@ -195,7 +198,15 @@ def generate_training_table(servers: list[dict]) -> str:
         train_mark = "✓" if "train" in types_set else "-"
         val_mark = "✓" if "validation" in types_set else "-"
 
-        verified_mark = "✓" if server.get("verified") else "-"
+        # Add verified status with URL if available
+        is_verified = server.get("verified", False)
+        verified_url = server.get("verified_url", "")
+        if is_verified and verified_url:
+            verified_mark = f"<a href='{verified_url}'>✓</a>"
+        elif is_verified:
+            verified_mark = "✓"
+        else:
+            verified_mark = "-"
 
         config_link = f"<a href='{server['config_path']}'>{server['config_filename']}</a>"
 

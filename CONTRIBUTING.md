@@ -66,15 +66,18 @@ The `verified` flag in resource server configs indicates that the environment ha
 
 ### Verification Process
 
-1. **Submit PR** with `verified: true` in your resource server config YAML:
+1. **Submit PR** with `verified: false` in your resource server config YAML.
+
+Please note any config staged without a `verified` flag will automatically be updated to contain `verified: false` via pre-commit hook.
 ```yaml
 your_server:
    resources_servers:
       your_server:
          entrypoint: app.py
          domain: coding
-         verified: true  # Set to true by default when submitting environment for review
+         verified: false  # Set to false by default when submitting environment for review
 ```
+
 
 2. **Include W&B Links** in the PR description.
 
@@ -86,8 +89,8 @@ A maintainer will:
 
 ### Default Status
 
-- All resource servers should **start as `verified: true`** by default
-- If a server's verification is later disputed or training runs cannot be accessed or reproduced, maintainers may update it to `verified: false`
+- All resource servers should **start as `verified: false`** by default until a reviewer approves and updates it to `true`
+- If a server's verification is later disputed or training runs cannot be accessed or reproduced, maintainers may revert it to `verified: false`
 - The verified flag is reflected in the README resource server tables
 
 
