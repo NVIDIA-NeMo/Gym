@@ -59,7 +59,7 @@ Understanding what gets deployed:
 * - Head Server
   - Configuration distribution
   - Internal coordinator
-  - 11000 (fixed)
+  - 11000
 * - Responses API Agent
   - Orchestrates interactions
   - External API endpoint
