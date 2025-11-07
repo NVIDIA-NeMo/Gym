@@ -1,299 +1,346 @@
-(config-debugging)=
-
 # Configuration Debugging
 
-Debug and validate your NeMo Gym configuration to catch errors before running.
+(config-debugging)=
+
+Validate configuration and diagnose issues before running servers.
 
 ---
 
-## Inspect Resolved Configuration
+## Quick Start
 
-View the fully resolved configuration after all three layers (YAML → env.yaml → CLI) are merged:
+View your resolved configuration to catch errors early:
 
 ```bash
-# Basic usage
 ng_dump_config "+config_paths=[config.yaml]"
-
-# Grep for specific values
-ng_dump_config "+config_paths=[config.yaml]" | grep policy_api_key
-
-# With multiple configs
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/library_judge_math/configs/bytedtsinghua_dapo17k.yaml"
-ng_dump_config "+config_paths=[$config_paths]"
 ```
 
-**Use `ng_dump_config` to**:
-- Debug configuration issues before running servers
-- Verify variable substitution from `env.yaml` works correctly
-- Confirm CLI overrides apply as expected
-- Understand the final configuration NeMo Gym sees
-- Troubleshoot server startup problems
+This shows the final configuration after merging all layers:
+
+1. Configuration files (from `config_paths`)
+2. Environment variables (from `env.yaml`)
+3. Command-line overrides (from `+key=value`)
 
 ```{tip}
-Run `ng_dump_config` before `ng_run` to catch configuration errors early. It uses the exact same config resolution logic as `ng_run`.
+Always run `ng_dump_config` before `ng_run` to validate configuration. It uses identical resolution logic.
 ```
 
 ---
 
-## Common Debugging Scenarios
+## Core Debugging Workflows
 
-### Check env.yaml Variable Resolution
+::::{tab-set}
 
-Verify that variables from `env.yaml` are properly substituted:
+:::{tab-item} Variable Resolution
+
+Verify `env.yaml` variables are substituted correctly:
 
 ```bash
-# env.yaml contains: policy_api_key: sk-abc123
+# Check specific variable
 ng_dump_config "+config_paths=[config.yaml]" | grep api_key
-# Should show: openai_api_key: sk-abc123
+
+# Expected output:
+# openai_api_key: sk-abc123
 ```
 
 **Common issues**:
-- Variable not defined in `env.yaml`
-- Typo in variable name (e.g., `${policy_key}` vs `${policy_api_key}`)
-- Wrong `env.yaml` file loaded (check `+dotenv_path`)
 
----
+- Variable undefined in `env.yaml`
+- Typo in variable name (`${policy_key}` vs `${policy_api_key}`)
+- Wrong env file loaded (specify with `+dotenv_path=env.prod.yaml`)
 
-### Verify CLI Overrides Apply
+:::
 
-Test that command-line overrides work as expected:
+:::{tab-item} Server References
 
-```bash
-ng_dump_config "+config_paths=[config.yaml]" +policy_model_name=gpt-4o-mini | grep model_name
-# Should show the overridden value: model_name: gpt-4o-mini
-```
-
-**Override syntax**:
-- Use `+key=value` for top-level keys
-- Use `+server.subsection.key=value` for nested keys
-- Quote values with spaces: `+key="value with spaces"`
-
----
-
-### Identify Port Conflicts
-
-Check which ports are assigned to each server:
+Validate server cross-references:
 
 ```bash
-ng_dump_config "+config_paths=[config.yaml]" | grep port
-# Shows all assigned ports across servers
-```
-
-**What to look for**:
-- Duplicate port numbers (conflict)
-- Ports outside allowed range
-- Ports conflicting with other services (8000, 5432, etc.)
-
-**Solution**: Explicitly set ports or let NeMo Gym auto-assign:
-
-```yaml
-my_server:
-  responses_api_models:
-    openai_model:
-      host: "127.0.0.1"
-      port: 8080  # Explicitly set to avoid conflicts
-```
-
----
-
-### Check Server References
-
-Verify that server references point to valid server names:
-
-```bash
+# List all server references
 ng_dump_config "+config_paths=[config.yaml]" | grep -A 2 "server:"
-# Shows all server references
 ```
 
-**Common reference issues**:
-- Referencing non-existent server name
-- Wrong server type (e.g., `type: responses_api_agents` instead of `responses_api_models`)
-- Typo in server name
-
-**Example valid reference**:
+**Valid reference structure**:
 
 ```yaml
 my_agent:
   responses_api_agents:
     simple_agent:
       model_server:
-        type: responses_api_models
-        name: policy_model  # Must match Level 1 name of a model server
+        type: responses_api_models  # Must match server category
+        name: policy_model          # Must match top-level server name
 ```
+
+**Common issues**:
+
+- Non-existent server name
+- Wrong server type
+- Server defined after reference (check `config_paths` order)
+
+:::
+
+:::{tab-item} Port Conflicts
+
+Check port assignments across all servers:
+
+```bash
+ng_dump_config "+config_paths=[config.yaml]" | grep "port:"
+```
+
+**Resolution strategies**:
+
+1. **Auto-assign** (recommended) - Omit `port` key entirely:
+
+   ```yaml
+   my_server:
+     responses_api_models:
+       openai_model:
+         host: "127.0.0.1"  # Port auto-assigned by OS
+   ```
+
+2. **Explicit ports** - Set unique ports manually:
+
+   ```yaml
+   policy_model:
+     responses_api_models:
+       openai_model:
+         port: 8080
+   
+   judge_model:
+     responses_api_models:
+       openai_model:
+         port: 8081
+   ```
+
+:::
+
+:::{tab-item} CLI Overrides
+
+Test command-line overrides apply correctly:
+
+```bash
+ng_dump_config "+config_paths=[config.yaml]" \
+    +policy_model.responses_api_models.openai_model.model_name=gpt-4o-mini \
+    | grep model_name
+```
+
+**Override syntax**:
+
+- Top-level: `+key=value`
+- Nested: `+server.section.key=value`
+- With spaces: `+key="value with spaces"`
+- Multiple: `+key1=value1 +key2=value2`
+
+:::
+
+::::
 
 ---
 
-### Validate Dataset Paths
+## Multi-Config Debugging
 
-Ensure dataset files exist at specified paths:
-
-```bash
-ng_dump_config "+config_paths=[config.yaml]" | grep jsonl_fpath
-# Lists all dataset file paths
-
-# Then verify files exist
-ls resources_servers/multineedle/data/*.jsonl
-```
-
-**Dataset path issues**:
-- Relative path is wrong (relative to repo root)
-- File doesn't exist yet (need to generate or download)
-- Typo in filename
-
----
-
-### Debug Multiple Configuration Files
-
-When using multiple config files, verify the merge order:
+When merging multiple configuration files:
 
 ```bash
-config_paths="base.yaml,prod.yaml,override.yaml"
+config_paths="base.yaml,dev.yaml,overrides.yaml"
 ng_dump_config "+config_paths=[$config_paths]"
 ```
 
-**Merge behavior**:
-- Files merged left-to-right (later files override earlier ones)
-- Each file can add new servers or override existing ones
-- CLI args override everything
+**Merge order**: Files merge left-to-right, with later files overriding earlier ones.
 
-**Debugging merge conflicts**:
+**Priority**: `config_paths[0]` < `config_paths[1]` < ... < `env.yaml` < CLI args
+
+### Compare Configs
 
 ```bash
-# Check each config individually
+# Dump each config separately
 ng_dump_config "+config_paths=[base.yaml]" > /tmp/base.yaml
-ng_dump_config "+config_paths=[prod.yaml]" > /tmp/prod.yaml
+ng_dump_config "+config_paths=[dev.yaml]" > /tmp/dev.yaml
 
-# Compare to see what changed
-diff /tmp/base.yaml /tmp/prod.yaml
+# See what changed
+diff /tmp/base.yaml /tmp/dev.yaml
+```
+
+```{seealso}
+See {doc}`multi-server` for multi-file configuration patterns.
 ```
 
 ---
 
-## Configuration Validation Workflow
+## Pre-Deployment Checklist
 
-Follow this workflow to validate configuration before deployment:
+Validate configuration before running:
 
 ```bash
-# 1. Dump and review configuration
-ng_dump_config "+config_paths=[config.yaml]" > /tmp/resolved_config.yaml
+# 1. Dump resolved config
+ng_dump_config "+config_paths=[$config_paths]" > /tmp/config.yaml
 
-# 2. Check for required variables
-grep "policy_api_key" /tmp/resolved_config.yaml
-grep "judge_api_key" /tmp/resolved_config.yaml
+# 2. Verify required variables present
+grep "api_key" /tmp/config.yaml
 
-# 3. Verify all servers are configured
-grep "entrypoint:" /tmp/resolved_config.yaml
+# 3. Check all servers configured
+grep "entrypoint:" /tmp/config.yaml
 
-# 4. Check port assignments
-grep "port:" /tmp/resolved_config.yaml
+# 4. Validate port assignments
+grep "port:" /tmp/config.yaml
 
-# 5. Validate dataset paths exist
-grep "jsonl_fpath:" /tmp/resolved_config.yaml | while read line; do
-    path=$(echo "$line" | cut -d':' -f2 | tr -d ' ')
-    ls "$path" 2>/dev/null || echo "Missing: $path"
-done
+# 5. Confirm dataset files exist
+grep "jsonl_fpath:" /tmp/config.yaml
 ```
 
 ---
 
-## Troubleshooting Common Errors
+## Common Errors
 
-### Error: "Server reference not found"
+::::{dropdown} Server reference not found
 
-```
+**Error**:
+
+```text
 ValueError: Server reference {'type': 'responses_api_models', 'name': 'policy_model'} not found
 ```
 
-**Cause**: Agent references a server that doesn't exist in configuration.
+**Cause**: Referenced server doesn't exist in merged configuration.
 
-**Solution**: 
-1. Run `ng_dump_config` and search for the server name
-2. Check spelling and ensure server is defined
-3. Verify server is in same config file or earlier in `config_paths`
+**Fix**:
 
----
+1. Dump config and search for server: `ng_dump_config ... | grep policy_model`
+2. Check spelling matches exactly
+3. Ensure server defined before reference (check `config_paths` order)
 
-### Error: "API key not set"
+::::
 
-```
+::::{dropdown} API key not set
+
+**Error**:
+
+```text
 ValueError: openai_api_key is required but not set
 ```
 
-**Cause**: Variable reference `${policy_api_key}` not resolved from `env.yaml`.
+**Cause**: Variable `${policy_api_key}` not resolved from `env.yaml`.
 
-**Solution**:
-1. Check `env.yaml` exists and contains the key
-2. Verify variable name matches exactly (case-sensitive)
-3. Try: `ng_dump_config "+config_paths=[config.yaml]" | grep api_key`
+**Fix**:
 
----
+1. Verify `env.yaml` exists and contains the variable
+2. Check exact spelling (case-sensitive)
+3. Test resolution: `ng_dump_config ... | grep api_key`
+4. Specify env file: `ng_dump_config "+dotenv_path=env.yaml" ...`
 
-### Error: "Port already in use"
+::::
 
-```
+::::{dropdown} Port already in use
+
+**Error**:
+
+```text
 OSError: [Errno 48] Address already in use
 ```
 
-**Cause**: Another service is using the assigned port.
+**Cause**: Port conflict with another service.
 
-**Solution**:
-1. Find which port is conflicting: `ng_dump_config ... | grep port`
-2. Change port in config or let NeMo Gym auto-assign (remove `port:` key)
-3. Kill conflicting process: `lsof -ti:8000 | xargs kill`
+**Fix**:
 
----
+1. Identify conflicting port: `ng_dump_config ... | grep port`
+2. **Best practice**: Remove `port` key (auto-assign)
+3. **Alternative**: Change to unused port
+4. **Temporary**: Kill process: `lsof -ti:8000 | xargs kill`
 
-### Error: "Dataset file not found"
+::::
 
-```
+::::{dropdown} Dataset file not found
+
+**Error**:
+
+```text
 FileNotFoundError: [Errno 2] No such file or directory: 'data/train.jsonl'
 ```
 
-**Cause**: Dataset path doesn't exist.
+**Cause**: Dataset path doesn't exist or is incorrect.
 
-**Solution**:
-1. Check path is relative to repo root: `ls data/train.jsonl`
-2. Generate example data or download from GitLab
-3. Verify path in config matches actual file location
+**Fix**:
+
+1. Check path relative to repo root: `ls data/train.jsonl`
+2. Verify path in config: `ng_dump_config ... | grep jsonl_fpath`
+3. Download dataset: `ng_download_dataset_from_gitlab ...`
+
+::::
+
+::::{dropdown} Configuration merge conflicts
+
+**Symptom**: Wrong values after merging multiple configs.
+
+**Cause**: Incorrect merge order or unintended overwrites.
+
+**Fix**:
+
+```bash
+# Bad: base overwrites dev settings
+config_paths="dev.yaml,base.yaml"  # ❌
+
+# Good: dev overrides base defaults
+config_paths="base.yaml,dev.yaml"  # ✅
+
+# Verify merge result
+ng_dump_config "+config_paths=[base.yaml,dev.yaml]" > /tmp/merged.yaml
+```
+
+Remember: Later files override earlier ones.
+
+::::
 
 ---
 
-## Advanced Debugging
+## Advanced Techniques
 
-### Compare Configurations Across Environments
+### Environment-Specific Validation
+
+Compare resolved configs across environments:
 
 ```bash
 # Development
-ng_dump_config "+config_paths=[config.yaml]" "+dotenv_path=env.dev.yaml" > /tmp/dev.yaml
+ng_dump_config "+dotenv_path=env.dev.yaml" > /tmp/dev.yaml
 
-# Production  
-ng_dump_config "+config_paths=[config.yaml]" "+dotenv_path=env.prod.yaml" > /tmp/prod.yaml
+# Production
+ng_dump_config "+dotenv_path=env.prod.yaml" > /tmp/prod.yaml
 
 # Compare
 diff /tmp/dev.yaml /tmp/prod.yaml
 ```
 
-### Extract Specific Server Configuration
+---
+
+### Extract Specific Server Config
 
 ```bash
-# Get just the policy model config
+# View single server configuration
 ng_dump_config "+config_paths=[config.yaml]" | grep -A 20 "^policy_model:"
-```
 
-### Validate Configuration in CI/CD
-
-```bash
-# In CI pipeline
-ng_dump_config "+config_paths=[${CONFIG_PATH}]" > resolved_config.yaml
-python scripts/validate_config.py resolved_config.yaml
+# View all model servers
+ng_dump_config "+config_paths=[config.yaml]" | grep -A 10 "responses_api_models:"
 ```
 
 ---
 
-## Related
+### CI/CD Validation
 
-- {doc}`../configuration/index` - Configuration overview
-- {doc}`../configuration/reference` - Complete configuration reference
-- {doc}`../operations/index` - Debugging running servers
+```bash
+# Validate in pipeline before deployment
+ng_dump_config "+config_paths=[${CONFIG_PATH}]" > resolved.yaml
 
+# Custom validation script
+python scripts/validate_config.py resolved.yaml
+
+# Check for required keys
+if ! grep -q "policy_api_key" resolved.yaml; then
+    echo "Error: Missing policy_api_key"
+    exit 1
+fi
+```
+
+---
+
+## Next Steps
+
+- **{doc}`index`** - Configuration system overview
+- **{doc}`multi-server`** - Multi-server configuration patterns
+- **{doc}`../operations/index`** - Debug running servers with logging and profiling
