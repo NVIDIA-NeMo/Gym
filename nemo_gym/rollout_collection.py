@@ -13,33 +13,50 @@
 # limitations under the License.
 import asyncio
 import json
-from asyncio import Semaphore
+from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
 from itertools import chain, repeat
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
 
-from nemo_gym.config_types import BaseServerConfig
+from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
     get_global_config_dict,
     is_global_aiohttp_client_setup,
+    raise_for_status,
     set_global_aiohttp_client,
 )
 
 
-class RolloutCollectionConfig(BaseModel):
-    agent_name: str
-    input_jsonl_fpath: str
-    output_jsonl_fpath: str
-    limit: Optional[int] = None
-    num_repeats: Optional[int] = None
-    num_samples_in_parallel: Optional[int] = None
-    responses_create_params: Dict[str, Any] = Field(default_factory=dict)
+class RolloutCollectionConfig(BaseNeMoGymCLIConfig):
+    """
+    Perform a batch of rollout collection.
+    """
+
+    agent_name: str = Field(description="The agent to collect rollouts from.")
+    input_jsonl_fpath: str = Field(
+        description="The input data source to use to collect rollouts, in the form of a file path to a jsonl file."
+    )
+    output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
+    limit: Optional[int] = Field(
+        default=None, description="Maximum number of examples to load and take from the input dataset."
+    )
+    num_repeats: Optional[int] = Field(
+        default=None,
+        description="The number of times to repeat each example to run. Useful if you want to calculate mean@k e.g. mean@4 or mean@16.",
+    )
+    num_samples_in_parallel: Optional[int] = Field(
+        default=None, description="Limit the number of concurrent samples running at once."
+    )
+    responses_create_params: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Overrides for the responses_create_params e.g. temperature, max_output_tokens, etc.",
+    )
 
 
 class RolloutCollectionHelper(BaseModel):  # pragma: no cover
@@ -60,6 +77,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
 
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
+            print(f"Querying with {config.num_samples_in_parallel} concurrent requests")
             semaphore = Semaphore(config.num_samples_in_parallel)
 
         server_client = self.setup_server_client()
@@ -79,7 +97,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
                 row["responses_create_params"] = row["responses_create_params"] | config.responses_create_params
                 async with semaphore:
                     response = await server_client.post(server_name=config.agent_name, url_path="/run", json=row)
-                    response.raise_for_status()
+                    await raise_for_status(response)
                     result = await response.json()
                     f.write(json.dumps(result) + "\n")
                     metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
@@ -87,20 +105,25 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
             await tqdm.gather(*map(_post_coroutine, rows), desc="Collecting rollouts", miniters=tqdm_miniters)
 
         avg_metrics = {k: v / len(rows) for k, v in metrics.items()}
-
+        avg_metrics.setdefault("reward", 0.0)
         print(json.dumps(avg_metrics, indent=4))
 
-    async def run_examples(
+    def run_examples(
         self, examples: List[Dict], head_server_config: Optional[BaseServerConfig] = None
-    ) -> List[Dict]:
+    ) -> Iterator[Future]:
+        """
+        We provide this function as a lower level interface for running rollout collection.
+        """
         server_client = self.setup_server_client(head_server_config)
 
         async def _post_subroutine(row: Dict) -> Dict:
             res = await server_client.post(server_name=row.pop("agent_ref")["name"], url_path="/run", json=row)
-            res.raise_for_status()
+            await raise_for_status(res)
             return await res.json()
 
-        return await tqdm.gather(*map(_post_subroutine, examples), desc="Collecting rollouts", miniters=10)
+        return tqdm.as_completed(
+            map(_post_subroutine, examples), desc="Collecting rollouts", miniters=10, total=len(examples)
+        )
 
     def setup_server_client(self, head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:
         server_client = ServerClient.load_from_global_config(head_server_config)

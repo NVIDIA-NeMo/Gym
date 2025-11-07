@@ -12,6 +12,7 @@ This document is a smattering of How-To's and FAQs that have not made their way 
 - [How To: Profile your resources server](#how-to-profile-your-resources-server)
 - [How To: Use a custom client to call Gym Responses API model endpoints during training](#how-to-use-a-custom-client-to-call-gym-responses-api-model-endpoints-during-training)
 - [How To: Detailed anatony of a Gym config](#how-to-detailed-anatony-of-a-gym-config)
+- [How To: Use Ray for parallelizing CPU-intensive tasks](#how-to-use-ray-for-parallelizing-cpu-intensive-tasks)
 - [FAQ: OpenAI Responses vs Chat Completions API](#faq-openai-responses-vs-chat-completions-api)
 - [FAQ: DCO and commit signing VSCode and Git setup](#faq-dco-and-commit-signing-vscode-and-git-setup)
 - [FAQ: SFT and RL](#faq-sft-and-rl)
@@ -99,13 +100,13 @@ Register your new `get_weather` function as a FastAPI route.
 ...
 ```
 
-You can see a complete example of `app.py` in `resources_servers/simple_weather/app.py`!
+You can see a complete example of `app.py` in `resources_servers/example_simple_weather/app.py`!
 
 Run an agent with your new server!
 ```bash
 config_paths="responses_api_agents/simple_agent/configs/simple_agent.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/simple_weather/configs/simple_weather.yaml"
+resources_servers/example_simple_weather/configs/simple_weather.yaml"
 ng_run "+config_paths=[$config_paths]" \
     +simple_agent.responses_api_agents.simple_agent.resources_server.name=test_weather
 ```
@@ -120,13 +121,13 @@ After you implement your server, please make sure to update the README.md with a
 
 Run the tests for your server
 ```bash
-ng_test +entrypoint=resources_servers/simple_weather
+ng_test +entrypoint=resources_servers/example_simple_weather
 ```
 
 
 You can also run detailed tests after running tests the first time
 ```bash
-cd resources_servers/simple_weather
+cd resources_servers/example_simple_weather
 source .venv/bin/activate
 pytest
 ```
@@ -134,7 +135,7 @@ pytest
 At some point, you will want to actually add data that can be used to query your server. Please follow the instructions for [How To: Prepare and validate data for PR submission or RL training](#how-to-prepare-and-validate-data-for-pr-submission-or-rl-training).
 
 
-If you need some dataset preprocessing or formatting scripts, please place them your resources server directory e.g. `resources_servers/simple_weather/my_preprocess_script.py`.
+If you need some dataset preprocessing or formatting scripts, please place them your resources server directory e.g. `resources_servers/example_simple_weather/my_preprocess_script.py`.
 
 
 You are required to have the following 3 files in your resources server data folder:
@@ -595,6 +596,59 @@ library_judge_math_simple_agent:
 ```
 
 
+
+# How To: Use Ray for parallelizing CPU-intensive tasks
+
+NeMo Gym automatically sets up Ray for distributed computing for CPU-intensive tasks.
+
+## Ray Setup in NeMo Gym
+
+### Automatic Initialization
+Ray is initialized when you start NeMo Gym servers:
+
+```bash
+ng_run "+config_paths=[$config_paths]"
+```
+
+The initialization happens in two places:
+1. **Main Process** (`cli.py`): Ray is initialized in the main process when `RunHelper.start()` is called
+2. **Server Process** (`server_utils.py`): Each server invokes `initialize_ray()` during its startup and connects to the same Ray cluster initialized by the main process.
+
+### Ray Configuration
+You can also specify a custom Ray cluster address in your config:
+```yaml
+ray_head_node_address: "ray://your-cluster-address:10001"
+```
+Training frameworks like [Nemo-RL](https://github.com/NVIDIA-NeMo/RL) will configure the Ray head node address, allowing remote tasks to run across all nodes in the cluster.
+
+If not specified, NeMo Gym will start a local Ray cluster and store the address in the global config for child processes to connect to.
+
+## Using Ray for CPU-Intensive Tasks
+
+Here's how to parallelize CPU-intensive functions using Ray's `@ray.remote` decorator. Please refer to [Ray documentation](https://docs.ray.io/en/latest/ray-core/api/doc/ray.remote.html) for more options.
+
+```python
+import ray
+
+# Decorate your CPU-intensive function
+# Spread tasks across different nodes for better parallelization
+@ray.remote(scheduling_strategy="SPREAD")
+def cpu_intensive_task(data):
+    # Your expensive computation here
+    result = expensive_computation(data)
+    return result
+
+# Use it in your code
+def process_data_parallel(data_list):
+    # Submit all tasks to Ray
+    futures = [cpu_intensive_task.remote(data) for data in data_list]
+    
+    # Get results
+    results = ray.get(futures)
+    return results
+```
+
+
 # FAQ: OpenAI Responses vs Chat Completions API
 Agents and verifiers work with responses in a standardized format based on the OpenAI Responses API schema. The verifier receives an object where the `output` field conforms to the Response object output [documented here](https://platform.openai.com/docs/api-reference/responses/object#responses/object-output).
 
@@ -775,7 +829,6 @@ Examples of PR checks that most PRs do not need to wait for to pass:
 1. CICD NeMo / cicd-container-build / build / main (push)
 2. CICD NeMo / Nemo_CICD_Test (push)
 ...
-
 
 # FAQ: Why aiohttp backend and not httpx/httpcore for async http?
 

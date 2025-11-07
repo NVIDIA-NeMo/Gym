@@ -21,6 +21,7 @@ import platform
 import signal
 import sys
 import time
+import traceback
 
 # used for debugging to time steps
 from datetime import datetime
@@ -306,6 +307,7 @@ def grade_call_based(code: str, all_inputs: list, all_outputs: list, fn_name: st
                     "error_message": "Runtime Error",
                     "inputs": truncatefn(gt_inp),
                     "expected": truncatefn(gt_out),
+                    "traceback": traceback.format_exc(),
                 }
 
         finally:
@@ -369,6 +371,7 @@ def grade_stdio(
                         "error_message": "Runtime Error",
                         "inputs": truncatefn(gt_inp),
                         "expected": truncatefn(gt_out),
+                        "traceback": traceback.format_exc(),
                     }
 
             finally:
@@ -431,7 +434,7 @@ def grade_stdio(
     return all_results, {"execution time": total_execution_time}
 
 
-def run_test(sample, test=None, debug=False, timeout=6):
+def run_test(in_outs, test=None, debug=False, timeout=6):
     """
     if test(generated_code) is not None it'll try to run the code.
     otherwise it'll just return an input and output pair.
@@ -440,16 +443,17 @@ def run_test(sample, test=None, debug=False, timeout=6):
 
     # Disable functionalities that can make destructive changes to the test.
     # max memory is set to 4GB
-    reliability_guard(4 * 1024**3)
+    reliability_guard(maximum_memory_bytes=4 * 1024**3)
 
     if debug:
         print(f"start = {datetime.now().time()}")
 
-    try:
-        in_outs = json.loads(sample["input_output"])
-    except ValueError as e:
-        raise e
-        in_outs = None
+    # The in_outs is already loaded from the sample from the parent process
+    # try:
+    #     in_outs = json.loads(sample["input_output"])
+    # except ValueError as e:
+    #     raise e
+    #     in_outs = None
 
     if in_outs:
         if in_outs.get("fn_name") is None:
@@ -537,7 +541,9 @@ def reliability_guard(maximum_memory_bytes=None):
     if maximum_memory_bytes is not None:
         import resource
 
-        _set_resource_limit(resource.RLIMIT_AS, maximum_memory_bytes)
+        # The resource limit on RLIMIT_AS has been disabled because setting it caused additional out-of-memory (OOM) issues with Ray.
+        # This happens since Ray and its subprocesses share the same virtual address space.
+        # _set_resource_limit(resource.RLIMIT_AS, maximum_memory_bytes)
         _set_resource_limit(resource.RLIMIT_DATA, maximum_memory_bytes)
 
         if not platform.uname().system == "Darwin":

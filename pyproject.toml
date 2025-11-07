@@ -72,9 +72,10 @@ dependencies = [
     ########################################
 
     # OpenAI: We leverage OpenAI Responses, Chat Completions, and Completions schemas for Nemo Gym abstractions. It may also be used to directly query endpoints.
-    # Updated Fri Jul 25, 2025 with openai==1.97.1
+    # We specifically upper bound this OpenAI dependency since the version bumps so frequently.
+    # Updated Wed Oct 29, 2025 with openai==2.6.1
     # License: Apache 2.0 https://github.com/openai/openai-python/blob/a8258744cbecf51321587fc870e8920bd2c07809/LICENSE
-    "openai<=1.97.1",
+    "openai<=2.6.1",
 
     # tqdm: Use for progress tracking on batch operations.
     # Updated Fri Jul 25, 2025 with tqdm==4.67.1
@@ -136,6 +137,11 @@ dependencies = [
     # Updated Mon Sep 22, 2025 with yappi==1.6.10
     # License: MIT https://github.com/sumerc/yappi/blob/1d3f7501701e1f050b6dcd6a86fd36aec08185c7/LICENSE
     "yappi",
+
+    # Ray: Used for distributed processing
+    # Updated Fri Oct 18, 2025 with ray[default]==2.46.0
+    # License: Apache 2.0 https://github.com/ray-project/ray/blob/master/LICENSE
+    "ray[default]",
 ]
 
 [dependency-groups]
@@ -254,6 +260,10 @@ ng_delete_dataset_from_gitlab = "nemo_gym.dataset_orchestrator:delete_jsonl_data
 # Configuration utils
 nemo_gym_dump_config = "nemo_gym.cli:dump_config"
 ng_dump_config = "nemo_gym.cli:dump_config"
+
+# Display help
+nemo_gym_help = "nemo_gym.cli:display_help"
+ng_help = "nemo_gym.cli:display_help"
 
 
 [tool.setuptools.packages.find]
