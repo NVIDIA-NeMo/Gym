@@ -8,6 +8,8 @@ Profile resource servers to identify performance bottlenecks and optimize verifi
 
 ## Quick Start
 
+Enable profiling during rollout collection to capture function-level performance metrics.
+
 :::::{tab-set}
 
 ::::{tab-item} Basic Profiling
@@ -70,6 +72,8 @@ To find the port: Check `ng_run` output for server startup messages, or use `lso
 
 ### Configuration
 
+These parameters control profiling behavior and output location.
+
 ```{list-table}
 :header-rows: 1
 :widths: 30 15 55
@@ -88,6 +92,8 @@ To find the port: Check `ng_run` output for server startup messages, or use `lso
 ---
 
 ## Understanding Results
+
+Profiling output shows function call counts, execution times, and performance bottlenecks.
 
 ### Output Format
 
@@ -129,7 +135,13 @@ name                                                                     ncall  
 
 ## Optimization Strategies
 
+Apply these techniques to reduce verification latency and improve throughput.
+
 ### Common Bottlenecks
+
+These patterns cause most performance issues in resource server implementations.
+
+
 
 :::::{tab-set}
 

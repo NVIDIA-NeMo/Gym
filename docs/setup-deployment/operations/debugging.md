@@ -73,6 +73,8 @@ grep -i error logs/*.log
 (debug-configuration)=
 ## Configuration Debugging
 
+Validate and troubleshoot YAML configurations, environment variables, and Hydra overrides.
+
 ### Inspect Resolved Configuration
 
 Use `ng_dump_config` to view the final configuration after variable substitution:
@@ -103,6 +105,8 @@ If this returns results, those variables are missing from `env.yaml`.
 ::::
 
 ### Common Configuration Problems
+
+These patterns cause most configuration failures and are straightforward to resolve.
 
 ::::{tab-set}
 
@@ -176,7 +180,13 @@ ng_dump_config "+config_paths=[config.yaml]" "+dotenv_path=env.yaml"
 (debug-connectivity)=
 ## Server Connectivity Debugging
 
+Diagnose port conflicts, connection failures, and server startup issues.
+
 ### Verify Servers Are Running
+
+Confirm that server processes are active and listening on the expected ports.
+
+
 
 ::::{tab-set}
 
@@ -223,6 +233,8 @@ ng_run "+config_paths=[config.yaml]" 2>&1 | tee server.log
 
 ### Resolve Port Conflicts
 
+Fix address-in-use errors when servers cannot bind to their configured ports.
+
 ::::{tab-set}
 
 :::{tab-item} Identify Conflict
@@ -245,9 +257,9 @@ ng_run "+config_paths=[config.yaml]" \
     +resource_server.port=8002
 ```
 
-:::{note}
+```{note}
 NeMo Gym automatically assigns ports if not specified. There is no global `default_port` parameter.
-:::
+```
 :::
 
 :::{tab-item} Kill Conflicting Process
@@ -270,7 +282,13 @@ kill -9 <PID>
 (debug-ray)=
 ## Ray Distributed Debugging
 
+Troubleshoot Ray cluster connectivity, worker failures, and distributed execution issues.
+
 ### Check Ray Cluster Status
+
+Verify Ray cluster health and view available nodes and resources.
+
+
 
 ::::{tab-set}
 
@@ -304,6 +322,8 @@ grep -i error /tmp/ray/session_latest/logs/*.log
 
 ### Common Ray Issues
 
+These Ray-specific problems typically arise during distributed deployment setup.
+
 ```{list-table}
 :header-rows: 1
 :widths: 30 35 35
@@ -333,6 +353,8 @@ For distributed deployment patterns, refer to {doc}`../deployment/distributed-co
 
 (debug-runtime)=
 ## Runtime Debugging
+
+Debug Python exceptions, verification failures, and logical errors in server code.
 
 ### Interactive Debugging with pdb
 
@@ -410,6 +432,8 @@ pytest tests/test_resource_server.py::test_specific_failing_case
 ::::
 
 ### Common Runtime Errors
+
+These Python exceptions and API failures occur frequently during development and testing.
 
 ::::{dropdown} ModuleNotFoundError: No module named 'nemo_gym'
 **Cause**: NeMo Gym not installed or wrong Python environment
@@ -542,7 +566,13 @@ When reporting issues, include:
 
 ## Logging Best Practices
 
+Configure logging to capture the right level of detail for effective troubleshooting.
+
 ### Capture Logs Effectively
+
+Use these patterns to save, filter, and monitor server logs during operation.
+
+
 
 ::::{tab-set}
 

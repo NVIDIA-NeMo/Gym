@@ -8,6 +8,8 @@ Validate your servers, configurations, and pipelines with NeMo Gym's testing too
 
 ## Quick Start
 
+Use these commands to validate servers, configurations, and end-to-end pipelines.
+
 ::::{tab-set}
 
 :::{tab-item} Test a Server
@@ -46,6 +48,8 @@ ng_collect_rollouts +agent_name=test_agent \
 ---
 
 ## Server Testing
+
+Validate resource servers with isolated test environments and automated pytest runs.
 
 ### Understanding `ng_test`
 
@@ -239,6 +243,8 @@ bash tests/functional_tests/L2_Functional_Tests_GPU.sh
 ---
 
 ## Troubleshooting
+
+Resolve common test failures and environment issues with these solutions.
 
 :::{dropdown} ImportError: No module named 'app'
 :icon: alert

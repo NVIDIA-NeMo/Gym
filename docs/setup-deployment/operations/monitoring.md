@@ -49,6 +49,8 @@ Monitor server activity and diagnose issues through log analysis.
 
 ### Logging Configuration
 
+Configure output verbosity and log destinations for different operational needs.
+
 :::::{tab-set}
 
 ::::{tab-item} Standard Logging
@@ -76,6 +78,8 @@ ng_run "+config_paths=[config.yaml]" +uvicorn_logging_show_200_ok=true
 :::::
 
 ### Analyze Logs
+
+Search for patterns, filter errors, and monitor log streams in real time.
 
 :::::{tab-set}
 
@@ -288,6 +292,8 @@ For Kubernetes deployments, configure fixed ports in your YAML configs for predi
 ---
 
 ## External Monitoring Integration
+
+Connect NeMo Gym deployments to enterprise monitoring systems for production observability.
 
 ### vLLM Server Prometheus Metrics
 
