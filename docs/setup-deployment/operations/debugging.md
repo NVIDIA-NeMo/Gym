@@ -204,7 +204,8 @@ telnet localhost 8000
 For servers with profiling enabled, you can test the `/stats` endpoint:
 ```bash
 # Only works if profiling_enabled=true
-curl http://localhost:8000/stats
+# Replace <PORT> with your server's actual port (shown in ng_run output)
+curl http://localhost:<PORT>/stats
 ```
 :::
 
@@ -460,7 +461,8 @@ source .venv/bin/activate
 ng_run "+config_paths=[config.yaml]" +profiling_enabled=true
 
 # Query stats endpoint while servers are running
-curl http://localhost:8000/stats
+# Replace <PORT> with your server's actual port (shown in ng_run output)
+curl http://localhost:<PORT>/stats
 ```
 
 **Solutions**:

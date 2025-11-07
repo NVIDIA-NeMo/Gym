@@ -85,11 +85,13 @@ Every resource server needs these files:
 
 ```python
 import pytest
-from app import ResourceServer
+from app import YourResourceServer  # Replace with your actual server class name
 
 @pytest.fixture
 def server():
-    return ResourceServer()
+    # Replace YourResourceServer with your actual class
+    # e.g., SimpleWeatherResourcesServer, MultiNeedleResourcesServer
+    return YourResourceServer()
 
 def test_verify(server):
     """Test verification logic."""
@@ -102,7 +104,7 @@ def test_verify(server):
 :::
 
 :::{warning}
-Test coverage is **not enforced by CI**. You own correctness and test quality for your servers.
+Test **coverage thresholds** are **not enforced by CI**. You own correctness and test quality for your servers. CI runs tests but does not enforce minimum coverage percentages.
 :::
 
 ### Direct pytest Usage

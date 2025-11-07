@@ -204,18 +204,20 @@ Verify servers are running by testing their API endpoints.
 
 :::{note}
 NeMo Gym servers do not have dedicated health check endpoints. The examples below test functional endpoints to verify server availability. For simple port checking, use `nc -zv localhost <port>` or `lsof -i :<port>`.
+
+**Port Assignment**: Servers use auto-assigned ports (varies per run). Find actual ports in `ng_run` startup output or use `lsof -i -P | grep LISTEN`.
 :::
 
 ### Check Individual Servers
 
-NeMo Gym servers expose these endpoints:
+NeMo Gym servers expose these endpoints (replace `<PORT>` with actual port from startup output):
 
 :::::{tab-set}
 
 ::::{tab-item} Resource Server
 ```bash
-# Test verification endpoint
-curl -X POST http://localhost:8003/verify \
+# Test verification endpoint (replace <PORT> with actual port)
+curl -X POST http://localhost:<PORT>/verify \
   -H "Content-Type: application/json" \
   -d '{}'
 ```
@@ -225,8 +227,8 @@ curl -X POST http://localhost:8003/verify \
 
 ::::{tab-item} Agent Server
 ```bash
-# Test agent endpoint
-curl -X POST http://localhost:8001/run \
+# Test agent endpoint (replace <PORT> with actual port)
+curl -X POST http://localhost:<PORT>/run \
   -H "Content-Type: application/json" \
   -d '{}'
 ```
@@ -236,8 +238,8 @@ curl -X POST http://localhost:8001/run \
 
 ::::{tab-item} Model Server
 ```bash
-# Test model endpoint (OpenAI-compatible)
-curl -X POST http://localhost:8002/v1/chat/completions \
+# Test model endpoint - OpenAI-compatible (replace <PORT> with actual port)
+curl -X POST http://localhost:<PORT>/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{}'
 ```
@@ -249,30 +251,38 @@ curl -X POST http://localhost:8002/v1/chat/completions \
 
 ### Multi-Server Availability Script
 
-Check all configured servers with simple port checks:
+Check all configured servers with simple port checks. First, extract actual ports from your startup output:
 
 ```bash
 #!/bin/bash
 # check_servers.sh
+# Note: Update port numbers based on your ng_run startup output
+
+# Example ports (your actual ports will differ)
+RESOURCE_PORT=54321
+AGENT_PORT=54322
+MODEL_PORT=54323
 
 # Resource server
-nc -zv localhost 8003 2>&1 | grep -q succeeded \
-  && echo "✓ Resource server (8003): running" \
-  || echo "✗ Resource server (8003): not responding"
+nc -zv localhost $RESOURCE_PORT 2>&1 | grep -q succeeded \
+  && echo "✓ Resource server ($RESOURCE_PORT): running" \
+  || echo "✗ Resource server ($RESOURCE_PORT): not responding"
 
 # Agent server  
-nc -zv localhost 8001 2>&1 | grep -q succeeded \
-  && echo "✓ Agent server (8001): running" \
-  || echo "✗ Agent server (8001): not responding"
+nc -zv localhost $AGENT_PORT 2>&1 | grep -q succeeded \
+  && echo "✓ Agent server ($AGENT_PORT): running" \
+  || echo "✗ Agent server ($AGENT_PORT): not responding"
 
 # Model server
-nc -zv localhost 8002 2>&1 | grep -q succeeded \
-  && echo "✓ Model server (8002): running" \
-  || echo "✗ Model server (8002): not responding"
+nc -zv localhost $MODEL_PORT 2>&1 | grep -q succeeded \
+  && echo "✓ Model server ($MODEL_PORT): running" \
+  || echo "✗ Model server ($MODEL_PORT): not responding"
 ```
 
 :::{tip}
-For Kubernetes deployments, use these port checks in liveness probes. For readiness probes, you can test functional endpoints but handle validation errors appropriately.
+**Finding ports**: Check `ng_run` output for startup messages like "Server running on port XXXXX", or use `lsof -i -P | grep LISTEN` to see all active ports.
+
+For Kubernetes deployments, configure fixed ports in your YAML configs for predictable service discovery, then use these port checks in liveness probes.
 :::
 
 ---

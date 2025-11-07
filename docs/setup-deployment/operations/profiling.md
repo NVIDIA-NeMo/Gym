@@ -43,15 +43,26 @@ Results save automatically to `results/profiling/library_judge_math/<server_name
 Monitor profiling stats without stopping servers:
 
 ```bash
-# Check real-time profiling data
-curl http://localhost:8003/stats
+# First, find your resource server's port from ng_run startup output
+# Look for: "🔍 Enabled profiling for <server_name>"
+# The server info will show its port (auto-assigned, varies per run)
+
+# Check real-time profiling data (replace <PORT> with actual port)
+curl http://localhost:<PORT>/stats
+
+# Example: If your resource server is on port 54321
+curl http://localhost:54321/stats
 
 # Track changes during optimization
-curl http://localhost:8003/stats > baseline.txt
+curl http://localhost:<PORT>/stats > baseline.txt
 # ... make code changes and deploy ...
-curl http://localhost:8003/stats > optimized.txt
+curl http://localhost:<PORT>/stats > optimized.txt
 diff baseline.txt optimized.txt
 ```
+
+:::{tip}
+To find the port: Check `ng_run` output for server startup messages, or use `lsof -i -P | grep LISTEN` to see all listening ports.
+:::
 
 ::::
 
@@ -68,7 +79,7 @@ diff baseline.txt optimized.txt
   - Description
 * - `profiling_enabled`
   - `bool`
-  - Enable profiling (disabled by default; adds ~1-2% overhead)
+  - Enable profiling (disabled by default; adds minimal overhead)
 * - `profiling_results_dirpath`
   - `str`
   - Directory for results (relative to project root; overwrites existing)
