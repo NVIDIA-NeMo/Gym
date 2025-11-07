@@ -10,8 +10,7 @@ NeMo Gym is a framework for building agentic reinforcement learning environments
 
 ## 🏆 Why NeMo Gym?
 
- - **Fast Data Generation** - Less boilerplate, more innovation: get from prompt to training rollouts quickly
-- **Rich Environment Library** - Leverage curated resource servers for common tasks: competitive coding, mathematical reasoning, MCQA, and more
+- **Fast Data Generation** - Less boilerplate, more innovation: get from prompt to training rollouts quickly
 - **Flexible Environment Integration** - Connect to any environment: custom APIs, MCP-compatible tools, external services, or leverage our curated resources
 - **Smart Orchestration** - Async architecture automatically coordinates model-resource calls for high-throughput training workloads
 - **Configuration-Driven** - Swap models, resources, and environments via YAML without touching code
