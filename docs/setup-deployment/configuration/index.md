@@ -29,7 +29,7 @@ policy_model:
     openai_model:
       entrypoint: responses_api_models/openai_model/app.py
       openai_api_key: ${policy_api_key}  # References env.yaml
-      model_name: gpt-4o-2024-11-20
+      openai_model: gpt-4o-2024-11-20
 ```
 
 ```yaml
