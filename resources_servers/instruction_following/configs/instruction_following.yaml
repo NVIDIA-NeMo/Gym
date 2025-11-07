@@ -3,6 +3,7 @@ instruction_following:
     instruction_following:
       entrypoint: app.py
       domain: instruction_following
+      verified: false
 instruction_following_simple_agent:
   responses_api_agents:
     simple_agent:

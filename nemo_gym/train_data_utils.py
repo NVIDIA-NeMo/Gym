@@ -476,7 +476,7 @@ class TrainDataProcessor(BaseModel):
 
         # Don't load everything into memory at once. Throw things away immediately.
         with open(dataset_config.jsonl_fpath) as f:
-            for line in f:
+            for line in tqdm(f, desc=f"{dataset_config.jsonl_fpath}"):
                 for _ in range(repeats):
                     yield line
 

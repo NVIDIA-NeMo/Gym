@@ -3,6 +3,7 @@ workbench:
     workbench:
       entrypoint: app.py
       domain: agent
+      verified: false
 workbench_simple_agent:
   responses_api_agents:
     simple_agent:

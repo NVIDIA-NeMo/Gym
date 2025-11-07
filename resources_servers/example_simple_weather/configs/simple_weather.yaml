@@ -1,8 +1,10 @@
-simple_weather:
+example_simple_weather:
   resources_servers:
-    simple_weather:
+    example_simple_weather:
       entrypoint: app.py
       domain: agent
+      verified: false
+      description: Basic single-step tool calling
 simple_weather_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -16,4 +18,4 @@ simple_weather_simple_agent:
       datasets:
       - name: example
         type: example
-        jsonl_fpath: resources_servers/simple_weather/data/example.jsonl
+        jsonl_fpath: resources_servers/example_simple_weather/data/example.jsonl
