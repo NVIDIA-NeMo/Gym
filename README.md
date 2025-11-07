@@ -67,16 +67,13 @@ python responses_api_agents/simple_agent/client.py
 We'd love your contributions! Here's how to get involved:
 
 - **[Report Issues](https://github.com/NVIDIA-NeMo/Gym/issues)** - Bug reports and feature requests
-<!-- : Add link [Discussions](https://github.com/NVIDIA-NeMo/Gym/discussions) -->
+<!-- TODO: Add link [Discussions](https://github.com/NVIDIA-NeMo/Gym/discussions) -->
 - **Discussions (Coming soon!)** - Community Q&A and ideas
 - **[Contributing Guide](https://github.com/NVIDIA-NeMo/Gym/blob/main/CONTRIBUTING.md)** - How to contribute code, docs, or new environments
 
 ## 📦 Available Resource Servers
 
 NeMo Gym includes a curated collection of resource servers for training and evaluation across multiple domains:
-
-> [!TIP]
-> Each resource server includes example data, configuration files, and tests. See each server's README for details.
 
 ### Table 1: Example Resource Servers
 
@@ -92,6 +89,9 @@ Purpose: Demonstrate NeMo Gym patterns and concepts.
 ### Table 2: Resource Servers for Training
 
 Purpose: Training-ready environments with curated datasets.
+
+> [!TIP]
+> Each resource server includes example data, configuration files, and tests. See each server's README for details.
 
 <!-- START_TRAINING_SERVERS_TABLE -->
 | Domain                | Resource Server       | Train | Validation | Verified                                                                                    | Config                                                                                                                                         | License                                                   |
@@ -114,3 +114,5 @@ Purpose: Training-ready environments with curated datasets.
 | math                  | Library Judge Math    | ✓     | ✓          | -                                                                                           | <a href='resources_servers/library_judge_math/configs/math_stack_overflow.yaml'>math_stack_overflow.yaml</a>                                   | Creative Commons Attribution-ShareAlike 4.0 International |
 | math                  | Python Math Exec      | ✓     | -          | -                                                                                           | <a href='resources_servers/python_math_exec/configs/python_math_exec.yaml'>python_math_exec.yaml</a>                                           | Apache 2.0                                                |
 <!-- END_TRAINING_SERVERS_TABLE -->
+
+
