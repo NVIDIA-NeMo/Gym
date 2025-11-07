@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Run as `python resources_servers/stateful_counter/create_examples.py`
+# Run as `python resources_servers/example_stateful_counter/create_examples.py`
 import json
 from copy import deepcopy
 
@@ -77,5 +77,5 @@ for query, initial_count, expected_count in queries:
 
     examples.append(json.dumps(example) + "\n")
 
-with open("resources_servers/stateful_counter/data/example.jsonl", "w") as f:
+with open("resources_servers/example_stateful_counter/data/example.jsonl", "w") as f:
     f.writelines(examples)

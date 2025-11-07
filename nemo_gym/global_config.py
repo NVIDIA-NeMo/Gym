@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from collections import defaultdict
 from os import getenv
 from pathlib import Path
 from platform import python_version
@@ -18,14 +19,16 @@ from socket import socket
 from typing import ClassVar, List, Optional, Tuple, Type
 
 import hydra
+import rich
 from omegaconf import DictConfig, OmegaConf, open_dict
 from openai import __version__ as openai_version
-from pydantic import BaseModel, ConfigDict, TypeAdapter
+from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from ray import __version__ as ray_version
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.config_types import (
     ServerInstanceConfig,
+    is_almost_server,
     is_server_ref,
     maybe_get_server_instance_config,
 )
@@ -121,7 +124,7 @@ class GlobalConfigDictParser(BaseModel):
         # Do one pass to get the server instance configs
         server_instance_configs: List[ServerInstanceConfig] = []
         for server_name, server_type_config_dict in non_reserved_items:
-            maybe_server_instance_config = maybe_get_server_instance_config(
+            maybe_server_instance_config, _ = maybe_get_server_instance_config(
                 name=server_name, server_type_config_dict=server_type_config_dict
             )
             if maybe_server_instance_config is not None:
@@ -205,6 +208,25 @@ class GlobalConfigDictParser(BaseModel):
             with open_dict(global_config_dict):
                 global_config_dict[CONFIG_PATHS_KEY_NAME] = config_paths
 
+        # Almost-server detection and reporting
+        almost_servers = self.detect_and_report_almost_servers(global_config_dict)
+
+        if almost_servers:
+            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]")
+            rich.print("[yellow]Configuration Warnings: Almost-Servers Detected[/yellow]")
+            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]")
+
+            for server_name, error in almost_servers:
+                rich.print(format_almost_server_warning(server_name, error))
+
+            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]\n")
+
+            error_on_almost_servers = global_config_dict.get("error_on_almost_servers", True)
+            if error_on_almost_servers:
+                error_msg = f"Found {len(almost_servers)} almost-server(s) with validation errors. "
+                error_msg += "Fix the issues above or set error_on_almost_servers=false to bypass this error."
+                raise ValueError(error_msg)
+
         server_instance_configs = self.filter_for_server_instance_configs(global_config_dict)
 
         # Do one pass through all the configs validate and populate various configs for our servers.
@@ -254,6 +276,29 @@ class GlobalConfigDictParser(BaseModel):
                 skip_load_from_dotenv=True,
             )
         )
+
+    def detect_and_report_almost_servers(
+        self,
+        global_config_dict: DictConfig,
+    ) -> List[Tuple[str, ValidationError]]:
+        non_reserved_items = [
+            (key, v) for key, v in global_config_dict.items() if key not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
+        ]
+
+        almost_servers = []
+
+        # Try to get config with error capture.
+        for server_name, server_type_config_dict in non_reserved_items:
+            config, error = maybe_get_server_instance_config(
+                name=server_name, server_type_config_dict=server_type_config_dict
+            )
+
+            # Failed validation but looks like a server = almost-server
+            if config is None and error is not None:
+                if is_almost_server(server_type_config_dict):
+                    almost_servers.append((server_name, error))
+
+        return almost_servers
 
 
 def get_global_config_dict(
@@ -336,3 +381,102 @@ def find_open_port(
         f"Unable to find an open port that doesn't conflict with disallowed ports "
         f"{disallowed_ports} after {max_retries} attempts"
     )
+
+
+def format_almost_server_warning(server_name: str, error: ValidationError) -> str:
+    """Format user-friendly warning. Union literal errors are consolidated.
+    Union discriminator noise is filtered out. Explanation:
+    Pydantic validation is quirky- it will report all failures in the union if any union member fails. Example:
+    If an agent server contains an invalid license, it will not only show the error for the invalid license in ResponsesAPIAgentServerInstanceConfig, but also missing values for ResponsesAPIModelServerInstanceConfig `responses_api_models` and ResourcesServerInstanceConfig `resources_servers`.
+    """
+
+    errors = error.errors()
+
+    # Identify the actual server type from the error (excluding Union discriminator noise)
+    server_type_keys = ["responses_api_models", "resources_servers", "responses_api_agents"]
+    actual_server_type = None
+
+    # Example error structure: ('ResponsesAPIAgentServerInstanceConfig', 'responses_api_agents', 'simple_agent', 'datasets', 0, 'license')
+    for err in errors:
+        loc = err["loc"]
+        # loc[1] is the actual server type key.
+        # Skip "missing" errors from the irrelevant Union variants.
+        if len(loc) > 1 and loc[1] in server_type_keys and err["type"] != "missing":
+            actual_server_type = loc[1]
+            break
+
+    # Fallback: if all errors are "missing", check the input dict for the actual server type.
+    if not actual_server_type:
+        for err in errors:
+            if "input" in err and isinstance(err["input"], dict):
+                for key in server_type_keys:
+                    if key in err["input"]:
+                        actual_server_type = key
+                        break
+                if actual_server_type:
+                    break
+
+    # Filter out Union discriminator false positives.
+    filtered_errors = []
+    for err in errors:
+        loc = err["loc"]
+
+        # Filter out "Field required" errors from wrong Union variants.
+        if (
+            err["type"] == "missing"
+            and len(loc) > 1
+            and loc[1] in server_type_keys
+            and actual_server_type
+            and loc[1] != actual_server_type
+        ):
+            continue
+
+        filtered_errors.append(err)
+
+    # Group errors by location to consolidate Union literals.
+    error_groups = defaultdict(list)
+
+    for err in filtered_errors:
+        loc = err["loc"]
+
+        # Check if literal union error (starts with "literal[").
+        if loc and isinstance(loc[-1], str) and loc[-1].startswith("literal["):
+            # Group without the literal type prefix.
+            base_loc = loc[:-1]
+            error_groups[base_loc].append(err)
+        else:
+            error_groups[loc].append(err)
+
+    error_details = []
+    for loc, errs in error_groups.items():
+        if len(errs) > 1 and all(isinstance(e["loc"][-1], str) and e["loc"][-1].startswith("literal[") for e in errs):
+            # Consolidate errors for literals into "Must be one of: X, Y, Z" format.
+            loc_str = " -> ".join(str(item) for item in loc)
+            valid_options = []
+            for e in errs:
+                literal_str = e["loc"][-1]
+                if literal_str.startswith("literal["):
+                    value = literal_str[8:-2]  # Remove "literal['" and "']"
+                    valid_options.append(value)
+
+            if valid_options:
+                options_str = "', ".join(valid_options)
+                error_details.append(f"  - {loc_str}: Must be one of: {options_str}'")
+            else:
+                error_details.append(f"  - {loc_str}: {errs[0]['msg']}")
+
+        else:
+            err = errs[0]
+            loc_str = " -> ".join(str(item) for item in err["loc"])
+            error_details.append(f"  - {loc_str}: {err['msg']}")
+
+    error_str = "\n".join(error_details)
+
+    return f"""
+    Almost-Server Detected: '{server_name}'
+    This server configuration failed validation:
+
+{error_str}
+
+    This server will NOT be started.
+    """
