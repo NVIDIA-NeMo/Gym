@@ -1,10 +1,9 @@
-
 xlam_fc:
   resources_servers:
     xlam_fc:
       entrypoint: app.py
       domain: agent
-
+      verified: false
 xlam_fc_simple_agent:
   responses_api_agents:
     simple_agent:
