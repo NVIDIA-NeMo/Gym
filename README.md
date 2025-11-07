@@ -73,6 +73,9 @@ We'd love your contributions! Here's how to get involved:
 
 NeMo Gym includes a curated collection of resource servers for training and evaluation across multiple domains:
 
+> [!TIP]
+> Each resource server includes example data, configuration files, and tests. See each server's README for details.
+
 ### Table 1: Example Resource Servers
 
 Purpose: Demonstrate NeMo Gym patterns and concepts.
@@ -109,6 +112,3 @@ Purpose: Training-ready environments with curated datasets.
 | math                  | Library Judge Math    | ✓     | ✓          | -                                                                                           | <a href='resources_servers/library_judge_math/configs/math_stack_overflow.yaml'>math_stack_overflow.yaml</a>                                   | Creative Commons Attribution-ShareAlike 4.0 International |
 | math                  | Python Math Exec      | ✓     | -          | -                                                                                           | <a href='resources_servers/python_math_exec/configs/python_math_exec.yaml'>python_math_exec.yaml</a>                                           | Apache 2.0                                                |
 <!-- END_TRAINING_SERVERS_TABLE -->
-
-> [!TIP]
-> Each resource server includes example data, configuration files, and tests. See each server's README for details.
