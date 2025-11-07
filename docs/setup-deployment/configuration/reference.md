@@ -2,296 +2,50 @@
 
 # Configuration Reference
 
-Complete anatomy of a NeMo Gym configuration file with all schemas and field definitions.
+Complete schema reference for NeMo Gym configuration files.
+
+```{tip}
+Use `ng_dump_config "+config_paths=[config.yaml]"` to validate your configuration and see the final resolved values.
+```
 
 ---
 
 ## Three-Level Naming Structure
 
-NeMo Gym configurations use a three-level hierarchy:
+All servers follow this hierarchy:
 
 ```yaml
-<unique_server_name>:              # Level 1: Unique identifier at runtime
-  <server_type>:                   # Level 2: Type (agents, models, or resources)
-    <server_implementation>:       # Level 3: Implementation type
+<unique_server_name>:              # Level 1: Unique identifier
+  <server_type>:                   # Level 2: Server category
+    <server_implementation>:       # Level 3: Implementation
       entrypoint: app.py
-      # ... configuration
 ```
 
-**Level 1: Unique Server Name**
+```{list-table}
+:header-rows: 1
+:widths: 15 85
 
-- Must be unique across your entire configuration
-- Used by other servers to reference this server
-- Example: `library_judge_math`, `policy_model`, `my_agent`
-
-**Level 2: Server Type**
-
-- One of three types:
-  - `responses_api_models` - Model inference servers
-  - `resources_servers` - Training environment servers
-  - `responses_api_agents` - Agent servers
-  
-**Level 3: Server Implementation**
-
-- Specific implementation of that server type
-- Example: `openai_model`, `vllm_model`, `simple_agent`, `library_judge_math`
-- Can run multiple instances with different names at Level 1
-
----
-
-## Complete Configuration Example
-
-```yaml
-# Resource Server Configuration
-library_judge_math_resources_server:
-  resources_servers:
-    library_judge_math:
-      entrypoint: app.py
-      # Server-specific configuration
-      judge_model_server:
-        type: responses_api_models
-        name: judge_model
-      judge_responses_create_params:
-        input: []
-      should_use_judge: false
-
-# Model Server Configuration  
-policy_model:
-  responses_api_models:
-    openai_model:
-      entrypoint: app.py
-      openai_api_key: ${policy_api_key}
-      model_name: gpt-4o-2024-11-20
-      base_url: https://api.openai.com/v1
-
-# Agent Server Configuration
-library_judge_math_simple_agent:
-  responses_api_agents:
-    simple_agent:
-      entrypoint: app.py
-      # Server references
-      resources_server:
-        type: resources_servers
-        name: library_judge_math_resources_server
-      model_server:
-        type: responses_api_models
-        name: policy_model
-      # Dataset configuration
-      datasets:
-      - name: train
-        type: train
-        jsonl_fpath: resources_servers/library_judge_math/data/train.jsonl
-        num_repeats: 1
-        gitlab_identifier:
-          dataset_name: bytedtsinghua_dapo17k
-          version: 0.0.1
-          artifact_fpath: train.jsonl
-        license: Apache 2.0
-      - name: validation
-        type: validation
-        jsonl_fpath: resources_servers/library_judge_math/data/validation.jsonl
-        num_repeats: 1
-        gitlab_identifier:
-          dataset_name: bytedtsinghua_dapo17k
-          version: 0.0.1
-          artifact_fpath: validation.jsonl
-        license: Apache 2.0
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/library_judge_math/data/example.jsonl
-        num_repeats: 1
+* - Level
+  - Description
+* - **Level 1**
+  - Unique server name used for cross-references. Must be unique across entire configuration.
+* - **Level 2**
+  - Server type: `responses_api_models`, `resources_servers`, or `responses_api_agents`
+* - **Level 3**
+  - Implementation: `openai_model`, `vllm_model`, `simple_agent`, `library_judge_math`, etc.
 ```
 
 ---
 
-## Server References
+## Server Configurations
 
-Servers reference each other using the `ServerRef` pattern:
+::::{tab-set}
 
-```yaml
-server_reference:
-  type: <server_type>       # responses_api_models, resources_servers, or responses_api_agents
-  name: <unique_name>       # Level 1 unique server name
-```
+:::{tab-item} Model Servers
 
-**Example**: Agent referencing model and resource servers:
+Model servers provide LLM inference for agents.
 
-```yaml
-my_agent:
-  responses_api_agents:
-    simple_agent:
-      resources_server:
-        type: resources_servers
-        name: my_resources_server    # References Level 1 name
-      model_server:
-        type: responses_api_models
-        name: my_model               # References Level 1 name
-```
-
----
-
-## Common Configuration Fields
-
-### All Servers
-
-```{list-table}
-:header-rows: 1
-:widths: 30 20 50
-
-* - Field
-  - Type
-  - Description
-* - `entrypoint`
-  - str
-  - Path to server implementation (e.g., `app.py`)
-* - `host`
-  - str
-  - Host address (auto-assigned if not specified)
-* - `port`
-  - int
-  - Port number (auto-assigned if not specified)
-```
-
-### Model Servers
-
-```{list-table}
-:header-rows: 1
-:widths: 30 20 50
-
-* - Field
-  - Type
-  - Description
-* - `model_name`
-  - str
-  - Model identifier (e.g., `gpt-4o-2024-11-20`)
-* - `base_url`
-  - str
-  - API endpoint URL
-* - `openai_api_key`
-  - str
-  - API key (use `${variable}` for env.yaml references)
-```
-
-**Example**:
-
-```yaml
-policy_model:
-  responses_api_models:
-    openai_model:
-      entrypoint: app.py
-      openai_api_key: ${policy_api_key}
-      model_name: gpt-4o-2024-11-20
-      base_url: https://api.openai.com/v1
-```
-
-### Resource Servers
-
-```{list-table}
-:header-rows: 1
-:widths: 30 20 50
-
-* - Field
-  - Type
-  - Description
-* - `domain`
-  - str
-  - Domain identifier for the resource server
-```
-
-Additional fields are server-specific. See individual resource server documentation.
-
-**Example**:
-
-```yaml
-math_resources_server:
-  resources_servers:
-    library_judge_math:
-      entrypoint: app.py
-      domain: mathematics
-      judge_model_server:
-        type: responses_api_models
-        name: judge_model
-      should_use_judge: false
-```
-
-### Agent Servers
-
-```{list-table}
-:header-rows: 1
-:widths: 30 20 50
-
-* - Field
-  - Type
-  - Description
-* - `resources_server`
-  - ServerRef
-  - Reference to resource server
-* - `model_server`
-  - ServerRef
-  - Reference to model server
-* - `datasets`
-  - list
-  - Dataset configurations (optional)
-```
-
-**Example**:
-
-```yaml
-my_agent:
-  responses_api_agents:
-    simple_agent:
-      entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: my_resources_server
-      model_server:
-        type: responses_api_models
-        name: policy_model
-      datasets: [...]
-```
-
----
-
-## Dataset Configuration
-
-Datasets are configured under agent servers:
-
-```yaml
-datasets:
-- name: train                    # Dataset identifier
-  type: train                    # Type: train, validation, or example
-  jsonl_fpath: path/to/data.jsonl
-  num_repeats: 1                 # Number of times to repeat dataset
-  start_idx: 0                   # Optional: Start index for slicing
-  end_idx: 1000                  # Optional: End index for slicing
-  gitlab_identifier:             # Required for train/validation
-    dataset_name: dataset_name
-    version: 0.0.1
-    artifact_fpath: train.jsonl
-  license: Apache 2.0            # Required for train/validation
-```
-
-### Dataset Types
-
-```{list-table}
-:header-rows: 1
-:widths: 20 30 50
-
-* - Type
-  - Requirements
-  - Purpose
-* - `train`
-  - `gitlab_identifier` + `license`
-  - Training data (main dataset)
-* - `validation`
-  - `gitlab_identifier` + `license`
-  - Validation data (evaluation during training)
-* - `example`
-  - None (committed to git)
-  - 5 examples for testing and documentation
-```
-
-### Dataset Fields
+**Required fields**:
 
 ```{list-table}
 :header-rows: 1
@@ -300,196 +54,361 @@ datasets:
 * - Field
   - Type
   - Description
-* - `name`
+* - `entrypoint`
   - str
-  - Dataset identifier (user-defined)
-* - `type`
+  - Path to server implementation (e.g., `app.py`)
+* - `model_name`
   - str
-  - Dataset type: `train`, `validation`, or `example`
-* - `jsonl_fpath`
+  - Model identifier (e.g., `gpt-4o-2024-11-20`)
+* - `base_url`
   - str
-  - Path to JSONL file (relative to repo root)
-* - `num_repeats`
-  - int
-  - Number of times to repeat dataset (default: 1)
-* - `start_idx`
-  - int
-  - Optional: Start index for dataset slicing
-* - `end_idx`
-  - int
-  - Optional: End index for dataset slicing
-* - `gitlab_identifier`
-  - object
-  - GitLab dataset registry information (required for train/validation)
-* - `license`
+  - API endpoint URL
+* - `openai_api_key`
   - str
-  - Dataset license (required for train/validation)
+  - API key (use `${variable}` syntax for secrets)
 ```
 
-### GitLab Identifier
+**Optional fields**: `host`, `port` (auto-assigned if omitted)
+
+**Example**:
 
 ```yaml
-gitlab_identifier:
-  dataset_name: bytedtsinghua_dapo17k
-  version: 0.0.1
-  artifact_fpath: train.jsonl
+policy_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_api_key: ${policy_api_key}
+      model_name: gpt-4o-2024-11-20
+      base_url: https://api.openai.com/v1
 ```
 
-Required for `train` and `validation` datasets. Not required for `example` datasets (which are committed to git).
+:::
+
+:::{tab-item} Resource Servers
+
+Resource servers define training environments and evaluation logic.
+
+**Required fields**:
+
+```{list-table}
+:header-rows: 1
+:widths: 25 15 60
+
+* - Field
+  - Type
+  - Description
+* - `entrypoint`
+  - str
+  - Path to server implementation (e.g., `app.py`)
+* - `domain`
+  - enum
+  - Domain: `math`, `coding`, `agent`, `knowledge`, `instruction_following`, `long_context`, `safety`, `games`, `e2e`, `other`
+```
+
+**Optional fields**: `host`, `port`, server-specific configuration
+
+**Example**:
+
+```yaml
+math_resources_server:
+  resources_servers:
+    library_judge_math:
+      entrypoint: app.py
+      domain: math
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+```
+
+```{seealso}
+Refer to individual resource server documentation for server-specific fields.
+```
+
+:::
+
+:::{tab-item} Agent Servers
+
+Agent servers orchestrate model and resource server interactions.
+
+**Required fields**:
+
+```{list-table}
+:header-rows: 1
+:widths: 25 15 60
+
+* - Field
+  - Type
+  - Description
+* - `entrypoint`
+  - str
+  - Path to server implementation (e.g., `app.py`)
+* - `resources_server`
+  - ServerRef
+  - Reference to resource server (`type` + `name`)
+* - `model_server`
+  - ServerRef
+  - Reference to model server (`type` + `name`)
+```
+
+**Optional fields**: `host`, `port`, `datasets`
+
+**Example**:
+
+```yaml
+math_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: math_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+```
+
+:::
+
+::::
+
+---
+
+## Server References
+
+Servers reference each other using `ServerRef` objects:
+
+```yaml
+server_reference:
+  type: <server_type>    # Must match Level 2 category
+  name: <unique_name>    # Must match Level 1 name
+```
+
+**Valid server types**: `responses_api_models`, `resources_servers`, `responses_api_agents`
+
+```{important}
+Referenced server names must exist in your configuration. Use `ng_dump_config` to validate references before running.
+```
+
+---
+
+## Dataset Configuration
+
+Configure datasets under agent servers. NeMo Gym supports three dataset types.
+
+::::{tab-set}
+
+:::{tab-item} Train
+
+Training data for model optimization.
+
+**Required fields**:
+
+```{list-table}
+:header-rows: 1
+:widths: 30 70
+
+* - Field
+  - Description
+* - `name`
+  - Dataset identifier (user-defined)
+* - `type`
+  - Must be `train`
+* - `jsonl_fpath`
+  - Path to JSONL file (relative to repo root)
+* - `gitlab_identifier`
+  - GitLab registry metadata (`dataset_name`, `version`, `artifact_fpath`)
+* - `license`
+  - Dataset license (e.g., `Apache 2.0`, `MIT`, `Creative Commons Attribution 4.0 International`)
+```
+
+**Optional**: `num_repeats` (default: 1), `start_idx`, `end_idx`
+
+**Example**:
+
+```yaml
+datasets:
+- name: train
+  type: train
+  jsonl_fpath: resources_servers/library_judge_math/data/train.jsonl
+  num_repeats: 1
+  gitlab_identifier:
+    dataset_name: bytedtsinghua_dapo17k
+    version: 0.0.1
+    artifact_fpath: train.jsonl
+  license: Apache 2.0
+```
+
+:::
+
+:::{tab-item} Validation
+
+Validation data for evaluation during training.
+
+**Required fields**: Same as train dataset
+
+**Example**:
+
+```yaml
+datasets:
+- name: validation
+  type: validation
+  jsonl_fpath: resources_servers/library_judge_math/data/validation.jsonl
+  gitlab_identifier:
+    dataset_name: bytedtsinghua_dapo17k
+    version: 0.0.1
+    artifact_fpath: validation.jsonl
+  license: Apache 2.0
+```
+
+:::
+
+:::{tab-item} Example
+
+Small example dataset (5 samples) for testing and documentation. Committed to git.
+
+**Required fields**:
+
+```{list-table}
+:header-rows: 1
+:widths: 30 70
+
+* - Field
+  - Description
+* - `name`
+  - Dataset identifier
+* - `type`
+  - Must be `example`
+* - `jsonl_fpath`
+  - Path to JSONL file (relative to repo root)
+```
+
+**Not required**: `gitlab_identifier`, `license` (commit examples to git)
+
+**Example**:
+
+```yaml
+datasets:
+- name: example
+  type: example
+  jsonl_fpath: resources_servers/library_judge_math/data/example.jsonl
+```
+
+:::
+
+::::
+
+```{seealso}
+Use `ng_download_dataset_from_gitlab` to download train/validation datasets from the GitLab registry.
+```
 
 ---
 
 ## Global Configuration Options
 
-Reserved top-level keys for global settings:
+Reserved top-level keys for system-wide settings.
 
-```yaml
-# Global settings (outside server configurations)
-config_paths: [...]              # List of YAML config files
-default_host: "127.0.0.1"        # Default host for all servers
-ray_head_node_address: "ray://..." # Custom Ray cluster address
+::::{tab-set}
 
-# Head server configuration
-head_server:
-  host: "127.0.0.1"
-  port: 8000
-
-# Profiling configuration
-profiling_enabled: false
-profiling_results_dirpath: results/profiling
-
-# HTTP client configuration
-global_aiohttp_connector_limit: 102400
-global_aiohttp_connector_limit_per_host: 1024
-```
-
-### Global Options Reference
+:::{tab-item} Core Settings
 
 ```{list-table}
 :header-rows: 1
 :widths: 35 15 50
 
 * - Field
-  - Type
+  - Default
   - Description
 * - `config_paths`
-  - list[str]
+  - `[]`
   - List of YAML configuration files to merge
 * - `default_host`
-  - str
-  - Default host for all servers (default: `127.0.0.1`)
-* - `ray_head_node_address`
-  - str
-  - Custom Ray cluster address (optional)
+  - `127.0.0.1`
+  - Default host for all servers
 * - `head_server.host`
-  - str
+  - `127.0.0.1`
   - Head server host address
 * - `head_server.port`
-  - int
-  - Head server port (default: 8000)
-* - `profiling_enabled`
-  - bool
-  - Enable performance profiling (default: false)
-* - `profiling_results_dirpath`
-  - str
-  - Directory for profiling results
+  - `11000`
+  - Head server port
+```
+
+**Example**:
+
+```yaml
+default_host: "0.0.0.0"
+head_server:
+  host: "0.0.0.0"
+  port: 11000
+```
+
+:::
+
+:::{tab-item} Ray Cluster
+
+```{list-table}
+:header-rows: 1
+:widths: 35 15 50
+
+* - Field
+  - Default
+  - Description
+* - `ray_head_node_address`
+  - Auto
+  - Custom Ray cluster address (e.g., `ray://127.0.0.1:10001`)
+```
+
+By default, NeMo Gym starts a local Ray cluster. Set `ray_head_node_address` to connect to an existing cluster.
+
+**Example**:
+
+```yaml
+ray_head_node_address: "ray://192.168.1.100:10001"
+```
+
+:::
+
+:::{tab-item} Performance
+
+```{list-table}
+:header-rows: 1
+:widths: 35 15 50
+
+* - Field
+  - Default
+  - Description
 * - `global_aiohttp_connector_limit`
-  - int
-  - Max concurrent connections (default: 102400)
+  - `102400`
+  - Max concurrent HTTP connections
 * - `global_aiohttp_connector_limit_per_host`
-  - int
-  - Max connections per host (default: 1024)
+  - `1024`
+  - Max connections per host
+* - `profiling_enabled`
+  - `false`
+  - Enable performance profiling
+* - `profiling_results_dirpath`
+  - None
+  - Directory for profiling results
 ```
 
----
-
-## Configuration Best Practices
-
-### Naming Conventions
-
-**Resource servers**: `<name>_resources_server`
+**Example**:
 
 ```yaml
-math_resources_server:
-  resources_servers:
-    library_judge_math:
-      # ...
+profiling_enabled: true
+profiling_results_dirpath: results/profiling
+global_aiohttp_connector_limit: 200000
 ```
 
-**Agents**: `<name>_simple_agent` or `<environment>_<name>_agent`
+:::
 
-```yaml
-math_simple_agent:
-  responses_api_agents:
-    simple_agent:
-      # ...
-```
-
-**Models**: `policy_model`, `judge_model`, or descriptive names
-
-```yaml
-policy_model:
-  responses_api_models:
-    openai_model:
-      # ...
-```
-
-### Structure
-
-- One agent per configuration file (with its dependencies)
-- Models and resources can be shared across agents
-- Use separate files for different environments (dev, staging, prod)
-
-**Recommended directory structure**:
-
-```
-configs/
-├── base/
-│   ├── models/
-│   │   ├── policy_model.yaml
-│   │   └── judge_model.yaml
-│   └── resources/
-│       ├── math.yaml
-│       └── search.yaml
-├── dev.yaml
-├── staging.yaml
-└── prod.yaml
-```
-
-### Server References
-
-- Always use Level 1 unique names in server references
-- Verify references exist before running (use `ng_dump_config`)
-- Server references are validated at startup
-
-**Validation**:
-
-```bash
-ng_dump_config "+config_paths=[config.yaml]" | grep -A 2 "server:"
-```
-
-### Datasets
-
-- Example datasets (5 examples) must be committed to git
-- Train/validation datasets must specify `gitlab_identifier`
-- Use `num_repeats` for data augmentation during training
-
-**Example dataset requirements**:
-
-```
-resources_servers/my_server/data/
-├── example.jsonl          # 5 examples (committed to git)
-├── example_metrics.json   # Metrics from ng_prepare_data
-└── example_rollouts.jsonl # Rollouts from ng_collect_rollouts
-```
+::::
 
 ---
 
 ## Variable Substitution
 
-Use `${variable}` syntax to reference values from `env.yaml`:
+Reference values from `env.yaml` using `${variable}` syntax.
 
-**In config YAML**:
+**In configuration file**:
 
 ```yaml
 policy_model:
@@ -506,25 +425,23 @@ policy_api_key: sk-your-actual-key
 policy_model_name: gpt-4o-2024-11-20
 ```
 
-**Best practices**:
-- Store all secrets in `env.yaml` (never commit)
-- Use descriptive variable names
-- Document required variables in README
-- Provide example `env.yaml.example` file
+```{important}
+Never commit `env.yaml` to git. Keep secrets in `env.yaml` and provide `env.yaml.example` for reference.
+```
 
 ---
 
 ## Configuration Hierarchy
 
-NeMo Gym loads configuration from three layers (lowest to highest priority):
+Configuration merges from three layers (later overrides earlier):
 
-```
-1. YAML Files          → Base configuration (structure)
-2. env.yaml            → Secrets and environment-specific values
+```text
+1. YAML Files          → Base configuration structure
+2. env.yaml            → Secrets and environment-specific values  
 3. Command-Line Args   → Runtime overrides
 ```
 
-**Example merge**:
+**Example**:
 
 ```yaml
 # base.yaml
@@ -540,56 +457,106 @@ policy_api_key: sk-abc123
 # Command line
 +policy_model.responses_api_models.openai_model.temperature=0.5
 
-# Final result (after merge):
+# Final result:
 policy_model:
   responses_api_models:
     openai_model:
       model_name: gpt-4o-2024-11-20
       openai_api_key: sk-abc123
-      temperature: 0.5
+      temperature: 0.5  # Overridden by CLI
 ```
 
 ---
 
-## Validation and Schema
+## Best Practices
 
-Configuration is validated at startup using Pydantic models. Common validation errors:
+::::{dropdown} Naming Conventions
 
-**Missing required field**:
+**Resource servers**: `<name>_resources_server`
 
-```
-ValidationError: field required (type=value_error.missing)
-```
-
-**Invalid server reference**:
-
-```
-ValueError: Server reference not found: {'type': 'responses_api_models', 'name': 'missing_model'}
+```yaml
+math_resources_server:
+  resources_servers:
+    library_judge_math:
+      entrypoint: app.py
 ```
 
-**Invalid dataset type**:
+**Agents**: `<name>_simple_agent` or `<environment>_<name>_agent`
 
-```
-ValidationError: value is not a valid enumeration member; permitted: 'train', 'validation', 'example'
+```yaml
+math_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
 ```
 
-Use `ng_dump_config` to validate configuration before running:
+**Models**: `policy_model`, `judge_model`, or descriptive names
 
-```bash
-ng_dump_config "+config_paths=[config.yaml]"
-# If this succeeds, configuration is valid
+```yaml
+policy_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
 ```
+
+::::
+
+::::{dropdown} Configuration Organization
+
+**Recommended directory structure**:
+
+```text
+configs/
+├── base/
+│   ├── models/
+│   │   ├── policy_model.yaml
+│   │   └── judge_model.yaml
+│   └── resources/
+│       ├── math.yaml
+│       └── search.yaml
+├── dev.yaml
+├── staging.yaml
+└── prod.yaml
+```
+
+**Guidelines**:
+
+- One agent per configuration file (with dependencies)
+- Share models and resources across agents
+- Use separate files for different environments
+
+::::
+
+::::{dropdown} Dataset Requirements
+
+**Example datasets**:
+
+- Commit to git
+- Include 5 examples
+- No `gitlab_identifier` or `license` required
+
+**Train/validation datasets**:
+
+- Must specify `gitlab_identifier`
+- Must specify `license`
+- Download via `ng_download_dataset_from_gitlab`
+
+**Directory structure**:
+
+```text
+resources_servers/my_server/data/
+├── example.jsonl          # 5 examples (committed to git)
+├── example_metrics.json   # Metrics from ng_prepare_data
+└── example_rollouts.jsonl # Rollouts from ng_collect_rollouts
+```
+
+::::
 
 ---
 
 ## Related
 
-- {doc}`index` - Configuration overview
+- {doc}`index` - Configuration system overview
 - {doc}`debugging` - Debug configuration issues
-- {doc}`multi-server` - Multi-server patterns
+- {doc}`multi-server` - Multi-server deployment patterns
 - {doc}`../../about/concepts/configuration-system` - Configuration system concepts
-
-```{seealso}
-For live configuration validation, use `ng_dump_config "+config_paths=[...]"` to see the fully resolved configuration as NeMo Gym sees it.
-```
-
