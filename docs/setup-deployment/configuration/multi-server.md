@@ -161,7 +161,7 @@ math_agent:
 - Separate policy and critic models
 - Cost optimization (cheap policy, expensive judge)
 
-See {doc}`../../tutorials/separate-policy-and-judge-models` for complete guide.
+See {ref}`tutorial-separate-policy-judge` for complete guide.
 
 :::
 
