@@ -225,17 +225,6 @@ ng_run "+config_paths=[config.yaml]" \
 **When needed**: Port conflicts, running simultaneous instances.
 ::::
 
-::::{dropdown} Enable Debug Logging
-
-```bash
-# Detailed logs for troubleshooting
-ng_run "+config_paths=[config.yaml]" \
-  +log_level=DEBUG
-```
-
-**Output includes**: Request/response bodies, tool call details, verification steps.
-::::
-
 ::::{dropdown} Use Different Models
 
 ```bash
@@ -285,6 +274,10 @@ ng_run "+config_paths=[config.yaml]" \
 # View collected training data
 ng_viewer +jsonl_fpath=outputs/2025-11-07/train.jsonl
 ```
+
+:::{note}
+The `ng_viewer` command uses `+jsonl_fpath` as its parameter. This differs from `ng_collect_rollouts`, which uses `+input_jsonl_fpath` and `+output_jsonl_fpath`.
+:::
 
 **Opens interactive viewer** showing:
 
