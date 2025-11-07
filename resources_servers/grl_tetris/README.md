@@ -8,11 +8,8 @@ FastAPI-based resource server that exposes the GRL Tetris environment through Ne
 - **Independence**: No runtime dependency on the GRL repository—the environment is vendored and self-contained.
 
 ## Setup
-1. **Install NeMo Gym (once)**  
-   Run this from the `Gym/` repository root so the editable install exposes the `ng_*` CLI.
-   ```bash
-   uv pip install -e ".[dev]"
-   ```
+
+Please follow the setup instructions as outlined in: https://github.com/NVIDIA-NeMo/Gym/blob/main/docs/tutorials/02-setup.md#step-1-clone-and-install. 
 
 ## Running
 Launch the resource server together with a compatible agent:
