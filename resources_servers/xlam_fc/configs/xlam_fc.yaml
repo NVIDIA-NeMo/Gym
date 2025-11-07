@@ -27,3 +27,11 @@ xlam_fc_simple_agent:
           version: 0.0.1
           artifact_fpath: train.jsonl
         license: Apache 2.0
+      - name: valid
+        type: validation
+        jsonl_fpath: resources_servers/xlam_fc/data/valid.jsonl
+        gitlab_identifier:
+          dataset_name: xlam_function_calling_60k
+          version: 0.0.1
+          artifact_fpath: valid.jsonl
+        license: Apache 2.0

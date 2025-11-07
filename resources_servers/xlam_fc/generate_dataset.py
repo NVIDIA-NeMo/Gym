@@ -124,17 +124,44 @@ def parse_tools(tools_str: str) -> List[Dict[str, Any]]:
         return []
 
 
-def generate_dataset(output_path: str = "resources_servers/xlam_fc/data/train.jsonl"):
+def generate_dataset(
+    output_dir: str = "resources_servers/xlam_fc/data",
+    valid_size: int = 1000
+):
     print("Loading dataset from HuggingFace...")
     dataset = load_dataset("Salesforce/xlam-function-calling-60k", split="train")
     print(f"Loaded {len(dataset)} examples")
-    output_file = Path(output_path)
-    output_file.parent.mkdir(parents=True, exist_ok=True)
 
+    print(f"Splitting dataset: {valid_size} for validation, rest for training...")
+    split_dataset = dataset.train_test_split(test_size=valid_size, seed=42)
+    train_dataset = split_dataset["train"]
+    valid_dataset = split_dataset["test"]
+
+    print(f"Train: {len(train_dataset)} examples")
+    print(f"Valid: {len(valid_dataset)} examples")
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    train_path = output_path / "train.jsonl"
+    valid_path = output_path / "valid.jsonl"
+
+    print("\nProcessing training set...")
+    train_processed, train_skipped = process_and_write_split(train_dataset, train_path)
+
+    print("\nProcessing validation set...")
+    valid_processed, valid_skipped = process_and_write_split(valid_dataset, valid_path)
+
+    print(f"\nDataset generation complete!")
+    print(f"Train - Processed: {train_processed}, Skipped: {train_skipped}")
+    print(f"Valid - Processed: {valid_processed}, Skipped: {valid_skipped}")
+    print(f"Output directory: {output_dir}")
+
+
+def process_and_write_split(dataset, output_path: Path) -> tuple[int, int]:
     processed_count = 0
     skipped_count = 0
 
-    print("Processing and writing dataset...")
     with open(output_path, "w") as f:
         for example in tqdm(dataset):
             tools = parse_tools(example["tools"])
@@ -161,10 +188,57 @@ def generate_dataset(output_path: str = "resources_servers/xlam_fc/data/train.js
             f.write(json.dumps(record) + "\n")
             processed_count += 1
 
-    print(f"\nDataset generation complete!")
-    print(f"Processed: {processed_count} examples")
-    print(f"Skipped: {skipped_count} examples")
-    print(f"Output: {output_path}")
+    return processed_count, skipped_count
+
+def generate_example_file(
+    output_dir: str = "resources_servers/xlam_fc/data",
+    num_examples: int = 5
+):
+    dataset = load_dataset("Salesforce/xlam-function-calling-60k", split="train")
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    example_path = output_path / "example.jsonl"
+
+    print(f"Generating {num_examples} examples...")
+    processed_count = 0
+    skipped_count = 0
+
+    with open(example_path, "w") as f:
+        for i, example in enumerate(dataset):
+            if processed_count >= num_examples:
+                break
+
+            tools = parse_tools(example["tools"])
+            expected_answers = parse_expected_answers(example["answers"])
+
+            if not tools or not expected_answers:
+                skipped_count += 1
+                continue
+
+            responses_create_params = {
+                "input": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": example["query"]},
+                ],
+                "tools": tools,
+            }
+
+            record = {
+                "id": processed_count,
+                "responses_create_params": responses_create_params,
+                "expected_answers": expected_answers,
+            }
+
+            f.write(json.dumps(record) + "\n")
+            processed_count += 1
+
+    print(f"Generated {processed_count} examples in {example_path}")
 
 if __name__ == "__main__":
-    generate_dataset()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--example":
+        generate_example_file()
+    else:
+        generate_dataset()
