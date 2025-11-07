@@ -1,14 +1,16 @@
 # NeMo Gym
 
-NeMo Gym enables scalable data collection for reinforcement learning of AI agents. It provides both the infrastructure to systematically capture agent interactions and a collection of high-quality RL environments, making it easy to generate training data for reinforcement learning workflows using the framework of your choice.
+NeMo Gym is a framework for building agentic reinforcement learning environments to train large language models. 
+
 
 > [!IMPORTANT]
-> NeMo Gym is currently in early development. While NVIDIA is using it for training Nemotron models, you should expect evolving APIs, incomplete documentation, and occasional bugs. We welcome contributions and feedback! For any changes, please open an issue first to coordinate with the team and ensure alignment with product direction.
+> NeMo Gym is currently in early development. You should expect evolving APIs, incomplete documentation, and occasional bugs. We welcome contributions and feedback! For any changes, please open an issue first to coordinate with the team and ensure alignment with product direction.
 
 
 ## 🏆 Why NeMo Gym?
 
 - **Fast Data Generation** - Less boilerplate, more innovation: get from prompt to training rollouts quickly
+- **Rich Environment Library** - Leverage curated resource servers for common tasks: competitive coding, mathematical reasoning, MCQA, and more
 - **Flexible Environment Integration** - Connect to any environment: custom APIs, MCP-compatible tools, external services, or leverage our curated resources
 - **Smart Orchestration** - Async architecture automatically coordinates model-resource calls for high-throughput training workloads
 - **Configuration-Driven** - Swap models, resources, and environments via YAML without touching code
@@ -65,7 +67,7 @@ python responses_api_agents/simple_agent/client.py
 We'd love your contributions! Here's how to get involved:
 
 - **[Report Issues](https://github.com/NVIDIA-NeMo/Gym/issues)** - Bug reports and feature requests
-<!-- TODO: Add link [Discussions](https://github.com/NVIDIA-NeMo/Gym/discussions) -->
+<!-- : Add link [Discussions](https://github.com/NVIDIA-NeMo/Gym/discussions) -->
 - **Discussions (Coming soon!)** - Community Q&A and ideas
 - **[Contributing Guide](https://github.com/NVIDIA-NeMo/Gym/blob/main/CONTRIBUTING.md)** - How to contribute code, docs, or new environments
 
