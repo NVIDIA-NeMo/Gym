@@ -10,6 +10,7 @@ library_judge_math:
       }
       should_use_judge: false
       domain: math
+      verified: false
 library_judge_math_simple_agent:
   responses_api_agents:
     simple_agent:

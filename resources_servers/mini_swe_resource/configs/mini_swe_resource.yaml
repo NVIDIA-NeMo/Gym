@@ -3,6 +3,7 @@ mini_swe_resource_resources_server:
     mini_swe_resource:
       entrypoint: app.py
       domain: coding
+      verified: false
 mini_swe_simple_agent:
   responses_api_agents:
     mini_swe_agent:

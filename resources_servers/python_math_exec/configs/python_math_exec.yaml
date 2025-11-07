@@ -4,6 +4,7 @@ python_math_exec:
       entrypoint: app.py
       max_execution_time: 10
       domain: math
+      verified: false
 python_math_exec_simple_agent:
   responses_api_agents:
     simple_agent:

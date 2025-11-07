@@ -3,6 +3,7 @@ structured_outputs:
     structured_outputs:
       entrypoint: app.py
       domain: instruction_following
+      verified: false
 structured_outputs_simple_agent:
   responses_api_agents:
     simple_agent:

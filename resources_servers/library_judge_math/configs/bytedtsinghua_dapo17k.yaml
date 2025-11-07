@@ -10,6 +10,8 @@ library_judge_math:
       }
       should_use_judge: false
       domain: math
+      verified: true
+      verified_url: https://wandb.ai/nvidia/bxyu-nemo-gym-rl-integration/runs/5d2a98ix
 library_judge_math_simple_agent:
   responses_api_agents:
     simple_agent:

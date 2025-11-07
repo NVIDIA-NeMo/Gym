@@ -3,6 +3,7 @@ google_search:
     google_search:
       entrypoint: app.py
       domain: agent
+      verified: false
 google_search_simple_agent:
   responses_api_agents:
     simple_agent:

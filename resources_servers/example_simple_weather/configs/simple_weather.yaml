@@ -3,6 +3,7 @@ example_simple_weather:
     example_simple_weather:
       entrypoint: app.py
       domain: agent
+      verified: false
       description: Basic single-step tool calling
 simple_weather_simple_agent:
   responses_api_agents:

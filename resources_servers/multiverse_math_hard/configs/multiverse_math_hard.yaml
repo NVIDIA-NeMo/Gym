@@ -3,6 +3,7 @@ multiverse_math_hard:
     multiverse_math_hard:
       entrypoint: app.py
       domain: agent
+      verified: false
 multiverse_math_hard_simple_agent:
   responses_api_agents:
     simple_agent:

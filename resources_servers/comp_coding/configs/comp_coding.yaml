@@ -3,6 +3,8 @@ comp_coding:
     comp_coding:
       entrypoint: app.py
       domain: coding
+      verified: true
+      verified_url: https://wandb.ai/nvidia/bxyu-nemo-gym-rl-integration-20250926/runs/54uzarwq
       num_processes: 8
       unit_test_timeout_secs: 10
       debug: false
