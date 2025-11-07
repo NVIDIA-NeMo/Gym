@@ -2,7 +2,7 @@
 
 # Setup & Deployment
 
-Configure and deploy NeMo Gym for your project. 
+Configure and deploy NeMo Gym for local development, production, or distributed environments with proper monitoring and operations.
 
 :::{button-ref} /get-started/index
 :color: secondary
@@ -14,62 +14,36 @@ Configure and deploy NeMo Gym for your project.
 
 ---
 
-## Configuration Management
+## Topics
 
-Master NeMo Gym's three-tier configuration system to handle different environments, secrets, and deployment scenarios.
+Choose the setup and deployment task that matches your current need:
 
-::::{grid} 1 1 1 1
+::::{grid} 1 1 2 2
 :gutter: 3
 
 :::{grid-item-card} {octicon}`gear;1.5em;sd-mr-1` Configuration Management
 :link: configuration/index
 :link-type: doc
 
-Manage NeMo Gym's three-tier configuration system, handle environments, secrets, and multi-server setups.
+Manage NeMo Gym's three-tier configuration system, environments, secrets, and multi-server setups.
 +++
 {bdg-secondary}`how-to` {bdg-secondary}`configuration`
 :::
 
-::::
-
-:::{seealso}
-**Understanding the concepts?** See {doc}`../about/concepts/configuration-system` for conceptual explanation of how the three-tier configuration system works.
-:::
-
----
-
-## Deployment
-
-Deploy NeMo Gym in different environments—local development, remote servers, or containerized infrastructure.
-
-::::{grid} 1 1 1 1
-:gutter: 3
-
-:::{grid-item-card} {octicon}`cloud;1.5em;sd-mr-1` Deployment
+:::{grid-item-card} {octicon}`cloud;1.5em;sd-mr-1` Deployment Scenarios
 :link: deployment/index
 :link-type: doc
 
-Deploy NeMo Gym locally, on remote servers, in containers, and scale for production.
+Deploy locally, on remote servers, in containers, or scale with distributed computing.
 +++
 {bdg-secondary}`how-to` {bdg-secondary}`deployment`
 :::
-
-::::
-
----
-
-## Operations
-
-Monitor, test, and debug your NeMo Gym deployment to ensure reliable operation.
-
-::::{grid} 1 1 1 1
-:gutter: 3
 
 :::{grid-item-card} {octicon}`pulse;1.5em;sd-mr-1` Operations
 :link: operations/index
 :link-type: doc
 
-Monitor, test, and debug your NeMo Gym deployment for reliable operation.
+Monitor health, test servers, profile performance, and debug deployment issues.
 +++
 {bdg-secondary}`how-to` {bdg-secondary}`operations`
 :::
@@ -78,11 +52,15 @@ Monitor, test, and debug your NeMo Gym deployment for reliable operation.
 
 ---
 
-## Common Workflows
+## Setup Workflow Patterns
 
-End-to-end workflows for typical setup and deployment scenarios:
+Common end-to-end workflows for typical setup and deployment scenarios.
 
-### Development Environment Setup
+::::{tab-set}
+
+:::{tab-item} Development Environment
+
+**Quick local setup for experimentation and testing**:
 
 ```bash
 # 1. Clone and install
@@ -99,11 +77,13 @@ EOF
 ng_run "+config_paths=[responses_api_agents/simple_agent/config.yaml]"
 ```
 
-**Next**: See {doc}`configuration/index` for more configuration patterns
+**Guides**: {doc}`configuration/index` → {doc}`deployment/local-development` → {doc}`operations/testing`
 
----
+:::
 
-### Production Deployment
+:::{tab-item} Production Deployment
+
+**Production server deployment with monitoring**:
 
 ```bash
 # 1. Set up production env.yaml
@@ -115,8 +95,37 @@ EOF
 # 2. Deploy with production config
 ng_run "+config_paths=[production_config.yaml]" \
     +default_host=0.0.0.0 \
-    +head_server.port=8000
+    +head_server.port=11000
+
+# 3. Monitor server availability
+watch -n 10 'lsof -i :11000 > /dev/null && echo "✓ Server running" || echo "✗ Server down"'
 ```
 
-**Next**: See {doc}`deployment/index` for deployment options
+**Guides**: {doc}`configuration/index` → {doc}`deployment/distributed-computing` → {doc}`operations/monitoring`
 
+:::
+
+:::{tab-item} Distributed Training
+
+**Multi-node setup with Ray for high-throughput workloads**:
+
+```bash
+# 1. Start Ray cluster
+ray start --head --port=6379
+
+# 2. Set up distributed config
+cat > distributed_config.yaml << EOF
+num_gpus: 4
+num_workers: 16
+EOF
+
+# 3. Run distributed rollout collection
+ng_run "+config_paths=[distributed_config.yaml]" \
+    +default_host=0.0.0.0
+```
+
+**Guides**: {doc}`deployment/distributed-computing` → {doc}`operations/profiling` → {doc}`operations/monitoring`
+
+:::
+
+::::

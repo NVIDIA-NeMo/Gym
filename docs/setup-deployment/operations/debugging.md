@@ -502,65 +502,59 @@ curl http://localhost:<PORT>/stats
 
 Follow this checklist for any issue:
 
-::::{tab-set}
+1. Capture Information:
 
-:::{tab-item} 1. Capture Information
-```bash
-# Capture full error output
-ng_run "+config_paths=[config.yaml]" 2>&1 | tee debug.log
-
-# Note the exact error message
-grep -i error debug.log
-
-# Check system resources
-df -h  # Disk space
-free -h  # Memory (Linux)
-top  # CPU usage
-```
-:::
-
-:::{tab-item} 2. Verify Configuration
-```bash
-# Dump and review configuration
-ng_dump_config "+config_paths=[config.yaml]" > config_dump.yaml
-
-# Check for unresolved variables
-grep '\${' config_dump.yaml
-
-# Verify file paths exist
-# (check paths in config_dump.yaml)
-```
-:::
-
-:::{tab-item} 3. Isolate Component
-```bash
-# Test resource server in isolation
-ng_test +entrypoint=resources_servers/your_server
-
-# Run with minimal configuration
-ng_run "+config_paths=[minimal_config.yaml]"
-
-# Test external dependencies separately
-# (e.g., API endpoints, databases)
-```
-:::
-
-:::{tab-item} 4. Document & Report
-When reporting issues, include:
-
-1. **Error message**: Complete stack trace
-2. **Configuration**: Sanitized (remove API keys)
-3. **Environment**:
    ```bash
-   echo "OS: $(uname -a)"
-   echo "Python: $(python --version)"
-   pip show nemo-gym
-   ```
-4. **Steps to reproduce**: Exact commands
-5. **Expected vs actual behavior**
-:::
+   # Capture full error output
+   ng_run "+config_paths=[config.yaml]" 2>&1 | tee debug.log
 
-::::
+   # Note the exact error message
+   grep -i error debug.log
+
+   # Check system resources
+   df -h  # Disk space
+   free -h  # Memory (Linux)
+   top  # CPU usage
+   ```
+
+2. Verify Configuration:
+
+   ```bash
+   # Dump and review configuration
+   ng_dump_config "+config_paths=[config.yaml]" > config_dump.yaml
+
+   # Check for unresolved variables
+   grep '\${' config_dump.yaml
+
+   # Verify file paths exist
+   # (check paths in config_dump.yaml)
+   ```
+
+3. Isolate Component:
+
+   ```bash
+   # Test resource server in isolation
+   ng_test +entrypoint=resources_servers/your_server
+
+   # Run with minimal configuration
+   ng_run "+config_paths=[minimal_config.yaml]"
+
+   # Test external dependencies separately
+   # (e.g., API endpoints, databases)
+   ```
+
+4. Document & Report. When reporting issues, include:
+
+   1. **Error message**: Complete stack trace
+   2. **Configuration**: Sanitized (remove API keys)
+   3. **Environment**:
+      ```bash
+      echo "OS: $(uname -a)"
+      echo "Python: $(python --version)"
+      pip show nemo-gym
+      ```
+   4. **Steps to reproduce**: Exact commands
+   5. **Expected vs actual behavior**
 
 ---
 
@@ -607,41 +601,3 @@ tail -f server.log | grep -i warn
 :::
 
 ::::
-
----
-
-## Next Steps
-
-::::{grid} 1 2 2 2
-:gutter: 3
-
-:::{grid-item-card} {octicon}`meter;1.5em` Performance Profiling
-:link: profiling
-:link-type: doc
-
-Profile slow verification logic
-:::
-
-:::{grid-item-card} {octicon}`pulse;1.5em` System Monitoring
-:link: monitoring
-:link-type: doc
-
-Set up continuous monitoring
-:::
-
-:::{grid-item-card} {octicon}`beaker;1.5em` Testing Guide
-:link: testing
-:link-type: doc
-
-Write tests to prevent regressions
-:::
-
-:::{grid-item-card} {octicon}`question;1.5em` Configuration Reference
-:link: ../configuration/reference
-:link-type: doc
-
-Full configuration options
-:::
-
-::::
-
