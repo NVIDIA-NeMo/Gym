@@ -49,6 +49,13 @@ repos:
         files: '.*\/[^\/]*_[^\/]*\.md$'
         exclude: '^\.github/'
         types: [file]
+      - id: add-verified-flag
+        name: Add verified flag to resource server configs
+        language: python
+        entry: python scripts/add_verified_flag.py
+        additional_dependencies: [pyyaml]
+        files: ^resources_servers/.*/configs/.*\.yaml$
+        pass_filenames: true
       - id: update-readme-table
         name: Update resource server list in README
         language: python

@@ -1,7 +1,7 @@
 {
     "name": "example",
     "type": "example",
-    "jsonl_fpath": "resources_servers/stateful_counter/data/example.jsonl",
+    "jsonl_fpath": "resources_servers/example_stateful_counter/data/example.jsonl",
     "gitlab_identifier": null,
     "license": null,
     "Number of examples": 5,

@@ -1,8 +1,10 @@
-stateful_counter_resources_server:
+example_stateful_counter_resources_server:
   resources_servers:
-    stateful_counter:
+    example_stateful_counter:
       entrypoint: app.py
       domain: agent
+      verified: false
+      description: Session state management (in-memory)
 stateful_counter_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -16,7 +18,7 @@ stateful_counter_simple_agent:
       datasets:
       - name: train
         type: train
-        jsonl_fpath: resources_servers/stateful_counter/data/train.jsonl
+        jsonl_fpath: resources_servers/example_stateful_counter/data/train.jsonl
         gitlab_identifier:
           dataset_name: stateful_counter
           version: 0.0.1
@@ -24,7 +26,7 @@ stateful_counter_simple_agent:
         license: Apache 2.0
       - name: validation
         type: validation
-        jsonl_fpath: resources_servers/stateful_counter/data/validation.jsonl
+        jsonl_fpath: resources_servers/example_stateful_counter/data/validation.jsonl
         gitlab_identifier:
           dataset_name: stateful_counter
           version: 0.0.1
@@ -32,4 +34,4 @@ stateful_counter_simple_agent:
         license: Apache 2.0
       - name: example
         type: example
-        jsonl_fpath: resources_servers/stateful_counter/data/example.jsonl
+        jsonl_fpath: resources_servers/example_stateful_counter/data/example.jsonl

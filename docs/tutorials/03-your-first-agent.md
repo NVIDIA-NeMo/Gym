@@ -50,7 +50,7 @@ The agent decided to call the weather tool with San Francisco as the city. The a
 }
 ```
 
-The weather resource server (defined in `resources_servers/simple_weather/app.py`) returned this response; it always says "cold" regardless of the actual city.
+The weather resource server (defined in `resources_servers/example_simple_weather/app.py`) returned this response; it always says "cold" regardless of the actual city.
 
 ### 5. Final Response
 ```json
@@ -141,7 +141,7 @@ Specify the config and run NeMo Gym
 ```bash
 # Define which servers to start
 config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/simple_weather/configs/simple_weather.yaml"
+resources_servers/example_simple_weather/configs/simple_weather.yaml"
 
 # Start all servers
 ng_run "+config_paths=[${config_paths}]"
@@ -176,7 +176,7 @@ python responses_api_agents/simple_agent/custom_client.py
 
 In this weather agent example, both the tool and verification functions are implemented directly within NeMo Gym:
 
-**Weather Tool** (`resources_servers/simple_weather/app.py`):
+**Weather Tool** (`resources_servers/example_simple_weather/app.py`):
 ```python
 async def get_weather(self, body: GetWeatherRequest) -> GetWeatherResponse:
     return GetWeatherResponse(

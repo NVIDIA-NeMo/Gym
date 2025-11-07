@@ -112,6 +112,7 @@ equivalence_llm_judge:
       # Default 0.5 (partial credit). Set to 1.0 for full credit or 0.0 to ignore.
       reward_if_full_generation_succeeds: 0.5
       domain: knowledge
+      verified: false
 equivalence_llm_judge_simple_agent:
   responses_api_agents:
     simple_agent:
