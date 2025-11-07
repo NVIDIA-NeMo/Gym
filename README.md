@@ -1,6 +1,7 @@
 # NeMo Gym
 
 NeMo Gym is a framework for building agentic reinforcement learning environments to train large language models. 
+> *Part of the [NVIDIA NeMo](https://www.nvidia.com/en-us/ai-data-science/products/nemo/) software suite for managing the AI agent lifecycle.*
 
 
 > [!IMPORTANT]
@@ -9,7 +10,7 @@ NeMo Gym is a framework for building agentic reinforcement learning environments
 
 ## 🏆 Why NeMo Gym?
 
-- **Fast Data Generation** - Less boilerplate, more innovation: get from prompt to training rollouts quickly
+ - **Fast Data Generation** - Less boilerplate, more innovation: get from prompt to training rollouts quickly
 - **Rich Environment Library** - Leverage curated resource servers for common tasks: competitive coding, mathematical reasoning, MCQA, and more
 - **Flexible Environment Integration** - Connect to any environment: custom APIs, MCP-compatible tools, external services, or leverage our curated resources
 - **Smart Orchestration** - Async architecture automatically coordinates model-resource calls for high-throughput training workloads
