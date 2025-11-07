@@ -216,13 +216,13 @@ def generate_training_table(servers: list[dict]) -> str:
 
     rows.sort(
         key=lambda r: (
-            normalize_str(r[0]),
-            normalize_str(r[1]),
-            normalize_str(r[2]),
-            normalize_str(r[3]),
-            normalize_str(r[4]),
-            normalize_str(r[5]),
-            normalize_str(r[6]),
+            0 if "✓" in r[4] else 1,  # verified (reverse order for checkmarks first)
+            normalize_str(r[0]),  # domain second
+            normalize_str(r[1]),  # name
+            normalize_str(r[2]),  # train
+            normalize_str(r[3]),  # val
+            normalize_str(r[5]),  # config
+            normalize_str(r[6]),  # license
         )
     )
 

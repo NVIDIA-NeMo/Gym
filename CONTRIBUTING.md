@@ -158,6 +158,7 @@ If you're contributing a new resource server to NeMo Gym, follow this comprehens
 5. **Training-based correctness check** [After Nemo Gym + Nemo RL integration]:
    - Train with GRPO on Qwen 30B A3B Instruct and Qwen 235B Instruct
    - Include training accuracy curve and test benchmark accuracy curve
+   - See [Resource Server Verification Process](#resource-server-verification-process) section
 
 6. **PR Check and Review**:
    1. Assign team member for reproduction and review
