@@ -92,7 +92,7 @@ The Ray address `ray://127.0.0.1:6379` is stored in global configuration and sha
 
 ### Use External Ray Cluster
 
-Connect to an existing Ray cluster for distributed computing:
+Connect to an existing Ray cluster for distributed computing by setting the `ray_head_node_address` configuration parameter:
 
 ::::{tab-set}
 
@@ -128,15 +128,11 @@ ng_run "+config_paths=[config.yaml]" \
 ```
 :::
 
-:::{tab-item} Via Environment Variable
-
-```bash
-export RAY_ADDRESS="ray://your-cluster:10001"
-ng_run "+config_paths=[config.yaml]"
-```
-:::
-
 ::::
+
+:::{note}
+The `ray_head_node_address` configuration parameter is NeMo Gym's standard way to connect to external Ray clusters. The address is stored in the global configuration and shared with all server processes.
+:::
 
 ### Console Output with Custom Cluster
 
@@ -321,55 +317,64 @@ Use object store for large data to avoid serialization costs.
 
 ## Real-World Examples
 
-### Example 1: Math Problem Verification
+### Example 1: Competitive Coding Verification
 
-The `library_judge_math` server verifies 1000+ math problems in parallel:
+The `comp_coding` server verifies code solutions in parallel using Ray:
 
 ```python
-# From resources_servers/library_judge_math/app.py
+# From resources_servers/comp_coding/lcb_integration/compute_code_generation_metrics.py
 
-@ray.remote
-def verify_math_solution(problem, solution):
-    """Verify a single math problem solution."""
-    try:
-        # Execute solution code
-        result = execute_python(solution)
-        
-        # Compare with expected answer
-        correct = compare_answers(result, problem["answer"])
-        
-        return {"correct": correct, "problem_id": problem["id"]}
-    except Exception as e:
-        return {"correct": False, "error": str(e)}
-
-
-class LibraryJudgeMathServer(SimpleResourcesServer):
-    async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
-        # Parallelize across Ray cluster
-        futures = [
-            verify_math_solution.remote(p, body.solution)
-            for p in body.problems
-        ]
-        
-        results = ray.get(futures)
-        
-        # Aggregate results
-        correct_count = sum(1 for r in results if r["correct"])
-        reward = correct_count / len(results)
-        
-        return BaseVerifyResponse(reward=reward)
+# Using SPREAD scheduling so Ray assigns tasks to distinct nodes
+@ray.remote(scheduling_strategy="SPREAD")
+def check_correctness_remote(sample, generation, timeout, debug=True):
+    """Ray wrapper for remote code execution and verification."""
+    return check_correctness(sample, generation, timeout, debug)
 ```
 
-**Performance**:
-- **Single-threaded**: ~500 problems/minute
-- **Ray (8 cores)**: ~3,000 problems/minute
-- **Ray cluster (3 nodes, 24 cores)**: ~9,000 problems/minute
+```python
+# From resources_servers/comp_coding/app.py
+
+class CompCodingResourcesServer(SimpleResourcesServer):
+    async def verify(self, body: CompCodingVerifyRequest) -> CompCodingVerifyResponse:
+        # Extract code from model output
+        code = extract_code(model_out, LMStyle.OpenAIChat)
+        
+        # Submit verification task to Ray cluster
+        async with self._semaphore:
+            task_args = (
+                {"input_output": tests.model_dump_json()},
+                code,
+                self.config.unit_test_timeout_secs,
+                self.config.debug,
+            )
+            
+            future = check_correctness_remote.remote(*task_args)
+            result, metadata = await loop.run_in_executor(None, ray.get, future)
+        
+        # Return verification results
+        reward = 1.0 if all(r == True for r in result) else 0.0
+        return CompCodingVerifyResponse(reward=reward, result=result, metadata=metadata)
+```
+
+**Performance** (approximate):
+- **Single-threaded**: ~50-100 verifications/minute
+- **Ray (8 cores)**: ~400-600 verifications/minute
+- **Ray cluster (3 nodes, 24 cores)**: ~1,200-1,800 verifications/minute
+
+:::{note}
+Performance varies based on test complexity, timeout values, and hardware specifications.
+:::
 
 ### Example 2: Distributed Rollout Collection
 
-Collect training data across multiple nodes:
+:::{tip}
+NeMo Gym's rollout collection automatically uses Ray for parallelization. When you run `ng_collect_rollouts`, requests are distributed across available Ray workers.
+:::
+
+For custom distributed patterns, you can use Ray actors:
 
 ```python
+# Conceptual example for advanced use cases
 @ray.remote
 class RolloutWorker:
     """Dedicated worker for rollout collection."""
@@ -390,12 +395,11 @@ class RolloutWorker:
 
 
 # Create workers across cluster
-workers = [
-    RolloutWorker.remote(model_config)
-    for _ in range(ray.available_resources()["CPU"] // 4)
-]
+num_workers = 4  # Adjust based on cluster size
+workers = [RolloutWorker.remote(model_config) for _ in range(num_workers)]
 
 # Distribute prompts to workers
+from itertools import cycle
 futures = [
     worker.collect_rollout.remote(prompt)
     for worker, prompt in zip(cycle(workers), prompts)
@@ -403,6 +407,10 @@ futures = [
 
 rollouts = ray.get(futures)
 ```
+
+:::{note}
+This is a conceptual example showing Ray patterns. For production rollout collection, use NeMo Gym's built-in `ng_collect_rollouts` command which handles Ray distribution automatically.
+:::
 
 ---
 
