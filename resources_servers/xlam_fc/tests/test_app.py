@@ -168,7 +168,7 @@ class TestApp:
         )
 
         result = await server.verify(verify_request)
-        assert result.reward == 0.5
+        assert result.reward == 0.0
         assert result.num_expected == 2
         assert result.num_predicted == 2
         assert result.num_correct == 1
