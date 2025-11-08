@@ -22,41 +22,46 @@ dynamic = [
     "version",
     "readme",
 ]
-description = "NeMo Gym is a collection of verifiers."
+description = "NeMo Gym is a framework for building reinforcement learning environments"
 license = {file = "LICENSE"}
 requires-python = ">=3.12"
-authors = [{ name = "NVIDIA", email = "nemo-toolkit@nvidia.com" }]
-maintainers = [{ name = "NVIDIA", email = "nemo-toolkit@nvidia.com" }]
+authors = [{ name = "NVIDIA" }]
+maintainers = [{ name = "NVIDIA" }]
+
 keywords = [
-    "NLP",
+    "reinforcement-learning",
+    "RL",
+    "agent",
+    "agentic",
+    "LLM",
+    "large-language-models",
+    "training-data",
+    "rollout",
+    "trajectory",
+    "verification",
+    "verifier",
+    "reward",
+    "tool-calling",
+    "function-calling",
+    "data-collection",
     "NeMo",
-    "deep",
-    "gpu",
-    "language",
-    "learning",
-    "machine",
-    "nvidia",
-    "pytorch",
-    "torch",
+    "NVIDIA",
 ]
 classifiers = [
-    "Development Status :: 5 - Production/Stable",
+    "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
-    "Intended Audience :: Information Technology",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
     "Natural Language :: English",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    "Topic :: Scientific/Engineering :: Image Recognition",
-    "Topic :: Scientific/Engineering :: Mathematics",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering",
-    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Mathematics",
     "Topic :: Software Development :: Libraries",
-    "Topic :: Utilities",
+    "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
     ########################################
@@ -262,7 +267,7 @@ include = ["resources_servers", "responses_api_agents", "responses_api_models", 
 
 [tool.pytest.ini_options]
 # durations=0 will display all tests execution time, sorted in ascending order starting from from the slowest one.
-# -vv will also display tests with durration = 0.00s
+# -vv will also display tests with duration = 0.00s
 addopts = "--verbose --pyargs --durations=0 --strict-markers"  # always add these arguments to pytest
 testpaths = ["tests"]
 # directories to ignore when discovering tests
