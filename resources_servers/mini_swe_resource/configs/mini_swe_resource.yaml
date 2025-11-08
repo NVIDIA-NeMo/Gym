@@ -24,6 +24,7 @@ mini_swe_main_agent_train:
           version: 0.0.1
           artifact_fpath: train.jsonl
         license: MIT
+        num_repeats: 100  # Just some big repeat number
       - name: example
         type: example
         jsonl_fpath: resources_servers/mini_swe_resource/data/example.jsonl
