@@ -103,8 +103,7 @@ class XlamFcResourcesServer(SimpleResourcesServer):
                     matched_predicted_indices.add(i)
                     break
 
-        reward = num_correct / len(expected_answers)
-
+        reward = 1.0 if num_correct == len(expected_answers) == len(predicted_calls) else 0.0
         return reward, num_correct
 
     async def verify(self, body: XlamFcVerifyRequest) -> XlamFcVerifyResponse:
