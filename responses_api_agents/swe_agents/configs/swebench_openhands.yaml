@@ -8,8 +8,6 @@ swe_agents:
       agent_framework: openhands
       agent_config: eval/swe-bench/openhands/default
       agent_max_turns: 100
-      agent_framework_repo: https://github.com/All-Hands-AI/OpenHands.git
-      agent_framework_commit: 9ee704a25a331d0d2eb9a8e87a4dcff1d948855b
       
       # Container configuration
       container_formatter: "docker://swebench/sweb.eval.x86_64.{instance_id}"

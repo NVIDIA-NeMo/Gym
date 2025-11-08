@@ -277,11 +277,21 @@ def convert_trajectory_to_output_items(
                     if tool_calls:
                         for tc in tool_calls:
                             if "function" in tc:
+                                # Handle both dict and string formats for tc["function"]
+                                func = tc["function"]
+                                if isinstance(func, str):
+                                    # If it's a string, try to parse as JSON or use as name
+                                    try:
+                                        func = json.loads(func)
+                                    except (json.JSONDecodeError, TypeError):
+                                        # If not valid JSON, treat the string as the function name
+                                        func = {"name": func, "arguments": ""}
+
                                 output_items.append(
                                     NeMoGymResponseFunctionToolCall(
-                                        arguments=tc["function"].get("arguments", ""),
+                                        arguments=func.get("arguments", ""),
                                         call_id=tc.get("id", ""),
-                                        name=tc["function"].get("name", ""),
+                                        name=func.get("name", ""),
                                         type="function_call",
                                         id=tc.get("id"),
                                         status="completed",
@@ -534,8 +544,21 @@ def extract_messages(trajectory_item) -> List[Dict]:
     Convert a trajectory item into assistant and tool messages.
     Returns a list of messages.
     """
+    # Defensive check: if trajectory_item is not a dict, return empty list
+    if not isinstance(trajectory_item, dict):
+        LOG.warning(f"trajectory_item is not a dict (type: {type(trajectory_item)}). Skipping.")
+        return []
+
     tool_calls = trajectory_item.get("tool_calls")
     final_message = []
+
+    # Get extra_info safely
+    extra_info = trajectory_item.get("extra_info", {})
+    if isinstance(extra_info, dict):
+        provider_specific_fields = extra_info.get("provider_specific_fields", {})
+    else:
+        provider_specific_fields = {}
+
     # Create assistant message
     assistant_msg = {
         "role": "assistant",
@@ -546,7 +569,7 @@ def extract_messages(trajectory_item) -> List[Dict]:
         "tool_calls": tool_calls,
         "message_type": "action",
         "thinking_blocks": [],
-        "provider_specific_fields": trajectory_item.get("extra_info", {}).get("provider_specific_fields", {}),
+        "provider_specific_fields": provider_specific_fields,
     }
     final_message.append(assistant_msg)
     if tool_calls is not None:
@@ -572,16 +595,46 @@ def extract_data_from_trajectory(
     final_trajectory = []
     history_copy = copy.deepcopy(history)
     trajectories_copy = copy.deepcopy(trajectory_data)
-    if len(trajectories_copy[-1]["query"][0]) == 0:  # error case
+
+    # Defensive checks for trajectory_data structure
+    if not trajectories_copy or len(trajectories_copy) == 0:
+        LOG.warning("Empty trajectories_copy, returning empty trajectory")
+        return []
+
+    # Check if last trajectory item is a dict
+    if not isinstance(trajectories_copy[-1], dict):
+        LOG.warning(
+            f"Last trajectory item is not a dict (type: {type(trajectories_copy[-1])}), returning empty trajectory"
+        )
+        return []
+
+    # Check if "query" key exists and is a list
+    if "query" not in trajectories_copy[-1] or not isinstance(trajectories_copy[-1]["query"], list):
+        LOG.warning("'query' key missing or not a list in last trajectory item, returning empty trajectory")
+        return []
+
+    if len(trajectories_copy[-1]["query"]) > 0 and len(trajectories_copy[-1]["query"][0]) == 0:  # error case
+        if len(trajectories_copy) < 2:
+            LOG.warning("Not enough trajectory items for error case, returning empty trajectory")
+            return []
+        if not isinstance(trajectories_copy[-2], dict) or "query" not in trajectories_copy[-2]:
+            LOG.warning("Second-to-last trajectory item is malformed, returning empty trajectory")
+            return []
         final_trajectory = trajectories_copy[-2]["query"].copy()
         final_trajectory.extend(extract_messages(trajectories_copy[-2]))
-        user_message = history_copy.pop()
-        assistant_message = history_copy.pop()
-        user_message["content"] = user_message["content"] + "." + assistant_message["content"]
-        final_trajectory.append(user_message)
+        if len(history_copy) >= 2:
+            user_message = history_copy.pop()
+            assistant_message = history_copy.pop()
+            if isinstance(user_message, dict) and isinstance(assistant_message, dict):
+                user_message["content"] = user_message.get("content", "") + "." + assistant_message.get("content", "")
+                final_trajectory.append(user_message)
     else:
         final_trajectory = trajectories_copy[-1]["query"].copy()
         final_trajectory.extend(extract_messages(trajectories_copy[-1]))
+
+    # Filter out any non-dict items that might have been added
+    final_trajectory = [item for item in final_trajectory if isinstance(item, dict)]
+
     return final_trajectory
 
 

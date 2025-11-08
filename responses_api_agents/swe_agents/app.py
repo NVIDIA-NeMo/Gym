@@ -14,6 +14,7 @@
 import json
 import logging
 import time
+import traceback
 from typing import Any, Dict, Optional
 
 from pydantic import Field
@@ -234,6 +235,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         except Exception as e:
             LOG.error(f"SWE-bench evaluation failed: {str(e)}")
+            LOG.error(f"Traceback: {traceback.format_exc()}")
             # Return error response
             error_message = NeMoGymResponseOutputMessage(
                 id=f"msg-{problem_info.get('instance_id', 'unknown')}-error",
