@@ -213,7 +213,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             """
             result_content_str = e.response_content.decode()
 
-            is_out_of_context_length = e.status == 400 and (
+            is_out_of_context_length = (e.status == 400 or '"code":400' in result_content_str) and (
                 "context length" in result_content_str or "max_tokens" in result_content_str
             )
             if is_out_of_context_length:
