@@ -1,0 +1,2 @@
+-e nemo-gym[dev] @ ../../
+textworld>=1.6.0
