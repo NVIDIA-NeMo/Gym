@@ -69,21 +69,30 @@ def extract_config_metadata(yaml_path: Path) -> tuple[str, str, list[str]]:
 
     def visit_agent_datasets(data):
         nonlocal license
-        for k1, v1 in data.items():
-            if k1.endswith("_simple_agent") and isinstance(v1, dict):
-                v2 = v1.get("responses_api_agents")
-                if isinstance(v2, dict):
-                    # Look for any agent key
-                    for agent_key, v3 in v2.items():
-                        if isinstance(v3, dict):
-                            datasets = v3.get("datasets")
-                            if isinstance(datasets, list):
-                                for entry in datasets:
-                                    if isinstance(entry, dict):
-                                        types.append(entry.get("type"))
-                                        if entry.get("type") == "train":
-                                            license = entry.get("license")
-                                return
+        for v1 in data.values():
+            if not isinstance(v1, dict):
+                continue
+
+            v2 = v1.get("responses_api_agents")
+            if not isinstance(v2, dict):
+                continue
+
+            # Look for any agent key
+            for v3 in v2.values():
+                if not isinstance(v3, dict):
+                    continue
+
+                datasets = v3.get("datasets")
+                if not isinstance(datasets, list):
+                    continue
+
+                for entry in datasets:
+                    if not isinstance(entry, dict):
+                        continue
+
+                    types.append(entry.get("type"))
+                    if entry.get("type") == "train":
+                        license = entry.get("license")
 
     visit_resource_server(data)
     visit_agent_datasets(data)
