@@ -212,6 +212,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             4. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/sampling_params.py#L463
             """
             result_content_str = e.response_content.decode()
+            print(f"CHAT COMPLETION ERROR: {result_content_str}. Status: {e.status}")
 
             is_out_of_context_length = (e.status == 400 or '"code":400' in result_content_str) and (
                 "context length" in result_content_str or "max_tokens" in result_content_str
