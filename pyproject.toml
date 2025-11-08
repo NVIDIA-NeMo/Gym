@@ -142,6 +142,11 @@ dependencies = [
     # Updated Fri Oct 18, 2025 with ray[default]==2.46.0
     # License: Apache 2.0 https://github.com/ray-project/ray/blob/master/LICENSE
     "ray[default]",
+
+    # psutil: Cross-platform process and system utilities
+    # Updated: Fri Nov 07, 2025 with psutil==6.1.1
+    # License: BSD 3-Clause https://github.com/giampaolo/psutil/blob/master/LICENSE
+    "psutil",
 ]
 
 [dependency-groups]
@@ -251,6 +256,9 @@ ng_dump_config = "nemo_gym.cli:dump_config"
 nemo_gym_help = "nemo_gym.cli:display_help"
 ng_help = "nemo_gym.cli:display_help"
 
+# Server status
+nemo_gym_status = "nemo_gym.cli:status"
+ng_status = "nemo_gym.cli:status"
 
 [tool.setuptools.packages.find]
 where = ["."]

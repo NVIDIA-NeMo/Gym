@@ -43,6 +43,7 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
+from nemo_gym.server_status import StatusCommand
 from nemo_gym.server_utils import (
     HEAD_SERVER_KEY_NAME,
     HeadServer,
@@ -653,3 +654,12 @@ def display_help():  # pragma: no cover
             continue
 
         print(script)
+
+
+def status():  # pragma: no cover
+    global_config_dict = get_global_config_dict()
+    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+
+    status_cmd = StatusCommand()
+    servers = status_cmd.discover_servers()
+    status_cmd.display_status(servers)
