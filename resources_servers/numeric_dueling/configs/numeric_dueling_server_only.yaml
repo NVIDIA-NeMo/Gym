@@ -1,0 +1,11 @@
+numeric_dueling_resources_server:
+  resources_servers:
+    numeric_dueling:
+      entrypoint: app.py
+      domain: games
+      verified: false
+      description: Probabilistic number selection game with risk assessment
+      # Port is auto-assigned by NeMo Gym if not specified
+      # To set a specific port, uncomment the line below:
+      port: 5011
+
