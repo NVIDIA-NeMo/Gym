@@ -15,7 +15,7 @@ from collections import defaultdict
 from os import getenv
 from pathlib import Path
 from platform import python_version
-from socket import socket
+from socket import gethostbyname, gethostname, socket
 from typing import ClassVar, List, Optional, Tuple, Type
 
 import hydra
@@ -234,9 +234,7 @@ class GlobalConfigDictParser(BaseModel):
         use_absolute_ip = global_config_dict.get(USE_ABSOLUTE_IP, False)
 
         if use_absolute_ip:
-            import socket
-
-            default_host = socket.gethostbyname(socket.gethostname())
+            default_host = gethostbyname(gethostname())
         else:
             default_host = global_config_dict.get(DEFAULT_HOST_KEY_NAME) or "127.0.0.1"
 
