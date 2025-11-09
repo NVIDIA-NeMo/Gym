@@ -11,10 +11,9 @@ swe_agents:
       agent_tools_file: configs/swe_agent_tools_openai_format.json
       agent_framework_repo: https://github.com/slikhite-1/nv-SWE-agent.git
       agent_framework_commit: HEAD
-      max_retries: 1
       
       # Container configuration
-      container_formatter: "docker://swebench/sweb.eval.x86_64.{instance_id}"
+      container_formatter: "/lustre/fsw/portfolios/llmservice/users/igitman/images/swe-bench/swebench_sweb.eval.x86_64.{instance_id}.sif"
       container_folder_path: null
       swebench_tests_timeout: 1800  # 30 minutes
       
@@ -30,7 +29,6 @@ swe_agents:
         dry_run: false
         max_concurrent_requests: 1  # SWE-bench is resource intensive
         inference.top_logprobs: 10  # Request logprobs to get token IDs for training
-      
       # Dataset configurations
       datasets:
         # Training dataset
