@@ -15,7 +15,7 @@ from collections import defaultdict
 from os import getenv
 from pathlib import Path
 from platform import python_version
-from socket import socket, gethostbyname, gethostname
+from socket import gethostbyname, gethostname, socket
 from typing import ClassVar, List, Optional, Tuple, Type
 
 import hydra
@@ -230,7 +230,7 @@ class GlobalConfigDictParser(BaseModel):
                 raise ValueError(error_msg)
 
         server_instance_configs = self.filter_for_server_instance_configs(global_config_dict)
-        
+
         use_absolute_ip = global_config_dict.get(USE_ABSOLUTE_IP, False)
         if use_absolute_ip:
             default_host = gethostbyname(gethostname())
