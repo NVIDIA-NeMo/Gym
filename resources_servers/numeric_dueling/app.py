@@ -584,7 +584,12 @@ class NumericDuelingResourcesServer(SimpleResourcesServer):
             )
 
         # Extract player's choice from LLM response
-        response_text = body.response.output[-1].text if body.response.output else ""
+        response_text = ""
+        if body.response.output:
+            last_output = body.response.output[-1]
+            if hasattr(last_output, "content") and last_output.content:
+                response_text = last_output.content[0].text
+
         player_choice = extract_number_from_response(
             response_text, game_state.config.min_number, game_state.config.max_number
         )
