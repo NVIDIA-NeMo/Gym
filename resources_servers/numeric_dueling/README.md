@@ -424,53 +424,6 @@ Initial implementation uses simple baseline opponents:
 - **Fixed**: Always chooses same number (e.g., 60)
 - **Adaptive**: Simple heuristic based on previous rounds
 
----
-
-## Success Metrics
-
-For training evaluation, we can measure:
-
-1. **Win Rate**: % of games won against baseline opponents
-2. **Average Score**: Points per game
-3. **Risk Calibration**: Correlation between optimal and actual choices
-4. **Adaptation**: Improvement in performance within a single game
-5. **Robustness**: Performance against diverse opponent strategies
-
----
-
-## Environment Design Principles
-
-**The environment is designed to be FLEXIBLE and CONFIGURABLE:**
-
-- All game parameters (N, M, D, R_dist, etc.) are configurable
-- Rule functions (BustRule, WinRule, ElimRule, Visibility) are pluggable
-- Opponent strategies are pluggable (can use random, fixed, adaptive, or another LLM)
-- Number extraction handles LLM responses with or without reasoning (reasoning is configured at model/agent level, not environment level)
-
-**Initial Testing Configuration ("Classic Variant"):**
-
-- 2 players, 5 rounds, 1-100 range
-- Uniform(1, 100) distribution
-- Standard bust rule, Highest wins, No elimination, Full visibility
-- Random opponent for testing
-
-But the environment code itself supports the full game specification with different configurations.
-
-## Testing Configuration Decisions
-
-These are decisions about how we'll **test and use** the environment initially (not limitations of the environment):
-
-1. **Initial Opponent Strategy**: Random opponent for initial testing. Environment designed with pluggable opponent interface to support:
-   - Random baseline
-   - Fixed heuristics (always 50, always 75, etc.)
-   - Adaptive opponents
-   - **Another LLM as opponent** (future)
-
-2. **Initial Round Count**: 5 rounds for initial testing. Environment supports configurable round counts.
-
-3. **Tutorial Rounds**: Not included in MVP, can be added later as a configuration option.
-
----
 
 ## Usage
 
@@ -499,9 +452,8 @@ uv sync --extra dev --group docs
 cd Gym
 source .venv/bin/activate
 
-# Start the numeric_dueling server (configured to use port 5011)
+# Start the numeric_dueling server (defaults to port 5011)
 ng_run "+config_paths=[resources_servers/numeric_dueling/configs/numeric_dueling_server_only.yaml]"
-# Server will start on http://localhost:5011
 ```
 
 **Terminal 2**: Play the game (in a new terminal)
@@ -516,17 +468,12 @@ python client.py
 # or explicitly specify port: python client.py --port 5011
 ```
 
-**Note on Port Configuration:**
-- `ng_run` auto-assigns ports to avoid conflicts (check terminal output)
-- To use a specific port, add `port: 8001` to the config YAML
-- For development/testing only, you can run `python app.py` directly (uses port 5011)
-
 #### What You Can Do
 
 The interactive client offers:
 - **5 preset variants**: Classic, Price is Right, High Stakes, Soft Landing, Risky Business
 - **Custom configurations**: Set your own rules, ranges, and opponents
-- **Visual feedback**: Round-by-round results with emojis and formatting
+- **Visual feedback**: Round-by-round results
 - **All opponent types**: Play against Random, Fixed, or Adaptive opponents
 
 This is useful for:
@@ -536,8 +483,6 @@ This is useful for:
 - Verifying implementation correctness
 
 ### Option 2: Train/Evaluate LLMs
-
-Use with NeMo Gym's training pipeline (requires model server configuration in `env.yaml`):
 
 ```bash
 # Start resource server + model server
