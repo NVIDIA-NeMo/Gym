@@ -1,0 +1,8 @@
+{"min_number": 1, "max_number": 100, "num_rounds": 5, "bust_rule": "standard", "win_rule": "highest", "opponent_type": "random"}
+{"min_number": 1, "max_number": 100, "num_rounds": 5, "bust_rule": "standard", "win_rule": "closest", "opponent_type": "random"}
+{"min_number": 1, "max_number": 100, "num_rounds": 5, "bust_rule": "standard", "win_rule": "cumulative", "opponent_type": "random"}
+{"min_number": 1, "max_number": 100, "num_rounds": 5, "bust_rule": "soft", "win_rule": "highest", "opponent_type": "random"}
+{"min_number": 1, "max_number": 100, "num_rounds": 5, "bust_rule": "probabilistic", "win_rule": "highest", "opponent_type": "random"}
+{"min_number": 1, "max_number": 50, "num_rounds": 3, "bust_rule": "standard", "win_rule": "highest", "opponent_type": "fixed", "opponent_fixed_value": 25}
+{"min_number": 1, "max_number": 100, "num_rounds": 10, "bust_rule": "probabilistic", "win_rule": "cumulative", "opponent_type": "adaptive"}
+{"min_number": 1, "max_number": 20, "num_rounds": 3, "bust_rule": "soft", "win_rule": "closest", "opponent_type": "random"}
