@@ -85,7 +85,7 @@ After rollout collection, you have JSONL with this structure:
     "input": [
       {"role": "user", "content": "What is 47 × 23?"}
     ],
-    "tools": [{"type": "function", "name": "calculator", ...}]
+    "tools": [{"type": "function", "name": "calculator",}]
   },
   "output": [
     {
@@ -134,7 +134,7 @@ After rollout collection, you have JSONL with this structure:
     {"role": "tool", "content": "1081"},
     {"role": "assistant", "content": "The answer is 1,081"}
   ],
-  "tools": [{"name": "calculator", "description": "...", "parameters": {...}}]
+  "tools": [{"name": "calculator", "description": "...", "parameters": {}}]
 }
 ```
 
@@ -271,5 +271,9 @@ For production deployments and advanced use cases:
 :hidden:
 :maxdepth: 1
 
+grpo
+sft
+dpo
+troubleshooting
 advanced
 ```
