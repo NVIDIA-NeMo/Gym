@@ -14,44 +14,28 @@ Validate that your resource server's verification logic produces useful reward s
 
 ## Choose Your Path
 
-:::::{grid} 1 1 2 2
+::::{grid} 1 1 2 2
 :gutter: 3
 
-::::{grid-item-card} {octicon}`check-circle;1.5em;sd-mr-1` Validate Verification
-**Most users** - Check your resource server works
+:::{grid-item-card} {octicon}`check-circle;1.5em;sd-mr-1` Validate Verification
+:link: validate-verification
+:link-type: doc
 
-After collecting sample rollouts, validate that reward signals are useful for training.
-
+Check your resource server works. After collecting sample rollouts, validate that reward signals are useful for training.
 +++
-{bdg-primary}`Start here`
-
-:::{button-ref} validate-verification
-:color: primary
-:outline:
-:ref-type: doc
-
-Validation Guide →
+{bdg-primary}`Start here` {bdg-secondary}`validation` {bdg-secondary}`testing`
 :::
-::::
 
-::::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build Custom Verification
-**Advanced** - For specialized domains
+:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build Custom Verification
+:link: custom-patterns-cookbook
+:link-type: doc
 
-Create custom verification logic with copy-paste patterns and multi-objective techniques.
-
+Create custom verification logic with copy-paste patterns and multi-objective techniques for specialized domains.
 +++
-{bdg-secondary}`Advanced`
-
-:::{button-ref} custom-patterns-cookbook
-:color: secondary
-:outline:
-:ref-type: doc
-
-Custom Patterns →
+{bdg-secondary}`Advanced` {bdg-secondary}`custom-patterns` {bdg-secondary}`multi-objective`
 :::
-::::
 
-:::::
+::::
 
 ---
 
@@ -125,30 +109,6 @@ Custom Patterns Cookbook →
 6. Hybrid (fallback strategies)
 
 **Advanced**: {ref}`training-verification-multi-objective` for combining multiple reward signals
-
----
-
-## Next Steps
-
-**Most users** (validating existing server):
-
-:::{button-ref} validate-verification
-:color: primary
-:outline:
-:ref-type: doc
-
-Validate Verification →
-:::
-
-**Advanced users** (building custom):
-
-:::{button-ref} custom-patterns-cookbook
-:color: secondary
-:outline:
-:ref-type: doc
-
-Custom Patterns Cookbook →
-:::
 
 ```{toctree}
 :hidden:
