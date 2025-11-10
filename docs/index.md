@@ -19,12 +19,12 @@ Overview of NeMo Gym and its approach to scalable rollout collection.
 {bdg-secondary}`target-users` {bdg-secondary}`core-components`
 :::
 
-:::{grid-item-card} {octicon}`checklist;1.5em;sd-mr-1` Key Features
-:link: about-features
+:::{grid-item-card} {octicon}`light-bulb;1.5em;sd-mr-1` Concepts
+:link: about-concepts
 :link-type: ref
-Comprehensive catalog of NeMo Gym capabilities and design principles.
+Core concepts behind models, resources, agents, and verification.
 +++
-{bdg-secondary}`features` {bdg-secondary}`capabilities`
+{bdg-secondary}`mental-models` {bdg-secondary}`abstractions`
 :::
 
 :::{grid-item-card} {octicon}`stack;1.5em;sd-mr-1` Architecture
@@ -41,14 +41,6 @@ How NeMo Gym components work together and interact.
 NeMo Gym's place in the NVIDIA NeMo Framework and ecosystem.
 +++
 {bdg-secondary}`nemo-framework` {bdg-secondary}`positioning`
-:::
-
-:::{grid-item-card} {octicon}`light-bulb;1.5em;sd-mr-1` Concepts
-:link: about-concepts
-:link-type: ref
-Core concepts behind models, resources, agents, and verification.
-+++
-{bdg-secondary}`mental-models` {bdg-secondary}`abstractions`
 :::
 
 ::::
@@ -121,10 +113,10 @@ Essential terminology for agent training and RL workflows.
 :maxdepth: 2
 
 Overview <about/index>
-Ecosystem <about/ecosystem>
-Architecture <about/architecture>
-Key Features <about/features>
 Concepts <about/concepts/index>
+Architecture <about/architecture>
+Ecosystem <about/ecosystem>
+<!-- Key Features <about/features> -->
 Release Notes <about/release-notes/index>
 ```
 
