@@ -19,12 +19,12 @@ Overview of NeMo Gym and its approach to scalable rollout collection.
 {bdg-secondary}`target-users` {bdg-secondary}`core-components`
 :::
 
-:::{grid-item-card} {octicon}`light-bulb;1.5em;sd-mr-1` Concepts
-:link: about-concepts
+:::{grid-item-card} {octicon}`checklist;1.5em;sd-mr-1` Key Features
+:link: about-features
 :link-type: ref
-Core concepts behind models, resources, agents, and verification.
+Comprehensive catalog of NeMo Gym capabilities and design principles.
 +++
-{bdg-secondary}`mental-models` {bdg-secondary}`abstractions`
+{bdg-secondary}`features` {bdg-secondary}`capabilities`
 :::
 
 :::{grid-item-card} {octicon}`stack;1.5em;sd-mr-1` Architecture
@@ -41,6 +41,14 @@ How NeMo Gym components work together and interact.
 NeMo Gym's place in the NVIDIA NeMo Framework and ecosystem.
 +++
 {bdg-secondary}`nemo-framework` {bdg-secondary}`positioning`
+:::
+
+:::{grid-item-card} {octicon}`light-bulb;1.5em;sd-mr-1` Concepts
+:link: about-concepts
+:link-type: ref
+Core concepts behind models, resources, agents, and verification.
++++
+{bdg-secondary}`mental-models` {bdg-secondary}`abstractions`
 :::
 
 ::::
@@ -82,6 +90,57 @@ Understand how NeMo Gym evaluates agent performance and what verification means 
 Generate your first batch of rollouts and understand how they become training data.
 +++
 {bdg-secondary}`training-data` {bdg-secondary}`scale`
+:::
+
+::::
+
+---
+
+## Training
+
+Scale up training data generation and integrate with RL frameworks. Master rollout collection, data quality, and framework integration for production workflows.
+
+::::{grid} 1 2 2 2
+:gutter: 1 1 1 2
+
+:::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` Rollout Collection
+:link: training/rollout-collection/index
+:link-type: doc
+Generate training rollouts at scale with optimized sampling and parallelization.
++++
+{bdg-secondary}`data-generation` {bdg-secondary}`throughput`
+:::
+
+:::{grid-item-card} {octicon}`trophy;1.5em;sd-mr-1` Verification
+:link: training/verification/index
+:link-type: doc
+Design reward signals and verification strategies that drive effective training.
++++
+{bdg-secondary}`rewards` {bdg-secondary}`scoring` {bdg-secondary}`verification`
+:::
+
+:::{grid-item-card} {octicon}`filter;1.5em;sd-mr-1` Data Quality
+:link: training/data-quality/index
+:link-type: doc
+Filter, curate, and balance rollouts to ensure high-quality training datasets.
++++
+{bdg-secondary}`filtering` {bdg-secondary}`curation`
+:::
+
+:::{grid-item-card} {octicon}`package-dependencies;1.5em;sd-mr-1` Datasets
+:link: training/datasets/index
+:link-type: doc
+Organize, validate, and prepare datasets for RL training frameworks.
++++
+{bdg-secondary}`formats` {bdg-secondary}`sft-dpo`
+:::
+
+:::{grid-item-card} {octicon}`plug;1.5em;sd-mr-1` Integration
+:link: training/integration/index
+:link-type: doc
+Connect to NeMo-RL, VeRL, OpenRLHF, TRL, and custom frameworks.
++++
+{bdg-secondary}`rl-frameworks` {bdg-secondary}`integration`
 :::
 
 ::::
@@ -139,6 +198,41 @@ Unified access to multiple model providers.
 
 ---
 
+## Setup & Deployment
+
+Configure NeMo Gym for your project. Manage environments, secure secrets, and deploy in development, testing, or production scenarios.
+
+::::{grid} 1 2 2 2
+:gutter: 1 1 1 2
+
+:::{grid-item-card} {octicon}`gear;1.5em;sd-mr-1` Configuration
+:link: setup-deployment/configuration/index
+:link-type: doc
+Master the three-tier configuration system for managing dev/test/prod environments and secrets.
++++
+{bdg-secondary}`how-to` {bdg-secondary}`config` {bdg-secondary}`secrets`
+:::
+
+:::{grid-item-card} {octicon}`cloud;1.5em;sd-mr-1` Deployment
+:link: setup-deployment/deployment/index
+:link-type: doc
+Deploy NeMo Gym locally, on remote servers, or in containerized infrastructure.
++++
+{bdg-secondary}`how-to` {bdg-secondary}`deployment` {bdg-secondary}`docker`
+:::
+
+:::{grid-item-card} {octicon}`pulse;1.5em;sd-mr-1` Operations
+:link: setup-deployment/operations/index
+:link-type: doc
+Monitor, test, and debug your NeMo Gym deployment for reliable operation.
++++
+{bdg-secondary}`how-to` {bdg-secondary}`monitoring` {bdg-secondary}`debugging`
+:::
+
+::::
+
+---
+
 ## Resources
 
 Quick reference materials to support your work with NeMo Gym.
@@ -164,9 +258,10 @@ Essential terminology for agent training and RL workflows.
 :maxdepth: 2
 
 Overview <about/index>
-Concepts <about/concepts/index>
-Architecture <about/architecture>
 Ecosystem <about/ecosystem>
+Architecture <about/architecture>
+Key Features <about/features>
+Concepts <about/concepts/index>
 Release Notes <about/release-notes/index>
 ```
 
@@ -183,6 +278,30 @@ get-started/collecting-rollouts
 ```
 
 ```{toctree}
+:caption: Tutorials
+:hidden:
+:maxdepth: 1
+
+Overview <tutorials/index>
+tutorials/offline-training-w-rollouts
+tutorials/separate-policy-and-judge-models
+```
+
+```{toctree}
+:caption: Training
+:hidden:
+:maxdepth: 2
+
+Overview <training/index>
+Resource Servers <training/resource-servers/index>
+Rollout Collection <training/rollout-collection/index>
+Verification <training/verification/index>
+Data Quality <training/data-quality/index>
+Datasets <training/datasets/index>
+Training Integration <training/integration/index>
+```
+
+```{toctree}
 :caption: Models
 :hidden:
 :maxdepth: 2
@@ -196,15 +315,15 @@ OpenRouter <models/openrouter/index>
 ```
 
 ```{toctree}
-:caption: Tutorials
+:caption: Setup & Deployment
 :hidden:
-:maxdepth: 1
+:maxdepth: 2
 
-Overview <tutorials/index>
-tutorials/offline-training-w-rollouts
-tutorials/separate-policy-and-judge-models
+Overview <setup-deployment/index>
+Configuration <setup-deployment/configuration/index>
+Deployment <setup-deployment/deployment/index>
+Operations <setup-deployment/operations/index>
 ```
-
 
 ```{toctree}
 :caption: Development
@@ -222,4 +341,3 @@ README
 Overview <resources/index>
 resources/glossary
 ```
-

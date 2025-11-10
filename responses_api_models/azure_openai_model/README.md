@@ -5,9 +5,9 @@ Use this model server to access Azure OpenAI endpoints for LLM-as-a-judge.
 
 Set up your `env.yaml` file:
 ```yaml
-policy_base_url: https://my.end.point.com/v1/azure
+policy_base_url: https://my-resource.openai.azure.com
 policy_api_key: <API_KEY>
-policy_model_name: gpt-5-nano
+policy_model_name: my-gpt-4-deployment
 ```
 
 ## Usage
