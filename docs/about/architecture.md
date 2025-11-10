@@ -33,18 +33,18 @@ Functional servers expose HTTP endpoints that your workflows call directly.
 
 ::::{tab-set}
 
-:::{tab-item} Resources Server
-Provides tools and verification to compute rewards.
+:::{tab-item} Responses API Agent Server
+Runs the minimal agent loop and returns metrics.
 
-**Endpoints**: `POST /seed_session`, `POST /verify`
+**Endpoints**: `POST /v1/responses`, `POST /run`
 
 ```py
-class SimpleResourcesServer(BaseResourcesServer, SimpleServer):
+class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, SimpleServer):
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
         self.setup_session_middleware(app)
-        app.post("/seed_session")(self.seed_session)
-        app.post("/verify")(self.verify)
+        app.post("/v1/responses")(self.responses)
+        app.post("/run")(self.run)
         return app
 ```
 :::
@@ -65,18 +65,18 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 ```
 :::
 
-:::{tab-item} Responses API Agent Server
-Runs the minimal agent loop and returns metrics.
+:::{tab-item} Resources Server
+Provides tools and verification to compute rewards.
 
-**Endpoints**: `POST /v1/responses`, `POST /run`
+**Endpoints**: `POST /seed_session`, `POST /verify`
 
 ```py
-class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, SimpleServer):
+class SimpleResourcesServer(BaseResourcesServer, SimpleServer):
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
         self.setup_session_middleware(app)
-        app.post("/v1/responses")(self.responses)
-        app.post("/run")(self.run)
+        app.post("/seed_session")(self.seed_session)
+        app.post("/verify")(self.verify)
         return app
 ```
 :::
@@ -143,6 +143,12 @@ class BaseRunServerConfig(BaseServerConfig):
 ```
 :::
 
+:::{tab-item} Responses API Agent
+```py
+class ResponsesAPIAgentServerTypeConfig(...)
+```
+:::
+
 :::{tab-item} Responses API Model
 ```py
 class ResponsesAPIModelServerTypeConfig(...)
@@ -152,12 +158,6 @@ class ResponsesAPIModelServerTypeConfig(...)
 :::{tab-item} Resources
 ```py
 class ResourcesServerTypeConfig(...)
-```
-:::
-
-:::{tab-item} Responses API Agent
-```py
-class ResponsesAPIAgentServerTypeConfig(...)
 ```
 :::
 

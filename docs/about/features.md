@@ -219,7 +219,7 @@ Build custom environments with base classes, templates, and plugin architecture 
 :widths: 30 70
 
 * - **Base Classes**
-  - Abstract base classes for Models, Resources, and Agents with clear interfaces. Inherit and override specific methods for custom behavior.
+  - Abstract base classes for Agents, Models, and Resources with clear interfaces. Inherit and override specific methods for custom behavior.
 * - **Template Generation**
   - `ng_init_resources_server` generates complete resource server skeleton with tests, configs, and documentation structure.
 * - **Plugin Architecture**

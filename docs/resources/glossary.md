@@ -4,6 +4,77 @@ Essential terminology for agent training, reinforcement learning workflows, and 
 
 ---
 
+## Architecture & Components
+
+```{glossary}
+Policy Model
+  The primary LLM being trained or evaluated—the "decision-making brain" you want to improve.
+
+Orchestration
+  Coordination logic that manages when to call models, which tools to use, and how to sequence multi-step operations.
+
+Verifier
+  Component that scores agent outputs, producing reward signals. May also refer colloquially to "training environment with verifiable rewards."
+
+Service Discovery
+  Mechanism by which distributed NeMo Gym components find and communicate with each other across machines.
+
+Reward
+Reward Signal
+  Numerical score (typically 0.0–1.0) indicating how well an agent performed on a task.
+
+Resource Server
+  Service that provides tools (functions agents can call) and verification logic (scoring agent performance).
+
+Responses API Model
+  Model implementation that follows OpenAI's Responses API format for handling agent interactions.
+
+Responses API Agent
+  Agent implementation that orchestrates between models and resource servers using the Responses API format.
+```
+
+---
+
+## Technical Infrastructure
+
+```{glossary}
+Responses API
+  OpenAI's standard interface for agent interactions, including function calls and multi-turn conversations. NeMo Gym's native format.
+
+Chat Completions API
+  OpenAI's simpler interface for basic LLM interactions. NeMo Gym includes middleware to convert formats.
+
+vLLM
+  High-performance inference server for running open-source language models locally. Alternative to commercial APIs.
+
+NeMo Gym CLI
+  Command-line interface (`ng_run`) for starting servers, managing configurations, and running rollout collection.
+
+Global Config
+  Central configuration file (`.nemo_gym_global_config.yaml`) that maps server names to URLs for service discovery.
+```
+
+---
+
+## Interaction Patterns
+
+```{glossary}
+Multi-turn
+  Conversations spanning multiple exchanges where context and state persist across turns.
+
+Multi-step
+  Complex tasks requiring agents to break problems into sequential steps, often using tools and intermediate reasoning.
+
+Tool Use
+Function Calling
+  Agents invoking external capabilities (APIs, calculators, databases) to accomplish tasks beyond text generation.
+
+Agentic Workflow
+  Multi-step processes where agents make decisions, use tools, and adapt based on intermediate results.
+```
+
+---
+
 ## Rollout & Data Collection
 
 ```{glossary}
@@ -38,37 +109,6 @@ Preference Pairs
 
 ---
 
-## Architecture & Components
-
-```{glossary}
-Policy Model
-  The primary LLM being trained or evaluated—the "decision-making brain" you want to improve.
-
-Orchestration
-  Coordination logic that manages when to call models, which tools to use, and how to sequence multi-step operations.
-
-Verifier
-  Component that scores agent outputs, producing reward signals. May also refer colloquially to "training environment with verifiable rewards."
-
-Service Discovery
-  Mechanism by which distributed NeMo Gym components find and communicate with each other across machines.
-
-Reward
-Reward Signal
-  Numerical score (typically 0.0–1.0) indicating how well an agent performed on a task.
-
-Resource Server
-  Service that provides tools (functions agents can call) and verification logic (scoring agent performance).
-
-Responses API Model
-  Model implementation that follows OpenAI's Responses API format for handling agent interactions.
-
-Responses API Agent
-  Agent implementation that orchestrates between models and resource servers using the Responses API format.
-```
-
----
-
 ## Training Approaches
 
 ```{glossary}
@@ -89,46 +129,6 @@ Online Training
 
 Offline Training
   Agent learns from pre-collected rollout data (SFT/DPO).
-```
-
----
-
-## Interaction Patterns
-
-```{glossary}
-Multi-turn
-  Conversations spanning multiple exchanges where context and state persist across turns.
-
-Multi-step
-  Complex tasks requiring agents to break problems into sequential steps, often using tools and intermediate reasoning.
-
-Tool Use
-Function Calling
-  Agents invoking external capabilities (APIs, calculators, databases) to accomplish tasks beyond text generation.
-
-Agentic Workflow
-  Multi-step processes where agents make decisions, use tools, and adapt based on intermediate results.
-```
-
----
-
-## Technical Infrastructure
-
-```{glossary}
-Responses API
-  OpenAI's standard interface for agent interactions, including function calls and multi-turn conversations. NeMo Gym's native format.
-
-Chat Completions API
-  OpenAI's simpler interface for basic LLM interactions. NeMo Gym includes middleware to convert formats.
-
-vLLM
-  High-performance inference server for running open-source language models locally. Alternative to commercial APIs.
-
-NeMo Gym CLI
-  Command-line interface (`ng_run`) for starting servers, managing configurations, and running rollout collection.
-
-Global Config
-  Central configuration file (`.nemo_gym_global_config.yaml`) that maps server names to URLs for service discovery.
 ```
 
 ---
@@ -173,7 +173,7 @@ Explore deeper explanations of how NeMo Gym works:
 :link: concepts-core-abstractions
 :link-type: ref
 
-Understand how Models, Resources, and Agents remain decoupled yet coordinated as independent HTTP services, including which endpoints each abstraction exposes.
+Understand how Agents, Models, and Resources remain decoupled yet coordinated as independent HTTP services, including which endpoints each abstraction exposes.
 :::
 
 :::{grid-item-card} {octicon}`file-code;1.5em;sd-mr-1` Rollout Collection Fundamentals

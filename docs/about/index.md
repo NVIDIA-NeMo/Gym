@@ -49,11 +49,11 @@ NeMo Gym solves these problems through three core design principles:
 
 NeMo Gym organizes around three core abstractions that work together:
 
+* **Agents**: Orchestration layers that connect models to resources, handle multi-turn conversations, route tool calls, and format responses consistently. Agents coordinate the interaction loop and can be extended with custom logic.
+
 * **Models**: LLM inference endpoints that generate text and make tool-calling decisions. Models are stateless and handle single-turn generation. Configure using OpenAI-compatible APIs or local vLLM servers.
 
 * **Resources**: Servers that provide both tools (functions agents can call) and verifiers (logic to evaluate agent performance and assign reward signals). Examples include mathematical reasoning environments, code execution sandboxes, web search tools, and custom verification logic.
-
-* **Agents**: Orchestration layers that connect models to resources, handle multi-turn conversations, route tool calls, and format responses consistently. Agents coordinate the interaction loop and can be extended with custom logic.
 
 These components communicate via HTTP APIs and can run as separate services, enabling flexible deployment and scaling.
 
@@ -136,7 +136,7 @@ Explore the documentation to understand NeMo Gym's architecture, concepts, and c
 :link: concepts/index
 :link-type: doc
 
-Understand the fundamental abstractions (Models, Resources, Agents), rollout collection, and verification patterns that power NeMo Gym.
+Understand the fundamental abstractions (Agents, Models, Resources), rollout collection, and verification patterns that power NeMo Gym.
 :::
 
 :::{grid-item-card} {octicon}`stack;1.5em;sd-mr-1` Architecture
@@ -146,18 +146,18 @@ Understand the fundamental abstractions (Models, Resources, Agents), rollout col
 Explore the internal design, component boundaries, and data flow patterns that make NeMo Gym modular and scalable.
 :::
 
-:::{grid-item-card} {octicon}`star;1.5em;sd-mr-1` Key Features
-:link: features
-:link-type: doc
-
-Discover available resource servers, supported environments, and capabilities across domains like mathematics, coding, and instruction-following.
-:::
-
 :::{grid-item-card} {octicon}`globe;1.5em;sd-mr-1` Ecosystem
 :link: ecosystem
 :link-type: doc
 
 Learn how NeMo Gym fits within the NVIDIA NeMo Framework and integrates with NeMo Agent Toolkit and other agent frameworks.
+:::
+
+:::{grid-item-card} {octicon}`star;1.5em;sd-mr-1` Key Features
+:link: features
+:link-type: doc
+
+Discover available resource servers, supported environments, and capabilities across domains like mathematics, coding, and instruction-following.
 :::
 
 ::::

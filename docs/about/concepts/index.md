@@ -15,7 +15,7 @@ Need a refresher on reinforcement learning language? Refer to the {doc}`../../re
 
 ## How to Navigate This Section
 
-- Read these explanations when your team needs shared vocabulary for configuring Models, Resources, and Agents together.
+- Read these explanations when your team needs shared vocabulary for configuring Agents, Models, and Resources together.
 - Pair each concept page with its related tutorials when you are ready to practice tasks such as assembling interaction datasets or scoring agent behavior.
 - Return here whenever you add a new teammate so that they can orient and choose the depth that fits their role.
 
@@ -31,7 +31,7 @@ Each explainer below covers one foundational idea and links to deeper material.
 :::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Core Abstractions
 :link: concepts-core-abstractions
 :link-type: ref
-Understand how Models, Resources, and Agents remain decoupled yet coordinated as independent HTTP services, including which endpoints each abstraction exposes.
+Understand how Agents, Models, and Resources remain decoupled yet coordinated as independent HTTP services, including which endpoints each abstraction exposes.
 :::
 
 :::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` Rollout Collection Fundamentals

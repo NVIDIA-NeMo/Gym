@@ -1,20 +1,38 @@
 (concepts-core-abstractions)=
 # Core Abstractions
 
-NeMo Gym is built around three simple but powerful ideas: **Models** (LLMs that generate text), **Resources** (tools and scoring systems), and **Agents** (orchestrators that connect them together).
+NeMo Gym is built around three simple but powerful ideas: **Agents** (orchestrators that connect components together), **Models** (LLMs that generate text), and **Resources** (tools and scoring systems).
 
 Think of it like building a research assistant:
+- The **Agent** is the coordinator who knows when to consult which resource and how to assemble the final answer
 - The **Model** is the brain that understands language and generates responses
 - The **Resources** are the reference books, calculators, and evaluation rubrics
-- The **Agent** is the coordinator who knows when to consult which resource and how to assemble the final answer
 
 This separation makes your system modular, testable, and easy to customize.
 
-![NeMo Gym architecture showing the relationship between Models, Resources, and Agents, with downstream outputs to RL frameworks, offline training, and evaluation](../../_images/product_overview.png)
+![NeMo Gym architecture showing the relationship between Agents, Models, and Resources, with downstream outputs to RL frameworks, offline training, and evaluation](../../_images/product_overview.png)
 
 ---
 
 ## The Three Abstractions
+
+### Agents — The Coordinators
+
+**What it does**: Connects models to resources, manages the tool-calling loop, and handles multi-turn conversations.
+
+**Think of it as**: The project manager who:
+- Routes user requests to the model
+- Provides available tools to the model
+- Executes tool calls when the model requests them
+- Manages conversation history across turns
+- Ensures responses are properly formatted
+
+**Example**: When a user asks "What's the weather in NYC?", the agent:
+1. Sends the question to the model with available tools
+2. Receives "I should call get_weather for NYC"
+3. Calls the weather resource server
+4. Sends the weather data back to the model
+5. Returns the model's friendly response to the user
 
 ### Models — The Brain
 
@@ -52,24 +70,6 @@ Models don't orchestrate conversations or call tools directly—they just respon
 ```
 
 Each resource server knows how to score agent performance in its domain, generating the reward signals needed for reinforcement learning. NeMo Gym includes several production-ready resource servers for you to get started with.
-
-### Agents — The Coordinators
-
-**What it does**: Connects models to resources, manages the tool-calling loop, and handles multi-turn conversations.
-
-**Think of it as**: The project manager who:
-- Routes user requests to the model
-- Provides available tools to the model
-- Executes tool calls when the model requests them
-- Manages conversation history across turns
-- Ensures responses are properly formatted
-
-**Example**: When a user asks "What's the weather in NYC?", the agent:
-1. Sends the question to the model with available tools
-2. Receives "I should call get_weather for NYC"
-3. Calls the weather resource server
-4. Sends the weather data back to the model
-5. Returns the model's friendly response to the user
 
 ---
 
@@ -129,9 +129,9 @@ Each abstraction is implemented as a FastAPI HTTP server:
 
 | Abstraction | Base Class | Key Endpoints |
 |-------------|-----------|---------------|
+| **Agents** | `BaseResponsesAPIAgent` | `POST /v1/responses`, `POST /run` |
 | **Models** | `BaseResponsesAPIModel` | `POST /v1/responses`, `POST /v1/chat/completions` |
 | **Resources** | `BaseResourcesServer` | `POST /verify`, `POST /seed_session` |
-| **Agents** | `BaseResponsesAPIAgent` | `POST /v1/responses`, `POST /run` |
 
 All components communicate via HTTP, enabling deployment flexibility.
 :::
