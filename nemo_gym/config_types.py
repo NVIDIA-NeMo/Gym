@@ -141,11 +141,11 @@ class DownloadJsonlDatasetGitlabConfig(JsonlDatasetGitlabIdentifer, BaseNeMoGymC
     output_fpath: str = Field(description="Where to save the downloaded dataset.")
 
 
-class DeleteJsonlDatasetGitlabConfig(BaseModel):
+class DeleteJsonlDatasetGitlabConfig(BaseNeMoGymCLIConfig):
     dataset_name: str
 
 
-class BaseUploadJsonlDatasetHuggingFaceConfig(BaseModel):
+class BaseUploadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
     hf_token: str
     hf_organization: str
     hf_collection_name: str
@@ -172,7 +172,7 @@ class UploadJsonlDatasetHuggingFaceMaybeDeleteConfig(BaseUploadJsonlDatasetHuggi
     delete_from_gitlab: Optional[bool] = False
 
 
-class DownloadJsonlDatasetHuggingFaceConfig(BaseModel):
+class DownloadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
     output_fpath: str
     hf_token: str
     artifact_fpath: str
