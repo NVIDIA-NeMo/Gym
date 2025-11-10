@@ -149,16 +149,12 @@ If you're contributing a new resource server to NeMo Gym, follow this comprehens
    2. The resulting rollout and judges (include 5 examples here for people to understand better the data samples, and to ensure reward here is correct.)
    3. Other additional notes for running the server properly with the new PR.
 3. Test: Please follow the guideline here to implement your own test and run test for your environment. Tests are strongly encouraged and you must have at least one test for every server you make. Test coverage is not explicitly required which means that YOU ARE RESPONSIBLE FOR YOUR OWN SERVER CORRECTNESS AND FUNCTION.
-4. Reward Profiling: Please run inference on your prompts and environments (a ~500 small subset is OK) on two models:
-   1. Qwen 3 30B A3B
-   2. Qwen 3 235B Instruct (for agents/instruction following) or Qwen 3 235B Thinking (for math/coding)
-   3. Generate 16 responses per prompt, report reward distribution
-   4. [If using tool calling] Provide tool call metrics and correlation with rewards
+4. Reward Profiling: Please run inference on your prompts and environments (a ~500 small subset is OK) on Qwen 3 30B A3B (or any other model with better performance). Generate 16 responses per prompt, report reward distribution. [If using tool calling] Provide tool call metrics and correlation with rewards.
 
-5. **Training-based correctness check** [After Nemo Gym + Nemo RL integration]:
-   - Train with GRPO on Qwen 30B A3B Instruct and Qwen 235B Instruct
-   - Include training accuracy curve and test benchmark accuracy curve
-   - See [Resource Server Verification Process](#resource-server-verification-process) section
+5. **Training-based correctness check**:
+   - Train with GRPO on Qwen 30B A3B Instruct (or any other model with better performance) on veRL / Nemo RL + Gym.
+   - Include training accuracy curve and test benchmark accuracy curve.
+   - See [Resource Server Verification Process](#resource-server-verification-process) section.
 
 6. **PR Check and Review**:
    1. Assign team member for reproduction and review
