@@ -43,6 +43,7 @@ def visit_resource_server(
             if level == 2 and k != "resources_servers":
                 continue
             return visit_resource_server(v, level + 1)
+    return None, None, False, None
 
 
 def visit_agent_datasets(data: dict) -> tuple[str | None, list[str]]:  # pragma: no cover
@@ -62,7 +63,7 @@ def visit_agent_datasets(data: dict) -> tuple[str | None, list[str]]:  # pragma:
                                     types.append(entry.get("type"))
                                     if entry.get("type") == "train":
                                         license = entry.get("license")
-                            return license, types
+    return license, types
 
 
 def extract_config_metadata(
