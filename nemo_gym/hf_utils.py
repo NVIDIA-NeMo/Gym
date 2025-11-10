@@ -18,9 +18,9 @@ from pathlib import Path
 import yaml
 from huggingface_hub import HfApi, hf_hub_download
 from huggingface_hub.utils import HfHubHTTPError
+from scripts.update_resource_servers import visit_resource_server
 
 from nemo_gym.config_types import DownloadJsonlDatasetHuggingFaceConfig, UploadJsonlDatasetHuggingFaceConfig
-from nemo_gym.config_utils import visit_resource_server
 from nemo_gym.server_utils import get_global_config_dict
 
 

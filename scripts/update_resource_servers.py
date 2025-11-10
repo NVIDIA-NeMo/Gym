@@ -16,12 +16,83 @@ import sys
 import unicodedata
 from pathlib import Path
 
-from nemo_gym.config_utils import extract_config_metadata
+import yaml
 
 
 README_PATH = Path("README.md")
 
 TARGET_FOLDER = Path("resources_servers")
+
+
+def visit_resource_server(
+    data: dict, level: int = 1
+) -> tuple[str | None, str | None, bool, str | None]:  # pragma: no cover
+    domain = None
+    description = None
+    verified = False
+    verified_url = None
+    if level == 4:
+        domain = data.get("domain")
+        description = data.get("description")
+        verified = data.get("verified", False)
+        verified_url = data.get("verified_url")
+        return domain, description, verified, verified_url
+    else:
+        for k, v in data.items():
+            if level == 2 and k != "resources_servers":
+                continue
+            return visit_resource_server(v, level + 1)
+
+
+def visit_agent_datasets(data: dict) -> tuple[str | None, list[str]]:  # pragma: no cover
+    license = None
+    types = []
+    for k1, v1 in data.items():
+        if k1.endswith("_simple_agent") and isinstance(v1, dict):
+            v2 = v1.get("responses_api_agents")
+            if isinstance(v2, dict):
+                # Look for any agent key
+                for agent_key, v3 in v2.items():
+                    if isinstance(v3, dict):
+                        datasets = v3.get("datasets")
+                        if isinstance(datasets, list):
+                            for entry in datasets:
+                                if isinstance(entry, dict):
+                                    types.append(entry.get("type"))
+                                    if entry.get("type") == "train":
+                                        license = entry.get("license")
+                            return license, types
+
+
+def extract_config_metadata(
+    yaml_path: Path,
+) -> tuple[str | None, str | None, str | None, list[str], bool, str | None]:  # pragma: no cover
+    """
+    Domain:
+        {name}_resources_server:
+            resources_servers:
+                {name}:
+                    domain: {example_domain}
+                    verified: {true/false}
+                    ...
+        {something}_simple_agent:
+            responses_api_agents:
+                simple_agent:
+                    datasets:
+                        - name: train
+                          type: {example_type_1}
+                          license: {example_license_1}
+                        - name: validation
+                          type: {example_type_2}
+                          license: {example_license_2}
+    """
+    with yaml_path.open() as f:
+        data = yaml.safe_load(f)
+
+    domain, description, verified, verified_url = visit_resource_server(data)
+    license, types = visit_agent_datasets(data)
+
+    return domain, description, license, types, verified, verified_url
 
 
 def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:  # pragma: no cover
