@@ -30,7 +30,6 @@ def extract_config_metadata(yaml_path: Path) -> tuple[str, str, list[str]]:
             resources_servers:
                 {name}:
                     domain: {example_domain}
-                    verified: {true/false}
                     ...
         {something}_simple_agent:
             responses_api_agents:
@@ -47,127 +46,85 @@ def extract_config_metadata(yaml_path: Path) -> tuple[str, str, list[str]]:
         data = yaml.safe_load(f)
 
     domain = None
-    description = None
     license = None
     types = []
-    verified = None
-    verified_url = None
 
-    def visit_resource_server(data, level=1):
-        nonlocal domain, description, verified, verified_url
+    def visit_domain(data, level=1):
+        nonlocal domain
         if level == 4:
             domain = data.get("domain")
-            description = data.get("description")
-            verified = data.get("verified", False)
-            verified_url = data.get("verified_url")
             return
         else:
             for k, v in data.items():
                 if level == 2 and k != "resources_servers":
                     continue
-                visit_resource_server(v, level + 1)
+                visit_domain(v, level + 1)
 
-    def visit_agent_datasets(data):
+    def visit_license_and_types(data):
         nonlocal license
         for k1, v1 in data.items():
             if k1.endswith("_simple_agent") and isinstance(v1, dict):
                 v2 = v1.get("responses_api_agents")
                 if isinstance(v2, dict):
-                    # Look for any agent key
-                    for agent_key, v3 in v2.items():
-                        if isinstance(v3, dict):
-                            datasets = v3.get("datasets")
-                            if isinstance(datasets, list):
-                                for entry in datasets:
-                                    if isinstance(entry, dict):
-                                        types.append(entry.get("type"))
-                                        if entry.get("type") == "train":
-                                            license = entry.get("license")
-                                return
+                    v3 = v2.get("simple_agent")
+                    if isinstance(v3, dict):
+                        datasets = v3.get("datasets")
+                        if isinstance(datasets, list):
+                            for entry in datasets:
+                                if isinstance(entry, dict):
+                                    types.append(entry.get("type"))
+                                    if entry.get("type") == "train":
+                                        license = entry.get("license")
+                            return
 
-    visit_resource_server(data)
-    visit_agent_datasets(data)
+    visit_domain(data)
+    visit_license_and_types(data)
 
-    return domain, description, license, types, verified, verified_url
-
-
-def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:
-    """Categorize servers into example-only and training-ready with metadata."""
-    example_only_servers = []
-    training_servers = []
-
-    for subdir in TARGET_FOLDER.iterdir():
-        if not subdir.is_dir():
-            continue
-
-        configs_folder = subdir / "configs"
-        if not (configs_folder.exists() and configs_folder.is_dir()):
-            continue
-
-        yaml_files = list(configs_folder.glob("*.yaml"))
-        if not yaml_files:
-            continue
-
-        for yaml_file in yaml_files:
-            domain, description, license, types, verified, verified_url = extract_config_metadata(yaml_file)
-
-            server_name = subdir.name
-            example_only_prefix = "example_"
-            is_example_only_prefix = server_name.startswith(example_only_prefix)
-
-            display_name = (
-                (server_name[len(example_only_prefix) :] if is_example_only_prefix else server_name)
-                .replace("_", " ")
-                .title()
-            )
-
-            config_path = f"{TARGET_FOLDER.name}/{server_name}/configs/{yaml_file.name}"
-            readme_path = f"{TARGET_FOLDER.name}/{server_name}/README.md"
-
-            server_info = {
-                "name": server_name,
-                "display_name": display_name,
-                "domain": domain,
-                "verified": verified,
-                "verified_url": verified_url,
-                "description": description,
-                "config_path": config_path,
-                "config_filename": yaml_file.name,
-                "readme_path": readme_path,
-                "types": types,
-                "license": license,
-                "yaml_file": yaml_file,
-            }
-
-            example_only_servers.append(server_info) if is_example_only_prefix else training_servers.append(
-                server_info
-            )
-
-    return example_only_servers, training_servers
+    return domain, license, types
 
 
-def generate_example_only_table(servers: list[dict]) -> str:
-    """Generate table for example-only resource servers."""
-    if not servers:
-        return "| Name | Demonstrates | Config | README |\n| ---- | ------------------- | ----------- | ------ |\n"
+def generate_table() -> str:
+    """
+    Outputs a grid with table data. Raw html <a> tags are used for the links instead of markdown
+    to avoid cross-reference warnings in the 'build-docs' CI/CD run (15+ warnings == fail)
+    """
+    col_names = ["Domain", "Resource Server Name", "Config Path", "License", "Usage"]
 
-    col_names = ["Name", "Demonstrates", "Config", "README"]
     rows = []
+    for subdir in TARGET_FOLDER.iterdir():
+        if subdir.is_dir():
+            path = f"{TARGET_FOLDER.name}/{subdir.name}"
+            server_name = subdir.name.replace("_", " ").title()
 
-    for server in servers:
-        name = server["display_name"]
+            configs_folder = subdir / "configs"
+            if configs_folder.exists() and configs_folder.is_dir():
+                yaml_files = configs_folder.glob("*.yaml")
+                if yaml_files:
+                    for yaml_file in yaml_files:
+                        config_path = path + "/configs/" + yaml_file.name
+                        config_path_link = f"<a href='{config_path}'>{config_path}</a>"
+                        extraction = extract_config_metadata(yaml_file)
+                        if extraction:
+                            domain, license, usages = extraction
+                            rows.append(
+                                [
+                                    domain,
+                                    server_name,
+                                    config_path_link,
+                                    license,
+                                    ", ".join([u.title() for u in usages]),
+                                ]
+                            )
 
-        # Optional {description} -> Required '{domain} example' -> Fallback: 'Example resource server'
-        description = (
-            server["description"] or f"{server.get('domain').title()} example"
-            if server.get("domain")
-            else "Example resource server"
-        )
-
-        config_link = f"<a href='{server['config_path']}'>{server['config_filename']}</a>"
-        readme_link = f"<a href='{server['readme_path']}'>README</a>"
-
-        rows.append([name, description, config_link, readme_link])
+    def normalize_str(s: str) -> str:
+        """
+        Rows with identical domain values may get reordered differently
+        between local and CI runs. We normalize text and
+        use all columns as tie-breakers to ensure deterministic sorting.
+        """
+        if not s:
+            return ""
+        return unicodedata.normalize("NFKD", s).casefold().strip()
 
     rows.sort(
         key=lambda r: (
@@ -180,65 +137,6 @@ def generate_example_only_table(servers: list[dict]) -> str:
 
     table = [col_names, ["-" for _ in col_names]] + rows
     return format_table(table)
-
-
-def generate_training_table(servers: list[dict]) -> str:
-    """Generate table for training resource servers."""
-    if not servers:
-        return "| Domain | Resource Server | Train | Validation | Verified | Config | License |\n| ------ | --------------- | ----- | ---------- | --------| ------ | ------- |\n"
-
-    col_names = ["Domain", "Resource Server", "Train", "Validation", "Verified", "Config", "License"]
-    rows = []
-
-    for server in servers:
-        domain = server["domain"] if server["domain"] else ""
-        name = server["display_name"]
-
-        types_set = set(server["types"]) if server["types"] else set()
-        train_mark = "✓" if "train" in types_set else "-"
-        val_mark = "✓" if "validation" in types_set else "-"
-
-        # Add verified status with URL if available
-        is_verified = server.get("verified", False)
-        verified_url = server.get("verified_url", "")
-        if is_verified and verified_url:
-            verified_mark = f"<a href='{verified_url}'>✓</a>"
-        elif is_verified:
-            verified_mark = "✓"
-        else:
-            verified_mark = "-"
-
-        config_link = f"<a href='{server['config_path']}'>{server['config_filename']}</a>"
-
-        license_str = server["license"] if server["license"] else "-"
-
-        rows.append([domain, name, train_mark, val_mark, verified_mark, config_link, license_str])
-
-    rows.sort(
-        key=lambda r: (
-            0 if "✓" in r[4] else 1,  # verified (reverse order for checkmarks first)
-            normalize_str(r[0]),  # domain
-            normalize_str(r[1]),  # name
-            normalize_str(r[2]),  # train
-            normalize_str(r[3]),  # val
-            normalize_str(r[5]),  # config
-            normalize_str(r[6]),  # license
-        )
-    )
-
-    table = [col_names, ["-" for _ in col_names]] + rows
-    return format_table(table)
-
-
-def normalize_str(s: str) -> str:
-    """
-    Rows with identical domain values may get reordered differently
-    between local and CI runs. We normalize text and
-    use all columns as tie-breakers to ensure deterministic sorting.
-    """
-    if not s:
-        return ""
-    return unicodedata.normalize("NFKD", s).casefold().strip()
 
 
 def format_table(table: list[list[str]]) -> str:
@@ -273,39 +171,21 @@ def format_table(table: list[list[str]]) -> str:
 
 def main():
     text = README_PATH.read_text()
-
-    example_servers, training_servers = get_example_and_training_server_info()
-
-    example_table_str = generate_example_only_table(example_servers)
-    training_table_str = generate_training_table(training_servers)
-
-    example_pattern = re.compile(
-        r"(<!-- START_EXAMPLE_ONLY_SERVERS_TABLE -->)(.*?)(<!-- END_EXAMPLE_ONLY_SERVERS_TABLE -->)",
+    pattern = re.compile(
+        r"(<!-- START_RESOURCE_TABLE -->)(.*?)(<!-- END_RESOURCE_TABLE -->)",
         flags=re.DOTALL,
     )
 
-    if not example_pattern.search(text):
+    if not pattern.search(text):
         sys.stderr.write(
-            "Error: README.md does not contain <!-- START_EXAMPLE_ONLY_SERVERS_TABLE --> and <!-- END_EXAMPLE_ONLY_SERVERS_TABLE --> markers.\n"
+            "Error: README.md does not contain <!-- START_RESOURCE_TABLE --> and <!-- END_RESOURCE_TABLE --> markers.\n"
         )
         sys.exit(1)
 
-    text = example_pattern.sub(lambda m: f"{m.group(1)}\n{example_table_str}\n{m.group(3)}", text)
+    table_str = generate_table()
 
-    training_pattern = re.compile(
-        r"(<!-- START_TRAINING_SERVERS_TABLE -->)(.*?)(<!-- END_TRAINING_SERVERS_TABLE -->)",
-        flags=re.DOTALL,
-    )
-
-    if not training_pattern.search(text):
-        sys.stderr.write(
-            "Error: README.md does not contain <!-- START_TRAINING_SERVERS_TABLE --> and <!-- END_TRAINING_SERVERS_TABLE --> markers.\n"
-        )
-        sys.exit(1)
-
-    text = training_pattern.sub(lambda m: f"{m.group(1)}\n{training_table_str}\n{m.group(3)}", text)
-
-    README_PATH.write_text(text)
+    new_text = pattern.sub(lambda m: f"{m.group(1)}\n{table_str}\n{m.group(3)}", text)
+    README_PATH.write_text(new_text)
 
 
 if __name__ == "__main__":
