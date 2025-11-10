@@ -25,26 +25,6 @@ These challenges slow research iteration and make it difficult to experiment wit
 
 ---
 
-## NeMo Gym's Approach
-
-NeMo Gym solves these problems through three core design principles:
-
-```{list-table}
-:header-rows: 1
-:widths: 30 70
-
-* - Design Principle
-  - How It Helps
-* - **Unified Interfaces**
-  - Standard abstractions for models (LLM inference), resources (tools + verification), and agents (orchestration) enable mix-and-match composition. Connect any model to any environment using consistent APIs based on OpenAI's Responses format.
-* - **Curated Environments**
-  - A growing collection of resource servers across domains (mathematics, coding, knowledge, instruction-following, agent workflows) provides both the tools agents can use and the verification logic to score their performance. Each environment includes training datasets, validation sets, and examples.
-* - **High-Throughput Architecture**
-  - Async orchestration with configurable parallelism supports generating thousands of rollouts concurrently. The system handles complex coordination (model inference, tool calls, verification) while maximizing throughput for training workloads.
-```
-
----
-
 ## Core Components
 
 NeMo Gym organizes around three core abstractions that work together:
@@ -63,7 +43,9 @@ For detailed explanations of these abstractions, see {doc}`Concepts <concepts/in
 
 ---
 
-## Target Users
+<!-- ## Target Users
+
+TODO: rewrite this section.
 
 NeMo Gym serves three primary user journeys. Choose the one that best describes your use case:
 
@@ -99,7 +81,7 @@ Similar to the NAT journey, your existing agent framework collects trajectories 
 **Key benefits**: Framework-agnostic integration, reuse existing agent code, standardized RL training path
 :::
 
-::::
+:::: -->
 
 ---
 
@@ -152,12 +134,4 @@ Explore the internal design, component boundaries, and data flow patterns that m
 
 Learn how NeMo Gym fits within the NVIDIA NeMo Framework and integrates with NeMo Agent Toolkit and other agent frameworks.
 :::
-
-:::{grid-item-card} {octicon}`star;1.5em;sd-mr-1` Key Features
-:link: features
-:link-type: doc
-
-Discover available resource servers, supported environments, and capabilities across domains like mathematics, coding, and instruction-following.
-:::
-
 ::::

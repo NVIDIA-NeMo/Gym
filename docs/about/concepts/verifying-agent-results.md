@@ -35,6 +35,35 @@ Without verification, agents can execute tools perfectly but have no signal abou
 
 ---
 
+## Real-World Verification Examples
+
+These examples demonstrate how verification combines multiple criteria with weighted priorities:
+
+```{list-table}
+:header-rows: 1
+:widths: 25 50 25
+
+* - Agent Type
+  - Verification Criteria (with example weights)
+  - Design Rationale
+* - **Math Tutoring**
+  - • **Correctness** (0.5): Final answer mathematically correct? <br>
+    • **Pedagogy** (0.3): Steps clearly explained?<br>
+    • **Efficiency** (0.2): Simplest method used?
+  - Correct answers matter most, but teaching quality is also important
+* - **Customer Service**
+  - • **Accuracy** (0.4): Addresses customer question? <br>
+    • **Tone** (0.3): Appropriate and professional? <br>
+    • **Resolution** (0.3): Solves problem or provides next steps? 
+  - Balances multiple dimensions of service quality—no single aspect dominates
+* - **Code Generation**
+  - • **Functionality** (0.6): All test cases pass? <br>
+    • **Quality** (0.3): Readable with good structure? <br>
+    • **Security** (0.1): Avoids vulnerabilities?
+  - Functional correctness is primary, but code quality matters for maintainability
+```
+---
+
 ## Why Verification Matters
 
 Verification measures the quality of outcomes, not just successful tool execution.
@@ -80,36 +109,6 @@ Different tasks require different notions of "good performance":
 ```
 
 Each resource server encapsulates domain expertise about what constitutes success.
-
----
-
-## Real-World Verification Examples
-
-These examples demonstrate how verification combines multiple criteria with weighted priorities:
-
-```{list-table}
-:header-rows: 1
-:widths: 25 50 25
-
-* - Agent Type
-  - Verification Criteria (with weights)
-  - Design Rationale
-* - **Math Tutoring**
-  - • **Correctness** (0.5): Final answer mathematically correct? <br>
-    • **Pedagogy** (0.3): Steps clearly explained?<br>
-    • **Efficiency** (0.2): Simplest method used?
-  - Correct answers matter most, but teaching quality is also important
-* - **Customer Service**
-  - • **Accuracy** (0.4): Addresses customer question? <br>
-    • **Tone** (0.3): Appropriate and professional? <br>
-    • **Resolution** (0.3): Solves problem or provides next steps? 
-  - Balances multiple dimensions of service quality—no single aspect dominates
-* - **Code Generation**
-  - • **Functionality** (0.6): All test cases pass? <br>
-    • **Quality** (0.3): Readable with good structure? <br>
-    • **Security** (0.1): Avoids vulnerabilities?
-  - Functional correctness is primary, but code quality matters for maintainability
-```
 
 ---
 

@@ -116,7 +116,7 @@ Overview <about/index>
 Concepts <about/concepts/index>
 Architecture <about/architecture>
 Ecosystem <about/ecosystem>
-Key Features <about/features>
+<!-- Key Features <about/features> -->
 Release Notes <about/release-notes/index>
 ```
 
