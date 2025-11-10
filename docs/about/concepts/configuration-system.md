@@ -5,8 +5,6 @@ NeMo Gym's configuration system provides a flexible, three-tier architecture for
 
 This document explains how configuration resolution works, why the three-tier design exists, and how to structure your configurations for different deployment scenarios.
 
----
-
 ## Why Three Tiers?
 
 The three-tier design separates concerns for secure, flexible deployments. Choose the perspective most relevant to your role:
@@ -67,9 +65,6 @@ policy_api_key: sk-actual-secret-key
 
 ::::
 
-
----
-
 ## How the Layers Work Together
 
 Each layer serves a specific purpose and overrides the previous one. Here's how they compare:
@@ -111,8 +106,6 @@ Each layer serves a specific purpose and overrides the previous one. Here's how 
   - `policy_api_key: sk-real-key`
   - `+policy_model_name=gpt-4o-mini`
 ```
-
----
 
 ## How Configuration Gets Resolved
 
