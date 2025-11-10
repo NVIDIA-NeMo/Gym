@@ -189,7 +189,7 @@ ng_run "+config_paths=[prod-config.yaml]" +policy_model_name=gpt-4o-2024-11-20
 ```bash
 # Test with math resources
 ng_run "+config_paths=[base.yaml]" \
-    +simple_agent.responses_api_agents.simple_agent.resources_server.name=library_judge_math
+    +simple_agent.responses_api_agents.simple_agent.resources_server.name=math_with_judge
 
 # Test with weather resources  
 ng_run "+config_paths=[base.yaml]" \
@@ -218,7 +218,7 @@ omegaconf.errors.MissingMandatoryValue: Missing mandatory value: policy_api_key
 ### Problem: Invalid Server References
 ```
 AssertionError: Could not find type='resources_servers' name='typo_weather' 
-in the list of available servers: [simple_weather, library_judge_math, ...]
+in the list of available servers: [simple_weather, math_with_judge, ...]
 ```
 **Fix**: Check your server name spelling and ensure the config is loaded.
 
@@ -312,7 +312,7 @@ policy_model:
 # env.yaml - organize related configs
 math_training_config_paths:
   - responses_api_models/openai_model/configs/openai_model.yaml
-  - resources_servers/library_judge_math/configs/library_judge_math.yaml
+  - resources_servers/math_with_judge/configs/math_with_judge.yaml
   - responses_api_agents/simple_agent/configs/simple_agent.yaml
 
 weather_demo_config_paths:

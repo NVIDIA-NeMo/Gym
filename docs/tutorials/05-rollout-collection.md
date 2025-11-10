@@ -90,13 +90,13 @@ Let's generate rollouts using the **MultiNeedle** resource server, which tests r
 ### Step 1: Start the MultiNeedle Agent
 
 ```bash
-# Start the multineedle agent server
+# Start the example_multi_step agent server
 config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/multineedle/configs/multineedle.yaml"
+resources_servers/example_multi_step/configs/example_multi_step.yaml"
 ng_run "+config_paths=[${config_paths}]"
 ```
 
-**✅ Success Check**: You should see 3 servers running including the `multineedle_simple_agent`.
+**✅ Success Check**: You should see 3 servers running including the `example_multi_step_simple_agent`.
 
 ### Step 3: Generate Rollouts
 
@@ -105,9 +105,9 @@ ng_run "+config_paths=[${config_paths}]"
 In a separate terminal, run:
 ```bash
 # Generate rollouts from the dataset
-ng_collect_rollouts +agent_name=multineedle_simple_agent \
-    +input_jsonl_fpath=resources_servers/multineedle/data/example.jsonl \
-    +output_jsonl_fpath=results/multineedle_rollouts.jsonl \
+ng_collect_rollouts +agent_name=example_multi_step_simple_agent \
+    +input_jsonl_fpath=resources_servers/example_multi_step/data/example.jsonl \
+    +output_jsonl_fpath=results/example_multi_step_rollouts.jsonl \
     +limit=5 \
     +num_repeats=2 \
     +num_samples_in_parallel=3 \
@@ -124,7 +124,7 @@ ng_collect_rollouts +agent_name=multineedle_simple_agent \
 
 ```bash
 # Launch the rollout viewer
-ng_viewer +jsonl_fpath=results/multineedle_rollouts.jsonl
+ng_viewer +jsonl_fpath=results/example_multi_step_rollouts.jsonl
 ```
 
 **What you'll see**: An interactive viewer showing agent reasoning, tool calls, and verification scores for each rollout.

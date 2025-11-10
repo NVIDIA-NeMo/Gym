@@ -339,17 +339,17 @@ ng_prepare_data "+config_paths=[responses_api_models/openai_model/configs/openai
 ```
 and your config must include an agent server config with an example dataset like:
 ```yaml
-multineedle_simple_agent:
+example_multi_step_simple_agent:
   responses_api_agents:
     simple_agent:
       ...
       datasets:
       - name: example
         type: example
-        jsonl_fpath: resources_servers/multineedle/data/example.jsonl
+        jsonl_fpath: resources_servers/example_multi_step/data/example.jsonl
 ```
 
-See `resources_servers/multineedle/configs/multineedle.yaml` for a full config example.
+See `resources_servers/example_multi_step/configs/example_multi_step.yaml` for a full config example.
 """
     with open(example_metrics_fpath) as f:
         example_metrics = json.load(f)
@@ -367,18 +367,18 @@ See `resources_servers/multineedle/configs/multineedle.yaml` for a full config e
 Your commands should look something like:
 ```bash
 # Server spinup
-multineedle_config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/multineedle/configs/multineedle.yaml"
-ng_run "+config_paths=[${{multineedle_config_paths}}]"
+example_multi_step_config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/example_multi_step/configs/example_multi_step.yaml"
+ng_run "+config_paths=[${{example_multi_step_config_paths}}]"
 
 # Collect the rollouts
-ng_collect_rollouts +agent_name=multineedle_simple_agent \
-    +input_jsonl_fpath=resources_servers/multineedle/data/example.jsonl \
-    +output_jsonl_fpath=resources_servers/multineedle/data/example_rollouts.jsonl \
+ng_collect_rollouts +agent_name=example_multi_step_simple_agent \
+    +input_jsonl_fpath=resources_servers/example_multi_step/data/example.jsonl \
+    +output_jsonl_fpath=resources_servers/example_multi_step/data/example_rollouts.jsonl \
     +limit=null
 
 # View your rollouts
-ng_viewer +jsonl_fpath=resources_servers/multineedle/data/example_rollouts.jsonl
+ng_viewer +jsonl_fpath=resources_servers/example_multi_step/data/example_rollouts.jsonl
 ```
 """
     with open(example_rollouts_fpath) as f:
