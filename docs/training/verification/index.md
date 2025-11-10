@@ -52,8 +52,7 @@ Verification is not a separate component—it lives inside your resource server 
 3. Resource server's `verify()` function scores the output
 4. Reward signal gets saved in the rollout JSONL
 
-:::{dropdown} **Architecture Details** (click to expand)
-:color: secondary
+:::{dropdown} **Architecture Details**
 :icon: code
 
 Each resource server implements the `verify()` method:
@@ -140,58 +139,6 @@ Different resource servers implement different verification approaches for their
 ```
 
 When you choose a resource server, you're choosing its verification logic as a package.
-
----
-
-## Verification Workflow
-
-The typical verification workflow for training data generation:
-
-```text
-[1. Choose Resource Server]  ← Selects verification logic
-    ↓
-[2. Collect Test Rollouts]   ← Generate 20-50 samples
-    ↓
-[3. Validate Verification]   ← Check reward distribution
-    ↓
-[4. Scale Collection]         ← Or customize if needed
-```
-
-**Most users**: {doc}`validate-verification` (5-10 min validation)  
-**Custom needs**: {doc}`custom-patterns-cookbook` (build your own `verify()`)
-
----
-
-## Quick Decision Guide
-
-```{list-table}
-:header-rows: 1
-:widths: 40 60
-
-* - Your Situation
-  - Recommended Action
-* - **Selected a resource server**
-  - Start with {doc}`validate-verification` to test it works
-* - **Verification produces bad rewards**
-  - Try different resource server or see {doc}`custom-patterns-cookbook`
-* - **Need domain-specific verification**
-  - Build custom with {doc}`custom-patterns-cookbook`
-* - **Want multi-objective scoring**
-  - See {doc}`multi-objective-scoring` for tracking dimensions
-```
-
----
-
-## Related Topics
-
-**Before verification**:
-
-- {ref}`training-resource-servers` - Choose which server (and verification)
-
-**After verification**:
-
-- {ref}`training-rollout-collection` - Scale up collection
-- {ref}`training-datasets` - Prepare data for training
 
 ```{toctree}
 :hidden:
