@@ -1,7 +1,7 @@
 (about-ecosystem)=
 # NeMo Gym in the NVIDIA Ecosystem
 
-NeMo Gym is a component of the [NVIDIA NeMo Framework](https://github.com/NVIDIA-NeMo), NVIDIA's GPU-accelerated platform for building and training generative AI models.
+NeMo Gym is a component of the [NVIDIA NeMo Framework](https://docs.nvidia.com/nemo-framework/), NVIDIA's GPU-accelerated platform for building and training generative AI models.
 
 :::{tip}
 For details on NeMo Gym capabilities, refer to the
@@ -30,7 +30,7 @@ The [NeMo Framework](https://github.com/NVIDIA-NeMo) is NVIDIA's GPU-accelerated
 
 ## Comparing NeMo Gym with NeMo Agent Toolkit
 
-While NeMo Gym is part of the NeMo Framework for **training**, the [NeMo Agent Toolkit](https://github.com/NVIDIA/NeMo-Agent-Toolkit) is a separate open-source framework focused on **inference** and building production agent workflows.
+While NeMo Gym is part of the NeMo Framework for **training**, the [NeMo Agent Toolkit](https://docs.nvidia.com/nemo/agent-toolkit/latest/) is a separate open-source framework focused on **inference** and building production agent workflows.
 
 ::::{tab-set}
 
@@ -219,10 +219,10 @@ Use this when you want to train models directly against resource servers without
 
 ## Related NVIDIA Components
 
-* **[NeMo Framework](https://github.com/NVIDIA-NeMo)**: The parent ecosystem containing NeMo Gym, NeMo RL, NeMo Curator, and other training components
-* **[NeMo Agent Toolkit](https://github.com/NVIDIA/NeMo-Agent-Toolkit)**: Separate framework for building production agent workflows with observability and profiling
+* **[NeMo Framework](https://docs.nvidia.com/nemo-framework/)**: The parent ecosystem containing NeMo Gym, NeMo RL, NeMo Curator, and other training components
+* **[NeMo Agent Toolkit](https://docs.nvidia.com/nemo/agent-toolkit/latest/)**: Separate framework for building production agent workflows with observability and profiling
 * **[NeMo-RL](https://docs.nvidia.com/nemo/rl/latest/)**: Training framework within NeMo Framework that consumes trajectory data from NeMo Gym
-* **NVIDIA NIM**: Inference microservices that can be paired with agent workflows and training pipelines
+* **[NVIDIA NIM](https://docs.nvidia.com/nim/)**: Inference microservices that can be paired with agent workflows and training pipelines
 
 ### Compatible RL Training Frameworks
 

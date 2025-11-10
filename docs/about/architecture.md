@@ -24,8 +24,13 @@ collection.
 
 ## Component Layers
 
-NeMo Gym organizes into three layers that work together to deliver RL training
-data and evaluation signals.
+NeMo Gym organizes into three layers that work together to deliver RL training data and evaluation signals:
+
+1. **Functional Servers** - The core HTTP services (Agents, Models, Resources) that handle requests and coordinate interactions
+2. **Runtime Services** - Shared utilities for session handling, profiling, and configuration management
+3. **Configuration Model** - Centralized settings that connect servers and define system behavior
+
+Each layer builds on the previous one, with functional servers providing the core capabilities, runtime services handling cross-cutting concerns, and configuration tying everything together at startup.
 
 ### Functional Servers
 
