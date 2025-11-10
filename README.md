@@ -1,9 +1,11 @@
 # NeMo Gym
 
-NeMo Gym enables scalable data collection for reinforcement learning of AI agents. It provides both the infrastructure to systematically capture agent interactions and a collection of high-quality RL environments, making it easy to generate training data for reinforcement learning workflows using the framework of your choice.
+NeMo Gym is a framework for building reinforcement learning environments to train large language models. 
+> *Part of the [NVIDIA NeMo](https://www.nvidia.com/en-us/ai-data-science/products/nemo/) software suite for managing the AI agent lifecycle.*
+
 
 > [!IMPORTANT]
-> NeMo Gym is currently in early development. While NVIDIA is using it for training Nemotron models, you should expect evolving APIs, incomplete documentation, and occasional bugs. We welcome contributions and feedback! For any changes, please open an issue first to coordinate with the team and ensure alignment with product direction.
+> NeMo Gym is currently in early development. You should expect evolving APIs, incomplete documentation, and occasional bugs. We welcome contributions and feedback - for any changes, please open an issue first to kick off discussion!
 
 
 ## 🏆 Why NeMo Gym?
@@ -73,9 +75,6 @@ We'd love your contributions! Here's how to get involved:
 
 NeMo Gym includes a curated collection of resource servers for training and evaluation across multiple domains:
 
-> [!TIP]
-> Each resource server includes example data, configuration files, and tests. See each server's README for details.
-
 ### Table 1: Example Resource Servers
 
 Purpose: Demonstrate NeMo Gym patterns and concepts.
@@ -90,6 +89,9 @@ Purpose: Demonstrate NeMo Gym patterns and concepts.
 ### Table 2: Resource Servers for Training
 
 Purpose: Training-ready environments with curated datasets.
+
+> [!TIP]
+> Each resource server includes example data, configuration files, and tests. See each server's README for details.
 
 <!-- START_TRAINING_SERVERS_TABLE -->
 | Domain                | Resource Server       | Train | Validation | Verified                                                                                    | Config                                                                                                                                         | License                                                   |
@@ -112,3 +114,5 @@ Purpose: Training-ready environments with curated datasets.
 | math                  | Library Judge Math    | ✓     | ✓          | -                                                                                           | <a href='resources_servers/library_judge_math/configs/math_stack_overflow.yaml'>math_stack_overflow.yaml</a>                                   | Creative Commons Attribution-ShareAlike 4.0 International |
 | math                  | Python Math Exec      | ✓     | -          | -                                                                                           | <a href='resources_servers/python_math_exec/configs/python_math_exec.yaml'>python_math_exec.yaml</a>                                           | Apache 2.0                                                |
 <!-- END_TRAINING_SERVERS_TABLE -->
+
+
