@@ -252,4 +252,4 @@ Supporting features for stateful environments, metrics computation, error handli
 
 ---
 
-For hands-on experience with these features, see the {doc}`../tutorials/README`.
+For hands-on experience with these features, see the {doc}`../tutorials/index`.
