@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from contextlib import nullcontext as does_not_raise
+from socket import gethostbyname, gethostname
 from typing import Dict
 from unittest.mock import MagicMock
-from socket import gethostbyname, gethostname
 
 from pytest import MonkeyPatch, raises
 
@@ -613,8 +613,6 @@ class TestServerUtils:
 
     def test_use_absolute_ip(self, monkeypatch: MonkeyPatch) -> None:
         """Test that use_absolute_ip=True uses machine's hostname ip for default_host."""
-        mock_versions_for_testing = self._mock_versions_for_testing(monkeypatch)
-
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
         monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
 
