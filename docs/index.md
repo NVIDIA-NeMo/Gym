@@ -43,14 +43,6 @@ NeMo Gym's place in the NVIDIA NeMo Framework and ecosystem.
 {bdg-secondary}`nemo-framework` {bdg-secondary}`positioning`
 :::
 
-:::{grid-item-card} {octicon}`checklist;1.5em;sd-mr-1` Key Features
-:link: about-features
-:link-type: ref
-Comprehensive catalog of NeMo Gym capabilities and design principles.
-+++
-{bdg-secondary}`features` {bdg-secondary}`capabilities`
-:::
-
 ::::
 
 ## Tutorial Highlights
