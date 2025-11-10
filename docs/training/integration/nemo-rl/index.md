@@ -302,10 +302,6 @@ DPO Training →
 :hidden:
 :maxdepth: 1
 
-grpo
-sft
-dpo
-troubleshooting
 advanced
 ```
 
