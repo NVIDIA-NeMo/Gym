@@ -18,9 +18,9 @@ from pathlib import Path
 import yaml
 from huggingface_hub import HfApi, hf_hub_download
 from huggingface_hub.utils import HfHubHTTPError
-from scripts.update_resource_servers import get_dataset_domain
 
 from nemo_gym.config_types import DownloadJsonlDatasetHuggingFaceConfig, UploadJsonlDatasetHuggingFaceConfig
+from nemo_gym.config_utils import visit_resource_server
 from nemo_gym.server_utils import get_global_config_dict
 
 
@@ -61,7 +61,7 @@ def upload_jsonl_dataset(
     with open(config.resource_config_path, "r") as f:
         data = yaml.safe_load(f)
 
-    domain = d.title() if (d := get_dataset_domain(data)) else None
+    domain = d.title() if (d := visit_resource_server(data)[0]) else None
     resource_server = config.resource_config_path.split("/")[1]
     dataset_name = config.dataset_name
     prefix = config.hf_dataset_prefix + "-" if config.hf_dataset_prefix else ""
