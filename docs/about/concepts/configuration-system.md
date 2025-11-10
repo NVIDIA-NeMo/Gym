@@ -9,469 +9,195 @@ This document explains how configuration resolution works, why the three-tier de
 
 ## Why Three Tiers?
 
-Different parts of your configuration have different needs:
+The three-tier design separates concerns for secure, flexible deployments. Choose the perspective most relevant to your role:
+
+::::{tab-set}
+
+:::{tab-item} Developer Perspective
+**What it means for you**:
+
+- **Rapid iteration**: Test different models or configurations with a single command-line override—no file editing required
+- **Safe experimentation**: Try changes without affecting your team's shared configs
+- **Easy rollback**: Command-line experiments don't persist; just remove the override
+
+**Example workflow**:
+```bash
+# Quick test with cheaper model
+ng_run "+config_paths=[${config}]" +policy_model_name=gpt-4o-mini
+
+# Back to normal - just remove the override
+ng_run "+config_paths=[${config}]"
+```
+:::
+
+:::{tab-item} DevOps Perspective
+**What it means for you**:
+
+- **Environment-specific deployments**: Same codebase, different env.yaml for dev/staging/prod
+- **Secrets management**: API keys never in version control, different credentials per environment
+- **CI/CD integration**: Override configurations via environment variables in pipelines
+- **Infrastructure as code**: YAML configs define server architecture in version control
+
+**Example deployment**:
+```bash
+# CI/CD pipeline with environment-specific overrides
+ng_run "+config_paths=[${base_config}]" \
+    +policy_api_key=${PROD_API_KEY} \
+    +policy_model_name=${MODEL_VERSION}
+```
+:::
+
+:::{tab-item} Security Perspective
+**What it means for you**:
+
+- **Zero secrets in git**: All sensitive values go in git-ignored env.yaml
+- **Variable interpolation**: YAML files reference variables, never hardcode keys
+- **Environment isolation**: Each environment has its own credentials
+- **Audit trail**: Configuration changes tracked in git (structure) without exposing secrets (values)
+
+**Security model**:
+```yaml
+# In git (public)
+openai_api_key: ${policy_api_key}  # Variable reference
+
+# In env.yaml (git-ignored, private)
+policy_api_key: sk-actual-secret-key
+```
+:::
+
+::::
+
+
+---
+
+## How the Layers Work Together
+
+Each layer serves a specific purpose and overrides the previous one. Here's how they compare:
 
 ```{list-table}
 :header-rows: 1
-:widths: 25 35 40
+:widths: 20 27 27 26
 
-* - What You're Configuring
-  - Where It Should Live
-  - Why
-* - **Server structure and defaults**
-  - YAML files (version controlled)
-  - Team shares these; they define the architecture
-* - **Secrets and credentials**
-  - env.yaml (git-ignored)
-  - Never commit API keys; each environment has different credentials
-* - **Runtime experiments**
-  - Command line arguments
-  - Quick testing without editing files; temporary overrides
-```
-
-This separation enables:
-- **Version control** for shared configurations without exposing secrets
-- **Environment-specific** settings (dev/staging/prod) with the same code
-- **Rapid iteration** via command-line overrides during development
-- **Secure deployment** with proper secrets management
-
----
-
-## The Three Configuration Layers
-
-### Layer 1: Server YAML Files (Foundation)
-
-**Purpose**: Define the structure and default values for your servers.
-
-**Location**: `responses_api_models/`, `resources_servers/`, `responses_api_agents/` directories
-
-**Example** (`responses_api_models/openai_model/configs/openai_model.yaml`):
-```yaml
-policy_model:
-  responses_api_models:
-    openai_model:
-      entrypoint: app.py
-      openai_base_url: ${policy_base_url}
-      openai_api_key: ${policy_api_key}
-      openai_model: ${policy_model_name}
-```
-
-**Key characteristics**:
-- Version controlled (committed to git)
-- Uses variable interpolation (`${variable_name}`) for secrets
-- Defines server hierarchy: server ID → server type → implementation → settings
-- Multiple YAML files can be loaded; later files override earlier ones
-
-**Evidence**: Configuration resolution in `nemo_gym/global_config.py:194`
-```python
-config_paths, extra_configs = self.load_extra_config_paths(config_paths)
-```
-
-### Layer 2: env.yaml (Secrets and Environment-Specific Values)
-
-**Purpose**: Store secrets, API keys, and environment-specific settings that should never be committed.
-
-**Location**: `env.yaml` in the project root (must be in `.gitignore`)
-
-**Example** (`env.yaml`):
-```yaml
-# API credentials (never commit!)
-policy_base_url: https://api.openai.com/v1
-policy_api_key: sk-your-actual-api-key-here
-policy_model_name: gpt-4o-2024-11-20
-
-# Config path collections for convenience
-simple_weather_config_paths:
-  - responses_api_models/openai_model/configs/openai_model.yaml
-  - resources_servers/simple_weather/configs/simple_weather.yaml
-```
-
-**Key characteristics**:
-- Loaded early so variables can be used in config paths
-- Overrides values from YAML files
-- Can store config path collections for convenience
-- Each environment (dev/staging/prod) has its own env.yaml
-
-**Evidence**: env.yaml loading in `nemo_gym/global_config.py:183-187`
-```python
-# Load the env.yaml config. We load it early so that people can use it to 
-# conveniently store config paths.
-dotenv_path = parse_config.dotenv_path or Path(PARENT_DIR) / "env.yaml"
-if dotenv_path.exists() and not parse_config.skip_load_from_dotenv:
-    dotenv_extra_config = OmegaConf.load(dotenv_path)
-```
-
-### Layer 3: Command Line Arguments (Runtime Overrides)
-
-**Purpose**: Temporary overrides for testing and experimentation without editing files.
-
-**Usage**:
-```bash
-ng_run "+config_paths=[configs.yaml]" \
-    +policy_model_name=gpt-4o-mini \
-    +simple_weather.resources_servers.simple_weather.port=8001
-```
-
-**Key characteristics**:
-- Highest priority—overrides everything
-- Uses Hydra syntax (`+key=value`)
-- Can override any nested configuration value
-- Perfect for one-off experiments and CI/CD pipelines
-
-**Evidence**: Command line priority in `nemo_gym/global_config.py:199-201`
-```python
-# Merge config dicts
-# global_config_dict is the last config arg here since we want command line args 
-# to override everything else.
-global_config_dict = OmegaConf.merge(*extra_configs, global_config_dict)
+* - 
+  - **Layer 1: YAML Files**
+  - **Layer 2: env.yaml**
+  - **Layer 3: Command Line**
+* - **Priority**
+  - Lowest (foundation)
+  - Middle (overrides YAML)
+  - Highest (overrides everything)
+* - **Purpose**
+  - Define server structure and architecture
+  - Store secrets and environment-specific values
+  - Temporary overrides for testing
+* - **Location**
+  - `responses_api_models/`, `resources_servers/`, `responses_api_agents/` directories
+  - `env.yaml` in project root
+  - Arguments passed to `ng_run`
+* - **Version Control**
+  - ✅ Committed to git
+  - ❌ In `.gitignore` (never commit)
+  - ❌ Not persisted
+* - **Contains**
+  - Server hierarchy, entrypoints, structure, variable references
+  - API keys, secrets, environment-specific values, config collections
+  - Any configuration override, experiment parameters
+* - **When to Use**
+  - Defining your system architecture
+  - Different credentials per environment (dev/staging/prod)
+  - Quick experiments without editing files
+* - **Example Content**
+  - `openai_base_url: ${policy_base_url}`
+  - `policy_api_key: sk-real-key`
+  - `+policy_model_name=gpt-4o-mini`
 ```
 
 ---
 
-## Configuration Resolution Process
+## How Configuration Gets Resolved
 
-When you run `ng_run`, NeMo Gym resolves configuration through this process:
+When you run `ng_run`, NeMo Gym merges configuration in this order:
 
-### Step 1: Parse Command Line
+1. **Parse command-line arguments**: Extracts `config_paths` and any overrides
+2. **Load env.yaml**: Loads secrets and environment-specific values
+3. **Load YAML files**: Loads each file in `config_paths`, resolving variables like `${policy_api_key}`
+4. **Merge with priority**: Combines all layers: YAML files → env.yaml → CLI (highest priority)
+5. **Validate and cache**: Verifies server references exist, populate defaults, cache for session
 
-Hydra extracts command-line arguments into a configuration dictionary:
+**Priority order**: CLI overrides env.yaml, which overrides YAML files.
 
-```bash
-ng_run "+config_paths=[model.yaml]" +policy_model_name=gpt-4o-mini
-```
-
-Creates: `{config_paths: ["model.yaml"], policy_model_name: "gpt-4o-mini"}`
-
-### Step 2: Load env.yaml
-
-If `env.yaml` exists in the project root, it's loaded:
-
-```yaml
-policy_api_key: sk-real-key
-policy_model_name: gpt-4o-2024-11-20  # Will be overridden by CLI
-```
-
-### Step 3: Resolve config_paths
-
-The system merges env.yaml with CLI args to resolve `config_paths`:
-
-```python
-# From global_config.py:189
-merged_config_for_config_paths = OmegaConf.merge(dotenv_extra_config, global_config_dict)
-config_paths = merged_config_for_config_paths.get(CONFIG_PATHS_KEY_NAME) or []
-```
-
-This allows using config path collections from env.yaml:
-```bash
-ng_run '+config_paths=${simple_weather_config_paths}'
-```
-
-### Step 4: Load YAML Files
-
-Each YAML file in `config_paths` is loaded in order. Later files override earlier ones.
-
-### Step 5: Final Merge (Priority Order)
-
-The system merges all layers with this priority:
-
-```python
-# From global_config.py:201
-global_config_dict = OmegaConf.merge(
-    *extra_configs,        # YAML files (lowest priority)
-    dotenv_extra_config,   # env.yaml (middle priority)
-    global_config_dict     # CLI args (highest priority)
-)
-```
-
-**Result**: A single configuration dictionary where later layers override earlier ones.
-
-### Step 6: Validation and Defaults
-
-The system validates and populates defaults:
-
-1. **Server references**: Verifies all server references exist
-2. **Host defaults**: Populates missing host values (default: `127.0.0.1`)
-3. **Port allocation**: Assigns available ports if not specified
-4. **Caching**: Configuration is resolved once and cached for the session
-
-**Evidence**: Validation in `nemo_gym/global_config.py:132-169`
+**Example**: If `policy_model_name` is in both env.yaml (`gpt-4o-2024-11-20`) and CLI (`+policy_model_name=gpt-4o-mini`), CLI wins.
 
 ---
 
-## Configuration Structure
+## Technical Details
 
-### Server Instance Config Format
+Understanding how NeMo Gym implements configuration resolution can help you optimize performance and debug issues:
 
-Every server in NeMo Gym follows this hierarchy:
-
-```yaml
-server_id:                    # Unique identifier for this server instance
-  server_type:                # One of: responses_api_models, resources_servers, responses_api_agents
-    implementation:           # Folder name under server_type/
-      entrypoint: app.py      # Python file to run
-      # Implementation-specific settings
-      setting_1: value
-      setting_2: ${variable}  # Variable interpolation
-```
-
-**Example** (Agent configuration):
-```yaml
-simple_weather_simple_agent:
-  responses_api_agents:
-    simple_agent:
-      entrypoint: app.py
-      max_steps: 10
-      resources_server:
-        type: resources_servers
-        name: simple_weather
-      model_server:
-        type: responses_api_models
-        name: policy_model
-```
-
-### Server References
-
-Agents and resources reference each other using this format:
-
-```yaml
-resources_server:
-  type: resources_servers      # Server type to reference
-  name: simple_weather         # Server ID to connect to
-```
-
-The system validates these references during configuration resolution to ensure all referenced servers exist.
-
-**Evidence**: Reference validation in `nemo_gym/global_config.py:145-153`
-
-### Policy Model Variables
-
-NeMo Gym provides three standard variables for the model being trained:
-
-```yaml
-policy_base_url: https://api.openai.com/v1    # Model API endpoint
-policy_api_key: sk-your-key                   # Authentication
-policy_model_name: gpt-4o-2024-11-20          # Model identifier
-```
-
-**Why they exist**: When training agents, you need consistent references to "the model being trained" across different components. These variables provide a standard way to specify the policy model regardless of which resource servers or agents are being used.
-
-**Evidence**: Variable definitions in `nemo_gym/global_config.py:54-56`
-
----
-
-## Environment-Specific Deployments
-
-### Approach 1: Multiple env.yaml Files
-
-Maintain separate environment files:
-
-```bash
-env.dev.yaml      # Development: gpt-4o-mini, test keys
-env.staging.yaml  # Staging: gpt-4o, staging keys
-env.prod.yaml     # Production: gpt-4o, production keys
-```
-
-Switch environments by copying:
-```bash
-cp env.prod.yaml env.yaml
-ng_run "+config_paths=[${config}]"
-```
-
-### Approach 2: Environment-Specific YAML Configs
-
-Use different YAML configs per environment:
-
-```bash
-# Development
-ng_run "+config_paths=[configs/dev.yaml]" +policy_model_name=gpt-4o-mini
-
-# Production
-ng_run "+config_paths=[configs/prod.yaml]" +policy_model_name=gpt-4o-2024-11-20
-```
-
-### Approach 3: Command-Line Overrides
-
-Keep a single config and override at runtime:
-
-```bash
-# CI/CD pipeline
-ng_run "+config_paths=[${base_config}]" \
-    +policy_model_name=${MODEL} \
-    +policy_api_key=${API_KEY} \
-    +limit=${LIMIT}
-```
-
----
-
-## Best Practices
-
-### 1. Never Commit Secrets
-
-**Always**:
-- Add `env.yaml` to `.gitignore`
-- Use variable interpolation in YAML files: `api_key: ${policy_api_key}`
-- Store secrets in env.yaml or environment variables
-
-**Never**:
-- Hard-code API keys in YAML files
-- Commit env.yaml to version control
-- Share secrets in documentation or examples
-
-### 2. Use Config Path Collections
-
-Group related configurations in env.yaml:
-
-```yaml
-math_training_config_paths:
-  - responses_api_models/openai_model/configs/openai_model.yaml
-  - resources_servers/library_judge_math/configs/library_judge_math.yaml
-  - responses_api_agents/simple_agent/configs/simple_agent.yaml
-```
-
-Benefits:
-- Single command to load complete setups
-- Easier to switch between scenarios
-- Less typing, fewer errors
-
-### 3. Document Your Overrides
-
-Use inline comments for command-line overrides:
-
-```bash
-ng_run "+config_paths=[${config}]" \
-    +policy_model_name=gpt-4o-mini \        # Cheaper model for dev
-    +limit=10 \                              # Small batch for testing
-    +num_samples_in_parallel=2               # Avoid rate limits
-```
-
-### 4. Provide an env.example.yaml
-
-Commit an example file showing required variables:
-
-```yaml
-# env.example.yaml (committed to git)
-policy_base_url: https://api.openai.com/v1
-policy_api_key: sk-your-key-here
-policy_model_name: gpt-4o-2024-11-20
-
-# Copy this file to env.yaml and fill in real values
-```
-
----
-
-## Troubleshooting
-
-### Missing Configuration Values
-
-**Error**:
-```
-omegaconf.errors.MissingMandatoryValue: Missing mandatory value: policy_api_key
-```
-
-**Cause**: A required variable isn't defined in any of the three layers.
-
-**Solution**: Add the value to env.yaml or override via command line.
-
-### Invalid Server References
-
-**Error**:
-```
-AssertionError: Could not find type='resources_servers' name='typo_weather' 
-in the list of available servers: [simple_weather, library_judge_math, ...]
-```
-
-**Cause**: Configuration references a server that doesn't exist or isn't loaded.
-
-**Solution**: 
-1. Check spelling (case-sensitive)
-2. Ensure the server's config file is in `config_paths`
-3. Check the error message for valid server names
-
-**Evidence**: Validation logic in `nemo_gym/global_config.py:151-153`
-
-### Port Conflicts
-
-**Error**:
-```
-OSError: [Errno 48] Address already in use
-```
-
-**Cause**: Another process is using the port.
-
-**Solution**:
-```bash
-# Option 1: Specify available port
-ng_run "+config_paths=[...]" +server.port=8001
-
-# Option 2: Auto-assign (recommended)
-ng_run "+config_paths=[...]" +server.port=0
-```
-
-The system will automatically find and assign an available port when `port=0`.
-
-**Evidence**: Port allocation in `nemo_gym/global_config.py:159-164`
-
----
-
-## Technical Implementation
-
-### Configuration Caching
+:::{dropdown} Configuration Caching
+:icon: cache
 
 The configuration is resolved once per process and cached:
 
 ```python
-# From global_config.py:280-282
 global _GLOBAL_CONFIG_DICT
 if _GLOBAL_CONFIG_DICT is not None:
     return _GLOBAL_CONFIG_DICT
 ```
 
-This ensures consistent configuration throughout the process lifetime.
+**Why**: Configuration resolution involves parsing command-line args, loading multiple YAML files, merging layers, and validation. This is expensive to do repeatedly.
 
-### Child Process Configuration
+**Implication**: Once resolved, configuration is immutable for the process lifetime. To change configuration, restart the process.
+
+**Benefit**: Consistent configuration across all components; no surprises from configuration changing mid-execution.
+
+:::
+
+:::{dropdown} Child Process Configuration
+:icon: versions
 
 When NeMo Gym spawns child processes (for individual servers), the parent passes configuration via environment variable:
 
 ```python
-# From global_config.py:284-290
 nemo_gym_config_dict_str_from_env = getenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME)
 if nemo_gym_config_dict_str_from_env:
     global_config_dict = OmegaConf.create(nemo_gym_config_dict_str_from_env)
 ```
 
-This avoids re-parsing configuration in every subprocess.
+**Why**: Each server runs in its own process. Without this optimization, every subprocess would need to re-parse command-line args, load YAML files, and perform resolution.
 
-### OmegaConf Integration
+**How it works**:
+1. Parent process resolves configuration once
+2. Serializes configuration to string
+3. Passes to child via `NEMO_GYM_CONFIG_DICT` environment variable
+4. Child deserializes and uses directly
+
+**Benefit**: Fast subprocess startup; no redundant file I/O or parsing.
+
+:::
+
+:::{dropdown} OmegaConf Integration
+:icon: tools
 
 NeMo Gym uses [OmegaConf](https://omegaconf.readthedocs.io/) for configuration management, which provides:
-- Variable interpolation: `${variable_name}`
-- Type validation
-- Hierarchical merging
-- Structured configs
 
----
+**Core features**:
+- **Variable interpolation**: `${variable_name}` references
+- **Hierarchical merging**: Later configs override earlier ones
+- **Type validation**: Ensures configuration values have correct types
+- **Structured configs**: Supports nested dictionaries and lists
+- **Dot notation**: Access nested values with `key.nested.value`
 
-## Related Concepts
+**Example of interpolation**:
+```yaml
+# Define once
+policy_model_name: gpt-4o-2024-11-20
 
-- **[Core Abstractions](core-abstractions.md)**: Understanding the three servers that configuration connects
-- **[Rollout Collection Fundamentals](rollout-collection-fundamentals.md)**: How configuration affects rollout generation
-
----
-
-## Summary
-
-NeMo Gym's three-tier configuration system provides:
-
-1. **YAML Files**: Version-controlled structure and defaults
-2. **env.yaml**: Environment-specific secrets and settings
-3. **Command Line**: Runtime overrides for experimentation
-
-Configuration is resolved once at startup with this priority order (highest last):
-```
-YAML files → env.yaml → Command Line
+# Reference everywhere
+model_1: ${policy_model_name}
+model_2: ${policy_model_name}
 ```
 
-This design enables secure, flexible deployments across different environments while maintaining a single codebase.
+**Hydra integration**: NeMo Gym uses Hydra (built on OmegaConf) for command-line parsing, enabling the `+key=value` override syntax.
 
-For hands-on practice with configuration, see the [Setup and Installation](../../get-started/setup-installation.md) tutorial.
-
+:::

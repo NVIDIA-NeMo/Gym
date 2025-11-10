@@ -19,12 +19,12 @@ Overview of NeMo Gym and its approach to scalable rollout collection.
 {bdg-secondary}`target-users` {bdg-secondary}`core-components`
 :::
 
-:::{grid-item-card} {octicon}`light-bulb;1.5em;sd-mr-1` Concepts
-:link: about-concepts
+:::{grid-item-card} {octicon}`checklist;1.5em;sd-mr-1` Key Features
+:link: about-features
 :link-type: ref
-Core concepts behind models, resources, agents, and verification.
+Comprehensive catalog of NeMo Gym capabilities and design principles.
 +++
-{bdg-secondary}`mental-models` {bdg-secondary}`abstractions`
+{bdg-secondary}`features` {bdg-secondary}`capabilities`
 :::
 
 :::{grid-item-card} {octicon}`stack;1.5em;sd-mr-1` Architecture
@@ -43,37 +43,53 @@ NeMo Gym's place in the NVIDIA NeMo Framework and ecosystem.
 {bdg-secondary}`nemo-framework` {bdg-secondary}`positioning`
 :::
 
+:::{grid-item-card} {octicon}`light-bulb;1.5em;sd-mr-1` Concepts
+:link: about-concepts
+:link-type: ref
+Core concepts behind models, resources, agents, and verification.
++++
+{bdg-secondary}`mental-models` {bdg-secondary}`abstractions`
+:::
+
 ::::
 
-## Tutorial Highlights
+## Get Started
 
-Start with these tutorials to learn NeMo Gym fundamentals and test and train a sample agent.
+New to NeMo Gym? Follow our guided tutorial path to build your first agent.
 
 ::::{grid} 1 1 1 1
 :gutter: 1 1 1 2
 
-:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Setup and Installation
-:link: tutorials/02-setup
+:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` 1. Setup and Installation
+:link: get-started/setup-installation
 :link-type: doc
-Get NeMo Gym installed and servers running.
+Get NeMo Gym installed and servers running with your first successful agent interaction.
 +++
-{bdg-primary}`beginner` {bdg-secondary}`installation`
+{bdg-secondary}`environment` {bdg-secondary}`first-run`
 :::
 
-:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` Your First Agent
-:link: tutorials/03-your-first-agent
+:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` 2. Your First Agent
+:link: get-started/first-agent
 :link-type: doc
 Understand how your weather agent works and learn to interact with it.
 +++
-{bdg-primary}`beginner` {bdg-secondary}`hands-on`
+{bdg-secondary}`workflow` {bdg-secondary}`tools`
 :::
 
-:::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` Rollout Collection
-:link: tutorials/05-rollout-collection
+:::{grid-item-card} {octicon}`checklist;1.5em;sd-mr-1` 3. Verifying Agent Results
+:link: get-started/verifying-agent-results
 :link-type: doc
-Master rollout collection for training data and evaluation.
+Understand how NeMo Gym evaluates agent performance and what verification means for training.
 +++
-{bdg-secondary}`data-generation` {bdg-secondary}`training`
+{bdg-secondary}`rewards` {bdg-secondary}`scoring`
+:::
+
+:::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` 4. Collecting Rollouts
+:link: get-started/collecting-rollouts
+:link-type: doc
+Generate your first batch of rollouts and understand how they become training data.
++++
+{bdg-secondary}`training-data` {bdg-secondary}`scale`
 :::
 
 ::::
@@ -105,11 +121,23 @@ Essential terminology for agent training and RL workflows.
 :maxdepth: 2
 
 Overview <about/index>
-Concepts <about/concepts/index>
-Architecture <about/architecture>
 Ecosystem <about/ecosystem>
-<!-- Key Features <about/features> -->
+Architecture <about/architecture>
+Key Features <about/features>
+Concepts <about/concepts/index>
 Release Notes <about/release-notes/index>
+```
+
+```{toctree}
+:caption: Get Started
+:hidden:
+:maxdepth: 1
+
+get-started/index
+get-started/setup-installation
+get-started/first-agent
+get-started/verifying-agent-results
+get-started/collecting-rollouts
 ```
 
 ```{toctree}
@@ -118,12 +146,8 @@ Release Notes <about/release-notes/index>
 :maxdepth: 1
 
 Overview <tutorials/index>
-tutorials/02-setup
-tutorials/03-your-first-agent
-tutorials/04-verifying-results
-tutorials/05-rollout-collection
-tutorials/07-sft-dpo-rollout-collection
-tutorials/09-configuration-guide
+tutorials/offline-training-w-rollouts
+tutorials/separate-policy-and-judge-models
 ```
 
 
