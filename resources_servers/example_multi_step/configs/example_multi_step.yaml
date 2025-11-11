@@ -1,36 +1,36 @@
-multineedle_resources_server:
+example_multi_step_resources_server:
   resources_servers:
-    multineedle:
+    example_multi_step:
       entrypoint: app.py
       domain: instruction_following
       verified: false
-multineedle_simple_agent:
+example_multi_step_simple_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py
       resources_server:
         type: resources_servers
-        name: multineedle_resources_server
+        name: example_multi_step_resources_server
       model_server:
         type: responses_api_models
         name: policy_model
       datasets:
       - name: train
         type: train
-        jsonl_fpath: resources_servers/multineedle/data/train.jsonl
+        jsonl_fpath: resources_servers/example_multi_step/data/train.jsonl
         gitlab_identifier:
-          dataset_name: multineedle
+          dataset_name: example_multi_step
           version: 0.0.1
           artifact_fpath: train.jsonl
         license: Apache 2.0
       - name: validation
         type: validation
-        jsonl_fpath: resources_servers/multineedle/data/validation.jsonl
+        jsonl_fpath: resources_servers/example_multi_step/data/validation.jsonl
         gitlab_identifier:
-          dataset_name: multineedle
+          dataset_name: example_multi_step
           version: 0.0.1
           artifact_fpath: validation.jsonl
         license: Apache 2.0
       - name: example
         type: example
-        jsonl_fpath: resources_servers/multineedle/data/example.jsonl
+        jsonl_fpath: resources_servers/example_multi_step/data/example.jsonl
