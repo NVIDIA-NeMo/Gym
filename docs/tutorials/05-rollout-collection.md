@@ -85,9 +85,9 @@ Each line in your input JSONL file should follow this schema:
 
 ## Hands-On: Generating Your First Rollouts
 
-Let's generate rollouts using the **MultiNeedle** resource server, which tests reading comprehension across long documents.
+Let's generate rollouts using the **Example Multi Step** resource server, which tests reading comprehension across long documents.
 
-### Step 1: Start the MultiNeedle Agent
+### Step 1: Start the Example Multi Step Agent
 
 ```bash
 # Start the example_multi_step agent server

@@ -1,12 +1,10 @@
 # Description
 
-1. Environment: This is a tool use - multi step agentic environment that tests the agents ability to execute tasks in a workplace setting. Workbench contains a sandbox environment with five databases, 26 tools, and 690 tasks. These tasks represent common business activities, such as sending emails and scheduling meetings.
+1. Environment: This is a tool use - multi step agentic environment that tests the agents ability to execute tasks in a workplace setting. Workplace assistant contains a sandbox environment with five databases, 26 tools, and 690 tasks. These tasks represent common business activities, such as sending emails and scheduling meetings.
 2. Domain: Business activities
 3. Source of prompts: 
 - Full set of prompts (1260): https://huggingface.co/datasets/Nexusflow/250319-workplace_assistant-fulleval/viewer/default/train?row=0
 4. Example prompt: Reply to carlos's last email about 'Task Update on Develop prototype for report generation' with 'Thanks for the update - I will get back to you tomorrow.'
-5. Verifier: The verifier accuracy is checked by running the same benchmark on the corresponding already implemented Workbench environment in (VERL)[https://gitlab-master.nvidia.com/nexus-team/verl/-/blob/jk/reasoning-adherence-wip/verl/third_party/environments/workplace_assistant/workben_env.py?ref_type=heads]. 
-6. Legal Approval Status: TBD
 
 Rollouts - 
 Link: https://huggingface.co/datasets/Nexusflow/abhibha-gpt-rollouts-completions-fixed-tools
