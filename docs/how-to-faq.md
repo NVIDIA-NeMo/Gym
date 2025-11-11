@@ -686,9 +686,9 @@ Tying back to NeMo Gym, NeMo gym can be used to create synthetic data for SFT tr
 If you get an error like this on your PR:
 ```
 Error: Found files with missing copyright:
-path= ./resources_servers/comp_coding/scripts/validate_dataset.py
-path= ./resources_servers/comp_coding/scripts/build_examples.py
-path= ./resources_servers/comp_coding/app.py
+path= ./resources_servers/code_gen/scripts/validate_dataset.py
+path= ./resources_servers/code_gen/scripts/build_examples.py
+path= ./resources_servers/code_gen/app.py
 ```
 
 Please add the following copyright snippet to the top of the files listed:
