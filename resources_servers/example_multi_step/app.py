@@ -27,7 +27,7 @@ from nemo_gym.base_resources_server import (
 )
 
 
-class MultiNeedleResourcesServerConfig(BaseResourcesServerConfig):
+class ExampleMultiStepResourcesServerConfig(BaseResourcesServerConfig):
     pass
 
 
@@ -47,7 +47,7 @@ class ExtractSynonymValuesResponse(BaseModel):
     success: bool
 
 
-class MultiNeedleRunRequest(BaseRunRequest):
+class ExampleMultiStepRunRequest(BaseRunRequest):
     id: int
     expected_synonym_values: List[int]
     expected_synonyms: List[str]
@@ -55,11 +55,11 @@ class MultiNeedleRunRequest(BaseRunRequest):
     minefield_label_value: int
 
 
-class MultiNeedleVerifyRequest(MultiNeedleRunRequest, BaseVerifyRequest):
+class ExampleMultiStepVerifyRequest(ExampleMultiStepRunRequest, BaseVerifyRequest):
     pass
 
 
-class MultiNeedleVerifyResponse(BaseVerifyResponse):
+class ExampleMultiStepVerifyResponse(BaseVerifyResponse):
     parsed_synonym_values: List[int]
     accuracy: bool
     set_overlap: float
@@ -67,8 +67,8 @@ class MultiNeedleVerifyResponse(BaseVerifyResponse):
     order_instruction_following_failure: bool
 
 
-class MultiNeedleResourcesServer(SimpleResourcesServer):
-    config: MultiNeedleResourcesServerConfig
+class ExampleMultiStepResourcesServer(SimpleResourcesServer):
+    config: ExampleMultiStepResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -84,7 +84,7 @@ class MultiNeedleResourcesServer(SimpleResourcesServer):
     async def extract_synonym_values(self, body: ExtractSynonymValuesRequest) -> ExtractSynonymValuesResponse:
         return ExtractSynonymValuesResponse(success=True)
 
-    async def verify(self, body: MultiNeedleVerifyRequest) -> MultiNeedleVerifyResponse:
+    async def verify(self, body: ExampleMultiStepVerifyRequest) -> ExampleMultiStepVerifyResponse:
         expected = body.expected_synonym_values
 
         actual = []
@@ -95,7 +95,7 @@ class MultiNeedleResourcesServer(SimpleResourcesServer):
 
         accuracy = expected == actual
         set_overlap = len(set(actual) & set(expected)) / len(expected)
-        return MultiNeedleVerifyResponse(
+        return ExampleMultiStepVerifyResponse(
             **body.model_dump(),
             reward=float(accuracy),
             parsed_synonym_values=actual,
@@ -107,4 +107,4 @@ class MultiNeedleResourcesServer(SimpleResourcesServer):
 
 
 if __name__ == "__main__":
-    MultiNeedleResourcesServer.run_webserver()
+    ExampleMultiStepResourcesServer.run_webserver()

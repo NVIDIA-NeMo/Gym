@@ -579,7 +579,7 @@ def init_resources_server():  # pragma: no cover
     app_fpath = dirpath / "app.py"
     with open("resources/resources_server_template.py") as f:
         app_template = f.read()
-    app_content = app_template.replace("MultiNeedle", server_type_title)
+    app_content = app_template.replace("ExampleMultiStep", server_type_title)
     with open(app_fpath, "w") as f:
         f.write(app_content)
 
@@ -589,7 +589,7 @@ def init_resources_server():  # pragma: no cover
     tests_fpath = tests_dirpath / "test_app.py"
     with open("resources/resources_server_test_template.py") as f:
         tests_template = f.read()
-    tests_content = tests_template.replace("MultiNeedle", server_type_title)
+    tests_content = tests_template.replace("ExampleMultiStep", server_type_title)
     tests_content = tests_content.replace("from app", f"from resources_servers.{server_type_name}.app")
     with open(tests_fpath, "w") as f:
         f.write(tests_content)
