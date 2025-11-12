@@ -15,7 +15,7 @@ Need a refresher on reinforcement learning language? Refer to the {doc}`../../re
 
 ## How to Navigate This Section
 
-- Read these explanations when your team needs shared vocabulary for configuring Agents, Models, and Resources together.
+- Read these explanations when your team needs shared vocabulary for configuring Models, Resources, and Agents together.
 - Pair each concept page with its related tutorials when you are ready to practice tasks such as assembling interaction datasets or scoring agent behavior.
 - Return here whenever you add a new teammate so that they can orient and choose the depth that fits their role.
 
@@ -31,7 +31,13 @@ Each explainer below covers one foundational idea and links to deeper material.
 :::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Core Abstractions
 :link: concepts-core-abstractions
 :link-type: ref
-Understand how Agents, Models, and Resources remain decoupled yet coordinated as independent HTTP services, including which endpoints each abstraction exposes.
+Understand how Models, Resources, and Agents remain decoupled yet coordinated as independent HTTP services, including which endpoints each abstraction exposes.
+:::
+
+:::{grid-item-card} {octicon}`gear;1.5em;sd-mr-1` Configuration System
+:link: concepts-configuration-system
+:link-type: ref
+Learn how NeMo Gym's three-tier configuration system (YAML → env.yaml → CLI) enables secure secrets management and flexible multi-environment deployments.
 :::
 
 :::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` Rollout Collection Fundamentals
@@ -52,8 +58,8 @@ Explore how resource servers score agent outputs with `verify()` implementations
 
 ## Continue Learning
 
-- Reinforce the architecture concepts and get started by stepping through {doc}`../../tutorials/03-your-first-agent` before exploring large-scale collection.
-- Apply the verification patterns in practice with the {doc}`../../tutorials/04-verifying-results` get started guide, then move on to high-volume data generation in {doc}`../../tutorials/05-rollout-collection` tutorial.
+- Reinforce the architecture concepts by stepping through {doc}`../../get-started/first-agent` before exploring large-scale collection.
+- Apply the verification patterns in practice with the {doc}`../../get-started/verifying-agent-results` tutorial, then move on to high-volume data generation in {doc}`../../get-started/collecting-rollouts`.
 - Catalog the services you plan to deploy by referencing {doc}`../features` once the core concepts are familiar.
 
 ---
@@ -63,6 +69,7 @@ Explore how resource servers score agent outputs with `verify()` implementations
 :maxdepth: 1
 
 Core Abstractions <core-abstractions>
+Configuration System <configuration-system>
 Rollout Collection Fundamentals <rollout-collection-fundamentals>
 Verifying Agent Results <verifying-agent-results>
 ```
