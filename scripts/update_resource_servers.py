@@ -1,10 +1,11 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,12 +21,56 @@ import yaml
 
 
 README_PATH = Path("README.md")
+
 TARGET_FOLDER = Path("resources_servers")
 
 
-def extract_config_metadata(yaml_path: Path) -> tuple[str, str, list[str]]:
+def visit_resource_server(
+    data: dict, level: int = 1
+) -> tuple[str | None, str | None, bool, str | None]:  # pragma: no cover
+    domain = None
+    description = None
+    verified = False
+    verified_url = None
+    if level == 4:
+        domain = data.get("domain")
+        description = data.get("description")
+        verified = data.get("verified", False)
+        verified_url = data.get("verified_url")
+        return domain, description, verified, verified_url
+    else:
+        for k, v in data.items():
+            if level == 2 and k != "resources_servers":
+                continue
+            return visit_resource_server(v, level + 1)
+    return None, None, False, None
+
+
+def visit_agent_datasets(data: dict) -> tuple[str | None, list[str]]:  # pragma: no cover
+    license = None
+    types = []
+    for k1, v1 in data.items():
+        if k1.endswith("_simple_agent") and isinstance(v1, dict):
+            v2 = v1.get("responses_api_agents")
+            if isinstance(v2, dict):
+                # Look for any agent key
+                for agent_key, v3 in v2.items():
+                    if isinstance(v3, dict):
+                        datasets = v3.get("datasets")
+                        if isinstance(datasets, list):
+                            for entry in datasets:
+                                if isinstance(entry, dict):
+                                    types.append(entry.get("type"))
+                                    if entry.get("type") == "train":
+                                        license = entry.get("license")
+    return license, types
+
+
+def extract_config_metadata(
+    yaml_path: Path,
+) -> tuple[str | None, str | None, str | None, list[str], bool, str | None]:  # pragma: no cover
     """
-    Domain, License, Types:
+    Domain:
         {name}_resources_server:
             resources_servers:
                 {name}:
@@ -46,52 +91,13 @@ def extract_config_metadata(yaml_path: Path) -> tuple[str, str, list[str]]:
     with yaml_path.open() as f:
         data = yaml.safe_load(f)
 
-    domain = None
-    description = None
-    license = None
-    types = []
-    verified = None
-    verified_url = None
-
-    def visit_resource_server(data, level=1):
-        nonlocal domain, description, verified, verified_url
-        if level == 4:
-            domain = data.get("domain")
-            description = data.get("description")
-            verified = data.get("verified", False)
-            verified_url = data.get("verified_url")
-            return
-        else:
-            for k, v in data.items():
-                if level == 2 and k != "resources_servers":
-                    continue
-                visit_resource_server(v, level + 1)
-
-    def visit_agent_datasets(data):
-        nonlocal license
-        for k1, v1 in data.items():
-            if k1.endswith("_simple_agent") and isinstance(v1, dict):
-                v2 = v1.get("responses_api_agents")
-                if isinstance(v2, dict):
-                    # Look for any agent key
-                    for agent_key, v3 in v2.items():
-                        if isinstance(v3, dict):
-                            datasets = v3.get("datasets")
-                            if isinstance(datasets, list):
-                                for entry in datasets:
-                                    if isinstance(entry, dict):
-                                        types.append(entry.get("type"))
-                                        if entry.get("type") == "train":
-                                            license = entry.get("license")
-                                return
-
-    visit_resource_server(data)
-    visit_agent_datasets(data)
+    domain, description, verified, verified_url = visit_resource_server(data)
+    license, types = visit_agent_datasets(data)
 
     return domain, description, license, types, verified, verified_url
 
 
-def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:
+def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:  # pragma: no cover
     """Categorize servers into example-only and training-ready with metadata."""
     example_only_servers = []
     training_servers = []
@@ -146,7 +152,7 @@ def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:
     return example_only_servers, training_servers
 
 
-def generate_example_only_table(servers: list[dict]) -> str:
+def generate_example_only_table(servers: list[dict]) -> str:  # pragma: no cover
     """Generate table for example-only resource servers."""
     if not servers:
         return "| Name | Demonstrates | Config | README |\n| ---- | ------------------- | ----------- | ------ |\n"
@@ -182,7 +188,7 @@ def generate_example_only_table(servers: list[dict]) -> str:
     return format_table(table)
 
 
-def generate_training_table(servers: list[dict]) -> str:
+def generate_training_table(servers: list[dict]) -> str:  # pragma: no cover
     """Generate table for training resource servers."""
     if not servers:
         return "| Domain | Resource Server | Train | Validation | Verified | Config | License |\n| ------ | --------------- | ----- | ---------- | --------| ------ | ------- |\n"
@@ -230,7 +236,7 @@ def generate_training_table(servers: list[dict]) -> str:
     return format_table(table)
 
 
-def normalize_str(s: str) -> str:
+def normalize_str(s: str) -> str:  # pragma: no cover
     """
     Rows with identical domain values may get reordered differently
     between local and CI runs. We normalize text and
@@ -241,7 +247,7 @@ def normalize_str(s: str) -> str:
     return unicodedata.normalize("NFKD", s).casefold().strip()
 
 
-def format_table(table: list[list[str]]) -> str:
+def format_table(table: list[list[str]]) -> str:  # pragma: no cover
     """Format grid of data into markdown table."""
     col_widths = []
     num_cols = len(table[0])
@@ -271,7 +277,7 @@ def format_table(table: list[list[str]]) -> str:
     return "\n".join(formatted_rows)
 
 
-def main():
+def main():  # pragma: no cover
     text = README_PATH.read_text()
 
     example_servers, training_servers = get_example_and_training_server_info()

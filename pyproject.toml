@@ -1,10 +1,11 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -250,6 +251,20 @@ nemo_gym_download_dataset_from_gitlab = "nemo_gym.gitlab_utils:download_jsonl_da
 ng_download_dataset_from_gitlab = "nemo_gym.gitlab_utils:download_jsonl_dataset_cli"
 nemo_gym_prepare_data = "nemo_gym.train_data_utils:prepare_data"
 ng_prepare_data = "nemo_gym.train_data_utils:prepare_data"
+
+# HF dataset upload and download
+nemo_gym_upload_dataset_to_hf = "nemo_gym.dataset_orchestrator:upload_jsonl_dataset_to_hf_cli"
+ng_upload_dataset_to_hf = "nemo_gym.dataset_orchestrator:upload_jsonl_dataset_to_hf_cli"
+nemo_gym_download_dataset_from_hf = "nemo_gym.dataset_orchestrator:download_jsonl_dataset_from_hf_cli"
+ng_download_dataset_from_hf = "nemo_gym.dataset_orchestrator:download_jsonl_dataset_from_hf_cli"
+
+# HF -> Gitlab (upload then delete)
+nemo_gym_gitlab_to_hf_dataset = "nemo_gym.dataset_orchestrator:upload_jsonl_dataset_to_hf_and_delete_gitlab_cli"
+ng_gitlab_to_hf_dataset = "nemo_gym.dataset_orchestrator:upload_jsonl_dataset_to_hf_and_delete_gitlab_cli"
+
+# Manually delete from Gitlab
+nemo_gym_delete_dataset_from_gitlab = "nemo_gym.dataset_orchestrator:delete_jsonl_dataset_from_gitlab_cli"
+ng_delete_dataset_from_gitlab = "nemo_gym.dataset_orchestrator:delete_jsonl_dataset_from_gitlab_cli"
 
 # Configuration utils
 nemo_gym_dump_config = "nemo_gym.cli:dump_config"
