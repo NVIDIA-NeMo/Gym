@@ -148,7 +148,7 @@ class StatusCommand:
             minutes, seconds = divmod(uptime_seconds, 60)
             hours, minutes = divmod(minutes, 60)
             days, hours = divmod(hours, 24)
-            return f"{days}d {hours}h {minutes}m {seconds}s"
+            return f"{int(days)}d {int(hours)}h {int(minutes)}m {seconds:.1f}s"
 
         healthy_count = 0
         for server in servers:
