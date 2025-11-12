@@ -1,10 +1,11 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -12,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from enum import Enum
-from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Set, Tuple, Union
 
 import rich
 from omegaconf import DictConfig, OmegaConf
@@ -139,6 +140,44 @@ class DownloadJsonlDatasetGitlabConfig(JsonlDatasetGitlabIdentifer, BaseNeMoGymC
     version: str = Field(description="The version of this dataset. Must be in the format `x.x.x`.")
     artifact_fpath: str = Field(description="The filepath to the artifact to download.")
     output_fpath: str = Field(description="Where to save the downloaded dataset.")
+
+
+class DeleteJsonlDatasetGitlabConfig(BaseNeMoGymCLIConfig):
+    dataset_name: str
+
+
+class BaseUploadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
+    hf_token: str
+    hf_organization: str
+    hf_collection_name: str
+    hf_collection_slug: str
+    dataset_name: str
+    input_jsonl_fpath: str
+    resource_config_path: str
+    hf_dataset_prefix: str = "NeMo-Gym"
+
+
+class UploadJsonlDatasetHuggingFaceConfig(BaseUploadJsonlDatasetHuggingFaceConfig):
+    forbidden_fields: ClassVar[Set[str]] = {"delete_from_gitlab"}
+
+    @model_validator(mode="before")
+    def check_forbidden_fields(cls, data):
+        if isinstance(data, dict) or hasattr(data, "keys"):
+            forbidden = cls.forbidden_fields.intersection(set(data.keys()))
+            if forbidden:
+                raise ValueError(f"Forbidden fields present: {forbidden}")
+        return data
+
+
+class UploadJsonlDatasetHuggingFaceMaybeDeleteConfig(BaseUploadJsonlDatasetHuggingFaceConfig):
+    delete_from_gitlab: Optional[bool] = False
+
+
+class DownloadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
+    output_fpath: str
+    hf_token: str
+    artifact_fpath: str
+    repo_id: str
 
 
 DatasetType = Union[Literal["train"], Literal["validation"], Literal["example"]]
