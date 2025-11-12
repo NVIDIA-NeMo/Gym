@@ -5,9 +5,26 @@ orphan: true
 (about-overview)=
 # About NVIDIA NeMo Gym
 
-NeMo Gym standardizes scalable rollout collection for LLM and VLM training. It provides the infrastructure to systematically generate agent interaction data and a curated collection of high-quality RL environments, making it easy to produce large-scale training data for reinforcement learning workflows using the framework of your choice.
+NeMo Gym provides infrastructure to generate and evaluate agent behavior at scale. It captures complete records of how AI agents interact with tools and environments—what they try, what works, and how well they perform—then transforms these records into training data for reinforcement learning workflows using the framework of your choice.
 
 By offering unified interfaces to heterogeneous RL environments and seamless data handoff to popular RL training frameworks (VeRL, NeMo-RL, OpenRLHF), NeMo Gym lets you focus on research and model improvement rather than infrastructure and orchestration.
+
+---
+
+## What Are Agent Interactions?
+
+When an AI agent tackles a task, it goes through a complete interaction cycle:
+
+1. **Receives a task**: "What's the weather in Seattle?"
+2. **Decides on actions**: Determines it needs to call a weather tool
+3. **Executes tools**: Calls `get_weather(city="Seattle")`
+4. **Processes results**: Receives weather data from the tool
+5. **Generates response**: Crafts a natural language answer for the user
+6. **Gets evaluated**: A verification system scores how well it performed
+
+This complete sequence—input, reasoning, actions, tool results, response, and score—is what we call **interaction data**. Each interaction becomes a training example that shows what the agent tried and whether it succeeded, enabling reinforcement learning algorithms to improve agent behavior over time.
+
+<!-- TODO(@cwing-nvidia): Add diagram showing the interaction cycle and how it connects to RL training -->
 
 ---
 
@@ -17,9 +34,9 @@ Training AI agents through reinforcement learning requires massive amounts of hi
 
 * **Infrastructure overhead**: Building systems to coordinate models, tools, and verification logic at scale
 * **Inconsistent interfaces**: Each environment requires custom integration code and data formats
-* **Quality verification**: Ensuring agent responses are accurately evaluated for reward signals
+* **Quality verification**: Building accurate scoring systems that distinguish good agent behavior from bad (for example, verifying a math answer is correct, checking that code actually runs, or confirming a search tool was used appropriately). Without reliable verification, training data contains incorrect reward signals.
 * **Framework fragmentation**: Difficulty connecting custom environments to different RL training frameworks
-* **Throughput bottlenecks**: Sequential processing cannot generate data fast enough for large-scale training
+* **Throughput bottlenecks**: Processing one interaction at a time is too slow for large-scale training. To generate millions of training examples, you need to process thousands of agent interactions concurrently.
 
 These challenges slow research iteration and make it difficult to experiment with different environments and training approaches.
 
@@ -27,13 +44,23 @@ These challenges slow research iteration and make it difficult to experiment wit
 
 ## Core Components
 
-NeMo Gym organizes around three core abstractions that work together:
+NeMo Gym organizes around three core abstractions. Here's how they work together in a complete interaction:
 
-* **Agents**: Orchestration layers that connect models to resources, handle multi-turn conversations, route tool calls, and format responses consistently. Agents coordinate the interaction loop and can be extended with custom logic.
+1. **Agent** receives the user request: "What's the weather in Seattle?"
+2. **Model** analyzes and decides: "I should call the weather tool"
+3. **Agent** routes the tool call to the weather **Resource**
+4. **Resource** executes `get_weather("Seattle")` and returns the weather data
+5. **Agent** sends the tool result back to the **Model**
+6. **Model** generates the final response: "It's cold in Seattle—bring a jacket!"
+7. **Resource** verifies the quality and assigns a reward score: 1.0
+
+Now let's understand each component in detail:
 
 * **Models**: LLM inference endpoints that generate text and make tool-calling decisions. Models are stateless and handle single-turn generation. Configure using OpenAI-compatible APIs or local vLLM servers.
 
 * **Resources**: Servers that provide both tools (functions agents can call) and verifiers (logic to evaluate agent performance and assign reward signals). Examples include mathematical reasoning environments, code execution sandboxes, web search tools, and custom verification logic.
+
+* **Agents**: Orchestration layers that connect models to resources, handle multi-turn conversations, route tool calls, and format responses consistently. Agents coordinate the interaction loop and can be extended with custom logic.
 
 These components communicate via HTTP APIs and can run as separate services, enabling flexible deployment and scaling.
 

@@ -17,14 +17,3 @@ Essential terminology for agent training, RL workflows, and NeMo Gym architectur
 :::
 
 ::::
-
----
-
-## What Are Resources?
-
-Resources are reference materials designed for quick lookup rather than sequential reading. Unlike tutorials (learning-oriented) or concepts (understanding-oriented), resources provide:
-
-- **Quick definitions** - Find terminology fast
-- **Reference tables** - Compare options and patterns
-- **Checklists** - Verify configurations and setups
-- **Examples** - Common patterns and code snippets
