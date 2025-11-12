@@ -4,6 +4,7 @@ This document is a smattering of How-To's and FAQs that have not made their way 
 - [How To: Add a resource server](#how-to-add-a-resource-server)
   - [TLDR final expected artifacts](#tldr-final-expected-artifacts)
 - [How To: Upload and download a dataset from Gitlab](#how-to-upload-and-download-a-dataset-from-gitlab)
+- [How To: Upload and download a dataset from HuggingFace](#how-to-upload-and-download-a-dataset-from-huggingface)
 - [How To: Prepare and validate data for PR submission or RL training](#how-to-prepare-and-validate-data-for-pr-submission-or-rl-training)
 - [How To: ng\_dump\_config - Dump a YAML config as exactly as NeMo Gym sees it](#how-to-ng_dump_config---dump-a-yaml-config-as-exactly-as-nemo-gym-sees-it)
 - [How To: Use NeMo Gym with a non-Responses compatible API endpoint like vLLM](#how-to-use-nemo-gym-with-a-non-responses-compatible-api-endpoint-like-vllm)
@@ -99,13 +100,13 @@ Register your new `get_weather` function as a FastAPI route.
 ...
 ```
 
-You can see a complete example of `app.py` in `resources_servers/simple_weather/app.py`!
+You can see a complete example of `app.py` in `resources_servers/example_simple_weather/app.py`!
 
 Run an agent with your new server!
 ```bash
 config_paths="responses_api_agents/simple_agent/configs/simple_agent.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/simple_weather/configs/simple_weather.yaml"
+resources_servers/example_simple_weather/configs/simple_weather.yaml"
 ng_run "+config_paths=[$config_paths]" \
     +simple_agent.responses_api_agents.simple_agent.resources_server.name=test_weather
 ```
@@ -120,13 +121,13 @@ After you implement your server, please make sure to update the README.md with a
 
 Run the tests for your server
 ```bash
-ng_test +entrypoint=resources_servers/simple_weather
+ng_test +entrypoint=resources_servers/example_simple_weather
 ```
 
 
 You can also run detailed tests after running tests the first time
 ```bash
-cd resources_servers/simple_weather
+cd resources_servers/example_simple_weather
 source .venv/bin/activate
 pytest
 ```
@@ -134,7 +135,7 @@ pytest
 At some point, you will want to actually add data that can be used to query your server. Please follow the instructions for [How To: Prepare and validate data for PR submission or RL training](#how-to-prepare-and-validate-data-for-pr-submission-or-rl-training).
 
 
-If you need some dataset preprocessing or formatting scripts, please place them your resources server directory e.g. `resources_servers/simple_weather/my_preprocess_script.py`.
+If you need some dataset preprocessing or formatting scripts, please place them your resources server directory e.g. `resources_servers/example_simple_weather/my_preprocess_script.py`.
 
 
 You are required to have the following 3 files in your resources server data folder:
@@ -203,6 +204,83 @@ ng_download_dataset_from_gitlab \
     +version=0.0.1 \
     +artifact_fpath=multineedle_benchmark.jsonl \
     +output_fpath=data/multineedle_benchmark.jsonl
+```
+
+
+# How To: Upload and download a dataset from HuggingFace
+The huggingface client requires that your credentials are in `env.yaml`, along with some other pertinent details needed to upload to the designated place. 
+```yaml
+hf_token: {your huggingface token}
+hf_organization: {your huggingface org}
+hf_collection_name: {your collection}
+hf_collection_slug: {your collection slug}  # alphanumeric string found at the end of a collection URI
+
+# optional:
+hf_dataset_prefix: str  # field to override the default value "NeMo-Gym" prepended to the dataset name
+```
+
+Naming convention for Huggingface datasets is as follows.
+
+`{hf_organization}/{hf_dataset_prefix}-{domain}–{resource_server_name}-{your dataset name}`
+
+E.g.:
+
+`Nvidia/Nemo-Gym-Math-library_judge_math-dapo17k`
+
+
+You will only need to manually input the `{your dataset name}` portion of the above when inputting the `dataset_name` flag in the upload command (see below). Everything preceding it will be automatically populated using your config prior to upload.
+
+To upload to Huggingface, use the below command:
+```bash
+resource_config_path="resources_servers/multineedle/configs/multineedle.yaml"
+ng_upload_dataset_to_hf \
+    +dataset_name={your dataset name} \
+    +input_jsonl_fpath=data/multineedle_benchmark.jsonl \
+    +resource_config_path=${resource_config_path}
+```
+
+Because of the required dataset nomenclature, the resource server config path is required when uploading. Specifically, `domain` is used in the naming of a dataset in Huggingface.
+
+You can optionally pass a `+delete_from_gitlab=true` flag to the above command, which will delete the model and all of its artifacts from Gitlab. By default, this is set to `False`.
+```bash
+resource_config_path="resources_servers/multineedle/configs/multineedle.yaml"
+ng_upload_dataset_to_hf \
+    +dataset_name={your dataset name} \
+    +input_jsonl_fpath=data/multineedle_benchmark.jsonl \
+    +resource_config_path=${resource_config_path} \
+    +delete_from_gitlab=true
+```
+
+There will be a confirmation dialog to confirm the deletion:
+```bash
+[Nemo-Gym] - Dataset uploaded successful
+[Nemo-Gym] - Found model 'fs-test' in the registry. Are you sure you want to delete it from Gitlab? [y/N]:
+```
+
+You can also run the below command which does the same thing without the need for a `+delete_from_gitlab` flag:
+
+```bash
+resource_config_path="resources_servers/multineedle/configs/multineedle.yaml"
+ng_gitlab_to_hf_dataset \
+    +dataset_name={your dataset name} \
+    +input_jsonl_fpath=data/multineedle_benchmark.jsonl \
+    +resource_config_path=${resource_config_path}
+```
+
+If you've already uploaded to Huggingface and just want to do a standalone delete from Gitlab:
+```bash
+ng_delete_dataset_from_gitlab \
+    +dataset_name={your dataset name}
+```
+
+**Important note**: Gitlab model names are case sensitive. There can be models named 'My_Model' and 'my_model' living simultaneously in the registry. When uploading to Huggingface with the intention of deleting Gitlab artifacts, be sure the casing of your Huggingface dataset name matches that of Gitlab's.
+
+Downloading a dataset from Huggingface is straightforward:
+```bash
+ng_download_dataset_from_hf \
+    +repo_id=Nvidia/NeMo-Gym-Instruction_Following-multineedle-{your dataset name} \
+    +artifact_fpath=multineedle_benchmark.jsonl \
+    +output_fpath=data/multineedle_benchmark_hf.jsonl
 ```
 
 
@@ -693,13 +771,14 @@ path= ./resources_servers/comp_coding/app.py
 
 Please add the following copyright snippet to the top of the files listed:
 ```python
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,

@@ -40,6 +40,16 @@ ng_collect_rollouts \
     +limit=5
 ```
 
+## Prepare for trajectory collection
+```bash
+config_paths="resources_servers/library_judge_math/configs/dapo17k_trajectory_collection.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml"
+ng_prepare_data "+config_paths=[$config_paths]" \
+    +output_dirpath=data/dapo17k_trajectory_collection \
+    +mode=train_preparation \
+    +should_download=true
+```
+
 # Licensing information
 Code: Apache 2.0<br>
 Data:

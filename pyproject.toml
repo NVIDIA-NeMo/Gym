@@ -1,10 +1,11 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,41 +23,46 @@ dynamic = [
     "version",
     "readme",
 ]
-description = "NeMo Gym is a collection of verifiers."
+description = "NeMo Gym is a framework for building reinforcement learning environments"
 license = {file = "LICENSE"}
 requires-python = ">=3.12"
-authors = [{ name = "NVIDIA", email = "nemo-toolkit@nvidia.com" }]
-maintainers = [{ name = "NVIDIA", email = "nemo-toolkit@nvidia.com" }]
+authors = [{ name = "NVIDIA" }]
+maintainers = [{ name = "NVIDIA" }]
+
 keywords = [
-    "NLP",
+    "reinforcement-learning",
+    "RL",
+    "agent",
+    "agentic",
+    "LLM",
+    "large-language-models",
+    "training-data",
+    "rollout",
+    "trajectory",
+    "verification",
+    "verifier",
+    "reward",
+    "tool-calling",
+    "function-calling",
+    "data-collection",
     "NeMo",
-    "deep",
-    "gpu",
-    "language",
-    "learning",
-    "machine",
-    "nvidia",
-    "pytorch",
-    "torch",
+    "NVIDIA",
 ]
 classifiers = [
-    "Development Status :: 5 - Production/Stable",
+    "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
-    "Intended Audience :: Information Technology",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
     "Natural Language :: English",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    "Topic :: Scientific/Engineering :: Image Recognition",
-    "Topic :: Scientific/Engineering :: Mathematics",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering",
-    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Mathematics",
     "Topic :: Software Development :: Libraries",
-    "Topic :: Utilities",
+    "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
     ########################################
@@ -243,6 +249,20 @@ ng_download_dataset_from_gitlab = "nemo_gym.gitlab_utils:download_jsonl_dataset_
 nemo_gym_prepare_data = "nemo_gym.train_data_utils:prepare_data"
 ng_prepare_data = "nemo_gym.train_data_utils:prepare_data"
 
+# HF dataset upload and download
+nemo_gym_upload_dataset_to_hf = "nemo_gym.dataset_orchestrator:upload_jsonl_dataset_to_hf_cli"
+ng_upload_dataset_to_hf = "nemo_gym.dataset_orchestrator:upload_jsonl_dataset_to_hf_cli"
+nemo_gym_download_dataset_from_hf = "nemo_gym.dataset_orchestrator:download_jsonl_dataset_from_hf_cli"
+ng_download_dataset_from_hf = "nemo_gym.dataset_orchestrator:download_jsonl_dataset_from_hf_cli"
+
+# HF -> Gitlab (upload then delete)
+nemo_gym_gitlab_to_hf_dataset = "nemo_gym.dataset_orchestrator:upload_jsonl_dataset_to_hf_and_delete_gitlab_cli"
+ng_gitlab_to_hf_dataset = "nemo_gym.dataset_orchestrator:upload_jsonl_dataset_to_hf_and_delete_gitlab_cli"
+
+# Manually delete from Gitlab
+nemo_gym_delete_dataset_from_gitlab = "nemo_gym.dataset_orchestrator:delete_jsonl_dataset_from_gitlab_cli"
+ng_delete_dataset_from_gitlab = "nemo_gym.dataset_orchestrator:delete_jsonl_dataset_from_gitlab_cli"
+
 # Configuration utils
 nemo_gym_dump_config = "nemo_gym.cli:dump_config"
 ng_dump_config = "nemo_gym.cli:dump_config"
@@ -262,7 +282,7 @@ include = ["resources_servers", "responses_api_agents", "responses_api_models", 
 
 [tool.pytest.ini_options]
 # durations=0 will display all tests execution time, sorted in ascending order starting from from the slowest one.
-# -vv will also display tests with durration = 0.00s
+# -vv will also display tests with duration = 0.00s
 addopts = "--verbose --pyargs --durations=0 --strict-markers"  # always add these arguments to pytest
 testpaths = ["tests"]
 # directories to ignore when discovering tests

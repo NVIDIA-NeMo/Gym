@@ -1,10 +1,11 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -325,7 +326,7 @@ def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover
         count = sum(1 for _ in f)
     assert count == 5, f"Expected 5 examples at {example_fpath} but got {count}."
 
-    server_type_name = test_config.dir_path.parts[1]
+    server_type_name = test_config.dir_path.parts[-1]
     example_metrics_fpath = test_config.dir_path / "data/example_metrics.json"
     assert (
         example_metrics_fpath.exists()
@@ -528,7 +529,7 @@ def init_resources_server():  # pragma: no cover
 
     server_type = dirpath.parts[0]
     assert server_type == "resources_servers"
-    server_type_name = dirpath.parts[1].lower()
+    server_type_name = dirpath.parts[-1].lower()
     server_type_title = "".join(x.capitalize() for x in server_type_name.split("_"))
 
     configs_dirpath = dirpath / "configs"

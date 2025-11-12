@@ -1,10 +1,11 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,11 +14,10 @@
 # limitations under the License.
 import asyncio
 import json
-from asyncio import Lock, Semaphore
-from collections import Counter
+from asyncio import Future, Lock, Semaphore
 from contextlib import nullcontext
 from itertools import count, product
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm as tqdm_asyncio
@@ -172,13 +172,17 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
         print("Done rollout collection.", flush=True)
 
         avg_metrics = {k: v / len(rows) for k, v in metrics.items()}
+        avg_metrics.setdefault("reward", 0.0)
 
         if avg_metrics:
             print(f"Metrics (sample mean): {json.dumps(avg_metrics, indent=4)}", flush=True)
 
-    async def run_examples(
+    def run_examples(
         self, examples: List[Dict], head_server_config: Optional[BaseServerConfig] = None
-    ) -> List[Dict]:
+    ) -> Iterator[Future]:
+        """
+        We provide this function as a lower level interface for running rollout collection.
+        """
         server_client = self.setup_server_client(head_server_config)
 
         async def _post_subroutine(row: Dict) -> Dict:
@@ -186,7 +190,9 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
             await raise_for_status(res)
             return await res.json()
 
-        return await tqdm.gather(*map(_post_subroutine, examples), desc="Collecting rollouts", miniters=10)
+        return tqdm.as_completed(
+            map(_post_subroutine, examples), desc="Collecting rollouts", miniters=10, total=len(examples)
+        )
 
     def setup_server_client(self, head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:
         server_client = ServerClient.load_from_global_config(head_server_config)

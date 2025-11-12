@@ -3,6 +3,7 @@ multineedle_resources_server:
     multineedle:
       entrypoint: app.py
       domain: instruction_following
+      verified: false
 multineedle_simple_agent:
   responses_api_agents:
     simple_agent:

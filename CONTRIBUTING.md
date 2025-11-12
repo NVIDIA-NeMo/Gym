@@ -58,8 +58,40 @@ We're excited about contributions that expand NeMo Gym's capabilities and improv
 
 
 
+## Resource Server Verification Process
+
+### What is the "Verified" flag?
+
+The `verified` flag in resource server configs indicates that the environment has demonstrated value through training runs and/or shows meaningful improvement on target benchmarks. This quality signal helps identify production-ready environments.
+
+### Verification Process
+
+1. **Submit PR** with `verified: false` in your resource server config YAML.
+
+Please note any config staged without a `verified` flag will automatically be updated to contain `verified: false` via pre-commit hook.
+```yaml
+your_server:
+   resources_servers:
+      your_server:
+         entrypoint: app.py
+         domain: coding
+         verified: false  # Set to false by default when submitting environment for review
+```
 
 
+2. **Include W&B Links** in the PR description.
+
+3. Reviewer Approval
+A maintainer will:
+- Review the W&B training run
+- Verify the improvement claims
+- Approve the PR if verification evidence is sufficient
+
+### Default Status
+
+- All resource servers should **start as `verified: false`** by default until a reviewer approves and updates it to `true`
+- If a server's verification is later disputed or training runs cannot be accessed or reproduced, maintainers may revert it to `verified: false`
+- The verified flag is reflected in the README resource server tables
 
 
 
@@ -117,15 +149,12 @@ If you're contributing a new resource server to NeMo Gym, follow this comprehens
    2. The resulting rollout and judges (include 5 examples here for people to understand better the data samples, and to ensure reward here is correct.)
    3. Other additional notes for running the server properly with the new PR.
 3. Test: Please follow the guideline here to implement your own test and run test for your environment. Tests are strongly encouraged and you must have at least one test for every server you make. Test coverage is not explicitly required which means that YOU ARE RESPONSIBLE FOR YOUR OWN SERVER CORRECTNESS AND FUNCTION.
-4. Reward Profiling: Please run inference on your prompts and environments (a ~500 small subset is OK) on two models:
-   1. Qwen 3 30B A3B
-   2. Qwen 3 235B Instruct (for agents/instruction following) or Qwen 3 235B Thinking (for math/coding)
-   3. Generate 16 responses per prompt, report reward distribution
-   4. [If using tool calling] Provide tool call metrics and correlation with rewards
+4. Reward Profiling: Please run inference on your prompts and environments (a ~500 small subset is OK) on Qwen 3 30B A3B (or any other model with better performance). Generate 16 responses per prompt, report reward distribution. [If using tool calling] Provide tool call metrics and correlation with rewards.
 
-5. **Training-based correctness check** [After Nemo Gym + Nemo RL integration]:
-   - Train with GRPO on Qwen 30B A3B Instruct and Qwen 235B Instruct
-   - Include training accuracy curve and test benchmark accuracy curve
+5. **Training-based correctness check**:
+   - Train with GRPO on Qwen 30B A3B Instruct (or any other model with better performance) on veRL / Nemo RL + Gym.
+   - Include training accuracy curve and test benchmark accuracy curve.
+   - See [Resource Server Verification Process](#resource-server-verification-process) section.
 
 6. **PR Check and Review**:
    1. Assign team member for reproduction and review
@@ -201,13 +230,14 @@ If the build-docs check fails:
 
 **Solution**: Add this header to all new Python files:
 ```python
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,

@@ -1,16 +1,18 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from contextlib import nullcontext as does_not_raise
 from typing import Dict
 from unittest.mock import MagicMock
 
@@ -265,6 +267,7 @@ class TestServerUtils:
                         "resources_servers": {
                             "c": {
                                 "entrypoint": "app.py",
+                                "domain": "other",
                             }
                         }
                     },
@@ -292,7 +295,14 @@ class TestServerUtils:
                 }
             },
             "resources_name": {
-                "resources_servers": {"c": {"entrypoint": "app.py", "host": "127.0.0.1", "port": 123456}}
+                "resources_servers": {
+                    "c": {
+                        "entrypoint": "app.py",
+                        "host": "127.0.0.1",
+                        "port": 123456,
+                        "domain": "other",
+                    }
+                }
             },
             "head_server": {"host": "127.0.0.1", "port": 11000},
             "disallowed_ports": [11000, 12345, 123456],
@@ -466,7 +476,7 @@ class TestServerUtils:
         def hydra_main_wrapper(fn):
             """Trigger find_open_port by excluding port from the config"""
             config_dict = DictConfig(
-                {"test_resource": {"resources_servers": {"test_server": {"entrypoint": "app.py"}}}}
+                {"test_resource": {"resources_servers": {"test_server": {"entrypoint": "app.py", "domain": "other"}}}}
             )
             return lambda: fn(config_dict)
 
@@ -484,3 +494,119 @@ class TestServerUtils:
         assert "disallowed_ports" in global_config_dict
         assert 11000 in global_config_dict["disallowed_ports"]
         assert 12345 in global_config_dict["disallowed_ports"]
+
+    def test_almost_servers_detection_and_warning(self, monkeypatch) -> None:
+        """Test the default flag error_on_almost_servers=true raises ValueError."""
+        # Clear any lingering env vars.
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        exists_mock = MagicMock()
+        exists_mock.return_value = False
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        rich_print_mock = MagicMock()
+        monkeypatch.setattr(nemo_gym.global_config.rich, "print", rich_print_mock)
+
+        hydra_main_mock = MagicMock()
+
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig(
+                {
+                    "test_resources_server": {
+                        "resources_servers": {"test_server": {"entrypoint": "app.py", "domain": "invalid_domain"}}
+                    },
+                    "test_agent": {
+                        "responses_api_agents": {
+                            "simple_agent": {
+                                "entrypoint": "app.py",
+                                "datasets": [
+                                    {
+                                        "name": "train",
+                                        "type": "train",
+                                        "jsonl_fpath": "data/train.jsonl",
+                                        "gitlab_identifier": {
+                                            "dataset_name": "test",
+                                            "version": "0.0.1",
+                                            "artifact_fpath": "train.jsonl",
+                                        },
+                                        "license": "Invalid License",
+                                    }
+                                ],
+                            }
+                        }
+                    },
+                }
+            )
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        with raises(ValueError, match="almost-server.*validation errors"):
+            get_global_config_dict()
+
+    def test_almost_servers_error_flag_bypasses_value_error(self, monkeypatch: MonkeyPatch) -> None:
+        """
+        Test that error_on_almost_servers=false does not raise ValueError.
+        Almost-servers are still detected and warnings are printed.
+        """
+        # Clear any lingering env vars.
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        exists_mock = MagicMock()
+        exists_mock.return_value = False
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        rich_print_mock = MagicMock()
+        monkeypatch.setattr(nemo_gym.global_config.rich, "print", rich_print_mock)
+
+        hydra_main_mock = MagicMock()
+
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig(
+                {
+                    "error_on_almost_servers": False,
+                    "test_resources_server": {
+                        "resources_servers": {"test_server": {"entrypoint": "app.py", "domain": "invalid_domain"}}
+                    },
+                    "test_agent": {
+                        "responses_api_agents": {
+                            "simple_agent": {
+                                "entrypoint": "app.py",
+                                "datasets": [
+                                    {
+                                        "name": "train",
+                                        "type": "train",
+                                        "jsonl_fpath": "data/train.jsonl",
+                                        "gitlab_identifier": {
+                                            "dataset_name": "test",
+                                            "version": "0.0.1",
+                                            "artifact_fpath": "train.jsonl",
+                                        },
+                                        "license": "Invalid License",
+                                    }
+                                ],
+                            }
+                        }
+                    },
+                }
+            )
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        with does_not_raise():
+            global_config_dict = get_global_config_dict()
+
+        assert global_config_dict is not None
+
+        printed_messages = " ".join(str(call) for call in rich_print_mock.call_args_list)
+        assert "Almost-Server" in printed_messages
+        assert "test_resources_server" in printed_messages
+        assert "test_agent" in printed_messages
+        assert "Configuration Warnings" in printed_messages
+        assert "license" in printed_messages
+        assert "domain" in printed_messages
