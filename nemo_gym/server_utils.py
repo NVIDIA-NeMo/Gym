@@ -12,10 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import __main__
 import asyncio
 import atexit
 import json
 import resource
+import sys
 from abc import abstractmethod
 from contextlib import asynccontextmanager
 from io import StringIO
@@ -488,7 +490,8 @@ class SimpleServer(BaseServer):
                 )
 
     @classmethod
-    def run_webserver(cls) -> None:  # pragma: no cover
+    def run_webserver_factory(cls):  # pragma: no cover
+        """Factory method that creates and returns the app (for dev mode hot reload)."""
         global_config_dict = get_global_config_dict()
 
         initialize_ray()
@@ -503,6 +506,12 @@ class SimpleServer(BaseServer):
         app = server.setup_webserver()
         server.set_ulimit()
         server.setup_exception_middleware(app)
+
+        return app, server, global_config_dict
+
+    @classmethod
+    def run_webserver(cls) -> None:  # pragma: no cover
+        app, server, global_config_dict = cls.run_webserver_factory()
 
         @app.exception_handler(RequestValidationError)
         async def validation_exception_handler(request: Request, exc):
@@ -536,16 +545,29 @@ Full body: {json.dumps(exc.body, indent=4)}
         dev_mode = getenv("NEMO_GYM_DEV_MODE") == "1"
 
         if dev_mode:
+            # Dev mode: use uvicorn's native reload with app:create_app factory
+            main_file = Path(__main__.__file__)
+            module_name = main_file.stem
+
             print("DEV MODE ENABLED - Hot reload is active, changes will trigger server restart")
 
-        uvicorn.run(
-            app,
-            host=server.config.host,
-            port=server.config.port,
-            # We add a very small graceful shutdown timeout so when we shutdown we cancel all inflight requests and there are no lingering requests (requests are cancelled)
-            timeout_graceful_shutdown=0.5,
-            reload=dev_mode,
-        )
+            uvicorn.run(
+                f"{module_name}:create_app",
+                factory=True,
+                host=server.config.host,
+                port=server.config.port,
+                timeout_graceful_shutdown=0.5,
+                reload=True,
+                app_dir=str(main_file.parent),
+                log_level="critical",  # Suppress uvicorn logs during reload
+            )
+        else:
+            uvicorn.run(
+                app,
+                host=server.config.host,
+                port=server.config.port,
+                timeout_graceful_shutdown=0.5,
+            )
 
 
 class HeadServer(BaseServer):

@@ -624,5 +624,11 @@ class VLLMConverter(BaseModel):
         return self._parse_think_tags(content)
 
 
+def create_app():
+    """Factory for dev mode hot reload."""
+    app, _, _ = VLLMModel.run_webserver_factory()
+    return app
+
+
 if __name__ == "__main__":
     VLLMModel.run_webserver()

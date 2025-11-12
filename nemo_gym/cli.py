@@ -164,10 +164,13 @@ class RunHelper:  # pragma: no cover
 
             # Check if dev mode is enabled for hot reload
             dev_mode = global_config_dict.get(DEV_MODE_KEY_NAME, False)
-            dev_env_var = "NEMO_GYM_DEV_MODE=1 " if dev_mode else ""
+            dev_env_vars = ""
+            if dev_mode:
+                # Set environment variables to suppress Ray and reload errors
+                dev_env_vars = "NEMO_GYM_DEV_MODE=1 RAY_LOG_TO_STDERR=0 GLOG_minloglevel=3 "
 
             command = f"""{_setup_env_command(dir_path, global_config_dict)} \\
-    && {dev_env_var}{NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
+    && {dev_env_vars}{NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
     {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(top_level_path)} \\
     python {str(entrypoint_fpath)}"""
 
