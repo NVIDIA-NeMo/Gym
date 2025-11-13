@@ -135,7 +135,7 @@ class JudgeEvaluation(BaseModel):
 
 
 class LLMJudgeVerifyResponse(BaseVerifyResponse):
-    expected_answer: str
+    judge_expected_answer: str
     judge_evaluations: list[JudgeEvaluation]
 
 
@@ -254,9 +254,7 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
 
     config: LLMJudgeResourcesServerConfig
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
+    def model_post_init(self, context):
         self._judge_endpoint_max_concurrency = nullcontext()
         if self.config.judge_endpoint_max_concurrency is not None:
             self._judge_endpoint_max_concurrency = asyncio.Semaphore(
@@ -265,6 +263,8 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
 
         with open(self.config.judge_prompt_template_fpath, "r") as f:
             self._judge_prompt_template = f.read().strip()
+
+        return super().model_post_init(context)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -321,9 +321,8 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
     ) -> LLMJudgeVerifyResponse:
         """Create verification response with reward and evaluations."""
         payload = body.model_dump()
-        payload.pop("expected_answer", None)
         return LLMJudgeVerifyResponse(
-            **payload, reward=reward, expected_answer=expected, judge_evaluations=evaluations
+            **payload, reward=reward, judge_expected_answer=expected, judge_evaluations=evaluations
         )
 
     async def _handle_first_pass_failed(
