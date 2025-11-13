@@ -280,33 +280,6 @@ class ServerClient(BaseModel):
             **kwargs,
         )
 
-    async def wrapped_post(
-        self,
-        server_name: str,
-        url_path: str,
-        default_factory,
-        **kwargs: Unpack[_RequestOptions],
-    ) -> ClientResponse:
-        """
-        Args:
-            server_name: str
-                The name of the server you are trying to call.
-            url_path: str
-                The URL path in the server you are trying to call e.g. "/v1/responses".
-            default_factory: callable
-                Used to return a default POST response in case of a caught exception.
-
-        """
-        try:
-            response = await self.post(server_name, url_path, **kwargs)
-        except (Exception, BaseException) as e:
-            print(
-                f"Server client HTTP POST exception: {type(e).__name__} {e}",
-                flush=True,
-            )
-            response = default_factory()
-        return response
-
     def poll_for_status(self, server_name: str) -> ServerStatus:  # pragma: no cover
         if server_name == HEAD_SERVER_KEY_NAME:
             server_config_dict = self.global_config_dict[HEAD_SERVER_KEY_NAME]

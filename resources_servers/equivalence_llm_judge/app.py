@@ -449,13 +449,19 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         responses_create_params.input = msgs
 
         async with self._judge_endpoint_max_concurrency:
-            response = await self.server_client.wrapped_post(
-                server_name=cfg.judge_model_server.name,
-                url_path="/v1/responses",
-                default_factory=empty_response,
-                json=responses_create_params,
-            )
-        judge_response = NeMoGymResponse.model_validate(await response.json())
+            try:
+                response = await self.server_client.post(
+                    server_name=cfg.judge_model_server.name,
+                    url_path="/v1/responses",
+                    json=responses_create_params,
+                )
+                judge_response = NeMoGymResponse.model_validate(await response.json())
+            except Exception as e:
+                print(
+                    f"DEBUG: LLMJudgeResourcesServer: server client HTTP POST exception: {type(e).__name__} {e}",
+                    flush=True,
+                )
+                judge_response = empty_response()
         eval_record = JudgeEvaluation(
             responses_create_params=responses_create_params,
             response=judge_response,
