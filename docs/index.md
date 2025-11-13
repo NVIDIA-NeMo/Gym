@@ -2,9 +2,9 @@
 
 # NeMo Gym Documentation
 
-NeMo Gym is a framework for building reinforcement learning training environments. It provides the infrastructure for creating high-quality training data through agentic model interactions. Use NeMo Gym to generate rollouts for RL training, collect trajectories for supervised fine-tuning, or create preference pairs for alignment.
+NeMo Gym is a framework for building reinforcement learning (RL) training environments. Gym is used to create data for RL training, and is especially tailored for agentic model training.
 
-At the core of NeMo Gym are three server concepts: **Model** servers provide LLM inference capabilities, **Resources** servers expose tools and environments that agents interact with, and **Agent** servers orchestrate the interaction between models and resources to generate verified training data.
+At the core of NeMo Gym are three server concepts: **Responses API Model** servers are model endpoints, **Resources** servers contain tool implementations and verification logic, and **Agent** servers orchestrate the interaction between models and resources.
 
 ## Quickstart
 
@@ -88,10 +88,6 @@ You can also use `Ctrl+C` in Terminal 1 to stop the `ng_run` process, then run `
 
 :::
 ::::
-
-```{include} ../README.md
-:relative-docs: docs/
-```
 
 ```{toctree}
 :caption: Tutorials📚
