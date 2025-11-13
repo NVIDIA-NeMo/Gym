@@ -13,10 +13,15 @@ This document is a smattering of How-To's and FAQs that have not made their way 
 - [How To: Use a custom client to call Gym Responses API model endpoints during training](#how-to-use-a-custom-client-to-call-gym-responses-api-model-endpoints-during-training)
 - [How To: Detailed anatony of a Gym config](#how-to-detailed-anatony-of-a-gym-config)
 - [How To: Use Ray for parallelizing CPU-intensive tasks](#how-to-use-ray-for-parallelizing-cpu-intensive-tasks)
+  - [Ray Setup in NeMo Gym](#ray-setup-in-nemo-gym)
+    - [Automatic Initialization](#automatic-initialization)
+    - [Ray Configuration](#ray-configuration)
+  - [Using Ray for CPU-Intensive Tasks](#using-ray-for-cpu-intensive-tasks)
 - [FAQ: OpenAI Responses vs Chat Completions API](#faq-openai-responses-vs-chat-completions-api)
 - [FAQ: DCO and commit signing VSCode and Git setup](#faq-dco-and-commit-signing-vscode-and-git-setup)
 - [FAQ: SFT and RL](#faq-sft-and-rl)
 - [FAQ: Error: Found files with missing copyright](#faq-error-found-files-with-missing-copyright)
+- [FAQ: PermissionError when starting NeMo Gym in sandboxed environments](#faq-permissionerror-when-starting-nemo-gym-in-sandboxed-environments)
 - [FAQ: build-docs / Build docs CI failures](#faq-build-docs--build-docs-ci-failures)
 - [FAQ: NeMo Gym, training frameworks, and token IDs](#faq-nemo-gym-training-frameworks-and-token-ids)
 - [FAQ: NeMo Gym what CI/CD do I need to pass?](#faq-nemo-gym-what-cicd-do-i-need-to-pass)
@@ -786,6 +791,54 @@ Please add the following copyright snippet to the top of the files listed:
 # See the License for the specific language governing permissions and
 # limitations under the License.
 ```
+
+
+# FAQ: PermissionError when starting NeMo Gym in sandboxed environments
+
+If you see an error like this when running `ng_run`:
+
+```python
+PermissionError: [Errno 1] Operation not permitted (originated from sysctl() malloc 1/3)
+
+Traceback:
+  File "ray/thirdparty_files/psutil/_psosx.py", line 337, in pids
+    ls = cext.pids()
+```
+
+**What's happening:**
+
+Ray (NeMo Gym's distributed computing dependency) uses `psutil` to enumerate and monitor processes, which requires calling system calls like `sysctl()` on macOS. In sandboxed execution environments, these system calls are blocked for security reasons.
+
+**Who is affected:**
+
+This is an **edge case** that only affects users in restricted environments:
+- Sandboxed command execution tools (like Cursor's AI sandbox)
+- Docker containers with restricted capabilities
+- CI/CD runners with security restrictions
+
+**Normal users running in their own terminal will NOT encounter this** - they have full system permissions by default.
+
+**Solution (if you're affected):**
+
+If you're running NeMo Gym in a sandboxed environment and hit this error, you'll need to either:
+
+1. **Disable the sandbox** for the command (if your environment supports it)
+2. **Grant additional permissions** to allow Ray to access process information
+3. **Run outside the sandbox** in a normal terminal environment
+
+For most development and production use cases, simply running `ng_run` in your regular terminal will work without any issues.
+
+**Specific workaround for Cursor AI:**
+
+If you're using Cursor's AI assistant to run NeMo Gym commands and encounter this error, the AI will need to run commands with elevated permissions. This is not something you configure - the AI assistant will automatically request additional permissions (specifically `required_permissions: ["all"]`) when it detects this error. If you see the error persist, try asking the AI to restart the servers or run the command in your own terminal instead.
+
+**Why NeMo Gym can't fix this:**
+
+This is a fundamental incompatibility between:
+- Ray legitimately needing system access to manage distributed workers
+- Sandboxed environments intentionally restricting system access for security
+
+There's no practical workaround that NeMo Gym can implement - the solution is to run with appropriate permissions for your environment.
 
 
 # FAQ: build-docs / Build docs CI failures
