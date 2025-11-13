@@ -16,7 +16,7 @@ swe_agents:
       container_formatter: "/lustre/fsw/portfolios/llmservice/users/igitman/images/swe-bench/swebench_sweb.eval.x86_64.{instance_id}.sif"
       container_folder_path: null
       swebench_tests_timeout: 1800  # 30 minutes
-      concurrency: 16
+      concurrency: 2048
       
       # Optional model server reference
       model_server:
@@ -28,7 +28,7 @@ swe_agents:
         max_samples: -1
         skip_filled: false
         dry_run: false
-        max_concurrent_requests: 1  # SWE-bench is resource intensive
+        max_concurrent_requests: 16  
         inference.top_logprobs: 10  # Request logprobs to get token IDs for training
       
       # Dataset configurations

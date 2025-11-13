@@ -15,7 +15,7 @@ from collections import defaultdict
 from os import getenv
 from pathlib import Path
 from platform import python_version
-from socket import socket
+from socket import gethostbyname, gethostname, socket
 from typing import ClassVar, List, Optional, Tuple, Type
 
 import hydra
@@ -44,6 +44,7 @@ HEAD_SERVER_KEY_NAME = "head_server"
 DISALLOWED_PORTS_KEY_NAME = "disallowed_ports"
 HEAD_SERVER_DEPS_KEY_NAME = "head_server_deps"
 PYTHON_VERSION_KEY_NAME = "python_version"
+USE_ABSOLUTE_IP = "use_absolute_ip"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -52,7 +53,9 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     DISALLOWED_PORTS_KEY_NAME,
     HEAD_SERVER_DEPS_KEY_NAME,
     PYTHON_VERSION_KEY_NAME,
+    USE_ABSOLUTE_IP,
 ]
+
 
 POLICY_BASE_URL_KEY_NAME = "policy_base_url"
 POLICY_API_KEY_KEY_NAME = "policy_api_key"  # pragma: allowlist secret
@@ -230,7 +233,12 @@ class GlobalConfigDictParser(BaseModel):
         server_instance_configs = self.filter_for_server_instance_configs(global_config_dict)
 
         # Do one pass through all the configs validate and populate various configs for our servers.
-        default_host = global_config_dict.get(DEFAULT_HOST_KEY_NAME) or "127.0.0.1"
+        use_absolute_ip = global_config_dict.get(USE_ABSOLUTE_IP, False)
+        if use_absolute_ip:
+            default_host = gethostbyname(gethostname())
+        else:
+            # Do one pass through all the configs validate and populate various configs for our servers.
+            default_host = global_config_dict.get(DEFAULT_HOST_KEY_NAME) or "127.0.0.1"
 
         head_server_config = global_config_dict.get(HEAD_SERVER_KEY_NAME, {})
         head_server_port = head_server_config.get("port", DEFAULT_HEAD_SERVER_PORT)
