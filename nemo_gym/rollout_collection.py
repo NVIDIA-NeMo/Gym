@@ -15,6 +15,7 @@
 import asyncio
 import json
 from asyncio import Future, Lock, Semaphore
+from collections import Counter
 from contextlib import nullcontext
 from itertools import count, product
 from typing import Any, Dict, Iterator, List, Optional
@@ -108,6 +109,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
         if config.responses_create_params:
             print(f"Overriding responses_create_params fields with {config.responses_create_params}")
 
+        metrics = Counter()
         cache_key_set = set()
 
         if config.enable_cache:
@@ -115,11 +117,12 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
             try:
                 with open(config.output_jsonl_fpath, "r") as f:
                     for line in tqdm(f, total=len(rows)):
-                        item = json.loads(line)
-                        assert "_rollout_cache_key" in item
-                        item_cache_key = item["_rollout_cache_key"]
-                        row_idx = item_cache_key["row_idx"]
-                        rep_idx = item_cache_key["rep_idx"]
+                        result = json.loads(line)
+                        assert "_rollout_cache_key" in result
+                        metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
+                        result_cache_key = result["_rollout_cache_key"]
+                        row_idx = result_cache_key["row_idx"]
+                        rep_idx = result_cache_key["rep_idx"]
                         cache_key_set.add((row_idx, rep_idx))
             except OSError:
                 pass
@@ -127,7 +130,6 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
 
         print("Starting rollout collection...", flush=True)
 
-        metrics = Counter()
         write_lock = Lock()
         write_file = open(config.output_jsonl_fpath, "a")
 
