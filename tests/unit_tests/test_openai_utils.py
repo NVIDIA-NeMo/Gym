@@ -43,12 +43,19 @@ class TestOpenAIUtils:
         responses_create_params = NeMoGymResponseCreateParamsNonStreaming.model_validate(
             {
                 "model": "yet/another/model",
-                "input": [],
+                "input": [
+                    {
+                        "role": "user",
+                        "content": "hi",
+                    },
+                ],
                 "parallel_tool_calls": True,
                 "tool_choice": "auto",
                 "tools": [],
             }
         )
+        assert responses_create_params.input[0].role == "user"
+        assert responses_create_params.input[0].content == "hi"
         actual_response = empty_response(responses_create_params)
         assert actual_response.id == expected_response_id
         assert actual_response.model == "yet/another/model"

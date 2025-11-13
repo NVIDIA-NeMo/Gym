@@ -461,7 +461,7 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
                     f"DEBUG: LLMJudgeResourcesServer: server client HTTP POST exception: {type(e).__name__} {e}",
                     flush=True,
                 )
-                judge_response = empty_response()
+                judge_response = empty_response(responses_create_params)
         eval_record = JudgeEvaluation(
             responses_create_params=responses_create_params,
             response=judge_response,
