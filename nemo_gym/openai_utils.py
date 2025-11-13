@@ -515,15 +515,10 @@ def empty_response(
         responses_create_params = NeMoGymResponseCreateParamsNonStreaming.model_validate(
             {
                 "model": "dummy/model",
+                "input": [],
                 "parallel_tool_calls": True,
                 "tool_choice": "auto",
                 "tools": [],
-                "output": [
-                    {
-                        "role": "assistant",
-                        "content": "",
-                    }
-                ],
             }
         )
     body = responses_create_params

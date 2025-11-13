@@ -35,3 +35,4 @@ class TestOpenAIUtils:
         expected_response_id = f"resp_{uuid_value.hex}"
         actual_response = empty_response()
         assert actual_response.id == expected_response_id
+        assert len(actual_response.output[0]["content"]) == 0
