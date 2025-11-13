@@ -13,9 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-import uuid
 from asyncio import sleep
-from datetime import datetime
+from time import time
+from uuid import uuid4
 from typing import (
     Any,
     Dict,
@@ -508,22 +508,52 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         return await response.json()
 
 
-def empty_response() -> NeMoGymResponse:
-    uid = str(uuid.uuid4().hex)
-    return NeMoGymResponse.model_validate(
-        {
-            "id": f"resp_{uid}",
-            "object": "response",
-            "created_at": datetime.utcnow().timestamp(),
-            "model": "dummy/model",
-            "parallel_tool_calls": True,
-            "tool_choice": "auto",
-            "tools": [],
-            "output": [
-                {
-                    "role": "assistant",
-                    "content": "",
-                }
-            ],
-        }
+def empty_response(
+    responses_create_params: Optional[NeMoGymResponseCreateParamsNonStreaming] = None,
+) -> NeMoGymResponse:
+    if responses_create_params is None:
+        responses_create_params = NeMoGymResponseCreateParamsNonStreaming.model_validate(
+            {
+                "model": "dummy/model",
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+                "output": [
+                    {
+                        "role": "assistant",
+                        "content": "",
+                    }
+                ],
+            }
+        )
+    body = responses_create_params
+    return NeMoGymResponse(
+        id=f"resp_{uuid4().hex}",
+        created_at=int(time()),
+        model=body.model,
+        object="response",
+        output=[
+            {
+                "role": "assistant",
+                "content": "",
+            }
+        ],
+        tool_choice=body.tool_choice if "tool_choice" in body else "auto",
+        parallel_tool_calls=body.parallel_tool_calls,
+        tools=body.tools,
+        temperature=body.temperature,
+        top_p=body.top_p,
+        background=body.background,
+        max_output_tokens=body.max_output_tokens,
+        max_tool_calls=body.max_tool_calls,
+        previous_response_id=body.previous_response_id,
+        prompt=body.prompt,
+        reasoning=body.reasoning,
+        service_tier=body.service_tier,
+        text=body.text,
+        top_logprobs=body.top_logprobs,
+        truncation=body.truncation,
+        metadata=body.metadata,
+        instructions=body.instructions,
+        user=body.user,
     )
