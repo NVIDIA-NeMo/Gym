@@ -115,7 +115,7 @@ class TestApp:
         )
         res = await rs.verify(req)
         assert res.reward == approx(1.0)
-        assert res.expected_answer == "2"
+        assert res.judge_expected_answer == "2"
         assert len(res.judge_evaluations) == 1
 
         # Now enable double-check and ensure two evaluations are returned
