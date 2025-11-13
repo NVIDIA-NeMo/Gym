@@ -30,9 +30,8 @@ Understand how NeMo Gym evaluates agent performance and what verification means 
 ### **[05 - Rollout Collection Fundamentals](05-rollout-collection.md)**
 Master NeMo Gym's rollout generation system - the foundation for understanding agent behavior, creating training data, and evaluating performance. Learn to systematically capture complete agent interactions.
 
-<!-- TODO: Add link [06 - Collecting Rollouts for Reinforcement Learning](06-rl-rollout-collection.md) -->
-### **06 - Collecting Rollouts for Reinforcement Learning (Coming soon!)**
-*Coming soon* - Generate rollouts for real-time RL training. Learn online rollout collection, integration with RL frameworks, and continuous agent improvement through environmental feedback.
+### **[06 - RL training with NeMo RL](06-rl-training-with-nemo-rl.md)**
+Train a model with NeMo RL. Learn data preparation and basics of RL training framework integration.
 
 ### **[07 - Collecting Rollouts for SFT and DPO Training](07-sft-dpo-rollout-collection.md)**
 Use generated rollouts to create training data for supervised fine-tuning and direct preference optimization. Learn data preparation and quality filtering.
