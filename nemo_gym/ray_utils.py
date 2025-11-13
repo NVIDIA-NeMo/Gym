@@ -21,7 +21,7 @@ from nemo_gym.server_utils import (
 )
 
 
-def spinup_single_ray_gpu_node_worker(worker_cls, num_gpus: Optional[int] = None):
+def spinup_single_ray_gpu_node_worker(worker_cls, num_gpus: Optional[int] = None):  # pragma: no cover
     from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
     cfg = get_global_config_dict()
