@@ -300,4 +300,3 @@ Next: Your First Agent →
 :::
 
 Learn how your weather agent works and explore the complete workflow from request to response.
-
