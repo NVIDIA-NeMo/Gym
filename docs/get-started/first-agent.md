@@ -186,7 +186,7 @@ Let's try different inputs to see how the agent behaves.
    ```bash
    # Define which servers to start
    config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-   resources_servers/simple_weather/configs/simple_weather.yaml"
+   resources_servers/example_simple_weather/configs/simple_weather.yaml"
 
    # Start all servers
    ng_run "+config_paths=[${config_paths}]"
@@ -237,7 +237,7 @@ This non-deterministic behavior is normal for language models—and it is exactl
 
 In this weather agent example, both the tool and verification functions are implemented directly within NeMo Gym:
 
-**Weather Tool** (`resources_servers/simple_weather/app.py`):
+**Weather Tool** (`resources_servers/example_simple_weather/app.py`):
 ```python
 async def get_weather(self, body: GetWeatherRequest) -> GetWeatherResponse:
     return GetWeatherResponse(

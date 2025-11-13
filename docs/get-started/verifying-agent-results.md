@@ -37,7 +37,7 @@ In the last tutorial, you ran your weather agent and saw it call the `get_weathe
 
 Your weather agent's resource server already has a `verify()` function, but it doesn't actually check anything—it just returns a fixed [reward](../about/glossary.md#reward) of 1.0 regardless of performance.
 
-Open `resources_servers/simple_weather/app.py` and locate the verify function:
+Open `resources_servers/example_simple_weather/app.py` and locate the verify function:
 
 ```python
 async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
@@ -61,7 +61,7 @@ Let us create verification logic that actually measures performance. You will bu
 
 Start by verifying the most basic requirement: did the agent call the weather tool?
 
-1. Replace the `verify()` function in `resources_servers/simple_weather/app.py`:
+1. Replace the `verify()` function in `resources_servers/example_simple_weather/app.py`:
 
    ```python
    async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
@@ -291,7 +291,7 @@ Now test whichever verification stage you have implemented to observe how differ
 
     ```bash
     config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-    resources_servers/simple_weather/configs/simple_weather.yaml"
+    resources_servers/example_simple_weather/configs/simple_weather.yaml"
 
     ng_run "+config_paths=[${config_paths}]"
     ```
