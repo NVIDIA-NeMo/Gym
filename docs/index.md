@@ -93,15 +93,14 @@ You can also use `Ctrl+C` in Terminal 1 to stop the `ng_run` process, then run `
 :caption: Tutorials📚
 :hidden:
 
-tutorials/README.md
-tutorials/00-terminology.md
+about/glossary.md
 tutorials/01-concepts.md
-tutorials/02-setup.md
-tutorials/03-your-first-agent.md
+get-started/setup-installation.md
+get-started/first-agent.md
 tutorials/04-verifying-results.md
-tutorials/05-rollout-collection.md
+tutorials/offline-training-w-rollouts.md
 tutorials/07-sft-dpo-rollout-collection.md
-tutorials/09-configuration-guide.md
+about/concepts/configuration-system.md
 how-to-faq.md
 ```
 
