@@ -1,5 +1,7 @@
+# How-To's and FAQ's
 This document is a smattering of How-To's and FAQs that have not made their way into an official tutorial yet!
 
+- [How-To's and FAQ's](#how-tos-and-faqs)
 - [How To: Run tests for simple agent](#how-to-run-tests-for-simple-agent)
 - [How To: Add a resource server](#how-to-add-a-resource-server)
   - [TLDR final expected artifacts](#tldr-final-expected-artifacts)
