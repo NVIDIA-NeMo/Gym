@@ -8,10 +8,6 @@ Hands-on learning experiences that guide you through building, training, and dep
 **New to NeMo Gym?** Begin with the {doc}`Get Started <../get-started/index>` section for a guided tutorial experience from installation through your first verified agent. Return here after completing those tutorials to learn about advanced topics like additional rollout collection methods and training data generation.
 :::
 
-:::{tip}
-**Need a quick definition?** Check the {doc}`Glossary <../resources/glossary>` for essential terminology.
-:::
-
 ---
 
 ## Rollout Collection and Training Data
@@ -51,7 +47,7 @@ Build custom environments, tools, and verification systems.
 
 ---
 
-## Advanced Operations
+## Model Configuration
 
 Apply configuration, testing, deployment, and scaling.
 
