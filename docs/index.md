@@ -104,3 +104,11 @@ tutorials/07-sft-dpo-rollout-collection.md
 tutorials/09-configuration-guide.md
 how-to-faq.md
 ```
+
+```{toctree}
+:caption: Development
+:hidden:
+
+
+apidocs/index.rst
+```
