@@ -1,5 +1,7 @@
+# How-To's and FAQ's
 This document is a smattering of How-To's and FAQs that have not made their way into an official tutorial yet!
 
+- [How-To's and FAQ's](#how-tos-and-faqs)
 - [How To: Run tests for simple agent](#how-to-run-tests-for-simple-agent)
 - [How To: Add a resource server](#how-to-add-a-resource-server)
   - [TLDR final expected artifacts](#tldr-final-expected-artifacts)
@@ -13,6 +15,10 @@ This document is a smattering of How-To's and FAQs that have not made their way 
 - [How To: Use a custom client to call Gym Responses API model endpoints during training](#how-to-use-a-custom-client-to-call-gym-responses-api-model-endpoints-during-training)
 - [How To: Detailed anatony of a Gym config](#how-to-detailed-anatony-of-a-gym-config)
 - [How To: Use Ray for parallelizing CPU-intensive tasks](#how-to-use-ray-for-parallelizing-cpu-intensive-tasks)
+  - [Ray Setup in NeMo Gym](#ray-setup-in-nemo-gym)
+    - [Automatic Initialization](#automatic-initialization)
+    - [Ray Configuration](#ray-configuration)
+  - [Using Ray for CPU-Intensive Tasks](#using-ray-for-cpu-intensive-tasks)
 - [FAQ: OpenAI Responses vs Chat Completions API](#faq-openai-responses-vs-chat-completions-api)
 - [FAQ: DCO and commit signing VSCode and Git setup](#faq-dco-and-commit-signing-vscode-and-git-setup)
 - [FAQ: SFT and RL](#faq-sft-and-rl)
