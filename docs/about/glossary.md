@@ -91,5 +91,5 @@ High-performance inference server for running open-source language models locall
 
 Now that you're familiar with the key terminology, let's understand how the core components work together.
 
-→ **[Next: Understanding Core Concepts](01-concepts.md)**
+→ **[Next: Understanding Core Concepts]**
 

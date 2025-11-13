@@ -211,4 +211,4 @@ This weather agent demonstrates patterns you'll see throughout NeMo Gym:
 - **Agents** orchestrate between models and resources
 - Everything is configurable via YAML files
 
-→ **[Next: Verifying Agent Results](04-verifying-results.md)**
+→ **[Next: Verifying Agent Results]**

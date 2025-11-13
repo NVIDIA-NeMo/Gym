@@ -163,4 +163,4 @@ This verification system is what makes NeMo Gym powerful for agent training:
 
 Now that you understand how agent performance is measured, the next step is learning how to systematically collect this verification data at scale through rollout generation.
 
-→ **[Next: Rollout Collection Fundamentals](05-rollout-collection.md)**
+→ **[Next: Rollout Collection Fundamentals]**
