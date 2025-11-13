@@ -1,6 +1,37 @@
+(tutorial-offline-training)=
+
 # Offline Training with Rollouts (SFT/DPO)
 
-**Goal**: Transform your generated rollouts into high-quality training data for supervised fine-tuning (SFT) and direct preference optimization (DPO).
+You've generated rollouts in the get-started series—now learn how to transform them into training data that can improve your AI models through supervised fine-tuning (SFT) and direct preference optimization (DPO).
+
+:::{card}
+
+**Goal**: Transform generated rollouts into high-quality training data for supervised fine-tuning and preference optimization.
+
+^^^
+
+**In this tutorial, you will**:
+
+1. Understand SFT and DPO training data formats
+2. Filter rollouts for quality
+3. Process rollouts into training formats
+4. Validate and evaluate your training data
+
+:::
+
+:::{button-ref} /get-started/index
+:color: secondary
+:outline:
+:ref-type: doc
+
+← New to NeMo Gym? Start with Get Started
+:::
+
+## Before You Start
+
+This tutorial assumes you've completed the [Get Started](../get-started/index.md) series and understand how to [collect rollouts](../get-started/collecting-rollouts.md). If you need a deeper understanding of rollout collection strategies, refer to [Rollout Collection Fundamentals](../about/concepts/rollout-collection-fundamentals.md).
+
+---
 
 ## Why Offline Training?
 
@@ -14,13 +45,26 @@
 
 **The offline training pipeline**: Generate rollouts → Filter and process → Train models → Deploy improved agents
 
+---
+
 ## Training Data Types
 
-### Supervised Fine-Tuning (SFT) Data
+Choose the training approach that matches your goal:
+
+::::{tab-set}
+
+:::{tab-item} SFT (Supervised Fine-Tuning)
+:sync: sft
 
 **Purpose**: Train models to follow successful agent interaction patterns
 
+**When to use**:
+- You have high-quality examples of desired behavior
+- Want the model to imitate specific interaction patterns
+- Need consistent, predictable responses
+
 **Data structure**: Input-output pairs showing complete agent conversations
+
 ```json
 {
   "messages": [
@@ -33,11 +77,22 @@
 }
 ```
 
-### Direct Preference Optimization (DPO) Data
+**Collection strategy**: Low temperature (0.1-0.3), single rollout per task
+
+:::
+
+:::{tab-item} DPO (Direct Preference Optimization)
+:sync: dpo
 
 **Purpose**: Train models to prefer better responses over worse ones
 
+**When to use**:
+- You can generate multiple responses with varying quality
+- Want to teach the model to distinguish good from bad
+- Need to improve response quality through comparison
+
 **Data structure**: Preference pairs with chosen vs rejected responses
+
 ```json
 {
   "prompt": [{"role": "user", "content": "Solve this math problem: 2x + 5 = 13"}],
@@ -51,19 +106,51 @@
 }
 ```
 
+**Collection strategy**: Higher temperature (0.6-0.8), 2+ rollouts per task for comparison
+
+:::
+
+::::
+
+---
+
 ## Data Preparation Overview
 
 The offline training pipeline follows this logical flow:
 
-1. Collect rollouts using strategies from [Tutorial 5](05-rollout-collection.md)
-- **SFT data**: Use consistent generation (low temperature, single rollout per task)
-- **DPO data**: Use diverse generation (higher temperature, 2 rollouts per task for comparison)
-2. Filter for quality - Remove poor rollouts before processing
-3. Format for training - Convert to SFT or DPO format based on your goals
+1. **Collect rollouts** using strategies from the {doc}`../get-started/collecting-rollouts` guide and {doc}`../about/concepts/rollout-collection-fundamentals` reference
+2. **Filter for quality** - Remove poor rollouts before processing
+3. **Format for training** - Convert to SFT or DPO format based on your goals
 
+### Quick Reference: SFT vs DPO Data Requirements
 
+```{list-table}
+:header-rows: 1
+:widths: 25 35 40
 
-## Step 1: Quality Filtering and Curation
+* - Aspect
+  - SFT
+  - DPO
+* - **Rollouts per task**
+  - 1 rollout per task
+  - 2+ rollouts per task
+* - **Temperature**
+  - Low (0.1-0.3)
+  - Higher (0.6-0.8)
+* - **Quality filter**
+  - Keep only high-quality (reward ≥ 0.8)
+  - Keep pairs with quality difference ≥ 0.1
+* - **Output format**
+  - Conversation history
+  - Preference pairs (chosen vs rejected)
+* - **Best for**
+  - Imitating expert behavior
+  - Learning preferences between responses
+```
+
+---
+
+## 1. Quality Filtering and Curation
 
 Always filter your rollouts first before formatting them for training. Here are example approaches you can customize for your needs:
 
@@ -99,6 +186,8 @@ filter_rollouts('raw_rollouts.jsonl', 'filtered_rollouts.jsonl', {
 })
 ```
 
+**✅ Success Check**: You should see output like `Kept 847/1203 rollouts (70.4%)` showing how many rollouts passed your quality filters.
+
 ### Manual Curation (Optional)
 
 For critical applications, sample and manually review:
@@ -125,13 +214,20 @@ def sample_for_review(input_file: str, sample_size: int = 50):
             out.write(json.dumps(rollout) + '\n')
 ```
 
-**Note**: These are example filtering approaches. Customize the criteria, thresholds, and sampling strategies based on your specific domain and quality requirements.
+:::{note}
+These are example filtering approaches. Customize the criteria, thresholds, and sampling strategies based on your specific domain and quality requirements.
+:::
 
-## Step 2: Format for Training
+---
+
+## 2. Format for Training
 
 Once you have filtered, high-quality rollouts, format them for your chosen training method:
 
-### SFT Data Processing
+::::{tab-set}
+
+:::{tab-item} SFT Data Processing
+:sync: sft
 
 Transform filtered rollouts into conversation format:
 
@@ -155,7 +251,12 @@ def process_sft_data(filtered_rollout_file: str, output_file: str):
 process_sft_data('filtered_rollouts.jsonl', 'sft_data.jsonl')
 ```
 
-### DPO Data Processing
+**✅ Success Check**: Your `sft_data.jsonl` file should now contain one training example per rollout, each with the conversation history and reward score.
+
+:::
+
+:::{tab-item} DPO Data Processing
+:sync: dpo
 
 Create preference pairs from filtered rollouts (requires 2 rollouts per task):
 
@@ -207,28 +308,60 @@ def create_dpo_pairs(filtered_rollout_file: str, output_file: str):
 create_dpo_pairs('filtered_rollouts.jsonl', 'dpo_pairs.jsonl')
 ```
 
+**✅ Success Check**: You should see output like `Created 423 preference pairs` showing how many comparison pairs were generated from your rollouts.
+
+:::
+
+::::
+
+---
+
 ## Training Integration
 
 Once you have your processed data (`sft_data.jsonl` or `dpo_pairs.jsonl`), you can use any post-training framework for SFT or DPO:
 
 ### Standard Data Formats
 
+Your processed data is now ready for training. Here's the format your training library expects:
+
+::::{tab-set}
+
+:::{tab-item} SFT Format
+:sync: sft
+
 SFT data follows the conversation format used by most training libraries:
+
 ```json
 {"messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}
 ```
 
+This format is compatible with OpenAI's fine-tuning API, Hugging Face Transformers, and most modern training frameworks.
+
+:::
+
+:::{tab-item} DPO Format
+:sync: dpo
+
 DPO data follows the preference pair format:
+
 ```json
 {"prompt": ["..."], "chosen": ["..."], "rejected": ["..."]}
 ```
 
+This format is compatible with TRL (Transformer Reinforcement Learning), Axolotl, and other DPO training libraries.
+
+:::
+
+::::
+
+---
 
 ## Validation and Evaluation
 
 ### Pre-Training Validation
 
 Before training, validate your data quality by checking:
+
 - **Dataset size**: Sufficient examples for training objectives
 - **Reward distribution**: Reasonable range and average quality scores  
 - **Length distribution**: Appropriate conversation lengths
@@ -247,9 +380,16 @@ ng_collect_rollouts +agent_name=improved_agent \
 
 Compare key metrics like average reward, success rate, and task-specific performance against your baseline to measure improvement.
 
+---
+
 ## Best Practices
 
-### 1. Data Quality Over Quantity
+:::{dropdown} 1. Data Quality Over Quantity
+:icon: shield-check
+
+**Principle**: Better to train on fewer high-quality examples than many noisy ones.
+
+**Implementation**:
 
 ```python
 # Prefer high-quality filtered data over large noisy datasets
@@ -260,7 +400,16 @@ filter_criteria = {
 }
 ```
 
-### 2. Balanced Datasets
+**Why it matters**: Training on low-quality data can teach the model bad behaviors that are difficult to unlearn.
+
+:::
+
+:::{dropdown} 2. Balanced Datasets
+:icon: rows
+
+**Principle**: Ensure diverse task representation to prevent overfitting to common patterns.
+
+**Implementation**:
 
 ```python
 # Ensure diverse task representation
@@ -282,18 +431,33 @@ def balance_dataset(input_file: str, output_file: str, max_per_category: int = 1
             out.write(json.dumps(data) + '\n')
 ```
 
-### 3. Iterative Improvement
+**Why it matters**: Imbalanced datasets lead to models that perform well on common tasks but fail on less frequent ones.
 
-```bash
-# Iteration cycle
+:::
+
+:::{dropdown} 3. Iterative Improvement
+:icon: iterations
+
+**Principle**: Use a continuous improvement cycle to progressively enhance agent quality.
+
+**The cycle**:
+
 1. Generate rollouts with current agent
 2. Filter and prepare training data  
 3. Train improved model
 4. Deploy and evaluate
 5. Use improved agent to generate better rollouts
-```
 
-### 4. Version Control
+**Why it matters**: Each iteration builds on previous improvements, creating a virtuous cycle of enhancement.
+
+:::
+
+:::{dropdown} 4. Version Control
+:icon: versions
+
+**Principle**: Track data and model versions for reproducibility and debugging.
+
+**Implementation**:
 
 ```bash
 # Track data versions
@@ -306,56 +470,105 @@ mkdir -p models/agent_v1.0/
 cp -r ./results/* models/agent_v1.0/
 ```
 
+**Why it matters**: Version control enables you to reproduce results, compare different approaches, and roll back if needed.
+
+:::
+
+
+---
+
 ## Troubleshooting
 
-### Problem: Poor Training Data Quality
+:::{dropdown} Problem: Poor Training Data Quality
+:icon: alert
+:color: warning
 
-```
-Low average rewards, inconsistent behaviors
-```
+**Symptoms:**
+- Low average rewards (< 0.5)
+- Inconsistent behaviors across similar tasks
+- Model produces irrelevant or incorrect responses after training
 
-**Solutions**:
-- Increase `min_reward` threshold for filtering
-- Generate rollouts with lower temperature (more consistent)
-- Add manual curation step
-- Improve base agent before data collection
+**Root causes:**
+- Base agent needs improvement
+- Filtering thresholds too permissive
+- Verification function not aligned with quality goals
 
-### Problem: Insufficient Data Diversity
+**Solutions:**
 
-```
-Model overfits to limited patterns
-```
+1. **Tighten filters**: Increase `min_reward` threshold from 0.7 to 0.8 or higher
+2. **Lower temperature**: Generate rollouts with temperature 0.1-0.3 for more consistent behavior
+3. **Manual curation**: Sample and review rollouts before training
+4. **Improve base agent**: Fix obvious issues before generating training data
 
-**Solutions**:
-- Generate rollouts with higher temperature
-- Use more diverse input tasks
-- Collect data from multiple agent configurations
-- Balance dataset across task types
+:::
 
-### Problem: Training Instability
+:::{dropdown} Problem: Insufficient Data Diversity
+:icon: git-branch
+:color: warning
 
-```
-Loss doesn't converge, model performance degrades
-```
+**Symptoms:**
+- Model performs well on training tasks but fails on variations
+- Overfitting to specific patterns or phrasings
+- Poor generalization to new task types
 
-**Solutions**:
-- Check data format compatibility with training framework
-- Reduce learning rate
-- Add regularization
-- Filter out extremely long or short conversations
+**Root causes:**
+- Input dataset too narrow
+- Temperature too low during generation
+- Imbalanced task distribution
+
+**Solutions:**
+
+1. **Increase diversity**: Generate rollouts with higher temperature (0.6-0.8)
+2. **Expand input tasks**: Use more diverse prompts and task variations
+3. **Multiple configurations**: Collect data from different agent setups or system prompts
+4. **Balance dataset**: Use the balancing script to ensure even task representation
+
+:::
+
+:::{dropdown} Problem: Training Instability
+:icon: flame
+:color: danger
+
+**Symptoms:**
+- Loss doesn't converge or oscillates wildly
+- Model performance degrades after training
+- Gradient explosions or NaN values
+
+**Root causes:**
+- Data format incompatibility
+- Extreme outliers in conversation length
+- Learning rate too high
+
+**Solutions:**
+
+1. **Verify format**: Check that data matches your training framework's expected format exactly
+2. **Filter outliers**: Remove conversations that are too long (> 20 turns) or too short (< 2 turns)
+3. **Reduce learning rate**: Start with a lower learning rate (e.g., 1e-5 instead of 1e-4)
+4. **Add regularization**: Use gradient clipping and weight decay
+
+:::
+
+
+---
 
 ## What You've Learned
 
-You now know how to transform rollouts into training data:
+You now have hands-on experience with:
 
-- **Data preparation strategies** for SFT and DPO
-- **Quality filtering and curation** techniques  
-- **Evaluation methods** to measure improvement
-- **Best practices** for sustainable offline training workflows
+- Understanding SFT and DPO training data formats
+- Filtering rollouts for quality before processing
+- Converting rollouts into training-ready formats
+- Validating and evaluating training data quality
 
-**Next steps**: 
-<!-- TODO: Add link [Online Training with Rollouts (RL)](07-online-training.md) -->
-<!-- - **Online Training with Rollouts (RL) (Coming soon!)** - Learn real-time training approaches -->
-<!-- TODO: Add link [Building Custom Resource Servers](08-building-custom-resources.md) -->
-<!-- - **Building Custom Resource Servers (Coming soon!)** - Create domain-specific training data -->
-- **[Configuration Management](09-configuration-guide.md)**
+**Key insight**: High-quality training data comes from careful filtering and processing of rollouts. Start with good data, and your models will learn better behaviors.
+
+---
+
+## Next Steps
+
+You've completed offline training data preparation! Continue with:
+
+- **[Separate Policy and Judge Models](separate-policy-and-judge-models.md)**: Learn advanced multi-model configuration patterns
+- **[Rollout Collection Fundamentals](../about/concepts/rollout-collection-fundamentals.md)**: Deep dive into advanced collection strategies
+
+Or explore the [Concepts](../about/concepts/index.md) section for deeper understanding of the framework.
