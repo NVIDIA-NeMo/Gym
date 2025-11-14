@@ -4,6 +4,8 @@ google_search:
       entrypoint: app.py
       domain: agent
       verified: false
+      description: Multi-choice question answering problems with search tools integrated
+      value: Improve knowledge-related benchmarks with search tools
 google_search_simple_agent:
   responses_api_agents:
     simple_agent:

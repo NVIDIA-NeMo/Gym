@@ -4,6 +4,8 @@ instruction_following:
       entrypoint: app.py
       domain: instruction_following
       verified: false
+      description: Instruction following datasets targeting IFEval and IFBench style instruction following capabilities
+      value: Improve IFEval and IFBench
 instruction_following_simple_agent:
   responses_api_agents:
     simple_agent:
