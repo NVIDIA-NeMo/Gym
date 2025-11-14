@@ -106,11 +106,11 @@ get-started/setup-installation.md
 :hidden:
 :maxdepth: 1
 
-concepts/core-abstractions.md
-concepts/task-verification.md
-concepts/rollout-collection.md
-concepts/configuration-system.md
-concepts/key-terminology.md
+about/concepts/core-abstractions.md
+about/concepts/task-verification.md
+about/concepts/rollout-collection.md
+about/concepts/configuration-system.md
+about/concepts/key-terminology.md
 ```
 
 ```{toctree}
