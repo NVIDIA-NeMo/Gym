@@ -25,34 +25,36 @@ README_PATH = Path("README.md")
 TARGET_FOLDER = Path("resources_servers")
 
 
-def visit_resource_server(
-    data: dict, level: int = 1
-) -> tuple[str | None, str | None, str | None, bool, str | None, str | None, str | None]:  # pragma: no cover
-    dataset_name = None
-    domain = None
-    description = None
-    verified = False
-    verified_url = None
-    value = None
+def visit_resource_server(data: dict, level: int = 1) -> dict[str, str | bool | None]:  # pragma: no cover
+    resource_dict = {
+        "dataset_name": None,
+        "domain": None,
+        "description": None,
+        "verified": False,
+        "verified_url": None,
+        "value": None,
+    }
     if level == 4:
-        dataset_name = data.get("dataset_name")
-        domain = data.get("domain")
-        description = data.get("description")
-        verified = data.get("verified", False)
-        verified_url = data.get("verified_url")
-        value = data.get("value")
-        return dataset_name, domain, description, verified, verified_url, value
+        resource_dict["dataset_name"] = data.get("dataset_name")
+        resource_dict["domain"] = data.get("domain")
+        resource_dict["description"] = data.get("description")
+        resource_dict["verified"] = data.get("verified", False)
+        resource_dict["verified_url"] = data.get("verified_url")
+        resource_dict["value"] = data.get("value")
+        return resource_dict
     else:
         for k, v in data.items():
             if level == 2 and k != "resources_servers":
                 continue
             return visit_resource_server(v, level + 1)
-    return None, None, None, False, None, None
+    return resource_dict
 
 
-def visit_agent_datasets(data: dict) -> tuple[str | None, list[str]]:  # pragma: no cover
-    license = None
-    types = []
+def visit_agent_datasets(data: dict) -> dict[str, str | list[str] | None]:  # pragma: no cover
+    agent_dict = {
+        "license": None,
+        "types": [],
+    }
     for k1, v1 in data.items():
         if k1.endswith("_simple_agent") and isinstance(v1, dict):
             v2 = v1.get("responses_api_agents")
@@ -64,15 +66,15 @@ def visit_agent_datasets(data: dict) -> tuple[str | None, list[str]]:  # pragma:
                         if isinstance(datasets, list):
                             for entry in datasets:
                                 if isinstance(entry, dict):
-                                    types.append(entry.get("type"))
+                                    agent_dict["types"].append(entry.get("type"))
                                     if entry.get("type") == "train":
-                                        license = entry.get("license")
-    return license, types
+                                        agent_dict["license"] = entry.get("license")
+    return agent_dict
 
 
 def extract_config_metadata(
     yaml_path: Path,
-) -> tuple[str | None, str | None, str | None, list[str], bool, str | None, str | None]:  # pragma: no cover
+) -> dict[str, str | bool | list[str] | None]:  # pragma: no cover
     """
     Domain:
         {name}_resources_server:
@@ -82,6 +84,7 @@ def extract_config_metadata(
                     verified: {true/false}
                     description: {example_description}
                     value: {example_value}
+                    dataset_name: {example_dataset_name}
                     ...
         {something}_simple_agent:
             responses_api_agents:
@@ -97,10 +100,13 @@ def extract_config_metadata(
     with yaml_path.open() as f:
         data = yaml.safe_load(f)
 
-    dataset_name, domain, description, verified, verified_url, value = visit_resource_server(data)
-    license, types = visit_agent_datasets(data)
+    resource_data = visit_resource_server(data)
+    agent_datasets_data = visit_agent_datasets(data)
 
-    return dataset_name, domain, description, license, types, verified, verified_url, value
+    return {
+        **resource_data,
+        **agent_datasets_data,
+    }
 
 
 def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:  # pragma: no cover
@@ -121,9 +127,7 @@ def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:  # 
             continue
 
         for yaml_file in yaml_files:
-            dataset_name, domain, description, license, types, verified, verified_url, value = extract_config_metadata(
-                yaml_file
-            )
+            yaml_data = extract_config_metadata(yaml_file)
 
             server_name = subdir.name
             example_only_prefix = "example_"
@@ -141,18 +145,18 @@ def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:  # 
             server_info = {
                 "name": server_name,
                 "display_name": display_name,
-                "dataset_name": dataset_name,
-                "domain": domain,
-                "verified": verified,
-                "verified_url": verified_url,
-                "description": description,
+                "dataset_name": yaml_data["dataset_name"],
+                "domain": yaml_data["domain"],
+                "verified": yaml_data["verified"],
+                "verified_url": yaml_data["verified_url"],
+                "description": yaml_data["description"],
                 "config_path": config_path,
                 "config_filename": yaml_file.name,
                 "readme_path": readme_path,
-                "types": types,
-                "license": license,
+                "types": yaml_data["types"],
+                "license": yaml_data["license"],
                 "yaml_file": yaml_file,
-                "value": value,
+                "value": yaml_data["value"],
             }
 
             example_only_servers.append(server_info) if is_example_only_prefix else training_servers.append(
@@ -267,7 +271,7 @@ def normalize_str(s: str) -> str:  # pragma: no cover
     between local and CI runs. We normalize text and
     use all columns as tie-breakers to ensure deterministic sorting.
     """
-    if not s:
+    if not s or not isinstance(s, str):
         return ""
     return unicodedata.normalize("NFKD", s).casefold().strip()
 
