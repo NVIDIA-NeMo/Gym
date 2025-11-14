@@ -345,6 +345,7 @@ def generate_training_table(servers: list[ServerInfo]) -> str:  # pragma: no cov
 
     rows.sort(
         key=lambda r: (
+            normalize_str(r[1]),  # domain
             0 if "✓" in r[7] else 1,  # verified first (reverse order for checkmarks...hyphens)
             tuple(normalize_str(cell) for cell in r),
         )
