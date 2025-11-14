@@ -275,7 +275,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 answer_chat_template_kwargs["add_generation_prompt"] = False
                 answer_params["chat_template_kwargs"] = answer_chat_template_kwargs
 
-                original_max_tokens = create_params.get("max_tokens", 4096)
+                original_max_tokens = create_params.get("max_tokens", 32768)
                 remaining_tokens = original_max_tokens - len(reasoning_generation_token_ids)
                 if remaining_tokens <= 0:
                     # No tokens left for answer, just return reasoning
