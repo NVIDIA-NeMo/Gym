@@ -65,6 +65,7 @@ Choose the training approach that matches your goal:
 
 **Data structure**: Input-output pairs showing complete agent conversations
 
+**Data structure**: Input-output pairs showing complete agent conversations
 ```json
 {
   "messages": [
@@ -361,7 +362,6 @@ This format is compatible with TRL (Transformer Reinforcement Learning), Axolotl
 ### Pre-Training Validation
 
 Before training, validate your data quality by checking:
-
 - **Dataset size**: Sufficient examples for training objectives
 - **Reward distribution**: Reasonable range and average quality scores  
 - **Length distribution**: Appropriate conversation lengths
