@@ -1,5 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import re
+from copy import deepcopy
 from time import time
-from typing import ClassVar, Dict, List, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
 from aiohttp.client_exceptions import ClientResponseError
@@ -65,6 +65,10 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     uses_reasoning_parser: bool
     replace_developer_role_with_system: bool = False
+
+    chat_template_kwargs: Optional[Dict[str, Any]] = None
+
+    reasoning_token_budget: Optional[int] = None
 
     def model_post_init(self, context):
         if isinstance(self.base_url, str):
@@ -144,6 +148,8 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         body_dict = body.model_dump(exclude_unset=True)
         body_dict["model"] = self.config.model
+        if self.config.chat_template_kwargs:
+            body_dict["chat_template_kwargs"] = deepcopy(self.config.chat_template_kwargs)
 
         session_id = request.session[SESSION_ID_KEY]
         if session_id not in self._session_id_to_client:
@@ -198,45 +204,197 @@ class VLLMModel(SimpleResponsesAPIModel):
                 else:
                     raise NotImplementedError
 
-        try:
-            chat_completion_dict = await client.create_chat_completion(**create_params)
-        except ClientResponseError as e:
-            """
-            Example messages for out of context length:
+        if self.config.reasoning_token_budget is not None:
+            try:
+                # first generate response with max len = reasoning budget
+                reasoning_params = create_params.copy()
+                reasoning_params["max_tokens"] = self.config.reasoning_token_budget
 
-            1. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L914
-            ```json
-            {"object":"error","message":"This model\'s maximum context length is 32768 tokens. However, you requested 32818 tokens in the messages, Please reduce the length of the messages. None","type":"BadRequestError","param":null,"code":400}
-            ```
-            2. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L940
-            3. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L948
-            4. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/sampling_params.py#L463
-            """
-            result_content_str = e.response_content.decode()
+                reasoning_params["logprobs"] = True
+                reasoning_params["return_tokens_as_token_ids"] = True
 
-            is_out_of_context_length = e.status == 400 and (
-                "context length" in result_content_str or "max_tokens" in result_content_str
-            )
-            if is_out_of_context_length:
-                return NeMoGymChatCompletion(
-                    id="chtcmpl-123",
-                    object="chat.completion",
-                    created=int(time()),
-                    model=self.config.model,
-                    choices=[
-                        NeMoGymChoice(
-                            index=0,
-                            finish_reason="stop",
-                            message=NeMoGymChatCompletionMessage(
-                                role="assistant",
-                                content=None,
-                                tool_calls=None,
-                            ),
-                        )
-                    ],
+                reasoning_response = await client.create_chat_completion(**reasoning_params)
+                reasoning_choice = reasoning_response["choices"][0]
+                reasoning_content = reasoning_choice["message"]["content"] or ""
+
+                reasoning_log_probs_data = reasoning_choice["logprobs"]["content"]
+                reasoning_generation_log_probs = [lp["logprob"] for lp in reasoning_log_probs_data]
+                reasoning_generation_token_ids = [lp["token"].removeprefix("token_id:") for lp in reasoning_log_probs_data]
+
+                if "</think>" in reasoning_content:
+                    # thinking did not exceed budget, so drop all after </think>, to regenerate the final answer with unrestricted budget.
+                    think_end_index = reasoning_content.find("</think>") + len("</think>")
+                    reasoning_content_truncated = reasoning_content[:think_end_index]
+
+                    if not reasoning_content_truncated.endswith("\n\n"):
+                        reasoning_content_truncated = f"{reasoning_content_truncated}\n\n"
+
+                    truncated_tokenize_response = await client.create_tokenize(
+                        model=self.config.model,
+                        messages=body_dict["messages"] + [{"role": "assistant", "content": reasoning_content_truncated}]
+                    )
+                    prompt_only_tokenize_response = await client.create_tokenize(
+                        model=self.config.model,
+                        messages=body_dict["messages"]
+                    )
+                    truncated_token_count = len(truncated_tokenize_response["tokens"]) - len(prompt_only_tokenize_response["tokens"])
+
+                    reasoning_generation_token_ids = reasoning_generation_token_ids[:truncated_token_count]
+                    reasoning_generation_log_probs = reasoning_generation_log_probs[:truncated_token_count]
+                    reasoning_content = reasoning_content_truncated
+                else:
+                    # thinking reached budget, so append </think> then generate the final answer
+                    reasoning_content = f"{reasoning_content.rstrip()}\n</think>\n\n"
+
+                    # tokenize with </think> to get correct token IDs
+                    full_reasoning_tokenize_response = await client.create_tokenize(
+                        model=self.config.model,
+                        messages=body_dict["messages"] + [{"role": "assistant", "content": reasoning_content}]
+                    )
+                    prompt_only_tokenize_response = await client.create_tokenize(
+                        model=self.config.model,
+                        messages=body_dict["messages"]
+                    )
+                    
+                    # for special tokens
+                    full_reasoning_token_count = len(full_reasoning_tokenize_response["tokens"]) - len(prompt_only_tokenize_response["tokens"])
+
+                    reasoning_generation_token_ids = full_reasoning_tokenize_response["tokens"][-full_reasoning_token_count:]
+
+                # 2nd request: Generate answer with budgeted reasoning
+                answer_params = create_params.copy()
+                answer_params["messages"] = body_dict["messages"] + [
+                    {"role": "assistant", "content": reasoning_content}
+                ]
+                # Use continue_final_message=True to continue the assistant message instead of starting a new one
+                # This prevents the model from starting reasoning again with <think>
+                # Note: continue_final_message requires add_generation_prompt=False
+                # May only work with some chat templates?
+                answer_chat_template_kwargs = answer_params.get("chat_template_kwargs", {}).copy() if "chat_template_kwargs" in answer_params else {}
+                answer_chat_template_kwargs["continue_final_message"] = True
+                answer_chat_template_kwargs["add_generation_prompt"] = False
+                answer_params["chat_template_kwargs"] = answer_chat_template_kwargs
+
+                original_max_tokens = create_params.get("max_tokens", 4096)
+                remaining_tokens = original_max_tokens - len(reasoning_generation_token_ids)
+                if remaining_tokens <= 0:
+                    # No tokens left for answer, just return reasoning
+                    chat_completion_dict = reasoning_response
+                else:
+                    answer_params["max_tokens"] = remaining_tokens
+                    answer_params["logprobs"] = True
+                    answer_params["return_tokens_as_token_ids"] = True
+                    # Get prompt logprobs to extract logprobs for reasoning tokens (needed for budget-exceeded case since we inserted </think>)
+                    answer_params["prompt_logprobs"] = 1
+
+                    answer_response = await client.create_chat_completion(**answer_params)
+                    answer_choice = answer_response["choices"][0]
+                    answer_content = answer_choice["message"]["content"] or ""
+
+                    # extract logprobs for reasoning from 2nd request prompt_logprobs
+                    prompt_logprobs = answer_response.get("prompt_logprobs")
+                    if prompt_logprobs:
+                        # prompt_logprobs is a list of dicts, each dict maps token_id to {logprob, rank, decoded_token}
+                        reasoning_prompt_logprobs = prompt_logprobs[-len(reasoning_generation_token_ids):]
+                        reasoning_generation_log_probs = [list(lp.values())[0]["logprob"] for lp in reasoning_prompt_logprobs]
+
+                    answer_log_probs_data = answer_choice["logprobs"]["content"]
+                    answer_generation_log_probs = [lp["logprob"] for lp in answer_log_probs_data]
+                    answer_generation_token_ids = [lp["token"].removeprefix("token_id:") for lp in answer_log_probs_data]
+
+                    combined_content = reasoning_content + answer_content
+                    combined_generation_token_ids = reasoning_generation_token_ids + answer_generation_token_ids
+                    combined_generation_log_probs = reasoning_generation_log_probs + answer_generation_log_probs
+
+                    chat_completion_dict = answer_response.copy()
+                    chat_completion_dict["choices"][0]["message"]["content"] = combined_content
+
+                    combined_logprobs_data = []
+                    for token_id, logprob in zip(combined_generation_token_ids, combined_generation_log_probs):
+                        combined_logprobs_data.append({
+                            "token": f"token_id:{token_id}",
+                            "logprob": logprob,
+                        })
+                    chat_completion_dict["choices"][0]["logprobs"] = {"content": combined_logprobs_data}
+
+            except ClientResponseError as e:
+                """
+                Example messages for out of context length:
+
+                1. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L914
+                ```json
+                {"object":"error","message":"This model\'s maximum context length is 32768 tokens. However, you requested 32818 tokens in the messages, Please reduce the length of the messages. None","type":"BadRequestError","param":null,"code":400}
+                ```
+                2. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L940
+                3. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L948
+                4. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/sampling_params.py#L463
+                """
+                result_content_str = e.response_content.decode()
+
+                is_out_of_context_length = e.status == 400 and (
+                    "context length" in result_content_str or "max_tokens" in result_content_str
                 )
-            else:
-                raise e
+                if is_out_of_context_length:
+                    return NeMoGymChatCompletion(
+                        id="chtcmpl-123",
+                        object="chat.completion",
+                        created=int(time()),
+                        model=self.config.model,
+                        choices=[
+                            NeMoGymChoice(
+                                index=0,
+                                finish_reason="stop",
+                                message=NeMoGymChatCompletionMessage(
+                                    role="assistant",
+                                    content=None,
+                                    tool_calls=None,
+                                ),
+                            )
+                        ],
+                    )
+                else:
+                    raise e
+        else:
+            # No budget 
+            try:
+                chat_completion_dict = await client.create_chat_completion(**create_params)
+            except ClientResponseError as e:
+                """
+                Example messages for out of context length:
+
+                1. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L914
+                ```json
+                {"object":"error","message":"This model\'s maximum context length is 32768 tokens. However, you requested 32818 tokens in the messages, Please reduce the length of the messages. None","type":"BadRequestError","param":null,"code":400}
+                ```
+                2. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L940
+                3. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L948
+                4. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/sampling_params.py#L463
+                """
+                result_content_str = e.response_content.decode()
+
+                is_out_of_context_length = e.status == 400 and (
+                    "context length" in result_content_str or "max_tokens" in result_content_str
+                )
+                if is_out_of_context_length:
+                    return NeMoGymChatCompletion(
+                        id="chtcmpl-123",
+                        object="chat.completion",
+                        created=int(time()),
+                        model=self.config.model,
+                        choices=[
+                            NeMoGymChoice(
+                                index=0,
+                                finish_reason="stop",
+                                message=NeMoGymChatCompletionMessage(
+                                    role="assistant",
+                                    content=None,
+                                    tool_calls=None,
+                                ),
+                            )
+                        ],
+                    )
+                else:
+                    raise e
 
         choice_dict = chat_completion_dict["choices"][0]
         if self.config.uses_reasoning_parser:
@@ -626,3 +784,4 @@ class VLLMConverter(BaseModel):
 
 if __name__ == "__main__":
     VLLMModel.run_webserver()
+
