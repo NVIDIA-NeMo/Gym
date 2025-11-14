@@ -4,6 +4,8 @@
 Verifies multiple-choice QA (MCQA) model outputs. 
 It consumes agent trajectories and returns a reward based on whether the assistant’s final output matches the gold answer.
 
+The dataset can be found in https://huggingface.co/datasets/nvidia/Nemotron-RL-knowledge-mcqa 
+
 ### Input schema
 Required fields:
 - `responses_create_params`: OpenAI Responses create params
@@ -113,12 +115,6 @@ config_paths="responses_api_agents/simple_agent/configs/simple_agent.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml,\
 resources_servers/mcqa/configs/mcqa.yaml"
 
-# This dataset already contains the instruction to add response inside \boxed{}
-ng_download_dataset_from_gitlab \
-    +dataset_name=syn_gpqa_v1.1 \
-    +version=1.1.2 \
-    +artifact_fpath=filtered_decontaminated.jsonl \
-    +output_fpath=data/MCQA_filtered_decontaminated.jsonl
 
 ng_run "+config_paths=[$config_paths]" \
     +simple_agent.responses_api_agents.simple_agent.resources_server.name=mcqa
