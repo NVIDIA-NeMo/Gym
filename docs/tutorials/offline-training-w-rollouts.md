@@ -1,361 +1,365 @@
-# Offline Training with Rollouts (SFT/DPO)
+# Rollout Collection Fundamentals
 
-**Goal**: Transform your generated rollouts into high-quality training data for supervised fine-tuning (SFT) and direct preference optimization (DPO).
+**Goal**: Master NeMo Gym's rollout collection system - the foundation for understanding agent behavior, creating training data, and evaluating performance.
 
-## Why Offline Training?
+## What Are Rollouts?
 
-**Offline training** uses pre-collected rollouts to improve AI models without real-time exploration. This approach is ideal when:
+**Rollouts are complete records of agent interactions** - from initial input through reasoning, tool calls, and final responses, including verification scores.
 
-- You have a working agent that demonstrates good behaviors
-- You want reproducible results - same data, consistent training outcomes
-- You need cost-effective training - no expensive exploration during training
-- You want to capture expert demonstrations - preserve successful patterns
-- You have limited compute - more efficient than reinforcement learning
+Think of rollouts as "interaction transcripts" that capture:
+- What the agent was asked to do (input)
+- How the agent reasoned (internal processing)  
+- What tools the agent used (function calls and responses)
+- How well the agent performed (verification scores)
+- The final response (output to user)
 
-**The offline training pipeline**: Generate rollouts → Filter and process → Train models → Deploy improved agents
+## Why Generate Rollouts?
 
-## Training Data Types
+Rollouts are the foundation for multiple critical use cases:
 
-### Supervised Fine-Tuning (SFT) Data
+- **Reinforcement Learning**: Generate reward signals and training experiences for RL algorithms
+- **Evaluation**: Benchmark agent performance across different scenarios
+- **Debugging**: Understand agent behavior patterns and identify failure modes
+- **Research**: Analyze agent reasoning strategies and tool usage patterns
+- **Quality Assurance**: Verify agent behavior before deployment
 
-**Purpose**: Train models to follow successful agent interaction patterns
+**NeMo Gym enables systematic rollout generation** - you configure agents and tasks, then NeMo Gym handles the complex orchestration of generating complete interaction data.
 
-**Data structure**: Input-output pairs showing complete agent conversations
+## The Rollout Generation Workflow
+
+<!-- TODO: Enable mermaid graph here i.e. ```mermaid``` -->
+```
+graph LR
+    A[Input Dataset] --> B[Agent Server]
+    B --> C[Model Reasoning]
+    C --> D[Tool Calls]
+    D --> E[Verification]
+    E --> F[Output Rollouts]
+    F --> G[Training Data]
+```
+
+1. **Input Dataset**: Tasks or questions in JSONL format
+2. **Agent Processing**: Your configured agent reasons about each task
+3. **Model Reasoning**: The underlying AI model generates responses and decisions
+4. **Tool Execution**: Agent calls available tools and processes responses  
+5. **Verification**: Resource server evaluates agent performance
+6. **Rollout Export**: Complete interaction traces saved in structured format
+
+## Prerequisites
+
+Before generating rollouts, ensure you have:
+- Agent server running
+- Input dataset in JSONL format
+- Model access: Either API credits or local model server (vLLM)
+
+### Input Data Sources
+
+You can use:
+- **Curated datasets**: Download datasets from NeMo Gym's Hugging Face collection
+  - TODO: Add link
+- **Custom datasets**: Create your own task-specific JSONL files
+- **Existing benchmarks**: Convert evaluation datasets to NeMo Gym format
+
+### Input JSONL Schema
+
+Each line in your input JSONL file should follow this schema:
+
 ```json
 {
-  "messages": [
-    {"role": "user", "content": "What's the weather in Paris?"},
-    {"role": "assistant", "tool_calls": [{"function": {"name": "get_weather", "arguments": "{\"city\": \"Paris\"}"}}]},
-    {"role": "tool", "content": "Temperature: 22°C, sunny"},
-    {"role": "assistant", "content": "The weather in Paris is 22°C and sunny."}
-  ],
-  "quality_score": 0.95
+    // REQUIRED: responses_create_params
+    "responses_create_params": {
+        // Input is an array Response input items (like messages) following OpenAI format (role + content)
+        "input": [
+            {"role": "user", "content": "Your task or question here"}
+        ],
+        // Optional: Other OpenAI Responses API parameters (tools, temperature, etc.)
+    },
+    // Optional: Resource server-specific metadata for verification
+    // e.g., expected answers, test cases, etc.
+    "expected_answer": "...",
+    "test_cases": "...",
+    "your_resource_specific_metadata_field": "..."
 }
 ```
 
-### Direct Preference Optimization (DPO) Data
 
-**Purpose**: Train models to prefer better responses over worse ones
+## Hands-On: Generating Your First Rollouts
 
-**Data structure**: Preference pairs with chosen vs rejected responses
-```json
-{
-  "prompt": [{"role": "user", "content": "Solve this math problem: 2x + 5 = 13"}],
-  "chosen": [
-    {"role": "assistant", "content": "I'll solve for x step by step:\n2x + 5 = 13\n2x = 13 - 5\n2x = 8\nx = 4"}
-  ],
-  "rejected": [
-    {"role": "assistant", "content": "The answer is x = 3"}
-  ],
-  "quality_difference": 0.7
-}
-```
+Let's generate rollouts using the **MultiNeedle** resource server, which tests reading comprehension across long documents.
 
-## Data Preparation Overview
-
-The offline training pipeline follows this logical flow:
-
-1. Collect rollouts using strategies from [Tutorial 5]
-- **SFT data**: Use consistent generation (low temperature, single rollout per task)
-- **DPO data**: Use diverse generation (higher temperature, 2 rollouts per task for comparison)
-1. Filter for quality - Remove poor rollouts before processing
-2. Format for training - Convert to SFT or DPO format based on your goals
-
-
-
-## Step 1: Quality Filtering and Curation
-
-Always filter your rollouts first before formatting them for training. Here are example approaches you can customize for your needs:
-
-### Automatic Filtering
-
-```python
-def filter_rollouts(input_file: str, output_file: str, filters: Dict):
-    """Apply automatic quality filters to rollouts."""
-    with open(input_file) as f, open(output_file, 'w') as out:
-        kept = 0
-        total = 0
-        
-        for line in f:
-            rollout = json.loads(line)
-            total += 1
-            
-            # Apply filters
-            if (rollout.get('reward', 0) >= filters.get('min_reward', 0.5) and
-                rollout.get('success', False) and
-                len(rollout.get('output', [])) >= filters.get('min_turns', 2) and
-                len(rollout.get('output', [])) <= filters.get('max_turns', 20)):
-                
-                out.write(line)
-                kept += 1
-        
-        print(f"Kept {kept}/{total} rollouts ({kept/total*100:.1f}%)")
-
-# Apply filters first
-filter_rollouts('raw_rollouts.jsonl', 'filtered_rollouts.jsonl', {
-    'min_reward': 0.7,
-    'min_turns': 3,
-    'max_turns': 15
-})
-```
-
-### Manual Curation (Optional)
-
-For critical applications, sample and manually review:
-
-```python
-def sample_for_review(input_file: str, sample_size: int = 50):
-    """Sample rollouts for manual review."""
-    import random
-    
-    with open(input_file) as f:
-        rollouts = [json.loads(line) for line in f]
-    
-    # Stratified sampling by reward
-    low_reward = [r for r in rollouts if r.get('reward', 0) < 0.5]
-    mid_reward = [r for r in rollouts if 0.5 <= r.get('reward', 0) < 0.8]
-    high_reward = [r for r in rollouts if r.get('reward', 0) >= 0.8]
-    
-    sample = (random.sample(low_reward, min(10, len(low_reward))) +
-              random.sample(mid_reward, min(20, len(mid_reward))) +
-              random.sample(high_reward, min(20, len(high_reward))))
-    
-    with open('manual_review_sample.jsonl', 'w') as out:
-        for rollout in sample:
-            out.write(json.dumps(rollout) + '\n')
-```
-
-**Note**: These are example filtering approaches. Customize the criteria, thresholds, and sampling strategies based on your specific domain and quality requirements.
-
-## Step 2: Format for Training
-
-Once you have filtered, high-quality rollouts, format them for your chosen training method:
-
-### SFT Data Processing
-
-Transform filtered rollouts into conversation format:
-
-```python
-import json
-from typing import List, Dict
-
-def process_sft_data(filtered_rollout_file: str, output_file: str):
-    """Convert filtered rollouts to SFT training format."""
-    with open(filtered_rollout_file) as f, open(output_file, 'w') as out:
-        for line in f:
-            rollout = json.loads(line)
-            sft_example = {
-                "messages": rollout['output'],
-                "reward": rollout['reward'],
-                "task_type": rollout.get('metadata', {}).get('task_type', 'general')
-            }
-            out.write(json.dumps(sft_example) + '\n')
-
-# Process filtered rollouts (no additional filtering needed)
-process_sft_data('filtered_rollouts.jsonl', 'sft_data.jsonl')
-```
-
-### DPO Data Processing
-
-Create preference pairs from filtered rollouts (requires 2 rollouts per task):
-
-```python
-def create_dpo_pairs(filtered_rollout_file: str, output_file: str):
-    """Create preference pairs from pairs of filtered rollouts."""
-    
-    # Group rollouts by task
-    task_groups = {}
-    with open(filtered_rollout_file) as f:
-        for line in f:
-            rollout = json.loads(line)
-            task_id = rollout.get('task_id') or hash(json.dumps(rollout['responses_create_params']['input']))
-            
-            if task_id not in task_groups:
-                task_groups[task_id] = []
-            task_groups[task_id].append(rollout)
-    
-    # Create preference pairs from pairs of rollouts
-    pairs = []
-    for task_rollouts in task_groups.values():
-        if len(task_rollouts) == 2:  # DPO works with pairs
-            rollout_1, rollout_2 = task_rollouts
-            
-            # Determine which is better based on reward
-            if rollout_1['reward'] > rollout_2['reward']:
-                chosen, rejected = rollout_1, rollout_2
-            else:
-                chosen, rejected = rollout_2, rollout_1
-            
-            # Only create pair if there's meaningful difference
-            quality_diff = chosen['reward'] - rejected['reward']
-            if quality_diff >= 0.1:  # Minimum difference threshold
-                pairs.append({
-                    "prompt": chosen['responses_create_params']['input'],
-                    "chosen": chosen['output'],
-                    "rejected": rejected['output'],
-                    "quality_difference": quality_diff
-                })
-    
-    # Save preference pairs
-    with open(output_file, 'w') as out:
-        for pair in pairs:
-            out.write(json.dumps(pair) + '\n')
-    
-    print(f"Created {len(pairs)} preference pairs")
-
-# Create DPO pairs from filtered rollouts
-create_dpo_pairs('filtered_rollouts.jsonl', 'dpo_pairs.jsonl')
-```
-
-## Training Integration
-
-Once you have your processed data (`sft_data.jsonl` or `dpo_pairs.jsonl`), you can use any post-training framework for SFT or DPO:
-
-### Standard Data Formats
-
-SFT data follows the conversation format used by most training libraries:
-```json
-{"messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}
-```
-
-DPO data follows the preference pair format:
-```json
-{"prompt": ["..."], "chosen": ["..."], "rejected": ["..."]}
-```
-
-
-## Validation and Evaluation
-
-### Pre-Training Validation
-
-Before training, validate your data quality by checking:
-- **Dataset size**: Sufficient examples for training objectives
-- **Reward distribution**: Reasonable range and average quality scores  
-- **Length distribution**: Appropriate conversation lengths
-- **Task diversity**: Balanced representation across different task types
-
-### Post-Training Evaluation
-
-Test your improved model by generating new rollouts on held-out evaluation tasks:
+### Step 1: Start the MultiNeedle Agent
 
 ```bash
-# Generate rollouts with improved model
-ng_collect_rollouts +agent_name=improved_agent \
-    +input_jsonl_fpath=evaluation_tasks.jsonl \
-    +output_jsonl_fpath=post_training_rollouts.jsonl
+# Start the multineedle agent server
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/multineedle/configs/multineedle.yaml"
+ng_run "+config_paths=[${config_paths}]"
 ```
 
-Compare key metrics like average reward, success rate, and task-specific performance against your baseline to measure improvement.
+**✅ Success Check**: You should see 3 servers running including the `multineedle_simple_agent`.
+
+### Step 3: Generate Rollouts
+
+**What this dataset contains**: Complex reading comprehension tasks where agents must find specific information ("needles") within long documents ("haystacks").
+
+In a separate terminal, run:
+```bash
+# Generate rollouts from the dataset
+ng_collect_rollouts +agent_name=multineedle_simple_agent \
+    +input_jsonl_fpath=resources_servers/multineedle/data/example.jsonl \
+    +output_jsonl_fpath=results/multineedle_rollouts.jsonl \
+    +limit=5 \
+    +num_repeats=2 \
+    +num_samples_in_parallel=3 \
+    +responses_create_params.max_output_tokens=8192
+```
+
+**What's happening**:
+- `limit=5`: Process only the first 5 examples (for quick testing)
+- `num_repeats=2`: Generate 2 rollouts per example (10 total rollouts)
+- `num_samples_in_parallel=3`: Process 3 requests simultaneously
+- `max_output_tokens=8192`: Allow longer responses for complex reasoning
+
+### Step 4: View Your Rollouts
+
+```bash
+# Launch the rollout viewer
+ng_viewer +jsonl_fpath=results/multineedle_rollouts.jsonl
+```
+
+**What you'll see**: An interactive viewer showing agent reasoning, tool calls, and verification scores for each rollout.
+
+## Understanding Rollout Data Structure
+
+Each rollout contains the complete interaction trace:
+
+```json
+{
+  "responses_create_params": {
+    "input": [
+      {"role": "user", "content": "Find the hidden information in this document..."}
+    ],
+    "tools": [{"type": "function", "name": "search_document", "..."}]
+  },
+  "output": [
+    {"role": "assistant", "content": "I'll search the document for the information."},
+    {"role": "assistant", "tool_calls": [{"function": {"name": "search_document", "arguments": "..."}}]},
+    {"role": "tool", "content": "Found: The answer is X"},
+    {"role": "assistant", "content": "Based on my search, the answer is X."}
+  ],
+  "reward": 1.0,
+  "success": true,
+  "metadata": {
+    "reasoning_steps": 3,
+    "tool_calls_made": 1,
+    "verification_score": 0.95
+  }
+}
+```
+
+**Key components**:
+- **responses_create_params**: Original task and available tools
+- **output**: Complete conversation including tool calls and responses
+- **reward**: Verification score from the resource server
+- **metadata**: Additional metrics for analysis
+
+## Rollout Generation Parameters
+
+### Essential Parameters
+
+```bash
+ng_collect_rollouts \
+    +agent_name=your_agent_name \              # Which agent to use
+    +input_jsonl_fpath=input/tasks.jsonl \     # Input dataset
+    +output_jsonl_fpath=output/rollouts.jsonl  # Where to save results
+```
+
+### Data Control Parameters
+
+```bash
++limit=100 \                    # Limit examples processed (null = all)
++num_repeats=3 \                # Rollouts per example (null = 1)  
++num_samples_in_parallel=5      # Concurrent requests (null = default)
+```
+
+### Model Behavior Parameters
+
+```bash
++responses_create_params.max_output_tokens=4096 \     # Response length limit
++responses_create_params.temperature=0.7 \            # Randomness (0-1)
++responses_create_params.top_p=0.9                    # Nucleus sampling
+```
+
+## Generation Strategies
+
+### Strategy 1: Consistent Behavior Analysis
+
+```bash
+# Generate single, consistent rollouts for analysis
+ng_collect_rollouts +agent_name=your_agent \
+    +input_jsonl_fpath=analysis_tasks.jsonl \
+    +output_jsonl_fpath=consistent_rollouts.jsonl \
+    +num_repeats=1 \
+    +responses_create_params.temperature=0.1    # Low temperature for consistency
+```
+
+**Use case**: Understanding typical agent behavior patterns.
+
+### Strategy 2: Behavioral Diversity Exploration
+
+```bash
+# Generate multiple responses to explore agent capabilities
+ng_collect_rollouts +agent_name=your_agent \
+    +input_jsonl_fpath=evaluation_tasks.jsonl \
+    +output_jsonl_fpath=diverse_rollouts.jsonl \
+    +num_repeats=4 \                            # Multiple attempts per task
+    +responses_create_params.temperature=0.8    # Higher temperature for diversity
+```
+
+**Use case**: Exploring the range of agent behaviors and capabilities.
+
+### Strategy 3: Performance Evaluation
+
+```bash
+# Comprehensive evaluation across full dataset  
+ng_collect_rollouts +agent_name=your_agent \
+    +input_jsonl_fpath=benchmark_full.jsonl \
+    +output_jsonl_fpath=evaluation_rollouts.jsonl \
+    +limit=null \                               # Process entire dataset
+    +num_repeats=1 \
+    +num_samples_in_parallel=10                 # Faster processing
+```
+
+**Use case**: Establishing comprehensive performance baselines.
+
+## Monitoring Generation Progress
+
+During generation, NeMo Gym shows real-time metrics:
+
+```
+Collecting rollouts: 100%|████████████| 50/50 [02:45<00:00,  1.82it/s]
+{
+    "avg_reward": 0.73,
+    "success_rate": 0.68,
+    "avg_tool_calls": 2.1,
+    "avg_response_length": 847
+}
+```
+
+**Key metrics to monitor**:
+- **Average reward**: Higher is generally better (depends on verification)
+- **Success rate**: Percentage of tasks completed successfully  
+- **Tool usage**: Average tools called per task
+- **Response length**: Token usage and verbosity
+
+## Analyzing Generated Data
+
+### Interactive Exploration
+
+```bash
+# View rollouts interactively
+ng_viewer +jsonl_fpath=results/your_rollouts.jsonl
+```
+
+### Command-Line Analysis
+
+```bash
+# Filter by success rate
+jq 'select(.success == true)' results/your_rollouts.jsonl > successful_rollouts.jsonl
+
+# Analyze reward distribution
+jq '.reward' results/your_rollouts.jsonl | sort -n | uniq -c
+
+# Count tool usage patterns
+jq '.output[] | select(.tool_calls) | .tool_calls[].function.name' rollouts.jsonl | sort | uniq -c
+```
 
 ## Best Practices
 
-### 1. Data Quality Over Quantity
-
-```python
-# Prefer high-quality filtered data over large noisy datasets
-filter_criteria = {
-    'min_reward': 0.8,        # High threshold for SFT
-    'min_success_rate': 0.9,
-    'require_tool_usage': True  # Domain-specific requirements
-}
-```
-
-### 2. Balanced Datasets
-
-```python
-# Ensure diverse task representation
-def balance_dataset(input_file: str, output_file: str, max_per_category: int = 100):
-    task_counts = {}
-    balanced_data = []
-    
-    with open(input_file) as f:
-        for line in f:
-            data = json.loads(line)
-            task_type = data.get('metadata', {}).get('task_type', 'general')
-            
-            if task_counts.get(task_type, 0) < max_per_category:
-                balanced_data.append(data)
-                task_counts[task_type] = task_counts.get(task_type, 0) + 1
-    
-    with open(output_file, 'w') as out:
-        for data in balanced_data:
-            out.write(json.dumps(data) + '\n')
-```
-
-### 3. Iterative Improvement
+### 1. Start Small, Scale Up
 
 ```bash
-# Iteration cycle
-1. Generate rollouts with current agent
-2. Filter and prepare training data  
-3. Train improved model
-4. Deploy and evaluate
-5. Use improved agent to generate better rollouts
+# Development: Small batches for quick iteration
++limit=10 +num_repeats=1
+
+# Production: Full datasets with multiple samples
++limit=null +num_repeats=3
 ```
 
-### 4. Version Control
+### 2. Control Parallel Processing
 
 ```bash
-# Track data versions
-mkdir -p training/v1.0/
-mv sft_data.jsonl training/v1.0/
-mv dpo_pairs.jsonl training/v1.0/
+# Conservative for API rate limits
++num_samples_in_parallel=5    
 
-# Track model versions  
-mkdir -p models/agent_v1.0/
-cp -r ./results/* models/agent_v1.0/
+# Aggressive for local models with sufficient resources
++num_samples_in_parallel=20   
 ```
+
+### 3. Version Your Data
+
+```bash
+# Include version info in output paths
++output_jsonl_fpath=data/rollouts_v2.0_$(date +%Y%m%d).jsonl
+```
+
+### 4. Monitor Resource Usage
+
+- **API models**: Watch rate limits and token consumption
+- **Local models**: Monitor GPU memory and processing speed
+- **Storage**: Rollout files can become large with comprehensive datasets
 
 ## Troubleshooting
 
-### Problem: Poor Training Data Quality
+### Problem: Low Success Rate
 
 ```
-Low average rewards, inconsistent behaviors
+"success_rate": 0.23
+```
+
+**Possible causes**:
+- Tasks too difficult for current agent
+- Verification criteria too strict
+- Insufficient context or tools
+
+**Solutions**:
+- Simplify input tasks or add examples
+- Review verification logic in resource server
+- Increase `max_output_tokens` for complex reasoning
+
+### Problem: Inconsistent Data Quality
+
+```
+Wide variation in reward scores
 ```
 
 **Solutions**:
-- Increase `min_reward` threshold for filtering
-- Generate rollouts with lower temperature (more consistent)
-- Add manual curation step
-- Improve base agent before data collection
+- Lower temperature for more consistent responses
+- Improve prompt clarity in input dataset
+- Refine verification criteria in resource server
+- Filter rollouts by minimum reward threshold
 
-### Problem: Insufficient Data Diversity
-
-```
-Model overfits to limited patterns
-```
-
-**Solutions**:
-- Generate rollouts with higher temperature
-- Use more diverse input tasks
-- Collect data from multiple agent configurations
-- Balance dataset across task types
-
-### Problem: Training Instability
+### Problem: Generation Too Slow
 
 ```
-Loss doesn't converge, model performance degrades
+Processing speed slower than expected
 ```
 
 **Solutions**:
-- Check data format compatibility with training framework
-- Reduce learning rate
-- Add regularization
-- Filter out extremely long or short conversations
+- Increase `num_samples_in_parallel`
+- Use faster models for initial exploration
+- Process smaller batches during development
+- Consider local models for high-volume generation
 
 ## What You've Learned
 
-You now know how to transform rollouts into training data:
+You now understand NeMo Gym's rollout generation system:
 
-- **Data preparation strategies** for SFT and DPO
-- **Quality filtering and curation** techniques  
-- **Evaluation methods** to measure improvement
-- **Best practices** for sustainable offline training workflows
+- **Core concepts**: What rollouts are and why they're fundamental to NeMo Gym
+- **Generation workflow**: From input tasks to complete interaction records
+- **Practical skills**: Using `ng_collect_rollouts` with different strategies
+- **Data analysis**: Understanding rollout structure and analyzing results
+- **Best practices**: Efficient and reliable rollout generation
 
-**Next steps**: 
-<!-- TODO: Add link [Online Training with Rollouts (RL)](07-online-training.md) -->
-<!-- - **Online Training with Rollouts (RL) (Coming soon!)** - Learn real-time training approaches -->
-<!-- TODO: Add link [Building Custom Resource Servers](08-building-custom-resources.md) -->
-<!-- - **Building Custom Resource Servers (Coming soon!)** - Create domain-specific training data -->
-- **[Configuration Management]**
+<!-- TODO: Add link [Next: Collecting Rollouts for Reinforcement Learning](06-rl-rollout-collection.md) -->
+→ **[Next: Offline Training with Rollouts (SFT/DPO)](07-sft-dpo-rollout-collection.md)**
