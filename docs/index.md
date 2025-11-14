@@ -97,7 +97,7 @@ Home <self>
 :hidden:
 :maxdepth: 1
 
-concepts/core-concepts.md
+concepts/core-abstractions.md
 concepts/task-verification.md
 concepts/rollout-collection-fundamentals.md
 concepts/configuration-system.md
