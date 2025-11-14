@@ -94,6 +94,7 @@ You can also use `Ctrl+C` in Terminal 1 to stop the `ng_run` process, then run `
 :hidden:
 :maxdepth: 1
 
+Overview <get-started/index>
 about/glossary.md
 tutorials/01-concepts.md
 get-started/setup-installation.md
@@ -111,14 +112,12 @@ how-to-faq.md
 
 Overview <tutorials/index>
 tutorials/offline-training-w-rollouts
-tutorials/configuration-management
 ```
 
 
 ```{toctree}
 :caption: Development
 :hidden:
-
 
 apidocs/index.rst
 ```

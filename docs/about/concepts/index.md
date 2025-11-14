@@ -59,7 +59,7 @@ Explore how resource servers score agent outputs with `verify()` implementations
 ## Continue Learning
 
 - Reinforce the architecture concepts by stepping through {doc}`../../get-started/first-agent` before exploring large-scale collection.
-- Apply the verification patterns in practice with the {doc}`../../get-started/verifying-agent-results` tutorial, then move on to high-volume data generation in {doc}`../../get-started/collecting-rollouts`.
+- Learn about task verification with the {doc}`task-verification` tutorial, then move on to high-volume data generation in {doc}`../../get-started/collecting-rollouts`.
 - Catalog the services you plan to deploy by referencing {doc}`../features` once the core concepts are familiar.
 
 ---
@@ -68,8 +68,5 @@ Explore how resource servers score agent outputs with `verify()` implementations
 :hidden:
 :maxdepth: 1
 
-Core Abstractions <core-abstractions>
-Configuration System <configuration-system>
 Rollout Collection Fundamentals <rollout-collection-fundamentals>
-Verifying Agent Results <verifying-agent-results>
 ```
