@@ -97,7 +97,9 @@ Home <self>
 :hidden:
 :maxdepth: 2
 
+about/index.md
 Concepts <about/concepts/index>
+Ecosystem <about/ecosystem>
 ```
 
 ```{toctree}
@@ -107,6 +109,7 @@ Concepts <about/concepts/index>
 
 Overview <get-started/index>
 get-started/setup-installation.md
+get-started/rollout-collection.md
 ```
 
 
@@ -115,6 +118,7 @@ get-started/setup-installation.md
 :hidden:
 :maxdepth: 1
 
+tutorials/index.md
 tutorials/offline-training-w-rollouts
 how-to-faq.md
 ```
