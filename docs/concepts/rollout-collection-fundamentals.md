@@ -1,16 +1,16 @@
 # Rollout Collection Fundamentals
 
-**Goal**: Master NeMo Gym's rollout collection system - the foundation for understanding agent behavior, creating training data, and evaluating performance.
+**Goal**: Master NeMo Gym's rollout collection system - the foundation for understanding model behavior, creating training data, and evaluating performance.
 
 ## What Are Rollouts?
 
-**Rollouts are complete records of agent interactions** - from initial input through reasoning, tool calls, and final responses, including verification scores.
+**A rollout is complete record of a task instance execution** - from initial input through reasoning, tool calls, and final responses, including verification scores.
 
 Think of rollouts as "interaction transcripts" that capture:
-- What the agent was asked to do (input)
-- How the agent reasoned (internal processing)  
-- What tools the agent used (function calls and responses)
-- How well the agent performed (verification scores)
+- What the model was asked to do (input)
+- How the model reasoned (internal processing)  
+- What tools were used (tool calls and tool responses)
+- How well the task was achieved (verification scores)
 - The final response (output to user)
 
 ## Why Generate Rollouts?
@@ -18,12 +18,12 @@ Think of rollouts as "interaction transcripts" that capture:
 Rollouts are the foundation for multiple critical use cases:
 
 - **Reinforcement Learning**: Generate reward signals and training experiences for RL algorithms
-- **Evaluation**: Benchmark agent performance across different scenarios
-- **Debugging**: Understand agent behavior patterns and identify failure modes
-- **Research**: Analyze agent reasoning strategies and tool usage patterns
-- **Quality Assurance**: Verify agent behavior before deployment
+- **Evaluation**: Benchmark task performance across different scenarios
+- **Debugging**: Understand model behavior patterns and identify failure modes
+- **Research**: Analyze model reasoning strategies and tool usage patterns
+- **Quality Assurance**: Verify model behavior before deployment
 
-**NeMo Gym enables systematic rollout generation** - you configure agents and tasks, then NeMo Gym handles the complex orchestration of generating complete interaction data.
+**NeMo Gym enables systematic rollout generation** - you configure tasks, then NeMo Gym handles the complex orchestration of generating complete interaction data.
 
 ## The Rollout Generation Workflow
 
@@ -39,16 +39,15 @@ graph LR
 ```
 
 1. **Input Dataset**: Tasks or questions in JSONL format
-2. **Agent Processing**: Your configured agent reasons about each task
-3. **Model Reasoning**: The underlying AI model generates responses and decisions
-4. **Tool Execution**: Agent calls available tools and processes responses  
-5. **Verification**: Resource server evaluates agent performance
-6. **Rollout Export**: Complete interaction traces saved in structured format
+2. **Model Reasoning**: The underlying AI model generates responses and decisions
+3. **Tool Execution**: Agent calls available tools and processes responses  
+4. **Verification**: Resource server evaluates agent performance
+5. **Rollout Export**: Complete interaction traces saved in structured format
 
 ## Prerequisites
 
 Before generating rollouts, ensure you have:
-- Agent server running
+- Gym servers running
 - Input dataset in JSONL format
 - Model access: Either API credits or local model server (vLLM)
 
@@ -56,7 +55,6 @@ Before generating rollouts, ensure you have:
 
 You can use:
 - **Curated datasets**: Download datasets from NeMo Gym's Hugging Face collection
-  - TODO: Add link
 - **Custom datasets**: Create your own task-specific JSONL files
 - **Existing benchmarks**: Convert evaluation datasets to NeMo Gym format
 
@@ -98,7 +96,7 @@ ng_run "+config_paths=[${config_paths}]"
 
 **✅ Success Check**: You should see 3 servers running including the `example_multi_step_simple_agent`.
 
-### Step 3: Generate Rollouts
+### Step 2: Generate Rollouts
 
 **What this dataset contains**: Complex reading comprehension tasks where agents must find specific information ("needles") within long documents ("haystacks").
 
