@@ -21,7 +21,9 @@ The judge prompt is fully configurable via server config.
 # limitations under the License.
 from __future__ import annotations
 
+import asyncio
 import re
+from contextlib import nullcontext
 from typing import Any, Optional
 
 from fastapi import FastAPI
@@ -39,6 +41,7 @@ from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    empty_response,
 )
 
 
@@ -58,8 +61,10 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
 
+    judge_endpoint_max_concurrency: Optional[int] = None
+
     judge_system_message: Optional[str] = None
-    judge_prompt_template: str
+    judge_prompt_template_fpath: str = "prompt_templates/equivalence_llm_judge.txt"
     judge_equal_label: str = "[[A=B]]"
     judge_not_equal_label: str = "[[A!=B]]"
     # Optional regex to extract the question from the last user message.
@@ -130,7 +135,7 @@ class JudgeEvaluation(BaseModel):
 
 
 class LLMJudgeVerifyResponse(BaseVerifyResponse):
-    expected_answer: str
+    judge_expected_answer: str
     judge_evaluations: list[JudgeEvaluation]
 
 
@@ -249,6 +254,18 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
 
     config: LLMJudgeResourcesServerConfig
 
+    def model_post_init(self, context):
+        self._judge_endpoint_max_concurrency = nullcontext()
+        if self.config.judge_endpoint_max_concurrency is not None:
+            self._judge_endpoint_max_concurrency = asyncio.Semaphore(
+                value=self.config.judge_endpoint_max_concurrency,
+            )
+
+        with open(self.config.judge_prompt_template_fpath, "r") as f:
+            self._judge_prompt_template = f.read().strip()
+
+        return super().model_post_init(context)
+
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         return app
@@ -304,9 +321,8 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
     ) -> LLMJudgeVerifyResponse:
         """Create verification response with reward and evaluations."""
         payload = body.model_dump()
-        payload.pop("expected_answer", None)
         return LLMJudgeVerifyResponse(
-            **payload, reward=reward, expected_answer=expected, judge_evaluations=evaluations
+            **payload, reward=reward, judge_expected_answer=expected, judge_evaluations=evaluations
         )
 
     async def _handle_first_pass_failed(
@@ -419,7 +435,7 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         not_equal_label = cfg.judge_not_equal_label
 
         responses_create_params = cfg.judge_responses_create_params.model_copy(deep=True)
-        prompt_template = cfg.judge_prompt_template
+        prompt_template = self._judge_prompt_template
         system_message = cfg.judge_system_message
 
         user_prompt = prompt_template.format(
@@ -432,12 +448,20 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         msgs.append(NeMoGymEasyInputMessage(role="user", content=user_prompt))
         responses_create_params.input = msgs
 
-        response = await self.server_client.post(
-            server_name=cfg.judge_model_server.name,
-            url_path="/v1/responses",
-            json=responses_create_params,
-        )
-        judge_response = NeMoGymResponse.model_validate(await response.json())
+        async with self._judge_endpoint_max_concurrency:
+            try:
+                response = await self.server_client.post(
+                    server_name=cfg.judge_model_server.name,
+                    url_path="/v1/responses",
+                    json=responses_create_params,
+                )
+                judge_response = NeMoGymResponse.model_validate(await response.json())
+            except Exception as e:
+                print(
+                    f"DEBUG: LLMJudgeResourcesServer: server client HTTP POST exception: {type(e).__name__} {e}",
+                    flush=True,
+                )
+                judge_response = empty_response(responses_create_params)
         eval_record = JudgeEvaluation(
             responses_create_params=responses_create_params,
             response=judge_response,
