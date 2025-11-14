@@ -4,6 +4,9 @@ mini_swe_agent_resources_server:
       entrypoint: app.py
       domain: coding
       verified: false
+      description: A software development with mini-swe-agent orchestration
+      value: Improve software development capabilities, like SWE-bench
+      dataset_name: Nemotron-RL-coding-mini_swe_agent
 mini_swe_simple_agent:
   responses_api_agents:
     mini_swe_agent:

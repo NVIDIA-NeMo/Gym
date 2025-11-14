@@ -11,6 +11,9 @@ math_with_judge:
       should_use_judge: true
       domain: math
       verified: false
+      description: Math dataset with math-verify and LLM-as-a-judge
+      value: Improve math capabilities including AIME 24 / 25
+      dataset_name: Nemotron-RL-math-OpenMathReasoning
 math_with_judge_simple_agent:
   responses_api_agents:
     simple_agent:
