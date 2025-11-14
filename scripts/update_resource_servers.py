@@ -133,6 +133,9 @@ def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:  # 
             example_only_prefix = "example_"
             is_example_only_prefix = server_name.startswith(example_only_prefix)
 
+            if not yaml_data["dataset_name"] and not is_example_only_prefix:
+                continue
+
             display_name = (
                 (server_name[len(example_only_prefix) :] if is_example_only_prefix else server_name)
                 .replace("_", " ")
