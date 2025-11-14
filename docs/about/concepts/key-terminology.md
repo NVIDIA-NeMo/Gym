@@ -1,3 +1,5 @@
+(key-terminology)=
+
 # Key Terminology
 
 Essential vocabulary for agent training, RL workflows, and NeMo Gym. This glossary defines terms you'll encounter throughout the tutorials and documentation.

@@ -1,3 +1,5 @@
+(configuration-management)=
+
 # Configuration Management
 
 NeMo Gym uses a powerful configuration system with three sources that are resolved in this order:
