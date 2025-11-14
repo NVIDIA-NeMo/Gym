@@ -99,7 +99,7 @@ Home <self>
 
 concepts/core-abstractions.md
 concepts/task-verification.md
-concepts/rollout-collection-fundamentals.md
+concepts/rollout-collection.md
 concepts/configuration-system.md
 concepts/key-terminology.md
 ```
