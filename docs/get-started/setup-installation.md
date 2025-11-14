@@ -2,7 +2,7 @@
 
 # Setup and Installation
 
-Welcome to NeMo Gym! In this tutorial, you will install NeMo Gym, configure your training environment, and run your first agent interaction—a simple weather agent that uses tools to answer questions. This allows you to test your environment independent of the training workflow.
+Welcome to NeMo Gym! In this tutorial, you will install NeMo Gym, configure your training environment, and run your first rollout collection—using a simple weather example to verify all components work together. This allows you to test your environment before collecting rollouts at scale.
 
 :::{card}
 
