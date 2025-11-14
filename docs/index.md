@@ -2,13 +2,13 @@
 
 # NeMo Gym Documentation
 
-NeMo Gym is a framework for building reinforcement learning (RL) training environments. Gym is used to create data for RL training, and is especially tailored for agentic model training.
+NeMo Gym is a framework for building reinforcement learning (RL) training environments large language models (LLMs). Gym provides training environment development scaffolding and training environment patterns such as multi-step, multi-turn, and user modeling scenarios.
 
-At the core of NeMo Gym are three server concepts: **Responses API Model** servers are model endpoints, **Resources** servers contain tool implementations and verification logic, and **Agent** servers orchestrate the interaction between models and resources.
+At the core of NeMo Gym are three server concepts: **Responses API Model servers** are model endpoints, **Resources servers** contain tool implementations and verification logic, and **Response API Agent servers** orchestrate the interaction between models and resources.
 
 ## Quickstart
 
-Run a simple agent and start collecting rollouts for training in under 5 minutes.
+Run a training environment and start collecting rollouts for training in under 5 minutes.
 
 ::::{tab-set}
 
@@ -18,8 +18,12 @@ Run a simple agent and start collecting rollouts for training in under 5 minutes
 # Clone and install dependencies
 git clone git@github.com:NVIDIA-NeMo/Gym.git
 cd Gym
+
+# Install UV if not already available
 curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.local/bin/env
+
+# Create a virtual environment and install Gym
 uv venv --python 3.12 && source .venv/bin/activate
 uv sync --extra dev --group docs
 
@@ -37,7 +41,8 @@ policy_model_name: gpt-4.1-2025-04-14" > env.yaml
 
 ```bash
 # Start servers (this will keep running)
-config_paths="resources_servers/example_simple_weather/configs/simple_weather.yaml,responses_api_models/openai_model/configs/openai_model.yaml"
+config_paths="resources_servers/example_simple_weather/configs/simple_weather.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml"
 ng_run "+config_paths=[${config_paths}]"
 ```
 
@@ -45,7 +50,7 @@ ng_run "+config_paths=[${config_paths}]"
 
 ```bash
 # In a NEW terminal, activate environment
-cd Gym && source .venv/bin/activate
+source .venv/bin/activate
 
 # Interact with your agent
 python responses_api_agents/simple_agent/client.py
@@ -77,14 +82,7 @@ This generates training data with verification scores!
 
 :::{tab-item} 4. Clean Up Servers
 
-**Terminal 1** (or any terminal with venv activated):
-
-```bash
-# Stop all servers and clean up Ray processes
-ray stop
-```
-
-You can also use `Ctrl+C` in Terminal 1 to stop the `ng_run` process, then run `ray stop` to clean up.
+**Terminal 1** with the running servers: Ctrl+C to stop the `ng_run` process.
 
 :::
 ::::
