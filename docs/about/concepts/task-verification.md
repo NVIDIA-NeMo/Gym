@@ -1,4 +1,4 @@
-# Verifying Agent Results
+# Task verification
 
 **Goal**: Understand how NeMo Gym evaluates agent performance and what verification means for training
 
