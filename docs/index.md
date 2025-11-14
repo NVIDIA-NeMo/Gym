@@ -99,7 +99,7 @@ get-started/setup-installation.md
 get-started/first-agent.md
 tutorials/04-verifying-results.md
 tutorials/offline-training-w-rollouts.md
-tutorials/07-sft-dpo-rollout-collection.md
+about/concepts/rollout-collection-fundamentals.md
 about/concepts/configuration-system.md
 how-to-faq.md
 ```
