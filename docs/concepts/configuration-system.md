@@ -140,22 +140,24 @@ policy_model:
 
 ## Troubleshooting
 
-NeMo Gym validates your configuration and provides helpful error messages:
+NeMo Gym validates your configuration and provides helpful error messages.
 
-### Problem: Missing Values
+:::{dropdown} "Missing mandatory value"
 ```
 omegaconf.errors.MissingMandatoryValue: Missing mandatory value: policy_api_key
 ```
 **Fix**: Add the missing value to `env.yaml` or command line.
+:::
 
-### Problem: Invalid Server References
+:::{dropdown} "Could not find X in the list of available servers"
 ```
 AssertionError: Could not find type='resources_servers' name='typo_weather' 
 in the list of available servers: [simple_weather, math_with_judge, ...]
 ```
 **Fix**: Check your server name spelling and ensure the config is loaded.
+:::
 
-### Problem: Almost-Server Detected (Configuration Validation)
+:::{dropdown} "Almost-Servers Detected"
 Example:
 ```bash
 ═══════════════════════════════════════════════════
@@ -180,7 +182,7 @@ Configuration Warnings: Almost-Servers Detected
 
 **Fix**: Update the configuration based on the validation errors shown. The warning will detail exactly which fields are problematic.
 
-### Strict Validation Mode
+#### Strict Validation Mode
 
 By default, invalid servers will throw an error. You can bypass strict validation and just show a warning:
 
@@ -202,3 +204,5 @@ ng_run "+config_paths=[config.yaml]" +error_on_almost_servers=false
 - All configuration issues are still detected and warnings are printed
 - NeMo Gym continues execution despite the invalid configurations
 - Invalid servers are skipped, and valid servers will attempt to start
+
+:::

@@ -2,8 +2,6 @@
 
 # Setup and Installation
 
-Welcome to NeMo Gym! In this tutorial, you will install NeMo Gym, configure your training environment—using a simple weather example to verify all components work together. This allows you to test your environment before collecting rollouts at scale.
-
 :::{card}
 
 **Goal**: Get NeMo Gym installed and servers running, then verify all components work together.
@@ -119,7 +117,8 @@ Check your `env.yaml` file has the correct API key format. Do not surround your 
 
 ```bash
 # Define which servers to start
-config_paths="resources_servers/example_simple_weather/configs/simple_weather.yaml,responses_api_models/openai_model/configs/openai_model.yaml"
+config_paths="resources_servers/example_simple_weather/configs/simple_weather.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml"
 
 # Start all servers
 ng_run "+config_paths=[${config_paths}]"

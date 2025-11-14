@@ -93,6 +93,15 @@ Home <self>
 ```
 
 ```{toctree}
+:caption: Get Started
+:hidden:
+:maxdepth: 1
+
+Overview <get-started/index>
+get-started/setup-installation.md
+```
+
+```{toctree}
 :caption: Concepts
 :hidden:
 :maxdepth: 1
@@ -102,15 +111,6 @@ concepts/task-verification.md
 concepts/rollout-collection.md
 concepts/configuration-system.md
 concepts/key-terminology.md
-```
-
-```{toctree}
-:caption: Get Started
-:hidden:
-:maxdepth: 1
-
-Overview <get-started/index>
-get-started/setup-installation.md
 ```
 
 ```{toctree}
