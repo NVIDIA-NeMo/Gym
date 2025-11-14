@@ -2,18 +2,13 @@
 
 Before diving into code, let's understand the three core abstractions in NeMo Gym.
 
-> [!TIP]
-> If you are new to reinforcement learning for LLMs, we recommend you review **[Key Terminology]** first.
+> If you are new to reinforcement learning for LLMs, we recommend you review **[Key Terminology](key-terminology)** first.
 
-## Overview
+::::{tab-set}
 
-<div align="center">
-  <img src="../../_images/product_overview.png" alt="NeMo Gym Architecture" width="800">
-</div>
+:::{tab-item} Model
 
-## 1. Models
-
-The LLM that performs text inference - stateless, single-call text generation without conversation memory or orchestration
+Responses API Model servers are model endpoints that performs text inference - stateless, single-call text generation without conversation memory or orchestration
 
 **Available Implementations:**
 - `openai_model`: Direct integration with OpenAI's Responses API  
@@ -21,10 +16,11 @@ The LLM that performs text inference - stateless, single-call text generation wi
 
 **Configuration:** Models are configured with API endpoints and credentials via YAML files in `responses_api_models/*/configs/`
 
+:::
 
-## 2. Resources
+:::{tab-item} Resources
 
-Servers that provide tools for agents to use and verifiers that score agent performance on tasks. NeMo Gym contains a variety of NVIDIA and community contributed resources that you may wish to utilize. We also have tutorials on how to add your own Resource server.
+Resources servers provide tools implementations that can be invoked via tool calling and verification logic that measure task performance. NeMo Gym contains a variety of NVIDIA and community contributed resources that you may wish to utilize. We also have tutorials on how to add your own Resource server.
 
 **Resources Provide**
 - **Tools**: Functions agents can call (e.g., `get_weather`, `search_web`)
@@ -41,10 +37,11 @@ Servers that provide tools for agents to use and verifiers that score agent perf
 
 **Configuration**: See resource-specific config files in `resources_servers/*/configs/`
 
+:::
 
-## 3. Agents
+:::{tab-item} Agents
 
-The orchestration layer that connects models to resources.
+Responses API Agent servers orchestrate the interaction between models and resources. An agent can also referred to as a "training environment".
 
 - Route requests to the right model
 - Provide tools to the model
@@ -66,6 +63,8 @@ your_agent_name:                     # server ID
         name: policy_model           
 ```
 
+:::
+::::
 
 
 ## How They Work Together
@@ -98,16 +97,14 @@ Let's trace through a weather request:
 
 7. **Model** → **Agent** → **User**: "It's cold in NYC, bring a jacket!"
 
+
+<div align="center">
+  <img src="../../_images/product_overview.png" alt="NeMo Gym Architecture" width="800">
+</div>
+
 ## Key Benefits of This Architecture
 
 - **Reusable**: Same model can work with different tools
 - **Testable**: Each component can be tested independently  
 - **Scalable**: Components can run on different servers
 - **Flexible**: Mix and match any combination
-
-
-## What's Next?
-
-Now that you understand the concepts, let's get everything installed and running.
-
-→ **Next: [Setup and Installation]**
