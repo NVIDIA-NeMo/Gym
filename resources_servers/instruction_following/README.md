@@ -4,13 +4,7 @@
 
 Evaluates language model responses against instruction-following criteria using Open-Instruct and IFEval.
 
-## Usage
-
-```bash
-# Install and run
-pip install -r requirements.txt
-python app.py
-```
+The dataset can be found at https://huggingface.co/datasets/nvidia/Nemotron-RL-instruction_following 
 
 ## Testing
 

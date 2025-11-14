@@ -2,9 +2,8 @@
 
 ### Overview
 Verifies competitive programming solutions by executing submitted code against unit tests. The server consumes agent trajectories and returns a reward based on whether the assistant's code produces the correct outputs for given test inputs.
-Model registry link:
-- Train: https://gitlab-master.nvidia.com/bxyu/nemo-gym/-/ml/models/80#/
-- Validation: https://gitlab-master.nvidia.com/bxyu/nemo-gym/-/ml/models/76#/
+
+The dataset is in preparation and the example data can be found in `data/example.jsonl`.
 
 ### Input schema
 - `responses_create_params`: OpenAI Responses create params

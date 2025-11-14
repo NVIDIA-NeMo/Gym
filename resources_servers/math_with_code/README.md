@@ -8,15 +8,7 @@
 
 ### How to run
 
-Download the `open_math_reasoning_problems` dataset (no python tool)
-
-```
-ng_download_dataset_from_gitlab \
-    +dataset_name=math_open_math_reasoning \
-    +version=0.0.1 \
-    +artifact_fpath=open_math_reasoning_problems.jsonl \
-    +output_fpath=data/open_math_reasoning_problems.jsonl
-```
+Download the `open_math_reasoning_problems` dataset from Huggingface: https://huggingface.co/datasets/nvidia/Nemotron-RL-math-OpenMathReasoning 
 
 Use this below script to convert it into `open_math_reasoning_problems_tool.jsonl` or (you can also download it directly)
 
