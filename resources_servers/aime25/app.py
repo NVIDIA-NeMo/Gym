@@ -22,6 +22,7 @@ from math_verify import LatexExtractionConfig, StringExtractionConfig, parse, ve
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
+    BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
@@ -29,6 +30,14 @@ from nemo_gym.base_resources_server import (
 
 
 class AIME25ResourcesServerConfig(BaseResourcesServerConfig):
+    pass
+
+
+class AIME25RunRequest(BaseRunRequest):
+    expected_answer: str
+
+
+class AIME25VerifyRequest(AIME25RunRequest, BaseVerifyRequest):
     pass
 
 
@@ -151,11 +160,22 @@ class AIME25ResourcesServer(SimpleResourcesServer):
         app = super().setup_webserver()
         return app
 
-    async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
-        expected_answer = body.prompt_vars.get('expected_answer')
+    async def verify(self, body: AIME25VerifyRequest) -> BaseVerifyResponse:
+        expected_answer = body.expected_answer
 
-        response = body.response
-        prediction = extract_math_answer(response)
+        assistant_responses = []
+        for output_item in body.response.output:
+            if output_item.type != "message":
+                continue
+
+            for content_item in output_item.content:
+                if content_item.type != "output_text":
+                    continue
+
+                assistant_responses.append(content_item.text)
+
+        combined_response = "".join(assistant_responses)
+        prediction = extract_math_answer(combined_response)
 
         is_correct = prediction and math_equal(expected_answer, prediction)
 
