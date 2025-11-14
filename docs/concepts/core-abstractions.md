@@ -1,4 +1,4 @@
-# Understanding Core Concepts
+# Understanding Core Abstractions
 
 Before diving into code, let's understand the three core abstractions in NeMo Gym.
 
