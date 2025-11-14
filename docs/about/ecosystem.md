@@ -5,8 +5,7 @@ NeMo Gym is a component of the [NVIDIA NeMo Framework](https://docs.nvidia.com/n
 
 :::{tip}
 For details on NeMo Gym capabilities, refer to the
-{ref}`Overview <about-overview>` and {ref}`Key Features <about-features>`. For internal design and
-boundaries, refer to {ref}`Architecture <about-architecture>`.
+{ref}`Overview <about-overview>`.
 :::
 
 ---

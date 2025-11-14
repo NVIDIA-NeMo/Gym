@@ -4,7 +4,7 @@
 
 Before diving into code, let's understand the three core abstractions in NeMo Gym.
 
-> If you are new to reinforcement learning for LLMs, we recommend you review **[Key Terminology](key-terminology)** first.
+> If you are new to reinforcement learning for LLMs, we recommend you review **[Key Terminology](./key-terminology)** first.
 
 ::::{tab-set}
 
