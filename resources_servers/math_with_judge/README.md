@@ -2,14 +2,9 @@
 This is a resource server for verifying the correctness of answers to mathematical problems.  It uses a combination of the Hugging Face Math-Verify library and an LLM as a judge.
 
 The problems in the OpenMathReasoning dataset are taken from the
-[OpenMathReasoning dataset](https://huggingface.co/datasets/nvidia/OpenMathReasoning)
+[OpenMathReasoning dataset](https://huggingface.co/datasets/nvidia/Nemotron-RL-math-OpenMathReasoning)
 on Hugging Face.
 
-The problems in the Math Stack Overflow dataset come from Stack Overflow.
-
-Data links:
-- OpenMathReasoning: https://gitlab-master.nvidia.com/bxyu/nemo-gym/-/ml/models/37#/
-- Math Stack Overflow: https://gitlab-master.nvidia.com/bxyu/nemo-gym/-/ml/models/68#/
 
 # Example usage
 

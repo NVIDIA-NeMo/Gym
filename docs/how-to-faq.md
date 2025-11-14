@@ -1,34 +1,6 @@
 # How-To's and FAQ's
 This document is a smattering of How-To's and FAQs that have not made their way into an official tutorial yet!
 
-- [How-To's and FAQ's](#how-tos-and-faqs)
-- [How To: Run tests for simple agent](#how-to-run-tests-for-simple-agent)
-- [How To: Add a resource server](#how-to-add-a-resource-server)
-  - [TLDR final expected artifacts](#tldr-final-expected-artifacts)
-- [How To: Upload and download a dataset from Gitlab](#how-to-upload-and-download-a-dataset-from-gitlab)
-- [How To: Upload and download a dataset from HuggingFace](#how-to-upload-and-download-a-dataset-from-huggingface)
-- [How To: Prepare and validate data for PR submission or RL training](#how-to-prepare-and-validate-data-for-pr-submission-or-rl-training)
-- [How To: ng\_dump\_config - Dump a YAML config as exactly as NeMo Gym sees it](#how-to-ng_dump_config---dump-a-yaml-config-as-exactly-as-nemo-gym-sees-it)
-- [How To: Use NeMo Gym with a non-Responses compatible API endpoint like vLLM](#how-to-use-nemo-gym-with-a-non-responses-compatible-api-endpoint-like-vllm)
-- [How To: Multi-verifier usage](#how-to-multi-verifier-usage)
-- [How To: Profile your resources server](#how-to-profile-your-resources-server)
-- [How To: Use a custom client to call Gym Responses API model endpoints during training](#how-to-use-a-custom-client-to-call-gym-responses-api-model-endpoints-during-training)
-- [How To: Detailed anatony of a Gym config](#how-to-detailed-anatony-of-a-gym-config)
-- [How To: Use Ray for parallelizing CPU-intensive tasks](#how-to-use-ray-for-parallelizing-cpu-intensive-tasks)
-  - [Ray Setup in NeMo Gym](#ray-setup-in-nemo-gym)
-    - [Automatic Initialization](#automatic-initialization)
-    - [Ray Configuration](#ray-configuration)
-  - [Using Ray for CPU-Intensive Tasks](#using-ray-for-cpu-intensive-tasks)
-- [FAQ: OpenAI Responses vs Chat Completions API](#faq-openai-responses-vs-chat-completions-api)
-- [FAQ: DCO and commit signing VSCode and Git setup](#faq-dco-and-commit-signing-vscode-and-git-setup)
-- [FAQ: SFT and RL](#faq-sft-and-rl)
-- [FAQ: Error: Found files with missing copyright](#faq-error-found-files-with-missing-copyright)
-- [FAQ: PermissionError when starting NeMo Gym in sandboxed environments](#faq-permissionerror-when-starting-nemo-gym-in-sandboxed-environments)
-- [FAQ: build-docs / Build docs CI failures](#faq-build-docs--build-docs-ci-failures)
-- [FAQ: NeMo Gym, training frameworks, and token IDs](#faq-nemo-gym-training-frameworks-and-token-ids)
-- [FAQ: NeMo Gym what CI/CD do I need to pass?](#faq-nemo-gym-what-cicd-do-i-need-to-pass)
-- [FAQ: Why aiohttp backend and not httpx/httpcore for async http?](#faq-why-aiohttp-backend-and-not-httpxhttpcore-for-async-http)
-
 
 # How To: Run tests for simple agent
 Run the Simple Chat Agent tests. `ng_test` or `nemo_gym_test` stands for `Nemo Gym Test`.

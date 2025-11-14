@@ -1,12 +1,14 @@
-# Verifying Agent Results
+(task-verification)=
 
-**Goal**: Understand how NeMo Gym evaluates agent performance and what verification means for training
+# Task verification
+
+**Goal**: Understand what task verification is and how rewards drive model training.
 
 ## What is Verification?
 
-Every resource server in NeMo Gym has a `verify()` function that **scores agent performance**. The purpose of this function is to define how to measure how well agents accomplish their goals.
+Every resource server in NeMo Gym has a `verify()` function that **measure task performance**. The purpose of this function is to define how to measure how well that task was accomplished.
 
-**The Problem**: When you ran your weather agent, it successfully called the tool and gave a response. But was that response *good*? Should the agent be rewarded or penalized for that behavior? Without verification, there's no way to measure improvement.
+**The Problem**: When you ran the weather example in the quickstart, it successfully called the tool and gave a response. But was that response *good*? Should the model be rewarded or penalized for that behavior? Without verification, there's no way to measure improvement.
 
 **The Solution**: Each resource server must define exactly what "good performance" means for its domain.
 
@@ -14,8 +16,8 @@ Every resource server in NeMo Gym has a `verify()` function that **scores agent 
 
 **Tool Execution ≠ Good Performance**
 
-- Your weather agent successfully called `get_weather("San Francisco")`
-- But did it give helpful advice? Was the response accurate? Was it efficient?
+- The right tool call was issued i.e. `get_weather("San Francisco")`
+- But was helpful advice given? Was the response accurate? Was it efficient?
 - Verification answers these questions with numerical scores
 
 **Training Signal**
@@ -23,18 +25,20 @@ Every resource server in NeMo Gym has a `verify()` function that **scores agent 
 Verification scores become the **reward signals** that drive reinforcement learning:
 - High scores → "Do more of this behavior"  
 - Low scores → "Avoid this behavior"
-- No verification = No way to improve the agent
+- No verification = No way to improve the model
 
 ## Common Verification Patterns
 
 Let's look at real examples from NeMo Gym's resource servers:
 
-### **Correctness Verification**
+::::{tab-set}
+
+:::{tab-item} Correctness Verification
 
 **Simple Correctness** (`mcqa` - Multiple Choice Questions):
 ```python
-# Extract agent's answer (A, B, C, or D)
-pred = extract_answer_from_response(agent_response)
+# Extract model answer (A, B, C, or D)
+pred = extract_answer_from_response(response)
 gold = expected_answer  # e.g., "C"
 
 # Binary scoring: right or wrong
@@ -55,7 +59,9 @@ judge_score = await llm_judge(judge_prompt)
 final_reward = combine_scores(library_reward, judge_score)
 ```
 
-### **Quality Verification** 
+:::
+
+:::{tab-item} Quality Verification
 
 **Instruction Following** (`instruction_following`):
 ```python
@@ -64,19 +70,21 @@ instructions = ["Use exactly 3 sentences", "Include the word 'banana'", "End wit
 follow_list = []
 
 for instruction in instructions:
-    follows = instruction_checker.verify(agent_response, instruction)
+    follows = instruction_checker.verify(model_response, instruction)
     follow_list.append(follows)
 
 # Only reward if ALL instructions followed
 reward = 1.0 if all(follow_list) else 0.0
 ```
 
-### **Efficiency Verification**
+:::
+
+:::{tab-item} Efficiency Verification
 
 **Tool Usage Patterns**:
 ```python
 # Count unnecessary tool calls
-tool_calls = count_tool_calls(agent_response)
+tool_calls = count_tool_calls(model_response)
 expected_calls = 1  # Should only need one weather call
 
 # Penalize inefficiency  
@@ -87,7 +95,7 @@ reward = max(0.0, efficiency_score)
 **Response Length**:
 ```python
 # Prefer concise but complete responses
-response_length = len(agent_response.split())
+response_length = len(model_response.split())
 optimal_length = 50  # words
 
 if response_length <= optimal_length:
@@ -97,15 +105,18 @@ else:
     reward = max(0.5, 1.0 - (response_length - optimal_length) * 0.01)
 ```
 
+:::
+::::
+
 ## From Verification to Training
 
 ### **How Rewards Drive Learning**
 
-1. Agent generates response → Gets verification score
+1. Model generates response → Gets verification score
 2. RL algorithm uses score to update model parameters  
 3. Higher-scoring behaviors become more likely
 4. Lower-scoring behaviors become less likely
-5. Agent improves over many training iterations
+5. Model improves over many training iterations
 
 ### **What Makes Good Verification**
 
@@ -138,29 +149,35 @@ reward = await expensive_api_call(predicted, expected)
 
 ## Real-World Verification Examples
 
-**Math Tutoring Agent**:
-- Correctness: Did the agent solve the problem correctly?
-- Pedagogy: Did it explain the steps clearly?
-- Efficiency: Did it use the simplest method?
+::::{tab-set}
 
-**Customer Service Agent**:
-- Accuracy: Did it answer the customer's question?
+:::{tab-item} Math Tutoring
+- Correctness: Did the model solve the problem correctly?
+- Pedagogy: Did the model explain the steps clearly?
+- Efficiency: Did the model use the simplest method?
+
+:::
+
+:::{tab-item} Customer Service
+
+- Accuracy: Did the model answer the customer's question?
 - Politeness: Was the tone appropriate?
-- Resolution: Did it solve the customer's problem?
+- Resolution: Did the model solve the customer's problem?
 
-**Code Generation Agent**:
+:::
+
+:::{tab-item} Code Generation
 - Functionality: Does the code run correctly?
-- Quality: Is it well-structured and readable?
-- Security: Does it avoid common vulnerabilities?
+- Quality: Is the code well-structured and readable?
+- Security: Does the code avoid common vulnerabilities?
+
+:::
+::::
 
 ## What You've Learned
 
-This verification system is what makes NeMo Gym powerful for agent training:
+This verification system is what makes NeMo Gym powerful for model training:
 - **Resource servers** provide both tools AND scoring systems
 - **Verification patterns** vary by domain but follow common principles  
-- **Reward signals** from verification drive agent improvement through RL
+- **Reward signals** from verification drive model improvement through RL
 - **Good verification** is reliable, meaningful, and scalable
-
-Now that you understand how agent performance is measured, the next step is learning how to systematically collect this verification data at scale through rollout generation.
-
-→ **[Next: Rollout Collection Fundamentals]**
