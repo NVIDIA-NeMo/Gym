@@ -167,12 +167,3 @@ REPO_LOCATION={your NeMo RL dir}\
     --config=examples/penguin/grpo_dapo17k_bytedtsinghua_qwen3_4binstruct_nf.yaml \
     logger.wandb.project="$USER-nemo-gym-rl-integration"
 ```
-
-
-## What You've Learned
-You now understand how to train a model with NeMo Gym and NeMo RL.
-
-- **Practical skills**: Set up NeMo Gym + NeMo RL training environment, run tests, prepare data, and launch single and multi-node training runs.
-
-**Next steps**: 
-- **[Next: Offline Training with Rollouts (SFT/DPO)](offline-training-w-rollouts.md)**

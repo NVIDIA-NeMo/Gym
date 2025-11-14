@@ -120,6 +120,7 @@ get-started/rollout-collection.md
 
 tutorials/index.md
 tutorials/offline-training-w-rollouts
+tutorials/rl-training-with-nemo-rl
 how-to-faq.md
 ```
 
