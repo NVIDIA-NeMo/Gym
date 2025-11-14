@@ -115,6 +115,7 @@ equivalence_llm_judge:
       verified: false
       description: Short answer questions with LLM-as-a-judge
       value: Improve knowledge-related benchmarks like GPQA / HLE
+      dataset_name: Nemotron-RL-knowledge-openQA
 equivalence_llm_judge_simple_agent:
   responses_api_agents:
     simple_agent:

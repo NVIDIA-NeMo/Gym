@@ -27,23 +27,27 @@ TARGET_FOLDER = Path("resources_servers")
 
 def visit_resource_server(
     data: dict, level: int = 1
-) -> tuple[str | None, str | None, bool, str | None]:  # pragma: no cover
+) -> tuple[str | None, str | None, str | None, bool, str | None, str | None, str | None]:  # pragma: no cover
+    dataset_name = None
     domain = None
     description = None
     verified = False
     verified_url = None
+    value = None
     if level == 4:
+        dataset_name = data.get("dataset_name")
         domain = data.get("domain")
         description = data.get("description")
         verified = data.get("verified", False)
         verified_url = data.get("verified_url")
-        return domain, description, verified, verified_url
+        value = data.get("value")
+        return dataset_name, domain, description, verified, verified_url, value
     else:
         for k, v in data.items():
             if level == 2 and k != "resources_servers":
                 continue
             return visit_resource_server(v, level + 1)
-    return None, None, False, None
+    return None, None, None, False, None, None
 
 
 def visit_agent_datasets(data: dict) -> tuple[str | None, list[str]]:  # pragma: no cover
@@ -68,7 +72,7 @@ def visit_agent_datasets(data: dict) -> tuple[str | None, list[str]]:  # pragma:
 
 def extract_config_metadata(
     yaml_path: Path,
-) -> tuple[str | None, str | None, str | None, list[str], bool, str | None]:  # pragma: no cover
+) -> tuple[str | None, str | None, str | None, list[str], bool, str | None, str | None]:  # pragma: no cover
     """
     Domain:
         {name}_resources_server:
@@ -76,6 +80,8 @@ def extract_config_metadata(
                 {name}:
                     domain: {example_domain}
                     verified: {true/false}
+                    description: {example_description}
+                    value: {example_value}
                     ...
         {something}_simple_agent:
             responses_api_agents:
@@ -91,10 +97,10 @@ def extract_config_metadata(
     with yaml_path.open() as f:
         data = yaml.safe_load(f)
 
-    domain, description, verified, verified_url = visit_resource_server(data)
+    dataset_name, domain, description, verified, verified_url, value = visit_resource_server(data)
     license, types = visit_agent_datasets(data)
 
-    return domain, description, license, types, verified, verified_url
+    return dataset_name, domain, description, license, types, verified, verified_url, value
 
 
 def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:  # pragma: no cover
@@ -115,7 +121,9 @@ def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:  # 
             continue
 
         for yaml_file in yaml_files:
-            domain, description, license, types, verified, verified_url = extract_config_metadata(yaml_file)
+            dataset_name, domain, description, license, types, verified, verified_url, value = extract_config_metadata(
+                yaml_file
+            )
 
             server_name = subdir.name
             example_only_prefix = "example_"
@@ -133,6 +141,7 @@ def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:  # 
             server_info = {
                 "name": server_name,
                 "display_name": display_name,
+                "dataset_name": dataset_name,
                 "domain": domain,
                 "verified": verified,
                 "verified_url": verified_url,
@@ -143,6 +152,7 @@ def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:  # 
                 "types": types,
                 "license": license,
                 "yaml_file": yaml_file,
+                "value": value,
             }
 
             example_only_servers.append(server_info) if is_example_only_prefix else training_servers.append(
@@ -191,14 +201,26 @@ def generate_example_only_table(servers: list[dict]) -> str:  # pragma: no cover
 def generate_training_table(servers: list[dict]) -> str:  # pragma: no cover
     """Generate table for training resource servers."""
     if not servers:
-        return "| Domain | Resource Server | Train | Validation | Verified | Config | License |\n| ------ | --------------- | ----- | ---------- | --------| ------ | ------- |\n"
+        return "| Dataset | Domain | Resource Server | Description | Value | Train | Validation | Verified | License |\n| ------- | ------ | --------------- | ----------- | ----- | ----- | ---------- | -------- | ------- |\n"
 
-    col_names = ["Domain", "Resource Server", "Train", "Validation", "Verified", "Config", "License"]
+    col_names = [
+        "Dataset",
+        "Domain",
+        "Resource Server",
+        "Description",
+        "Value",
+        "Train",
+        "Validation",
+        "Verified",
+        "License",
+    ]
     rows = []
 
     for server in servers:
         domain = server["domain"] if server["domain"] else ""
         name = server["display_name"]
+        description = server["description"]
+        value = server["value"]
 
         types_set = set(server["types"]) if server["types"] else set()
         train_mark = "✓" if "train" in types_set else "-"
@@ -214,21 +236,24 @@ def generate_training_table(servers: list[dict]) -> str:  # pragma: no cover
         else:
             verified_mark = "-"
 
-        config_link = f"<a href='{server['config_path']}'>{server['config_filename']}</a>"
+        dataset_link = f"<a href='{server['config_path']}'>{server['dataset_name']}</a>"
 
         license_str = server["license"] if server["license"] else "-"
 
-        rows.append([domain, name, train_mark, val_mark, verified_mark, config_link, license_str])
+        rows.append([dataset_link, domain, name, description, value, train_mark, val_mark, verified_mark, license_str])
 
     rows.sort(
         key=lambda r: (
-            0 if "✓" in r[4] else 1,  # verified (reverse order for checkmarks first)
-            normalize_str(r[0]),  # domain
-            normalize_str(r[1]),  # name
-            normalize_str(r[2]),  # train
-            normalize_str(r[3]),  # val
-            normalize_str(r[5]),  # config
-            normalize_str(r[6]),  # license
+            0 if "✓" in r[6] else 1,  # verified first (reverse order for checkmarks...hyphens)
+            normalize_str(r[0]),
+            normalize_str(r[1]),
+            normalize_str(r[2]),
+            normalize_str(r[3]),
+            normalize_str(r[4]),
+            normalize_str(r[5]),
+            normalize_str(r[6]),
+            normalize_str(r[7]),
+            normalize_str(r[8]),
         )
     )
 

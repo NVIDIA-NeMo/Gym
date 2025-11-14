@@ -6,6 +6,7 @@ workplace_assistant:
       verified: false
       description: Workplace assistant multi-step tool-using environment
       value: Improve multi-step tool use capability
+      dataset_name: Nemotron-RL-agent-workplace_assistant
 workplace_assistant_simple_agent:
   responses_api_agents:
     simple_agent:
