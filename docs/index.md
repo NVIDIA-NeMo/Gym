@@ -92,6 +92,17 @@ This generates training data with verification scores!
 Home <self>
 ```
 
+```{toctree}
+:caption: About
+:hidden:
+:maxdepth: 1
+
+about/concepts/core-concepts.md
+about/glossary.md
+about/concepts/task-verification.md
+about/concepts/rollout-collection-fundamentals.md
+about/concepts/configuration-system.md
+```
 
 ```{toctree}
 :caption: Get Started
@@ -99,14 +110,7 @@ Home <self>
 :maxdepth: 1
 
 Overview <get-started/index>
-about/glossary.md
-tutorials/01-concepts.md
 get-started/setup-installation.md
-about/concepts/task-verification.md
-tutorials/offline-training-w-rollouts.md
-about/concepts/rollout-collection-fundamentals.md
-about/concepts/configuration-system.md
-how-to-faq.md
 ```
 
 ```{toctree}
@@ -116,6 +120,7 @@ how-to-faq.md
 
 Overview <tutorials/index>
 tutorials/offline-training-w-rollouts
+how-to-faq.md
 ```
 
 

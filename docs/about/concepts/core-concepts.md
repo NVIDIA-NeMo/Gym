@@ -8,7 +8,7 @@ Before diving into code, let's understand the three core abstractions in NeMo Gy
 ## Overview
 
 <div align="center">
-  <img src="product_overview.png" alt="NeMo Gym Architecture" width="800">
+  <img src="../../_images/product_overview.png" alt="NeMo Gym Architecture" width="800">
 </div>
 
 ## 1. Models
