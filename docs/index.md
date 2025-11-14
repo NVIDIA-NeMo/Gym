@@ -31,7 +31,7 @@ policy_model_name: gpt-4.1-2025-04-14" > env.yaml
 
 :::
 
-:::{tab-item} 2. Run Agent
+:::{tab-item} 2. Start Servers
 
 **Terminal 1** (start servers):
 
@@ -90,8 +90,9 @@ You can also use `Ctrl+C` in Terminal 1 to stop the `ng_run` process, then run `
 ::::
 
 ```{toctree}
-:caption: Tutorials📚
+:caption: Get Started
 :hidden:
+:maxdepth: 1
 
 about/glossary.md
 tutorials/01-concepts.md
@@ -103,6 +104,17 @@ about/concepts/rollout-collection-fundamentals.md
 about/concepts/configuration-system.md
 how-to-faq.md
 ```
+
+```{toctree}
+:caption: Tutorials
+:hidden:
+:maxdepth: 1
+
+Overview <tutorials/index>
+tutorials/offline-training-w-rollouts
+tutorials/configuration-management
+```
+
 
 ```{toctree}
 :caption: Development
