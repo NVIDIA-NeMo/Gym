@@ -2,11 +2,11 @@
 
 # Setup and Installation
 
-Welcome to NeMo Gym! In this tutorial, you will install NeMo Gym, configure your training environment, and run your first rollout collection—using a simple weather example to verify all components work together. This allows you to test your environment before collecting rollouts at scale.
+Welcome to NeMo Gym! In this tutorial, you will install NeMo Gym, configure your training environment—using a simple weather example to verify all components work together. This allows you to test your environment before collecting rollouts at scale.
 
 :::{card}
 
-**Goal**: Get NeMo Gym installed and servers running with your first successful agent interaction.
+**Goal**: Get NeMo Gym installed and servers running, then verify all components work together.
 
 ^^^
 
@@ -15,8 +15,7 @@ Welcome to NeMo Gym! In this tutorial, you will install NeMo Gym, configure your
 1. Clone the repository and install dependencies
 2. Configure your OpenAI API key
 3. Start the NeMo Gym servers
-4. Run your first agent interaction
-5. Verify everything works correctly
+4. Test the setup
 
 :::
 
@@ -139,13 +138,12 @@ INFO:     Uvicorn running on http://127.0.0.1:62920 (Press CTRL+C to quit)
 The head server always uses port **11000**. Other servers get automatically assigned ports (like 62920, 52341, etc.) - your port numbers will differ from the example above.
 :::
 
-This means **4 servers are now running**:
+When you ran `ng_run`, it started all the servers you configured:
 
-1. **Head server** (coordinates everything)
-2. 3 Gym servers. These 3 servers and their high level config should be printed to terminal!
-   1. **Simple weather resource** (provides weather tool)
-   2. **OpenAI model server** (connects to GPT-4)
-   3. **Simple agent** (orchestrates model + resources)
+- **Head server:** coordinating all components
+- **Resources server:** defining tools and verification
+- **Model server:** providing LLM inference
+- **Agent server:** orchestrating how the model interacts with the resources
 
 :::{dropdown} Troubleshooting: "command not found: ng_run"
 Make sure you activated the virtual environment:
@@ -278,25 +276,3 @@ Gym/
 └── docs/                       # Documentation files
 ```
 
-## What Is Running?
-
-When you ran `ng_run`, it started all the servers you configured:
-
-- **Head server:** coordinating all components
-- **Resources server:** defining tools and verification
-- **Model server:** providing LLM inference
-- **Agent server:** orchestrating how the model interacts with the resources
-
-## Next Steps
-
-Now that everything is working, let's take a closer look at what just happened and how to interact with your agent.
-
-:::{button-ref} first-agent
-:color: primary
-:outline:
-:ref-type: doc
-
-Next: Your First Agent →
-:::
-
-Learn how your weather agent works and explore the complete workflow from request to response.
