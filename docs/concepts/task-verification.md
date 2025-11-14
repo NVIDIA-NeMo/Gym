@@ -29,7 +29,9 @@ Verification scores become the **reward signals** that drive reinforcement learn
 
 Let's look at real examples from NeMo Gym's resource servers:
 
-### **Correctness Verification**
+::::{tab-set}
+
+:::{tab-item} Correctness Verification
 
 **Simple Correctness** (`mcqa` - Multiple Choice Questions):
 ```python
@@ -55,7 +57,9 @@ judge_score = await llm_judge(judge_prompt)
 final_reward = combine_scores(library_reward, judge_score)
 ```
 
-### **Quality Verification** 
+:::
+
+:::{tab-item} Quality Verification
 
 **Instruction Following** (`instruction_following`):
 ```python
@@ -71,7 +75,9 @@ for instruction in instructions:
 reward = 1.0 if all(follow_list) else 0.0
 ```
 
-### **Efficiency Verification**
+:::
+
+:::{tab-item} Efficiency Verification
 
 **Tool Usage Patterns**:
 ```python
@@ -96,6 +102,9 @@ else:
     # Penalize verbosity
     reward = max(0.5, 1.0 - (response_length - optimal_length) * 0.01)
 ```
+
+:::
+::::
 
 ## From Verification to Training
 
@@ -138,20 +147,30 @@ reward = await expensive_api_call(predicted, expected)
 
 ## Real-World Verification Examples
 
-**Math Tutoring Agent**:
+::::{tab-set}
+
+:::{tab-item} Math Tutoring
 - Correctness: Did the model solve the problem correctly?
 - Pedagogy: Did the model explain the steps clearly?
 - Efficiency: Did the model use the simplest method?
 
-**Customer Service Agent**:
+:::
+
+:::{tab-item} Customer Service
+
 - Accuracy: Did the model answer the customer's question?
 - Politeness: Was the tone appropriate?
 - Resolution: Did the model solve the customer's problem?
 
-**Code Generation Agent**:
+:::
+
+:::{tab-item} Code Generation
 - Functionality: Does the code run correctly?
 - Quality: Is the code well-structured and readable?
 - Security: Does the code avoid common vulnerabilities?
+
+:::
+::::
 
 ## What You've Learned
 
