@@ -90,6 +90,12 @@ You can also use `Ctrl+C` in Terminal 1 to stop the `ng_run` process, then run `
 ::::
 
 ```{toctree}
+:hidden:
+Home <self>
+```
+
+
+```{toctree}
 :caption: Get Started
 :hidden:
 :maxdepth: 1
