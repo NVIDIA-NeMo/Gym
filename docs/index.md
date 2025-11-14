@@ -99,6 +99,7 @@ get-started/setup-installation.md
 get-started/first-agent.md
 tutorials/04-verifying-results.md
 tutorials/offline-training-w-rollouts.md
+tutorials/06-rl-training-with-nemo-rl.md
 about/concepts/rollout-collection-fundamentals.md
 about/concepts/configuration-system.md
 how-to-faq.md

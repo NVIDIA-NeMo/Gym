@@ -169,4 +169,4 @@ You now understand how to train a model with NeMo Gym and NeMo RL.
 - **Practical skills**: Set up NeMo Gym + NeMo RL training environment, run tests, prepare data, and launch single and multi-node training runs.
 
 **Next steps**: 
-- **[Next: Offline Training with Rollouts (SFT/DPO)](07-sft-dpo-rollout-collection.md)**
+- **[Next: Offline Training with Rollouts (SFT/DPO)](offline-training-w-rollouts.md)**

@@ -361,4 +361,4 @@ You now understand NeMo Gym's rollout generation system:
 - **Data analysis**: Understanding rollout structure and analyzing results
 - **Best practices**: Efficient and reliable rollout generation
 
-→ **[Next: RL training with NeMo RL](06-rl-training-with-nemo-rl.md)**
+→ **[Next: RL training with NeMo RL](../../tutorials/06-rl-training-with-nemo-rl.md)**
