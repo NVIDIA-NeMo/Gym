@@ -101,10 +101,3 @@ Let's trace through a weather request:
 <div align="center">
   <img src="../../_images/product_overview.png" alt="NeMo Gym Architecture" width="800">
 </div>
-
-## Key Benefits of This Architecture
-
-- **Reusable**: Same model can work with different tools
-- **Testable**: Each component can be tested independently  
-- **Scalable**: Components can run on different servers
-- **Flexible**: Mix and match any combination
