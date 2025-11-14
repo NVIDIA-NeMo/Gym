@@ -2,7 +2,7 @@
 
 # Setup and Installation
 
-Welcome to NeMo Gym! In this tutorial, you will install NeMo Gym, configure your environment, and run your first agent interaction—a simple weather agent that uses tools to answer questions.
+Welcome to NeMo Gym! In this tutorial, you will install NeMo Gym, configure your training environment, and run your first agent interaction—a simple weather agent that uses tools to answer questions. This allows you to test your environment independent of the training workflow.
 
 :::{card}
 
@@ -280,12 +280,12 @@ Gym/
 
 ## What Is Running?
 
-When you ran `ng_run`, you started a complete AI agent system:
+When you ran `ng_run`, it started all the servers you configured:
 
-- **Web servers** handling HTTP requests
-- **Agent logic** coordinating between components
-- **Weather tool** ready to be called
-- **OpenAI integration** ready to think and respond
+- **Head server:** coordinating all components
+- **Resources server:** defining tools and verification
+- **Model server:** providing LLM inference
+- **Agent server:** orchestrating how the model interacts with the resources
 
 ## Next Steps
 

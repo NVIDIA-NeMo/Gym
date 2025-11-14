@@ -4,7 +4,7 @@
 
 **Estimated Time**: 25-30 minutes
 
-This guided tutorial experience is designed for those brand new to training AI agents with reinforcement learning (RL). These tutorials walk you through the complete journey from installation to generating training data at scale.
+This tutorial is designed for those new to reinforcement learning (RL) with large language models, walking you through the complete journey from installation to generating training data at scale.
 
 **By the end of this tutorial series, you will have:**
 

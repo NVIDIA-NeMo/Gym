@@ -31,7 +31,7 @@ policy_model_name: gpt-4.1-2025-04-14" > env.yaml
 
 :::
 
-:::{tab-item} 2. Run Agent
+:::{tab-item} 2. Start Servers
 
 **Terminal 1** (start servers):
 
