@@ -118,7 +118,6 @@ concepts/key-terminology.md
 :hidden:
 :maxdepth: 1
 
-Overview <tutorials/index>
 tutorials/offline-training-w-rollouts
 how-to-faq.md
 ```
