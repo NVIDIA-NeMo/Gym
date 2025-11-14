@@ -59,6 +59,5 @@ Begin Tutorial: Setup and Installation →
 :::{tip}
 **New to reinforcement learning?** Do not worry—these tutorials introduce RL concepts naturally as you build.
 
-- For deeper conceptual understanding, explore the [About](../about/index.md) section.
-- For quick definitions, refer to the [Glossary](../about/glossary.md).
+- For quick definitions, refer to the [Key terminology](../concepts/key-terminology.md).
 :::

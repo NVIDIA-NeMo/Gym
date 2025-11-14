@@ -93,15 +93,15 @@ Home <self>
 ```
 
 ```{toctree}
-:caption: About
+:caption: Concepts
 :hidden:
 :maxdepth: 1
 
-about/concepts/core-concepts.md
-about/glossary.md
-about/concepts/task-verification.md
-about/concepts/rollout-collection-fundamentals.md
-about/concepts/configuration-system.md
+concepts/core-concepts.md
+concepts/task-verification.md
+concepts/rollout-collection-fundamentals.md
+concepts/configuration-system.md
+concepts/key-terminology.md
 ```
 
 ```{toctree}
