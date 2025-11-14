@@ -410,11 +410,38 @@ async def run_swebench_evaluation(
 
     LOG.info(f"Running NeMo-Skills command: {' '.join(cmd)}")
 
+    # Prepare environment and pass through HuggingFace credentials
+    env = os.environ.copy()
+    
+    # Pass through HF_TOKEN if available to avoid rate limiting
+    if 'HF_TOKEN' in os.environ:
+        env['HF_TOKEN'] = os.environ['HF_TOKEN']
+        # Also set APPTAINERENV_ prefix so it gets passed into apptainer containers
+        env['APPTAINERENV_HF_TOKEN'] = os.environ['HF_TOKEN']
+        LOG.info("Using HF_TOKEN from environment for dataset access")
+    
+    # Pass through HF_HOME to use shared cache location
+    if 'HF_HOME' in os.environ:
+        env['HF_HOME'] = os.environ['HF_HOME']
+        # Also set APPTAINERENV_ prefix so it gets passed into apptainer containers
+        env['APPTAINERENV_HF_HOME'] = os.environ['HF_HOME']
+        LOG.info(f"Using HF_HOME from environment: {env['HF_HOME']}")
+    
+    # Only enable offline mode if explicitly requested (e.g., for air-gapped systems)
+    # This allows first-time downloads while still using cached data when available
+    if os.environ.get('HF_DATASETS_OFFLINE') == '1':
+        env['HF_DATASETS_OFFLINE'] = '1'
+        env['TRANSFORMERS_OFFLINE'] = '1'
+        env['APPTAINERENV_HF_DATASETS_OFFLINE'] = '1'
+        env['APPTAINERENV_TRANSFORMERS_OFFLINE'] = '1'
+        LOG.info("Running in offline mode - will only use cached datasets")
+    
     # Run in subprocess to avoid event loop conflicts
     process = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,  # Merge stderr into stdout
+        env=env,
     )
 
     # Stream output in real-time
