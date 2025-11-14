@@ -53,12 +53,4 @@ Apply configuration, testing, deployment, and scaling.
 ::::{grid} 1 1 1 1
 :gutter: 1 1 1 2
 
-:::{grid-item-card} {octicon}`gear;1.5em;sd-mr-1` Managing Configurations Across Environments
-:link: configuration-management
-:link-type: doc
-Master NeMo Gym's three-layer configuration system to securely manage secrets and switch between dev/prod environments.
-+++
-{bdg-secondary}`configuration` {bdg-secondary}`deployment`
-:::
-
 ::::

@@ -28,39 +28,13 @@ Each explainer below covers one foundational idea and links to deeper material.
 ::::{grid} 1 1 1 2
 :gutter: 1 1 1 2
 
-:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Core Abstractions
-:link: concepts-core-abstractions
-:link-type: ref
-Understand how Models, Resources, and Agents remain decoupled yet coordinated as independent HTTP services, including which endpoints each abstraction exposes.
-:::
-
-:::{grid-item-card} {octicon}`gear;1.5em;sd-mr-1` Configuration System
-:link: concepts-configuration-system
-:link-type: ref
-Learn how NeMo Gym's three-tier configuration system (YAML → env.yaml → CLI) enables secure secrets management and flexible multi-environment deployments.
-:::
-
-:::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` Rollout Collection Fundamentals
-:link: concepts-rc-fundamentals
-:link-type: ref
-Learn why complete interaction transcripts matter for reinforcement learning, how they enable evaluation, and how collection orchestrators stream results to JSONL datasets.
-:::
-
-:::{grid-item-card} {octicon}`check-circle;1.5em;sd-mr-1` Verifying Agent Results
-:link: concepts-verifying-results
-:link-type: ref
-Explore how resource servers score agent outputs with `verify()` implementations that transform correctness, quality, and efficiency checks into reward signals.
-:::
-
 ::::
 
 ---
 
 ## Continue Learning
 
-- Reinforce the architecture concepts by stepping through {doc}`../../get-started/first-agent` before exploring large-scale collection.
-- Learn about task verification with the {doc}`task-verification` tutorial, then move on to high-volume data generation in {doc}`../../get-started/collecting-rollouts`.
-- Catalog the services you plan to deploy by referencing {doc}`../features` once the core concepts are familiar.
+- Learn about task verification with the {doc}`task-verification` tutorial
 
 ---
 

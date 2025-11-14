@@ -40,33 +40,6 @@ Get NeMo Gym installed and servers running with your first successful agent inte
 {bdg-secondary}`environment` {bdg-secondary}`first-run`
 :::
 
-:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` 2. Your First Agent
-:link: first-agent
-:link-type: doc
-
-Understand how your weather agent works and learn to interact with it.
-+++
-{bdg-secondary}`workflow` {bdg-secondary}`tools`
-:::
-
-:::{grid-item-card} {octicon}`checklist;1.5em;sd-mr-1` 3. Verifying Agent Results
-:link: verifying-agent-results
-:link-type: doc
-
-Understand how NeMo Gym evaluates agent performance and what verification means for training.
-+++
-{bdg-secondary}`rewards` {bdg-secondary}`scoring`
-:::
-
-:::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` 4. Collecting Rollouts
-:link: collecting-rollouts
-:link-type: doc
-
-Generate your first batch of rollouts and understand how they become training data.
-+++
-{bdg-secondary}`training-data` {bdg-secondary}`scale`
-:::
-
 ::::
 
 ---
