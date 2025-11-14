@@ -311,7 +311,9 @@ def generate_example_only_table(servers: list[ServerInfo]) -> str:  # pragma: no
 def generate_training_table(servers: list[ServerInfo]) -> str:  # pragma: no cover
     """Generate table for training resource servers."""
     if not servers:
-        return "| Dataset | Domain | Resource Server | Description | Value | Train | Validation | Verified | License |\n| ------- | ------ | --------------- | ----------- | ----- | ----- | ---------- | -------- | ------- |\n"
+        # TODO: Add back in when we can verify resource servers
+        # return "| Dataset | Domain | Resource Server | Description | Value | Train | Validation | Verified | License |\n| ------- | ------ | --------------- | ----------- | ----- | ----- | ---------- | -------- | ------- |\n"
+        return "| Dataset | Domain | Resource Server | Description | Value | Train | Validation | License |\n| ------- | ------ | --------------- | ----------- | ----- | ----- | ---------- | ------- |\n"
 
     col_names = [
         "Dataset",
@@ -321,13 +323,14 @@ def generate_training_table(servers: list[ServerInfo]) -> str:  # pragma: no cov
         "Value",
         "Train",
         "Validation",
-        "Verified",
+        # "Verified",
         "License",
     ]
     rows = []
 
     for server in servers:
-        verified_mark = server.get_verified_mark()
+        # TODO: Add back in when we can verify resource servers
+        # verified_mark = server.get_verified_mark()
 
         rows.append(
             [
@@ -338,7 +341,8 @@ def generate_training_table(servers: list[ServerInfo]) -> str:  # pragma: no cov
                 server.get_value_or_dash(),
                 server.get_train_mark(),
                 server.get_validation_mark(),
-                verified_mark,
+                # TODO: Add back in when we can verify resource servers
+                # verified_mark,
                 server.get_license_or_dash(),
             ]
         )
