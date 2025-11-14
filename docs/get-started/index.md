@@ -4,13 +4,11 @@
 
 **Estimated Time**: 25-30 minutes
 
-This guided tutorial experience is designed for those brand new to training AI agents with reinforcement learning (RL). These tutorials walk you through the complete journey from installation to generating training data at scale.
+This guided tutorial experience is designed for those brand new to training models with reinforcement learning (RL). These tutorials walk you through the complete journey from installation to generating training data at scale.
 
 **By the end of this tutorial series, you will have:**
 
 ✅ A working NeMo Gym installation with servers running  
-✅ Hands-on experience with agent workflows and tool usage  
-✅ Understanding of how verification drives agent improvement  
 ✅ Ability to generate rollouts for RL training
 
 ## Before You Start
