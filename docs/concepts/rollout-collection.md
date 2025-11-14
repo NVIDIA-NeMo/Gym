@@ -134,8 +134,7 @@ Then visit http://127.0.0.1:7860
 
 ## Rollout Generation Parameters
 
-### Essential Parameters
-
+Essential
 ```bash
 ng_collect_rollouts \
     +agent_name=your_agent_name \              # Which agent to use
@@ -143,31 +142,16 @@ ng_collect_rollouts \
     +output_jsonl_fpath=output/rollouts.jsonl  # Where to save results
 ```
 
-### Data Control Parameters
-
+Data Control
 ```bash
-+limit=100 \                    # Limit examples processed (null = all)
-+num_repeats=3 \                # Rollouts per example (null = 1)  
-+num_samples_in_parallel=5      # Concurrent requests (null = default)
+    +limit=100 \                    # Limit examples processed (null = all)
+    +num_repeats=3 \                # Rollouts per example (null = 1)  
+    +num_samples_in_parallel=5      # Concurrent requests (null = default)
 ```
 
-### Model Behavior Parameters
-
+Model Behavior
 ```bash
-+responses_create_params.max_output_tokens=4096 \     # Response length limit
-+responses_create_params.temperature=0.7 \            # Randomness (0-1)
-+responses_create_params.top_p=0.9                    # Nucleus sampling
+    +responses_create_params.max_output_tokens=4096 \     # Response length limit
+    +responses_create_params.temperature=0.7 \            # Randomness (0-1)
+    +responses_create_params.top_p=0.9                    # Nucleus sampling
 ```
-
-## What You've Learned
-
-You now understand NeMo Gym's rollout generation system:
-
-- **Core concepts**: What rollouts are and why they're fundamental to NeMo Gym
-- **Generation workflow**: From input tasks to complete interaction records
-- **Practical skills**: Using `ng_collect_rollouts` with different strategies
-- **Data analysis**: Understanding rollout structure and analyzing results
-- **Best practices**: Efficient and reliable rollout generation
-
-<!-- TODO: Add link [Next: Collecting Rollouts for Reinforcement Learning](06-rl-rollout-collection.md) -->
-→ **[Next: Offline Training with Rollouts (SFT/DPO)]**
