@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import contextlib
 import logging
 from io import StringIO
@@ -36,12 +37,14 @@ from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    empty_response,
 )
 
 
 class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+    judge_endpoint_max_concurrency: Optional[int] = None
     should_use_judge: bool = True
 
 
@@ -94,6 +97,12 @@ Example output: "My final verdict is different [[A!=B]]"."""
     config: LibraryJudgeMathResourcesServerConfig
 
     def model_post_init(self, context: Any) -> None:
+        self._judge_endpoint_max_concurrency = contextlib.nullcontext()
+        if self.config.judge_endpoint_max_concurrency is not None:
+            self._judge_endpoint_max_concurrency = asyncio.Semaphore(
+                value=self.config.judge_endpoint_max_concurrency,
+            )
+
         super().model_post_init(context)
 
         logging.getLogger("math_verify").setLevel(logging.CRITICAL)
@@ -248,12 +257,20 @@ Example output: "My final verdict is different [[A!=B]]"."""
             ),
         ]
 
-        response = await self.server_client.post(
-            server_name=config.judge_model_server.name,
-            url_path="/v1/responses",
-            json=responses_create_params,
-        )
-        judge_response = NeMoGymResponse.model_validate(await response.json())
+        async with self._judge_endpoint_max_concurrency:
+            try:
+                response = await self.server_client.post(
+                    server_name=config.judge_model_server.name,
+                    url_path="/v1/responses",
+                    json=responses_create_params,
+                )
+                judge_response = NeMoGymResponse.model_validate(await response.json())
+            except Exception as e:
+                print(
+                    f"DEBUG: LibraryJudgeMathResourcesServer: server client HTTP POST exception: {type(e).__name__} {e}",
+                    flush=True,
+                )
+                judge_response = empty_response(responses_create_params)
         judge_evaluation = JudgeEvaluation(responses_create_params=responses_create_params, response=judge_response)
 
         # Currently, for all the cases in which the response from the LLM judge
