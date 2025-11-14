@@ -24,12 +24,12 @@ from nemo_gym.base_resources_server import (
 )
 
 
-class MultiNeedleResourcesServerConfig(BaseResourcesServerConfig):
+class ExampleMultiStepResourcesServerConfig(BaseResourcesServerConfig):
     pass
 
 
-class MultiNeedleResourcesServer(SimpleResourcesServer):
-    config: MultiNeedleResourcesServerConfig
+class ExampleMultiStepResourcesServer(SimpleResourcesServer):
+    config: ExampleMultiStepResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -44,4 +44,4 @@ class MultiNeedleResourcesServer(SimpleResourcesServer):
 
 
 if __name__ == "__main__":
-    MultiNeedleResourcesServer.run_webserver()
+    ExampleMultiStepResourcesServer.run_webserver()

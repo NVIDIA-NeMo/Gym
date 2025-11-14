@@ -154,25 +154,25 @@ You are required to have the following 3 files in your resources server data fol
 ## TLDR final expected artifacts
 1. All the artifacts produced by `ng_init_resources_server +entrypoint=resources_servers/test_weather`. Your agent and resources server must be runnable.
 ```bash
-multineedle_config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/multineedle/configs/multineedle.yaml"
-ng_run "+config_paths=[${multineedle_config_paths}]"
+example_multi_step_config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/example_multi_step/configs/example_multi_step.yaml"
+ng_run "+config_paths=[${example_multi_step_config_paths}]"
 ```
 2. At least 1 test at `resources_servers/test_weather/tests/test_app.py`.
 3. 5 examples found at `resources_servers/test_weather/data/examples.jsonl`
 4. Example metrics as output by `ng_prepare_data` found at `resources_servers/test_weather/data/example_metrics.json`
 ```bash
-multineedle_config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/multineedle/configs/multineedle.yaml"
-ng_prepare_data "+config_paths=[${multineedle_config_paths}]" \
-    +output_dirpath=data/multineedle \
+example_multi_step_config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/example_multi_step/configs/example_multi_step.yaml"
+ng_prepare_data "+config_paths=[${example_multi_step_config_paths}]" \
+    +output_dirpath=data/example_multi_step \
     +mode=example_validation
 ```
 5. Example rollouts as output by `ng_collect_rollouts` found at `resources_servers/test_weather/data/example_rollouts.jsonl`
 ```bash
-ng_collect_rollouts +agent_name=multineedle_simple_agent \
-    +input_jsonl_fpath=resources_servers/multineedle/data/example.jsonl \
-    +output_jsonl_fpath=resources_servers/multineedle/data/example_rollouts.jsonl \
+ng_collect_rollouts +agent_name=example_multi_step_simple_agent \
+    +input_jsonl_fpath=resources_servers/example_multi_step/data/example.jsonl \
+    +output_jsonl_fpath=resources_servers/example_multi_step/data/example_rollouts.jsonl \
     +limit=null \
     +num_repeats=null \
     +num_samples_in_parallel=null
@@ -199,18 +199,18 @@ mlflow_tracking_token: {your Gitlab PAT}
 Upload a dataset to Gitlab model artifact registry. Dataset name will be your model artifact name. Version must be a str in the format `x.x.x`.
 ```bash
 ng_upload_dataset_to_gitlab \
-    +dataset_name=multineedle \
+    +dataset_name=example_multi_step \
     +version=0.0.1 \
-    +input_jsonl_fpath=data/multineedle_benchmark.jsonl
+    +input_jsonl_fpath=data/example_multi_step_benchmark.jsonl
 ```
 
 Download a dataset from Gitlab model artifact registry.
 ```bash
 ng_download_dataset_from_gitlab \
-    +dataset_name=multineedle \
+    +dataset_name=example_multi_step \
     +version=0.0.1 \
-    +artifact_fpath=multineedle_benchmark.jsonl \
-    +output_fpath=data/multineedle_benchmark.jsonl
+    +artifact_fpath=example_multi_step_benchmark.jsonl \
+    +output_fpath=data/example_multi_step_benchmark.jsonl
 ```
 
 
@@ -292,20 +292,20 @@ ng_download_dataset_from_hf \
 
 
 # How To: Prepare and validate data for PR submission or RL training
-When you use `ng_init_resources_server +entrypoint=resources_servers/multineedle` to initialize a resources server, you will get a config.yaml that looks like the below code block. The dataset information for training, validation, and example will be inside the scope of your agent config (e.g. under simple_agent) and is a list of dataset objects.
+When you use `ng_init_resources_server +entrypoint=resources_servers/example_multi_step` to initialize a resources server, you will get a config.yaml that looks like the below code block. The dataset information for training, validation, and example will be inside the scope of your agent config (e.g. under simple_agent) and is a list of dataset objects.
 
 ```yaml
-multineedle_resources_server:
+example_multi_step_resources_server:
   resources_servers:
-    multineedle:
+    example_multi_step:
       entrypoint: app.py
-multineedle_simple_agent:
+example_multi_step_simple_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py
       resources_server:
         type: resources_servers
-        name: multineedle_resources_server
+        name: example_multi_step_resources_server
       model_server:
         type: responses_api_models
         name: policy_model
@@ -313,26 +313,26 @@ multineedle_simple_agent:
       - name: train
         type: train
         license: Apache 2.0
-        jsonl_fpath: resources_servers/multineedle/data/train.jsonl
+        jsonl_fpath: resources_servers/example_multi_step/data/train.jsonl
         num_repeats: 1
         gitlab_identifier:
-          dataset_name: multineedle
+          dataset_name: example_multi_step
           version: 0.0.1
-          artifact_fpath: multineedle/train.jsonl
+          artifact_fpath: example_multi_step/train.jsonl
         license: Apache 2.0
       - name: validation
         type: validation
         license: Apache 2.0
-        jsonl_fpath: resources_servers/multineedle/data/validation.jsonl
+        jsonl_fpath: resources_servers/example_multi_step/data/validation.jsonl
         num_repeats: 1
         gitlab_identifier:
-          dataset_name: multineedle
+          dataset_name: example_multi_step
           version: 0.0.1
-          artifact_fpath: multineedle/validation.jsonl
+          artifact_fpath: example_multi_step/validation.jsonl
         license: Apache 2.0
       - name: example
         type: example
-        jsonl_fpath: resources_servers/multineedle/data/example.jsonl
+        jsonl_fpath: resources_servers/example_multi_step/data/example.jsonl
         num_repeats: 1
 ```
 
@@ -347,11 +347,11 @@ A dataset object consists of:
 ```yaml
 - name: train
   type: train
-  jsonl_fpath: resources_servers/multineedle/data/train.jsonl
+  jsonl_fpath: resources_servers/example_multi_step/data/train.jsonl
   gitlab_identifier:
-    dataset_name: multineedle
+    dataset_name: example_multi_step
     version: 0.0.1
-    artifact_fpath: multineedle/validation.jsonl
+    artifact_fpath: example_multi_step/validation.jsonl
   license: Apache 2.0
 ```
 
@@ -359,10 +359,10 @@ Each config.yaml in the resources server requires at least one agent with one ex
 
 For every PR that contributes data, we require common dataset statistics and sanity checks on the data itself. This process is also helpful to catch any simple issues before you ever train with NeMo RL. NeMo Gym provides a helper command ng_prepare_data to do so.
 ```bash
-config_paths="resources_servers/multineedle/configs/multineedle.yaml,\
+config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml"
 ng_prepare_data "+config_paths=[$config_paths]" \
-    +output_dirpath=data/multineedle \
+    +output_dirpath=data/example_multi_step \
     +mode=example_validation
 
 # Run NeMo Gym servers the exact same way with the same configs!
@@ -389,10 +389,10 @@ The `ng_prepare_data` command will:
 
 The `ng_prepare_data` command has 2 modes, one for actual train and validation set preparation, and one for example validation intended to sanity check your data format. You would typically run `+mode=example_validation` when first contributing a resources server, and then run with `+mode=train_preparation` when you actually go to train.
 ```bash
-config_paths="resources_servers/multineedle/configs/multineedle.yaml,\
+config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml"
 ng_prepare_data "+config_paths=[$config_paths]" \
-    +output_dirpath=data/multineedle \
+    +output_dirpath=data/example_multi_step \
     +mode=example_validation
 ```
 
@@ -400,7 +400,7 @@ ng_prepare_data "+config_paths=[$config_paths]" \
 # How To: ng_dump_config - Dump a YAML config as exactly as NeMo Gym sees it
 ```bash
 # Example ng_run command
-config_paths="resources_servers/multineedle/configs/multineedle.yaml,\
+config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml"
 ng_run "+config_paths=[$config_paths]"
 
@@ -417,7 +417,7 @@ As a result, we provide a Responses API to Chat Completions mapping middleware l
 
 **To use VLLMModel, just change the `responses_api_models/openai_model/configs/openai_model.yaml` in your config paths to `responses_api_models/vllm_model/configs/vllm_model.yaml`!**
 ```bash
-config_paths="resources_servers/multineedle/configs/multineedle.yaml,\
+config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\
 responses_api_models/vllm_model/configs/vllm_model.yaml"
 ng_run "+config_paths=[$config_paths]"
 ```
@@ -456,7 +456,7 @@ Let's say you want to use both math and search verifiers. Normally how you spin 
 For math:
 ```bash
 config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/library_judge_math/configs/bytedtsinghua_dapo17k.yaml"
+resources_servers/math_with_judge/configs/bytedtsinghua_dapo17k.yaml"
 ng_run "+config_paths=[${config_paths}]"
 ```
 For search:
@@ -469,7 +469,7 @@ ng_run "+config_paths=[$config_paths]"
 If you want to use them both you would just add the yamls together like:
 ```bash
 config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/library_judge_math/configs/bytedtsinghua_dapo17k.yaml,\
+resources_servers/math_with_judge/configs/bytedtsinghua_dapo17k.yaml,\
 resources_servers/google_search/configs/google_search.yaml"
 ng_run "+config_paths=[$config_paths]"
 ```
@@ -485,17 +485,17 @@ In one terminal, start your agent, model, and resources servers, with profiling 
 - `profiling_results_dirpath` (str): The directory to save all server profiling results in. Previous logs for the same will be overwritten in the same directory.
 ```bash
 config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/library_judge_math/configs/bytedtsinghua_dapo17k.yaml"
+resources_servers/math_with_judge/configs/bytedtsinghua_dapo17k.yaml"
 ng_run "+config_paths=[${config_paths}]" \
     +profiling_enabled=true \
-    +profiling_results_dirpath=results/profiling/library_judge_math
+    +profiling_results_dirpath=results/profiling/math_with_judge
 ```
 
 In another terminal, run some large number of rollouts against your servers. Use the `limit` and `num_repeats` flags to adjust the number of samples you want to run.
 ```bash
-ng_collect_rollouts +agent_name=library_judge_math_simple_agent \
-    +input_jsonl_fpath=resources_servers/library_judge_math/data/dapo17k_bytedtsinghua_train.jsonl \
-    +output_jsonl_fpath=temp/library_judge_math_rollouts.jsonl \
+ng_collect_rollouts +agent_name=math_with_judge_simple_agent \
+    +input_jsonl_fpath=resources_servers/math_with_judge/data/dapo17k_bytedtsinghua_train.jsonl \
+    +output_jsonl_fpath=temp/math_with_judge_rollouts.jsonl \
     +limit=1024 \
     +num_repeats=1
 ```
@@ -507,11 +507,11 @@ After `ng_collect_rollouts` finishes, ctrl+c to quit your servers. You should se
 The log file content for a server will look something like the following:
 ```
 name                                                                                                                      ncall       tsub      ttot      tavg      
-.../nemo-gym/resources_servers/library_judge_math/app.py:118 LibraryJudgeMathResourcesServer.verify                       1024        0.009755  17.98387  0.017562
-.../nemo-gym/resources_servers/library_judge_math/app.py:145 LibraryJudgeMathResourcesServer._verify_answer               1024        0.002933  17.87998  0.017461
-.../nemo-gym/resources_servers/library_judge_math/app.py:173 LibraryJudgeMathResourcesServer._verify_answer_with_library  1024        0.007851  17.87704  0.017458
-.../nemo-gym/resources_servers/library_judge_math/app.py:191 <genexpr>                                                    2339        0.001695  0.029082  0.000012
-.../nemo-gym/resources_servers/library_judge_math/app.py:163 _mute_output                                                 2048        0.007473  0.016538  0.000008
+.../nemo-gym/resources_servers/math_with_judge/app.py:118 LibraryJudgeMathResourcesServer.verify                       1024        0.009755  17.98387  0.017562
+.../nemo-gym/resources_servers/math_with_judge/app.py:145 LibraryJudgeMathResourcesServer._verify_answer               1024        0.002933  17.87998  0.017461
+.../nemo-gym/resources_servers/math_with_judge/app.py:173 LibraryJudgeMathResourcesServer._verify_answer_with_library  1024        0.007851  17.87704  0.017458
+.../nemo-gym/resources_servers/math_with_judge/app.py:191 <genexpr>                                                    2339        0.001695  0.029082  0.000012
+.../nemo-gym/resources_servers/math_with_judge/app.py:163 _mute_output                                                 2048        0.007473  0.016538  0.000008
 ```
 
 - `ncall`: number of calls (how many times the function/subroutine was invoked).
@@ -558,13 +558,13 @@ Let's break down the anatomy of a Gym config further and help clarify some thing
 TODO: bxyu-nvidia
 
 ```yaml
-# `library_judge_math` here at the top most level is the unique name of your resources server. This must be unique across your config.
+# `math_with_judge` here at the top most level is the unique name of your resources server. This must be unique across your config.
 # When you or other servers call this server, they will do so using the ServerClient and its name.
-library_judge_math:
+math_with_judge:
   # `resources_servers` here at the second level is the server type. There are 3 server types in gym: agent, model, or resources.
   resources_servers:
     # This is the resources server type. This is not unique at runtime, and you can spin up multiple instances of this with different configs if you wish!
-    library_judge_math:
+    math_with_judge:
       entrypoint: app.py
       judge_model_server:
         type: responses_api_models
@@ -573,20 +573,20 @@ library_judge_math:
         input: []
       }
       should_use_judge: false
-library_judge_math_simple_agent:
+math_with_judge_simple_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py
       resources_server:
         type: resources_servers
-        name: library_judge_math
+        name: math_with_judge
       model_server:
         type: responses_api_models
         name: policy_model
       datasets:
       - name: train
         type: train
-        jsonl_fpath: resources_servers/library_judge_math/data/dapo17k_bytedtsinghua_train.jsonl
+        jsonl_fpath: resources_servers/math_with_judge/data/dapo17k_bytedtsinghua_train.jsonl
         gitlab_identifier:
           dataset_name: bytedtsinghua_dapo17k
           version: 0.0.1
@@ -594,7 +594,7 @@ library_judge_math_simple_agent:
         license: Apache 2.0
       - name: validation
         type: validation
-        jsonl_fpath: resources_servers/library_judge_math/data/aime24_bytedtsinghua_validation.jsonl
+        jsonl_fpath: resources_servers/math_with_judge/data/aime24_bytedtsinghua_validation.jsonl
         gitlab_identifier:
           dataset_name: bytedtsinghua_dapo17k
           version: 0.0.1
@@ -771,9 +771,9 @@ Tying back to NeMo Gym, NeMo gym can be used to create synthetic data for SFT tr
 If you get an error like this on your PR:
 ```
 Error: Found files with missing copyright:
-path= ./resources_servers/comp_coding/scripts/validate_dataset.py
-path= ./resources_servers/comp_coding/scripts/build_examples.py
-path= ./resources_servers/comp_coding/app.py
+path= ./resources_servers/code_gen/scripts/validate_dataset.py
+path= ./resources_servers/code_gen/scripts/build_examples.py
+path= ./resources_servers/code_gen/app.py
 ```
 
 Please add the following copyright snippet to the top of the files listed:

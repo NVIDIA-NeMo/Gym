@@ -12,21 +12,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from nemo_gym.server_utils import ServerClient
-
-from app import ExampleMultiStepResourcesServer, ExampleMultiStepResourcesServerConfig
-
 from unittest.mock import MagicMock
+
+from nemo_gym.server_utils import ServerClient
+from resources_servers.mini_swe_agent.app import (
+    MiniSweResourceResourcesServer,
+    MiniSweResourceResourcesServerConfig,
+)
 
 
 class TestApp:
     def test_sanity(self) -> None:
-        config = ExampleMultiStepResourcesServerConfig(
+        config = MiniSweResourceResourcesServerConfig(
+            name="mini_swe_agent",
             host="0.0.0.0",
             port=8080,
             entrypoint="",
-            name="",
         )
-        ExampleMultiStepResourcesServer(
-            config=config, server_client=MagicMock(spec=ServerClient)
-        )
+        MiniSweResourceResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))

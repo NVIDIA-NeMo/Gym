@@ -12,21 +12,23 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
+from asyncio import run
+
 from nemo_gym.server_utils import ServerClient
 
-from app import ExampleMultiStepResourcesServer, ExampleMultiStepResourcesServerConfig
 
-from unittest.mock import MagicMock
-
-
-class TestApp:
-    def test_sanity(self) -> None:
-        config = ExampleMultiStepResourcesServerConfig(
-            host="0.0.0.0",
-            port=8080,
-            entrypoint="",
-            name="",
-        )
-        ExampleMultiStepResourcesServer(
-            config=config, server_client=MagicMock(spec=ServerClient)
-        )
+server_client = ServerClient.load_from_global_config()
+task = server_client.post(
+    server_name="math_with_code",
+    url_path="/execute_python",
+    json={
+        "code": """
+print("Hello, world!")
+a=np.ones(10)
+print(np.sum(a))
+"""
+    },
+)
+result = run(task)
+print(json.dumps(run(result.json()), indent=4))

@@ -12,11 +12,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from nemo_gym.server_utils import ServerClient
-
-from app import ExampleMultiStepResourcesServer, ExampleMultiStepResourcesServerConfig
-
 from unittest.mock import MagicMock
+
+from nemo_gym.server_utils import ServerClient
+from resources_servers.example_multi_step.app import (
+    ExampleMultiStepResourcesServer,
+    ExampleMultiStepResourcesServerConfig,
+)
 
 
 class TestApp:
@@ -27,6 +29,4 @@ class TestApp:
             entrypoint="",
             name="",
         )
-        ExampleMultiStepResourcesServer(
-            config=config, server_client=MagicMock(spec=ServerClient)
-        )
+        ExampleMultiStepResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
