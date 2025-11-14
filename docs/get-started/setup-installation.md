@@ -21,7 +21,6 @@
 
 Make sure you have these prerequisites ready before beginning:
 
-- **Python 3.12+** (check with `python3 --version`)
 - **Git** (for cloning the repository)
 - **OpenAI API key with available credits** (for the tutorial agent)
 
@@ -78,27 +77,25 @@ Want to catch configuration issues early? Test your API key before starting serv
 
 ```bash
 python -c "
-import openai
-import yaml
+from openai import OpenAI
+from nemo_gym.global_config import get_global_config_dict
 
-# Load your configuration
-with open('env.yaml') as f:
-    config = yaml.safe_load(f)
+global_config = get_global_config_dict()
 
 # Test API access
-client = openai.OpenAI(
-    api_key=config['policy_api_key'],
-    base_url=config['policy_base_url']
+client = OpenAI(
+    api_key=global_config['policy_api_key'],
+    base_url=global_config['policy_base_url']
 )
 
 # Try a simple request
 response = client.chat.completions.create(
-    model=config['policy_model_name'],
+    model=global_config['policy_model_name'],
     messages=[{'role': 'user', 'content': 'Say hello'}],
     max_tokens=10
 )
 print('✅ API key validated successfully!')
-print(f'Model: {config[\"policy_model_name\"]}')
+print(f'Model: {global_config[\"policy_model_name\"]}')
 print(f'Response: {response.choices[0].message.content}')
 "
 ```
@@ -110,7 +107,7 @@ If this step fails, you will see a clear error message (like quota exceeded or i
 :::
 
 :::{dropdown} Troubleshooting: "Missing mandatory value: policy_api_key"
-Check your `env.yaml` file has the correct API key format. Do not surround your API key with quotes.
+Check your `env.yaml` file has the correct API key format.
 :::
 
 ## 3. Start the Servers
