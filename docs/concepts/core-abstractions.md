@@ -8,7 +8,7 @@ Before diving into code, let's understand the three core abstractions in NeMo Gy
 
 :::{tab-item} Model
 
-Responses API Model servers are model endpoints that performs text inference - stateless, single-call text generation without conversation memory or orchestration
+Responses API Model servers are model endpoints that performs text inference - stateless, single-call text generation without conversation memory or orchestration. You will always have at least one Response API Model server active during training, typically known as the "policy" model.
 
 **Available Implementations:**
 - `openai_model`: Direct integration with OpenAI's Responses API  
@@ -20,7 +20,7 @@ Responses API Model servers are model endpoints that performs text inference - s
 
 :::{tab-item} Resources
 
-Resources servers provide tools implementations that can be invoked via tool calling and verification logic that measure task performance. NeMo Gym contains a variety of NVIDIA and community contributed resources that you may wish to utilize. We also have tutorials on how to add your own Resource server.
+Resources servers provide tools implementations that can be invoked via tool calling and verification logic that measure task performance. NeMo Gym contains a variety of NVIDIA and community contributed resources servers that you may wish to utilize during training. We also have tutorials on how to add your own Resource server.
 
 **Resources Provide**
 - **Tools**: Functions agents can call (e.g., `get_weather`, `search_web`)
@@ -41,12 +41,14 @@ Resources servers provide tools implementations that can be invoked via tool cal
 
 :::{tab-item} Agents
 
-Responses API Agent servers orchestrate the interaction between models and resources. An agent can also referred to as a "training environment".
+Responses API Agent servers orchestrate the interaction between models and resources.
 
 - Route requests to the right model
 - Provide tools to the model
 - Handle multi-turn conversations
 - Format responses consistently
+
+An agent can also referred to as a "training environment". NeMo Gym contains several training environment patterns that cover a variety of scenarios including multi-step, multi-turn, or user modeling scenarios.
 
 **Examples:**
 - `simple_agent`: Basic agent that coordinates model calls with resource tools
@@ -65,37 +67,6 @@ your_agent_name:                     # server ID
 
 :::
 ::::
-
-
-## How They Work Together
-
-Let's trace through a weather request:
-
-1. **User** → **Agent**: "What's the weather in NYC?"
-
-2. **Agent** → **Model**: 
-   ```json
-   {
-     "messages": [{"role": "user", "content": "What's the weather in NYC?"}],
-     "tools": [{"name": "get_weather", "parameters": "..."}]
-   }
-   ```
-
-3. **Model** → **Agent**: "I should call the weather tool"
-   ```json
-   {"tool_calls": [{"name": "get_weather", "arguments": "{\"city\":\"NYC\"}"}]}
-   ```
-
-4. **Agent** → **Resource**: Calls the weather server
-
-5. **Resource** → **Agent**: Returns weather data
-   ```json
-   {"city": "NYC", "weather_description": "cold"}
-   ```
-
-6. **Agent** → **Model**: "Here's the weather data, respond to user"
-
-7. **Model** → **Agent** → **User**: "It's cold in NYC, bring a jacket!"
 
 
 <div align="center">
