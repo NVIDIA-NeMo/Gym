@@ -55,11 +55,11 @@
 
 The offline training pipeline follows this logical flow:
 
-1. Collect rollouts using strategies from [Tutorial 5](05-rollout-collection.md)
+1. Collect rollouts using strategies from [Tutorial 5]
 - **SFT data**: Use consistent generation (low temperature, single rollout per task)
 - **DPO data**: Use diverse generation (higher temperature, 2 rollouts per task for comparison)
-2. Filter for quality - Remove poor rollouts before processing
-3. Format for training - Convert to SFT or DPO format based on your goals
+1. Filter for quality - Remove poor rollouts before processing
+2. Format for training - Convert to SFT or DPO format based on your goals
 
 
 
@@ -358,4 +358,4 @@ You now know how to transform rollouts into training data:
 <!-- - **Online Training with Rollouts (RL) (Coming soon!)** - Learn real-time training approaches -->
 <!-- TODO: Add link [Building Custom Resource Servers](08-building-custom-resources.md) -->
 <!-- - **Building Custom Resource Servers (Coming soon!)** - Create domain-specific training data -->
-- **[Configuration Management](09-configuration-guide.md)**
+- **[Configuration Management]**

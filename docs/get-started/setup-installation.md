@@ -175,4 +175,4 @@ When you ran `ng_run`, you started a complete AI agent system:
 
 Now that everything is working, let's understand what just happened and how to interact with your agent.
 
-→ **[Next: Your First Agent](03-your-first-agent.md)**
+→ **[Next: Your First Agent]**

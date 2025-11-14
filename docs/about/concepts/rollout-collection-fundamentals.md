@@ -362,4 +362,4 @@ You now understand NeMo Gym's rollout generation system:
 - **Best practices**: Efficient and reliable rollout generation
 
 <!-- TODO: Add link [Next: Collecting Rollouts for Reinforcement Learning](06-rl-rollout-collection.md) -->
-→ **[Next: Offline Training with Rollouts (SFT/DPO)](07-sft-dpo-rollout-collection.md)**
+→ **[Next: Offline Training with Rollouts (SFT/DPO)]**
