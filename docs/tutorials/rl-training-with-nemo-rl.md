@@ -2,7 +2,7 @@
 
 **Goal**: Train a model with NeMo RL. Learn how to set up NeMo Gym + NeMo RL training environment, run tests, prepare data, and launch single and multi-node training runs!
 
-Multinode Slurm script and run command are found at the bottom of this document. Please do the single node setup first! Do NOT skip it.
+Multinode Slurm script and run command are found at the bottom of this document. Please do the single node setup first! Do NOT skip it. Throughout this tutorial, you may see mentions of "Penguin". This refers to Gym's codename before it was fully open-sourced.
 
 ## Single GPU node setup to ensure correctness
 
@@ -40,7 +40,6 @@ source /opt/nemo_rl_venv/bin/activate
 uv sync --group={build,docs,dev,test} --extra penguin
 
 # This will take 10-15 mins
-# NOTE: the test `unit/environments/test_penguin.py::test_penguin_sanity` is failing with a Ray error and currently being worked on in this PR. This has no impact on the training!
 # We add the HF token here to avoid HF rate limits
 HF_HOME=.cache/ \
 HF_TOKEN={your HF token} \
@@ -53,9 +52,11 @@ HF_TOKEN={your HF token} \
 
 ### Prepare NeMo Gym data
 
-You will need to all `ng_prepare_data` for all data you intend to train on, including data that you already have locally. The `ng_prepare_data` command will add an `agent_ref` property to each example that tells Gym which agent to route that example to!
+You will need to use Gym's data preparation command `ng_prepare_data` to prepare the data you intend to train on, including data that you already have locally. The `ng_prepare_data` command will add an `agent_ref` property to each example that tells NeMo Gym which agent server to route that example to!
 
-The `ng_prepare_data` command below includes a model config, not because a model is used in the preparation step, but in order to help Gym resolve the agent config properly. Gym will error out if it detects anything wrong about the config. Specifically in this case, an agent config will require a model reference and it will error out if a model ref is not provided.
+Note: The `ng_prepare_data` command below includes the full set of configuration yaml paths (including the model yaml path). The configs you use to prepare data are exactly the same configs you use for training.
+
+This command will output the data into the `data/bytedtsinghua_dapo17k`, that subsequent configs will point to.
 
 ```bash
 # Setup Penguin local venv
@@ -77,7 +78,12 @@ cd ../../.. && source /opt/nemo_rl_venv/bin/activate
 
 ### Single node training
 
-Launch a single node training job training Qwen 3 4B Instruct using the library judge math verifier on the DAPO 17K math dataset. You should see training start and for the reward to end up roughly around 0.8 or greater.
+Launch a single node training job training Qwen 3 4B Instruct using the library judge math verifier on the DAPO 17K math dataset. We find that Qwen 3 4B Instruct is the smallest model that still provides experimental signal. We use the DAPO 17K math dataset since it is a very solid baseline set by the DAPO team. You should see training start and for the reward to end up roughly around 0.8 or greater.
+
+Prerequisites for the command below:
+1. A W&B API key
+2. The above `ng_prepare_data` command has been run.
+
 
 ```bash
 # Run example training config for single node
