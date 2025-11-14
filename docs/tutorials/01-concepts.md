@@ -3,7 +3,7 @@
 Before diving into code, let's understand the three core abstractions in NeMo Gym.
 
 > [!TIP]
-> If you are new to reinforcement learning for LLMs, we recommend you review **[Key Terminology](00-terminology.md)** first.
+> If you are new to reinforcement learning for LLMs, we recommend you review **[Key Terminology]** first.
 
 ## Overview
 
@@ -33,8 +33,8 @@ Servers that provide tools for agents to use and verifiers that score agent perf
 **Examples:**
 - `simple_weather`: Mock weather API for testing and tutorials
 - `google_search`: Web search capabilities via Google Search API  
-- `python_math_exec`: Python code execution environment for mathematical reasoning
-- `library_judge_math`: Mathematical problem verification using symbolic computation
+- `math_with_code`: Python code execution environment for mathematical reasoning
+- `math_with_judge`: Mathematical problem verification using symbolic computation
 - `mcqa`: Multiple choice question answering evaluation
 - `instruction_following`: General instruction compliance scoring
 
@@ -110,4 +110,4 @@ Let's trace through a weather request:
 
 Now that you understand the concepts, let's get everything installed and running.
 
-→ **Next: [Setup and Installation](02-setup.md)**
+→ **Next: [Setup and Installation]**

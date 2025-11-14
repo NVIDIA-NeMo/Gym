@@ -42,7 +42,7 @@ is_correct = (pred == gold)
 reward = 1.0 if is_correct else 0.0
 ```
 
-**Sophisticated Correctness** (`library_judge_math` - Math Problems):
+**Sophisticated Correctness** (`math_with_judge` - Math Problems):
 ```python
 # Uses math-verify library for mathematical equivalence
 library_reward = math_metric.compute(predicted_answer, expected_answer)
@@ -163,4 +163,4 @@ This verification system is what makes NeMo Gym powerful for agent training:
 
 Now that you understand how agent performance is measured, the next step is learning how to systematically collect this verification data at scale through rollout generation.
 
-→ **[Next: Rollout Collection Fundamentals](05-rollout-collection.md)**
+→ **[Next: Rollout Collection Fundamentals]**
