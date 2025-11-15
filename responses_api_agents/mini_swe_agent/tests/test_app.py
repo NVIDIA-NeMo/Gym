@@ -104,7 +104,7 @@ def create_test_config(
         entrypoint="",
         resources_server=ResourcesServerRef(
             type="resources_servers",
-            name="mini_swe_resource",
+            name="mini_swe_agent",
         ),
         model_server=ModelServerRef(
             type="responses_api_models",

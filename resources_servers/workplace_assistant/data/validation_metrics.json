@@ -1,0 +1,60 @@
+{
+    "name": "validation",
+    "type": "validation",
+    "jsonl_fpath": "resources_servers/workplace_assistant/data/validation.jsonl",
+    "gitlab_identifier": {
+        "dataset_name": "workplace_assistant",
+        "version": "0.0.4",
+        "artifact_fpath": "validation.jsonl"
+    },
+    "license": "Apache 2.0",
+    "Number of examples": 545,
+    "Number of tools": {
+        "Total # non-null values": 545,
+        "Average": 27.0,
+        "Min": 27.0,
+        "Max": 27.0,
+        "Median": 27.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 545,
+        "Average": 1724.98,
+        "Min": 1713.0,
+        "Max": 1746.0,
+        "Median": 1723.81,
+        "Standard deviation": 6.27
+    },
+    "Number of turns": {
+        "Total # non-null values": 545,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 545,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
+    },
+    "id": {
+        "Total # non-null values": 545,
+        "Average": 272.0,
+        "Min": 0.0,
+        "Max": 544.0,
+        "Median": 272.0,
+        "Standard deviation": 157.47
+    },
+    "category": {
+        "unique_count": 5,
+        "total_count": 545
+    },
+    "environment_name": {
+        "unique_count": 1,
+        "total_count": 545
+    }
+}

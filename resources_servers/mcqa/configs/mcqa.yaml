@@ -4,6 +4,9 @@ mcqa:
       entrypoint: app.py
       domain: knowledge
       verified: false
+      description: Multi-choice question answering problems
+      value: Improve benchmarks like MMLU / GPQA / HLE
+      dataset_name: Nemotron-RL-knowledge-mcqa
 mcqa_simple_agent:
   responses_api_agents:
     simple_agent:

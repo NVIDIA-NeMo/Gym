@@ -4,6 +4,9 @@ structured_outputs:
       entrypoint: app.py
       domain: instruction_following
       verified: false
+      description: Check if responses are following structured output requirements in prompts
+      value: Improve instruction following capabilities
+      dataset_name: Nemotron-RL-instruction_following-structured_outputs
 structured_outputs_simple_agent:
   responses_api_agents:
     simple_agent:
