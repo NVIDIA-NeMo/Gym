@@ -54,27 +54,48 @@ from nemo_gym.server_utils import (
 
 
 def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  # pragma: no cover
-    # For python >= 3.12, uv venv --seed no longer installs setuptools and wheels.
-    # https://docs.astral.sh/uv/reference/cli/#uv-venv--seed
-    pre_install_cmd = "uv pip install setuptools setuptools_scm packaging wheel"
+    pyproject_toml = False
+    with open(f"{dir_path}/pyproject.toml", "r") as _f:
+        pyproject_toml = True
 
-    install_cmd = "uv pip install -r requirements.txt"
-    head_server_deps = global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]
-    install_cmd += " " + " ".join(head_server_deps)
-
-    cmd = f"""cd {dir_path} \\
-    && uv venv --seed --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} \\
+    cmd = f"""uv venv --seed --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} \\
     && source .venv/bin/activate \\
-    && {pre_install_cmd} \\
-    && {install_cmd} \\
     """
+
+    if pyproject_toml:
+        cmd += """&& uv pip install --editable . \\
+        """
+
+    else:
+        # For python >= 3.12, uv venv --seed no longer installs setuptools and wheels.
+        # https://docs.astral.sh/uv/reference/cli/#uv-venv--seed
+        pre_install_cmd = "uv pip install setuptools setuptools_scm packaging wheel"
+
+        install_cmd = "uv pip install -r requirements.txt"
+        head_server_deps = global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]
+        install_cmd += " " + " ".join(head_server_deps)
+
+        cmd += f"""&& {pre_install_cmd} \\
+        && {install_cmd} \\
+        """
+
     return cmd
 
 
 def _run_command(command: str, working_directory: Path) -> Popen:  # pragma: no cover
     custom_env = environ.copy()
-    custom_env["PYTHONPATH"] = f"{working_directory.absolute()}:{custom_env.get('PYTHONPATH', '')}"
-    return Popen(command, executable="/bin/bash", shell=True, env=custom_env)
+    py_path = custom_env.get("PYTHONPATH", None)
+    if py_path is not None:
+        custom_env["PYTHONPATH"] = f"{working_directory.absolute()}:{py_path}"
+    else:
+        custom_env["PYTHONPATH"] = working_directory.absolute()
+    return Popen(
+        command,
+        executable="/bin/bash",
+        shell=True,
+        cwd=working_directory,
+        env=custom_env,
+    )
 
 
 class RunConfig(BaseNeMoGymCLIConfig):
