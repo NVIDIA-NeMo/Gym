@@ -56,7 +56,7 @@ from nemo_gym.server_utils import (
 def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  # pragma: no cover
     pyproject_toml = False
     try:
-        with open(f"{dir_path}/pyproject.toml", "r") as _f:
+        with open(f"{dir_path / 'pyproject.toml'}", "r") as _f:
             pyproject_toml = True
     except OSError:
         pass
@@ -85,18 +85,19 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
     return cmd
 
 
-def _run_command(command: str, working_directory: Path) -> Popen:  # pragma: no cover
+def _run_command(command: str, working_dir_path: Path) -> Popen:  # pragma: no cover
+    work_dir = f"{working_dir_path.absolute()}"
     custom_env = environ.copy()
     py_path = custom_env.get("PYTHONPATH", None)
     if py_path is not None:
-        custom_env["PYTHONPATH"] = f"{working_directory.absolute()}:{py_path}"
+        custom_env["PYTHONPATH"] = f"{work_dir}:{py_path}"
     else:
-        custom_env["PYTHONPATH"] = working_directory.absolute()
+        custom_env["PYTHONPATH"] = work_dir
     return Popen(
         command,
         executable="/bin/bash",
         shell=True,
-        cwd=working_directory,
+        cwd=work_dir,
         env=custom_env,
     )
 
