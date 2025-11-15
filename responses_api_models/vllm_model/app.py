@@ -214,8 +214,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             if self.config.end_token_ids is not None:
                 vllm_xargs["end_token_ids"] = json.dumps(self.config.end_token_ids)
 
-            create_params["extra_body"] = create_params.get("extra_body", {})
-            create_params["extra_body"]["vllm_xargs"] = vllm_xargs
+            create_params["vllm_xargs"] = vllm_xargs
 
         try:
             chat_completion_dict = await client.create_chat_completion(**create_params)
