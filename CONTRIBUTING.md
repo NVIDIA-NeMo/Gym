@@ -57,44 +57,6 @@ We're excited about contributions that expand NeMo Gym's capabilities and improv
 **Not sure where to start?** Check our [open issues](https://github.com/NVIDIA-NeMo/Gym/issues) or create a new issue to discuss your idea!
 
 
-
-## Resource Server Verification Process
-
-### What is the "Verified" flag?
-
-The `verified` flag in resource server configs indicates that the environment has demonstrated value through training runs and/or shows meaningful improvement on target benchmarks. This quality signal helps identify production-ready environments.
-
-### Verification Process
-
-1. **Submit PR** with `verified: false` in your resource server config YAML.
-
-Please note any config staged without a `verified` flag will automatically be updated to contain `verified: false` via pre-commit hook.
-```yaml
-your_server:
-   resources_servers:
-      your_server:
-         entrypoint: app.py
-         domain: coding
-         verified: false  # Set to false by default when submitting environment for review
-```
-
-
-2. **Include W&B Links** in the PR description.
-
-3. Reviewer Approval
-A maintainer will:
-- Review the W&B training run
-- Verify the improvement claims
-- Approve the PR if verification evidence is sufficient
-
-### Default Status
-
-- All resource servers should **start as `verified: false`** by default until a reviewer approves and updates it to `true`
-- If a server's verification is later disputed or training runs cannot be accessed or reproduced, maintainers may revert it to `verified: false`
-- The verified flag is reflected in the README resource server tables
-
-
-
 ## Quick Start for Contributors
 
 ### Development Setup
@@ -154,7 +116,8 @@ If you're contributing a new resource server to NeMo Gym, follow this comprehens
 5. **Training-based correctness check**:
    - Train with GRPO on Qwen 30B A3B Instruct (or any other model with better performance) on veRL / Nemo RL + Gym.
    - Include training accuracy curve and test benchmark accuracy curve.
-   - See [Resource Server Verification Process](#resource-server-verification-process) section.
+   <!-- TODO: Add back in when we can verify resource servers -->
+   <!-- - See [Resource Server Verification Process](#resource-server-verification-process) section. -->
 
 6. **PR Check and Review**:
    1. Assign team member for reproduction and review
