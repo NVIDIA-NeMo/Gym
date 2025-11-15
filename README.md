@@ -94,12 +94,14 @@ We'd love your contributions! Here's how to get involved:
 
 If you use NeMo Gym in your research, please cite it using the following BibTeX entry:
 
+```bibtex
 @misc{nemo-gym,
-title = {NeMo Gym: An Open Source Framework for Scaling Reinforcement Learning Environments for LLM},
-howpublished = {\url{https://github.com/NVIDIA-NeMo/Gym}},
-year = {2025},
-note = {GitHub repository},
+  title = {NeMo Gym: An Open Source Framework for Scaling Reinforcement Learning Environments for LLM},
+  howpublished = {\url{https://github.com/NVIDIA-NeMo/Gym}},
+  year = {2025},
+  note = {GitHub repository},
 }
+```
 
 ## 📦 Available Resource Servers
 
