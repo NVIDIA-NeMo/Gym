@@ -1,3 +1,5 @@
+(rl-training-with-nemo-rl)=
+
 # RL Training with NeMo RL
 
 **Goal**: Train a model with NeMo RL. Learn how to set up NeMo Gym + NeMo RL training environment, run tests, prepare data, and launch single and multi-node training runs!

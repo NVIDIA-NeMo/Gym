@@ -24,4 +24,12 @@ Transform rollouts into training data for supervised fine-tuning (SFT) and direc
 {bdg-secondary}`sft` {bdg-secondary}`dpo`
 :::
 
+:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` RL Training with NeMo RL
+:link: rl-training-with-nemo-rl
+:link-type: doc
+Train a model with NeMo RL. Learn how to set up NeMo Gym + NeMo RL training environment, run tests, prepare data, and launch single and multi-node training runs.
++++
+{bdg-secondary}`sft` {bdg-secondary}`dpo`
+:::
+
 ::::
