@@ -80,7 +80,7 @@ This generates training data with verification scores!
 ## 📖 Documentation
 
 - **[Documentation](https://docs.nvidia.com/nemo/gym/latest/index.html)** - Technical reference docs
-- **[Tutorials](https://docs.nvidia.com/nemo/evaluator/latest/tutorials/index.html)** - Hands-on tutorials and practical examples
+- **[Tutorials](https://docs.nvidia.com/nemo/gym/latest/tutorials/index.html)** - Hands-on tutorials and practical examples
  
 
 ## 🤝 Community & Support
