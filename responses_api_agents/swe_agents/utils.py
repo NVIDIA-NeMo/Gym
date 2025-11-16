@@ -11,16 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import asyncio
 import copy
 import json
 import logging
 import os
-import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+from openai.types.responses.function_tool import FunctionTool
 
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -33,6 +32,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.server_utils import ServerClient, get_first_server_config_dict
+from responses_api_agents.swe_agents.swebench_core import run_single_swe_agent_problem
 
 
 LOG = logging.getLogger(__name__)
@@ -327,8 +328,6 @@ def get_model_endpoint(model_server_name: Optional[str]) -> str:
         RuntimeError: If endpoint cannot be determined
     """
     try:
-        from nemo_gym.server_utils import ServerClient, get_first_server_config_dict
-
         global_config_dict = ServerClient.load_from_global_config().global_config_dict
 
         model_server_config = get_first_server_config_dict(
@@ -357,7 +356,7 @@ async def run_swebench_evaluation(
     agent_framework_repo: Optional[str] = None,
     agent_framework_commit: str = "HEAD",
 ) -> Dict:
-    """Run SWE-bench evaluation using NeMo-Skills.
+    """Run SWE-bench evaluation directly without subprocess.
 
     Args:
         problem_info: Problem information
@@ -368,7 +367,7 @@ async def run_swebench_evaluation(
         agent_tools_file: Path to tools JSON file (for SWE-agent)
         agent_max_turns: Maximum iterations for the agent
         swebench_tests_timeout: Timeout for running tests
-        nemo_skills_config: Additional NeMo-Skills configuration
+        nemo_skills_config: Additional configuration (currently unused)
         agent_framework_repo: URL of the agent framework repo to clone (optional)
         agent_framework_commit: Commit/branch to use when cloning (default: HEAD)
 
@@ -378,6 +377,10 @@ async def run_swebench_evaluation(
     Raises:
         RuntimeError: If evaluation fails
     """
+    # Only SWE-agent is supported
+    if agent_framework != "swe_agent":
+        raise ValueError(f"Only 'swe_agent' framework is supported, got: {agent_framework}")
+
     # Create persistent directory for I/O and logs in local workspace
     workspace_root = Path(os.path.dirname(os.path.abspath(__file__))).parent.parent  # Go up to nemo-gym root
     instance_id = problem_info.get("instance_id", "unknown")
@@ -385,91 +388,75 @@ async def run_swebench_evaluation(
     persistent_dir = workspace_root / "temp_swebench" / f"{instance_id}_{timestamp}"
     persistent_dir.mkdir(parents=True, exist_ok=True)
 
-    input_file = persistent_dir / "input.jsonl"
-    output_file = persistent_dir / "output.jsonl"
+    LOG.info(f"Running SWE-bench evaluation for {instance_id} in {persistent_dir}")
 
-    # Write input file
-    with open(input_file, "w") as f:
-        json.dump(problem_info, f)
-        f.write("\n")
+    # Extract model name from body
+    model_name = getattr(body, "model", "gpt-4.1-2025-04-14")
 
-    # Build command to run NeMo-Skills
-    cmd = build_nemo_skills_command(
-        input_file,
-        output_file,
-        model_endpoint,
-        body,
-        agent_framework,
-        agent_config,
-        agent_max_turns,
-        swebench_tests_timeout,
-        nemo_skills_config,
-        agent_framework_repo,
-        agent_framework_commit,
-    )
+    # Build inference parameters dict
+    inference_params = {
+        "temperature": getattr(body, "temperature", 0.0),
+        "top_p": getattr(body, "top_p", 0.95),
+    }
 
-    LOG.info(f"Running NeMo-Skills command: {' '.join(cmd)}")
+    # Add optional parameters if present
+    if hasattr(body, "max_output_tokens") and body.max_output_tokens is not None:
+        inference_params["tokens_to_generate"] = body.max_output_tokens
 
-    # Prepare environment and pass through HuggingFace credentials
-    env = os.environ.copy()
-    
-    # Pass through HF_TOKEN if available to avoid rate limiting
-    if 'HF_TOKEN' in os.environ:
-        env['HF_TOKEN'] = os.environ['HF_TOKEN']
-        # Also set APPTAINERENV_ prefix so it gets passed into apptainer containers
-        env['APPTAINERENV_HF_TOKEN'] = os.environ['HF_TOKEN']
-        LOG.info("Using HF_TOKEN from environment for dataset access")
-    
-    # Pass through HF_HOME to use shared cache location
-    if 'HF_HOME' in os.environ:
-        env['HF_HOME'] = os.environ['HF_HOME']
-        # Also set APPTAINERENV_ prefix so it gets passed into apptainer containers
-        env['APPTAINERENV_HF_HOME'] = os.environ['HF_HOME']
-        LOG.info(f"Using HF_HOME from environment: {env['HF_HOME']}")
-    
-    # Only enable offline mode if explicitly requested (e.g., for air-gapped systems)
-    # This allows first-time downloads while still using cached data when available
-    if os.environ.get('HF_DATASETS_OFFLINE') == '1':
-        env['HF_DATASETS_OFFLINE'] = '1'
-        env['TRANSFORMERS_OFFLINE'] = '1'
-        env['APPTAINERENV_HF_DATASETS_OFFLINE'] = '1'
-        env['APPTAINERENV_TRANSFORMERS_OFFLINE'] = '1'
-        LOG.info("Running in offline mode - will only use cached datasets")
-    
-    # Run in subprocess to avoid event loop conflicts
-    process = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,  # Merge stderr into stdout
-        env=env,
-    )
+    # Add any inference params from body.inference if present
+    if hasattr(body, "inference"):
+        body_inference = getattr(body, "inference", {})
+        if isinstance(body_inference, dict):
+            for key, value in body_inference.items():
+                if value is not None:
+                    inference_params[key] = value
 
-    # Stream output in real-time
-    stdout_lines = []
-    while True:
-        line = await process.stdout.readline()
-        if not line:
-            break
-        line_str = line.decode().strip()
-        if line_str:
-            LOG.info(f"NeMo-Skills: {line_str}")
-            stdout_lines.append(line_str)
+    # Get agent_timeout from config if specified (default 1 hour)
+    agent_timeout = nemo_skills_config.get("agent_timeout", 3600)
 
-    await process.wait()
-
-    if process.returncode != 0:
-        error_msg = f"NeMo-Skills failed with code {process.returncode}"
-        if stdout_lines:
-            error_msg += f": {' '.join(stdout_lines[-5:])}"  # Show last 5 lines
-        LOG.error(error_msg)
-        raise RuntimeError(error_msg)
-
-    # Read results
-    if not output_file.exists():
-        raise RuntimeError("No output file generated")
-
-    with open(output_file, "r") as f:
-        result = json.loads(f.read().strip())
+    # Run SWE-agent evaluation directly
+    try:
+        result = await run_single_swe_agent_problem(
+            problem_info=problem_info,
+            model_name=model_name,
+            model_endpoint=model_endpoint,
+            output_dir=persistent_dir,
+            agent_config=agent_config,
+            agent_max_turns=agent_max_turns,
+            swebench_tests_timeout=swebench_tests_timeout,
+            inference_params=inference_params,
+            agent_framework_repo=agent_framework_repo,
+            agent_framework_commit=agent_framework_commit,
+            agent_timeout=agent_timeout,
+        )
+    except Exception as e:
+        # Handle failures gracefully
+        failure_reason = f"SWE-agent execution failed: {str(e)}"
+        LOG.error(failure_reason)
+        result = {
+            "swe-bench-metrics": {
+                "patch_is_None": True,
+                "patch_exists": False,
+                "patch_successfully_applied": False,
+                "resolved": False,
+                "tests_status": {
+                    "FAIL_TO_PASS": {"success": [], "failure": []},
+                    "PASS_TO_PASS": {"success": [], "failure": []},
+                    "FAIL_TO_FAIL": {"success": [], "failure": []},
+                    "PASS_TO_FAIL": {"success": [], "failure": []},
+                },
+            },
+            "swe-bench-outputs": {
+                "instance_id": instance_id,
+                "model_patch": "",
+                "generation": "",
+                "error": failure_reason,
+                "evaluation_failed": True,
+            },
+            "_evaluation_failed": True,
+            "_failure_reason": failure_reason,
+        }
+        LOG.info("Dummy result created - this will result in reward=0 for failed evaluation")
 
     # Try to find and include trajectory file
     trajectories_dir = persistent_dir / "trajectories"
@@ -485,86 +472,8 @@ async def run_swebench_evaluation(
         result["tools"] = tools
         LOG.info(f"Added {len(tools)} tools to result")
 
+    print("result", result)
     return result
-
-
-def build_nemo_skills_command(
-    input_file: Path,
-    output_file: Path,
-    model_endpoint: str,
-    body: NeMoGymResponseCreateParamsNonStreaming,
-    agent_framework: str,
-    agent_config: Optional[str],
-    agent_max_turns: int,
-    swebench_tests_timeout: int,
-    nemo_skills_config: Dict[str, Any],
-    agent_framework_repo: Optional[str] = None,
-    agent_framework_commit: str = "HEAD",
-) -> list:
-    """Build command to run NeMo-Skills SWE-bench evaluation.
-
-    Args:
-        input_file: Input JSONL file path
-        output_file: Output JSONL file path
-        model_endpoint: Model API endpoint
-        body: Request body
-        agent_framework: Agent framework
-        agent_config: Path to agent configuration file
-        agent_max_turns: Maximum iterations
-        swebench_tests_timeout: Test timeout
-        nemo_skills_config: Additional configuration
-        agent_framework_repo: URL of the agent framework repo to clone (optional)
-        agent_framework_commit: Commit/branch to use when cloning (default: HEAD)
-
-    Returns:
-        Command as list of strings
-    """
-    # Extract model name from endpoint or body
-    model_name = getattr(body, "model", "gpt-4.1-2025-04-14")
-
-    # Build base command
-    cmd = [
-        sys.executable,
-        "-m",
-        "nemo_skills.inference.eval.swebench",
-        f"++input_file={input_file}",
-        f"++output_file={output_file}",
-        f"++agent_framework={agent_framework}",
-        f"++server.model={model_name}",
-        f"++server.base_url={model_endpoint}",
-        f"++agent_max_turns={agent_max_turns}",
-        f"++swebench_tests_timeout={swebench_tests_timeout}",
-    ]
-
-    # Add agent config if specified
-    if agent_config:
-        cmd.append(f"++agent_config={agent_config}")
-
-    # Add agent framework repo and commit if specified
-    if agent_framework_repo:
-        cmd.append(f"++agent_framework_repo={agent_framework_repo}")
-    if agent_framework_commit:
-        cmd.append(f"++agent_framework_commit={agent_framework_commit}")
-
-    # Add inference parameters
-    inference_params = getattr(body, "inference", {})
-    if hasattr(body, "temperature") and body.temperature is not None:
-        inference_params["temperature"] = body.temperature
-    if hasattr(body, "top_p") and body.top_p is not None:
-        inference_params["top_p"] = body.top_p
-    if hasattr(body, "max_output_tokens") and body.max_output_tokens is not None:
-        inference_params["tokens_to_generate"] = body.max_output_tokens
-
-    for key, value in inference_params.items():
-        cmd.append(f"++inference.{key}={value}")
-
-    # Add any additional NeMo-Skills config
-    for key, value in nemo_skills_config.items():
-        # Skip None/null values - let NeMo-Skills use its defaults or don't pass the param
-        if value is not None:
-            cmd.append(f"++{key}={value}")
-
-    return cmd
 
 
 def extract_messages(trajectory_item) -> List[Dict]:
@@ -684,16 +593,7 @@ def get_trajectory_and_tools(
     trajectory_data = None
     tools = []
 
-    # Handle different agent frameworks' trajectory storage
-    if agent_framework == "openhands":
-        # Get trajectory from completion files (complete and in OpenAI format)
-        trajectory_data, tools = get_openhands_trajectory_from_completions(trajectories_dir, instance_id)
-        if trajectory_data:
-            LOG.info(f"Loaded OpenHands trajectory from llm_completions ({len(trajectory_data)} messages)")
-        else:
-            LOG.warning(f"No trajectory files found in {trajectories_dir}")
-
-    elif agent_framework == "swe_agent":
+    if agent_framework == "swe_agent":
         # For SWE-agent, look for .traj files
         if trajectories_dir.exists():
             traj_files = [f for f in trajectories_dir.glob("**/*.traj") if "demonstrations" not in str(f)]
@@ -730,76 +630,6 @@ def get_trajectory_and_tools(
     return trajectory_data, tools
 
 
-def get_openhands_trajectory_from_completions(trajectories_dir: Path, instance_id: str) -> tuple:
-    """Get trajectory from llm_completions directory for OpenHands.
-
-    Args:
-        trajectories_dir: Trajectories directory
-        instance_id: Instance ID
-
-    Returns:
-        Tuple of (messages, tools)
-    """
-    messages = []
-    tools = []
-    completions_dir = trajectories_dir / instance_id / "llm_completions" / instance_id
-
-    if not completions_dir.exists():
-        LOG.warning(f"No llm_completions directory found: {completions_dir}")
-        return messages, tools
-
-    # Get all completion files sorted by timestamp
-    completion_files = sorted(completions_dir.glob("*.json"))
-
-    if not completion_files:
-        LOG.warning(f"No completion files found in: {completions_dir}")
-        return messages, tools
-
-    # Use the last file for messages since it contains the cumulative conversation
-    last_file = completion_files[-1]
-
-    try:
-        with open(last_file, "r") as f:
-            data = json.load(f)
-
-        # Get all messages from the last file
-        messages = data["messages"]
-
-        # Add the final assistant response
-        messages.append(data["response"]["choices"][0]["message"])
-
-        # Get tools (they should be the same across all turns)
-        tools = data.get("kwargs", {}).get("tools", [])
-
-        LOG.info(f"Loaded {len(messages)} messages from last completion file: {last_file.name}")
-
-    except Exception as e:
-        LOG.error(f"Failed to read completion file {last_file}: {e}")
-        return [], []
-
-    # Convert content format if needed (OpenHands uses list of dicts for content)
-    for msg in messages:
-        if "content" in msg:
-            if msg["content"] is None:
-                msg["content"] = ""
-            elif isinstance(msg["content"], list):
-                # Handle empty content lists (e.g., assistant messages with only tool calls)
-                if len(msg["content"]) == 0:
-                    msg["content"] = ""
-                elif len(msg["content"]) == 1:
-                    # Extract the single text item
-                    item = msg["content"][0]
-                    if not isinstance(item, dict) or item.get("type") != "text" or "text" not in item:
-                        raise ValueError(f"Expected content item to be {{type: 'text', text: '...'}}, got {item}")
-                    msg["content"] = item["text"]
-                else:
-                    raise ValueError(f"Expected 0 or 1 content items, got {len(msg['content'])}")
-        else:
-            raise ValueError(f"Expected content in message, got {msg}")
-
-    return messages, tools
-
-
 def convert_tools_to_function_format(raw_tools: List[Dict]) -> List:
     """Convert tools from ChatCompletion format to Response FunctionTool format.
 
@@ -809,8 +639,6 @@ def convert_tools_to_function_format(raw_tools: List[Dict]) -> List:
     Returns:
         List of FunctionTool objects
     """
-    from openai.types.responses.function_tool import FunctionTool
-
     tools = []
     for tool in raw_tools:
         # Tools from SWE-agent are in ChatCompletion format with nested structure
@@ -827,41 +655,3 @@ def convert_tools_to_function_format(raw_tools: List[Dict]) -> List:
             )
             tools.append(function_tool)
     return tools
-
-
-def ensure_nemo_run_symlink():
-    """Ensure /nemo_run/code symlink exists pointing to nemo_skills package.
-
-    Raises:
-        RuntimeError: If symlink cannot be created
-    """
-    # Find nemo_skills in the .venv directory
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    venv_lib = os.path.join(current_dir, ".venv/lib")
-
-    nemo_skills_path = None
-    if os.path.exists(venv_lib):
-        # Look for python* directories
-        for python_dir in os.listdir(venv_lib):
-            if python_dir.startswith("python"):
-                potential_path = os.path.join(venv_lib, python_dir, "site-packages/nemo_skills")
-                if os.path.exists(potential_path):
-                    nemo_skills_path = potential_path
-                    break
-
-    if not nemo_skills_path:
-        raise RuntimeError(f"Could not find nemo_skills package in {venv_lib}")
-
-    # Create symlink if it doesn't exist
-    if not os.path.exists("/nemo_run/code"):
-        # Create directory
-        result = subprocess.run(["mkdir", "-p", "/nemo_run"], capture_output=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to create /nemo_run directory: {result.stderr.decode()}")
-
-        # Create symlink
-        result = subprocess.run(["ln", "-sf", nemo_skills_path, "/nemo_run/code"], capture_output=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to create symlink: {result.stderr.decode()}")
-
-        LOG.info(f"Created symlink: /nemo_run/code -> {nemo_skills_path}")

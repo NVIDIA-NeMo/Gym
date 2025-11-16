@@ -18,7 +18,6 @@ import subprocess
 import sys
 import time
 from asyncio import Semaphore
-from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 import ray
@@ -46,7 +45,6 @@ from nemo_gym.openai_utils import (
 from responses_api_agents.swe_agents.utils import (
     convert_tools_to_function_format,
     convert_trajectory_to_output_items,
-    ensure_nemo_run_symlink,
     extract_input_messages_from_trajectory,
     extract_problem_info,
     get_model_endpoint,
@@ -57,18 +55,6 @@ from responses_api_agents.swe_agents.utils import (
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 LOG = logging.getLogger(__name__)
-
-# Check if NeMo-Skills is available
-try:
-    import importlib.util
-
-    nemo_skills_spec = importlib.util.find_spec("nemo_skills")
-    NEMO_SKILLS_AVAILABLE = nemo_skills_spec is not None
-except ImportError:
-    NEMO_SKILLS_AVAILABLE = False
-
-if not NEMO_SKILLS_AVAILABLE:
-    LOG.warning("NeMo-Skills is not installed. Please install with: uv sync --extra nemo-skills")
 
 
 @ray.remote(
@@ -166,10 +152,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         """Initialize the wrapper and check dependencies."""
         self.sem = Semaphore(self.config.concurrency)
         print(f"Semaphore initialized with {self.config.concurrency} tokens")
-        if not NEMO_SKILLS_AVAILABLE:
-            raise ImportError(
-                "NeMo-Skills is required for SWE-bench wrapper. Please install it with: uv sync --extra nemo-skills"
-            )
         LOG.info("in init for swe bench")
 
         # Install Apptainer on Ubuntu/Debian
@@ -179,61 +161,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             result = subprocess.run(["which", "apptainer"], capture_output=True, text=True)
             if result.returncode == 0:
                 LOG.info("Apptainer is already installed")
-            else:
-                LOG.info("Installing Apptainer...")
-                # Download and install Apptainer
-                subprocess.run(
-                    "cd /tmp && wget https://github.com/apptainer/apptainer/releases/download/v1.3.1/apptainer_1.3.1_amd64.deb",
-                    shell=True,
-                    check=True,
-                )
-                subprocess.run(
-                    "apt-get update && apt-get install -y /tmp/apptainer_1.3.1_amd64.deb", shell=True, check=True
-                )
-                LOG.info("Apptainer installation completed")
-        except subprocess.CalledProcessError as e:
-            LOG.warning(f"Apptainer installation failed (may already be installed): {e}")
         except Exception as e:
             LOG.warning(f"Error during Apptainer setup: {e}")
-
-        # Ensure symlink exists for /nemo_run/code
-        ensure_nemo_run_symlink()
-
-        # Resolve agent_config path if it's relative
-        if self.config.agent_config and not Path(self.config.agent_config).is_absolute():
-            # If it starts with eval/ or config/, it's a path within the SWE-agent repo, leave as-is
-            if not self.config.agent_config.startswith(("eval/")):
-                # It's a relative path to a local file - resolve it to absolute path
-                module_dir = Path(__file__).parent
-                resolved_path = (module_dir / self.config.agent_config).resolve()
-                if resolved_path.exists():
-                    # Copy custom config to /nemo_run/code so it's accessible in container
-                    self._copy_config_to_nemo_run(resolved_path)
-                else:
-                    LOG.error(f"Config file not found at: {resolved_path}")
-                    raise FileNotFoundError(f"Agent config not found: {resolved_path}")
-
-    def _copy_config_to_nemo_run(self, config_path: Path):
-        """Copy custom config file to /nemo_run/code for container access."""
-        nemo_run_code = Path("/nemo_run/code")
-        if not nemo_run_code.exists():
-            LOG.warning(f"/nemo_run/code does not exist, using absolute path: {config_path}")
-            self.config.agent_config = str(config_path)
-            return
-
-        # Copy to /nemo_run/code/swe_agent_configs/
-        config_dest_dir = nemo_run_code / "swe_agent_configs"
-        config_dest_dir.mkdir(exist_ok=True)
-        config_dest = config_dest_dir / config_path.name
-
-        import shutil
-
-        shutil.copy2(config_path, config_dest)
-        LOG.info(f"Copied custom config from {config_path} to {config_dest}")
-
-        # Update config path to the mounted location inside container
-        self.config.agent_config = f"/nemo_run/code/swe_agent_configs/{config_path.name}"
-        LOG.info(f"Updated agent_config to container path: {self.config.agent_config}")
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         """Run NeMo-Skills SWE-bench evaluation."""
@@ -263,21 +192,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             }
             future = runner_ray_remote.remote(run_swebench_evaluation, params)
             result = await asyncio.to_thread(ray.get, future)
-
-            # result = await run_swebench_evaluation(
-            #     problem_info,
-            #     model_endpoint,
-            #     body,
-            #     self.config.agent_framework,
-            #     self.config.agent_config,
-            #     self.config.agent_tools_file,
-            #     self.config.agent_max_turns,
-            #     self.config.swebench_tests_timeout,
-            #     self.config.nemo_skills_config,
-            #     self.config.agent_framework_repo,
-            #     self.config.agent_framework_commit,
-            # )
-
             # Extract trajectory and convert to proper NeMoGym format
             output_items = []
             trajectory = result.get("trajectory", [])
@@ -370,8 +284,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # Fix None values in responses_create_params to use defaults
             # This is needed because the pydantic model has non-Optional fields with defaults
             update_dict = {}
-            # SWE-agent processes tool calls sequentially, OpenHands can do parallel
-            update_dict["parallel_tool_calls"] = False if self.config.agent_framework == "swe_agent" else True
+            # SWE-agent processes tool calls sequentially
+            update_dict["parallel_tool_calls"] = False
             if body.responses_create_params.tool_choice is None:
                 update_dict["tool_choice"] = "auto"  # OpenAI default
 
