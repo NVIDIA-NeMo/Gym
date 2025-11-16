@@ -1,1 +1,1 @@
--e nemo-gym[dev,nemo-skills] @ ../../
+-e nemo-gym[dev] @ ../../

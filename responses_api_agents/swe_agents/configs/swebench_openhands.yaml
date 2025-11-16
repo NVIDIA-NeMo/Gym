@@ -6,12 +6,12 @@ swe_agents:
       
       # Agent framework configuration
       agent_framework: openhands
-      agent_config: eval/swe-bench/openhands/default
+      agent_config: /lustre/fsw/portfolios/llmservice/users/sdevare/repos/nemo-rl-sl/3rdparty/Penguin-workspace/Penguin/responses_api_agents/swe_agents/configs/oh_config.toml
       agent_max_turns: 100
       agent_framework_repo: https://github.com/All-Hands-AI/OpenHands.git
       agent_framework_commit: 9ee704a25a331d0d2eb9a8e87a4dcff1d948855b
       # Container configuration
-      container_formatter: "docker://swebench/sweb.eval.x86_64.{instance_id}"
+      container_formatter: "/lustre/fsw/portfolios/llmservice/users/igitman/images/swe-bench/swebench_sweb.eval.x86_64.{instance_id}.sif"
       container_folder_path: null
       swebench_tests_timeout: 1800  # 30 minutes
       

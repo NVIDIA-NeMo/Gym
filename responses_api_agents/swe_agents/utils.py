@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import asyncio
 import copy
 import json
 import logging
@@ -32,6 +31,12 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
+)
+from responses_api_agents.swe_agents.run_openhands import (
+    SweBenchGenerationConfig,
+    SupportedAgentFrameworks,
+    SweBenchInferenceConfig,
+    RunOpenHandsAgent,
 )
 
 
@@ -356,6 +361,7 @@ async def run_swebench_evaluation(
     nemo_skills_config: Dict[str, Any],
     agent_framework_repo: Optional[str] = None,
     agent_framework_commit: str = "HEAD",
+    openhands_setup_dir: Optional[Path] = None,
 ) -> Dict:
     """Run SWE-bench evaluation using NeMo-Skills.
 
@@ -371,6 +377,7 @@ async def run_swebench_evaluation(
         nemo_skills_config: Additional NeMo-Skills configuration
         agent_framework_repo: URL of the agent framework repo to clone (optional)
         agent_framework_commit: Commit/branch to use when cloning (default: HEAD)
+        openhands_setup_dir: Path to pre-built OpenHands directory (optional)
 
     Returns:
         Evaluation results dictionary
@@ -393,56 +400,50 @@ async def run_swebench_evaluation(
         json.dump(problem_info, f)
         f.write("\n")
 
-    # Build command to run NeMo-Skills
-    cmd = build_nemo_skills_command(
-        input_file,
-        output_file,
-        model_endpoint,
-        body,
-        agent_framework,
-        agent_config,
-        agent_max_turns,
-        swebench_tests_timeout,
-        nemo_skills_config,
-        agent_framework_repo,
-        agent_framework_commit,
+    inference_params = {}
+    model_name = getattr(body, "model", "gpt-4.1-2025-04-14")
+
+    if hasattr(body, "temperature") and body.temperature is not None:
+        inference_params["temperature"] = body.temperature
+    if hasattr(body, "top_p") and body.top_p is not None:
+        inference_params["top_p"] = body.top_p
+    if hasattr(body, "max_output_tokens") and body.max_output_tokens is not None:
+        inference_params["tokens_to_generate"] = body.max_output_tokens
+
+    inference_config = SweBenchInferenceConfig(**inference_params)
+    server = {
+        "model": model_name,
+        "base_url": model_endpoint,
+    }
+
+    cfg = SweBenchGenerationConfig(
+        input_file=input_file,
+        output_file=output_file,
+        agent_framework=SupportedAgentFrameworks.openhands,
+        agent_framework_repo=agent_framework_repo,
+        agent_framework_commit=agent_framework_commit,
+        agent_config=agent_config,
+        agent_max_turns=agent_max_turns,
+        swebench_tests_timeout=swebench_tests_timeout,
+        inference=inference_config,
+        server=server,
+        **nemo_skills_config,
     )
 
-    LOG.info(f"Running NeMo-Skills command: {' '.join(cmd)}")
+    run_oh = RunOpenHandsAgent(cfg=cfg, openhands_setup_dir=openhands_setup_dir)
+    result = await run_oh.process_single_datapoint(problem_info)
+    print(f"Process completed for {instance_id}", flush=True)
 
-    # Run in subprocess to avoid event loop conflicts
-    process = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,  # Merge stderr into stdout
-    )
-
-    # Stream output in real-time
-    stdout_lines = []
-    while True:
-        line = await process.stdout.readline()
-        if not line:
-            break
-        line_str = line.decode().strip()
-        if line_str:
-            LOG.info(f"NeMo-Skills: {line_str}")
-            stdout_lines.append(line_str)
-
-    await process.wait()
-
-    if process.returncode != 0:
-        error_msg = f"NeMo-Skills failed with code {process.returncode}"
-        if stdout_lines:
-            error_msg += f": {' '.join(stdout_lines[-5:])}"  # Show last 5 lines
-        LOG.error(error_msg)
-        raise RuntimeError(error_msg)
+    try:
+        with open(output_file, "w") as f:
+            json.dump(result, f)
+    except Exception as e:
+        LOG.error(f"Failed to write result to {output_file}: {e}")
+        raise e
 
     # Read results
     if not output_file.exists():
-        raise RuntimeError("No output file generated")
-
-    with open(output_file, "r") as f:
-        result = json.loads(f.read().strip())
+        raise RuntimeError(f"No output file generated: {output_file}")
 
     # Try to find and include trajectory file
     trajectories_dir = persistent_dir / "trajectories"
@@ -838,3 +839,217 @@ def ensure_nemo_run_symlink():
             raise RuntimeError(f"Failed to create symlink: {result.stderr.decode()}")
 
         LOG.info(f"Created symlink: /nemo_run/code -> {nemo_skills_path}")
+
+
+def setup_openhands_environment(
+    agent_framework_repo: Optional[str] = None,
+    agent_framework_commit: str = "HEAD",
+    setup_dir: Optional[Path] = None,
+) -> Path:
+    """Set up OpenHands environment once during initialization.
+
+    This function builds OpenHands in a persistent location that can be mounted
+    into Apptainer containers, avoiding repeated setup for each request.
+
+    Args:
+        agent_framework_repo: URL of the OpenHands repo (default: official repo)
+        agent_framework_commit: Commit/branch to use (default: HEAD)
+        setup_dir: Directory to set up OpenHands (default: workspace_root/openhands_setup)
+
+    Returns:
+        Path to the built OpenHands directory
+
+    Raises:
+        RuntimeError: If setup fails
+    """
+    if agent_framework_repo is None:
+        agent_framework_repo = "https://github.com/All-Hands-AI/OpenHands.git"
+
+    # Determine setup directory
+    if setup_dir is None:
+        workspace_root = Path(os.path.dirname(os.path.abspath(__file__))).parent.parent
+        setup_dir = workspace_root / "openhands_setup"
+
+    # Resolve to absolute path to handle symlinks
+    setup_dir = setup_dir.resolve()
+
+    openhands_dir = setup_dir / "OpenHands"
+    miniforge_dir = setup_dir / "miniforge3"
+
+    # Check if already set up (validate all critical components exist)
+    if (
+        openhands_dir.exists()
+        and (openhands_dir / "pyproject.toml").exists()
+        and (miniforge_dir / "bin" / "conda").exists()
+        and (miniforge_dir / "bin" / "mamba").exists()
+    ):
+        LOG.info(f"OpenHands already set up at {setup_dir}")
+        LOG.info(f"  - Miniforge: {miniforge_dir}")
+        LOG.info(f"  - OpenHands: {openhands_dir}")
+        return setup_dir  # Return parent directory, not OpenHands subdirectory
+
+    # If partial setup exists, log that we'll rebuild
+    if setup_dir.exists():
+        LOG.warning(f"Incomplete setup detected at {setup_dir}, will rebuild/complete setup...")
+
+    LOG.info(f"Setting up OpenHands environment at {setup_dir}...")
+    setup_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create setup script
+    setup_script = setup_dir / "setup_openhands.sh"
+    script_content = f"""#!/bin/bash
+set -e
+set -x  # Enable debug output
+
+cd {setup_dir}
+
+# Install miniforge if not properly installed
+if [ ! -f "{miniforge_dir}/bin/conda" ] || [ ! -f "{miniforge_dir}/bin/mamba" ]; then
+    echo "Installing miniforge..."
+    # Clean up any partial installation
+    rm -rf "{miniforge_dir}"
+    rm -f Miniforge3-*.sh
+    
+    echo "Downloading miniforge..."
+    curl -L -O "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-$(uname)-$(uname -m).sh"
+    
+    echo "Running miniforge installer..."
+    bash Miniforge3-$(uname)-$(uname -m).sh -b -p {miniforge_dir}
+    
+    echo "Cleaning up installer..."
+    rm Miniforge3-$(uname)-$(uname -m).sh
+else
+    echo "Miniforge already installed at {miniforge_dir}"
+fi
+
+# Add conda to PATH and source conda setup
+echo "Setting up conda environment..."
+export PATH="{miniforge_dir}/bin:$PATH"
+source {miniforge_dir}/etc/profile.d/conda.sh
+conda activate base
+
+# Verify conda and mamba are available
+echo "Verifying conda installation..."
+which conda
+which mamba
+conda --version
+mamba --version
+
+# Install required packages
+echo "Installing conda packages (this may take 5-10 minutes)..."
+mamba install -y --override-channels conda-forge::python=3.12 conda-forge::nodejs conda-forge::poetry conda-forge::tmux
+
+# Verify installations
+echo "Verifying package installations..."
+which python
+which node
+which poetry
+python --version
+node --version
+poetry --version
+
+# Clone OpenHands
+if [ ! -d "{openhands_dir}/.git" ]; then
+    echo "Cloning OpenHands..."
+    # Clean up any partial clone
+    rm -rf "{openhands_dir}"
+    git clone {agent_framework_repo} {openhands_dir}
+else
+    echo "OpenHands already cloned at {openhands_dir}"
+fi
+
+cd {openhands_dir}
+echo "Checking out {agent_framework_commit}..."
+git checkout {agent_framework_commit}
+
+# Build OpenHands
+echo "Building OpenHands (this may take 5-10 minutes)..."
+export INSTALL_DOCKER=0
+
+
+# Remove any cached virtualenvs from previous runs
+echo "Removing any cached poetry virtualenvs..."
+rm -rf ~/.cache/pypoetry/virtualenvs/openhands-* || true
+
+# CRITICAL: Unset any active virtualenv from the host (Penguin .venv)
+# This prevents poetry from getting confused about which venv to use
+echo "Unsetting host virtualenv to avoid poetry confusion..."
+unset VIRTUAL_ENV
+unset PYTHONHOME
+# Remove any venv paths from PATH to ensure clean environment
+export PATH=$(echo "$PATH" | tr ':' '\\n' | grep -v '\\.venv' | tr '\\n' ':' | sed 's/:$//')
+
+# Configure poetry to create virtualenv in the project directory (so it's mounted in container)
+export POETRY_VIRTUALENVS_IN_PROJECT=true
+
+make build
+
+# Install Python dependencies with poetry
+echo "Installing Python dependencies (creating .venv in OpenHands directory)..."
+poetry install --no-interaction --no-root
+
+# Install datasets package
+echo "Installing datasets package..."
+poetry run python -m pip install datasets
+
+echo "Verifying .venv was created..."
+if [ -d .venv ]; then
+    echo "✓ .venv created at $(pwd)/.venv"
+else
+    echo "✗ ERROR: .venv was not created!"
+    exit 1
+fi
+
+echo "OpenHands setup complete!"
+"""
+
+    with open(setup_script, "w") as f:
+        f.write(script_content)
+
+    setup_script.chmod(0o755)
+
+    # Run setup script with live output
+    LOG.info("Running OpenHands setup script...")
+    LOG.info(f"Setup script: {setup_script}")
+    LOG.info("=" * 80)
+
+    process = None
+    try:
+        # Use Popen to stream output in real-time
+        process = subprocess.Popen(
+            [str(setup_script)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,  # Merge stderr into stdout
+            text=True,
+            bufsize=1,  # Line buffered
+        )
+
+        # Stream output line by line
+        output_lines = []
+        for line in process.stdout:
+            # Print to console
+            print(line, end="", flush=True)
+            # Also collect for error reporting
+            output_lines.append(line)
+
+        # Wait for process to complete
+        process.wait(timeout=1800)  # 30 minute timeout
+
+        if process.returncode != 0:
+            full_output = "".join(output_lines)
+            raise RuntimeError(f"OpenHands setup failed with return code {process.returncode}:\n{full_output}")
+
+        LOG.info("=" * 80)
+        LOG.info(f"OpenHands setup completed successfully!")
+        LOG.info(f"Setup directory: {setup_dir}")
+        LOG.info(f"  - Miniforge: {miniforge_dir}")
+        LOG.info(f"  - OpenHands: {openhands_dir}")
+
+        return setup_dir  # Return parent directory containing both miniforge3 and OpenHands
+
+    except subprocess.TimeoutExpired:
+        if process:
+            process.kill()
+        raise RuntimeError("OpenHands setup timed out after 30 minutes")
+    except Exception as e:
+        raise RuntimeError(f"OpenHands setup failed: {e}")

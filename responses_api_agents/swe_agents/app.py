@@ -51,24 +51,13 @@ from responses_api_agents.swe_agents.utils import (
     extract_problem_info,
     get_model_endpoint,
     run_swebench_evaluation,
+    setup_openhands_environment,
 )
 
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 LOG = logging.getLogger(__name__)
-
-# Check if NeMo-Skills is available
-try:
-    import importlib.util
-
-    nemo_skills_spec = importlib.util.find_spec("nemo_skills")
-    NEMO_SKILLS_AVAILABLE = nemo_skills_spec is not None
-except ImportError:
-    NEMO_SKILLS_AVAILABLE = False
-
-if not NEMO_SKILLS_AVAILABLE:
-    LOG.warning("NeMo-Skills is not installed. Please install with: uv sync --extra nemo-skills")
 
 
 @ray.remote(
@@ -127,6 +116,13 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
     # Concurrency control
     concurrency: int = Field(default=1, description="Maximum number of concurrent SWE-bench runs")
 
+    # Pre-built OpenHands directory path (set during initialization)
+    openhands_setup_dir: Optional[Path] = Field(
+        default=None,
+        description="Path to pre-built OpenHands directory (automatically set during initialization)",
+        exclude=True,
+    )
+
 
 class SWEBenchRunRequest(BaseRunRequest):
     """Request format for SWE-bench runs."""
@@ -166,74 +162,22 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         """Initialize the wrapper and check dependencies."""
         self.sem = Semaphore(self.config.concurrency)
         print(f"Semaphore initialized with {self.config.concurrency} tokens")
-        if not NEMO_SKILLS_AVAILABLE:
-            raise ImportError(
-                "NeMo-Skills is required for SWE-bench wrapper. Please install it with: uv sync --extra nemo-skills"
-            )
         LOG.info("in init for swe bench")
+        LOG.info(f"Agent framework: {self.config.agent_framework}")
+        LOG.info(f"Concurrency: {self.config.concurrency}")
 
-        # Install Apptainer on Ubuntu/Debian
-        LOG.info("Checking Apptainer installation...")
-        try:
-            # Check if apptainer is already installed
-            result = subprocess.run(["which", "apptainer"], capture_output=True, text=True)
-            if result.returncode == 0:
-                LOG.info("Apptainer is already installed")
-            else:
-                LOG.info("Installing Apptainer...")
-                # Download and install Apptainer
-                subprocess.run(
-                    "cd /tmp && wget https://github.com/apptainer/apptainer/releases/download/v1.3.1/apptainer_1.3.1_amd64.deb",
-                    shell=True,
-                    check=True,
+        # Pre-build OpenHands environment if using openhands framework
+        if self.config.agent_framework == "openhands":
+            LOG.info("Setting up OpenHands environment during initialization...")
+            try:
+                self.config.openhands_setup_dir = setup_openhands_environment(
+                    agent_framework_repo=self.config.agent_framework_repo,
+                    agent_framework_commit=self.config.agent_framework_commit,
                 )
-                subprocess.run(
-                    "apt-get update && apt-get install -y /tmp/apptainer_1.3.1_amd64.deb", shell=True, check=True
-                )
-                LOG.info("Apptainer installation completed")
-        except subprocess.CalledProcessError as e:
-            LOG.warning(f"Apptainer installation failed (may already be installed): {e}")
-        except Exception as e:
-            LOG.warning(f"Error during Apptainer setup: {e}")
-
-        # Ensure symlink exists for /nemo_run/code
-        ensure_nemo_run_symlink()
-
-        # Resolve agent_config path if it's relative
-        if self.config.agent_config and not Path(self.config.agent_config).is_absolute():
-            # If it starts with eval/ or config/, it's a path within the SWE-agent repo, leave as-is
-            if not self.config.agent_config.startswith(("eval/")):
-                # It's a relative path to a local file - resolve it to absolute path
-                module_dir = Path(__file__).parent
-                resolved_path = (module_dir / self.config.agent_config).resolve()
-                if resolved_path.exists():
-                    # Copy custom config to /nemo_run/code so it's accessible in container
-                    self._copy_config_to_nemo_run(resolved_path)
-                else:
-                    LOG.error(f"Config file not found at: {resolved_path}")
-                    raise FileNotFoundError(f"Agent config not found: {resolved_path}")
-
-    def _copy_config_to_nemo_run(self, config_path: Path):
-        """Copy custom config file to /nemo_run/code for container access."""
-        nemo_run_code = Path("/nemo_run/code")
-        if not nemo_run_code.exists():
-            LOG.warning(f"/nemo_run/code does not exist, using absolute path: {config_path}")
-            self.config.agent_config = str(config_path)
-            return
-
-        # Copy to /nemo_run/code/swe_agent_configs/
-        config_dest_dir = nemo_run_code / "swe_agent_configs"
-        config_dest_dir.mkdir(exist_ok=True)
-        config_dest = config_dest_dir / config_path.name
-
-        import shutil
-
-        shutil.copy2(config_path, config_dest)
-        LOG.info(f"Copied custom config from {config_path} to {config_dest}")
-
-        # Update config path to the mounted location inside container
-        self.config.agent_config = f"/nemo_run/code/swe_agent_configs/{config_path.name}"
-        LOG.info(f"Updated agent_config to container path: {self.config.agent_config}")
+                LOG.info(f"OpenHands environment ready at: {self.config.openhands_setup_dir}")
+            except Exception as e:
+                LOG.error(f"Failed to set up OpenHands environment: {e}")
+                raise
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         """Run NeMo-Skills SWE-bench evaluation."""
@@ -260,6 +204,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "nemo_skills_config": self.config.nemo_skills_config,
                 "agent_framework_repo": self.config.agent_framework_repo,
                 "agent_framework_commit": self.config.agent_framework_commit,
+                "openhands_setup_dir": self.config.openhands_setup_dir,
             }
             future = runner_ray_remote.remote(run_swebench_evaluation, params)
             result = await asyncio.to_thread(ray.get, future)
