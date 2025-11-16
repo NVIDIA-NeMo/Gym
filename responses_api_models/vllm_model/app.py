@@ -74,7 +74,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     enable_router: bool = False
     # router_backend values should be one of "ray" or "mp" (matching the allowed
     # values of VLLM --distributed-executor-backend).
-    router_backend: str = "ray"
+    router_backend: str = "mp"
     router_dp_size: Optional[int] = 1
 
     def model_post_init(self, context):
