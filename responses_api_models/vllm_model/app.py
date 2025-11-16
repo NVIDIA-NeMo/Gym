@@ -71,13 +71,20 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     spinup_server: bool = False
     server_args: Optional[Dict[str, Any]] = None
 
+    enable_router: bool = False
+    router_backend: str = "ray"
+    router_dp_size: Optional[int] = 1
+
     def model_post_init(self, context):
         if isinstance(self.base_url, str):
             self.base_url = [self.base_url]
         return super().model_post_init(context)
 
 
-def _spinup_vllm_server(config: VLLMModelConfig, server_host: str, server_port: int) -> None:
+def _spinup_vllm_server(
+    config: VLLMModelConfig, server_host: str, server_port: int, router_dp_rank: Optional[int]
+) -> None:
+    import os
     import sys
 
     import uvloop
@@ -93,6 +100,11 @@ def _spinup_vllm_server(config: VLLMModelConfig, server_host: str, server_port: 
     sys.argv.append(server_host)
     sys.argv.append("--port")
     sys.argv.append(f"{server_port}")
+    sys.argv.append("--distributed-executor-backend")
+    if config.enable_router:
+        sys.argv.append(config.router_backend)
+    else:
+        sys.argv.append("mp")
     if config.server_args:
         for k, v in config.server_args.items():
             if isinstance(v, bool):
@@ -106,6 +118,14 @@ def _spinup_vllm_server(config: VLLMModelConfig, server_host: str, server_port: 
                 sys.argv.append(arg_key)
                 sys.argv.append(f"{v}")
 
+    if config.enable_router and config.router_backend == "mp":
+        tp_size = (config.server_args or {}).get("tensor_parallel_size", 1)
+        tp_start = router_dp_rank * tp_size
+        tp_ranks = []
+        for tp_rank_offset in range(tp_size):
+            tp_ranks.append(tp_start + tp_rank_offset)
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join([f"{r}" for r in tp_ranks])
+
     server_args = vllm.utils.FlexibleArgumentParser()
     server_args = vllm.entrypoints.openai.cli_args.make_arg_parser(server_args)
     server_args = server_args.parse_args()
@@ -118,28 +138,41 @@ class VLLMModel(SimpleResponsesAPIModel):
     config: VLLMModelConfig
 
     def model_post_init(self, context):
-        self._server_proc = None
         if self.config.spinup_server:
-            server_host = "127.0.0.1"
-            server_port = find_open_port()
+            self._server_procs = []
+            self._clients = []
 
-            server_proc = Process(
-                target=_spinup_vllm_server,
-                args=(self.config, server_host, server_port),
-                daemon=False,
-            )
-            server_proc.start()
+            router_dp_size = 1
+            if self.config.enable_router:
+                router_dp_size = max(1, self.config.router_dp_size)
 
-            self._server_proc = server_proc
-            self._clients = [
-                NeMoGymAsyncOpenAI(
-                    base_url=f"http://{server_host}:{server_port}/v1",
-                    api_key=self.config.api_key,
+            for router_dp_rank in range(router_dp_size):
+                # FIXME: this server host is wrong for multi-node via ray.
+                server_host = "127.0.0.1"
+                server_port = find_open_port()
+
+                server_proc = Process(
+                    target=_spinup_vllm_server,
+                    args=(
+                        self.config,
+                        server_host,
+                        server_port,
+                        router_dp_rank if self.config.enable_router else None,
+                    ),
+                    daemon=False,
                 )
-            ]
+                server_proc.start()
+
+                self._server_procs.append(server_proc)
+                self._clients.append(
+                    NeMoGymAsyncOpenAI(
+                        base_url=f"http://{server_host}:{server_port}/v1",
+                        api_key=self.config.api_key,
+                    )
+                )
 
         else:
-            self._server_proc = None
+            self._server_procs = None
             self._clients = [
                 NeMoGymAsyncOpenAI(
                     base_url=base_url,
