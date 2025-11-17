@@ -71,26 +71,32 @@ def spinup_single_ray_gpu_node_worker(
     **worker_kwargs,
 ):  # pragma: no cover
     cfg = get_global_config_dict()
+
+    # If value of RAY_GPU_NODES_KEY_NAME is None, then Gym will use all Ray GPU nodes.
+    # Otherwise if value of RAY_GPU_NODES_KEY_NAME is a list, then Gym will only use
+    # the listed Ray GPU nodes.
     gpu_nodes = cfg.get(RAY_GPU_NODES_KEY_NAME, None)
     if gpu_nodes is not None:
         gpu_nodes = set([node["node_id"] for node in gpu_nodes])
+
     num_gpus_per_node = cfg.get(RAY_NUM_GPUS_PER_NODE_KEY_NAME, 8)
     assert num_gpus >= 1, f"Must request at least 1 GPU node for spinning up {worker_cls}"
     assert num_gpus <= num_gpus_per_node, (
         f"Requested {num_gpus} > {num_gpus_per_node} GPU nodes for spinning up {worker_cls}"
     )
+
     node_id = _lookup_node_id_with_free_gpus(num_gpus, reserved_gpu_nodes=gpu_nodes)
     if node_id is None:
         raise RuntimeError(f"Cannot find {num_gpus} available Ray GPU nodes for spinning up {worker_cls}")
+
     worker_options = {}
     worker_options["num_gpus"] = num_gpus
     worker_options["scheduling_strategy"] = NodeAffinitySchedulingStrategy(
         node_id=node_id,
         soft=False,
     )
-    py_exec = sys.executable
     worker_runtime_env = {
-        "py_executable": py_exec,
+        "py_executable": sys.executable,
         "env_vars": {
             **os.environ,
         },
