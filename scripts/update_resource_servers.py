@@ -289,8 +289,10 @@ def get_example_and_training_server_info() -> tuple[list[ServerInfo], list[Serve
 
 def generate_example_only_table(servers: list[ServerInfo]) -> str:  # pragma: no cover
     """Generate table for example-only resource servers."""
+    col_names = ["Name", "Demonstrates", "Config", "README"]
+
     if not servers:
-        return "| Name | Demonstrates | Config | README |\n| ---- | ------------------- | ----------- | ------ |\n"
+        return handle_empty_table(col_names)
 
     col_names = ["Name", "Demonstrates", "Config", "README"]
     rows = []
@@ -313,11 +315,6 @@ def generate_example_only_table(servers: list[ServerInfo]) -> str:  # pragma: no
 
 def generate_training_table(servers: list[ServerInfo]) -> str:  # pragma: no cover
     """Generate table for training resource servers."""
-    if not servers:
-        # TODO: Add back in when we can verify resource servers
-        # return "| Resource Server | Domain | Dataset | Description | Value | Config |Train | Validation | Verified | License |\n| --------------- | ------ | ------- | ----------- | ----- |------| ----- | ---------- | --------| ------- |\n"
-        return "| Resource Server | Domain | Dataset | Description | Value | Config | Train | Validation | License |\n| --------------- | ------ | ------- | ----------- | ----- |------| ----- | ---------- | ------- |\n"
-
     col_names = [
         "Resource Server",
         "Domain",
@@ -327,9 +324,13 @@ def generate_training_table(servers: list[ServerInfo]) -> str:  # pragma: no cov
         "Config",
         "Train",
         "Validation",
+        # TODO: Add back in when we can verify resource servers
         # "Verified",
         "License",
     ]
+    if not servers:
+        return handle_empty_table(col_names)
+
     rows = []
 
     for server in servers:
@@ -363,6 +364,12 @@ def generate_training_table(servers: list[ServerInfo]) -> str:  # pragma: no cov
 
     table = [col_names, ["-" for _ in col_names]] + rows
     return format_table(table)
+
+
+def handle_empty_table(col_names: list[str]) -> str:  # pragma: no cover
+    """Generate an empty table when there are no servers."""
+    separator = ["-" * len(col_name) for col_name in col_names]
+    return format_table([col_names, separator])
 
 
 def normalize_str(s: str) -> str:  # pragma: no cover
