@@ -208,20 +208,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             future = runner_ray_remote.remote(run_swebench_evaluation, params)
             result = await asyncio.to_thread(ray.get, future)
 
-            # result = await run_swebench_evaluation(
-            #     problem_info,
-            #     model_endpoint,
-            #     body,
-            #     self.config.agent_framework,
-            #     self.config.agent_config,
-            #     self.config.agent_tools_file,
-            #     self.config.agent_max_turns,
-            #     self.config.swebench_tests_timeout,
-            #     self.config.nemo_skills_config,
-            #     self.config.agent_framework_repo,
-            #     self.config.agent_framework_commit,
-            # )
-
             # Extract trajectory and convert to proper NeMoGym format
             output_items = []
             trajectory = result.get("trajectory", [])

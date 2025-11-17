@@ -266,7 +266,8 @@ class RunOpenHandsAgent:
                 f"    {data_point['dataset_name']} "  # dataset name
                 f"    {data_point['split']} "  # dataset split
                 f"    {eval_dir_in_openhands} "
-                f"    {data_point['instance_id']} &&"
+                f"    {data_point['instance_id']} "
+                f"    {shlex.quote(data_point['instance_dict'])} && "
                 # move outputs to the mounted directory
                 f"mkdir -p /trajectories_mount/trajectories && "
                 f"cp -r {eval_dir_in_openhands}/*/*/* /trajectories_mount/trajectories/{data_point['instance_id']}/"

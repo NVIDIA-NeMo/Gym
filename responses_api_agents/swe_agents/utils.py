@@ -64,6 +64,8 @@ def extract_problem_info(body: NeMoGymResponseCreateParamsNonStreaming, containe
         "base_commit": metadata["base_commit"],
         "dataset_name": metadata["dataset_name"],
         "split": metadata["split"],
+        # TODO (sugam): refactor this to a cleaner approach
+        "instance_dict": metadata["instance_dict"],
         "container_formatter": container_formatter,
     }
 
