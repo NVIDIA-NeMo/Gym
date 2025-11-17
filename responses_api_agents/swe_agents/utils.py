@@ -20,6 +20,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+import uuid
 
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -191,7 +192,7 @@ def convert_trajectory_to_output_items(
                             NeMoGymResponseOutputMessageForTraining(
                                 id=f"msg-{len(output_items)}",
                                 content=[
-                                    NeMoGymResponseOutputText(type="output_text", text=text_content, annotations=[])
+                                    NeMoGymResponseOutputText(type="output_text", text=content_data, annotations=[])
                                 ],
                                 role="assistant",
                                 status="completed",
@@ -398,7 +399,7 @@ async def run_swebench_evaluation(
     workspace_root = Path(os.path.dirname(os.path.abspath(__file__))).parent.parent  # Go up to nemo-gym root
     instance_id = problem_info.get("instance_id", "unknown")
     timestamp = int(time.time() * 1000)  # Millisecond timestamp for uniqueness
-    persistent_dir = workspace_root / "temp_swebench" / f"{instance_id}_{timestamp}"
+    persistent_dir = workspace_root / "temp_swebench" / f"{instance_id}_{timestamp}_{uuid.uuid4()}"
     persistent_dir.mkdir(parents=True, exist_ok=True)
 
     input_file = persistent_dir / "input.jsonl"
@@ -754,7 +755,14 @@ def get_openhands_trajectory_from_completions(trajectories_dir: Path, instance_i
         messages = data["messages"]
 
         # Add the final assistant response
-        messages.append(data["response"]["choices"][0]["message"])
+        provider_specific_fields = data.get("provider_specific_fields", {})
+        final_assistant_message = data["response"]["choices"][0]["message"]
+
+        for key in ["prompt_token_ids", "generation_token_ids", "generation_log_probs"]:
+            if key in provider_specific_fields:
+                final_assistant_message[key] = provider_specific_fields[key]
+
+        messages.append(final_assistant_message)
 
         # Get tools (they should be the same across all turns)
         tools = data.get("kwargs", {}).get("tools", [])
