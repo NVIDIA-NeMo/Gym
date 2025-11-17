@@ -13,8 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import importlib
 import json
+import os
+import platform
 import shlex
+import sys
 import tomllib
 from glob import glob
 from os import environ, makedirs
@@ -33,7 +37,7 @@ from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, Field
 from tqdm.auto import tqdm
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import PARENT_DIR, __version__
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
     HEAD_SERVER_DEPS_KEY_NAME,
@@ -654,3 +658,47 @@ def display_help():  # pragma: no cover
             continue
 
         print(script)
+
+
+def version():  # pragma: no cover
+    """Display gym version and system information."""
+    config = get_global_config_dict()
+    verbose = config.get("verbose", False)
+    json_output = config.get("json", False)
+
+    info = {
+        "nemo_gym": __version__,
+        "python": platform.python_version(),
+        "python_path": sys.executable,
+        "installation": str(PARENT_DIR),
+    }
+
+    if verbose or json_output:
+        try:
+            info["fastapi"] = importlib.metadata.version("fastapi")
+            info["openai"] = importlib.metadata.version("openai")
+            info["pydantic"] = importlib.metadata.version("pydantic")
+        except Exception:
+            pass
+
+        info["os"] = platform.system()
+        info["architecture"] = platform.machine()
+        info["cpus"] = os.cpu_count()
+
+    if json_output:
+        print(json.dumps(info))
+    else:
+        print(f"NeMo Gym v{info['nemo_gym']}")
+        print(f"Python {info['python']} ({info['python_path']})")
+        print(f"Installation: {info['installation']}")
+
+        if verbose:
+            print("\nDependencies:")
+            if "fastapi" in info:
+                print(f"  fastapi: {info['fastapi']}")
+            if "openai" in info:
+                print(f"  openai: {info['openai']}")
+            if "pydantic" in info:
+                print(f"  pydantic: {info['pydantic']}")
+
+            print(f"\nSystem: {info['os']} {info['architecture']} ({info['cpus']} CPUs)")
