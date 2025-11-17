@@ -6,7 +6,7 @@ instruction_following:
       verified: false
       description: Instruction following datasets targeting IFEval and IFBench style instruction following capabilities
       value: Improve IFEval and IFBench
-      dataset_name: Nemotron-RL-instruction_following
+      dataset_url: https://huggingface.co/datasets/nvidia/Nemotron-RL-instruction_following
 instruction_following_simple_agent:
   responses_api_agents:
     simple_agent:

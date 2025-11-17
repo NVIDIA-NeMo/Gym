@@ -6,7 +6,7 @@ google_search:
       verified: false
       description: Multi-choice question answering problems with search tools integrated
       value: Improve knowledge-related benchmarks with search tools
-      dataset_name: Nemotron-RL-knowledge-web_search-mcqa
+      dataset_url: https://huggingface.co/datasets/nvidia/Nemotron-RL-knowledge-web_search-mcqa
 google_search_simple_agent:
   responses_api_agents:
     simple_agent:

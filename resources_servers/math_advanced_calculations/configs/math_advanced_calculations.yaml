@@ -6,7 +6,7 @@ math_advanced_calculations:
       verified: false
       description: An instruction following math environment with counter-intuitive calculators
       value: Improve instruction following capabilities in specific math environments
-      dataset_name: Nemotron-RL-math-advanced_calculations
+      dataset_url: https://huggingface.co/datasets/nvidia/Nemotron-RL-math-advanced_calculations
 math_advanced_calculations_simple_agent:
   responses_api_agents:
     simple_agent:
