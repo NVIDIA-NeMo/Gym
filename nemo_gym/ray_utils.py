@@ -29,7 +29,7 @@ from nemo_gym.global_config import (
 )
 
 
-def _lookup_node_id_with_free_gpus(
+def _lookup_ray_node_with_free_gpus(
     num_gpus: int, allowed_gpu_nodes: Optional[Set[str]] = None
 ) -> Optional[str]:  # pragma: no cover
     cfg = get_global_config_dict()
@@ -91,7 +91,7 @@ def spinup_single_ray_gpu_node_worker(
         f"Requested {num_gpus} > {num_gpus_per_node} GPU nodes for spinning up {worker_cls}"
     )
 
-    node_id = _lookup_node_id_with_free_gpus(num_gpus, allowed_gpu_nodes=gpu_nodes)
+    node_id = _lookup_ray_node_with_free_gpus(num_gpus, allowed_gpu_nodes=gpu_nodes)
     if node_id is None:
         raise RuntimeError(f"Cannot find {num_gpus} available Ray GPU nodes for spinning up {worker_cls}")
 
