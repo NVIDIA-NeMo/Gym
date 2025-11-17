@@ -33,3 +33,11 @@ Train a model with NeMo RL. Learn how to set up NeMo Gym + NeMo RL training envi
 :::
 
 ::::
+
+```{toctree}
+:hidden:
+:maxdepth: 1
+
+offline-training-w-rollouts
+rl-training-with-nemo-rl
+```

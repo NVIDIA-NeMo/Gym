@@ -128,6 +128,8 @@ how-to-faq.md
 ```{toctree}
 :caption: Development
 :hidden:
+:maxdepth: 2
 
+tutorials/development/debugging/index
 apidocs/index.rst
 ```

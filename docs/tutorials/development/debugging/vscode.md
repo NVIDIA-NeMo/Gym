@@ -1,4 +1,4 @@
-# Debugging Servers in VS Code
+# Debugging in VS Code
 
 This guide shows you how to debug NeMo Gym servers using VS Code's debugger.
 
@@ -7,7 +7,7 @@ This guide shows you how to debug NeMo Gym servers using VS Code's debugger.
 Make sure you have the dev dependencies installed:
 
 ```bash
-pip install -e ".[dev]"
+uv sync --extra dev
 ```
 
 This includes `debugpy`, which is required for remote debugging.
@@ -203,7 +203,7 @@ VS Code will show multiple debug sessions in the Call Stack panel.
 
 Install dev dependencies:
 ```bash
-pip install -e ".[dev]"
+uv sync --extra dev
 ```
 
 ## How It Works
