@@ -18,6 +18,7 @@ import subprocess
 import sys
 import time
 from asyncio import Semaphore
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 import ray
@@ -49,6 +50,8 @@ from responses_api_agents.swe_agents.utils import (
     extract_problem_info,
     get_model_endpoint,
     run_swebench_evaluation,
+    setup_sweagent_environment,
+    setup_swebench_environment,
 )
 
 
@@ -112,6 +115,19 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
 
     # Concurrency control
     concurrency: int = Field(default=1, description="Maximum number of concurrent SWE-bench runs")
+    # Pre-built Swe-agent directory path (set during initialization)
+    sweagent_setup_dir: Optional[Path] = Field(
+        default=None,
+        description="Path to pre-built Swe-agent directory (automatically set during initialization)",
+        exclude=True,
+    )
+
+    # Pre-built SWE-bench directory path (set during initialization)
+    swebench_setup_dir: Optional[Path] = Field(
+        default=None,
+        description="Path to pre-built SWE-bench directory (automatically set during initialization)",
+        exclude=True,
+    )
 
 
 class SWEBenchRunRequest(BaseRunRequest):
@@ -152,7 +168,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         """Initialize the wrapper and check dependencies."""
         self.sem = Semaphore(self.config.concurrency)
         print(f"Semaphore initialized with {self.config.concurrency} tokens")
-        LOG.info("in init for swe bench")
 
         # Install Apptainer on Ubuntu/Debian
         LOG.info("Checking Apptainer installation...")
@@ -163,6 +178,27 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 LOG.info("Apptainer is already installed")
         except Exception as e:
             LOG.warning(f"Error during Apptainer setup: {e}")
+        # Pre-build OpenHands environment if using openhands framework
+        if self.config.agent_framework == "swe_agent":
+            LOG.info("Setting up Swe-agent environment during initialization...")
+            try:
+                self.config.sweagent_setup_dir = setup_sweagent_environment(
+                    agent_framework_repo=self.config.agent_framework_repo,
+                    agent_framework_commit=self.config.agent_framework_commit,
+                )
+                LOG.info(f"Swe-agent environment ready at: {self.config.sweagent_setup_dir}")
+            except Exception as e:
+                LOG.error(f"Failed to set up Swe-agent environment: {e}")
+                raise
+
+        # Pre-build SWE-bench environment (needed for evaluation regardless of agent framework)
+        LOG.info("Setting up SWE-bench environment during initialization...")
+        try:
+            self.config.swebench_setup_dir = setup_swebench_environment()
+            LOG.info(f"SWE-bench environment ready at: {self.config.swebench_setup_dir}")
+        except Exception as e:
+            LOG.error(f"Failed to set up SWE-bench environment: {e}")
+            raise
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         """Run NeMo-Skills SWE-bench evaluation."""
@@ -189,6 +225,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "nemo_skills_config": self.config.nemo_skills_config,
                 "agent_framework_repo": self.config.agent_framework_repo,
                 "agent_framework_commit": self.config.agent_framework_commit,
+                "sweagent_setup_dir": self.config.sweagent_setup_dir,
+                "swebench_setup_dir": self.config.swebench_setup_dir,
             }
             future = runner_ray_remote.remote(run_swebench_evaluation, params)
             result = await asyncio.to_thread(ray.get, future)

@@ -324,6 +324,8 @@ async def run_swe_agent_and_evaluate(
     agent_framework_repo: Optional[str] = None,
     agent_framework_commit: str = "HEAD",
     agent_timeout: int = 3600,  # Agent execution timeout in seconds (default 1 hour)
+    sweagent_setup_dir: Optional[Path] = None,  # Pre-built SWE-agent directory
+    swebench_setup_dir: Optional[Path] = None,  # Pre-built SWE-bench directory
 ) -> Dict:
     """Run SWE-agent and evaluation in a single container execution.
 
@@ -354,12 +356,49 @@ async def run_swe_agent_and_evaluate(
     """
     if agent_config is None:
         agent_config = "eval/swe-bench/swe-agent/default"
-    if agent_framework_repo is None:
-        agent_framework_repo = "https://github.com/SWE-agent/SWE-agent.git"
 
-    # Ensure both repos are cloned to assets directory
-    swe_agent_path = ensure_repo_cloned(agent_framework_repo, "SWE-agent", agent_framework_commit)
-    swe_bench_path = ensure_repo_cloned("https://github.com/HeyyyyyyG/SWE-bench.git", "SWE-bench", "HEAD")
+    # Use pre-built directories if provided, otherwise clone on-the-fly (legacy behavior)
+    if sweagent_setup_dir is not None:
+        swe_agent_path = sweagent_setup_dir / "SWE-agent"
+        if not swe_agent_path.exists():
+            raise ValueError(f"SWE-agent directory not found at {swe_agent_path}")
+        LOG.info(f"Using pre-built SWE-agent from: {swe_agent_path}")
+        # Mount entire setup dir at BOTH locations:
+        # 1. Original absolute path (for hardcoded paths in venv wrappers)
+        # 2. Convenient path (for our scripts)
+        # This is needed because uv venv has hardcoded absolute paths in its wrappers
+        sweagent_mount_src = str(sweagent_setup_dir.resolve())
+        sweagent_original_path = sweagent_mount_src
+        sweagent_convenient_path = "/root/sweagent_setup"
+    else:
+        LOG.warning("No sweagent_setup_dir provided, cloning on-the-fly (this is slower!)")
+        if agent_framework_repo is None:
+            agent_framework_repo = "https://github.com/SWE-agent/SWE-agent.git"
+        swe_agent_path = ensure_repo_cloned(agent_framework_repo, "SWE-agent", agent_framework_commit)
+        # For on-the-fly, just mount the repo directly
+        sweagent_mount_src = str(swe_agent_path)
+        sweagent_original_path = None  # No dual mount needed
+        sweagent_convenient_path = "/root/SWE-agent"
+
+    if swebench_setup_dir is not None:
+        swe_bench_path = swebench_setup_dir / "SWE-bench"
+        if not swe_bench_path.exists():
+            raise ValueError(f"SWE-bench directory not found at {swe_bench_path}")
+        LOG.info(f"Using pre-built SWE-bench from: {swe_bench_path}")
+        # Mount entire setup dir at BOTH locations:
+        # 1. Original absolute path (for hardcoded paths in venv wrappers)
+        # 2. Convenient path (for our scripts)
+        # This is needed because uv venv has hardcoded absolute paths in its wrappers
+        swebench_mount_src = str(swebench_setup_dir.resolve())
+        swebench_original_path = swebench_mount_src
+        swebench_convenient_path = "/root/swebench_setup"
+    else:
+        LOG.warning("No swebench_setup_dir provided, cloning on-the-fly (this is slower!)")
+        swe_bench_path = ensure_repo_cloned("https://github.com/HeyyyyyyG/SWE-bench.git", "SWE-bench", "HEAD")
+        # For on-the-fly, just mount the repo directly
+        swebench_mount_src = str(swe_bench_path)
+        swebench_original_path = None  # No dual mount needed
+        swebench_convenient_path = "/root/SWE-bench"
 
     # Build completion_kwargs for OpenAI API parameters
     completion_kwargs = {
@@ -370,20 +409,52 @@ async def run_swe_agent_and_evaluate(
     if "top_logprobs" in completion_kwargs:
         completion_kwargs["logprobs"] = True
 
-    # Mount both repos in container
-    combined_mounts = {str(swe_agent_path): "/root/SWE-agent", str(swe_bench_path): "/root/SWE-bench"}
+    # Mount repos/setup dirs in container
+    # For pre-built setups: Mount at BOTH the original path (for hardcoded venv paths) AND convenient path
+    # For on-the-fly: Just mount at convenient path
+    combined_mounts = {}
+
+    # Mount SWE-agent setup
+    if sweagent_original_path:
+        # Pre-built: Mount at original path (this is what venv scripts expect)
+        combined_mounts[sweagent_mount_src] = sweagent_original_path
+        LOG.info(f"Mounting SWE-agent at original path: {sweagent_mount_src} -> {sweagent_original_path}")
+    else:
+        # On-the-fly: Mount at convenient path only
+        combined_mounts[sweagent_mount_src] = sweagent_convenient_path
+        LOG.info(f"Mounting SWE-agent at: {sweagent_mount_src} -> {sweagent_convenient_path}")
+
+    # Mount SWE-bench setup
+    if swebench_original_path:
+        # Pre-built: Mount at original path (this is what venv scripts expect)
+        combined_mounts[swebench_mount_src] = swebench_original_path
+        LOG.info(f"Mounting SWE-bench at original path: {swebench_mount_src} -> {swebench_original_path}")
+    else:
+        # On-the-fly: Mount at convenient path only
+        combined_mounts[swebench_mount_src] = swebench_convenient_path
+        LOG.info(f"Mounting SWE-bench at: {swebench_mount_src} -> {swebench_convenient_path}")
 
     # Combined command: run agent, then evaluate
+    # Use pre-built venvs if they exist, otherwise setup from scratch
     # We'll use a bash variable to track the pred file path
+    if sweagent_setup_dir is not None:
+        # Pre-built setup: Use ORIGINAL path (where venv was built) so hardcoded paths work
+        # But the SWE-agent repo is under that path
+        swe_agent_dir = f"{sweagent_original_path}/SWE-agent"
+        agent_setup_cmd = f"cd {swe_agent_dir} && "
+    else:
+        # On-the-fly setup: install uv and create venv, paths are in /root/SWE-agent
+        swe_agent_dir = "/root/SWE-agent"
+        agent_setup_cmd = (
+            "curl -LsSf https://astral.sh/uv/install.sh | sh && "
+            "source /root/.local/bin/env && "
+            f"cd {swe_agent_dir} && "
+            "uv venv --python 3.12 venv && "
+            f"uv pip install -p {swe_agent_dir}/venv/bin/python -e . && "
+        )
+
     combined_cmd = (
-        # Install uv once for both
-        "curl -LsSf https://astral.sh/uv/install.sh | sh && "
-        "source /root/.local/bin/env && "
-        # Setup and run SWE-agent
-        "cd /root/SWE-agent && "
-        "uv venv --python 3.12 venv && "
-        "uv pip install -p /root/SWE-agent/venv/bin/python -e . && "
-        f"/root/SWE-agent/venv/bin/python -m sweagent run "
+        agent_setup_cmd + f"{swe_agent_dir}/venv/bin/python -m sweagent run "
         f"    --config {get_config_path(agent_config)} "
         f"    --agent.model.name hosted_vllm/{model_name} "
         f"    --agent.model.api_base {api_base} "
@@ -409,12 +480,31 @@ async def run_swe_agent_and_evaluate(
         # Also copy the .jsonl file to the root for easy access by evaluation
         f"cp $PRED_JSONL /trajectories_mount/$PRED_JSONL_NAME && "
         # Setup and run SWE-bench evaluation (only if patch exists)
-        "cd /root/SWE-bench && "
-        "uv venv --python 3.12 venv-eval && "
-        "uv pip install -p /root/SWE-bench/venv-eval/bin/python -e . && "
+        # Use pre-built venv if available, otherwise create it
+    )
+
+    # Determine SWE-bench directory path in container
+    if swebench_setup_dir is not None:
+        # Pre-built setup: Use ORIGINAL path (where venv was built) so hardcoded paths work
+        swe_bench_dir = f"{swebench_original_path}/SWE-bench"
+    else:
+        swe_bench_dir = "/root/SWE-bench"
+
+    combined_cmd += (
+        f"cd {swe_bench_dir} && "
+        f"if [ -d 'venv' ] && [ -f 'venv/bin/python' ]; then "
+        f"  echo 'Using pre-built SWE-bench venv'; "
+        f"else "
+        f"  echo 'Creating SWE-bench venv'; "
+        f"  if [ ! -f /root/.local/bin/uv ]; then "
+        f"    curl -LsSf https://astral.sh/uv/install.sh | sh && source /root/.local/bin/env; "
+        f"  fi; "
+        f"  uv venv --python 3.12 venv && "
+        f"  uv pip install -p {swe_bench_dir}/venv/bin/python -e .; "
+        f"fi && "
         # Check if patch exists before running evaluation (check for both None and empty string)
         "if python3 -c \"import json; data=json.load(open('/trajectories_mount/'+'${PRED_JSONL_NAME}', 'r')); patch=data.get('model_patch'); exit(0 if patch and str(patch).strip() else 1)\"; then "
-        f"  env -u VIRTUAL_ENV /root/SWE-bench/venv-eval/bin/python -m swebench.harness.run_local_evaluation "
+        f"  env -u VIRTUAL_ENV {swe_bench_dir}/venv/bin/python -m swebench.harness.run_local_evaluation "
         "    --predictions_path /trajectories_mount/${PRED_JSONL_NAME} "
         f"    --instance_ids {problem_info['instance_id']} "
         f"    --run_id eval-outputs "
@@ -513,7 +603,6 @@ async def run_swe_agent_and_evaluate(
         "swe-bench-outputs": trajectory_dict,
         "generation": "",  # required for compatibility
     }
-    print("output_dict", output_dict)
     return output_dict
 
 
@@ -529,6 +618,8 @@ async def run_single_swe_agent_problem(
     agent_framework_repo: Optional[str] = None,
     agent_framework_commit: str = "HEAD",
     agent_timeout: int = 3600,  # Agent execution timeout in seconds (default 1 hour)
+    sweagent_setup_dir: Optional[Path] = None,
+    swebench_setup_dir: Optional[Path] = None,
 ) -> Dict:
     """Run SWE-agent on a single problem and evaluate the results.
 
@@ -545,9 +636,11 @@ async def run_single_swe_agent_problem(
         agent_max_turns: Maximum agent iterations
         swebench_tests_timeout: Timeout for tests in seconds
         inference_params: Dict with keys like temperature, top_p, tokens_to_generate, etc.
-        agent_framework_repo: URL of SWE-agent repo (optional)
-        agent_framework_commit: Commit/branch to use (default: HEAD)
+        agent_framework_repo: URL of SWE-agent repo (optional, only used if sweagent_setup_dir not provided)
+        agent_framework_commit: Commit/branch to use (default: HEAD, only used if sweagent_setup_dir not provided)
         agent_timeout: Timeout for agent execution in seconds
+        sweagent_setup_dir: Pre-built SWE-agent directory (if None, will clone on-the-fly)
+        swebench_setup_dir: Pre-built SWE-bench directory (if None, will clone on-the-fly)
 
     Returns:
         dict: Results dictionary with keys:
@@ -573,6 +666,8 @@ async def run_single_swe_agent_problem(
         agent_framework_repo=agent_framework_repo,
         agent_framework_commit=agent_framework_commit,
         agent_timeout=agent_timeout,
+        sweagent_setup_dir=sweagent_setup_dir,
+        swebench_setup_dir=swebench_setup_dir,
     )
 
     # Calculate generation time

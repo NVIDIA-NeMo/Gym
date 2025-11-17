@@ -15,6 +15,7 @@ import copy
 import json
 import logging
 import os
+import subprocess
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -355,6 +356,8 @@ async def run_swebench_evaluation(
     nemo_skills_config: Dict[str, Any],
     agent_framework_repo: Optional[str] = None,
     agent_framework_commit: str = "HEAD",
+    sweagent_setup_dir: Optional[Path] = None,
+    swebench_setup_dir: Optional[Path] = None,
 ) -> Dict:
     """Run SWE-bench evaluation directly without subprocess.
 
@@ -428,6 +431,8 @@ async def run_swebench_evaluation(
             agent_framework_repo=agent_framework_repo,
             agent_framework_commit=agent_framework_commit,
             agent_timeout=agent_timeout,
+            sweagent_setup_dir=sweagent_setup_dir,
+            swebench_setup_dir=swebench_setup_dir,
         )
     except Exception as e:
         # Handle failures gracefully
@@ -472,7 +477,6 @@ async def run_swebench_evaluation(
         result["tools"] = tools
         LOG.info(f"Added {len(tools)} tools to result")
 
-    print("result", result)
     return result
 
 
@@ -655,3 +659,360 @@ def convert_tools_to_function_format(raw_tools: List[Dict]) -> List:
             )
             tools.append(function_tool)
     return tools
+
+
+def setup_sweagent_environment(
+    agent_framework_repo: Optional[str] = None,
+    agent_framework_commit: str = "HEAD",
+    setup_dir: Optional[Path] = None,
+) -> Path:
+    """Set up SWE-agent environment once during initialization.
+
+    This function clones and sets up SWE-agent in a persistent location that can be mounted
+    into Apptainer containers, avoiding repeated setup for each request.
+
+    Args:
+        agent_framework_repo: URL of the SWE-agent repo (default: official SWE-agent repo)
+        agent_framework_commit: Commit/branch to use (default: HEAD)
+        setup_dir: Directory to set up SWE-agent (default: workspace_root/swe_sweagent_setup)
+
+    Returns:
+        Path to the built SWE-agent directory
+
+    Raises:
+        RuntimeError: If setup fails
+    """
+    if agent_framework_repo is None:
+        agent_framework_repo = "https://github.com/SWE-agent/SWE-agent.git"
+
+    # Determine setup directory
+    if setup_dir is None:
+        workspace_root = Path(os.path.dirname(os.path.abspath(__file__))).parent.parent
+        setup_dir = workspace_root / "swe_sweagent_setup"
+
+    # Resolve to absolute path to handle symlinks
+    setup_dir = setup_dir.resolve()
+
+    sweagent_dir = setup_dir / "SWE-agent"
+    uv_dir = setup_dir / "uv"
+    python_dir = setup_dir / "python"
+
+    # Check if already set up (validate all critical components exist)
+    if (
+        sweagent_dir.exists()
+        and (sweagent_dir / "pyproject.toml").exists()
+        and (sweagent_dir / "venv" / "bin" / "python").exists()
+        and (sweagent_dir / "venv" / "pyvenv.cfg").exists()
+        and (uv_dir / "bin" / "uv").exists()
+        and python_dir.exists()
+    ):
+        LOG.info(f"SWE-agent already set up at {setup_dir}")
+        LOG.info(f"  - SWE-agent: {sweagent_dir}")
+        LOG.info(f"  - venv: {sweagent_dir / 'venv'}")
+        LOG.info(f"  - uv: {uv_dir}")
+        LOG.info(f"  - Python: {python_dir}")
+        return setup_dir  # Return parent directory, not SWE-agent subdirectory
+
+    # If partial setup exists, log that we'll rebuild
+    if setup_dir.exists():
+        LOG.warning(f"Incomplete setup detected at {setup_dir}, will rebuild/complete setup...")
+
+    LOG.info(f"Setting up SWE-agent environment at {setup_dir}...")
+    setup_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create setup script
+    setup_script = setup_dir / "setup_sweagent.sh"
+    script_content = f"""#!/bin/bash
+set -e
+set -x  # Enable debug output
+
+cd {setup_dir}
+
+# Set UV_INSTALL_DIR to install uv in the sweagent setup directory
+export UV_INSTALL_DIR="{uv_dir}"
+
+# Set UV_PYTHON_INSTALL_DIR to install Python in a portable location
+export UV_PYTHON_INSTALL_DIR="{python_dir}"
+
+# Install uv if not already installed
+if [ ! -f "{uv_dir}/bin/uv" ]; then
+    echo "Installing uv to {uv_dir}..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+else
+    echo "uv already installed at {uv_dir}"
+fi
+
+# Add uv to PATH for this script
+export PATH="{uv_dir}/bin:$PATH"
+
+# Clone or update SWE-agent repository
+if [ ! -d "SWE-agent" ]; then
+    echo "Cloning SWE-agent repository..."
+    git clone {agent_framework_repo} SWE-agent
+else
+    echo "SWE-agent repository already exists"
+fi
+
+cd {sweagent_dir}
+echo "Checking out {agent_framework_commit}..."
+git checkout {agent_framework_commit}
+
+# First, explicitly install Python 3.12 to the portable location
+echo "Installing Python 3.12 to portable location..."
+uv python install 3.12
+
+# Verify Python was installed in the right place
+echo "Python installations:"
+uv python list
+
+# Create virtual environment with uv using the portable Python
+echo "Creating virtual environment with uv..."
+# Remove any existing venv first
+rm -rf venv
+uv venv --python 3.12 venv
+
+# Install SWE-agent in editable mode
+echo "Installing SWE-agent..."
+uv pip install -p {sweagent_dir}/venv/bin/python -e .
+
+echo "Verifying venv was created..."
+if [ -d venv ] && [ -f venv/bin/python ]; then
+    echo "✓ venv created at $(pwd)/venv"
+    echo "✓ Python version: $(venv/bin/python --version)"
+else
+    echo "✗ ERROR: venv was not created properly!"
+    exit 1
+fi
+
+echo "SWE-agent setup complete!"
+"""
+
+    with open(setup_script, "w") as f:
+        f.write(script_content)
+
+    setup_script.chmod(0o755)
+
+    LOG.info("Running SWE-agent setup script...")
+    LOG.info(f"Setup script: {setup_script}")
+    LOG.info("=" * 80)
+
+    process = None
+    try:
+        process = subprocess.Popen(
+            [str(setup_script)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+
+        output_lines = []
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            output_lines.append(line)
+
+        process.wait(timeout=600)
+
+        if process.returncode != 0:
+            full_output = "".join(output_lines)
+            raise RuntimeError(f"SWE-agent setup failed with return code {process.returncode}:\n{full_output}")
+
+        LOG.info("=" * 80)
+        LOG.info("SWE-agent setup completed successfully!")
+        LOG.info(f"Setup directory: {setup_dir}")
+        LOG.info(f"  - SWE-agent: {sweagent_dir}")
+        LOG.info(f"  - venv: {sweagent_dir / 'venv'}")
+        LOG.info(f"  - uv: {uv_dir}")
+        LOG.info(f"  - Python: {python_dir}")
+
+        return setup_dir
+
+    except subprocess.TimeoutExpired:
+        if process:
+            process.kill()
+        raise RuntimeError("SWE-agent setup timed out after 10 minutes")
+    except Exception as e:
+        raise RuntimeError(f"SWE-agent setup failed: {e}")
+
+
+def setup_swebench_environment(
+    swebench_repo: Optional[str] = None,
+    swebench_commit: str = "HEAD",
+    setup_dir: Optional[Path] = None,
+) -> Path:
+    """Set up SWE-bench environment once during initialization.
+
+    This function builds SWE-bench in a persistent location that can be mounted
+    into Apptainer containers, avoiding repeated setup for each request.
+
+    Args:
+        swebench_repo: URL of the SWE-bench repo (default: HeyyyyyyG/SWE-bench)
+        swebench_commit: Commit/branch to use (default: HEAD)
+        setup_dir: Directory to set up SWE-bench (default: workspace_root/swe_swebench_setup)
+
+    Returns:
+        Path to the built SWE-bench directory
+
+    Raises:
+        RuntimeError: If setup fails
+    """
+    if swebench_repo is None:
+        swebench_repo = "https://github.com/HeyyyyyyG/SWE-bench.git"
+
+    # Determine setup directory
+    if setup_dir is None:
+        workspace_root = Path(os.path.dirname(os.path.abspath(__file__))).parent.parent
+        setup_dir = workspace_root / "swe_swebench_setup"
+
+    # Resolve to absolute path to handle symlinks
+    setup_dir = setup_dir.resolve()
+
+    swebench_dir = setup_dir / "SWE-bench"
+    uv_dir = setup_dir / "uv"
+    python_dir = setup_dir / "python"
+
+    # Check if already set up (validate all critical components exist)
+    if (
+        swebench_dir.exists()
+        and (swebench_dir / "pyproject.toml").exists()
+        and (swebench_dir / "venv" / "bin" / "python").exists()
+        and (swebench_dir / "venv" / "pyvenv.cfg").exists()
+        and (uv_dir / "bin" / "uv").exists()
+        and python_dir.exists()
+    ):
+        LOG.info(f"SWE-bench already set up at {setup_dir}")
+        LOG.info(f"  - SWE-bench: {swebench_dir}")
+        LOG.info(f"  - venv: {swebench_dir / 'venv'}")
+        LOG.info(f"  - uv: {uv_dir}")
+        LOG.info(f"  - Python: {python_dir}")
+        return setup_dir  # Return parent directory, not SWE-bench subdirectory
+
+    # If partial setup exists, log that we'll rebuild
+    if setup_dir.exists():
+        LOG.warning(f"Incomplete setup detected at {setup_dir}, will rebuild/complete setup...")
+
+    LOG.info(f"Setting up SWE-bench environment at {setup_dir}...")
+    setup_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create setup script
+    setup_script = setup_dir / "setup_swebench.sh"
+    uv_dir = setup_dir / "uv"
+    python_dir = setup_dir / "python"  # Portable Python installation directory
+    script_content = f"""#!/bin/bash
+set -e
+set -x  # Enable debug output
+
+cd {setup_dir}
+
+# Set UV_INSTALL_DIR to install uv in the swebench setup directory
+export UV_INSTALL_DIR="{uv_dir}"
+
+# Set UV_PYTHON_INSTALL_DIR to install Python in a portable location
+export UV_PYTHON_INSTALL_DIR="{python_dir}"
+
+# Install uv if not already installed
+if [ ! -f "{uv_dir}/bin/uv" ]; then
+    echo "Installing uv to {uv_dir}..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+else
+    echo "uv already installed at {uv_dir}"
+fi
+
+# Add uv to PATH
+export PATH="{uv_dir}/bin:$PATH"
+
+# Verify uv is available
+echo "Verifying uv installation..."
+which uv
+uv --version
+
+# Clone SWE-bench
+if [ ! -d "{swebench_dir}/.git" ]; then
+    echo "Cloning SWE-bench..."
+    # Clean up any partial clone
+    rm -rf "{swebench_dir}"
+    git clone {swebench_repo} {swebench_dir}
+else
+    echo "SWE-bench already cloned at {swebench_dir}"
+fi
+
+cd {swebench_dir}
+echo "Checking out {swebench_commit}..."
+git checkout {swebench_commit}
+
+# First, explicitly install Python 3.12 to the portable location
+echo "Installing Python 3.12 to portable location..."
+uv python install 3.12
+
+# Verify Python was installed in the right place
+echo "Python installations:"
+uv python list
+
+# Create virtual environment with uv using the portable Python
+echo "Creating virtual environment with uv..."
+# Remove any existing venv first
+rm -rf venv
+uv venv --python 3.12 venv
+
+# Install SWE-bench in editable mode
+echo "Installing SWE-bench..."
+uv pip install -p {swebench_dir}/venv/bin/python -e .
+
+echo "Verifying venv was created..."
+if [ -d venv ] && [ -f venv/bin/python ]; then
+    echo "✓ venv created at $(pwd)/venv"
+    echo "✓ Python version: $(venv/bin/python --version)"
+else
+    echo "✗ ERROR: venv was not created properly!"
+    exit 1
+fi
+
+echo "SWE-bench setup complete!"
+"""
+
+    with open(setup_script, "w") as f:
+        f.write(script_content)
+
+    setup_script.chmod(0o755)
+
+    LOG.info("Running SWE-bench setup script...")
+    LOG.info(f"Setup script: {setup_script}")
+    LOG.info("=" * 80)
+
+    process = None
+    try:
+        process = subprocess.Popen(
+            [str(setup_script)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+
+        output_lines = []
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            output_lines.append(line)
+
+        process.wait(timeout=600)
+
+        if process.returncode != 0:
+            full_output = "".join(output_lines)
+            raise RuntimeError(f"SWE-bench setup failed with return code {process.returncode}:\n{full_output}")
+
+        LOG.info("=" * 80)
+        LOG.info("SWE-bench setup completed successfully!")
+        LOG.info(f"Setup directory: {setup_dir}")
+        LOG.info(f"  - SWE-bench: {swebench_dir}")
+        LOG.info(f"  - venv: {swebench_dir / 'venv'}")
+        LOG.info(f"  - uv: {uv_dir}")
+        LOG.info(f"  - Python: {python_dir}")
+
+        return setup_dir
+
+    except subprocess.TimeoutExpired:
+        if process:
+            process.kill()
+        raise RuntimeError("SWE-bench setup timed out after 10 minutes")
+    except Exception as e:
+        raise RuntimeError(f"SWE-bench setup failed: {e}")
