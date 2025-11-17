@@ -16,19 +16,20 @@ import os
 import sys
 from collections import defaultdict
 from time import sleep
-from typing import Any, Dict, List, Optional
+from typing import Optional, Set
 
 import ray.util.state
 from ray.actor import ActorClass
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from nemo_gym.global_config import (
+    RAY_GPU_NODES_KEY_NAME,
     RAY_NUM_GPUS_PER_NODE_KEY_NAME,
     get_global_config_dict,
 )
 
 
-def _lookup_node_id_with_free_gpus(num_gpus: int, node_list: Optional[List[Dict[str, Any]]] = None) -> Optional[str]:
+def _lookup_node_id_with_free_gpus(num_gpus: int, reserved_gpu_nodes: Set[str] = None) -> Optional[str]:
     cfg = get_global_config_dict()
     node_avail_gpu_dict = defaultdict(int)
     node_states = ray.util.state.list_nodes(
@@ -37,6 +38,8 @@ def _lookup_node_id_with_free_gpus(num_gpus: int, node_list: Optional[List[Dict[
     )
     for state in node_states:
         assert state.node_id is not None
+        if reserved_gpu_nodes is not None and state.node_id in reserved_gpu_nodes:
+            continue
         node_avail_gpu_dict[state.node_id] += state.resources_total.get("GPU", 0)
     while True:
         retry = False
@@ -68,13 +71,15 @@ def spinup_single_ray_gpu_node_worker(
     **worker_kwargs,
 ):  # pragma: no cover
     cfg = get_global_config_dict()
-    # nodes = cfg.get(RAY_GPU_NODES_KEY_NAME, None)
+    gpu_nodes = cfg.get(RAY_GPU_NODES_KEY_NAME, None)
+    if gpu_nodes is not None:
+        gpu_nodes = set([node["node_id"] for node in gpu_nodes])
     num_gpus_per_node = cfg.get(RAY_NUM_GPUS_PER_NODE_KEY_NAME, 8)
     assert num_gpus >= 1, f"Must request at least 1 GPU node for spinning up {worker_cls}"
     assert num_gpus <= num_gpus_per_node, (
         f"Requested {num_gpus} > {num_gpus_per_node} GPU nodes for spinning up {worker_cls}"
     )
-    node_id = _lookup_node_id_with_free_gpus(num_gpus)
+    node_id = _lookup_node_id_with_free_gpus(num_gpus, reserved_gpu_nodes=gpu_nodes)
     if node_id is None:
         raise RuntimeError(f"Cannot find {num_gpus} available Ray GPU nodes for spinning up {worker_cls}")
     worker_options = {}
