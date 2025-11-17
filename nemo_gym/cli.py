@@ -68,8 +68,7 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
     if pyproject_toml:
         cmd = f"""{uv_venv_cmd} \\
         && source .venv/bin/activate \\
-        && uv pip install {" ".join(head_server_deps)} \\
-        && uv pip install --editable . \\
+        && uv pip install --refresh . '../..[dev]' {" ".join(head_server_deps)} \\
         """
 
     else:
