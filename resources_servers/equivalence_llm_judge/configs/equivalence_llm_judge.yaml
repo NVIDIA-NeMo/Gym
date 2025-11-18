@@ -135,5 +135,7 @@ equivalence_llm_judge_simple_agent:
         type: example
         license: "TBD"
         jsonl_fpath: resources_servers/equivalence_llm_judge/data/example_openqa.jsonl
-
-
+      - name: train
+        type: train
+        license: Apache 2.0
+        jsonl_fpath: resources_servers/equivalence_llm_judge/data/train.jsonl
