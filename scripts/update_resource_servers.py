@@ -295,7 +295,6 @@ def generate_example_only_table(servers: list[ServerInfo]) -> str:  # pragma: no
     if not servers:
         return handle_empty_table(col_names)
 
-    col_names = ["Name", "Demonstrates", "Config", "README"]
     rows = []
 
     for server in servers:
