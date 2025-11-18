@@ -677,7 +677,7 @@ def version():  # pragma: no cover
         "installation_path": str(PARENT_DIR),
     }
 
-    if verbose or json_output:
+    if verbose:
         key_deps = [
             "fastapi",
             "gradio",
