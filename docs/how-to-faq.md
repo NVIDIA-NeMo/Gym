@@ -382,6 +382,126 @@ ng_dump_config "+config_paths=[$config_paths]"
 ```
 
 
+# How To: ng_version - Check NeMo Gym version and system information
+Check your NeMo Gym installation version and environment details for troubleshooting or support.
+
+**Basic version information:**
+```bash
+ng_version
+```
+
+**Example output:**
+```bash
+NeMo Gym v0.2.0rc0
+Python 3.13.5 (/Users/user/Documents/nemo-gym/.venv/bin/python3)
+Installation: /Users/user/Documents/nemo-gym
+```
+
+**Machine-readable JSON format:**
+```bash
+ng_version +json=true
+```
+
+**Example output:**
+```bash
+{
+  "nemo_gym": "0.2.0rc0",
+  "python": "3.13.5",
+  "python_path": "/Users/user/nemo-gym/.venv/bin/python3",
+  "installation_path": "/Users/user/nemo-gym",
+  "dependencies": {
+    "fastapi": "0.116.1",
+    "gradio": "5.44.1",
+    "hydra-core": "1.3.2",
+    "mlflow": "3.3.2",
+    "openai": "2.6.1",
+    "omegaconf": "2.3.0",
+    "psutil": "7.1.0",
+    "pydantic": "2.11.7",
+    "ray": "2.50.1",
+    "uvicorn": "0.35.0",
+    "uvloop": "0.21.0"
+  },
+  "system": {
+    "os": "Darwin 25.0.0",
+    "platform": "macOS-26.0.1-arm64-arm-64bit-Mach-O",
+    "architecture": "arm64",
+    "processor": "arm",
+    "cpus": 14,
+    "memory_gb": 48.0
+  }
+}
+```
+
+**Detailed info with dependencies and system details:**
+```bash
+ng_version +verbose=true
+```
+
+**Example output:**
+```bash
+NeMo Gym v0.2.0rc0
+Python 3.13.5 (/Users/fsiino/nemo-gym/.venv/bin/python3)
+Installation: /Users/fsiino/nemo-gym
+
+Key Dependencies:
+  fastapi: 0.116.1
+  gradio: 5.44.1
+  hydra-core: 1.3.2
+  mlflow: 3.3.2
+  openai: 2.6.1
+  omegaconf: 2.3.0
+  psutil: 7.1.0
+  pydantic: 2.11.7
+  ray: 2.50.1
+  uvicorn: 0.35.0
+  uvloop: 0.21.0
+
+System:
+  OS: Darwin 25.0.0
+  Architecture: arm64
+  CPUs: 14
+  Memory: 48.0 GB
+```
+
+
+**You can combine flags:**
+```bash
+ng_version +verbose=true +json=true
+```
+
+**Example Output:**
+```bash
+{
+  "nemo_gym": "0.2.0rc0",
+  "python": "3.13.5",
+  "python_path": "/Users/user/nemo-gym/.venv/bin/python3",
+  "installation_path": "/Users/user/nemo-gym",
+  "dependencies": {
+    "fastapi": "0.116.1",
+    "gradio": "5.44.1",
+    "hydra-core": "1.3.2",
+    "mlflow": "3.3.2",
+    "openai": "2.6.1",
+    "omegaconf": "2.3.0",
+    "psutil": "7.1.0",
+    "pydantic": "2.11.7",
+    "ray": "2.50.1",
+    "uvicorn": "0.35.0",
+    "uvloop": "0.21.0"
+  },
+  "system": {
+    "os": "Darwin 25.0.0",
+    "platform": "macOS-26.0.1-arm64-arm-64bit-Mach-O",
+    "architecture": "arm64",
+    "processor": "arm",
+    "cpus": 14,
+    "memory_gb": 48.0
+  }
+}
+```
+
+
 # How To: Use NeMo Gym with a non-Responses compatible API endpoint like vLLM
 As of Sep 05, 2025, not many models have been trained with middlewares or chat templates that are easily parseable to OpenAI Responses API schema, with the notable exception of OpenAI's own open source model GPT-OSS. Since Gym is first-party Responses API, this makes Gym very difficult to use with basically any model.
 

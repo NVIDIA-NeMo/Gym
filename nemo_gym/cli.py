@@ -20,7 +20,8 @@ import shlex
 import sys
 import tomllib
 from glob import glob
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as md_version
 from os import environ, makedirs
 from os.path import exists
 from pathlib import Path
@@ -677,12 +678,24 @@ def version():  # pragma: no cover
     }
 
     if verbose or json_output:
-        key_deps = ["fastapi", "openai", "hydra-core", "pydantic", "ray", "uvicorn", "gradio"]
+        key_deps = [
+            "fastapi",
+            "gradio",
+            "hydra-core",
+            "mlflow",
+            "openai",
+            "omegaconf",
+            "psutil",
+            "pydantic",
+            "ray",
+            "uvicorn",
+            "uvloop",
+        ]
         dependencies = {}
 
         for dep in key_deps:
             try:
-                dependencies[dep] = version(dep)
+                dependencies[dep] = md_version(dep)
             except PackageNotFoundError:
                 dependencies[dep] = "not installed"
 

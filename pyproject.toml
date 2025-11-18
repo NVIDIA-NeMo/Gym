@@ -152,7 +152,7 @@ dependencies = [
     # psutil: Cross-platform process and system utilities
     # Updated: Fri Nov 07, 2025 with psutil==6.1.1
     # License: BSD 3-Clause https://github.com/giampaolo/psutil/blob/master/LICENSE
-    "psutil",    
+    "psutil",
 ]
 
 [dependency-groups]
