@@ -6,7 +6,6 @@ instruction_following:
       verified: false
       description: Instruction following datasets targeting IFEval and IFBench style instruction following capabilities
       value: Improve IFEval and IFBench
-      dataset_url: https://huggingface.co/datasets/nvidia/Nemotron-RL-instruction_following
 instruction_following_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -26,6 +25,7 @@ instruction_following_simple_agent:
           version: 0.0.1
           artifact_fpath: instruction_following.jsonl
         license: Apache 2.0
+        dataset_url: https://huggingface.co/datasets/nvidia/Nemotron-RL-instruction_following
       - name: example
         type: example
         jsonl_fpath: resources_servers/instruction_following/data/example.jsonl

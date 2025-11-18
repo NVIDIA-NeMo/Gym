@@ -6,7 +6,6 @@ mini_swe_agent_resources_server:
       verified: false
       description: A software development with mini-swe-agent orchestration
       value: Improve software development capabilities, like SWE-bench
-      dataset_url: https://huggingface.co/datasets/princeton-nlp/SWE-bench_Verified
 mini_swe_simple_agent:
   responses_api_agents:
     mini_swe_agent:
@@ -21,6 +20,7 @@ mini_swe_simple_agent:
       - name: train
         type: train
         jsonl_fpath: resources_servers/mini_swe_agent/data/train.jsonl
+        dataset_url: https://huggingface.co/datasets/princeton-nlp/SWE-bench_Verified
         gitlab_identifier:
           dataset_name: mini_swe_agent
           version: 0.0.1

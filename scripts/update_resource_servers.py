@@ -31,7 +31,6 @@ TARGET_FOLDER = Path("resources_servers")
 class ResourceServerMetadata:
     """Metadata extracted from resource server YAML config."""
 
-    dataset_url: Optional[str] = None
     domain: Optional[str] = None
     description: Optional[str] = None
     verified: bool = False
@@ -41,7 +40,6 @@ class ResourceServerMetadata:
     def to_dict(self) -> dict[str, str | bool | None]:  # pragma: no cover
         """Convert to dict for backward compatibility with hf_utils.py"""
         return {
-            "dataset_url": self.dataset_url,
             "domain": self.domain,
             "description": self.description,
             "verified": self.verified,
@@ -56,10 +54,12 @@ class AgentDatasetsMetadata:
 
     license: str | None = None
     types: list[str] = field(default_factory=list)
+    dataset_url: Optional[str] = None
 
     def to_dict(self) -> dict[str, str | list[str] | None]:  # pragma: no cover
         """Convert to dict for backward compatibility."""
         return {
+            "dataset_url": self.dataset_url,
             "license": self.license,
             "types": self.types,
         }
@@ -84,12 +84,12 @@ class ConfigMetadata:
     ) -> "ConfigMetadata":  # pragma: no cover
         """Combine resource server and agent datasets metadata."""
         return cls(
-            dataset_url=resource.dataset_url,
             domain=resource.domain,
             description=resource.description,
             verified=resource.verified,
             verified_url=resource.verified_url,
             value=resource.value,
+            dataset_url=agent.dataset_url,
             license=agent.license,
             types=agent.types,
         )
@@ -201,6 +201,7 @@ def visit_agent_datasets(data: dict) -> AgentDatasetsMetadata:  # pragma: no cov
                                     agent.types.append(entry.get("type"))
                                     if entry.get("type") == "train":
                                         agent.license = entry.get("license")
+                                        agent.dataset_url = entry.get("dataset_url")
     return agent
 
 
@@ -214,7 +215,6 @@ def extract_config_metadata(yaml_path: Path) -> ConfigMetadata:  # pragma: no co
                     verified: {true/false}
                     description: {example_description}
                     value: {example_value}
-                    dataset_url: {example_dataset_url}
                     ...
         {something}_simple_agent:
             responses_api_agents:
@@ -223,6 +223,7 @@ def extract_config_metadata(yaml_path: Path) -> ConfigMetadata:  # pragma: no co
                         - name: train
                           type: {example_type_1}
                           license: {example_license_1}
+                          dataset_url: {example_dataset_url}
                         - name: validation
                           type: {example_type_2}
                           license: {example_license_2}

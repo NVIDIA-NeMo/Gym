@@ -115,7 +115,6 @@ equivalence_llm_judge:
       verified: false
       description: Short answer questions with LLM-as-a-judge
       value: Improve knowledge-related benchmarks like GPQA / HLE
-      dataset_url: https://huggingface.co/datasets/nvidia/Nemotron-RL-knowledge-openQA
 equivalence_llm_judge_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -139,3 +138,4 @@ equivalence_llm_judge_simple_agent:
         type: train
         license: Apache 2.0
         jsonl_fpath: resources_servers/equivalence_llm_judge/data/train.jsonl
+        dataset_url: https://huggingface.co/datasets/nvidia/Nemotron-RL-knowledge-openQA
