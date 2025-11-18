@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
-import importlib
 import json
 import os
 import platform
@@ -21,6 +20,7 @@ import shlex
 import sys
 import tomllib
 from glob import glob
+from importlib.metadata import PackageNotFoundError, version
 from os import environ, makedirs
 from os.path import exists
 from pathlib import Path
@@ -30,6 +30,7 @@ from threading import Thread
 from time import sleep
 from typing import Dict, List, Optional
 
+import psutil
 import rich
 import uvicorn
 from devtools import pprint
@@ -662,43 +663,63 @@ def display_help():  # pragma: no cover
 
 def version():  # pragma: no cover
     """Display gym version and system information."""
-    config = get_global_config_dict()
-    verbose = config.get("verbose", False)
-    json_output = config.get("json", False)
+    global_config_dict = get_global_config_dict()
+    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
-    info = {
+    verbose = global_config_dict.get("verbose", False)
+    json_output = global_config_dict.get("json", False)
+
+    version_info = {
         "nemo_gym": __version__,
         "python": platform.python_version(),
         "python_path": sys.executable,
-        "installation": str(PARENT_DIR),
+        "installation_path": str(PARENT_DIR),
     }
 
     if verbose or json_output:
+        key_deps = ["fastapi", "openai", "hydra-core", "pydantic", "ray", "uvicorn", "gradio"]
+        dependencies = {}
+
+        for dep in key_deps:
+            try:
+                dependencies[dep] = version(dep)
+            except PackageNotFoundError:
+                dependencies[dep] = "not installed"
+
+        version_info["dependencies"] = dependencies
+
+        # System info
+        version_info["system"] = {
+            "os": f"{platform.system()} {platform.release()}",
+            "platform": platform.platform(),
+            "architecture": platform.machine(),
+            "processor": platform.processor() or "unknown",
+            "cpus": os.cpu_count(),
+        }
+
+        # Memory info
         try:
-            info["fastapi"] = importlib.metadata.version("fastapi")
-            info["openai"] = importlib.metadata.version("openai")
-            info["pydantic"] = importlib.metadata.version("pydantic")
-        except Exception:
-            pass
+            mem = psutil.virtual_memory()
+            version_info["system"]["memory_gb"] = round(mem.total / (1024**3), 2)
+        except ImportError:
+            version_info["system"]["memory_gb"] = "N/A (psutil not installed)"
 
-        info["os"] = platform.system()
-        info["architecture"] = platform.machine()
-        info["cpus"] = os.cpu_count()
-
+    # Output
     if json_output:
-        print(json.dumps(info))
+        print(json.dumps(version_info, indent=2))
     else:
-        print(f"NeMo Gym v{info['nemo_gym']}")
-        print(f"Python {info['python']} ({info['python_path']})")
-        print(f"Installation: {info['installation']}")
+        print(f"NeMo Gym v{version_info['nemo_gym']}")
+        print(f"Python {version_info['python']} ({version_info['python_path']})")
+        print(f"Installation: {version_info['installation_path']}")
 
-        if verbose:
-            print("\nDependencies:")
-            if "fastapi" in info:
-                print(f"  fastapi: {info['fastapi']}")
-            if "openai" in info:
-                print(f"  openai: {info['openai']}")
-            if "pydantic" in info:
-                print(f"  pydantic: {info['pydantic']}")
+        if verbose and "dependencies" in version_info:
+            print("\nKey Dependencies:")
+            for dep, ver in version_info["dependencies"].items():
+                print(f"  {dep}: {ver}")
 
-            print(f"\nSystem: {info['os']} {info['architecture']} ({info['cpus']} CPUs)")
+            print("\nSystem:")
+            sys_info = version_info["system"]
+            print(f"  OS: {sys_info['os']}")
+            print(f"  Architecture: {sys_info['architecture']}")
+            print(f"  CPUs: {sys_info['cpus']}")
+            print(f"  Memory: {sys_info['memory_gb']} GB")
