@@ -1,0 +1,53 @@
+{
+    "name": "livecodebench_v5_validation",
+    "type": "validation",
+    "jsonl_fpath": "resources_servers/code_gen/data/livecodebench_v5_2024-07-01_2025-02-01_validation.jsonl",
+    "num_repeats": 10,
+    "gitlab_identifier": {
+        "dataset_name": "livecodebench",
+        "version": "0.0.1",
+        "artifact_fpath": "livecodebench_v5_2024-07-01_2025-02-01_validation.jsonl"
+    },
+    "license": "MIT",
+    "Number of examples": 3220,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 3220,
+        "Average": 321.93,
+        "Min": 140.0,
+        "Max": 789.0,
+        "Median": 303.35,
+        "Standard deviation": 110.41
+    },
+    "Number of turns": {
+        "Total # non-null values": 3220,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "reward": {
+        "Total # non-null values": 3220,
+        "Average": 0.339,
+        "Min": 0.0,
+        "Max": 1.0,
+        "Median": 0.339,
+        "Standard deviation": 0.473
+    }
+}
