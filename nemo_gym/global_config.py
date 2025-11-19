@@ -45,6 +45,8 @@ HEAD_SERVER_KEY_NAME = "head_server"
 DISALLOWED_PORTS_KEY_NAME = "disallowed_ports"
 HEAD_SERVER_DEPS_KEY_NAME = "head_server_deps"
 PYTHON_VERSION_KEY_NAME = "python_version"
+DEBUG_MODE_KEY_NAME = "debug_mode"
+DEBUG_PORT_KEY_NAME = "debug_port"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -53,6 +55,8 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     DISALLOWED_PORTS_KEY_NAME,
     HEAD_SERVER_DEPS_KEY_NAME,
     PYTHON_VERSION_KEY_NAME,
+    DEBUG_MODE_KEY_NAME,
+    DEBUG_PORT_KEY_NAME,
 ]
 
 POLICY_BASE_URL_KEY_NAME = "policy_base_url"
@@ -138,12 +142,14 @@ class GlobalConfigDictParser(BaseModel):
         server_instance_configs: List[ServerInstanceConfig],
         default_host: str,
         initial_disallowed_ports: Optional[List[int]] = None,
+        debug_mode: bool = False,
+        debug_base_port: int = 5678,
     ) -> List[int]:
         server_refs = [c.get_server_ref() for c in server_instance_configs]
 
         disallowed_ports = initial_disallowed_ports.copy() if initial_disallowed_ports is not None else []
 
-        for server_instance_config in server_instance_configs:
+        for server_index, server_instance_config in enumerate(server_instance_configs):
             run_server_config_dict = server_instance_config.get_inner_run_server_config_dict()
 
             # Check server refs
@@ -169,6 +175,10 @@ class GlobalConfigDictParser(BaseModel):
                 else:
                     # Port already exists, add it to the disallowed list.
                     disallowed_ports.append(run_server_config_dict["port"])
+
+                # Populate debug_port if debug_mode is enabled
+                if debug_mode:
+                    run_server_config_dict["debug_port"] = debug_base_port + server_index
 
         return disallowed_ports
 
@@ -232,13 +242,19 @@ class GlobalConfigDictParser(BaseModel):
 
         # Do one pass through all the configs validate and populate various configs for our servers.
         default_host = global_config_dict.get(DEFAULT_HOST_KEY_NAME) or "127.0.0.1"
+        debug_mode = global_config_dict.get(DEBUG_MODE_KEY_NAME, False)
+        debug_base_port = global_config_dict.get(DEBUG_PORT_KEY_NAME, 5678)
 
         head_server_config = global_config_dict.get(HEAD_SERVER_KEY_NAME, {})
         head_server_port = head_server_config.get("port", DEFAULT_HEAD_SERVER_PORT)
 
         initial_disallowed_ports = [head_server_port] if head_server_port is not None else []
         disallowed_ports = self.validate_and_populate_defaults(
-            server_instance_configs, default_host, initial_disallowed_ports
+            server_instance_configs,
+            default_host,
+            initial_disallowed_ports,
+            debug_mode,
+            debug_base_port,
         )
 
         with open_dict(global_config_dict):

@@ -36,6 +36,8 @@ from tqdm.auto import tqdm
 from nemo_gym import PARENT_DIR
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
+    DEBUG_MODE_KEY_NAME,
+    DEBUG_PORT_KEY_NAME,
     HEAD_SERVER_DEPS_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
@@ -106,6 +108,7 @@ class ServerInstanceDisplayConfig(BaseModel):
     entrypoint: str
     host: Optional[str] = None
     port: Optional[int] = None
+    debug_port: Optional[int] = None
     pid: Optional[int] = None
     config_path: str
     url: Optional[str] = None
@@ -137,6 +140,11 @@ class RunHelper:  # pragma: no cover
         self._processes: Dict[str, Popen] = dict()
         self._server_instance_display_configs: List[ServerInstanceDisplayConfig] = []
 
+        # Check if debug mode is enabled for subprocess debugging
+        if global_config_dict.get(DEBUG_MODE_KEY_NAME, False):
+            debug_base_port = global_config_dict.get(DEBUG_PORT_KEY_NAME, 5678)
+            print(f"🐛 Debug mode enabled - servers will use ports starting from {debug_base_port}")
+
         # TODO there is a better way to resolve this that uses nemo_gym/global_config.py::ServerInstanceConfig
         for top_level_path in top_level_paths:
             server_config_dict = global_config_dict[top_level_path]
@@ -161,10 +169,18 @@ class RunHelper:  # pragma: no cover
 
             dir_path = PARENT_DIR / Path(first_key, second_key)
 
+            # Set up debugging for this subprocess if enabled
+            # Debug port is pre-resolved in the server config during global config parsing
+            debug_port = server_config_dict.get("debug_port")
+            if debug_port is not None:
+                python_cmd = f"python -m debugpy --listen 0.0.0.0:{debug_port}"
+            else:
+                python_cmd = "python"
+
             command = f"""{_setup_env_command(dir_path, global_config_dict)} \\
     && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
     {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(top_level_path)} \\
-    python {str(entrypoint_fpath)}"""
+    {python_cmd} {str(entrypoint_fpath)}"""
 
             process = _run_command(command, dir_path)
             self._processes[top_level_path] = process
@@ -181,6 +197,7 @@ class RunHelper:  # pragma: no cover
                     entrypoint=str(entrypoint_fpath),
                     host=host,
                     port=port,
+                    debug_port=debug_port,
                     url=f"http://{host}:{port}" if host and port else None,
                     pid=process.pid,
                     config_path=top_level_path,
