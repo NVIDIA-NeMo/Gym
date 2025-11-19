@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from signal import SIGINT
 from time import time
 from typing import List
 
@@ -19,6 +20,57 @@ import requests
 from devtools import pprint
 
 from nemo_gym.server_utils import ServerClient, ServerInstanceDisplayConfig, ServerStatus
+
+
+def stop_server(server_info: ServerProcessInfo, force: bool = False) -> dict:
+    try:
+        proc = psutil.Process(server_info.pid)
+
+        if force:
+            proc.kill()
+            proc.wait(timeout=2)
+            return {
+                "server": server_info,
+                "success": True,
+                "method": "force",
+                "message": f"Force stopped {server_info.name}",
+            }
+        else:
+            proc.send_signal(SIGINT)
+
+            try:
+                proc.wait(timeout=10)
+                return {
+                    "server_info": server_info,
+                    "success": True,
+                    "method": "graceful",
+                    "message": f"Gracefully stopped {server_info.name}",
+                }
+            except psutil.TimeoutExpired:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                    return {
+                        "server": server_info,
+                        "success": True,
+                        "method": "terminate",
+                        "message": f"Terminated {server_info.name} (graceful shutdown timed out)",
+                    }
+                except psutil.TimeoutExpired:
+                    return {
+                        "server": server_info,
+                        "success": False,
+                        "method": "failed",
+                        "message": f"Failed to stop {server_info.name} - use --force",
+                    }
+    # TODO: handle more targetted errors (Nosuchprocess.. etc)
+    except Exception as e:
+        return {
+            "server": server_info,
+            "success": False,
+            "method": "error",
+            "message": f"Error stopping {server_info.name}: {e}",
+        }
 
 
 class StatusCommand:
