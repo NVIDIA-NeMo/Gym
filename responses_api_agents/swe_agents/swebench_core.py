@@ -25,6 +25,7 @@ import os
 import shlex
 import subprocess
 import time
+import uuid
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -226,6 +227,12 @@ async def execute_container_command(
     if os.getenv("HF_TOKEN"):
         env_flags += f" --env HF_TOKEN={shlex.quote(os.getenv('HF_TOKEN'))}"
         LOG.info("Passing HF_TOKEN to Apptainer container")
+    
+    # Add LiteLLM retry configuration for better connection handling
+    env_flags += " --env LITELLM_NUM_RETRIES=8"  # Increase retries from default 6
+    env_flags += " --env LITELLM_RETRY_DELAY=2"  # Initial delay 2s (exponential backoff)
+    env_flags += " --env LITELLM_MAX_RETRY_DELAY=120"  # Max delay 2 minutes
+    env_flags += " --env LITELLM_TIMEOUT=180"  # Request timeout 3 minutes
     if os.getenv("HF_HOME"):
         env_flags += f" --env HF_HOME={shlex.quote(os.getenv('HF_HOME'))}"
         LOG.info(f"Passing HF_HOME={os.getenv('HF_HOME')} to Apptainer container")
@@ -326,6 +333,7 @@ async def run_swe_agent_and_evaluate(
     agent_timeout: int = 3600,  # Agent execution timeout in seconds (default 1 hour)
     sweagent_setup_dir: Optional[Path] = None,  # Pre-built SWE-agent directory
     swebench_setup_dir: Optional[Path] = None,  # Pre-built SWE-bench directory
+    run_id: str = None,  # Unique run ID for organizing evaluation outputs
 ) -> Dict:
     """Run SWE-agent and evaluation in a single container execution.
 
@@ -357,7 +365,7 @@ async def run_swe_agent_and_evaluate(
     if agent_config is None:
         agent_config = "eval/swe-bench/swe-agent/default"
 
-    # Use pre-built directories if provided, otherwise clone on-the-fly (legacy behavior)
+    # Use pre-built directories if provided, otherwise clone on-the-fly
     if sweagent_setup_dir is not None:
         swe_agent_path = sweagent_setup_dir / "SWE-agent"
         if not swe_agent_path.exists():
@@ -474,7 +482,7 @@ async def run_swe_agent_and_evaluate(
         f"PRED_JSONL_NAME=$(basename $PRED_JSONL) && "
         f"TRAJ_DIR=$(dirname $PRED_FILE) && "
         f"cp $PRED_FILE $PRED_JSONL && "
-        # Copy only the specific trajectory directory for this instance, not all trajectories
+        # Copy only the specific trajectory directory for this instance
         f"mkdir -p /trajectories_mount/trajectories && "
         f"cp -r $TRAJ_DIR /trajectories_mount/trajectories/ && "
         # Also copy the .jsonl file to the root for easy access by evaluation
@@ -507,17 +515,12 @@ async def run_swe_agent_and_evaluate(
         f"  env -u VIRTUAL_ENV {swe_bench_dir}/venv/bin/python -m swebench.harness.run_local_evaluation "
         "    --predictions_path /trajectories_mount/${PRED_JSONL_NAME} "
         f"    --instance_ids {problem_info['instance_id']} "
-        f"    --run_id eval-outputs "
+        f"    --run_id {run_id} "
         f"    --timeout {swebench_tests_timeout} "
         f"    --dataset_name {problem_info['dataset_name']} "
         f"    --split {problem_info['split']} && "
-        # Copy only the specific instance's evaluation results, not all eval-outputs
-        f"  EVAL_DIR=$(find logs/run_evaluation/eval-outputs -type d -name '{problem_info['instance_id']}' | head -1) && "
-        f'  if [ -n "$EVAL_DIR" ]; then '
-        f"    EVAL_PARENT=$(dirname $EVAL_DIR) && "
-        f"    mkdir -p /trajectories_mount/eval-outputs && "
-        f"    cp -r $EVAL_PARENT /trajectories_mount/eval-outputs/; "
-        f"  fi; "
+        # Copy evaluation results preserving run_id directory structure
+        f"  cp -r logs/run_evaluation/{run_id} /trajectories_mount/; "
         f"else "
         f"  echo 'No patch found, skipping evaluation'; "
         f"fi"
@@ -560,7 +563,8 @@ async def run_swe_agent_and_evaluate(
     # Try to read evaluation report if valid patch existed
     report_json = None
     if has_valid_patch:
-        report_path = os.path.join(output_dir, "eval-outputs", "**", f"{problem_info['instance_id']}/report.json")
+        # Search for report within the run_id directory structure
+        report_path = os.path.join(output_dir, run_id, "**", f"{problem_info['instance_id']}/report.json")
         report_files = glob.glob(report_path, recursive=True)
 
         if report_files:
@@ -649,6 +653,8 @@ async def run_single_swe_agent_problem(
             - generation: Empty string (for compatibility)
     """
     LOG.info(f"Running SWE-agent and evaluation on problem: {problem_info['instance_id']}")
+    # Generate unique run_id for organizing evaluation outputs (matching OpenHands pattern)
+    run_id = f"{problem_info['instance_id']}_{int(time.time())}_{str(uuid.uuid4())[:8]}"
 
     # Start timing
     start_time = time.time()
@@ -668,6 +674,7 @@ async def run_single_swe_agent_problem(
         agent_timeout=agent_timeout,
         sweagent_setup_dir=sweagent_setup_dir,
         swebench_setup_dir=swebench_setup_dir,
+        run_id=run_id,
     )
 
     # Calculate generation time

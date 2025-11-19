@@ -388,7 +388,8 @@ async def run_swebench_evaluation(
     workspace_root = Path(os.path.dirname(os.path.abspath(__file__))).parent.parent  # Go up to nemo-gym root
     instance_id = problem_info.get("instance_id", "unknown")
     timestamp = int(time.time() * 1000)  # Millisecond timestamp for uniqueness
-    persistent_dir = workspace_root / "temp_swebench" / f"{instance_id}_{timestamp}"
+    run_id = f"{instance_id}_{timestamp}"
+    persistent_dir = workspace_root / "temp_swebench" / run_id
     persistent_dir.mkdir(parents=True, exist_ok=True)
 
     LOG.info(f"Running SWE-bench evaluation for {instance_id} in {persistent_dir}")
@@ -434,6 +435,7 @@ async def run_swebench_evaluation(
             sweagent_setup_dir=sweagent_setup_dir,
             swebench_setup_dir=swebench_setup_dir,
         )
+        #raise Exception("test")
     except Exception as e:
         # Handle failures gracefully
         failure_reason = f"SWE-agent execution failed: {str(e)}"
@@ -460,6 +462,23 @@ async def run_swebench_evaluation(
             },
             "_evaluation_failed": True,
             "_failure_reason": failure_reason,
+            # Add response structure expected by Penguin for failed evaluations
+            # This ensures penguin.py's _postprocess_penguin_to_nemo_rl_result doesn't fail
+            # Include token_ids so Penguin can process it normally (empty tokens = no training on this sample)
+            "response": {
+                "output": [
+                    {
+                        "role": "assistant",
+                        "content": f"Evaluation failed: {failure_reason}",
+                        "status": "failed",
+                        "type": "message",
+                        "prompt_token_ids": [],  # Empty prompt
+                        "generation_token_ids": [],  # Empty generation (no tokens to train on)
+                        "generation_log_probs": [],  # No log probs for failed generation
+                    }
+                ]
+            },
+            #"loss_multiplier": 0.0, 
         }
         LOG.info("Dummy result created - this will result in reward=0 for failed evaluation")
 
