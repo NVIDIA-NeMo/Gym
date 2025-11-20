@@ -18,6 +18,7 @@ from collections import defaultdict
 from time import sleep
 from typing import Dict, Optional, Set
 
+import ray
 import ray.util.state
 from ray.actor import ActorClass, ActorProxy
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
