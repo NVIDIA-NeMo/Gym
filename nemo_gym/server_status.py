@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from dataclasses import dataclass, field
 from signal import SIGINT
 from time import time
 from typing import List
@@ -23,12 +24,15 @@ from nemo_gym.server_utils import ServerClient, ServerInstanceDisplayConfig, Ser
 
 
 def stop_server(server_info: ServerProcessInfo, force: bool = False) -> dict:
+    """Stop a single server process."""
+
     try:
         proc = psutil.Process(server_info.pid)
 
         if force:
             proc.kill()
             proc.wait(timeout=2)
+
             return {
                 "server": server_info,
                 "success": True,
@@ -36,10 +40,12 @@ def stop_server(server_info: ServerProcessInfo, force: bool = False) -> dict:
                 "message": f"Force stopped {server_info.name}",
             }
         else:
+            # Graceful shutdown, then wait
             proc.send_signal(SIGINT)
 
             try:
                 proc.wait(timeout=10)
+
                 return {
                     "server_info": server_info,
                     "success": True,
@@ -47,9 +53,12 @@ def stop_server(server_info: ServerProcessInfo, force: bool = False) -> dict:
                     "message": f"Gracefully stopped {server_info.name}",
                 }
             except psutil.TimeoutExpired:
+                # Graceful didn't work, so terminate and wait
                 proc.terminate()
+
                 try:
                     proc.wait(timeout=5)
+
                     return {
                         "server": server_info,
                         "success": True,
@@ -63,7 +72,20 @@ def stop_server(server_info: ServerProcessInfo, force: bool = False) -> dict:
                         "method": "failed",
                         "message": f"Failed to stop {server_info.name} - use --force",
                     }
-    # TODO: handle more targetted errors (Nosuchprocess.. etc)
+    except psutil.NoSuchProcess:
+        return {
+            "server": server_info,
+            "success": False,
+            "method": "no_process",
+            "message": f"{server_info.name} not found",
+        }
+    except psutil.AccessDenied:
+        return {
+            "server": server_info,
+            "success": False,
+            "method": "access_denied",
+            "message": f"Access denied to stop {server_info.name} (PID: {server_info.pid})",
+        }
     except Exception as e:
         return {
             "server": server_info,
@@ -163,3 +185,34 @@ Is the head server running? Start it with: `ng_run`
         print(f"""
 {len(servers)} servers found ({healthy_count} healthy, {len(servers) - healthy_count} unhealthy)
 """)
+
+
+@dataclass
+class StopCommand:
+    """Class to stop gym servers"""
+
+    status_cmd: StatusCommand = field(default_factory=StatusCommand)
+
+    def stop_all(self, force: bool = False) -> List[dict]:
+        """Stop all running servers"""
+        servers = self.status_cmd.discover_servers()
+        return [stop_server(server, force) for server in servers]
+
+    def stop_by_name(self, name: str, force: bool = False) -> dict:
+        """Stop a server by name"""
+        servers = self.status_cmd.discover_servers()
+        # TODO: handle multiple matching servers?
+        matching = next((s for s in servers if s.name == name), None)
+
+        if not matching:
+            return {"success": False, "message": f"No server found with name: {name}"}
+
+        return stop_server(matching, force)
+
+    def stop_by_port(self, port: int, force: bool = False) -> dict:
+        """Stop a server on a specific port"""
+        servers = self.status_cmd.discover_servers()
+        matching = next((s for s in servers if s.port == port), None)
+
+        if not matching:
+            return [{"success": False, "message": f"No server found with port: {port}"}]
