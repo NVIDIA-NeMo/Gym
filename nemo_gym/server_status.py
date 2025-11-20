@@ -196,13 +196,17 @@ class StopCommand:
     def stop_all(self, force: bool = False) -> List[dict]:
         """Stop all running servers"""
         servers = self.status_cmd.discover_servers()
+
+        if not servers:
+            return [{"success": False, "message": "No servers found"}]
+
         return [stop_server(server, force) for server in servers]
 
     def stop_by_name(self, name: str, force: bool = False) -> List[dict]:
         """Stop a server by name"""
         servers = self.status_cmd.discover_servers()
-        # TODO: handle multiple matching servers?
-        matching = next((s for s in servers if s.name == name), None)
+        name = name.lower()
+        matching = next((s for s in servers if s.name.lower() == name), None)
 
         if not matching:
             return [{"success": False, "message": f"No server found with name: {name}"}]
@@ -218,3 +222,22 @@ class StopCommand:
             return [{"success": False, "message": f"No server found with port: {port}"}]
 
         return [stop_server(matching, force)]
+
+    def display_results(self, results: List[dict]) -> None:
+        """Display stop results"""
+        print("\nStopping NeMo Gym servers...\n")
+
+        success_count = 0
+        failure_count = 0
+        for result in results:
+            if result["success"]:
+                success_count += 1
+                icon = "✓"
+            else:
+                failure_count += 1
+                icon = "✗"
+
+            print(f"{icon} {result['message']}")
+
+        total_count = len(results)
+        print(f"\n{success_count} of {total_count} servers stopped successfully, {failure_count} failed")

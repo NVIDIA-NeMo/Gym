@@ -936,7 +936,7 @@ def stop():  # pragma: no cover
 
     # Validation to prevent multiple options from being set
     options_set = sum([config.all, config.name is not None, config.port is not None])
-    # TODO: add usage clarificaiton instructions for each option
+    # TODO: add usage clarification instructions for each option
 
     if options_set == 0:
         print("Error: Must specify one of: '+all', '+name', or '+port'")
@@ -947,10 +947,11 @@ def stop():  # pragma: no cover
         exit(1)
 
     if config.all:
-        stop_cmd.stop_all(config.force)
+        results = stop_cmd.stop_all(config.force)
     elif config.name:
-        stop_cmd.stop_by_name(config.name, config.force)
+        results = stop_cmd.stop_by_name(config.name, config.force)
     elif config.port:
-        stop_cmd.stop_by_port(config.port, config.force)
+        results = stop_cmd.stop_by_port(config.port, config.force)
 
-    # TODO: display results
+    stop_cmd.display_results(results)
+    exit()
