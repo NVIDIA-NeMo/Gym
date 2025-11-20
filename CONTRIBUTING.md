@@ -65,7 +65,8 @@ We're excited about contributions that expand NeMo Gym's capabilities and improv
 git clone git@github.com:NVIDIA-NeMo/Gym.git
 cd Gym
 curl -LsSf https://astral.sh/uv/install.sh | sh
-source $HOME/.local/bin/env
+export PATH=$HOME/.local/bin/env/bin:$PATH  # or 
+# echo 'export PATH=$HOME/.local/bin/env/bin:$PATH' >> ~/.bashrc
 uv venv --python 3.12
 source .venv/bin/activate
 uv sync --extra dev --group docs
