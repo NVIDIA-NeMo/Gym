@@ -198,21 +198,23 @@ class StopCommand:
         servers = self.status_cmd.discover_servers()
         return [stop_server(server, force) for server in servers]
 
-    def stop_by_name(self, name: str, force: bool = False) -> dict:
+    def stop_by_name(self, name: str, force: bool = False) -> List[dict]:
         """Stop a server by name"""
         servers = self.status_cmd.discover_servers()
         # TODO: handle multiple matching servers?
         matching = next((s for s in servers if s.name == name), None)
 
         if not matching:
-            return {"success": False, "message": f"No server found with name: {name}"}
+            return [{"success": False, "message": f"No server found with name: {name}"}]
 
-        return stop_server(matching, force)
+        return [stop_server(matching, force)]
 
-    def stop_by_port(self, port: int, force: bool = False) -> dict:
+    def stop_by_port(self, port: int, force: bool = False) -> List[dict]:
         """Stop a server on a specific port"""
         servers = self.status_cmd.discover_servers()
         matching = next((s for s in servers if s.port == port), None)
 
         if not matching:
             return [{"success": False, "message": f"No server found with port: {port}"}]
+
+        return [stop_server(matching, force)]

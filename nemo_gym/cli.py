@@ -49,7 +49,7 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
-from nemo_gym.server_status import StatusCommand
+from nemo_gym.server_status import StatusCommand, StopCommand
 from nemo_gym.server_utils import (
     HEAD_SERVER_KEY_NAME,
     HeadServer,
@@ -115,6 +115,13 @@ class RunConfig(BaseNeMoGymCLIConfig):
     entrypoint: str = Field(
         description="Entrypoint for this command. This must be a relative path with 2 parts. Should look something like `responses_api_agents/simple_agent`."
     )
+
+
+class StopConfig(BaseNeMoGymCLIConfig):
+    all: bool = Field(default=False, description="Stop all running servers")
+    name: Optional[str] = Field(default=None, description="Stop server by name")
+    port: Optional[int] = Field(default=None, description="Stop server on specific port")
+    force: bool = Field(default=False, description="Force stop unresponsive servers")
 
 
 class TestConfig(RunConfig):
@@ -921,3 +928,29 @@ System:
   Memory: {sys_info["memory_gb"]} GB"""
 
         print(output)
+def stop():  # pragma: no cover
+    global_config_dict = get_global_config_dict()
+    config = StopConfig.model_validate(global_config_dict)
+
+    stop_cmd = StopCommand()
+
+    # Validation to prevent multiple options from being set
+    options_set = sum([config.all, config.name is not None, config.port is not None])
+    # TODO: add usage clarificaiton instructions for each option
+
+    if options_set == 0:
+        print("Error: Must specify one of: '+all', '+name', or '+port'")
+        exit(1)
+
+    if options_set > 1:
+        print("Error: Can only specify one of: '+all', '+name', or '+port'")
+        exit(1)
+
+    if config.all:
+        stop_cmd.stop_all(config.force)
+    elif config.name:
+        stop_cmd.stop_by_name(config.name, config.force)
+    elif config.port:
+        stop_cmd.stop_by_port(config.port, config.force)
+
+    # TODO: display results
