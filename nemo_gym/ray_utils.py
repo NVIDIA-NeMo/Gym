@@ -16,7 +16,7 @@ import os
 import sys
 from collections import defaultdict
 from time import sleep
-from typing import Optional, Set
+from typing import Dict, Optional, Set
 
 import ray.util.state
 from ray.actor import ActorClass, ActorProxy
@@ -27,6 +27,18 @@ from nemo_gym.global_config import (
     RAY_NUM_GPUS_PER_NODE_KEY_NAME,
     get_global_config_dict,
 )
+
+
+def lookup_current_ray_node_id() -> str:
+    return ray.runtime_context.get_runtime_context().get_node_id()
+
+
+def lookup_ray_node_id_to_ip_dict() -> Dict[str, str]:
+    id_to_ip = {}
+    node_states = ray.util.state.list_nodes()
+    for state in node_states:
+        id_to_ip[state.node_id] = state.node_ip
+    return id_to_ip
 
 
 def _lookup_ray_node_with_free_gpus(

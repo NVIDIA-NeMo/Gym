@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import os
 import re
 import urllib
 from multiprocessing import Process
@@ -20,6 +21,7 @@ from time import sleep, time
 from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
+import ray
 from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request
 from pydantic import BaseModel, Field
@@ -58,6 +60,11 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
     TokenIDLogProbMixin,
 )
+from nemo_gym.ray_utils import (
+    lookup_current_ray_node_id,
+    lookup_ray_node_id_to_ip_dict,
+    spinup_single_ray_gpu_node_worker,
+)
 from nemo_gym.server_utils import SESSION_ID_KEY
 
 
@@ -74,9 +81,6 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     server_args: Optional[Dict[str, Any]] = None
 
     enable_router: bool = False
-    # router_backend values should be one of "ray" or "mp" (matching the allowed
-    # values of VLLM --distributed-executor-backend).
-    router_backend: str = "mp"
     router_dp_size: int = 1
 
     def model_post_init(self, context):
@@ -85,11 +89,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
         return super().model_post_init(context)
 
 
-def _spinup_vllm_server(
-    config: VLLMModelConfig, server_host: str, server_port: int, router_dp_rank: Optional[int]
-) -> None:
-    import os
-
+def _spinup_vllm_server(config: VLLMModelConfig, server_host: str, server_port: int, router_dp_rank: int) -> None:
     import uvloop
     import vllm.engine.arg_utils
     import vllm.entrypoints.openai.api_server
@@ -104,10 +104,7 @@ def _spinup_vllm_server(
     argv.append("--port")
     argv.append(f"{server_port}")
     argv.append("--distributed-executor-backend")
-    if config.enable_router:
-        argv.append(config.router_backend)
-    else:
-        argv.append("mp")
+    argv.append("mp")
     for k, v in (config.server_args or {}).items():
         if isinstance(v, bool):
             if not v:
@@ -120,20 +117,44 @@ def _spinup_vllm_server(
             argv.append(arg_key)
             argv.append(f"{v}")
 
-    if config.enable_router and config.router_backend == "mp":
-        tp_size = (config.server_args or {}).get("tensor_parallel_size", 1)
-        tp_start = router_dp_rank * tp_size
-        tp_ranks = []
-        for tp_rank_offset in range(tp_size):
-            tp_ranks.append(tp_start + tp_rank_offset)
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join([f"{r}" for r in tp_ranks])
-
     server_args = vllm.utils.FlexibleArgumentParser()
     server_args = vllm.entrypoints.openai.cli_args.make_arg_parser(server_args)
     server_args = server_args.parse_args(argv)
     vllm.entrypoints.openai.cli_args.validate_parsed_serve_args(server_args)
 
     uvloop.run(vllm.entrypoints.openai.api_server.run_server(server_args))
+
+
+@ray.remote
+class VLLMModelSpinupWorker:
+    def __init__(self, config: VLLMModelConfig, working_dir: Optional[str], router_dp_rank: int):
+        self.config = config
+        self.working_dir = working_dir
+        self._server_host = "0.0.0.0"
+        self._server_port = find_open_port()
+        self._router_dp_rank = router_dp_rank
+
+        if self.working_dir is not None:
+            os.chdir(self.working_dir)
+
+        server_proc = Process(
+            target=_spinup_vllm_server,
+            args=(
+                self.config,
+                self._server_host,
+                self._server_port,
+                self._router_dp_rank,
+            ),
+            daemon=False,
+        )
+        server_proc.start()
+        self._server_proc = server_proc
+
+    def _get_ip(self) -> int:
+        return lookup_ray_node_id_to_ip_dict()[lookup_current_ray_node_id()]
+
+    def _get_port(self) -> int:
+        return self._server_port
 
 
 # Use this to query the VLLM servers during spinup without having to start an
@@ -175,35 +196,38 @@ class VLLMModel(SimpleResponsesAPIModel):
     config: VLLMModelConfig
 
     def model_post_init(self, context):
+        working_dir = os.getcwd()
+
         if self.config.spinup_server:
             self._server_urls = []
-            self._server_procs = []
+            self._server_workers = []
             self._clients = []
+
+            server_tp_size = (self.config.server_args or {}).get("tensor_parallel_size", 1)
+            server_dp_size = (self.config.server_args or {}).get("data_parallel_size", 1)
+
+            assert server_dp_size == 1
 
             router_dp_size = 1
             if self.config.enable_router:
                 router_dp_size = max(1, self.config.router_dp_size)
 
             for router_dp_rank in range(router_dp_size):
-                # FIXME: this server host is wrong for multi-node via ray.
-                server_host = "127.0.0.1"
-                server_port = find_open_port()
-                server_url = f"http://{server_host}:{server_port}/v1"
-
-                server_proc = Process(
-                    target=_spinup_vllm_server,
-                    args=(
-                        self.config,
-                        server_host,
-                        server_port,
-                        router_dp_rank if self.config.enable_router else None,
-                    ),
-                    daemon=False,
+                server_worker = spinup_single_ray_gpu_node_worker(
+                    VLLMModelSpinupWorker,
+                    num_gpus=server_tp_size,
+                    config=self.config,
+                    working_dir=working_dir,
+                    router_dp_rank=router_dp_rank,
                 )
-                server_proc.start()
+
+                server_ip = ray.get(server_worker._get_ip.remote())
+                server_port = ray.get(server_worker._get_port.remote())
+                server_url = f"http://{server_ip}:{server_port}/v1"
 
                 self._server_urls.append(server_url)
-                self._server_procs.append(server_proc)
+                self._server_workers.append(server_worker)
+
                 self._clients.append(
                     NeMoGymAsyncOpenAI(
                         base_url=server_url,
@@ -222,7 +246,7 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         else:
             self._server_urls = None
-            self._server_procs = None
+            self._server_workers = None
             self._clients = [
                 NeMoGymAsyncOpenAI(
                     base_url=base_url,
