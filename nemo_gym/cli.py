@@ -278,24 +278,44 @@ class RunHelper:  # pragma: no cover
         if not self._head_server_thread.is_alive():
             raise RuntimeError("Head server finished unexpectedly!")
 
+        # Clean up processes that have stopped
+        processes_to_delete = []
         for process_name, process in self._processes.items():
-            if process.poll() is not None:
-                proc_out, proc_err = process.communicate()
-                print_str = f"Process `{process_name}` finished unexpectedly!"
+            poll_result = process.poll()
 
-                if isinstance(proc_out, bytes):
-                    proc_out = proc_out.decode("utf-8")
-                    print_str = f"""{print_str}
-Process `{process_name}` stdout:
-{proc_out}
-"""
-                if isinstance(proc_err, bytes):
-                    proc_err = proc_err.decode("utf-8")
-                    print_str = f"""{print_str}
-Process `{process_name}` stderr:
-{proc_err}"""
+            if poll_result is not None:
+                # Assume the process exited
+                exit_code = poll_result
 
-                raise RuntimeError(print_str)
+                try:
+                    proc_out, proc_err = process.communicate()
+                except:
+                    proc_out, proc_err = None, None
+
+                if exit_code <= 0:
+                    processes_to_delete.append(process_name)
+                else:
+                    print_str = f"Process `{process_name}` finished unexpectedly!"
+
+                    if isinstance(proc_out, bytes):
+                        proc_out = proc_out.decode("utf-8")
+                        print_str = f"""{print_str}
+    Process `{process_name}` stdout:
+    {proc_out}
+    """
+                    if isinstance(proc_err, bytes):
+                        proc_err = proc_err.decode("utf-8")
+                        print_str = f"""{print_str}
+    Process `{process_name}` stderr:
+    {proc_err}"""
+
+                    raise RuntimeError(print_str)
+
+        for process_name in processes_to_delete:
+            del self._processes[process_name]
+
+        if not self._processes:
+            raise KeyboardInterrupt()
 
     def wait_for_spinup(self) -> None:
         sleep_interval = 3
@@ -346,10 +366,22 @@ Sleeping {sleep_interval}s..."""
 
     def run_forever(self) -> None:
         async def sleep():
+            initial_count = len(self._processes)
+            poll_interval = 60
+
             # Indefinitely
             while True:
                 self.poll()
-                await asyncio.sleep(60)
+
+                # If servers start dying, poll more frequently
+                current_count = len(self._processes)
+                if current_count < initial_count:
+                    print("Servers started dying! Polling every 5s")
+                    poll_interval = 0.5
+                else:
+                    poll_interval = 60
+
+                await asyncio.sleep(poll_interval)
 
         try:
             asyncio.run(sleep())
