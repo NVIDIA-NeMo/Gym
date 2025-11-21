@@ -16,6 +16,7 @@ import asyncio
 import atexit
 import json
 import resource
+import sys
 from abc import abstractmethod
 from contextlib import asynccontextmanager
 from io import StringIO
@@ -487,6 +488,25 @@ class SimpleServer(BaseServer):
                     e,
                 )
 
+    def setup_shutdown_message(self, app: FastAPI) -> None:  # pragma: no cover
+        """Wrap lifespan to print shutdown message before uvicorn logs"""
+        main_app_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan_wrapper(app):
+            # Startup
+            async with main_app_lifespan(app) as maybe_state:
+                yield maybe_state
+
+            # Shutdown
+            print(f"\n{'#' * 100}")
+            print(f"Shutting down {self.config.name}...")
+            print(f"{'#' * 100}\n")
+
+            sys.stdout.flush()
+
+        app.router.lifespan_context = lifespan_wrapper
+
     @classmethod
     def run_webserver(cls) -> None:  # pragma: no cover
         global_config_dict = get_global_config_dict()
@@ -503,6 +523,7 @@ class SimpleServer(BaseServer):
         app = server.setup_webserver()
         server.set_ulimit()
         server.setup_exception_middleware(app)
+        server.setup_shutdown_message(app)
 
         @app.exception_handler(RequestValidationError)
         async def validation_exception_handler(request: Request, exc):

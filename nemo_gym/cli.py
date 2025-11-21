@@ -367,22 +367,28 @@ Sleeping {sleep_interval}s..."""
     def run_forever(self) -> None:
         async def sleep():
             poll_interval = 60
-            check_interval = 1
+            sleep_interval = 1
+            secs_since_last_poll = 0
 
             # Indefinitely
             while True:
-                # Sleeping in smaller chunks allows for quick checks for server shutdown
-                for _ in range(poll_interval):
-                    alive_processes = []
-                    for name, proc in self._processes.items():
-                        if proc.poll() is None:  # still running
-                            alive_processes.append(name)
+                if secs_since_last_poll >= poll_interval:
+                    self.poll()
+                    secs_since_last_poll = 0
 
-                    if not alive_processes:
-                        print("All servers stopped, shutting down head server...")
-                        return
+                alive_count = 0
+                for proc in self._processes.values():
+                    if proc.poll() is None:  # still running
+                        alive_count += 1
 
-                    await asyncio.sleep(check_interval)
+                if self._processes and alive_count == 0:
+                    print(f"\n{'#' * 100}")
+                    print("All servers stopped. Shutting down head server...")
+                    print(f"{'#' * 100}\n")
+                    return
+
+                await asyncio.sleep(sleep_interval)
+                secs_since_last_poll += sleep_interval
 
         try:
             asyncio.run(sleep())
