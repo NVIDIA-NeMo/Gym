@@ -1,0 +1,31 @@
+mcqa:
+  resources_servers:
+    mcqa:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: GPQA is a benchmark for multi-choice question answering problems
+      value: Test general purpose knowledge on STEM topics with google-proof questions
+      dataset_name: Nemotron-RL-knowledge-gpqa-benchmark
+mcqa_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: mcqa
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/mcqa/data/validation.jsonl
+        gitlab_identifier:
+          dataset_name: gpqa_main_benchmark
+          version: 0.0.1
+          artifact_fpath: gpqa_main.jsonl
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/mcqa/data/example_gpqa_main.jsonl
