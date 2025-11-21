@@ -366,22 +366,23 @@ Sleeping {sleep_interval}s..."""
 
     def run_forever(self) -> None:
         async def sleep():
-            initial_count = len(self._processes)
             poll_interval = 60
+            check_interval = 1
 
             # Indefinitely
             while True:
-                self.poll()
+                # Sleeping in smaller chunks allows for quick checks for server shutdown
+                for _ in range(poll_interval):
+                    alive_processes = []
+                    for name, proc in self._processes.items():
+                        if proc.poll() is None:  # still running
+                            alive_processes.append(name)
 
-                # If servers start dying, poll more frequently
-                current_count = len(self._processes)
-                if current_count < initial_count:
-                    print("Servers started dying! Polling every 5s")
-                    poll_interval = 0.5
-                else:
-                    poll_interval = 60
+                    if not alive_processes:
+                        print("All servers stopped, shutting down head server...")
+                        return
 
-                await asyncio.sleep(poll_interval)
+                    await asyncio.sleep(check_interval)
 
         try:
             asyncio.run(sleep())
@@ -968,14 +969,18 @@ def stop():  # pragma: no cover
 
     # Validation to prevent multiple options from being set
     options_set = sum([config.all, config.name is not None, config.port is not None])
-    # TODO: add usage clarification instructions for each option
 
     if options_set == 0:
-        print("Error: Must specify one of: '+all', '+name', or '+port'")
+        print("Error: Must specify one of: '+all=<bool>', '+name=<name>', or '+port=<port>'")
+        print("\nUsage:")
+        print("  ng_stop +all=true              # Stop all servers")
+        print("  ng_stop +name=simple_weather   # Stop specific server")
+        print("  ng_stop +port=8001             # Stop server on port 8001")
+        print("  ng_stop +all=true +force=true  # Force stop all servers")
         exit(1)
 
     if options_set > 1:
-        print("Error: Can only specify one of: '+all', '+name', or '+port'")
+        print("Error: Can only specify one of: '+all=<bool>', '+name=<name>', or '+port=<port>'")
         exit(1)
 
     if config.all:
