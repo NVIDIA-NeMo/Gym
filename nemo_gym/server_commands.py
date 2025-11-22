@@ -47,7 +47,7 @@ def stop_server(server_info: ServerProcessInfo, force: bool = False) -> dict:
                 proc.wait(timeout=10)
 
                 return {
-                    "server_info": server_info,
+                    "server": server_info,
                     "success": True,
                     "method": "graceful",
                     "message": f"Gracefully stopped {server_info.name}",
