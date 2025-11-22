@@ -49,7 +49,7 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
-from nemo_gym.server_status import StatusCommand, StopCommand
+from nemo_gym.server_commands import StatusCommand, StopCommand
 from nemo_gym.server_utils import (
     HEAD_SERVER_KEY_NAME,
     HeadServer,
