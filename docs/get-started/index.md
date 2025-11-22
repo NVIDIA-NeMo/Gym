@@ -50,9 +50,37 @@ Generate your first batch of rollouts and understand how they become training da
 
 ---
 
+## Next Steps
+
+After completing the get-started tutorials, explore these fundamental patterns:
+
+::::{grid} 1 1 1 1
+:gutter: 2
+
+:::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` Multi-Step Interactions
+:link: ../tutorials/development/multi-step-patterns
+:link-type: doc
+
+Learn how to build agents that maintain state across multiple tool calls. Essential for most agentic tasks.
++++
+{bdg-secondary}`foundational` {bdg-secondary}`state-management`
+:::
+
+::::
+
+---
+
 :::{tip}
 **New to reinforcement learning?** Do not worry—these tutorials introduce RL concepts naturally as you build.
 
 - For deeper conceptual understanding, explore the [About](../about/index.md) section.
 - For quick definitions, refer to the [Glossary](../about/concepts/key-terminology.md).
 :::
+
+```{toctree}
+:hidden:
+:maxdepth: 1
+
+setup-installation
+rollout-collection
+```

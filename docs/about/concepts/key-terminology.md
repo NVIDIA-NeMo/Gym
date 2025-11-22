@@ -77,13 +77,16 @@ Online vs Offline Training
 
 ```{glossary}
 Multi-turn
-    Conversations spanning multiple exchanges where context and state persist across turns.
+    Conversations spanning multiple user ↔ assistant exchanges where context persists across turns. Example: A back-and-forth dialogue where the user asks follow-up questions.
 
 Multi-step  
-    Complex tasks requiring agents to break problems into sequential steps, often using tools and intermediate reasoning.
+    Complex tasks where agents make multiple sequential tool calls within a single trajectory to accomplish a goal. Example: An agent that searches for data, analyzes it, then formats results—all in response to one user query. See {doc}`Multi-Step Patterns <../../tutorials/development/multi-step-patterns>` for details.
 
 Tool Use / Function Calling
     Agents invoking external capabilities (APIs, calculators, databases) to accomplish tasks beyond text generation.
+
+Session
+    A unique identifier and associated state that persists across multiple tool calls within a single trajectory. Sessions enable stateful multi-step interactions.
 ```
 
 ## Technical Infrastructure

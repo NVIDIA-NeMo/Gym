@@ -60,8 +60,9 @@ Essential vocabulary for agent training, RL workflows, and NeMo Gym. This glossa
 :hidden:
 :maxdepth: 1
 
-Core Abstractions <core-abstractions>
-Configuration System <configuration-system>
-Task Verification <task-verification>
 Key Terminology <key-terminology>
+Core Abstractions <core-abstractions>
+Sessions Explained <sessions-explained>
+Task Verification <task-verification>
+Configuration System <configuration-system>
 ```

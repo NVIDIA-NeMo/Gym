@@ -80,7 +80,9 @@ This generates training data with verification scores!
 ## 📖 Documentation
 
 - **[Documentation](https://docs.nvidia.com/nemo/gym/latest/index.html)** - Technical reference docs
+- **[Get Started](https://docs.nvidia.com/nemo/gym/latest/get-started/index.html)** - Installation through your first verified agent
 - **[Tutorials](https://docs.nvidia.com/nemo/gym/latest/tutorials/index.html)** - Hands-on tutorials and practical examples
+- **[Multi-Step Patterns](https://docs.nvidia.com/nemo/gym/latest/tutorials/development/multi-step-patterns.html)** - Essential guide to session-based state management
  
 
 ## 🤝 Community & Support

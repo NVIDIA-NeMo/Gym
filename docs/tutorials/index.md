@@ -9,6 +9,25 @@ Hands-on learning experiences that guide you through building, training, and dep
 :::
 ---
 
+## Development Patterns
+
+Learn fundamental patterns for building resource servers and agents.
+
+::::{grid} 1 1 2 2
+:gutter: 1 1 1 2
+
+:::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` Multi-Step Interactions
+:link: development/multi-step-patterns
+:link-type: doc
+Master session-based state management for agents that make multiple tool calls. Understand when to use stateful vs stateless patterns.
++++
+{bdg-secondary}`foundational` {bdg-secondary}`state-management` {bdg-secondary}`sessions`
+:::
+
+::::
+
+---
+
 ## Rollout Collection and Training Data
 
 Implement rollout generation and training data preparation for RL, SFT, and DPO.

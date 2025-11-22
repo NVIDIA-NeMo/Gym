@@ -27,15 +27,18 @@ Resources servers provide tools implementations that can be invoked via tool cal
 **Resources Provide**
 - **Tools**: Functions agents can call (e.g., `get_weather`, `search_web`)
 - **Verification Logic**: Scoring systems that evaluate agent responses for training/evaluation
+- **State Management**: Optional session-based state for multi-step interactions
 
 **Examples:**
-- `simple_weather`: Mock weather API for testing and tutorials
+- `simple_weather`: Mock weather API for testing and tutorials (stateless)
+- `example_stateful_counter`: Demonstrates session state management (stateful)
 - `google_search`: Web search capabilities via Google Search API  
 - `math_with_code`: Python code execution environment for mathematical reasoning
 - `math_with_judge`: Mathematical problem verification using symbolic computation
 - `mcqa`: Multiple choice question answering evaluation
 - `instruction_following`: General instruction compliance scoring
 
+> **Tip:** Learn about stateful vs stateless resource servers in the {doc}`Multi-Step Interactions <../../tutorials/development/multi-step-patterns>` tutorial.
 
 **Configuration**: See resource-specific config files in `resources_servers/*/configs/`
 

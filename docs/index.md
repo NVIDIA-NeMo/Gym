@@ -116,9 +116,10 @@ get-started/rollout-collection.md
 ```{toctree}
 :caption: Tutorials
 :hidden:
-:maxdepth: 1
+:maxdepth: 2
 
 tutorials/index.md
+tutorials/development/index
 tutorials/offline-training-w-rollouts
 tutorials/rl-training-with-nemo-rl
 how-to-faq.md
