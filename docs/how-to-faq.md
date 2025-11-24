@@ -1,6 +1,6 @@
-# How-To's and FAQ's
-This document is a smattering of How-To's and FAQs that have not made their way into an official tutorial yet!
+# [EXPERIMENTAL] How-To's and FAQ's
 
+[!TIP] This document is a smattering of How-To's and FAQs that have not made their way into an official tutorial yet! The tutorials below are experimental and still under development! You may run into bugs and issues that need additional time and experience to resolve correctly. If you wish to proceed, please do so with caution.
 
 # How To: Run tests for simple agent
 Run the Simple Chat Agent tests. `ng_test` or `nemo_gym_test` stands for `Nemo Gym Test`.
