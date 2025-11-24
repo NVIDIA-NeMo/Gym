@@ -1,6 +1,8 @@
 (rl-training-with-nemo-rl)=
 
-# RL Training with NeMo RL
+# [EXPERIMENTAL] RL Training with NeMo RL
+
+[!TIP] This tutorial is experimental and still under development! You may run into bugs and issues that need additional time and experience to resolve correctly. If you wish to proceed, please do so with caution.
 
 **Goal**: Train a model with NeMo RL. Learn how to set up NeMo Gym + NeMo RL training environment, run tests, prepare data, and launch single and multi-node training runs!
 

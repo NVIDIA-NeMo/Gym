@@ -1,4 +1,6 @@
-# Offline Training with Rollouts (SFT/DPO)
+# [EXPERIMENTAL] Offline Training with Rollouts (SFT/DPO)
+
+[!TIP] This tutorial is experimental and still under development! You may run into bugs and issues that need additional time and experience to resolve correctly. If you wish to proceed, please do so with caution.
 
 **Goal**: Transform your generated rollouts into high-quality training data for supervised fine-tuning (SFT) and direct preference optimization (DPO).
 
