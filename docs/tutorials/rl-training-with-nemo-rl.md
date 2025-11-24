@@ -1,16 +1,19 @@
 (rl-training-with-nemo-rl)=
 
-# [EXPERIMENTAL] RL Training with NeMo RL
+# RL Training with NeMo RL - Experimental
 
-[!TIP] This tutorial is experimental and still under development! You may run into bugs and issues that need additional time and experience to resolve correctly. If you wish to proceed, please do so with caution.
+:::{warning}
+This tutorial is **experimental** and may contain bugs. Proceed with caution.
+:::
 
 **Goal**: Train a model with NeMo RL. Learn how to set up NeMo Gym + NeMo RL training environment, run tests, prepare data, and launch single and multi-node training runs!
 
-Multinode Slurm script and run command are found at the bottom of this document. Please do the single node setup first! Do NOT skip it. Throughout this tutorial, you may see mentions of "Penguin". This refers to Gym's codename before it was fully open-sourced.
+Multinode Slurm script and run command are at the bottom of this document. Do the single node setup first. Do not skip it. Throughout this tutorial, you can see mentions of "Penguin". This refers to Gym's codename before it was fully open-sourced.
 
 ## Single GPU node setup to ensure correctness
 
 ### SSH or enter into a GPU node
+
 Here is an example command to enter into a GPU node hosted on a Slurm cluster.
 ```bash
 srun \
@@ -21,7 +24,6 @@ srun \
     --nodes=1 --ntasks=1 --time 04:00:00 \
     --pty /bin/bash
 ```
-
 
 ### Setup NeMo RL and NeMo Gym
 
@@ -36,14 +38,14 @@ cd RL
 # Clone NeMo Gym
 git clone https://github.com/NVIDIA-NeMo/Gym.git 3rdparty/Penguin-workspace/Penguin
 
-# Pull necessary submodules (e.g. megatron, automodel, etc). Nothing Gym-specific.
+# Pull necessary submodules (for example, megatron, automodel, and so on). Nothing Gym-specific.
 git submodule update --init --recursive
 
 # Initial setup
 source /opt/nemo_rl_venv/bin/activate
 uv sync --group={build,docs,dev,test} --extra penguin
 
-# This will take 10-15 mins
+# This will take 10 to 15 minutes
 # We add the HF token here to avoid HF rate limits
 HF_HOME=.cache/ \
 HF_TOKEN={your HF token} \
@@ -53,14 +55,13 @@ HF_TOKEN={your HF token} \
 # If you've run these tests before and are getting HF rate limit errors, you can add `HF_HUB_OFFLINE=1`
 ```
 
-
 ### Prepare NeMo Gym data
 
 You will need to use Gym's data preparation command `ng_prepare_data` to prepare the data you intend to train on, including data that you already have locally. The `ng_prepare_data` command will add an `agent_ref` property to each example that tells NeMo Gym which agent server to route that example to!
 
-Note: The `ng_prepare_data` command below includes the full set of configuration yaml paths (including the model yaml path). The configs you use to prepare data are exactly the same configs you use for training.
+Note: The `ng_prepare_data` command below includes the full set of configuration yaml paths (including the model yaml path). The configs you use to prepare data are the same configs you use for training.
 
-This command will output the data into the `data/bytedtsinghua_dapo17k`, that subsequent configs will point to.
+This command will output the data into the `data/bytedtsinghua_dapo17k`, which later configs will point to.
 
 ```bash
 # Setup Penguin local venv
@@ -82,11 +83,12 @@ cd ../../.. && source /opt/nemo_rl_venv/bin/activate
 
 ### Single node training
 
-Launch a single node training job training Qwen 3 4B Instruct using the library judge math verifier on the DAPO 17K math dataset. We find that Qwen 3 4B Instruct is the smallest model that still provides experimental signal. We use the DAPO 17K math dataset since it is a very solid baseline set by the DAPO team. You should see training start and for the reward to end up roughly around 0.8 or greater.
+Launch a single node training job training Qwen 3 4B Instruct using the library judge math verifier on the DAPO 17K math dataset. We find that Qwen 3 4B Instruct is the smallest model that still provides experimental signal. We use the DAPO 17K math dataset since it is a solid baseline set by the DAPO team. You should see training start and the reward should end up around 0.8 or greater.
 
 Prerequisites for the command below:
+
 1. A W&B API key
-2. The above `ng_prepare_data` command has been run.
+2. Run the above `ng_prepare_data` command.
 
 
 ```bash
@@ -112,14 +114,13 @@ uv run python examples/penguin/run_grpo_penguin.py \
     checkpointing.checkpoint_dir=results/$EXP_NAME &
 ```
 
-
 ## Multi node
 
 We will run a multi-node training job on a Slurm cluster. First, we will write our Slurm job launch script and then run it.
 
 ### Submit script
 
-Place this script (named e.g. `temp_penguin_submit.sh`) in the root NeMo RL dir.
+Place this script (named, for example, `temp_penguin_submit.sh`) in the root NeMo RL dir.
 
 ```bash
 # ----- PARAMETERS -----
@@ -145,7 +146,7 @@ EOF
 
 echo -e "Running command:\n$COMMAND"
 
-# Not sure why this is necessary, but ray.sub needs to be launched from the NeMo-RL root directory
+# ray.sub needs to be launched from the NeMo-RL root directory
 cd $REPO_LOCATION
 COMMAND=$COMMAND \
 CONTAINER=$CONTAINER_IMAGE_PATH \
