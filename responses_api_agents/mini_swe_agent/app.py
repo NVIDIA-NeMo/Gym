@@ -65,6 +65,8 @@ class MiniSWEAgentConfig(BaseResponsesAPIAgentConfig):
 
 class MiniSWEAgentRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
+    # for Miles
+    sglang_url: Optional[str] = None
 
 
 class MiniSWEAgentVerifyRequest(BaseVerifyRequest):
@@ -73,6 +75,8 @@ class MiniSWEAgentVerifyRequest(BaseVerifyRequest):
 
 class MiniSWEAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
+    # For Miles
+    messages: Optional[list[dict]] = None
 
 
 @ray.remote(
@@ -120,9 +124,14 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             workers = 1
             cache_dir_template = self.config.cache_dir_template
             run_golden = self.config.run_golden
-            base_url = f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
+            # For Miles
+            if body.sglang_url:
+                base_url = body.sglang_url
+                model_name = f"openai/{policy_model_name}"
+            else:
+                base_url = f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
+                model_name = f"hosted_vllm/{policy_model_name}"
             dummy_key = "dummy_key"
-            model_name = f"hosted_vllm/{policy_model_name}"
             step_timeout = self.config.step_timeout
             eval_timeout = self.config.eval_timeout
             env = self.config.env
@@ -221,6 +230,8 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 response=response,
                 instance_id=instance_id,
                 metadata=result.get("eval_report", {}) if result else {},
+                # for Miles - pass messages for tokenization on Miles side
+                messages=messages if result else [],
             )
 
             output_path = Path(f"{output_file_dir}/{instance_id}")
