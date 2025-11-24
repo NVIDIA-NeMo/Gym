@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import re
+from copy import deepcopy
 from time import time
-from typing import ClassVar, Dict, List, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
-from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request
 from pydantic import BaseModel, Field
 
@@ -34,7 +34,6 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionAssistantMessageParam,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionDeveloperMessageParam,
-    NeMoGymChatCompletionMessage,
     NeMoGymChatCompletionMessageParam,
     NeMoGymChatCompletionMessageToolCallFunctionParam,
     NeMoGymChatCompletionMessageToolCallParam,
@@ -65,6 +64,8 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     uses_reasoning_parser: bool
     replace_developer_role_with_system: bool = False
+
+    chat_template_kwargs: Optional[Dict[str, Any]] = None
 
     def model_post_init(self, context):
         if isinstance(self.base_url, str):
@@ -132,6 +133,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             metadata=body.metadata,
             instructions=body.instructions,
             user=body.user,
+            incomplete_details={"reason": "max_output_tokens"} if choice.finish_reason == "length" else None,
         )
 
     async def chat_completions(
@@ -144,6 +146,8 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         body_dict = body.model_dump(exclude_unset=True)
         body_dict["model"] = self.config.model
+        if self.config.chat_template_kwargs:
+            body_dict["chat_template_kwargs"] = deepcopy(self.config.chat_template_kwargs)
 
         session_id = request.session[SESSION_ID_KEY]
         if session_id not in self._session_id_to_client:
@@ -198,45 +202,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 else:
                     raise NotImplementedError
 
-        try:
-            chat_completion_dict = await client.create_chat_completion(**create_params)
-        except ClientResponseError as e:
-            """
-            Example messages for out of context length:
-
-            1. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L914
-            ```json
-            {"object":"error","message":"This model\'s maximum context length is 32768 tokens. However, you requested 32818 tokens in the messages, Please reduce the length of the messages. None","type":"BadRequestError","param":null,"code":400}
-            ```
-            2. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L940
-            3. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L948
-            4. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/sampling_params.py#L463
-            """
-            result_content_str = e.response_content.decode()
-
-            is_out_of_context_length = e.status == 400 and (
-                "context length" in result_content_str or "max_tokens" in result_content_str
-            )
-            if is_out_of_context_length:
-                return NeMoGymChatCompletion(
-                    id="chtcmpl-123",
-                    object="chat.completion",
-                    created=int(time()),
-                    model=self.config.model,
-                    choices=[
-                        NeMoGymChoice(
-                            index=0,
-                            finish_reason="stop",
-                            message=NeMoGymChatCompletionMessage(
-                                role="assistant",
-                                content=None,
-                                tool_calls=None,
-                            ),
-                        )
-                    ],
-                )
-            else:
-                raise e
+        chat_completion_dict = await client.create_chat_completion(**create_params)
 
         choice_dict = chat_completion_dict["choices"][0]
         if self.config.uses_reasoning_parser:
