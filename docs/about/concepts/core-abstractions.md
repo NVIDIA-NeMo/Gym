@@ -50,7 +50,7 @@ Responses API Agent servers orchestrate the interaction between models and resou
 - Handle multi-turn conversations
 - Format responses consistently
 
-An agent can also referred to as a "training environment". NeMo Gym contains several training environment patterns that cover a variety of scenarios including multi-step, multi-turn, or user modeling scenarios.
+An agent can also be referred to as a "training environment." NeMo Gym contains several training environment patterns that cover a variety of scenarios including multi-step, multi-turn, or user modeling scenarios.
 
 **Examples:**
 - `simple_agent`: Basic agent that coordinates model calls with resource tools
