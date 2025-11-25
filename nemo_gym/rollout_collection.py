@@ -143,3 +143,7 @@ def collect_rollouts():  # pragma: no cover
     rch = RolloutCollectionHelper()
 
     asyncio.run(rch.run_from_config(config))
+
+
+if __name__ == "__main__":
+    collect_rollouts()
