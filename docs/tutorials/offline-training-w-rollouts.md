@@ -1,6 +1,8 @@
-# [EXPERIMENTAL] Offline Training with Rollouts (SFT/DPO)
+#  Offline Training with Rollouts (SFT/DPO) - Experimental
 
-[!TIP] This tutorial is experimental and still under development! You may run into bugs and issues that need additional time and experience to resolve correctly. If you wish to proceed, please do so with caution.
+:::{warning}
+This tutorial is **experimental** and may contain bugs. Proceed with caution.
+:::
 
 **Goal**: Transform your generated rollouts into high-quality training data for supervised fine-tuning (SFT) and direct preference optimization (DPO).
 
@@ -127,11 +129,13 @@ def sample_for_review(input_file: str, sample_size: int = 50):
             out.write(json.dumps(rollout) + '\n')
 ```
 
-**Note**: These are example filtering approaches. Customize the criteria, thresholds, and sampling strategies based on your specific domain and quality requirements.
+:::{note}
+These are example filtering approaches. Customize the criteria, thresholds, and sampling strategies based on your specific domain and quality requirements.
+:::
 
 ## Step 2: Format for Training
 
-Once you have filtered, high-quality rollouts, format them for your chosen training method:
+After you have filtered, high-quality rollouts, format them for your chosen training method:
 
 ### SFT Data Processing
 
@@ -211,7 +215,7 @@ create_dpo_pairs('filtered_rollouts.jsonl', 'dpo_pairs.jsonl')
 
 ## Training Integration
 
-Once you have your processed data (`sft_data.jsonl` or `dpo_pairs.jsonl`), you can use any post-training framework for SFT or DPO:
+After you have your processed data (`sft_data.jsonl` or `dpo_pairs.jsonl`), you can use any post-training framework for SFT or DPO:
 
 ### Standard Data Formats
 
