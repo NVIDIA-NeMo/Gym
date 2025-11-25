@@ -17,6 +17,58 @@
 
 :::
 
+## Requirements
+
+### Hardware Requirements
+
+NeMo Gym is designed to run on standard development machines without specialized hardware:
+
+- **GPU**: Not required for NeMo Gym framework operation
+  - GPU may be needed for specific resource servers or model inference (see individual server documentation). E.g. if you are intending to train your model with NeMo-RL, GPU resources are required (see training documentation)
+- **CPU**: Any modern x86_64 or ARM64 processor (e.g., Intel, AMD, Apple Silicon)
+- **RAM**: Minimum 8 GB (16 GB+ recommended for larger environments and datasets)
+- **Storage**: Minimum 2 GB free disk space for installation and basic usage
+
+
+### Software Requirements
+
+- **Operating System**: 
+  - Linux (Ubuntu 20.04+, CentOS 7+, or equivalent)
+  - macOS (11.0+ for x86_64, 12.0+ for Apple Silicon)
+  - Windows via WSL2 (Ubuntu 20.04+ recommended)
+- **Python**: 3.12 or higher (required)
+- **Git**: For cloning the repository
+- **curl or wget**: For installing the UV package manager
+- **Internet Connection**: Required for:
+  - Downloading dependencies
+  - Accessing model APIs (OpenAI, Azure, etc.)
+  - Downloading datasets
+
+### Additional Requirements
+
+- **API Keys**: Model provider access
+  - OpenAI API key with available credits (for quickstart and most examples)
+  - OR Azure OpenAI credentials
+  - OR self-hosted model setup (via vLLM or compatible inference server)
+- **Ray**: Automatically installed as a dependency for distributed processing (no separate setup required)
+
+### Verified Configurations
+
+The following configurations have been tested and verified:
+
+| Operating System | Architecture | Python Version | Status |
+|-----------------|--------------|----------------|--------|
+| Ubuntu 22.04 LTS | x86_64 | 3.12 | ✅ Verified |
+| macOS 14+ | Apple Silicon (M1/M2/M3) | 3.12 | ✅ Verified |
+| macOS 13+ | x86_64 (Intel) | 3.12 | ✅ Verified |
+| Windows 11 | x86_64 (via WSL2) | 3.12 | ✅ Verified |
+
+:::{note}
+While NeMo Gym itself does not require a GPU, some resource servers (particularly those involving local model inference or training) may have GPU requirements. Check the individual resource server documentation for specific requirements.
+:::
+
+---
+
 ## Before You Start
 
 Make sure you have these prerequisites ready before beginning:
