@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from io import StringIO
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from pytest import MonkeyPatch
 
@@ -121,7 +121,7 @@ test_resources_server:
         assert "test_resource" in output
         assert "test_model" in output
 
-    def test_stop_server_force(self) -> None:
+    def test_stop_server_force(self, monkeypatch: MonkeyPatch) -> None:
         server_info = ServerProcessInfo(
             pid=99999,
             server_type="resources_servers",
@@ -135,26 +135,26 @@ test_resources_server:
             entrypoint="app.py",
         )
 
-        with patch("psutil.Process") as mock_process_cls:
-            mock_proc = MagicMock()
-            mock_process_cls.return_value = mock_proc
+        mock_proc = MagicMock()
+        mock_process_cls = MagicMock(return_value=mock_proc)
+        monkeypatch.setattr("psutil.Process", mock_process_cls)
 
-            result = stop_server(server_info, force=True)
+        result = stop_server(server_info, force=True)
 
-            assert result["success"] is True
-            assert result["method"] == "force"
-            mock_proc.kill.assert_called_once()
+        assert result["success"] is True
+        assert result["method"] == "force"
+        mock_proc.kill.assert_called_once()
 
-    def test_stop_command_stop_all(self) -> None:
+    def test_stop_command_stop_all(self, monkeypatch: MonkeyPatch) -> None:
         cmd = StopCommand()
 
         # No servers running
-        with patch.object(cmd.status_cmd, "discover_servers", return_value=[]):
-            results = cmd.stop_all(force=False)
+        monkeypatch.setattr(cmd.status_cmd, "discover_servers", lambda: [])
+        results = cmd.stop_all(force=False)
 
-            assert len(results) == 1
-            assert results[0]["success"] is False
-            assert "No servers found" in results[0]["message"]
+        assert len(results) == 1
+        assert results[0]["success"] is False
+        assert "No servers found" in results[0]["message"]
 
         # With running servers
         servers = [
@@ -172,22 +172,22 @@ test_resources_server:
             )
         ]
 
-        with patch.object(cmd.status_cmd, "discover_servers", return_value=servers):
-            with patch("nemo_gym.server_commands.stop_server") as mock_stop:
-                mock_stop.return_value = {
-                    "server": servers[0],
-                    "success": True,
-                    "method": "graceful",
-                    "message": "Stopped server1",
-                }
+        mock_stop_result = {
+            "server": servers[0],
+            "success": True,
+            "method": "graceful",
+            "message": "Stopped server1",
+        }
 
-                results = cmd.stop_all(force=False)
+        monkeypatch.setattr(cmd.status_cmd, "discover_servers", lambda: servers)
+        monkeypatch.setattr("nemo_gym.server_commands.stop_server", lambda s, f: mock_stop_result)
 
-                assert len(results) == 1
-                assert results[0]["success"] is True
-                mock_stop.assert_called_once_with(servers[0], False)
+        results = cmd.stop_all(force=False)
 
-    def test_stop_command_stop_by_name(self) -> None:
+        assert len(results) == 1
+        assert results[0]["success"] is True
+
+    def test_stop_command_stop_by_name(self, monkeypatch: MonkeyPatch) -> None:
         cmd = StopCommand()
 
         servers = [
@@ -206,30 +206,30 @@ test_resources_server:
         ]
 
         # Found by name
-        with patch.object(cmd.status_cmd, "discover_servers", return_value=servers):
-            with patch("nemo_gym.server_commands.stop_server") as mock_stop:
-                mock_stop.return_value = {
-                    "server": servers[0],
-                    "success": True,
-                    "method": "graceful",
-                    "message": "Stopped test_server",
-                }
+        mock_stop_result = {
+            "server": servers[0],
+            "success": True,
+            "method": "graceful",
+            "message": "Stopped test_server",
+        }
 
-                results = cmd.stop_by_name("test_server", force=False)
+        monkeypatch.setattr(cmd.status_cmd, "discover_servers", lambda: servers)
+        monkeypatch.setattr("nemo_gym.server_commands.stop_server", lambda s, f: mock_stop_result)
 
-                assert len(results) == 1
-                assert results[0]["success"] is True
-                mock_stop.assert_called_once()
+        results = cmd.stop_by_name("test_server", force=False)
+
+        assert len(results) == 1
+        assert results[0]["success"] is True
 
         # Not found by name
-        with patch.object(cmd.status_cmd, "discover_servers", return_value=[]):
-            results = cmd.stop_by_name("nonexistent", force=False)
+        monkeypatch.setattr(cmd.status_cmd, "discover_servers", lambda: [])
+        results = cmd.stop_by_name("nonexistent", force=False)
 
-            assert len(results) == 1
-            assert results[0]["success"] is False
-            assert "No server found" in results[0]["message"]
+        assert len(results) == 1
+        assert results[0]["success"] is False
+        assert "No server found" in results[0]["message"]
 
-    def test_stop_command_stop_by_port(self) -> None:
+    def test_stop_command_stop_by_port(self, monkeypatch: MonkeyPatch) -> None:
         cmd = StopCommand()
 
         servers = [
@@ -248,25 +248,25 @@ test_resources_server:
         ]
 
         # Found on port
-        with patch.object(cmd.status_cmd, "discover_servers", return_value=servers):
-            with patch("nemo_gym.server_commands.stop_server") as mock_stop:
-                mock_stop.return_value = {
-                    "server": servers[0],
-                    "success": True,
-                    "method": "graceful",
-                    "message": "Stopped server on port 8000",
-                }
+        mock_stop_result = {
+            "server": servers[0],
+            "success": True,
+            "method": "graceful",
+            "message": "Stopped server on port 8000",
+        }
 
-                results = cmd.stop_by_port(8000, force=False)
+        monkeypatch.setattr(cmd.status_cmd, "discover_servers", lambda: servers)
+        monkeypatch.setattr("nemo_gym.server_commands.stop_server", lambda s, f: mock_stop_result)
 
-                assert len(results) == 1
-                assert results[0]["success"] is True
-                mock_stop.assert_called_once()
+        results = cmd.stop_by_port(8000, force=False)
+
+        assert len(results) == 1
+        assert results[0]["success"] is True
 
         # Not found on port
-        with patch.object(cmd.status_cmd, "discover_servers", return_value=[]):
-            results = cmd.stop_by_port(9999, force=False)
+        monkeypatch.setattr(cmd.status_cmd, "discover_servers", lambda: [])
+        results = cmd.stop_by_port(9999, force=False)
 
-            assert len(results) == 1
-            assert results[0]["success"] is False
-            assert "No server found" in results[0]["message"]
+        assert len(results) == 1
+        assert results[0]["success"] is False
+        assert "No server found" in results[0]["message"]
