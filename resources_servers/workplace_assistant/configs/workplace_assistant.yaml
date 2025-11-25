@@ -6,7 +6,6 @@ workplace_assistant:
       verified: false
       description: Workplace assistant multi-step tool-using environment
       value: Improve multi-step tool use capability
-      dataset_name: Nemotron-RL-agent-workplace_assistant
 workplace_assistant_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -26,6 +25,7 @@ workplace_assistant_simple_agent:
             version: 0.0.4
             artifact_fpath: train.jsonl
           license: Apache 2.0
+          dataset_url: https://huggingface.co/datasets/nvidia/Nemotron-RL-agent-workplace_assistant
         - name: validation
           type: validation
           jsonl_fpath: resources_servers/workplace_assistant/data/validation.jsonl
