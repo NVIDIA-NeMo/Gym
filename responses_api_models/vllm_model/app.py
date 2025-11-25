@@ -12,7 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 import re
+import sys
 from time import time
 from typing import ClassVar, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
@@ -66,6 +68,8 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     uses_reasoning_parser: bool
     replace_developer_role_with_system: bool = False
 
+    debug_log_base_dir: Optional[str] = "/tmp/nemo_gym/debug_logs"
+
     def model_post_init(self, context):
         if isinstance(self.base_url, str):
             self.base_url = [self.base_url]
@@ -76,6 +80,16 @@ class VLLMModel(SimpleResponsesAPIModel):
     config: VLLMModelConfig
 
     def model_post_init(self, context):
+        if self.config.debug_log_base_dir is not None:
+            debug_log_base_dir = self.config.debug_log_base_dir
+            name = self.config.name
+            type_name = "VLLMModel"
+            log_prefix = f"{name}-{type_name}"
+            os.makedirs(debug_log_base_dir, exist_ok=True)
+            sys.stdout = open(f"{debug_log_base_dir}/{log_prefix}.out.log", "a")
+            sys.stderr = open(f"{debug_log_base_dir}/{log_prefix}.err.log", "a")
+            print(f"DEBUG: VLLMModel: config = {self.config}", flush=True)
+
         self._clients = [
             NeMoGymAsyncOpenAI(
                 base_url=base_url,
