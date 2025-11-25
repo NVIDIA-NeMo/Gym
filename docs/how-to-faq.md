@@ -386,6 +386,30 @@ ng_dump_config "+config_paths=[$config_paths]"
 ```
 
 
+# How To: ng_status - Check Running Server Status
+Use `ng_status` (or `nemo_gym_status`) to view all currently running NeMo Gym servers and their health status:
+
+**Example Output:**
+```bash
+NeMo Gym Server Status:
+
+✓ example_simple_weather (resources_servers) Port: 59338 PID: 31444 Uptime: 0d 0h 52m 39.9s
+✓ simple_agent (responses_api_agents) Port: 59339 PID: 31445 Uptime: 0d 0h 52m 39.6s
+✓ openai_model (responses_api_models) Port: 59340 PID: 31446 Uptime: 0d 0h 52m 39.6s
+
+3 servers found (3 healthy, 0 unhealthy)
+```
+
+Each server line shows information extracted from your config and the running process:
+- **Server name** (e.g., `simple_weather`) - corresponds to the third-level key in your config YAML (e.g., `resources_servers` → `example_simple_weather`)
+- **Server type** (e.g., `resources_servers`) - the second-level key indicating whether it's a resources server, model server, or agent server
+- **Port** - from the `port` field in the server config, or auto-assigned by NeMo Gym if not specified
+- **PID** (Process ID) - the operating system's unique identifier for this process
+- **Uptime** - calculated from when the process started, showing days, hours, minutes, and seconds
+
+The health check (✓/✗) is performed by making an HTTP request to `http://{host}:{port}` to verify the server is responding.
+
+
 # How To: Use NeMo Gym with a non-Responses compatible API endpoint like vLLM
 As of Sep 05, 2025, not many models have been trained with middlewares or chat templates that are easily parseable to OpenAI Responses API schema, with the notable exception of OpenAI's own open source model GPT-OSS. Since Gym is first-party Responses API, this makes Gym very difficult to use with basically any model.
 
