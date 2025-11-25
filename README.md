@@ -22,11 +22,11 @@ NeMo Gym is a component of the [NVIDIA NeMo Framework](https://docs.nvidia.com/n
 
 NeMo Gym is designed to run on standard development machines:
 
+- **GPU**: Not required for NeMo Gym framework operation
+  - GPU may be needed for specific resource servers or model inference (see individual server documentation)
 - **CPU**: Any modern x86_64 or ARM64 processor (e.g., Intel, AMD, Apple Silicon)
 - **RAM**: Minimum 8 GB (16 GB+ recommended for larger environments)
 - **Storage**: Minimum 5 GB free disk space for installation and basic usage
-- **GPU**: Not required for NeMo Gym framework operation
-  - GPU may be needed for specific resource servers or model inference (see individual server documentation)
 
 ### Software Requirements
 
