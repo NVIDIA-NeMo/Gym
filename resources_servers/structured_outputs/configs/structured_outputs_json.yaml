@@ -6,7 +6,6 @@ structured_outputs:
       verified: false
       description: Check if responses are following structured output requirements in prompts
       value: Improve instruction following capabilities
-      dataset_name: Nemotron-RL-instruction_following-structured_outputs
 structured_outputs_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -26,6 +25,7 @@ structured_outputs_simple_agent:
           version: 0.0.2
           artifact_fpath: structured_outputs_251027_nano_v3_sdg_json_train.jsonl
         license: Apache 2.0
+        dataset_url: https://huggingface.co/datasets/nvidia/Nemotron-RL-instruction_following-structured_outputs
       - name: validation
         type: validation
         jsonl_fpath: resources_servers/structured_outputs/data/structured_outputs_251027_nano_v3_sdg_json_val.jsonl

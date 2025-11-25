@@ -6,7 +6,6 @@ mcqa:
       verified: false
       description: Multi-choice question answering problems
       value: Improve benchmarks like MMLU / GPQA / HLE
-      dataset_name: Nemotron-RL-knowledge-mcqa
 mcqa_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -26,6 +25,7 @@ mcqa_simple_agent:
           version: 1.1.2
           artifact_fpath: filtered_decontaminated.jsonl
         license: Apache 2.0
+        dataset_url: https://huggingface.co/datasets/nvidia/Nemotron-RL-knowledge-mcqa
       - name: example
         type: example
         jsonl_fpath: resources_servers/mcqa/data/example.jsonl
