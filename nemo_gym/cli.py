@@ -14,9 +14,13 @@
 # limitations under the License.
 import asyncio
 import json
+import os
+import platform
 import shlex
+import sys
 import tomllib
 from glob import glob
+from importlib.metadata import version as md_version
 from os import environ, makedirs
 from os.path import exists
 from pathlib import Path
@@ -26,6 +30,7 @@ from threading import Thread
 from time import sleep
 from typing import Dict, List, Optional
 
+import psutil
 import rich
 import uvicorn
 from devtools import pprint
@@ -33,7 +38,7 @@ from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, Field
 from tqdm.auto import tqdm
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import PARENT_DIR, __version__
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
     HEAD_SERVER_DEPS_KEY_NAME,
@@ -654,3 +659,70 @@ def display_help():  # pragma: no cover
             continue
 
         print(script)
+
+
+class VersionConfig(BaseNeMoGymCLIConfig):
+    json_format: bool = Field(default=False, alias="json", description="Output in JSON format for programmatic use.")
+
+
+def version():  # pragma: no cover
+    """Display gym version and system information."""
+    global_config_dict = get_global_config_dict()
+    config = VersionConfig.model_validate(global_config_dict)
+
+    json_output = config.json_format
+
+    version_info = {
+        "nemo_gym": __version__,
+        "python": platform.python_version(),
+        "python_path": sys.executable,
+        "installation_path": str(PARENT_DIR),
+    }
+
+    key_deps = [
+        "openai",
+        "ray",
+    ]
+
+    dependencies = {dep: md_version(dep) for dep in key_deps}
+
+    version_info["dependencies"] = dependencies
+
+    # System info
+    version_info["system"] = {
+        "os": f"{platform.system()} {platform.release()}",
+        "platform": platform.platform(),
+        "architecture": platform.machine(),
+        "processor": platform.processor() or "unknown",
+        "cpus": os.cpu_count(),
+    }
+
+    # Memory info
+    mem = psutil.virtual_memory()
+    version_info["system"]["memory_gb"] = round(mem.total / (1024**3), 2)
+
+    # Output
+    if json_output:
+        print(json.dumps(version_info))
+    else:
+        lines = [
+            f"NeMo Gym v{version_info['nemo_gym']}",
+            f"Python {version_info['python']} ({version_info['python_path']})",
+            f"Installation: {version_info['installation_path']}",
+        ]
+
+        if "dependencies" in version_info:
+            lines.append("\nKey Dependencies:")
+            for dep, ver in version_info["dependencies"].items():
+                lines.append(f"  {dep}: {ver}")
+
+            sys_info = version_info["system"]
+            lines.append("\nSystem:")
+            lines.append(f"  OS: {sys_info['os']}")
+            lines.append(f"  Platform: {sys_info['platform']}")
+            lines.append(f"  Architecture: {sys_info['architecture']}")
+            lines.append(f"  Processor: {sys_info['processor']}")
+            lines.append(f"  CPUs: {sys_info['cpus']}")
+            lines.append(f"  Memory: {sys_info['memory_gb']} GB")
+
+        print("\n".join(lines))
