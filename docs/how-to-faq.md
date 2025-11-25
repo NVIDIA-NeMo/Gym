@@ -385,7 +385,7 @@ ng_dump_config "+config_paths=[$config_paths]"
 # How To: ng_version - Check NeMo Gym version and system information
 Check your NeMo Gym installation version and environment details for troubleshooting or support.
 
-**Basic version information:**
+**Standard format:**
 ```bash
 ng_version
 ```
@@ -393,8 +393,20 @@ ng_version
 **Example output:**
 ```bash
 NeMo Gym v0.2.0rc0
-Python 3.13.5 (/Users/user/Documents/nemo-gym/.venv/bin/python3)
-Installation: /Users/user/Documents/nemo-gym
+Python 3.13.5 (/Users/user/nemo-gym/.venv/bin/python3)
+Installation: /Users/user/nemo-gym
+
+Key Dependencies:
+  openai: 2.6.1
+  ray: 2.50.1
+
+System:
+  OS: Darwin 25.1.0
+  Platform: macOS-26.1-arm64-arm-64bit-Mach-O
+  Architecture: arm64
+  Processor: arm
+  CPUs: 14
+  Memory: 48.0 GB
 ```
 
 **Machine-readable JSON format:**
@@ -407,71 +419,15 @@ ng_version +json=true
 {
   "nemo_gym": "0.2.0rc0",
   "python": "3.13.5",
-  "python_path": "/Users/user/Documents/nemo-gym/.venv/bin/python3",
-  "installation_path": "/Users/user/Documents/nemo-gym"
-}
-```
-
-**Detailed info with dependencies and system details:**
-```bash
-ng_version +verbose=true
-```
-
-**Example output:**
-```bash
-NeMo Gym v0.2.0rc0
-Python 3.13.5 (/Users/user/Documents/nemo-gym/.venv/bin/python3)
-Installation: /Users/user/Documents/nemo-gym
-
-Key Dependencies:
-  fastapi: 0.116.1
-  gradio: 5.44.1
-  hydra-core: 1.3.2
-  mlflow: 3.3.2
-  openai: 2.6.1
-  omegaconf: 2.3.0
-  psutil: 7.1.0
-  pydantic: 2.11.7
-  ray: 2.50.1
-  uvicorn: 0.35.0
-  uvloop: 0.21.0
-
-System:
-  OS: Darwin 25.0.0
-  Architecture: arm64
-  CPUs: 14
-  Memory: 48.0 GB
-```
-
-
-**You can combine flags:**
-```bash
-ng_version +verbose=true +json=true
-```
-
-**Example Output:**
-```bash
-{
-  "nemo_gym": "0.2.0rc0",
-  "python": "3.13.5",
-  "python_path": "/Users/user/Documents/nemo-gym/.venv/bin/python3",
-  "installation_path": "/Users/user/Documents/nemo-gym",
+  "python_path": "/Users/user/nemo-gym/.venv/bin/python3",
+  "installation_path": "/Users/user/nemo-gym",
   "dependencies": {
-    "fastapi": "0.116.1",
-    "gradio": "5.44.1",
-    "hydra-core": "1.3.2",
-    "mlflow": "3.3.2",
     "openai": "2.6.1",
-    "omegaconf": "2.3.0",
-    "psutil": "7.1.0",
-    "pydantic": "2.11.7",
-    "ray": "2.50.1",
-    "uvicorn": "0.35.0",
-    "uvloop": "0.21.0"
+    "ray": "2.50.1"
   },
   "system": {
-    "os": "Darwin 25.0.0",
-    "platform": "macOS-26.0.1-arm64-arm-64bit-Mach-O",
+    "os": "Darwin 25.1.0",
+    "platform": "macOS-26.1-arm64-arm-64bit-Mach-O",
     "architecture": "arm64",
     "processor": "arm",
     "cpus": 14,

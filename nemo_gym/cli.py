@@ -20,7 +20,6 @@ import shlex
 import sys
 import tomllib
 from glob import glob
-from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as md_version
 from os import environ, makedirs
 from os.path import exists
@@ -662,13 +661,16 @@ def display_help():  # pragma: no cover
         print(script)
 
 
+class VersionConfig(BaseNeMoGymCLIConfig):
+    json_format: bool = Field(default=False, alias="json", description="Output in JSON format for programmatic use.")
+
+
 def version():  # pragma: no cover
     """Display gym version and system information."""
     global_config_dict = get_global_config_dict()
-    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+    config = VersionConfig.model_validate(global_config_dict)
 
-    verbose = global_config_dict.get("verbose", False)
-    json_output = global_config_dict.get("json", False)
+    json_output = config.json_format
 
     version_info = {
         "nemo_gym": __version__,
@@ -677,62 +679,50 @@ def version():  # pragma: no cover
         "installation_path": str(PARENT_DIR),
     }
 
-    if verbose:
-        key_deps = [
-            "fastapi",
-            "gradio",
-            "hydra-core",
-            "mlflow",
-            "openai",
-            "omegaconf",
-            "psutil",
-            "pydantic",
-            "ray",
-            "uvicorn",
-            "uvloop",
-        ]
-        dependencies = {}
+    key_deps = [
+        "openai",
+        "ray",
+    ]
 
-        for dep in key_deps:
-            try:
-                dependencies[dep] = md_version(dep)
-            except PackageNotFoundError:
-                dependencies[dep] = "not installed"
+    dependencies = {dep: md_version(dep) for dep in key_deps}
 
-        version_info["dependencies"] = dependencies
+    version_info["dependencies"] = dependencies
 
-        # System info
-        version_info["system"] = {
-            "os": f"{platform.system()} {platform.release()}",
-            "platform": platform.platform(),
-            "architecture": platform.machine(),
-            "processor": platform.processor() or "unknown",
-            "cpus": os.cpu_count(),
-        }
+    # System info
+    version_info["system"] = {
+        "os": f"{platform.system()} {platform.release()}",
+        "platform": platform.platform(),
+        "architecture": platform.machine(),
+        "processor": platform.processor() or "unknown",
+        "cpus": os.cpu_count(),
+    }
 
-        # Memory info
-        try:
-            mem = psutil.virtual_memory()
-            version_info["system"]["memory_gb"] = round(mem.total / (1024**3), 2)
-        except ImportError:
-            version_info["system"]["memory_gb"] = "N/A (psutil not installed)"
+    # Memory info
+    mem = psutil.virtual_memory()
+    version_info["system"]["memory_gb"] = round(mem.total / (1024**3), 2)
 
     # Output
     if json_output:
-        print(json.dumps(version_info, indent=2))
+        print(json.dumps(version_info))
     else:
-        print(f"NeMo Gym v{version_info['nemo_gym']}")
-        print(f"Python {version_info['python']} ({version_info['python_path']})")
-        print(f"Installation: {version_info['installation_path']}")
+        lines = [
+            f"NeMo Gym v{version_info['nemo_gym']}",
+            f"Python {version_info['python']} ({version_info['python_path']})",
+            f"Installation: {version_info['installation_path']}",
+        ]
 
-        if verbose and "dependencies" in version_info:
-            print("\nKey Dependencies:")
+        if "dependencies" in version_info:
+            lines.append("\nKey Dependencies:")
             for dep, ver in version_info["dependencies"].items():
-                print(f"  {dep}: {ver}")
+                lines.append(f"  {dep}: {ver}")
 
-            print("\nSystem:")
             sys_info = version_info["system"]
-            print(f"  OS: {sys_info['os']}")
-            print(f"  Architecture: {sys_info['architecture']}")
-            print(f"  CPUs: {sys_info['cpus']}")
-            print(f"  Memory: {sys_info['memory_gb']} GB")
+            lines.append("\nSystem:")
+            lines.append(f"  OS: {sys_info['os']}")
+            lines.append(f"  Platform: {sys_info['platform']}")
+            lines.append(f"  Architecture: {sys_info['architecture']}")
+            lines.append(f"  Processor: {sys_info['processor']}")
+            lines.append(f"  CPUs: {sys_info['cpus']}")
+            lines.append(f"  Memory: {sys_info['memory_gb']} GB")
+
+        print("\n".join(lines))
