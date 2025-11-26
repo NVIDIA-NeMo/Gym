@@ -9,6 +9,25 @@ Hands-on learning experiences that guide you through building, training, and dep
 :::
 ---
 
+## Building Custom Components
+
+Create custom resource servers and implement tool-based agent interactions.
+
+::::{grid} 1 1 1 1
+:gutter: 1 1 1 2
+
+:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Creating a Resource Server
+:link: creating-resource-server
+:link-type: doc
+Build custom resource servers with tools, verification logic, and business logic for your AI agents.
++++
+{bdg-primary}`beginner` {bdg-secondary}`30 min`
+:::
+
+::::
+
+---
+
 ## Rollout Collection and Training Data
 
 Implement rollout generation and training data preparation for RL, SFT, and DPO.

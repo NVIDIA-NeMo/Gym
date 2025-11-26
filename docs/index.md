@@ -131,6 +131,7 @@ get-started/rollout-collection.md
 :maxdepth: 1
 
 tutorials/index.md
+tutorials/creating-resource-server
 tutorials/offline-training-w-rollouts
 tutorials/rl-training-with-nemo-rl
 how-to-faq.md

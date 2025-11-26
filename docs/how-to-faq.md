@@ -14,143 +14,20 @@ Tests are strongly encouraged and you must have at least one test for every serv
 
 
 # How To: Add a resource server
-Reading time: 5 mins
-Date: Tue Aug 05, 2025
+
+:::{tip}
+For a comprehensive tutorial on creating resource servers, see the {doc}`tutorials/creating-resource-server` tutorial. This section provides quick reference information.
+:::
 
 Resource servers are used to abstract out any business logic of tool implementations and verifiers. Each resource server must implement a `verify` function.
 
-Resource servers live in the `resources_servers` folder. Initialize a resource server now. For this example, we will be writing a dummy test weather server.
-```bash
-ng_init_resources_server +entrypoint=resources_servers/test_weather
-```
-
-For the purposes of this example, we don't have any external dependencies, but if you want to add server-specific requirements, you would do so in the `requirements.txt` file. You can add requirements for external PyPI packages or Github repos.
-```
--e nemo-gym[dev] @ ../../
-{additional dependencies here}
-```
-
-
-Implement a tool for your agent to use in `app.py`. Start by adding your request and response schemas
-```python
-...
-class TestWeatherResourcesServerConfig(BaseResourcesServerConfig):
-    pass
-
-
-class GetWeatherRequest(BaseModel):
-    city: str
-
-
-class GetWeatherResponse(BaseModel):
-    city: str
-    weather_description: str
-
-
-class TestWeatherResourcesServer(SimpleResourcesServer):
-    config: TestWeatherResourcesServerConfig
-
-...
-```
-Implement a `get_weather` function under the `TestWeatherResourcesServer` class. For now we will just always say it is cold.
-```python
-...
-        # app.post("/get_weather")(self.get_weather)
-
-        return app
-
-    async def get_weather(self, body: GetWeatherRequest) -> GetWeatherResponse:
-        return GetWeatherResponse(
-            city=body.city, weather_description=f"The weather in {body.city} is cold."
-        )
-
-    async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
-        return BaseVerifyResponse(**body.model_dump(), reward=1.0)
-...
-```
-Register your new `get_weather` function as a FastAPI route.
-```python
-...
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-
-        # Additional server routes go here! e.g.:
-        app.post("/get_weather")(self.get_weather)
-
-        return app
-...
-```
-
-Refer to a complete example of `app.py` in `resources_servers/example_simple_weather/app.py`.
-
-Run an agent with your new server!
-```bash
-config_paths="responses_api_agents/simple_agent/configs/simple_agent.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/example_simple_weather/configs/simple_weather.yaml"
-ng_run "+config_paths=[$config_paths]" \
-    +simple_agent.responses_api_agents.simple_agent.resources_server.name=test_weather
-```
-
-Run a query with your new resources server! Your agent should say that it's cold in SF :)
-```bash
-python responses_api_agents/simple_agent/client.py
-```
-
-After you implement your server, make sure to update the README.md with appropriate licensing information. Your PR will not be merged unless licensing information is present and accurate.
-
-
-Run the tests for your server
-```bash
-ng_test +entrypoint=resources_servers/example_simple_weather
-```
-
-
-You can also run detailed tests after running tests the first time
-```bash
-cd resources_servers/example_simple_weather
-source .venv/bin/activate
-pytest
-```
-
-At some point, you will want to actually add data that can be used to query your server. Follow the instructions for [How To: Prepare and validate data for PR submission or RL training](#how-to-prepare-and-validate-data-for-pr-submission-or-rl-training).
-
-
-If you need some dataset preprocessing or formatting scripts, place them in your resources server directory, for example `resources_servers/example_simple_weather/my_preprocess_script.py`.
-
-
-You are required to have the following 3 files in your resources server data folder:
-1. example.jsonl - contains 5 example inputs to an agent server that uses your resources server. These examples need to be created on your own using whatever data processing script you want. It's highly suggested to store the data processing scripts in each folder if possible.
-2. example_metrics.json - the metrics for the examples above, as output by `ng_prepare_data` in the data validation flow above.
-3. example_rollouts.jsonl - rollouts through your resources server for the 5 example inputs in example.jsonl.
-
-
-## TLDR final expected artifacts
-1. All the artifacts produced by `ng_init_resources_server +entrypoint=resources_servers/test_weather`. Your agent and resources server must be runnable.
-```bash
-example_multi_step_config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/example_multi_step/configs/example_multi_step.yaml"
-ng_run "+config_paths=[${example_multi_step_config_paths}]"
-```
-2. At least 1 test at `resources_servers/test_weather/tests/test_app.py`.
-3. 5 examples found at `resources_servers/test_weather/data/examples.jsonl`
-4. Example metrics as output by `ng_prepare_data` found at `resources_servers/test_weather/data/example_metrics.json`
-```bash
-example_multi_step_config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/example_multi_step/configs/example_multi_step.yaml"
-ng_prepare_data "+config_paths=[${example_multi_step_config_paths}]" \
-    +output_dirpath=data/example_multi_step \
-    +mode=example_validation
-```
-5. Example rollouts as output by `ng_collect_rollouts` found at `resources_servers/test_weather/data/example_rollouts.jsonl`
-```bash
-ng_collect_rollouts +agent_name=example_multi_step_simple_agent \
-    +input_jsonl_fpath=resources_servers/example_multi_step/data/example.jsonl \
-    +output_jsonl_fpath=resources_servers/example_multi_step/data/example_rollouts.jsonl \
-    +limit=null \
-    +num_repeats=null \
-    +num_samples_in_parallel=null
-```
+For detailed step-by-step instructions, see the {doc}`tutorials/creating-resource-server` tutorial which covers:
+- Initializing a resource server
+- Implementing tools and verification logic
+- Configuring the domain field
+- Writing tests
+- Running with agents
+- Data requirements and artifacts
 
 
 # How To: Upload and download a dataset from Gitlab
