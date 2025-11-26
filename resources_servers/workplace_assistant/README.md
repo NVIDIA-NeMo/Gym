@@ -24,9 +24,6 @@ ng_collect_rollouts +agent_name=workplace_assistant_simple_agent \
    +limit=1
 ```
 
-Data links: 
-Nemogym prompt datasets: https://gitlab-master.nvidia.com/bxyu/nemo-gym/-/ml/models/55/versions/98#/
-
 # Licensing information
 Code: Apache 2.0
 Data: Apache 2.0
