@@ -31,12 +31,14 @@ from nemo_gym.global_config import (
 
 
 def lookup_current_ray_node_id() -> str:
-    return ray.runtime_context.get_runtime_context().get_node_id()
+    return ray.get_runtime_context().get_node_id()
 
 
 def lookup_ray_node_id_to_ip_dict() -> Dict[str, str]:
+    cfg = get_global_config_dict()
+    head = cfg["ray_head_node_address"]
     id_to_ip = {}
-    node_states = ray.util.state.list_nodes()
+    node_states = ray.util.state.list_nodes(head)
     for state in node_states:
         id_to_ip[state.node_id] = state.node_ip
     return id_to_ip
@@ -46,12 +48,10 @@ def _lookup_ray_node_with_free_gpus(
     num_gpus: int, allowed_gpu_nodes: Optional[Set[str]] = None
 ) -> Optional[str]:  # pragma: no cover
     cfg = get_global_config_dict()
+    head = cfg["ray_head_node_address"]
 
     node_avail_gpu_dict = defaultdict(int)
-    node_states = ray.util.state.list_nodes(
-        cfg["ray_head_node_address"],
-        detail=True,
-    )
+    node_states = ray.util.state.list_nodes(head, detail=True)
     for state in node_states:
         assert state.node_id is not None
         if allowed_gpu_nodes is not None and state.node_id not in allowed_gpu_nodes:
@@ -61,10 +61,7 @@ def _lookup_ray_node_with_free_gpus(
     while True:
         retry = False
         node_used_gpu_dict = defaultdict(int)
-        actor_states = ray.util.state.list_actors(
-            cfg["ray_head_node_address"],
-            detail=True,
-        )
+        actor_states = ray.util.state.list_actors(head, detail=True)
         for state in actor_states:
             if state.state == "DEAD":
                 continue
@@ -116,11 +113,20 @@ def spinup_single_ray_gpu_node_worker(
         node_id=node_id,
         soft=False,
     )
+    worker_env_vars = {
+        **os.environ,
+    }
+    pop_env_vars = [
+        "CUDA_VISIBLE_DEVICES",
+        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
+        "RAY_JOB_ID",
+        "RAY_RAYLET_PID",
+    ]
+    for k in pop_env_vars:
+        worker_env_vars.pop(k, None)
     worker_runtime_env = {
         "py_executable": sys.executable,
-        "env_vars": {
-            **os.environ,
-        },
+        "env_vars": worker_env_vars,
     }
     worker_options["runtime_env"] = worker_runtime_env
     worker = worker_cls.options(**worker_options).remote(*worker_args, **worker_kwargs)
