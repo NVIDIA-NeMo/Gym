@@ -30,18 +30,43 @@ Responses API Model servers are model endpoints that performs text inference - s
 
 Resources servers provide tools implementations that can be invoked via tool calling and verification logic that measure task performance. NeMo Gym contains a variety of NVIDIA and community contributed resources servers that you may wish to utilize during training. We also have tutorials on how to add your own Resource server.
 
-**Resources Provide**
-- **Tools**: Functions agents can call (e.g., `get_weather`, `search_web`)
-- **Verification Logic**: Scoring systems that evaluate agent responses for training/evaluation
+**What Resources Provide**
 
-**Examples:**
-- `simple_weather`: Mock weather API for testing and tutorials
-- `google_search`: Web search capabilities via Google Search API  
-- `math_with_code`: Python code execution environment for mathematical reasoning
-- `math_with_judge`: Mathematical problem verification using symbolic computation
-- `mcqa`: Multiple choice question answering evaluation
-- `instruction_following`: General instruction compliance scoring
+Each resource server combines both tools and verifiers:
+- **Tools**: Functions agents can call during task execution
+- **Verifiers**: Scoring logic that evaluates performance (returns reward signals for training)
 
+**Example Resource Servers**
+
+Each example shows what **tools** the agent can use and what **verifier** logic measures success:
+
+- **`google_search`**: Web search with verification
+  - **Tools**: `search()` queries Google API; `browse()` extracts webpage content
+  - **Verifier**: Checks if final answer matches expected result for MCQA questions
+
+- **`math_with_code`**: Mathematical reasoning with code execution
+  - **Tool**: `execute_python()` runs Python code with numpy, scipy, pandas
+  - **Verifier**: Extracts boxed answer and checks mathematical correctness
+
+- **`code_gen`**: Competitive programming problems
+  - **Tools**: None (agent generates code directly)
+  - **Verifier**: Executes generated code against unit test inputs/outputs
+
+- **`math_with_judge`**: Mathematical problem solving
+  - **Tools**: None (or can be combined with `math_with_code`)
+  - **Verifier**: Uses math library + LLM judge to verify answer equivalence
+
+- **`mcqa`**: Multiple choice question answering
+  - **Tools**: None (knowledge-based reasoning)
+  - **Verifier**: Checks if selected option matches ground truth
+
+- **`instruction_following`**: Instruction compliance evaluation
+  - **Tools**: None (evaluates response format/content)
+  - **Verifier**: Checks if response follows all specified instructions
+
+- **`simple_weather`**: Mock weather API
+  - **Tool**: `get_weather()` returns mock weather data
+  - **Verifier**: Checks if weather tool was called correctly
 
 **Configuration**: See resource-specific config files in `resources_servers/*/configs/`
 
