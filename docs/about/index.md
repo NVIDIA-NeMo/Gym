@@ -13,4 +13,7 @@ Three components work together to generate and evaluate agent interactions:
 
 - **Agents**: Orchestrate multi-turn interactions between models and resources. Handle conversation flow, tool routing, and response formatting.
 - **Models**: LLM inference endpoints (OpenAI-compatible or vLLM). Handle single-turn text generation and tool-calling decisions.
-- **Resources**: Provide tools (functions agents call) + verifiers (logic to score performance). Examples: math environments, code sandboxes, web search.
+- **Resources**: Provide tools (functions agents call) + verifiers (logic to score performance). Each resource server combines both:
+  - **Example - Web Search**: Tools = `search()` and `browse()`; Verifier = checks if answer matches expected result
+  - **Example - Math with Code**: Tool = `execute_python()`; Verifier = checks if final answer is mathematically correct
+  - **Example - Code Generation**: Tools = none (provides problem statement); Verifier = runs unit tests against generated code
