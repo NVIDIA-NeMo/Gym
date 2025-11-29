@@ -1,0 +1,7 @@
+policy_model:
+  responses_api_models:
+    trl_vllm_model:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      model: ${policy_model_name}
+      return_token_id_information: true
