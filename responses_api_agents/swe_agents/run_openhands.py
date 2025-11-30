@@ -255,8 +255,8 @@ class RunOpenHandsAgent:
             f"echo {shlex.quote(config_str)} >config.toml && "
             # set local runtime & force verbose logs
             "export RUNTIME=local && "
-            "export LOG_ALL_EVENTS=true && "
-            "export LOG_LEVEL=DEBUG && "
+            "export LOG_LEVEL=INFO && "
+            "export LOG_TO_FILE=false && "
             # run the agent
             # f" export EVAL_OUTPUT_DIR={eval_dir_in_openhands} && "
             f"./evaluation/benchmarks/swe_bench/scripts/run_infer.sh "
@@ -601,7 +601,6 @@ class RunOpenHandsAgent:
                     f"    --split {data_point['split']} "
                     f"    --run_id {run_id} && "
                     f"cp -r logs/run_evaluation/{run_id} /trajectories_mount/ && "
-
                     # remove the logs directory after the evaluation is done
                     f"rm -rf logs/run_evaluation/{run_id}"
                 )
