@@ -5,7 +5,7 @@ orphan: true
 (about-overview)=
 # About NVIDIA NeMo Gym
 
-NeMo Gym generates training data for reinforcement learning by capturing how AI agents interact with tools and environments.
+[NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) is an open-source framework that generates training data for reinforcement learning by capturing how AI agents interact with tools and environments.
 
 ## Core Components
 
