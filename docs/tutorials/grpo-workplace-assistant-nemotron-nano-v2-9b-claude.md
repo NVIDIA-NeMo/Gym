@@ -34,23 +34,18 @@ By completing this tutorial, you will:
 
 ## Prerequisites
 
-### Technical Level
-- **Intermediate to Advanced**: Familiarity with Python, PyTorch, and basic RL concepts
-- **Infrastructure**: Access to NVIDIA GPUs (8x GPUs recommended, e.g., H100 or A100)
+### Technical Level & Required Knowledge
+- **Intermediate to Advanced**: You should be comfortable with Python, LLM fine-tuning, and basic reinforcement learning concepts such as policy optimization, rewards, and rollouts. While detailed knowledge of the GRPO algorithm is not required, a general understanding is helpful.
+- Some basic knowledge of Slurm (for multi-node runs) is helpful. Example commands are provided below as well.
 
-### Required Knowledge
-- Basic understanding of Large Language Model (LLM) fine-tuning
-- Familiarity with Slurm cluster management (for multi-node setups)
-- Experience with YAML configuration files
+### Hardware Requirements
+- **Minimum**: 8× NVIDIA GPUs with 80GB or more VRAM each (e.g., H100, A100). Note: NeMo Gym does not require GPUs; GPUs are only necessary for GRPO training with NeMo RL.
 
 ### Required Accounts & Tokens
 | Service                | Purpose                  | How to Obtain                         |
 |------------------------|--------------------------|---------------------------------------|
 | Hugging Face (HF)      | Model and data downloads | [Create account](https://huggingface.co/join) |
 | Weights & Biases (W&B) | Training metrics logging | [Create account](https://wandb.ai/signup)      |
-
-### Hardware Requirements
-- **Minimum**: 8x NVIDIA GPUs with 80GB+ VRAM (e.g., H100, A100)
 
 ---
 
@@ -62,7 +57,7 @@ The Workplace Assistant dataset simulates realistic office productivity scenario
 
 | Property | Value |
 |----------|-------|
-| **HuggingFace Dataset** | `nvidia/Nemotron-RL-agent-workplace_assistant` |
+| **HuggingFace Dataset** | [`nvidia/Nemotron-RL-agent-workplace_assistant`](https://huggingface.co/datasets/nvidia/Nemotron-RL-agent-workplace_assistant) |
 | **Original Split** | `train` only (1,255 samples) |
 | **After Local Split** | 1,129 train / 126 validation (90/10) |
 
@@ -75,17 +70,76 @@ The environment includes tools for:
 - 📋 **Task Management**: Create and track to-do items
 - 🔍 **Search**: Query information across systems
 
-### Example Task
+### Example Tasks
+
+Each task is a natural language request that the model must complete using the available tools. The environment allows up to 6 tool-calling steps per task.
+
+**Single-Step Task** (1 tool call needed):
 
 ```json
 {
-  "task": "Schedule a meeting with John for next Tuesday at 2pm to discuss the Q4 budget report, then send him an email confirmation with the meeting details.",
-  "expected_tools": ["calendar_create_event", "email_send"],
-  "max_steps": 6
+  "input": [
+    {
+      "role": "system",
+      "content": "Today's date is Thursday, 2023-11-30 and the current time is 23:59:00. Remember the current date and time when answering queries. Meetings must not start before 9am or end after 6pm."
+    },
+    {
+      "role": "user", 
+      "content": "Reply to carlos's last email about 'Task Update on Develop prototype for report generation' with 'Thanks for the update - I will get back to you tomorrow.'"
+    }
+  ],
+  "tools": [
+    {"type": "function", "name": "email_reply_email", "description": "Replies to an email by its ID.", "parameters": {"type": "object", "properties": {"email_id": {"type": "string"}, "body": {"type": "string"}}, "required": ["email_id", "body"]}},
+    {"type": "function", "name": "email_search_emails", "description": "Searches for emails matching the given query...", "parameters": {...}},
+    {"type": "function", "name": "email_send_email", "...": "..."},
+    // ... 23 more tools (calendar, analytics, project_management, CRM)
+  ],
+  "parallel_tool_calls": false,
+  "temperature": 1.0
 }
 ```
 
-The model must determine which tools to call, in what order, and with what parameters to complete the task successfully.
+**Expected output:** `email_reply_email(email_id="00000057", body="Thanks for the update - I will get back to you tomorrow.")`
+
+---
+
+**Multi-Step Task** (3 tool calls needed):
+
+```json
+{
+  "input": [
+    {
+      "role": "system",
+      "content": "Today's date is Thursday, 2023-11-30 and the current time is 23:59:00. Remember the current date and time when answering queries. Meetings must not start before 9am or end after 6pm."
+    },
+    {
+      "role": "user",
+      "content": "John is taking over all of Akira's leads that are interested in software. Can you reassign them in the crm?"
+    }
+  ],
+  "tools": [
+    {"type": "function", "name": "customer_relationship_manager_search_customers", "description": "Searches for customers based on the given parameters with pagination support.", "parameters": {"type": "object", "properties": {"assigned_to_email": {"type": "string"}, "product_interest": {"type": "string"}, "status": {"type": "string"}, ...}}},
+    {"type": "function", "name": "customer_relationship_manager_update_customer", "description": "Updates a customer record by ID.", "parameters": {"type": "object", "properties": {"customer_id": {"type": "string"}, "field": {"type": "string"}, "new_value": {"type": "string"}}, "required": ["customer_id", "field", "new_value"]}},
+    {"type": "function", "name": "company_directory_find_email_address", "description": "Finds all email addresses containing the given name...", "parameters": {...}},
+    // ... 23 more tools
+  ],
+  "parallel_tool_calls": false,
+  "temperature": 1.0
+}
+```
+
+**Expected output sequence:**
+1. `customer_relationship_manager_update_customer(customer_id="00000095", field="assigned_to_email", new_value="john.smith@atlas.com")`
+2. `customer_relationship_manager_update_customer(customer_id="00000080", field="assigned_to_email", new_value="john.smith@atlas.com")`
+3. `customer_relationship_manager_update_customer(customer_id="00000035", field="assigned_to_email", new_value="john.smith@atlas.com")`
+
+---
+
+The model must:
+1. Understand the user's intent from natural language
+2. Determine which tools to call and in what order
+3. Infer correct parameters (e.g., look up email addresses, find matching customer records)
+4. Execute all necessary steps to complete the task
 
 ---
 
