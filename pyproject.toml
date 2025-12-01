@@ -279,10 +279,13 @@ ng_dump_config = "nemo_gym.cli:dump_config"
 nemo_gym_help = "nemo_gym.cli:display_help"
 ng_help = "nemo_gym.cli:display_help"
 
+# Server status
+nemo_gym_status = "nemo_gym.cli:status"
+ng_status = "nemo_gym.cli:status"
+
 # Display version
 nemo_gym_version = "nemo_gym.cli:version"
 ng_version = "nemo_gym.cli:version"
-
 
 [tool.setuptools.packages.find]
 where = ["."]
