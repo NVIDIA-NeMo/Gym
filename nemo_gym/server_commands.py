@@ -1,0 +1,298 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+from dataclasses import dataclass, field
+from signal import SIGINT
+from time import time
+from typing import List, Optional
+
+import psutil
+import requests
+from omegaconf import OmegaConf
+from pydantic import BaseModel
+
+from nemo_gym.global_config import (
+    NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
+    NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
+    get_first_server_config_dict,
+)
+from nemo_gym.server_utils import ServerStatus
+
+
+class ServerProcessInfo(BaseModel):
+    """Information about a running server process"""
+
+    pid: int
+    server_type: str  # "resources_server", "responses_api_model", "responses_api_agent"
+    name: str  # e.g. "simple_weather", "policy_model", etc.
+    process_name: str  # config path from env var
+    host: Optional[str]
+    port: Optional[int]
+    url: Optional[str]
+    uptime_seconds: float
+    status: ServerStatus  # "success", "connection_error", etc.
+    entrypoint: Optional[str]
+
+
+def parse_server_info(proc, cmdline: List[str], env: dict) -> Optional[ServerProcessInfo]:
+    """Takes process, command line, and env and returns server process information"""
+    try:
+        process_name = env.get(NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME)
+        if not process_name:
+            return None
+
+        config_dict_yaml = env.get(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME)
+        if not config_dict_yaml:
+            return None
+
+        global_config_dict = OmegaConf.create(config_dict_yaml)
+
+        server_config_dict = get_first_server_config_dict(global_config_dict, process_name)
+
+        top_level_config = global_config_dict[process_name]
+        server_type = list(top_level_config.keys())[0]
+        server_type_config = top_level_config[server_type]
+        server_name = list(server_type_config.keys())[0]
+
+        host = server_config_dict.get("host")
+        port = server_config_dict.get("port")
+
+        url = f"http://{host}:{port}" if host and port else None
+
+        entrypoint = None
+        for i, arg in enumerate(cmdline):
+            if arg == "python" and i + 1 < len(cmdline):
+                entrypoint = cmdline[i + 1]
+                break
+
+        current_time = time()
+        create_time = proc.info["create_time"]
+        uptime_seconds = current_time - create_time
+
+        return ServerProcessInfo(
+            pid=proc.info["pid"],
+            server_type=server_type,
+            name=server_name,
+            process_name=process_name,
+            host=host,
+            port=port,
+            url=url,
+            uptime_seconds=uptime_seconds,
+            status="unknown_error",
+            entrypoint=entrypoint,
+        )
+    except (KeyError, IndexError, AttributeError, TypeError) as e:
+        print(f"Error parsing PID {proc.info['pid']}: {type(e).__name__}: {e}")
+        return None
+
+
+def stop_server(server_info: ServerProcessInfo, force: bool = False) -> dict:
+    """Stop a single server process."""
+
+    try:
+        proc = psutil.Process(server_info.pid)
+
+        if force:
+            proc.kill()
+            proc.wait(timeout=2)
+
+            return {
+                "server": server_info,
+                "success": True,
+                "method": "force",
+                "message": f"Force stopped {server_info.name}",
+            }
+        else:
+            # Graceful shutdown, then wait
+            proc.send_signal(SIGINT)
+
+            try:
+                proc.wait(timeout=10)
+
+                return {
+                    "server": server_info,
+                    "success": True,
+                    "method": "graceful",
+                    "message": f"Gracefully stopped {server_info.name}",
+                }
+            except psutil.TimeoutExpired:
+                # Graceful didn't work, so terminate and wait
+                proc.terminate()
+
+                try:
+                    proc.wait(timeout=5)
+
+                    return {
+                        "server": server_info,
+                        "success": True,
+                        "method": "terminate",
+                        "message": f"Terminated {server_info.name} (graceful shutdown timed out)",
+                    }
+                except psutil.TimeoutExpired:
+                    return {
+                        "server": server_info,
+                        "success": False,
+                        "method": "failed",
+                        "message": f"Failed to stop {server_info.name} - use --force",
+                    }
+    except psutil.NoSuchProcess:
+        return {
+            "server": server_info,
+            "success": False,
+            "method": "no_process",
+            "message": f"{server_info.name} not found",
+        }
+    except psutil.AccessDenied:
+        return {
+            "server": server_info,
+            "success": False,
+            "method": "access_denied",
+            "message": f"Access denied to stop {server_info.name} (PID: {server_info.pid})",
+        }
+    except Exception as e:
+        return {
+            "server": server_info,
+            "success": False,
+            "method": "error",
+            "message": f"Error stopping {server_info.name}: {e}",
+        }
+
+
+class StatusCommand:
+    """Main class to check server status"""
+
+    def discover_servers(self) -> List[ServerProcessInfo]:
+        """Find all running NeMo Gym server processes"""
+
+        def check_health(server_info: ServerProcessInfo) -> ServerStatus:
+            """Check if server is responding"""
+            if not server_info.url:
+                return "unknown_error"
+
+            try:
+                requests.get(server_info.url, timeout=2)
+                return "success"
+            except requests.exceptions.ConnectionError:
+                return "connection_error"
+            except requests.exceptions.Timeout:
+                return "timeout"
+            except Exception:
+                return "unknown_error"
+
+        servers = []
+        for proc in psutil.process_iter(["pid", "name", "cmdline", "create_time", "environ"]):
+            try:
+                env = proc.info.get("environ", {})
+                if not env:
+                    continue
+
+                cmdline = proc.info["cmdline"]
+                server_info = parse_server_info(proc, cmdline, env)
+
+                if server_info:
+                    server_info.status = check_health(server_info)
+                    servers.append(server_info)
+
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+
+        return servers
+
+    def display_status(self, servers: List[ServerProcessInfo]) -> None:
+        """Show server info in a table"""
+
+        if not servers:
+            print("No NeMo Gym servers found running.")
+            return
+
+        print("\nNeMo Gym Server Status:\n")
+
+        def format_uptime(uptime_seconds: float) -> str:
+            """Format uptime in a human readable format"""
+            minutes, seconds = divmod(uptime_seconds, 60)
+            hours, minutes = divmod(minutes, 60)
+            days, hours = divmod(hours, 24)
+            return f"{int(days)}d {int(hours)}h {int(minutes)}m {seconds:.1f}s"
+
+        healthy_count = 0
+        for server in servers:
+            status_icon = "✓" if server.status == "success" else "✗"
+            if server.status == "success":
+                healthy_count += 1
+
+            uptime_str = format_uptime(server.uptime_seconds)
+
+            print(
+                f"{status_icon} {server.name} ({server.server_type}) "
+                f"Port: {server.port} PID: {server.pid} "
+                f"Uptime: {uptime_str}"
+            )
+
+        print(f"\n{len(servers)} servers found ({healthy_count} healthy, {len(servers) - healthy_count} unhealthy)\n")
+
+
+@dataclass
+class StopCommand:
+    """Class to stop gym servers"""
+
+    status_cmd: StatusCommand = field(default_factory=StatusCommand)
+
+    def stop_all(self, force: bool = False) -> List[dict]:
+        """Stop all running servers"""
+        servers = self.status_cmd.discover_servers()
+
+        if not servers:
+            return [{"success": False, "message": "No servers found"}]
+
+        return [stop_server(server, force) for server in servers]
+
+    def stop_by_name(self, name: str, force: bool = False) -> List[dict]:
+        """Stop a server by name"""
+        servers = self.status_cmd.discover_servers()
+        name = name.lower()
+        matching = next((s for s in servers if s.name.lower() == name), None)
+
+        if not matching:
+            return [{"success": False, "message": f"No server found with name: {name}"}]
+
+        return [stop_server(matching, force)]
+
+    def stop_by_port(self, port: int, force: bool = False) -> List[dict]:
+        """Stop a server on a specific port"""
+        servers = self.status_cmd.discover_servers()
+        matching = next((s for s in servers if s.port == port), None)
+
+        if not matching:
+            return [{"success": False, "message": f"No server found with port: {port}"}]
+
+        return [stop_server(matching, force)]
+
+    def display_results(self, results: List[dict]) -> None:
+        """Display stop results"""
+        print("\nStopping NeMo Gym servers...\n")
+
+        success_count = 0
+        failure_count = 0
+        for result in results:
+            if result["success"]:
+                success_count += 1
+                icon = "✓"
+            else:
+                failure_count += 1
+                icon = "✗"
+
+            print(f"{icon} {result['message']}")
+
+        total_count = len(results)
+        print(f"\n{success_count} of {total_count} servers stopped successfully, {failure_count} failed")
