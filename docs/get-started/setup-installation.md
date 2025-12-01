@@ -4,7 +4,7 @@
 
 :::{card}
 
-**Goal**: Get NeMo Gym installed and servers running, then verify all components work together.
+**Goal**: Get [NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) installed and servers running, then verify all components work together.
 
 ^^^
 
@@ -27,6 +27,8 @@ Make sure you have these prerequisites ready before beginning:
 ---
 
 ## 1. Clone and Install
+
+Clone the [NeMo Gym repository](https://github.com/NVIDIA-NeMo/Gym) and install dependencies:
 
 ```bash
 # Clone the repository
