@@ -30,11 +30,11 @@ from nemo_gym.global_config import (
 )
 
 
-def lookup_current_ray_node_id() -> str:
+def lookup_current_ray_node_id() -> str:  # pragma: no cover
     return ray.get_runtime_context().get_node_id()
 
 
-def lookup_ray_node_id_to_ip_dict() -> Dict[str, str]:
+def lookup_ray_node_id_to_ip_dict() -> Dict[str, str]:  # pragma: no cover
     cfg = get_global_config_dict()
     head = cfg["ray_head_node_address"]
     id_to_ip = {}
@@ -44,7 +44,7 @@ def lookup_ray_node_id_to_ip_dict() -> Dict[str, str]:
     return id_to_ip
 
 
-def _lookup_ray_node_with_free_gpus(
+def lookup_ray_node_with_free_gpus(
     num_gpus: int, allowed_gpu_nodes: Optional[Set[str]] = None
 ) -> Optional[str]:  # pragma: no cover
     cfg = get_global_config_dict()
@@ -103,7 +103,7 @@ def spinup_single_ray_gpu_node_worker(
         f"Requested {num_gpus} > {num_gpus_per_node} GPU nodes for spinning up {worker_cls}"
     )
 
-    node_id = _lookup_ray_node_with_free_gpus(num_gpus, allowed_gpu_nodes=gpu_nodes)
+    node_id = lookup_ray_node_with_free_gpus(num_gpus, allowed_gpu_nodes=gpu_nodes)
     if node_id is None:
         raise RuntimeError(f"Cannot find {num_gpus} available Ray GPU nodes for spinning up {worker_cls}")
 
