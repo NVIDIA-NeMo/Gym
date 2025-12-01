@@ -4,12 +4,12 @@
 
 **Estimated Time**: 25-30 minutes
 
-This guided tutorial experience is designed for those brand new to training models with reinforcement learning (RL). These tutorials walk you through the complete journey from installation to generating training data at scale.
+This guided tutorial is designed for users new to training models with reinforcement learning (RL). These tutorials walk you through the complete journey from installation to generating training data at scale.
 
 **By the end of this tutorial series, you will have:**
 
-✅ A working NeMo Gym installation with servers running  
-✅ Ability to generate rollouts for RL training
+✅ A working NeMo Gym installation with servers running
+✅ The ability to generate rollouts for RL training
 
 ## Before You Start
 
@@ -23,7 +23,7 @@ Make sure you have these prerequisites ready before beginning the tutorials:
 
 ## Tutorial Path
 
-Follow these four tutorials in sequence to build your first AI agent from scratch:
+Follow these tutorials in sequence to build your first AI agent from scratch:
 
 ::::{grid} 1 1 1 1
 :gutter: 3

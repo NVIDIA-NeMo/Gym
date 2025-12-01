@@ -1,7 +1,7 @@
-# How-To's and FAQ's
+# How-Tos and FAQs
 
 :::{warning}
-This document is a smattering of How-To's and FAQs that have not made their way into an official tutorial yet. The following guides are **experimental** and may contain bugs. Proceed with caution.
+This document is a collection of How-Tos and FAQs that have not made their way into an official tutorial yet. The following guides are **experimental** and may contain bugs. Proceed with caution.
 :::
 
 # How To: Run tests for simple agent
@@ -766,7 +766,7 @@ TODO @bxyu-nvidia: expand on this later.
 
 # FAQ: NeMo Gym what CI/CD do I need to pass?
 
-NeMo Gym has an E2E suite of CI/CD in the form of Github actions workflows. Some of these are critical to PR merge and some of the mare not.
+NeMo Gym has an E2E suite of CI/CD in the form of Github actions workflows. Some of these are critical to PR merge and some of them are not.
 
 For the majority of PRs, there are 5 checks that need to pass:
 1. DCO
@@ -780,7 +780,7 @@ Examples of PR checks that most PRs do not need to wait for to pass:
 2. CICD NeMo / Nemo_CICD_Test (push)
 ...
 
-# FAQ: Why aiohttp backend and not httpx/httpcore for async http?
+# FAQ: Why use aiohttp backend instead of httpx/httpcore for async http?
 
 TL;DR: httpx is O(n^2) runtime where n is the number of queued requests (i.e. for each request, we check all other queued requests). This is terribly inefficient and results in major slowdowns.
 
