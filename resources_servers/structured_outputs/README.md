@@ -60,11 +60,9 @@ ng_prepare_data "+config_paths=[${config_paths}]" \
 ```
 
 # Licensing information
-Code: Apache 2.0<br>
-Data:
-- Structured Outputs: Apache 2.0
-  - [Dataset Seed 1](https://huggingface.co/datasets/nvidia/structured-dataset-nanov3)
-  - [Dataset Seed 2](https://huggingface.co/datasets/nvidia/structured-dataset-nanov3-reasoning/viewer/default/train?row=20&views%5B%5D=train)
+Code: Apache 2.0
+
+Data: CC BY 4.0
 
 Dependencies
 - nemo_gym: Apache 2.0
