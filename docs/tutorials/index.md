@@ -5,7 +5,7 @@
 Hands-on learning experiences that guide you through building, training, and deploying AI agents with NeMo Gym.
 
 :::{tip}
-**New to NeMo Gym?** Begin with the {doc}`Get Started <../get-started/index>` section for a guided tutorial experience from installation through your first verified agent. Return here after completing those tutorials to learn about advanced topics like additional rollout collection methods and training data generation.
+**New to NeMo Gym?** Begin with the {doc}`Get Started <../get-started/index>` section for a guided tutorial experience from installation through your first verified agent. Return here after completing those tutorials to learn about advanced topics like additional rollout collection methods and training data generation. You can find the project repository on [GitHub](https://github.com/NVIDIA-NeMo/Gym).
 :::
 ---
 

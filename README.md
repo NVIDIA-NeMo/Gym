@@ -16,20 +16,58 @@ NeMo Gym is a component of the [NVIDIA NeMo Framework](https://docs.nvidia.com/n
 > [!IMPORTANT]
 > NeMo Gym is currently in early development. You should expect evolving APIs, incomplete documentation, and occasional bugs. We welcome contributions and feedback - for any changes, please open an issue first to kick off discussion!
 
+## 📋 Requirements
+
+### Hardware Requirements
+
+NeMo Gym is designed to run on standard development machines:
+
+- **GPU**: Not required for NeMo Gym framework operation
+  - GPU may be needed for specific resource servers or model inference (see individual server documentation)
+- **CPU**: Any modern x86_64 or ARM64 processor (e.g., Intel, AMD, Apple Silicon)
+- **RAM**: Minimum 8 GB (16 GB+ recommended for larger environments)
+- **Storage**: Minimum 5 GB free disk space for installation and basic usage
+
+### Software Requirements
+
+- **Operating System**: 
+  - Linux (Ubuntu 20.04+, or equivalent)
+  - macOS (11.0+ for x86_64, 12.0+ for Apple Silicon)
+  - Windows (via WSL2)
+- **Python**: 3.12 or higher
+- **Git**: For cloning the repository
+- **Internet Connection**: Required for downloading dependencies and API access
+
+### Additional Requirements
+
+- **API Keys**: OpenAI API key with available credits (for the quickstart examples)
+  - Other model providers supported (Azure OpenAI, self-hosted models via vLLM)
+- **Ray**: Automatically installed as a dependency (no separate setup required)
+
 ## 🚀 Quick Start
 
 ### Setup
 ```bash
+# Clone the repository
 git clone git@github.com:NVIDIA-NeMo/Gym.git
 cd Gym
 
-# Install dependencies
+# Install UV (Python package manager)
 curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.local/bin/env
-uv venv --python 3.12 && source .venv/bin/activate
-uv sync --extra dev --group docs
 
-# Configure your model API access
+# Create virtual environment
+uv venv --python 3.12
+source .venv/bin/activate
+
+# Install NeMo Gym
+uv sync --extra dev --group docs
+```
+
+### Configure Your API Key
+Create an `env.yaml` file that contains your OpenAI API key and the model you want to use. Replace `your-openai-api-key` with your actual key. This file helps keep your secrets out of version control while still making them available to NeMo Gym.
+
+```bash
 echo "policy_base_url: https://api.openai.com/v1
 policy_api_key: your-openai-api-key
 policy_model_name: gpt-4.1-2025-04-14" > env.yaml
@@ -127,15 +165,15 @@ Purpose: Training-ready environments with curated datasets.
 > Each resource server includes example data, configuration files, and tests. See each server's README for details.
 
 <!-- START_TRAINING_SERVERS_TABLE -->
-| Dataset                                                                                                                                      | Domain                | Resource Server            | Description                                                                                          | Value                                                                    | Train | Validation | License                                        |
-| -------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- | -------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ | ----- | ---------- | ---------------------------------------------- |
-| <a href='resources_servers/google_search/configs/google_search.yaml'>Nemotron-RL-knowledge-web_search-mcqa</a>                               | agent                 | Google Search              | Multi-choice question answering problems with search tools integrated                                | Improve knowledge-related benchmarks with search tools                   | ✓     | -          | Apache 2.0                                     |
-| <a href='resources_servers/math_advanced_calculations/configs/math_advanced_calculations.yaml'>Nemotron-RL-math-advanced_calculations</a>    | agent                 | Math Advanced Calculations | An instruction following math environment with counter-intuitive calculators                         | Improve instruction following capabilities in specific math environments | ✓     | -          | Apache 2.0                                     |
-| <a href='resources_servers/workplace_assistant/configs/workplace_assistant.yaml'>Nemotron-RL-agent-workplace_assistant</a>                   | agent                 | Workplace Assistant        | Workplace assistant multi-step tool-using environment                                                | Improve multi-step tool use capability                                   | ✓     | ✓          | Apache 2.0                                     |
-| <a href='resources_servers/mini_swe_agent/configs/mini_swe_agent.yaml'>Nemotron-RL-coding-mini_swe_agent</a>                                 | coding                | Mini Swe Agent             | A software development with mini-swe-agent orchestration                                             | Improve software development capabilities, like SWE-bench                | ✓     | ✓          | MIT                                            |
-| <a href='resources_servers/instruction_following/configs/instruction_following.yaml'>Nemotron-RL-instruction_following</a>                   | instruction_following | Instruction Following      | Instruction following datasets targeting IFEval and IFBench style instruction following capabilities | Improve IFEval and IFBench                                               | ✓     | -          | Apache 2.0                                     |
-| <a href='resources_servers/structured_outputs/configs/structured_outputs_json.yaml'>Nemotron-RL-instruction_following-structured_outputs</a> | instruction_following | Structured Outputs         | Check if responses are following structured output requirements in prompts                           | Improve instruction following capabilities                               | ✓     | ✓          | Apache 2.0                                     |
-| <a href='resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml'>Nemotron-RL-knowledge-openQA</a>                        | knowledge             | Equivalence Llm Judge      | Short answer questions with LLM-as-a-judge                                                           | Improve knowledge-related benchmarks like GPQA / HLE                     | -     | -          | -                                              |
-| <a href='resources_servers/mcqa/configs/mcqa.yaml'>Nemotron-RL-knowledge-mcqa</a>                                                            | knowledge             | Mcqa                       | Multi-choice question answering problems                                                             | Improve benchmarks like MMLU / GPQA / HLE                                | ✓     | -          | Apache 2.0                                     |
-| <a href='resources_servers/math_with_judge/configs/math_with_judge.yaml'>Nemotron-RL-math-OpenMathReasoning</a>                              | math                  | Math With Judge            | Math dataset with math-verify and LLM-as-a-judge                                                     | Improve math capabilities including AIME 24 / 25                         | ✓     | ✓          | Creative Commons Attribution 4.0 International |
+| Resource Server            | Domain                | Dataset                                                                                                                                                        | Description                                                                                          | Value                                                                    | Config                                                                                                    | Train | Validation | License                                        |
+| -------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- | ----- | ---------- | ---------------------------------------------- |
+| Google Search              | agent                 | <a href='https://huggingface.co/datasets/nvidia/Nemotron-RL-knowledge-web_search-mcqa'>Nemotron-RL-knowledge-web_search-mcqa</a>                               | Multi-choice question answering problems with search tools integrated                                | Improve knowledge-related benchmarks with search tools                   | <a href='resources_servers/google_search/configs/google_search.yaml'>config</a>                           | ✓     | -          | Apache 2.0                                     |
+| Math Advanced Calculations | agent                 | <a href='https://huggingface.co/datasets/nvidia/Nemotron-RL-math-advanced_calculations'>Nemotron-RL-math-advanced_calculations</a>                             | An instruction following math environment with counter-intuitive calculators                         | Improve instruction following capabilities in specific math environments | <a href='resources_servers/math_advanced_calculations/configs/math_advanced_calculations.yaml'>config</a> | ✓     | -          | Apache 2.0                                     |
+| Workplace Assistant        | agent                 | <a href='https://huggingface.co/datasets/nvidia/Nemotron-RL-agent-workplace_assistant'>Nemotron-RL-agent-workplace_assistant</a>                               | Workplace assistant multi-step tool-using environment                                                | Improve multi-step tool use capability                                   | <a href='resources_servers/workplace_assistant/configs/workplace_assistant.yaml'>config</a>               | ✓     | ✓          | Apache 2.0                                     |
+| Mini Swe Agent             | coding                | <a href='https://huggingface.co/datasets/princeton-nlp/SWE-bench_Verified'>SWE-bench_Verified</a>                                                              | A software development with mini-swe-agent orchestration                                             | Improve software development capabilities, like SWE-bench                | <a href='resources_servers/mini_swe_agent/configs/mini_swe_agent.yaml'>config</a>                         | ✓     | ✓          | MIT                                            |
+| Instruction Following      | instruction_following | <a href='https://huggingface.co/datasets/nvidia/Nemotron-RL-instruction_following'>Nemotron-RL-instruction_following</a>                                       | Instruction following datasets targeting IFEval and IFBench style instruction following capabilities | Improve IFEval and IFBench                                               | <a href='resources_servers/instruction_following/configs/instruction_following.yaml'>config</a>           | ✓     | -          | Apache 2.0                                     |
+| Structured Outputs         | instruction_following | <a href='https://huggingface.co/datasets/nvidia/Nemotron-RL-instruction_following-structured_outputs'>Nemotron-RL-instruction_following-structured_outputs</a> | Check if responses are following structured output requirements in prompts                           | Improve instruction following capabilities                               | <a href='resources_servers/structured_outputs/configs/structured_outputs_json.yaml'>config</a>            | ✓     | ✓          | Apache 2.0                                     |
+| Equivalence Llm Judge      | knowledge             | <a href='https://huggingface.co/datasets/nvidia/Nemotron-RL-knowledge-openQA'>Nemotron-RL-knowledge-openQA</a>                                                 | Short answer questions with LLM-as-a-judge                                                           | Improve knowledge-related benchmarks like GPQA / HLE                     | <a href='resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml'>config</a>           | ✓     | -          | Apache 2.0                                     |
+| Mcqa                       | knowledge             | <a href='https://huggingface.co/datasets/nvidia/Nemotron-RL-knowledge-mcqa'>Nemotron-RL-knowledge-mcqa</a>                                                     | Multi-choice question answering problems                                                             | Improve benchmarks like MMLU / GPQA / HLE                                | <a href='resources_servers/mcqa/configs/mcqa.yaml'>config</a>                                             | ✓     | -          | Apache 2.0                                     |
+| Math With Judge            | math                  | <a href='https://huggingface.co/datasets/nvidia/Nemotron-RL-math-OpenMathReasoning'>Nemotron-RL-math-OpenMathReasoning</a>                                     | Math dataset with math-verify and LLM-as-a-judge                                                     | Improve math capabilities including AIME 24 / 25                         | <a href='resources_servers/math_with_judge/configs/math_with_judge.yaml'>config</a>                       | ✓     | ✓          | Creative Commons Attribution 4.0 International |
 <!-- END_TRAINING_SERVERS_TABLE -->

@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from contextlib import nullcontext as does_not_raise
+from socket import gethostbyname, gethostname
 from typing import Dict
 from unittest.mock import MagicMock
 
@@ -610,3 +611,37 @@ class TestServerUtils:
         assert "Configuration Warnings" in printed_messages
         assert "license" in printed_messages
         assert "domain" in printed_messages
+
+    def test_use_absolute_ip(self, monkeypatch: MonkeyPatch) -> None:
+        """Test that use_absolute_ip=True uses machine's hostname ip for default_host."""
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        exists_mock = MagicMock()
+        exists_mock.return_value = False
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        find_open_port_mock = MagicMock()
+        find_open_port_mock.return_value = 12345
+        monkeypatch.setattr(nemo_gym.global_config, "find_open_port", find_open_port_mock)
+
+        hydra_main_mock = MagicMock()
+
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig(
+                {
+                    "use_absolute_ip": True,
+                    "test_resource": {"responses_api_models": {"test_model": {"entrypoint": "app.py"}}},
+                }
+            )
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        expected_ip = gethostbyname(gethostname())
+
+        global_config_dict = get_global_config_dict()
+
+        assert global_config_dict["head_server"]["host"] == expected_ip
+        assert global_config_dict["test_resource"]["responses_api_models"]["test_model"]["host"] == expected_ip

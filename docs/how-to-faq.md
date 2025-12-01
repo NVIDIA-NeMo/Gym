@@ -1,6 +1,8 @@
 # How-To's and FAQ's
-This document is a smattering of How-To's and FAQs that have not made their way into an official tutorial yet!
 
+:::{warning}
+This document is a smattering of How-To's and FAQs that have not made their way into an official tutorial yet. The following guides are **experimental** and may contain bugs. Proceed with caution.
+:::
 
 # How To: Run tests for simple agent
 Run the Simple Chat Agent tests. `ng_test` or `nemo_gym_test` stands for `Nemo Gym Test`.
@@ -79,7 +81,7 @@ Register your new `get_weather` function as a FastAPI route.
 ...
 ```
 
-You can see a complete example of `app.py` in `resources_servers/example_simple_weather/app.py`!
+Refer to a complete example of `app.py` in `resources_servers/example_simple_weather/app.py`.
 
 Run an agent with your new server!
 ```bash
@@ -95,7 +97,7 @@ Run a query with your new resources server! Your agent should say that it's cold
 python responses_api_agents/simple_agent/client.py
 ```
 
-After you implement your server, please make sure to update the README.md with appropriate licensing information! Your PR will not be merged unless licensing information is present and accurate.
+After you implement your server, make sure to update the README.md with appropriate licensing information. Your PR will not be merged unless licensing information is present and accurate.
 
 
 Run the tests for your server
@@ -111,10 +113,10 @@ source .venv/bin/activate
 pytest
 ```
 
-At some point, you will want to actually add data that can be used to query your server. Please follow the instructions for [How To: Prepare and validate data for PR submission or RL training](#how-to-prepare-and-validate-data-for-pr-submission-or-rl-training).
+At some point, you will want to actually add data that can be used to query your server. Follow the instructions for [How To: Prepare and validate data for PR submission or RL training](#how-to-prepare-and-validate-data-for-pr-submission-or-rl-training).
 
 
-If you need some dataset preprocessing or formatting scripts, please place them your resources server directory e.g. `resources_servers/example_simple_weather/my_preprocess_script.py`.
+If you need some dataset preprocessing or formatting scripts, place them in your resources server directory, for example `resources_servers/example_simple_weather/my_preprocess_script.py`.
 
 
 You are required to have the following 3 files in your resources server data folder:
@@ -154,7 +156,7 @@ ng_collect_rollouts +agent_name=example_multi_step_simple_agent \
 # How To: Upload and download a dataset from Gitlab
 We want to track and version golden versions of our datasets so that we always know what data is being trained on and that the data we are training on is high quality. Major versions of all training datasets should be tracked in NeMo Gym. For example, the HelpSteer dataset https://huggingface.co/datasets/nvidia/HelpSteer3 has 3 major versions 1, 2, and 3. Each of these major versions would be uploaded and tracked in NeMo Gym.
 
-Right now, NeMo Gym is hosted in Nvidia Gitlab and we use Gitlab's model artifact registry to store datasets. https://gitlab-master.nvidia.com/bxyu/nemo-gym/-/ml/models?first=30&orderBy=created_at&sort=desc#/
+Right now, NeMo Gym is hosted in NVIDIA Gitlab and we use Gitlab's model artifact registry to store datasets. https://gitlab-master.nvidia.com/bxyu/nemo-gym/-/ml/models?first=30&orderBy=created_at&sort=desc#/
 
 Gitlab uses MLFlow to interface with its model artifact registry. You will need:
 1. The NeMo Gym repository Gitlab URI.
@@ -204,10 +206,10 @@ Naming convention for Huggingface datasets is as follows.
 
 E.g.:
 
-`Nvidia/Nemo-Gym-Math-library_judge_math-dapo17k`
+`NVIDIA/Nemo-Gym-Math-math_with_judge-dapo17k`
 
 
-You will only need to manually input the `{your dataset name}` portion of the above when inputting the `dataset_name` flag in the upload command (see below). Everything preceding it will be automatically populated using your config prior to upload.
+You will only need to manually input the `{your dataset name}` portion of the above when inputting the `dataset_name` flag in the upload command (refer to the command below). Everything preceding it will be automatically populated using your config prior to upload.
 
 To upload to Huggingface, use the below command:
 ```bash
@@ -252,12 +254,14 @@ ng_delete_dataset_from_gitlab \
     +dataset_name={your dataset name}
 ```
 
-**Important note**: Gitlab model names are case sensitive. There can be models named 'My_Model' and 'my_model' living simultaneously in the registry. When uploading to Huggingface with the intention of deleting Gitlab artifacts, be sure the casing of your Huggingface dataset name matches that of Gitlab's.
+:::{important}
+Gitlab model names are case sensitive. There can be models named 'My_Model' and 'my_model' living simultaneously in the registry. When uploading to Huggingface with the intention of deleting Gitlab artifacts, be sure the casing of your Huggingface dataset name matches that of Gitlab's.
+:::
 
 Downloading a dataset from Huggingface is straightforward:
 ```bash
 ng_download_dataset_from_hf \
-    +repo_id=Nvidia/NeMo-Gym-Instruction_Following-multineedle-{your dataset name} \
+    +repo_id=NVIDIA/NeMo-Gym-Instruction_Following-multineedle-{your dataset name} \
     +artifact_fpath=multineedle_benchmark.jsonl \
     +output_fpath=data/multineedle_benchmark_hf.jsonl
 ```
@@ -395,8 +399,11 @@ ng_run "+config_paths=[$config_paths]"
 ```
 
 Here is an e2e example of how to spin up a NeMo Gym compatible vLLM Chat Completions OpenAI server.
-- If you want to use tools, please find the appropriate vLLM arguments regarding the tool call parser to use. In this example, we use Qwen3-30B-A3B, which is suggested to use the `hermes` tool call parser.
-- **Important note**: Please do NOT use a reasoning parser argument to vLLM here. The Responses to Chat Completions middleware logic needs to parse to and from Responses Reasoning items and Chat Completion Message content. **Do NOT use things like `--reasoning-parser qwen3`**.
+- If you want to use tools, find the appropriate vLLM arguments regarding the tool call parser to use. In this example, we use Qwen3-30B-A3B, which is suggested to use the `hermes` tool call parser.
+
+:::{important}
+Do NOT use a reasoning parser argument to vLLM here. The Responses to Chat Completions middleware logic needs to parse to and from Responses Reasoning items and Chat Completion Message content. **Do NOT use things like `--reasoning-parser qwen3`**.
+:::
 ```bash
 uv venv --python 3.12 --seed 
 source .venv/bin/activate
@@ -450,7 +457,7 @@ The same process goes for data preparation and downstream training framework Gym
 
 
 # How To: Profile your resources server
-For large scale verifier training, it's critical that your resources server is as efficient as possible. It may be slammed with 16k concurrent requests or more. Gym provides easy tools to profile and understand the efficiency of your servers.
+For large scale verifier training, it's critical that your resources server is as efficient as possible. It can be slammed with 16k concurrent requests or more. Gym provides easy tools to profile and understand the efficiency of your servers.
 
 In one terminal, start your agent, model, and resources servers, with profiling enabled.
 - `profiling_enabled` (bool): whether profiling is enabled or not. By default this is disabled since it incurs some slight overhead we don't want at runtime.
@@ -472,7 +479,7 @@ ng_collect_rollouts +agent_name=math_with_judge_simple_agent \
     +num_repeats=1
 ```
 
-After `ng_collect_rollouts` finishes, ctrl+c to quit your servers. You should see some output in the terminal like this:
+After `ng_collect_rollouts` finishes, ctrl+c to quit your servers. You should see some output in the terminal like the following:
 ```bash
 ```
 
@@ -497,7 +504,7 @@ name                                                                            
 
 
 # How To: Use a custom client to call Gym Responses API model endpoints during training
-During training time, Gym keeps track of the ground truth prompt token ids, generation token ids, and generation log probs for downstream consumption by the RL framework. As a result, we need to add a few fields to request and response schemas in order to properly facilitate this. This usually doesn't matter if you are using 100% Gym, but in certain situations you may need or want to use a separate client (e.g. LiteLLM, your own OpenAI client, etc) to call model endpoints.
+During training time, Gym keeps track of the ground truth prompt token ids, generation token ids, and generation log probs for downstream consumption by the RL framework. As a result, we need to add a few fields to request and response schemas in order to properly facilitate this. This usually doesn't matter if you are using 100% Gym, but in certain situations you may need or want to use a separate client (such as LiteLLM, your own OpenAI client, and so on) to call model endpoints.
 
 For Chat Completions, outside of training, an Assistant message will look like:
 ```python
@@ -604,7 +611,7 @@ If not specified, NeMo Gym will start a local Ray cluster and store the address 
 
 ## Using Ray for CPU-Intensive Tasks
 
-Here's how to parallelize CPU-intensive functions using Ray's `@ray.remote` decorator. Please refer to [Ray documentation](https://docs.ray.io/en/latest/ray-core/api/doc/ray.remote.html) for more options.
+Here's how to parallelize CPU-intensive functions using Ray's `@ray.remote` decorator. Refer to [Ray documentation](https://docs.ray.io/en/latest/ray-core/api/doc/ray.remote.html) for more options.
 
 ```python
 import ray
@@ -631,7 +638,7 @@ def process_data_parallel(data_list):
 # FAQ: OpenAI Responses vs Chat Completions API
 Agents and verifiers work with responses in a standardized format based on the OpenAI Responses API schema. The verifier receives an object where the `output` field conforms to the Response object output [documented here](https://platform.openai.com/docs/api-reference/responses/object#responses/object-output).
 
-The `output` list may contain multiple item types, such as:
+The `output` list can contain multiple item types, such as:
 - `ResponseOutputMessage` - The main user-facing message content returned by the model.
 - `ResponseOutputItemReasoning` - Internal reasoning or "thinking" traces that explain the model’s thought process.
 - `ResponseFunctionToolCall` - A request from the model to invoke an external function or tool.
@@ -706,15 +713,15 @@ VSCode workspace settings at `.vscode/settings.json`
 
 Set up your Github signing keys! https://docs.github.com/en/authentication/managing-commit-signature-verification/about-commit-signature-verification#ssh-commit-signature-verification
 
-Specifically, if you visit https://github.com/settings/keys while logged into your account, you should see the following:
+Specifically, if you visit https://github.com/settings/keys while logged into your account, you should see the following items:
 1. Under the "SSH keys" major section, there are 2 subsections
    1. Authentication keys
    2. Signing key
 
-More often than node, the SHA256 displayed by Github (SHA256:xxxx) should be the same for the two keys above since you probably want to just use the same SSH key for both purposes. If you do not see the following, please following the signing keys link above!
+More often than not, the SHA256 displayed by Github (SHA256:xxxx) should be the same for the two keys above since you probably want to just use the same SSH key for both purposes. If you do not see the following, follow the signing keys link above.
 
 
-For developers that sign commits via SSH keys, this is configuration so that VSCode source control is able to sign commits properly!
+For developers that sign commits using SSH keys, this is configuration so that VSCode source control is able to sign commits properly.
 ```bash
 git config gpg.format ssh
 git config user.signingkey ~/.ssh/id_ed25519.pub
@@ -734,7 +741,7 @@ Let's say you wanted to train your model to be really good at math.
 
 One way I like to think about these things is:
 - You can do RL on SFT data, where your input is your SFT input, and the model answer scorer is just an exact match on the SFT gold label.
-- You can also do SFT on RL data via synthetic data generation, where you run your inputs into some strong teacher model, score the responses, and use the scores to pick your SFT gold label.
+- You can also do SFT on RL data using synthetic data generation, where you run your inputs into some strong teacher model, score the responses, and use the scores to pick your SFT gold label.
 
 Tying back to NeMo Gym, NeMo gym can be used to create synthetic data for SFT training by running strong teacher models on the different environments. Critically, it will also be used as the source of data during RL training.
 
@@ -748,7 +755,7 @@ path= ./resources_servers/code_gen/scripts/build_examples.py
 path= ./resources_servers/code_gen/app.py
 ```
 
-Please add the following copyright snippet to the top of the files listed:
+Add the following copyright snippet to the top of the files listed:
 ```python
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
@@ -769,7 +776,7 @@ Please add the following copyright snippet to the top of the files listed:
 
 # FAQ: PermissionError when starting NeMo Gym in sandboxed environments
 
-If you see an error like this when running `ng_run`:
+If you see an error like the following when running `ng_run`:
 
 ```python
 PermissionError: [Errno 1] Operation not permitted (originated from sysctl() malloc 1/3)
@@ -816,7 +823,7 @@ There's no practical workaround that NeMo Gym can implement - the solution is to
 
 
 # FAQ: build-docs / Build docs CI failures
-If you see some docs building related errors that are kind of cryptic regarding .rst files like
+If you see some docs building related errors that are kind of cryptic regarding .rst files like the following
 ```
 updating environment: [config changed ('toc_object_entries_show_parents')] 16 added, 0 changed, 0 removed
 reading sources... [100%] index
@@ -835,7 +842,7 @@ One of the goals of NeMo Gym is to act as a rollout tool for LLM post-training, 
 
 RL training frameworks don't typically operate in OpenAI schema; they operate in tokens IDs. It is especially critical to always have the correct token IDs during training so that we stay on-policy and to make sure that what we think the model sees is what the model actually sees. However, when providing this OpenAI schema compatible interface to training environment developers, we lose track of the token IDs in Gym.
 
-For example, say we are training a Qwen 3 family model. During rollouts, the model may sample from the entire token distribution. The token IDs are then decoded into text and subsequently converted to OpenAI schema and returned to the training environment developer. At some point for multi-step and multi-turn scenarios, the training environment developer will call the model again with the previously output OpenAI schema. This re-tokenization causes problems since a single string may map to multiple possible sequences of token IDs. So if the model generations token ID sequence 1 and the re-tokenization outputs token ID sequence 2, suddenly things may become off policy when the Gym result is consumed by the RL training framework.
+For example, say we are training a Qwen 3 family model. During rollouts, the model can sample from the entire token distribution. The token IDs are then decoded into text and subsequently converted to OpenAI schema and returned to the training environment developer. At some point for multi-step and multi-turn scenarios, the training environment developer will call the model again with the previously output OpenAI schema. This re-tokenization causes problems since a single string can map to multiple possible sequences of token IDs. So if the model generations token ID sequence 1 and the re-tokenization outputs token ID sequence 2, suddenly things can become off policy when the Gym result is consumed by the RL training framework.
 
 So, the OpenAI compatible model server in a training framework needs to be able to handle this discrepancy. In order to do that, Gym needs a handle on the ground truth token IDs and it needs to provide that information back to the training frameworks' OpenAI compatible server.
 
