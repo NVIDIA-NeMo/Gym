@@ -14,20 +14,32 @@ Run a training environment and start collecting rollouts for training in under 5
 
 :::{tab-item} 1. Set Up
 
+**Install NeMo Gym**
+
+Get NeMo Gym installed and ready to use:
+
 ```bash
-# Clone and install dependencies
+# Clone the repository
 git clone git@github.com:NVIDIA-NeMo/Gym.git
 cd Gym
 
-# Install UV if not already available
+# Install UV (Python package manager)
 curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.local/bin/env
 
-# Create a virtual environment and install Gym
-uv venv --python 3.12 && source .venv/bin/activate
-uv sync --extra dev --group docs
+# Create virtual environment
+uv venv --python 3.12
+source .venv/bin/activate
 
-# Configure your model API access
+# Install NeMo Gym
+uv sync --extra dev --group docs
+```
+
+**Configure Your API Key**
+
+Create an `env.yaml` file that contains your OpenAI API key and the model you want to use. Replace `your-openai-api-key` with your actual key. This file helps keep your secrets out of version control while still making them available to NeMo Gym.
+
+```bash
 echo "policy_base_url: https://api.openai.com/v1
 policy_api_key: your-openai-api-key
 policy_model_name: gpt-4.1-2025-04-14" > env.yaml
