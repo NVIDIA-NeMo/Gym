@@ -25,7 +25,8 @@ cd Gym
 
 # Install dependencies
 curl -LsSf https://astral.sh/uv/install.sh | sh
-source $HOME/.local/bin/env
+export PATH=$HOME/.local/bin/env/bin:$PATH  # or 
+# echo 'export PATH=$HOME/.local/bin/env/bin:$PATH' >> ~/.bashrc
 uv venv --python 3.12 && source .venv/bin/activate
 uv sync --extra dev --group docs
 
@@ -59,7 +60,7 @@ python responses_api_agents/simple_agent/client.py
 **Terminal 2** (keep servers running in Terminal 1):
 ```bash
 # Create a simple dataset with one query
-echo '{"responses_create_params":{"input":[{"role":"developer","content":"You are a helpful assistant."},{"role":"user","content":"What is the weather in Seattle?"}]}}' > weather_query.jsonl
+echo '{"responses_create_params":{"input":[{"role":"developer","content":"You are a helpful assistant."},{"role":"user","content":"What is the weather in Seattle?"}],"tools":[{"type":"function","name":"get_weather","description":"","parameters":{"type":"object","properties":{"city":{"type":"string","description":""}},"required":["city"],"additionalProperties":false},"strict":true}]}}' > weather_query.jsonl
 
 # Collect verified rollouts
 ng_collect_rollouts \

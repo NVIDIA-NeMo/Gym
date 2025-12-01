@@ -30,6 +30,7 @@ task = server_client.post(
                 "content": "You are a helpful personal assistant that aims to be helpful and reduce any pain points the user has.",
             },
             {"role": "user", "content": "going out in sf tn"},
+            # {"role": "user", "content": "What is the weather in San Francisco?"}, # If you want to force the weather tool call, replace the above user query with this one
         ],
         tools=[
             {

@@ -2,7 +2,7 @@
 
 # NeMo Gym Documentation
 
-NeMo Gym is a framework for building reinforcement learning (RL) training environments large language models (LLMs). Gym provides training environment development scaffolding and training environment patterns such as multi-step, multi-turn, and user modeling scenarios.
+NeMo Gym is a framework for building reinforcement learning (RL) training environments for large language models (LLMs). Gym provides training environment development scaffolding and training environment patterns such as multi-step, multi-turn, and user modeling scenarios.
 
 At the core of NeMo Gym are three server concepts: **Responses API Model servers** are model endpoints, **Resources servers** contain tool implementations and verification logic, and **Response API Agent servers** orchestrate the interaction between models and resources.
 
@@ -21,7 +21,8 @@ cd Gym
 
 # Install UV if not already available
 curl -LsSf https://astral.sh/uv/install.sh | sh
-source $HOME/.local/bin/env
+export PATH=$HOME/.local/bin/env/bin:$PATH  # or 
+# echo 'export PATH=$HOME/.local/bin/env/bin:$PATH' >> ~/.bashrc
 
 # Create a virtual environment and install Gym
 uv venv --python 3.12 && source .venv/bin/activate
@@ -64,7 +65,7 @@ python responses_api_agents/simple_agent/client.py
 
 ```bash
 # Create a simple dataset with one query
-echo '{"responses_create_params":{"input":[{"role":"developer","content":"You are a helpful assistant."},{"role":"user","content":"What is the weather in Seattle?"}]}}' > weather_query.jsonl
+echo '{"responses_create_params":{"input":[{"role":"developer","content":"You are a helpful assistant."},{"role":"user","content":"What is the weather in Seattle?"}],"tools":[{"type":"function","name":"get_weather","description":"","parameters":{"type":"object","properties":{"city":{"type":"string","description":""}},"required":["city"],"additionalProperties":false},"strict":true}]}}' > weather_query.jsonl
 
 # Collect verified rollouts
 ng_collect_rollouts \
