@@ -253,7 +253,8 @@ class RunHelper:  # pragma: no cover
             if len(statuses) != num_spun_up:
                 print(
                     f"""{num_spun_up} / {len(statuses)} servers ready ({statuses.count("timeout")} timed out, {statuses.count("connection_error")} connection errored, {statuses.count("unknown_error")} had unknown errors).
-Waiting for servers {waiting} to spin up. Sleeping {sleep_interval}s..."""
+Waiting for servers to spin up: {waiting}
+Sleeping {sleep_interval}s..."""
                 )
             else:
                 print(f"All {num_spun_up} / {len(statuses)} servers ready! Polling every 60s")
