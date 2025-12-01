@@ -705,24 +705,25 @@ def version():  # pragma: no cover
     if json_output:
         print(json.dumps(version_info))
     else:
-        lines = [
-            f"NeMo Gym v{version_info['nemo_gym']}",
-            f"Python {version_info['python']} ({version_info['python_path']})",
-            f"Installation: {version_info['installation_path']}",
-        ]
+        output = f"""\
+NeMo Gym v{version_info["nemo_gym"]}
+Python {version_info["python"]} ({version_info["python_path"]})
+Installation: {version_info["installation_path"]}"""
 
         if "dependencies" in version_info:
-            lines.append("\nKey Dependencies:")
-            for dep, ver in version_info["dependencies"].items():
-                lines.append(f"  {dep}: {ver}")
-
+            deps_lines = "\n".join(f"  {dep}: {ver}" for dep, ver in version_info["dependencies"].items())
             sys_info = version_info["system"]
-            lines.append("\nSystem:")
-            lines.append(f"  OS: {sys_info['os']}")
-            lines.append(f"  Platform: {sys_info['platform']}")
-            lines.append(f"  Architecture: {sys_info['architecture']}")
-            lines.append(f"  Processor: {sys_info['processor']}")
-            lines.append(f"  CPUs: {sys_info['cpus']}")
-            lines.append(f"  Memory: {sys_info['memory_gb']} GB")
+            output += f"""
 
-        print("\n".join(lines))
+Key Dependencies:
+{deps_lines}
+
+System:
+  OS: {sys_info["os"]}
+  Platform: {sys_info["platform"]}
+  Architecture: {sys_info["architecture"]}
+  Processor: {sys_info["processor"]}
+  CPUs: {sys_info["cpus"]}
+  Memory: {sys_info["memory_gb"]} GB"""
+
+        print(output)
