@@ -13,14 +13,6 @@ Need a refresher on reinforcement learning language? Refer to the {doc}`key-term
 
 ---
 
-## How to Navigate This Section
-
-- Read these explanations when your team needs shared vocabulary for configuring Models, Resources, and Agents together.
-- Pair each concept page with its related tutorials when you are ready to practice tasks such as assembling interaction datasets or scoring agent behavior.
-- Return here whenever you add a new teammate so that they can orient and choose the depth that fits their role.
-
----
-
 ## Concept Highlights
 
 Each explainer below covers one foundational idea and links to deeper material.
