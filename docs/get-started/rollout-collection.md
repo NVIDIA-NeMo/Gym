@@ -2,7 +2,7 @@
 
 A rollout is complete record of a task instance execution that captures:
 - What the model was asked to do (input)
-- How the model reasoned (internal processing)  
+- How the model reasoned (internal processing)
 - What tools were used (tool calls and tool responses)
 - How well the task was achieved (verification scores)
 - The final response (output to user)
@@ -203,7 +203,7 @@ ng_collect_rollouts \
 Data Control
 ```bash
     +limit=100 \                    # Limit examples processed (null = all)
-    +num_repeats=3 \                # Rollouts per example (null = 1)  
+    +num_repeats=3 \                # Rollouts per example (null = 1)
     +num_samples_in_parallel=5      # Concurrent requests (null = default)
 ```
 
