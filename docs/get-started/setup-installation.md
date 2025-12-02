@@ -103,7 +103,7 @@ uv sync --extra dev --group docs
 
 ## 2. Configure Your API Key
 
-Create an `env.yaml` file in the project root:
+Create an `env.yaml` file in the project root to configure your {term}`Policy Model` credentials:
 
 ```bash
 # Create env.yaml with your OpenAI credentials

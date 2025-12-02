@@ -118,7 +118,7 @@ ng_run "+config_paths=[${config_paths}]" \
 
 ## Special Policy Model Variables
 
-NeMo Gym provides standard placeholders for the model being trained:
+NeMo Gym provides standard placeholders for the {term}`Policy Model` being trained:
 
 ```yaml
 # These variables are available in any config file

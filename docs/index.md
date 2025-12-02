@@ -37,7 +37,7 @@ uv sync --extra dev --group docs
 
 **Configure Your API Key**
 
-Create an `env.yaml` file that contains your OpenAI API key and the model you want to use. Replace `your-openai-api-key` with your actual key. This file helps keep your secrets out of version control while still making them available to NeMo Gym.
+Create an `env.yaml` file that contains your OpenAI API key and the {term}`Policy Model` you want to use. Replace `your-openai-api-key` with your actual key. This file helps keep your secrets out of version control while still making them available to NeMo Gym.
 
 ```bash
 echo "policy_base_url: https://api.openai.com/v1
