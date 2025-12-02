@@ -36,7 +36,6 @@ import uvicorn
 from devtools import pprint
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, Field
-from ray import ActorProxy
 from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR, __version__
@@ -121,7 +120,7 @@ class ServerInstanceDisplayConfig(BaseModel):
 class RunHelper:  # pragma: no cover
     _head_server: uvicorn.Server
     _head_server_thread: Thread
-    _head_ray_gpu_helper: ActorProxy
+    _head_ray_gpu_helper: "ActorProxy"
 
     _processes: Dict[str, Popen]
     _server_instance_display_configs: List[ServerInstanceDisplayConfig]
