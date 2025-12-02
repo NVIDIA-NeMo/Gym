@@ -74,7 +74,7 @@ responses_api_models/openai_model/configs/openai_model.yaml"
 ng_run "+config_paths=[${config_paths}]"
 ```
 
-**✅ Success Check**: You should see servers running including the `simple_weather_simple_agent`.
+**✅ Success Check**: You should see 3 servers running including the `simple_weather_simple_agent`.
 
 :::
 
