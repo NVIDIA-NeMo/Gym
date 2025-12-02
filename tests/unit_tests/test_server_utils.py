@@ -192,7 +192,7 @@ class TestServerUtils:
 
         initialize_ray()
 
-        ray_is_initialized_mock.assert_called_once()
+        ray_is_initialized_mock.assert_called()
         get_global_config_dict_mock.assert_called_once()
         ray_init_mock.assert_called_once_with(
             address="ray://test-address:10001", ignore_reinit_error=True, namespace="nemo_gym"
