@@ -12,8 +12,10 @@ Learn how to create a custom resource server to implement tools, verifiers, and 
 :::
 
 :::{grid-item-card} {octicon}`bookmark;1em;` **Prerequisites**
+
 - Completed {doc}`../get-started/setup-installation`
 - Basic Python and FastAPI knowledge
+
 :::
 
 ::::
@@ -32,17 +34,19 @@ Each resource server must implement a `verify` function that evaluates the agent
 
 ---
 
-## Step 1: Initialize the Resource Server
+## 1. Initialize the Resource Server
 
 Resource servers live in the `resources_servers/` directory. Create a weather server that provides weather information to agents.
+
+Run the initialization command from the repository root:
 
 ```bash
 ng_init_resources_server +entrypoint=resources_servers/my_weather_tool
 ```
 
-This command creates the following structure:
+This command creates a new directory structure with template files:
 
-```
+```text
 resources_servers/my_weather_tool/
 ├── app.py                      # Main server implementation
 ├── configs/
@@ -61,9 +65,9 @@ The initialization command also creates a paired simple agent configuration that
 
 ---
 
-## Step 2: Configure the Domain
+## 2. Configure the Domain
 
-Open `resources_servers/my_weather_tool/configs/my_weather_tool.yaml` and verify the `domain` field is set appropriately:
+Open `resources_servers/my_weather_tool/configs/my_weather_tool.yaml` and update the `domain` field:
 
 ```yaml
 my_weather_tool_resources_server:
@@ -88,7 +92,7 @@ The `domain` field categorizes your resource server and is **required**. Choose 
 
 ---
 
-## Step 3: Implement the Server
+## 3. Implement the Server
 
 Open `resources_servers/my_weather_tool/app.py` and add the complete implementation:
 
@@ -139,8 +143,8 @@ class MyWeatherResourcesServer(SimpleResourcesServer):
         """
         Tool implementation: Get weather for a city.
         
-        In a real implementation, this would call a weather API.
-        For this example, we will return a simple static response.
+        In a production implementation, this would call a weather API.
+        For this example, we return a simple static response.
         """
         return GetWeatherResponse(
             city=body.city,
@@ -151,11 +155,11 @@ class MyWeatherResourcesServer(SimpleResourcesServer):
         """
         Verification function: Evaluate agent performance.
         
-        This is called after an agent completes an interaction.
+        This function is called after an agent completes an interaction.
         Return a reward between 0.0 and 1.0.
         
         For this simple example, we always return 1.0 (success).
-        In practice, you would implement custom verification logic.
+        In practice, implement custom verification logic based on your requirements.
         """
         return BaseVerifyResponse(**body.model_dump(), reward=1.0)
 
@@ -175,7 +179,7 @@ if __name__ == "__main__":
 
 ---
 
-## Step 4: Add Dependencies (Optional)
+## 4. Add Dependencies (Optional)
 
 If your server needs external packages, add them to `requirements.txt`:
 
@@ -186,7 +190,7 @@ If your server needs external packages, add them to `requirements.txt`:
 
 ---
 
-## Step 5: Write Tests
+## 5. Write Tests
 
 Update `resources_servers/my_weather_tool/tests/test_app.py` to test your implementation:
 
@@ -228,19 +232,22 @@ async def test_get_weather(server):
 @pytest.mark.asyncio
 async def test_verify(server):
     """Test the verify function."""
-    # Create a minimal verify request
-    verify_request = {
-        "response": {
-            "input": [{"type": "text", "text": "What's the weather?"}],
-            "output": [{"type": "text", "text": "It's cold."}]
-    }
-    }
+    from nemo_gym.base_resources_server import BaseVerifyRequest
+    from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
     
-    # In practice, you would create a proper BaseVerifyRequest
-    # This is simplified for demonstration
-    # response = await server.verify(verify_request)
-    # assert response.reward >= 0.0
-    # assert response.reward <= 1.0
+    # Create a proper BaseVerifyRequest with required fields
+    verify_request = BaseVerifyRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+            input=[{"type": "text", "text": "What's the weather?"}]
+        ),
+        response=NeMoGymResponse(
+            output=[{"type": "text", "text": "It's cold."}]
+        )
+    )
+    
+    response = await server.verify(verify_request)
+    assert response.reward >= 0.0
+    assert response.reward <= 1.0
 ```
 
 Run the tests:
@@ -259,9 +266,9 @@ pytest -v
 
 ---
 
-## Step 6: Run with an Agent
+## 6. Run with an Agent
 
-The initialization command created a paired agent configuration. Run your resource server with an agent:
+The initialization command created a paired simple agent configuration in the same YAML file. Start the servers:
 
 ```bash
 config_paths="responses_api_agents/simple_agent/configs/simple_agent.yaml,\
@@ -272,7 +279,12 @@ ng_run "+config_paths=[$config_paths]" \
     +simple_agent.responses_api_agents.simple_agent.resources_server.name=my_weather_tool_resources_server
 ```
 
-Make sure you have your OpenAI API key configured in `env.yaml`:
+This starts three servers:
+1. The simple agent server (coordinates interactions)
+2. The OpenAI model server (provides LLM responses)
+3. Your weather resource server (provides the `get_weather` tool)
+
+Configure your OpenAI API key in `env.yaml`:
 
 ```yaml
 openai_api_key: your-key-here
@@ -283,7 +295,7 @@ policy_model_name: gpt-4o-mini
 
 ### Test the Agent
 
-With the servers running, test your agent in a new terminal:
+After the servers start, test your agent in a new terminal:
 
 ```bash
 python responses_api_agents/simple_agent/client.py
@@ -293,9 +305,9 @@ The agent should be able to use your `get_weather` tool to answer questions abou
 
 ---
 
-## Step 7: Create Example Data
+## 7. Create Example Data
 
-Your resource server needs example data for testing and validation. Create `resources_servers/my_weather_tool/data/example.jsonl` with 5 example inputs:
+Your resource server needs example data for testing and validation. Create `resources_servers/my_weather_tool/data/example.jsonl` with at least five example inputs:
 
 ```json
 {"input": [{"type": "text", "text": "What's the weather in San Francisco?"}]}
@@ -307,7 +319,7 @@ Your resource server needs example data for testing and validation. Create `reso
 
 ### Generate Example Rollouts
 
-Collect rollouts through your server for the example inputs:
+Collect rollouts by running the agent against your example inputs. This generates interaction traces showing how agents use your tools:
 
 ```bash
 ng_collect_rollouts +agent_name=my_weather_tool_simple_agent \
@@ -318,11 +330,13 @@ ng_collect_rollouts +agent_name=my_weather_tool_simple_agent \
     +num_samples_in_parallel=null
 ```
 
-This creates `example_rollouts.jsonl` showing how agents interact with your server.
+:::{note}
+Ensure your servers are running (from step 6) before collecting rollouts. The command processes each input example, runs it through the agent, and saves the complete interaction including tool calls and verification rewards to `example_rollouts.jsonl`.
+:::
 
 ---
 
-## Step 8: Update Documentation
+## 8. Update Documentation
 
 Update `resources_servers/my_weather_tool/README.md` with licensing and usage information:
 
@@ -337,7 +351,7 @@ This resource server provides a `get_weather` tool that returns weather informat
 
 ## Data
 
-- Example data: 5 synthetic weather queries
+- Example data: Five synthetic weather queries
 
 ## Licensing Information
 
@@ -363,7 +377,7 @@ Before submitting a PR, ensure you have:
 - [ ] **Runnable server**: Can start with `ng_run`
 - [ ] **Unit tests**: At least one test in `tests/test_app.py`
 - [ ] **Configuration**: Valid `configs/*.yaml` with correct `domain` field
-- [ ] **Example data**: `data/example.jsonl` with 5+ examples
+- [ ] **Example data**: `data/example.jsonl` with at least five examples
 - [ ] **Example rollouts**: `data/example_rollouts.jsonl`
 - [ ] **Documentation**: Complete `README.md` with licensing information
 - [ ] **Dependencies**: Properly declared in `requirements.txt`
@@ -393,9 +407,9 @@ async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
 ```
 
 For examples of more complex verification logic, refer to:
-- `resources_servers/example_multi_step/app.py` - Multi-step task verification
-- `resources_servers/math_with_judge/app.py` - LLM-as-judge verification
-- `resources_servers/code_gen/app.py` - Unit test based verification
+- `resources_servers/example_multi_step/app.py` — Multi-step task verification
+- `resources_servers/math_with_judge/app.py` — LLM-as-judge verification
+- `resources_servers/code_gen/app.py` — Unit test based verification
 
 ---
 
@@ -404,8 +418,8 @@ For examples of more complex verification logic, refer to:
 Now that you have a working resource server:
 
 1. **Add training data**: Collect rollouts and prepare datasets for RL training
-2. **Implement complex verification**: Add reward shaping and detailed performance metrics
-3. **Scale up**: Add multiple tools and more sophisticated business logic
+2. **Add complex verification**: Add reward shaping and detailed performance metrics
+3. **Scale up**: Add more tools and more sophisticated business logic
 4. **Integrate with RL**: Use {doc}`rl-training-with-nemo-rl` to train agents on your tasks
 
 ::::{grid} 2
@@ -431,11 +445,11 @@ Train agents using your resource server with NeMo RL.
 
 ### Domain validation error
 
-If you see `"A domain is required for resource servers"`, make sure the `domain` field is set in your config YAML file.
+If you encounter the error `"A domain is required for resource servers"`, ensure the `domain` field is set in your config YAML file.
 
 ### Import errors
 
-Make sure you're running commands from the repository root directory and have installed dependencies:
+Ensure you are running commands from the repository root directory and have installed dependencies:
 
 ```bash
 uv sync
@@ -451,6 +465,7 @@ Check that:
 ### Tests fail
 
 Ensure:
+
 - You are in the correct Python environment
 - All dependencies are installed
 - Test file imports match your actual file structure
@@ -463,7 +478,7 @@ You've learned how to:
 
 ✅ Initialize a resource server with `ng_init_resources_server`  
 ✅ Configure the required `domain` field  
-✅ Implement tools and verification logic  
+✅ Add tools and verification logic  
 ✅ Write and run tests  
 ✅ Run your server with an agent  
 ✅ Create required data artifacts  
