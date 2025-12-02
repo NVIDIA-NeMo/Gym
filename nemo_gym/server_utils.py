@@ -366,12 +366,10 @@ def initialize_ray() -> None:
 
     ray.init(**ray_init_kwargs)
 
-    ray_ctx = ray.get_runtime_context()
     if not ray_head_node_address:
         with open_dict(global_config_dict):
-            global_config_dict["ray_head_node_address"] = ray_ctx.gcs_address
+            global_config_dict["ray_head_node_address"] = ray.get_runtime_context().gcs_address
         print(f"Started Ray cluster at {global_config_dict['ray_head_node_address']}")
-    return
 
 
 class SimpleServer(BaseServer):
