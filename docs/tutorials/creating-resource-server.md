@@ -34,7 +34,7 @@ Each resource server must implement a `verify` function that evaluates the agent
 
 ## Step 1: Initialize the Resource Server
 
-Resource servers live in the `resources_servers/` directory. Let's create a weather server that provides weather information to agents.
+Resource servers live in the `resources_servers/` directory. Create a weather server that provides weather information to agents.
 
 ```bash
 ng_init_resources_server +entrypoint=resources_servers/my_weather_tool
@@ -140,7 +140,7 @@ class MyWeatherResourcesServer(SimpleResourcesServer):
         Tool implementation: Get weather for a city.
         
         In a real implementation, this would call a weather API.
-        For this example, we'll return a simple static response.
+        For this example, we will return a simple static response.
         """
         return GetWeatherResponse(
             city=body.city,
@@ -233,10 +233,10 @@ async def test_verify(server):
         "response": {
             "input": [{"type": "text", "text": "What's the weather?"}],
             "output": [{"type": "text", "text": "It's cold."}]
-        }
+    }
     }
     
-    # In practice, you'd create a proper BaseVerifyRequest
+    # In practice, you would create a proper BaseVerifyRequest
     # This is simplified for demonstration
     # response = await server.verify(verify_request)
     # assert response.reward >= 0.0
@@ -392,7 +392,7 @@ async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
     return BaseVerifyResponse(**body.model_dump(), reward=reward)
 ```
 
-For examples of more complex verification logic, see:
+For examples of more complex verification logic, refer to:
 - `resources_servers/example_multi_step/app.py` - Multi-step task verification
 - `resources_servers/math_with_judge/app.py` - LLM-as-judge verification
 - `resources_servers/code_gen/app.py` - Unit test based verification
@@ -441,7 +441,7 @@ Make sure you're running commands from the repository root directory and have in
 uv sync
 ```
 
-### Server won't start
+### Server does not start
 
 Check that:
 - Port is not already in use
@@ -451,7 +451,7 @@ Check that:
 ### Tests fail
 
 Ensure:
-- You're in the correct Python environment
+- You are in the correct Python environment
 - All dependencies are installed
 - Test file imports match your actual file structure
 
