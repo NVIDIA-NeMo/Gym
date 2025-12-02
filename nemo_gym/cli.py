@@ -72,21 +72,14 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
 
     if pyproject_toml:
         install_cmd = f"""uv pip install '-e .' {" ".join(head_server_deps)}"""
-
-        cmd = f"""cd {dir_path} \\
-        && {uv_venv_cmd} \\
-        && source .venv/bin/activate \\
-        && {install_cmd} \\
-        """
-
     else:
         install_cmd = f"""uv pip install -r requirements.txt {" ".join(head_server_deps)}"""
 
-        cmd = f"""cd {dir_path} \\
-        && {uv_venv_cmd} \\
-        && source .venv/bin/activate \\
-        && {install_cmd} \\
-        """
+    cmd = f"""cd {dir_path} \\
+    && {uv_venv_cmd} \\
+    && source .venv/bin/activate \\
+    && {install_cmd} \\
+    """
 
     return cmd
 
