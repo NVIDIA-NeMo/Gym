@@ -13,23 +13,6 @@ ng_test +entrypoint=responses_api_agents/simple_agent
 Tests are strongly encouraged and you must have at least one test for every server you make. Test coverage is not explicitly required which means that **YOU ARE RESPONSIBLE FOR YOUR OWN SERVER CORRECTNESS AND FUNCTION**.
 
 
-# How To: Add a resource server
-
-:::{tip}
-For a comprehensive tutorial on creating resource servers, see the {doc}`tutorials/creating-resource-server` tutorial. This section provides quick reference information.
-:::
-
-Resource servers are used to abstract out any business logic of tool implementations and verifiers. Each resource server must implement a `verify` function.
-
-For detailed step-by-step instructions, see the {doc}`tutorials/creating-resource-server` tutorial which covers:
-- Initializing a resource server
-- Implementing tools and verification logic
-- Configuring the domain field
-- Writing tests
-- Running with agents
-- Data requirements and artifacts
-
-
 # How To: Upload and download a dataset from Gitlab
 We want to track and version golden versions of our datasets so that we always know what data is being trained on and that the data we are training on is high quality. Major versions of all training datasets should be tracked in NeMo Gym. For example, the HelpSteer dataset https://huggingface.co/datasets/nvidia/HelpSteer3 has 3 major versions 1, 2, and 3. Each of these major versions would be uploaded and tracked in NeMo Gym.
 
