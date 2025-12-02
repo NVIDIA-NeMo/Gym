@@ -28,7 +28,7 @@ from signal import SIGINT
 from subprocess import Popen
 from threading import Thread
 from time import sleep
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import psutil
 import rich
@@ -120,7 +120,7 @@ class ServerInstanceDisplayConfig(BaseModel):
 class RunHelper:  # pragma: no cover
     _head_server: uvicorn.Server
     _head_server_thread: Thread
-    _head_ray_gpu_helper: "ActorProxy"
+    _head_ray_gpu_helper: Any
 
     _processes: Dict[str, Popen]
     _server_instance_display_configs: List[ServerInstanceDisplayConfig]
