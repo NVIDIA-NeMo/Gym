@@ -180,7 +180,16 @@ class DownloadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
     repo_id: str
 
 
+class PrepareDataConfig(BaseNeMoGymCLIConfig):
+    dataset_download_backend: Literal["gitlab", "huggingface"] = "gitlab"
+
+
 DatasetType = Union[Literal["train"], Literal["validation"], Literal["example"]]
+
+
+class HfDatasetIdentifier(BaseModel):
+    repo_id: str
+    artifact_fpath: str
 
 
 class DatasetConfig(BaseModel):
@@ -190,6 +199,7 @@ class DatasetConfig(BaseModel):
 
     num_repeats: int = Field(default=1, ge=1)
     gitlab_identifier: Optional[JsonlDatasetGitlabIdentifer] = None
+    hf_identifier: Optional[HfDatasetIdentifier] = None
     license: Optional[
         Union[
             Literal["Apache 2.0"],
@@ -204,7 +214,6 @@ class DatasetConfig(BaseModel):
     @model_validator(mode="after")
     def check_train_validation_sets(self) -> "DatasetConfig":
         if self.type in ["train", "validation"]:
-            assert self.gitlab_identifier is not None, f"A Gitlab path is required for {self.name}"
             assert self.license is not None, f"A license is required for {self.name}"
 
         return self

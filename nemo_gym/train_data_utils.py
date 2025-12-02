@@ -34,6 +34,7 @@ from nemo_gym.config_types import (
     DatasetConfig,
     DatasetType,
     DownloadJsonlDatasetGitlabConfig,
+    DownloadJsonlDatasetHuggingFaceConfig,
     ServerInstanceConfig,
 )
 from nemo_gym.gitlab_utils import download_jsonl_dataset
@@ -42,6 +43,7 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
+from nemo_gym.hf_utils import download_jsonl_dataset as download_jsonl_dataset_from_hf
 
 
 class TrainDataProcessorConfig(BaseNeMoGymCLIConfig):
@@ -437,16 +439,44 @@ class TrainDataProcessor(BaseModel):
                 "Missing local datasets. You must provide local datasets since download is disabled. Run with `+should_download=true` to enable downloading."
             )
 
+        backend = config.dataset_download_backend
+        is_valid, error_msg = validate_backend_credentials(backend)
+        global_config = get_global_config_dict()
+        if not is_valid:
+            print(f"Cannot download datasets: {error_msg}")
+            return
+
         for (
             server_name,
             datasets,
         ) in local_datasets_not_found.items():  # pragma: no cover
             for d in datasets:
-                download_config = DownloadJsonlDatasetGitlabConfig.model_validate(
-                    d.gitlab_identifier.model_dump() | {"output_fpath": d.jsonl_fpath}
-                )
-                print(f"Downloading dataset `{d.name}` from `{server_name}` using {download_config}")
-                download_jsonl_dataset(download_config)
+                try:
+                    if backend == "gitlab":
+                        if d.gitlab_identifier is None:
+                            print(f"⚠️  Dataset `{d.name}` missing gitlab_identifier for GitLab backend")
+                            continue
+
+                        download_config = DownloadJsonlDatasetGitlabConfig.model_validate(
+                            d.gitlab_identifier.model_dump() | {"output_fpath": d.jsonl_fpath}
+                        )
+                        print(f"Downloading dataset `{d.name}` from `{server_name}` using {download_config}")
+                        download_jsonl_dataset(download_config)
+
+                    elif backend == "huggingface":
+                        if d.hf_identifier is None:
+                            print(f"⚠️  Dataset `{d.name}` missing hf_identifier for HuggingFace backend")
+                            continue
+
+                        download_config = DownloadJsonlDatasetHuggingFaceConfig.model_validate(
+                            d.hf_identifier.model_dump()
+                            | {"output_fpath": d.jsonl_fpath, "hf_token": global_config["hf_token"]}
+                        )
+                        print(f"Downloading dataset `{d.name}` from `{server_name}` using {download_config}")
+                        download_jsonl_dataset_from_hf(download_config)
+
+                except Exception as e:
+                    print(f"Failed to download dataset `{d.name}` from {backend}: {e}")
 
     ########################################
     # Validate samples and aggregate metrics
@@ -713,6 +743,36 @@ This could be due to a change in how metrics are calculated, leading to outdated
 
         final_fpaths_str = "\n- ".join([""] + [f"{type}: {fpath}" for type, fpath in final_fpaths.items()])
         print(f"View your final data!{final_fpaths_str}")
+
+
+def validate_backend_credentials(backend: str) -> tuple[bool, str]:
+    """Check if required env variables are present for the chosen backend"""
+    global_config = get_global_config_dict()
+
+    if backend == "gitlab":
+        required = ["mlflow_tracking_uri", "mlflow_tracking_token"]
+        missing = [k for k in required if k not in global_config or not global_config[k]]
+        if missing:
+            return False, (
+                f"GitLab backend selected but missing credentials: {missing}\n"
+                f"Add to env.yaml:\n"
+                f"  mlflow_tracking_uri: <your_gitlab_uri>\n"
+                f"  mlflow_tracking_token: <your_gitlab_token>"
+            )
+
+    elif backend == "huggingface":
+        required = ["hf_token", "hf_organization", "hf_collection_slug"]
+        missing = [k for k in required if k not in global_config or not global_config[k]]
+        if missing:
+            return False, (
+                f"HuggingFace backend selected but missing credentials: {missing}\n"
+                f"Add to env.yaml:\n"
+                f"  hf_token: <your_hf_token>\n"
+                f"  hf_organization: <your_org>\n"
+                f"  hf_collection_slug: <your_collection_slug>"
+            )
+
+    return True, ""
 
 
 def prepare_data():  # pragma: no cover
