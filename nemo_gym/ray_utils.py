@@ -162,7 +162,7 @@ def spinup_single_ray_gpu_node_worker(
     helper = get_global_ray_gpu_scheduling_helper()
     node_id = ray.get(helper.alloc_gpu_node.remote(num_gpus))
     if node_id is None:
-        raise RuntimeError(f"Cannot find {num_gpus} available Ray GPU nodes for spinning up {worker_cls}")
+        raise RuntimeError(f"Cannot find an available Ray node with {num_gpus} GPUs to spin up {worker_cls}")
 
     worker_options = {}
     worker_options["num_gpus"] = num_gpus
