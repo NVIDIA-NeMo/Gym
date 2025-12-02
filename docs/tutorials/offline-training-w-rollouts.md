@@ -4,11 +4,11 @@
 This tutorial is **experimental** and may contain bugs. Proceed with caution.
 :::
 
-**Goal**: Transform your generated rollouts into high-quality training data for supervised fine-tuning (SFT) and direct preference optimization (DPO).
+**Goal**: Transform your generated rollouts into high-quality training data for {term}`supervised fine-tuning (SFT) <SFT (Supervised Fine-Tuning)>` and {term}`direct preference optimization (DPO) <DPO (Direct Preference Optimization)>`.
 
 ## Why Offline Training?
 
-**Offline training** uses pre-collected rollouts to improve AI models without real-time exploration. This approach is ideal when:
+**{term}`Offline training <Online vs Offline Training>`** uses pre-collected rollouts to improve AI models without real-time exploration. This approach is ideal when:
 
 - You have a working agent that demonstrates good behaviors
 - You want reproducible results - same data, consistent training outcomes

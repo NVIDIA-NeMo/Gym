@@ -1,6 +1,6 @@
 # Rollout Collection
 
-A rollout is complete record of a task instance execution that captures:
+A {term}`rollout <Rollout / Trajectory>` is complete record of a task instance execution that captures:
 - What the model was asked to do (input)
 - How the model reasoned (internal processing)  
 - What tools were used (tool calls and tool responses)
@@ -91,7 +91,7 @@ Then visit http://127.0.0.1:7860
 **What you'll see**: An interactive viewer showing reasoning, tool calls, and verification scores for each rollout.
 
 **Key components**:
-- **reward**: Verification score from the resource server. Required on output
+- **{term}`reward <Reward / Reward Signal>`**: Verification score from the resource server. Required on output
 - **response**: Complete output conversation including tool calls and responses
 - **metadata** (`parsed_synonym_values`, `set_overlap`, etc): Additional metrics for analysis
 

@@ -33,10 +33,10 @@ Resource servers provide tool implementations that can be invoked through tool c
 
 **What Resources Provide**
 
-Each resource server combines both tools and verification logic:
+Each resource server combines both tools and {term}`verification <Verifier>` logic:
 
 - **Tools**: Functions agents can call during task execution
-- **Verification logic**: Scoring logic that evaluates performance (returns reward signals for training)
+- **Verification logic**: Scoring logic that evaluates performance (returns {term}`reward signals <Reward / Reward Signal>` for training)
 
 **Example Resource Servers**
 
@@ -76,7 +76,7 @@ Each example shows what **tools** the agent can use and what **verification logi
 
 :::{tab-item} Agents
 
-Responses API Agent servers orchestrate the interaction between models and resources.
+Responses API Agent servers {term}`orchestrate <Orchestration>` the interaction between models and resources.
 
 - Route requests to the right model
 - Provide tools to the model
