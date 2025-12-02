@@ -10,51 +10,71 @@ A rollout is complete record of a task instance execution that captures:
 
 ## Generating Your First Rollouts
 
-Let's generate rollouts using the **Example Multi Step** resource server, which tests reading comprehension across long documents.
+Now that you have servers running from the previous tutorial, let's generate rollouts using the **Simple Weather** resource server you already set up.
 
 ::::{tab-set}
 
 :::{tab-item} 1. Inspect data
 ```bash
-head -1 resources_servers/example_multi_step/data/example.jsonl | python -m json.tool
+head -1 resources_servers/example_simple_weather/data/example.jsonl | python -m json.tool
 ```
 
-**What this dataset contains**: Complex reading comprehension tasks where agents must find specific information ("needles") within long documents ("haystacks").
+**What this dataset contains**: Simple weather queries where agents must use the `get_weather` tool to provide weather information.
 
 Each line in the input JSONL file follows the schema below.
 
 **Key components**:
 - **responses_create_params**: Original task and available tools. Required
-- **metadata** (e.g. `expected_synonyms`, `minefield_label`, etc): Additional metadata used by the resources server to either setup or perform verification
+- **input**: The conversation messages including system prompt and user query
+- **tools**: Available tools the agent can use (in this case, `get_weather`)
 
 ```json
 {
     "responses_create_params": {
         "input": [
             {
-                "role": "user",
-                "content": "What factors contribute to a region experiencing extremely high temperatures, and how do these factors interact?"
+                "content": "what's it like in sf?",
+                "role": "user"
+            }
+        ],
+        "tools": [
+            {
+                "name": "get_weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": {
+                            "type": "string",
+                            "description": ""
+                        }
+                    },
+                    "required": [
+                        "city"
+                    ],
+                    "additionalProperties": false
+                },
+                "strict": true,
+                "type": "function",
+                "description": ""
             }
         ]
-    },
-    "expected_synonyms": [
-        "Blazing",
-        "Warm"
-    ],
-    "minefield_label": "Hot"
+    }
 }
 ```
 
 :::
-:::{tab-item} 2. Start servers
-Start the example_multi_step agent server
+:::{tab-item} 2. Verify servers are running
+
+If you still have servers running from the [Setup and Installation](setup-installation.md) tutorial, you're ready to proceed to the next step.
+
+If not, start them again:
 ```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/example_multi_step/configs/example_multi_step.yaml"
+config_paths="resources_servers/example_simple_weather/configs/simple_weather.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml"
 ng_run "+config_paths=[${config_paths}]"
 ```
 
-**✅ Success Check**: You should see 3 servers running including the `example_multi_step_simple_agent`.
+**✅ Success Check**: You should see servers running including the `simple_weather_simple_agent`.
 
 :::
 
@@ -62,20 +82,18 @@ ng_run "+config_paths=[${config_paths}]"
 
 In a separate terminal, run:
 ```bash
-ng_collect_rollouts +agent_name=example_multi_step_simple_agent \
-    +input_jsonl_fpath=resources_servers/example_multi_step/data/example.jsonl \
-    +output_jsonl_fpath=results/example_multi_step_rollouts.jsonl \
+ng_collect_rollouts +agent_name=simple_weather_simple_agent \
+    +input_jsonl_fpath=resources_servers/example_simple_weather/data/example.jsonl \
+    +output_jsonl_fpath=results/simple_weather_rollouts.jsonl \
     +limit=5 \
     +num_repeats=2 \
-    +num_samples_in_parallel=3 \
-    +responses_create_params.max_output_tokens=8192
+    +num_samples_in_parallel=3
 ```
 
 **What's happening**:
 - `limit=5`: Process only the first 5 examples (for quick testing)
 - `num_repeats=2`: Generate 2 rollouts per example (10 total rollouts)
 - `num_samples_in_parallel=3`: Process 3 requests simultaneously
-- `max_output_tokens=8192`: Allow longer responses for complex reasoning
 
 :::
 
@@ -83,48 +101,88 @@ ng_collect_rollouts +agent_name=example_multi_step_simple_agent \
 
 Launch the rollout viewer
 ```bash
-ng_viewer +jsonl_fpath=results/example_multi_step_rollouts.jsonl
+ng_viewer +jsonl_fpath=results/simple_weather_rollouts.jsonl
 ```
 
 Then visit http://127.0.0.1:7860
 
-**What you'll see**: An interactive viewer showing reasoning, tool calls, and verification scores for each rollout.
+**What you'll see**: An interactive viewer showing tool calls and verification scores for each rollout.
 
 **Key components**:
 - **reward**: Verification score from the resource server. Required on output
 - **response**: Complete output conversation including tool calls and responses
-- **metadata** (`parsed_synonym_values`, `set_overlap`, etc): Additional metrics for analysis
 
 ```json
 {
     "responses_create_params": {
         "input": [
             {
-                "content": "What factors contribute to a region experiencing extremely high temperatures, and how do these factors interact?",
+                "content": "You are a helpful personal assistant that aims to be helpful and reduce any pain points the user has.",
+                "role": "developer",
+                "type": "message"
+            },
+            {
+                "content": "what's it like in sf?",
                 "role": "user",
                 "type": "message"
             }
-        ]
+        ],
     },
     "response": {
         "output": [
             {
-                "arguments": "{\"synonym\":\"Blazing\"}",
-                "name": "get_synonym_value",
+                "arguments": "{\"city\":\"San Francisco\"}",
+                "call_id": "call_zuJigUcshS8H02NTWrsI4fcH",
+                "name": "get_weather",
                 "type": "function_call",
+                "id": "fc_026df8ad0671316700692f58eb22cc8193bdd92b0524f0c66c",
+                "status": "completed"
             },
-            "..."
-        ]
+            {
+                "call_id": "call_zuJigUcshS8H02NTWrsI4fcH",
+                "output": "{\"city\":\"San Francisco\",\"weather_description\":\"The weather in San Francisco is cold.\"}",
+                "type": "function_call_output",
+                "id": null,
+                "status": null
+            },
+            {
+                "id": "msg_026df8ad0671316700692f58edf44881938cb000ea88577cae",
+                "content": [
+                    {
+                        "annotations": [],
+                        "text": "The weather in San Francisco is currently cold. If you need more specific details or a forecast, just let me know!",
+                        "type": "output_text",
+                        "logprobs": []
+                    }
+                ],
+                "role": "assistant",
+                "status": "completed",
+                "type": "message"
+            }
+        ],
     },
-    "reward": 1.0,
-    "parsed_synonym_values": [
-        711,
-        407
+    "tools": [
+        {
+            "name": "get_weather",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {
+                        "type": "string",
+                        "description": ""
+                    }
+                },
+                "required": [
+                    "city"
+                ],
+                "additionalProperties": false
+            },
+            "strict": true,
+            "type": "function",
+            "description": null
+        }
     ],
-    "accuracy": true,
-    "set_overlap": 1.0,
-    "original_term_minefield_hit": false,
-    "order_instruction_following_failure": false
+    "reward": 1.0
 }
 ```
 
