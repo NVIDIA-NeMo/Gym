@@ -181,15 +181,10 @@ class DownloadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
 
 
 class PrepareDataConfig(BaseNeMoGymCLIConfig):
-    dataset_download_backend: Literal["gitlab", "huggingface"] = "gitlab"
+    data_source: Literal["gitlab", "huggingface"] = "gitlab"
 
 
 DatasetType = Union[Literal["train"], Literal["validation"], Literal["example"]]
-
-
-class HfDatasetIdentifier(BaseModel):
-    repo_id: str
-    artifact_fpath: str
 
 
 class DatasetConfig(BaseModel):
@@ -199,7 +194,7 @@ class DatasetConfig(BaseModel):
 
     num_repeats: int = Field(default=1, ge=1)
     gitlab_identifier: Optional[JsonlDatasetGitlabIdentifer] = None
-    hf_identifier: Optional[HfDatasetIdentifier] = None
+    dataset_url: Optional[str] = None  # In almost all cases, would be a huggingface dataset url.
     license: Optional[
         Union[
             Literal["Apache 2.0"],
