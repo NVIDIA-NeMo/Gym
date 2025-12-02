@@ -26,12 +26,6 @@ Each explainer below covers one foundational idea and links to deeper material.
 Understand how Models, Resources, and Agents remain decoupled yet coordinated as independent HTTP services, including which endpoints each abstraction exposes.
 :::
 
-:::{grid-item-card} {octicon}`gear;1.5em;sd-mr-1` Configuration System
-:link: configuration-management
-:link-type: ref
-Learn how NeMo Gym's three-tier configuration system (YAML → env.yaml → CLI) enables secure secrets management and flexible multi-environment deployments.
-:::
-
 :::{grid-item-card} {octicon}`check-circle;1.5em;sd-mr-1` Task Verification
 :link: task-verification
 :link-type: ref
@@ -53,7 +47,6 @@ Essential vocabulary for agent training, RL workflows, and NeMo Gym. This glossa
 :maxdepth: 1
 
 Core Abstractions <core-abstractions>
-Configuration System <configuration-system>
 Task Verification <task-verification>
 Key Terminology <key-terminology>
 ```
