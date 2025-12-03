@@ -4,6 +4,10 @@
 
 These errors appear when running `ng_run` or `ng_collect_rollouts`. NeMo Gym validates configuration at startup before launching servers.
 
+:::{seealso}
+{doc}`/reference/configuration` for complete configuration syntax and options.
+:::
+
 ---
 
 ## Startup Errors
@@ -78,7 +82,7 @@ Configuration Warnings: Almost-Servers Detected
 - Invalid `license` value in dataset configs
 - Missing required fields for the server type
 
-**Fix**: Check the validation error path (e.g., `resources_servers -> example_server -> domain`) and update the field with a valid value.
+**Fix**: Check the validation error path (for example, `resources_servers -> example_server -> domain`) and update the field with a valid value. Refer to {ref}`configuration-reference` for valid field values.
 
 #### Bypass Strict Validation
 

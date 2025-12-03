@@ -190,3 +190,9 @@ datasets:
 - `example`: For testing and development
 - `train`: Requires `license` and GitLab identifier
 - `validation`: Requires `license` and GitLab identifier
+
+---
+
+:::{seealso}
+{doc}`/troubleshooting/configuration` for common configuration errors and solutions.
+:::

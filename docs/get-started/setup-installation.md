@@ -123,6 +123,7 @@ Replace `sk-your-actual-openai-api-key-here` with your real OpenAI API key. This
 - The model must support function calling (most GPT-4 models do)
 - Refer to [OpenAI's models documentation](https://platform.openai.com/docs/models) 🔗 for available models
 
+Refer to {doc}`/reference/configuration` for additional `env.yaml` options.
 :::
 
 :::{dropdown} Optional: Validate your API key before proceeding
