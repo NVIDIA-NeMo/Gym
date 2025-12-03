@@ -13,41 +13,6 @@ ng_test +entrypoint=responses_api_agents/simple_agent
 Tests are strongly encouraged and you must have at least one test for every server you make. Test coverage is not explicitly required which means that **YOU ARE RESPONSIBLE FOR YOUR OWN SERVER CORRECTNESS AND FUNCTION**.
 
 
-# How To: Upload and download a dataset from Gitlab
-We want to track and version golden versions of our datasets so that we always know what data is being trained on and that the data we are training on is high quality. Major versions of all training datasets should be tracked in NeMo Gym. For example, the HelpSteer dataset https://huggingface.co/datasets/nvidia/HelpSteer3 has 3 major versions 1, 2, and 3. Each of these major versions would be uploaded and tracked in NeMo Gym.
-
-Right now, NeMo Gym is hosted in NVIDIA Gitlab and we use Gitlab's model artifact registry to store datasets. https://gitlab-master.nvidia.com/bxyu/nemo-gym/-/ml/models?first=30&orderBy=created_at&sort=desc#/
-
-Gitlab uses MLFlow to interface with its model artifact registry. You will need:
-1. The NeMo Gym repository Gitlab URI.
-   1. Go to the Model Registry page, click the "..." next to "Create model", then click "Using the MLFlow client".
-   2. The URI will look something like `https://gitlab-master.nvidia.com/api/v4/projects/191584/ml/mlflow/`
-2. Your Gitlab token. Your Gitlab token must have the `api` and `read_api` scopes.
-
-Provide your MLFlow credentials in `env.yaml`.
-```yaml
-mlflow_tracking_uri: {your NeMo Gym Gitlab URI}
-mlflow_tracking_token: {your Gitlab PAT}
-```
-
-Upload a dataset to Gitlab model artifact registry. Dataset name will be your model artifact name. Version must be a str in the format `x.x.x`.
-```bash
-ng_upload_dataset_to_gitlab \
-    +dataset_name=example_multi_step \
-    +version=0.0.1 \
-    +input_jsonl_fpath=data/example_multi_step_benchmark.jsonl
-```
-
-Download a dataset from Gitlab model artifact registry.
-```bash
-ng_download_dataset_from_gitlab \
-    +dataset_name=example_multi_step \
-    +version=0.0.1 \
-    +artifact_fpath=example_multi_step_benchmark.jsonl \
-    +output_fpath=data/example_multi_step_benchmark.jsonl
-```
-
-
 # How To: Upload and download a dataset from HuggingFace
 The huggingface client requires that your credentials are in `env.yaml`, along with some other pertinent details needed to upload to the designated place. 
 ```yaml
