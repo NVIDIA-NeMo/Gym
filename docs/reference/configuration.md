@@ -4,6 +4,10 @@
 
 Complete syntax and options for NeMo Gym configuration.
 
+:::{seealso}
+{doc}`/about/concepts/configuration` for understanding the three-level config pattern.
+:::
+
 ## File Locations
 
 | File | Location | Version Control |

@@ -38,6 +38,12 @@ Explore how resource servers score agent outputs with `verify()` implementations
 Essential vocabulary for agent training, RL workflows, and NeMo Gym. This glossary defines terms you'll encounter throughout the tutorials and documentation.
 :::
 
+:::{grid-item-card} {octicon}`gear;1.5em;sd-mr-1` Configuration System
+:link: configuration-concepts
+:link-type: ref
+Understand the three-level config pattern and why server IDs and implementations are independent choices.
+:::
+
 ::::
 
 ---
@@ -49,4 +55,5 @@ Essential vocabulary for agent training, RL workflows, and NeMo Gym. This glossa
 Core Abstractions <core-abstractions>
 Task Verification <task-verification>
 Key Terminology <key-terminology>
+Configuration System <configuration>
 ```
