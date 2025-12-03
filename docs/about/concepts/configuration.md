@@ -2,11 +2,11 @@
 
 # Configuration System
 
-NeMo Gym uses YAML configuration files to define your [Model, Resources, and Agent servers](./core-abstractions). Each server gets its own configuration block, giving you modular control over your entire training environment.
+NeMo Gym uses YAML configuration files to define [Model, Resources, and Agent servers](./core-abstractions). Each server gets its own configuration block, providing modular control over the entire training environment.
 
 ## How Servers Connect
 
-A training environment typically includes all three server types working together. The Agent server config specifies which Model and Resources servers to use by referencing their server IDs. This wiring is what ties your training environment together — the Agent knows which Model to call and which Resources to use.
+A training environment typically includes all three server types working together. The Agent server config specifies which Model and Resources servers to use by referencing their server IDs. This wiring is what ties each training environment together — the Agent knows which Model to call and which Resources to use.
 
 ## Config File Locations
 
@@ -32,20 +32,13 @@ responses_api_agents/
 ## Server Block Structure
 
 Each config file defines a server using this structure:
-
 ```yaml
-server_id:              # Your unique name for this server
-  server_type:          # Model, resources, or agent
-    implementation:     # Which implementation directory to use
-      entrypoint:       # The code file to run
+server_id:                    # Your unique name for this server
+  server_type:                # responses_api_models | resources_servers | responses_api_agents
+    implementation:           # Directory name inside the server type directory
+      entrypoint: app.py      # Python file to run
+      # ... additional fields vary by server type
 ```
-
-| Field | Permitted Values |
-|-------|------------------|
-| **Server ID** | Any name you choose |
-| **Server Type** | `responses_api_models`, `resources_servers`, or `responses_api_agents` |
-| **Implementation** | Must match a directory name inside the specified server type directory |
-| **Entrypoint** | A Python file in the implementation directory (e.g., `app.py`) |
 
 Different server types have additional required fields (e.g., `domain` for resources servers, `resources_server` and `model_server` for agents). See {doc}`/reference/configuration` for complete field specifications.
 
@@ -65,20 +58,10 @@ These serve different purposes:
 
 Examples often use matching names for simplicity, but the two values are independent choices.
 
-## Policy Model Variables
-
-NeMo Gym provides three standard placeholders for "the model being trained":
-
-- `policy_base_url` - Model API endpoint
-- `policy_api_key` - Authentication key
-- `policy_model_name` - Model identifier
-
-These let you reference the training model consistently across configs without hardcoding values. Define them once in `env.yaml` at the repository root, then use `${variable_name}` syntax anywhere you need them.
-
 ---
 
 :::{seealso}
 - {doc}`/reference/configuration` for complete syntax and field specifications
-- {doc}`/troubleshooting/configuration` for common errors
+- {doc}`/troubleshooting/configuration` for troubleshooting configuration related errors
 :::
 
