@@ -472,7 +472,7 @@ class TrainDataProcessor(BaseModel):
 
                     elif backend == "huggingface":
                         if d.huggingface_identifier is None:
-                            print(f"Dataset `{d.name}` missing dataset_url for HuggingFace backend")
+                            print(f"Dataset `{d.name}` missing huggingface_identifier for HuggingFace backend")
                             continue
 
                         download_config = DownloadJsonlDatasetHuggingFaceConfig.model_validate(

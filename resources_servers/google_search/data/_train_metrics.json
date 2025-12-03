@@ -8,6 +8,7 @@
         "version": "0.0.1",
         "artifact_fpath": "MCQA_syn_gpqa_1_2_difficulty_filtered_responses_api.jsonl"
     },
+    "dataset_url": "https://huggingface.co/datasets/nvidia/Nemotron-RL-knowledge-web_search-mcqa",
     "license": "Apache 2.0",
     "Number of examples": 2907,
     "Number of tools": {

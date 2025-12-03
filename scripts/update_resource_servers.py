@@ -54,12 +54,12 @@ class AgentDatasetsMetadata:
 
     license: str | None = None
     types: list[str] = field(default_factory=list)
-    dataset_url: Optional[str] = None
+    huggingface_repo_id: Optional[str] = None
 
     def to_dict(self) -> dict[str, str | list[str] | None]:  # pragma: no cover
         """Convert to dict for backward compatibility."""
         return {
-            "dataset_url": self.dataset_url,
+            "huggingface_repo_id": self.huggingface_repo_id,
             "license": self.license,
             "types": self.types,
         }
@@ -69,7 +69,7 @@ class AgentDatasetsMetadata:
 class ConfigMetadata:
     """Combined metadata from YAML configuration file."""
 
-    dataset_url: Optional[str] = None
+    huggingface_repo_id: Optional[str] = None
     domain: Optional[str] = None
     description: Optional[str] = None
     verified: bool = False
@@ -89,7 +89,7 @@ class ConfigMetadata:
             verified=resource.verified,
             verified_url=resource.verified_url,
             value=resource.value,
-            dataset_url=agent.dataset_url,
+            huggingface_repo_id=agent.huggingface_repo_id,
             license=agent.license,
             types=agent.types,
         )
@@ -108,8 +108,8 @@ class ServerInfo:
     yaml_file: Path
 
     @property
-    def dataset_url(self) -> str | None:  # pragma: no cover
-        return self.config_metadata.dataset_url
+    def huggingface_repo_id(self) -> str | None:  # pragma: no cover
+        return self.config_metadata.huggingface_repo_id
 
     @property
     def domain(self) -> str | None:  # pragma: no cover
@@ -154,10 +154,12 @@ class ServerInfo:
         return "✓" if "validation" in set(self.config_metadata.types) else "-"
 
     def get_dataset_link(self) -> str:  # pragma: no cover
-        if not self.config_metadata.dataset_url:
+        if not self.config_metadata.huggingface_repo_id:
             return "-"
-        dataset_name = self.config_metadata.dataset_url.split("/")[-1]
-        return f"<a href='{self.config_metadata.dataset_url}'>{dataset_name}</a>"
+        repo_id = self.config_metadata.huggingface_repo_id
+        dataset_name = repo_id.split("/")[-1]
+        dataset_url = f"https://huggingface.co/datasets/{repo_id}"
+        return f"<a href='{dataset_url}'>{dataset_name}</a>"
 
     def get_config_link(self, use_filename: bool = True) -> str:  # pragma: no cover
         return f"<a href='{self.config_path}'>{self.config_filename if use_filename else 'config'}</a>"
@@ -170,7 +172,6 @@ def visit_resource_server(data: dict, level: int = 1) -> ResourceServerMetadata:
     """Extract resource server metadata from YAML data."""
     resource = ResourceServerMetadata()
     if level == 4:
-        resource.dataset_url = data.get("dataset_url")
         resource.domain = data.get("domain")
         resource.description = data.get("description")
         resource.verified = data.get("verified", False)
@@ -201,7 +202,9 @@ def visit_agent_datasets(data: dict) -> AgentDatasetsMetadata:  # pragma: no cov
                                     agent.types.append(entry.get("type"))
                                     if entry.get("type") == "train":
                                         agent.license = entry.get("license")
-                                        agent.dataset_url = entry.get("dataset_url")
+                                        hf_id = entry.get("huggingface_identifier")
+                                        if hf_id and isinstance(hf_id, dict):
+                                            agent.huggingface_repo_id = hf_id.get("repo_id")
     return agent
 
 
@@ -223,7 +226,9 @@ def extract_config_metadata(yaml_path: Path) -> ConfigMetadata:  # pragma: no co
                         - name: train
                           type: {example_type_1}
                           license: {example_license_1}
-                          dataset_url: {example_dataset_url}
+                          huggingface_identifier:
+                            repo_id: {example_repo_id_1}
+                            artifact_fpath: {example_artifact_fpath_1}  # optional
                         - name: validation
                           type: {example_type_2}
                           license: {example_license_2}
@@ -260,7 +265,7 @@ def get_example_and_training_server_info() -> tuple[list[ServerInfo], list[Serve
             server_name = subdir.name
             is_example_only = server_name.startswith("example_")
 
-            if not is_example_only and not yaml_data.dataset_url:
+            if not is_example_only and not yaml_data.huggingface_repo_id:
                 continue
 
             display_name = (
