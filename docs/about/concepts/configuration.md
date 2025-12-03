@@ -21,25 +21,25 @@ server_id:              # What YOU call it (your choice)
 |-------|-------------|------------|
 | **Server ID** | ✅ Yes - name it anything | Nothing - it's your identifier |
 | **Server Type** | ❌ Pick from 3 options | `responses_api_models`, `resources_servers`, or `responses_api_agents` |
-| **Implementation** | ❌ Pick existing impl | A folder inside that server type |
+| **Implementation** | ❌ Pick existing implementation | A folder inside that server type |
 
-## Why This Matters
+### Understanding the Naming Pattern
 
-A common source of confusion:
+In many examples, you'll see the same name appear twice:
 
 ```yaml
 example_simple_weather:        # ← Server ID
   resources_servers:
-    example_simple_weather:    # ← Implementation (same name, different purpose!)
+    example_simple_weather:    # ← Implementation
 ```
 
-These look like duplicates, but they're not:
+These serve different purposes:
 
-- **First** `example_simple_weather`: Your chosen name for this server instance. Used in API requests and when other servers reference it. You could call it `my_weather` or `weather_prod` - it's arbitrary.
+- **Server ID** (`example_simple_weather` on line 1): Your chosen identifier for this server instance. Used in API requests and when other servers reference it. You could name it `my_weather` or `weather_prod` instead.
 
-- **Second** `example_simple_weather`: Must match the folder `resources_servers/example_simple_weather/`. This tells NeMo Gym which code to run.
+- **Implementation** (`example_simple_weather` on line 3): Must match the folder `resources_servers/example_simple_weather/`. This tells NeMo Gym which code to run.
 
-Many examples use the same name for both (because why not?), but this obscures that they're independent choices.
+Examples often use matching names for simplicity, but the two values are independent choices.
 
 ## Policy Model Variables
 
