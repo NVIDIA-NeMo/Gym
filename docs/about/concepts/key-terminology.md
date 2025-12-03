@@ -62,6 +62,9 @@ Reward / Reward Signal
 SFT (Supervised Fine-Tuning)
     Training approach using examples of good agent behavior. Shows successful rollouts as training data.
 
+GRPO (Group Relative Policy Optimization)
+    Reinforcement learning algorithm that optimizes policies by comparing groups of rollouts relative to each other. Used for online RL training with language models.
+
 DPO (Direct Preference Optimization)
     Training approach using pairs of rollouts where one is preferred over another. Teaches better vs worse responses.
 

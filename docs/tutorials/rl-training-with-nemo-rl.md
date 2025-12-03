@@ -8,7 +8,68 @@ This tutorial is **experimental** and may contain bugs. Proceed with caution.
 
 **Goal**: Train a model with NeMo RL. Learn how to set up NeMo Gym + NeMo RL training environment, run tests, prepare data, and launch single and multi-node training runs!
 
-Multinode Slurm script and run command are at the bottom of this document. Complete the single-node setup first before proceeding to multi-node training. Throughout this tutorial, you may see mentions of "Penguin", which refers to Gym's codename before it was fully open-sourced.
+## Overview
+
+In this tutorial, you will train a language model using {term}`reinforcement learning <RL (Reinforcement Learning)>` with NeMo RL and NeMo Gym. Specifically, you will:
+
+- **Model**: Train the **Qwen 3 4B Instruct** {term}`policy model`, which is the smallest model that provides meaningful experimental signal for this task
+- **Dataset**: Use the **DAPO 17K math dataset** ([ByteDTsinghua/DAPO-Math-17k](https://huggingface.co/datasets/BytedTsinghua-SIA/DAPO-Math-17k)), a solid baseline dataset curated by the DAPO team containing 17,000 mathematical reasoning problems
+- **Verification**: Leverage the **library judge math {term}`verifier`** to automatically score mathematical reasoning outputs
+- **Training Method**: Use {term}`GRPO (Group Relative Policy Optimization)` for reinforcement learning
+- **Expected Outcome**: Achieve a {term}`reward` score of **0.8 or greater**, indicating improved mathematical reasoning capabilities
+
+This tutorial covers both single-node setup (for testing and verification) and multi-node training (for production-scale training runs on Slurm clusters).
+
+:::{note}
+Throughout this tutorial, you may see mentions of "Penguin". This refers to NeMo Gym's codename before it was fully open-sourced.
+:::
+
+## Prerequisites
+
+Before starting this tutorial, ensure you have the following hardware and software requirements:
+
+### Hardware Requirements
+
+- **GPU**: Multi-GPU setup required for RL training
+  - **Single-node testing**: 1 node with 8 GPUs (e.g., 8x A100 or H100 GPUs)
+  - **Multi-node training**: 8+ nodes with 8 GPUs each recommended for production training
+- **CPU**: Modern x86_64 processor
+- **RAM**: 64 GB+ recommended per node
+- **Storage**: 100 GB+ free disk space for:
+  - NeMo RL repository and dependencies
+  - Model checkpoints and training artifacts
+  - Dataset storage (DAPO 17K and prepared data)
+
+### Software Requirements
+
+- **Operating System**: Linux (Ubuntu 20.04+ or equivalent)
+- **Python**: 3.12 or higher
+- **NeMo RL Container**: Pre-built container image with NeMo RL dependencies
+  - Path example: `/path/to/nemo-rl/container` (update with your actual container path)
+- **Slurm**: For multi-node training on GPU clusters
+- **Git**: For cloning repositories
+- **UV Package Manager**: Python package manager (installed during setup)
+
+### Optional API Keys and Accounts
+
+- **Weights & Biases (W&B) API Key** (optional): For experiment tracking and visualization
+  - Sign up at [wandb.ai](https://wandb.ai) if you don't have an account
+  - Find your API key at [wandb.ai/authorize](https://wandb.ai/authorize)
+  - If not provided, training will proceed without W&B logging
+- **HuggingFace Token** (optional): For downloading models and datasets
+  - Create a token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
+  - Recommended to avoid rate limits when downloading models and datasets
+  - Ensure you have accepted the model license for Qwen 3 4B Instruct
+
+### Filesystem Access
+
+- **Shared Filesystem**: Required for multi-node training
+  - Example: `/shared/filesystem` mounted and accessible from all compute nodes
+  - Used for storing code, data, checkpoints, and results
+
+:::{important}
+**Do the single node setup first. Do not skip it.** The single-node setup validates that your environment is configured correctly before attempting multi-node training.
+:::
 
 ## Single GPU node setup to ensure correctness
 
@@ -34,6 +95,7 @@ srun \
 # Clone NeMo RL
 git clone https://github.com/NVIDIA-NeMo/RL
 cd RL
+git checkout d2e9ef71f71a7afcf01eb809cb0bf1af2c7ed82a  # specific commit for compatibility
 
 # Clone NeMo Gym
 git clone https://github.com/NVIDIA-NeMo/Gym.git 3rdparty/Penguin-workspace/Penguin
@@ -41,54 +103,72 @@ git clone https://github.com/NVIDIA-NeMo/Gym.git 3rdparty/Penguin-workspace/Peng
 # Pull necessary submodules (for example, megatron, automodel, and so on). Nothing Gym-specific.
 git submodule update --init --recursive
 
-# Initial setup
-source /opt/nemo_rl_venv/bin/activate
-uv sync --group={build,docs,dev,test} --extra penguin
-
 # This will take 10 to 15 minutes
 # We add the HF token here to avoid HF rate limits
+NRL_FORCE_REBUILD_VENVS=true \
 HF_HOME=.cache/ \
 HF_TOKEN={your HF token} \
     ./examples/penguin/run_penguin_single_node_sanity_tests.sh
-
-# If you used Gym previously, to run these tests properly, you may need to set `NRL_FORCE_REBUILD_VENVS=true` on an initial run or something.
-# If you've run these tests before and are getting HF rate limit errors, you can add `HF_HUB_OFFLINE=1`
 ```
 
 ### Prepare NeMo Gym data
 
-You will need to use Gym's data preparation command `ng_prepare_data` to prepare the data you intend to train on, including data that you already have locally. The `ng_prepare_data` command will add an `agent_ref` property to each example that tells NeMo Gym which agent server to route that example to!
+Before training, you need to prepare the DAPO 17K math dataset for use with NeMo Gym's RL training pipeline.
 
-Note: The `ng_prepare_data` command below includes the full set of configuration yaml paths (including the model yaml path). The configs you use to prepare data are the same configs you use for training.
+#### What is the DAPO 17K Math Dataset?
 
-This command will output the data into the `data/bytedtsinghua_dapo17k`, which later configs will point to.
+The **DAPO 17K math dataset** ([ByteDTsinghua/DAPO-Math-17k](https://huggingface.co/datasets/BytedTsinghua-SIA/DAPO-Math-17k) on HuggingFace) is a collection of approximately 17,000 mathematics problems spanning diverse mathematical topics and difficulty levels, including competition-level mathematics from benchmarks like AIME and AMC. Each problem is paired with a single correct integer answer label, making it well-suited for verification-based learning approaches where models learn through correctness feedback rather than step-by-step supervision. The dataset was designed with minimal annotation beyond ground-truth labels, enabling compatibility with binary reward signals and preference optimization frameworks commonly used in RL training.
+
+#### Why Data Preparation is Needed
+
+The `ng_prepare_data` command performs several critical steps:
+
+1. **Downloads the dataset** from HuggingFace (when `should_download=true`)
+2. **Adds routing metadata**: Adds an `agent_ref` property to each example that tells NeMo Gym which agent server to route that example to during training
+3. **Formats for training**: Structures the data for compatibility with the NeMo RL training loop
+4. **Outputs prepared data**: Saves processed data to `data/bytedtsinghua_dapo17k` for use in training
+
+The configuration files you provide to `ng_prepare_data` are the same ones used during training, ensuring consistency.
+
+#### Data Preparation Commands
 
 ```bash
 # Setup Penguin local venv
 cd 3rdparty/Penguin-workspace/Penguin
 uv venv --python 3.12 --allow-existing
-source .venv/bin/activate
 uv sync --active --extra dev
 
-# Prepare data
+# Prepare data - downloads DAPO 17K from HuggingFace and processes it
 config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
 resources_servers/math_with_judge/configs/bytedtsinghua_dapo17k.yaml"
 ng_prepare_data "+config_paths=[${config_paths}]" \
     +output_dirpath=data/bytedtsinghua_dapo17k \
-    +mode=train_preparation +should_download=true
+    +mode=train_preparation \
+    +should_download=true
 
 # Return to NeMo RL directory and Python env
 cd ../../.. && source /opt/nemo_rl_venv/bin/activate
 ```
 
+**What this command does**:
+- Downloads the DAPO 17K dataset from HuggingFace (requires HuggingFace token set earlier)
+- Processes it according to the `math_with_judge` resource server configuration
+- Outputs the prepared dataset to `data/bytedtsinghua_dapo17k/`
+- This output directory is referenced in the training configuration files
+
+:::{tip}
+If you've already downloaded the dataset or are re-running preparation, you can set `+should_download=false` to skip the download step and use your local copy.
+:::
+
 ### Single node training
 
-Launch a single node training job training Qwen 3 4B Instruct using the library judge math verifier on the DAPO 17K math dataset. We find that Qwen 3 4B Instruct is the smallest model that still provides experimental signal. We use the DAPO 17K math dataset since it is a solid baseline set by the DAPO team. You should see training start and the reward should end up around 0.8 or greater.
+Now you're ready to launch a single-node training run to verify your setup works correctly before scaling to multi-node training.
 
-Prerequisites for the command below:
+**Prerequisites for this step**:
 
-1. A W&B API key
-2. Run the above `ng_prepare_data` command.
+1. Completed the `ng_prepare_data` command above (data should be in `data/bytedtsinghua_dapo17k/`)
+2. W&B API key (see [Prerequisites](#prerequisites) section above)
+3. HuggingFace token configured (see setup steps above)
 
 
 ```bash
