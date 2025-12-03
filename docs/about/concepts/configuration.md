@@ -41,26 +41,15 @@ These look like duplicates, but they're not:
 
 Many examples use the same name for both (because why not?), but this obscures that they're independent choices.
 
-## Server Types Map to Abstractions
+## Policy Model Variables
 
-The three server types correspond to NeMo Gym's {doc}`core abstractions </about/concepts/core-abstractions>`:
+NeMo Gym provides three standard placeholders for "the model being trained":
 
-| Server Type | Abstraction | Folder |
-|-------------|-------------|--------|
-| `responses_api_models` | Models | `responses_api_models/` |
-| `resources_servers` | Resources | `resources_servers/` |
-| `responses_api_agents` | Agents | `responses_api_agents/` |
+- `policy_base_url` - Model API endpoint
+- `policy_api_key` - Authentication key
+- `policy_model_name` - Model identifier
 
-## Layered Configuration
-
-Configuration resolves in priority order:
-
-```text
-Server YAML files  →  env.yaml  →  Command line
-(base settings)      (secrets)     (overrides)
-```
-
-This lets you version-control base configs while keeping secrets separate and allowing runtime experimentation.
+These let you reference the training model consistently across configs without hardcoding values. Define them once in `env.yaml`, then use `${variable_name}` syntax anywhere you need them.
 
 ---
 
