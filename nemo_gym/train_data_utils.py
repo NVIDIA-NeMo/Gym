@@ -471,25 +471,21 @@ class TrainDataProcessor(BaseModel):
                         download_jsonl_dataset(download_config)
 
                     elif backend == "huggingface":
-                        if d.dataset_url is None:
+                        if d.huggingface_identifier is None:
                             print(f"Dataset `{d.name}` missing dataset_url for HuggingFace backend")
                             continue
 
-                        if config.artifact_fpath is None:
-                            print(f"Dataset `{d.name}` requires +artifact_fpath for HuggingFace backend")
-                            continue
-
-                        repo_id = d.dataset_url.rstrip("/").split("/datasets/")[-1]
-
                         download_config = DownloadJsonlDatasetHuggingFaceConfig.model_validate(
                             {
-                                "repo_id": repo_id,
-                                "artifact_fpath": config.artifact_fpath,
+                                "repo_id": d.huggingface_identifier.repo_id,
+                                "artifact_fpath": d.huggingface_identifier.artifact_fpath,
                                 "output_fpath": d.jsonl_fpath,
                                 "hf_token": global_config["hf_token"],
                             }
                         )
-                        print(f"Downloading dataset `{d.name}` for `{server_name}` from {backend}: {repo_id}")
+                        print(
+                            f"Downloading dataset `{d.name}` for `{server_name}` from {backend}: {d.huggingface_identifier.repo_id}"
+                        )
                         download_jsonl_dataset_from_hf(download_config)
 
                 except Exception as e:

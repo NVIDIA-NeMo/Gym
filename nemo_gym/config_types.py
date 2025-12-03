@@ -146,6 +146,17 @@ class DeleteJsonlDatasetGitlabConfig(BaseNeMoGymCLIConfig):
     dataset_name: str
 
 
+class JsonlDatasetHuggingFaceIdentifer(BaseModel):
+    repo_id: str
+    artifact_fpath: str
+
+
+class DownloadJsonlDatasetHuggingFaceConfig(JsonlDatasetHuggingFaceIdentifer, BaseNeMoGymCLIConfig):
+    repo_id: str = Field(description="The repo id.")
+    artifact_fpath: str = Field(description="The filepath to the artifact to download.")
+    output_fpath: str = Field(description="Where to save the downloaded dataset.")
+
+
 class BaseUploadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
     hf_token: str
     hf_organization: str
@@ -194,7 +205,7 @@ class DatasetConfig(BaseModel):
 
     num_repeats: int = Field(default=1, ge=1)
     gitlab_identifier: Optional[JsonlDatasetGitlabIdentifer] = None
-    dataset_url: Optional[str] = None  # In almost all cases, would be a huggingface dataset url.
+    huggingface_identifier: Optional[JsonlDatasetHuggingFaceIdentifer] = None
     license: Optional[
         Union[
             Literal["Apache 2.0"],
