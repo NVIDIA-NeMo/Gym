@@ -30,6 +30,21 @@ from nemo_gym.global_config import (
 )
 
 
+def _prepare_ray_worker_env_vars() -> Dict[str, str]:
+    worker_env_vars = {
+        **os.environ,
+    }
+    pop_env_vars = [
+        "CUDA_VISIBLE_DEVICES",
+        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
+        "RAY_JOB_ID",
+        "RAY_RAYLET_PID",
+    ]
+    for k in pop_env_vars:
+        worker_env_vars.pop(k, None)
+    return worker_env_vars
+
+
 def get_global_ray_gpu_scheduling_helper() -> ActorProxy:  # pragma: no cover
     cfg = get_global_config_dict()
     while True:
@@ -59,6 +74,10 @@ class _NeMoGymRayGPUSchedulingHelper:  # pragma: no cover
                 node_id=node_id,
                 soft=True,
             )
+        worker_options["runtime_env"] = {
+            "py_executable": sys.executable,
+            "env_vars": _prepare_ray_worker_env_vars(),
+        }
         worker = worker_cls.options(**worker_options).remote()
         return worker
 
@@ -174,21 +193,9 @@ def spinup_single_ray_gpu_node_worker(
         node_id=node_id,
         soft=False,
     )
-    worker_env_vars = {
-        **os.environ,
-    }
-    pop_env_vars = [
-        "CUDA_VISIBLE_DEVICES",
-        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
-        "RAY_JOB_ID",
-        "RAY_RAYLET_PID",
-    ]
-    for k in pop_env_vars:
-        worker_env_vars.pop(k, None)
-    worker_runtime_env = {
+    worker_options["runtime_env"] = {
         "py_executable": sys.executable,
-        "env_vars": worker_env_vars,
+        "env_vars": _prepare_ray_worker_env_vars(),
     }
-    worker_options["runtime_env"] = worker_runtime_env
     worker = worker_cls.options(**worker_options).remote(*worker_args, **worker_kwargs)
     return worker
