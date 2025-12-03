@@ -5,7 +5,7 @@
 This page explains the structure of NeMo Gym configuration files—the YAML hierarchy, what each field means, and how config files relate to the three core abstractions (Model, Resource, Agent).
 
 :::{tip}
-For information about configuration priority, `env.yaml`, and command-line overrides, see {doc}`configuration-system`.
+For information about configuration priority, `env.yaml`, and command-line overrides, see {doc}`about/concepts/configuration-system`.
 :::
 
 ---
@@ -283,7 +283,7 @@ NeMo Gym has three core abstractions. Each maps to a server type in configuratio
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-For more on these abstractions, see {doc}`core-abstractions`.
+For more on these abstractions, see {doc}`about/concepts/core-abstractions`.
 
 ---
 
@@ -347,6 +347,6 @@ simple_weather_simple_agent:          # Level 1: Server Instance ID
 
 ## Related Pages
 
-- {doc}`configuration-system` — Configuration priority, env.yaml, and CLI overrides
-- {doc}`core-abstractions` — Understanding Model, Resource, and Agent servers
+- {doc}`about/concepts/configuration-system` — Configuration priority, env.yaml, and CLI overrides
+- {doc}`about/concepts/core-abstractions` — Understanding Model, Resource, and Agent servers
 - {doc}`tutorials/creating-resource-server` — Step-by-step guide to creating resource servers
