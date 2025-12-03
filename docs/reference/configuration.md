@@ -4,16 +4,6 @@
 
 Complete syntax and options for NeMo Gym configuration.
 
-:::{button-ref} configuration-concepts
-:color: secondary
-:outline:
-:ref-type: ref
-
-← Configuration Concepts
-:::
-
----
-
 ## File Locations
 
 | File | Location | Version Control |
