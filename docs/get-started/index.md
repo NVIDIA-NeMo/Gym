@@ -23,7 +23,7 @@ Make sure you have these prerequisites ready before beginning the tutorials:
 
 ## Tutorial Path
 
-Follow these tutorials in sequence to build your first AI agent from scratch:
+Follow these tutorials in sequence to start collecting rollouts with NeMo Gym:
 
 ::::{grid} 1 1 1 1
 :gutter: 3
@@ -51,7 +51,7 @@ Generate your first batch of rollouts and understand how they become training da
 ---
 
 :::{tip}
-**New to reinforcement learning?** Do not worry—these tutorials introduce RL concepts naturally as you build.
+**New to reinforcement learning?** Do not worry—these tutorials introduce RL concepts naturally as you learn rollout collection.
 
 - For deeper conceptual understanding, explore the [About](../about/index.md) section.
 - For quick definitions, refer to the [Glossary](../about/concepts/key-terminology.md).
