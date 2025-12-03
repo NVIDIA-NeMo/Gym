@@ -22,7 +22,8 @@ Complete syntax and options for NeMo Gym configuration.
 | env.yaml | Repository root (`./env.yaml`) | ❌ Gitignored (user creates) |
 
 **Example paths**:
-```
+
+```text
 resources_servers/example_simple_weather/configs/simple_weather.yaml
 responses_api_models/openai_model/configs/openai_model.yaml
 responses_api_agents/simple_agent/configs/simple_agent.yaml
@@ -33,18 +34,29 @@ responses_api_agents/simple_agent/configs/simple_agent.yaml
 
 ## Config File Structure
 
-Each config file defines one or more server instances. The server ID becomes the unique identifier used in API requests and cross-references.
+Each config file defines one or more server instances using three-level nesting:
 
 ```yaml
-# Server ID (used in requests and references)
-my_server_name:
-  # Server type (determines which folder contains the implementation)
-  responses_api_agents:       # or: resources_servers, responses_api_models
-    # Implementation name (folder inside the server type directory)
-    simple_agent:
-      entrypoint: app.py      # Python file to run
+server_id:                       # Level 1: Your chosen name (used in API requests)
+  server_type:                   # Level 2: resources_servers | responses_api_models | responses_api_agents
+    implementation:              # Level 3: Must match a folder inside the server type directory
+      entrypoint: app.py         # Required: Python file to run
       # Additional fields vary by server type...
 ```
+
+**Example**:
+
+```yaml
+my_agent:                        # Server ID (you choose this)
+  responses_api_agents:          # Server type
+    simple_agent:                # Implementation (must match folder: responses_api_agents/simple_agent/)
+      entrypoint: app.py
+      # ...
+```
+
+:::{tip}
+The server ID and implementation name are independent. Use descriptive server IDs that reflect your use case (for example, `math_tutor_agent`), while the implementation name must match an existing folder.
+:::
 
 ### Server Types
 
