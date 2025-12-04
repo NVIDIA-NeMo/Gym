@@ -141,8 +141,18 @@ how-to-faq.md
 
 
 ```{toctree}
-:caption: Development
+:caption: Reference
 :hidden:
+:maxdepth: 1
 
+Configuration <reference/configuration>
 apidocs/index.rst
+```
+
+```{toctree}
+:caption: Troubleshooting
+:hidden:
+:maxdepth: 1
+
+troubleshooting/configuration.md
 ```

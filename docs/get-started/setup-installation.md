@@ -123,6 +123,8 @@ Replace `sk-your-actual-openai-api-key-here` with your real OpenAI API key. This
 - The model must support function calling (most GPT-4 models do)
 - Refer to [OpenAI's models documentation](https://platform.openai.com/docs/models) 🔗 for available models
 
+Refer to {doc}`/reference/configuration` for additional `env.yaml` options.
+
 **Why GPT-4.1?** We use GPT-4.1 for getting started because it provides low latency (no reasoning step) and reliable function calling support out-of-the-box, letting you focus on learning NeMo Gym without configuration complexity.
 
 **Can I use my own model?** Yes! NeMo Gym works with any OpenAI-compatible inference server that supports function calling:
@@ -130,7 +132,6 @@ Replace `sk-your-actual-openai-api-key-here` with your real OpenAI API key. This
 - **Other providers**: Any inference server that implements the OpenAI API specification
 
 Simply update `policy_base_url`, `policy_api_key`, and `policy_model_name` in your `env.yaml` to point to your chosen endpoint.
-
 :::
 
 :::{dropdown} Optional: Validate your API key before proceeding
