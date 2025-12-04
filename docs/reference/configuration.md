@@ -2,10 +2,10 @@
 
 # Configuration Reference
 
-Complete syntax and options for NeMo Gym configuration.
+Complete syntax and field specifications for NeMo Gym configuration files.
 
 :::{seealso}
-{doc}`/about/concepts/configuration` for understanding the three-level config pattern.
+{doc}`/about/concepts/configuration` for understanding how configs are structured and how servers connect.
 :::
 
 ## File Locations
@@ -15,106 +15,110 @@ Complete syntax and options for NeMo Gym configuration.
 | Server configs | `<server_type>/<implementation>/configs/*.yaml` | ✅ Committed |
 | env.yaml | Repository root (`./env.yaml`) | ❌ Gitignored (user creates) |
 
-**Example paths**:
-
-```text
-resources_servers/example_simple_weather/configs/simple_weather.yaml
-responses_api_models/openai_model/configs/openai_model.yaml
-responses_api_agents/simple_agent/configs/simple_agent.yaml
-./env.yaml  ← you create this
-```
-
 ---
 
-## Config File Structure
+## Server Configuration
 
-Each config file defines one or more server instances using three-level nesting:
-
-```yaml
-server_id:                       # Level 1: Your chosen name (used in API requests)
-  server_type:                   # Level 2: resources_servers | responses_api_models | responses_api_agents
-    implementation:              # Level 3: Must match a folder inside the server type directory
-      entrypoint: app.py         # Required: Python file to run
-      # Additional fields vary by server type...
-```
-
-**Example**:
+All servers share this structure:
 
 ```yaml
-my_agent:                        # Server ID (you choose this)
-  responses_api_agents:          # Server type
-    simple_agent:                # Implementation (must match folder: responses_api_agents/simple_agent/)
-      entrypoint: app.py
-      # ...
-```
-
-:::{tip}
-The server ID and implementation name are independent. Use descriptive server IDs that reflect your use case (for example, `math_tutor_agent`), while the implementation name must match an existing folder.
-:::
-
-### Server Types
-
-| Type | Purpose | Required Fields |
-|------|---------|-----------------|
-| `responses_api_models` | LLM inference endpoints | `entrypoint` |
-| `resources_servers` | Tools and verification logic | `entrypoint`, `domain` |
-| `responses_api_agents` | Orchestration between models and resources | `entrypoint`, `resources_server`, `model_server` |
-
-### Resources Server Fields
-
-```yaml
-my_resource:
-  resources_servers:
-    my_implementation:
-      entrypoint: app.py
-      domain: math              # Required (see domain values below)
-      verified: false           # Optional: marks server as production-ready
-      description: "Short description"  # Optional
-```
-
-**Domain values**: `math`, `coding`, `agent`, `knowledge`, `instruction_following`, `long_context`, `safety`, `games`, `e2e`, `other`
-
-### Agent Server Fields
-
-Agent servers reference other servers using the `type` and `name` pattern:
-
-```yaml
-my_agent:
-  responses_api_agents:
-    simple_agent:
-      entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: my_resource       # Must match a loaded server ID
-      model_server:
-        type: responses_api_models
-        name: policy_model      # Must match a loaded server ID
-      datasets:                 # Optional: define associated datasets
-        - name: example
-          type: example         # example | train | validation
-          jsonl_fpath: path/to/data.jsonl
+server_id:                    # Your unique name for this server
+  server_type:                # responses_api_models | resources_servers | responses_api_agents
+    implementation:           # Directory name inside the server type directory
+      entrypoint: app.py      # Python file to run
+      # ... additional fields vary by server type
 ```
 
 ### Model Server Fields
 
 ```yaml
-policy_model:
-  responses_api_models:
-    openai_model:
-      entrypoint: app.py
-      openai_base_url: ${policy_base_url}
-      openai_api_key: ${policy_api_key}
-      openai_model: ${policy_model_name}
+policy_model:                                 # Server ID (use "policy_model" — agent configs expect this name)
+  responses_api_models:                       # Server type (must be "responses_api_models" for model servers)
+    openai_model:                             # Implementation (use "openai_model", "vllm_model", or "azure_openai_model")
+      entrypoint: app.py                      # Python file to run
+      openai_base_url: ${policy_base_url}     # API endpoint URL
+      openai_api_key: ${policy_api_key}       # Authentication key
+      openai_model: ${policy_model_name}      # Model identifier
 ```
+
+:::{tip}
+Keep the server ID as `policy_model` — agent configs reference this name by default. The `${policy_base_url}`, `${policy_api_key}`, and `${policy_model_name}` placeholders should be defined in `env.yaml` at the repository root, allowing you to change model settings in one place.
+:::
+
+### Resources Server Fields
+
+```yaml
+my_resource:                                  # Server ID (your choice — agents reference this name)
+  resources_servers:                          # Server type (must be "resources_servers" for resources servers)
+    example_simple_weather:                   # Implementation (must match a directory in resources_servers/)
+      entrypoint: app.py                      # Python file to run
+      domain: agent                           # Server category (see values below)
+      verified: false                         # Passed reward profiling and training checks (default: false)
+      description: "Short description"        # Server description
+      value: "What this improves"             # Training value provided
+```
+
+**Domain values:** `math`, `coding`, `agent`, `knowledge`, `instruction_following`, `long_context`, `safety`, `games`, `e2e`, `other` (see {py:class}`~nemo_gym.config_types.Domain`)
+
+### Agent Server Fields
+
+Agent servers must include both a `resources_server` and `model_server` block to specify which servers to use.
+
+```yaml
+my_agent:                                     # Server ID (your choice — used in API requests)
+  responses_api_agents:                       # Server type (must be "responses_api_agents" for agent servers)
+    simple_agent:                             # Implementation (must match a directory in responses_api_agents/)
+      entrypoint: app.py                      # Python file to run
+      resources_server:                       # Specifies which resources server to use
+        type: resources_servers               # Always "resources_servers"
+        name: my_resource                     # Server ID of the resources server
+      model_server:                           # Specifies which model server to use
+        type: responses_api_models            # Always "responses_api_models"
+        name: policy_model                    # Server ID of the model server
+      datasets:                               # Optional: define for training workflows
+        - name: train                         # Dataset identifier
+          type: train                         # example | train | validation
+          jsonl_fpath: path/to/data.jsonl     # Path to data file
+          license: Apache 2.0                 # Required for train/validation
+```
+
+#### Dataset Configuration
+
+Define datasets associated with agent servers for training and evaluation.
+
+```yaml
+datasets:
+  - name: my_dataset
+    type: train
+    jsonl_fpath: path/to/data.jsonl
+    license: Apache 2.0
+    num_repeats: 1
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | Yes | Dataset identifier |
+| `type` | Yes | `example`, `train`, or `validation` |
+| `jsonl_fpath` | Yes | Path to data file |
+| `license` | For train/validation | License identifier (see values below) |
+| `num_repeats` | No | Repeat dataset n times (default: `1`) |
+
+**Dataset types:**
+- `example` — For testing and development
+- `train` — Training data (requires `license`)
+- `validation` — Evaluation data (requires `license`)
+
+**License values:** `Apache 2.0`, `MIT`, `Creative Commons Attribution 4.0 International`, `Creative Commons Attribution-ShareAlike 4.0 International`, `TBD` (see {py:attr}`~nemo_gym.config_types.DatasetConfig.license`)
 
 ---
 
-## env.yaml Options
+## Local Configuration (env.yaml)
 
-Store secrets and environment-specific values that should not be committed to version control.
+Store secrets and local settings at the repository root. This file is gitignored.
 
 ```yaml
-# Required for OpenAI-compatible models
+# Policy model (required for most setups)
+# Reference these variables in server configs using `${variable_name}` syntax (e.g., `${policy_base_url}`)
 policy_base_url: https://api.openai.com/v1
 policy_api_key: sk-your-api-key
 policy_model_name: gpt-4o-2024-11-20
@@ -125,29 +129,35 @@ my_config_paths:
   - resources_servers/example_simple_weather/configs/simple_weather.yaml
 
 # Optional: validation behavior
-error_on_almost_servers: true   # Default: true (exit on invalid configs)
+error_on_almost_servers: true   # Exit on invalid configs (default: true)
 ```
 
 ---
 
-## Command Line Overrides
+## Command Line Usage
 
-Override any configuration value at runtime using Hydra syntax. Command line arguments have the highest priority.
+Run servers using `ng_run` with Hydra syntax for configuration.
+
+### Loading Configs
 
 ```bash
-# Load config files
+# Load one or more config files
 ng_run "+config_paths=[config1.yaml,config2.yaml]"
 
+# Use paths stored in env.yaml
+ng_run '+config_paths=${my_config_paths}'
+```
+
+### Overriding Values
+
+```bash
 # Override nested values (use dot notation after server ID)
 ng_run "+config_paths=[config.yaml]" \
     +my_server.resources_servers.my_impl.domain=coding
 
-# Override model selection
+# Override policy model
 ng_run "+config_paths=[config.yaml]" \
     +policy_model_name=gpt-4o-mini
-
-# Use paths stored in env.yaml
-ng_run '+config_paths=${my_config_paths}'
 
 # Disable strict validation
 ng_run "+config_paths=[config.yaml]" +error_on_almost_servers=false
@@ -155,47 +165,7 @@ ng_run "+config_paths=[config.yaml]" +error_on_almost_servers=false
 
 ---
 
-## Policy Model Variables
-
-Standard placeholders resolved from `env.yaml` for consistent model references across configurations.
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `policy_base_url` | Model API endpoint | `https://api.openai.com/v1` |
-| `policy_api_key` | Authentication key | `sk-...` |
-| `policy_model_name` | Model identifier | `gpt-4o-2024-11-20` |
-
-Reference in config files using `${variable_name}`:
-
-```yaml
-openai_base_url: ${policy_base_url}
-openai_api_key: ${policy_api_key}
-openai_model: ${policy_model_name}
-```
-
----
-
-## Dataset Configuration
-
-Define datasets associated with servers for training data collection.
-
-```yaml
-datasets:
-  - name: my_dataset
-    type: example           # example | train | validation
-    jsonl_fpath: path/to/data.jsonl
-    num_repeats: 1          # Optional: repeat dataset (default: 1)
-    license: "Apache 2.0"   # Required for train/validation types
-```
-
-**License values**: `Apache 2.0`, `MIT`, `Creative Commons Attribution 4.0 International`, `Creative Commons Attribution-ShareAlike 4.0 International`, `TBD`
-
-**Dataset types**:
-- `example`: For testing and development
-- `train`: Requires `license` and GitLab identifier
-- `validation`: Requires `license` and GitLab identifier
-
----
+## Troubleshooting
 
 :::{seealso}
 {doc}`/troubleshooting/configuration` for common configuration errors and solutions.
