@@ -117,6 +117,14 @@ This generates training data with verification scores!
 
 **Terminal 1** with the running servers: Ctrl+C to stop the ng_run process.
 
+### What's Next?
+
+Now that you can generate rollouts, choose your path:
+
+- **Use an existing training environment** — Browse the [Available Resource Servers](#-available-resource-servers) below to find a training-ready environment that matches your goals.
+
+- **Build a custom training environment** — Implement or integrate existing tools and define task verification logic. Get started with the [Creating a Resource Server](https://docs.nvidia.com/nemo/gym/latest/tutorials/creating-resource-server.html) tutorial.
+
 
 ## 📖 Documentation
 

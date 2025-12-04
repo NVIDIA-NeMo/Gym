@@ -155,3 +155,27 @@ Model Behavior
     +responses_create_params.temperature=0.7 \            # Randomness (0-1)
     +responses_create_params.top_p=0.9                    # Nucleus sampling
 ```
+
+---
+
+## What's Next?
+
+Congratulations! You now have a working NeMo Gym installation and understand how to generate rollouts. Choose your path based on your goals:
+
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Use an Existing Training Environment
+:link: https://github.com/NVIDIA-NeMo/Gym#-available-resource-servers
+
+Browse the available resource servers to find a training-ready environment that matches your goals.
+:::
+
+:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build a Custom Training Environment
+:link: ../tutorials/creating-resource-server
+:link-type: doc
+
+Implement or integrate existing tools and define task verification logic.
+:::
+
+::::
