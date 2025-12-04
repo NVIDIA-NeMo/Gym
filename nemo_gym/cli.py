@@ -49,7 +49,9 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
-from nemo_gym.ray_utils import _NeMoGymRayGPUSchedulingHelper
+from nemo_gym.ray_utils import (
+    _start_global_ray_gpu_scheduling_helper,
+)
 from nemo_gym.server_utils import (
     HEAD_SERVER_KEY_NAME,
     HeadServer,
@@ -176,7 +178,7 @@ class RunHelper:  # pragma: no cover
         # Note: This function will modify the global config dict - update `ray_head_node_address`
         initialize_ray()
 
-        self._head_ray_gpu_helper = _NeMoGymRayGPUSchedulingHelper._start_global()
+        self._head_ray_gpu_helper = _start_global_ray_gpu_scheduling_helper()
 
         # Assume Nemo Gym Run is for a single agent.
         escaped_config_dict_yaml_str = shlex.quote(OmegaConf.to_yaml(global_config_dict))

@@ -96,7 +96,12 @@ def _start_vllm_server(config: VLLMModelConfig, server_host: str, server_port: i
     import vllm.engine.arg_utils
     import vllm.entrypoints.openai.api_server
     import vllm.entrypoints.openai.cli_args
-    import vllm.utils
+    try:
+        import vllm.utils.argparse_utils
+        old_vllm_argparse = False
+    except ImportError:
+        import vllm.utils
+        old_vllm_argparse = True
 
     argv = []
     argv.append("--model")
@@ -122,7 +127,10 @@ def _start_vllm_server(config: VLLMModelConfig, server_host: str, server_port: i
             argv.append(arg_key)
             argv.append(f"{v}")
 
-    server_args = vllm.utils.FlexibleArgumentParser()
+    if not old_vllm_argparse:
+        server_args = vllm.utils.argparse_utils.FlexibleArgumentParser()
+    else:
+        server_args = vllm.utils.FlexibleArgumentParser()
     server_args = vllm.entrypoints.openai.cli_args.make_arg_parser(server_args)
     server_args = server_args.parse_args(argv)
     vllm.entrypoints.openai.cli_args.validate_parsed_serve_args(server_args)
@@ -139,7 +147,9 @@ class VLLMServerSpinupWorker:
         self._server_host = lookup_current_ray_node_ip()
         self._server_port = find_open_port()
 
-        chdir_except = False
+        og_working_dir = os.getcwd()
+
+        chdir_except = None
         if self.working_dir is not None:
             try:
                 os.chdir(self.working_dir)
@@ -157,8 +167,12 @@ class VLLMServerSpinupWorker:
 
         print(f"DEBUG: VLLMModelSpinupWorker: config = {self.config}", flush=True)
 
+        print(f"DEBUG: VLLMModelSpinupWorker: og working dir  = {og_working_dir}", flush=True)
+        if self.working_dir is not None:
+            print(f"DEBUG: VLLMModelSpinupWorker: new working dir = {self.working_dir}", flush=True)
+
         if chdir_except is not None:
-            print(f"DEBUG: VLLMModelSpinupWorker: chdir except: {type(e).__name__} {e}", flush=True)
+            print(f"DEBUG: VLLMModelSpinupWorker: chdir except: {type(chdir_except).__name__} {chdir_except}", flush=True)
 
         server_proc = Process(
             target=_start_vllm_server,
@@ -219,7 +233,8 @@ class VLLMModel(SimpleResponsesAPIModel):
     config: VLLMModelConfig
 
     def model_post_init(self, context):
-        if self.config.debug_log_base_dir is not None:
+        if False:
+        # if self.config.debug_log_base_dir is not None:
             debug_log_base_dir = self.config.debug_log_base_dir
             name = self.config.name
             type_name = "VLLMModel"
