@@ -170,6 +170,7 @@ ng_collect_rollouts \
     +responses_create_params.temperature=0.7 \            # Randomness (0-1)
     +responses_create_params.top_p=0.9                    # Nucleus sampling
 ```
+::::
 
 ---
 
