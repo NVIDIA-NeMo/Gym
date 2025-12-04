@@ -93,7 +93,7 @@ class _NeMoGymRayGPUSchedulingHelper:  # pragma: no cover
         allowed_gpu_nodes = self.cfg.get(RAY_GPU_NODES_KEY_NAME, None)
         if allowed_gpu_nodes is not None:
             allowed_gpu_nodes = set(
-                [node["node_id"] if isinstance(node, dict) else node for node in allowed_gpu_nodes]
+                [node["node_id"] if "node_id" in node else node for node in allowed_gpu_nodes]
             )
 
         head = self.cfg["ray_head_node_address"]
@@ -102,7 +102,8 @@ class _NeMoGymRayGPUSchedulingHelper:  # pragma: no cover
             assert state.node_id is not None
             if allowed_gpu_nodes is not None and state.node_id not in allowed_gpu_nodes:
                 continue
-            self.avail_gpus_dict[state.node_id] += state.resources_total.get("GPU", 0)
+            avail_num_gpus = state.resources_total.get("GPU", 0)
+            self.avail_gpus_dict[state.node_id] += avail_num_gpus
 
     def alloc_gpu_node(self, num_gpus: int) -> Optional[str]:
         for node_id, avail_num_gpus in self.avail_gpus_dict.items():
