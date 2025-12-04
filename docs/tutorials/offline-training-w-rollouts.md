@@ -59,11 +59,11 @@ This tutorial is **experimental** and may contain bugs. Proceed with caution.
 
 The offline training pipeline follows this logical flow:
 
-1. Collect rollouts using strategies from [Tutorial 5]
-- **SFT data**: Use consistent generation (low temperature, single rollout per task)
-- **DPO data**: Use diverse generation (higher temperature, 2 rollouts per task for comparison)
-1. Filter for quality - Remove poor rollouts before processing
-2. Format for training - Convert to SFT or DPO format based on your goals
+1. Collect rollouts
+   - **SFT data**: Use consistent generation (low temperature, single rollout per task)
+   - **DPO data**: Use diverse generation (higher temperature, 2 rollouts per task for comparison)
+2. Filter for quality - Remove poor rollouts before processing
+3. Format for training - Convert to SFT or DPO format based on your goals
 
 
 

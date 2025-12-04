@@ -2,9 +2,9 @@
 
 # NeMo Gym Documentation
 
-NeMo Gym is a framework for building reinforcement learning (RL) training environments large language models (LLMs). Gym provides training environment development scaffolding and training environment patterns such as multi-step, multi-turn, and user modeling scenarios.
+NeMo Gym is a framework for building reinforcement learning (RL) training environments for large language models (LLMs). It provides training environment development scaffolding and training environment patterns for multi-step, multi-turn, and user modeling scenarios.
 
-At the core of NeMo Gym are three server concepts: **Responses API Model servers** are model endpoints, **Resources servers** contain tool implementations and verification logic, and **Response API Agent servers** orchestrate the interaction between models and resources.
+NeMo Gym has three core server types: **Responses API Model servers** provide model endpoints, **Resources servers** contain tool implementations and verification logic, and **Responses API Agent servers** orchestrate interactions between models and resources.
 
 ## Quickstart
 

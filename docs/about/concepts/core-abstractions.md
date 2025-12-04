@@ -16,7 +16,7 @@ Before diving into code, let's understand the three core abstractions in NeMo Gy
 
 :::{tab-item} Model
 
-Responses API Model servers are model endpoints that perform text inference - stateless, single-call text generation without conversation memory or orchestration. You will always have at least one Response API Model server active during training, typically known as the "policy" model.
+Responses API Model servers are stateless model endpoints that perform single-call text generation without conversation memory or orchestration. During training, you will always have at least one active Responses API Model server, typically called the "policy" model.
 
 **Available Implementations:**
 
@@ -29,7 +29,7 @@ Responses API Model servers are model endpoints that perform text inference - st
 
 :::{tab-item} Resources
 
-Resource servers provide tool implementations that can be invoked through tool calling and verification logic that measures task performance. NeMo Gym contains a variety of NVIDIA and community contributed resource servers that you can use during training. We also have tutorials on how to add your own resource server.
+Resources servers provide tool implementations that can be invoked via tool calling and verification logic that measures task performance. NeMo Gym includes various NVIDIA and community-contributed resources servers for use during training, and provides tutorials for creating your own Resource server.
 
 **What Resources Provide**
 
@@ -83,7 +83,7 @@ Responses API Agent servers {term}`orchestrate <Orchestration>` the interaction 
 - Handle multi-turn conversations
 - Format responses consistently
 
-An agent can also be referred to as a "training environment." NeMo Gym contains several training environment patterns that cover a variety of scenarios including multi-step, multi-turn, or user modeling scenarios.
+Agents are also called "training environments." NeMo Gym includes several training environment patterns covering multi-step, multi-turn, and user modeling scenarios.
 
 **Examples:**
 

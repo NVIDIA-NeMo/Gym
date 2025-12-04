@@ -5,7 +5,7 @@
 Hands-on learning experiences that guide you through building, training, and deploying AI agents with NeMo Gym.
 
 :::{tip}
-**New to NeMo Gym?** Begin with the {doc}`Get Started <../get-started/index>` section for a guided tutorial experience from installation through your first verified agent. Return here after completing those tutorials to learn about advanced topics like additional rollout collection methods and training data generation. You can find the project repository on [GitHub](https://github.com/NVIDIA-NeMo/Gym).
+**New to NeMo Gym?** Begin with the {doc}`Get Started <../get-started/index>` section for a guided tutorial from installation through your first verified agent. Return here afterward to learn about advanced topics like additional rollout collection methods and training data generation. You can find the project repository on [GitHub](https://github.com/NVIDIA-NeMo/Gym).
 :::
 ---
 
@@ -46,9 +46,9 @@ Transform rollouts into training data for {term}`supervised fine-tuning (SFT) <S
 :::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` RL Training with NeMo RL
 :link: rl-training-with-nemo-rl
 :link-type: doc
-Train a model with NeMo RL. Learn how to set up NeMo Gym + NeMo RL training environment, run tests, prepare data, and launch single and multi-node training runs.
+Train a model with NeMo RL. Learn how to set up NeMo Gym and NeMo RL training environments, run tests, prepare data, and launch single-node and multi-node training runs.
 +++
-{bdg-secondary}`sft` {bdg-secondary}`dpo`
+{bdg-secondary}`rl` {bdg-secondary}`training`
 :::
 
 ::::
