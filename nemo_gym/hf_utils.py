@@ -14,7 +14,6 @@
 import json
 from os import environ
 from pathlib import Path
-from typing import Optional
 
 import yaml
 from datasets import load_dataset
@@ -57,16 +56,13 @@ def check_jsonl_format(file_path: str) -> bool:  # pragma: no cover
 
 
 def download_parquet_dataset_as_jsonl(
-    repo_id: str,
-    output_fpath: str,
-    split: str = "train",
-    token: Optional[str] = None,
+    config: DownloadJsonlDatasetHuggingFaceConfig,
 ) -> None:  # pragma: no cover
     """Download a HF dataset and save as JSONL"""
     try:
-        ds = load_dataset(repo_id, split=split, token=token)
-        ds.to_json(output_fpath)
-        print(f"[Nemo-Gym] - Downloaded and converted dataset to: {output_fpath}")
+        ds = load_dataset(config.repo_id, split=config.split, token=config.hf_token)
+        ds.to_json(config.output_fpath)
+        print(f"[Nemo-Gym] - Downloaded and converted dataset to: {config.output_fpath}")
     except Exception as e:
         print(f"[Nemo-Gym] - Error downloading/converting dataset: {e}")
         raise

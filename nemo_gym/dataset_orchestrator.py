@@ -78,12 +78,14 @@ def download_jsonl_dataset_from_hf_cli() -> None:  # pragma: no cover
     if config.artifact_fpath:
         download_jsonl_dataset_from_hf(config)
     else:
-        download_parquet_dataset_as_jsonl(
-            repo_id=config.repo_id,
-            output_fpath=config.output_fpath,
-            split=config.split,
-            token=config.hf_token,
+        print(
+            f"""\
+[Nemo-Gym] - No artifact_fpath provided.
+Downloading the entire '{config.split}' split from '{config.repo_id}'
+and saving as JSONL at '{config.output_fpath}'.
+"""
         )
+        download_parquet_dataset_as_jsonl(config)
 
 
 def delete_jsonl_dataset_from_gitlab_cli() -> None:  # pragma: no cover

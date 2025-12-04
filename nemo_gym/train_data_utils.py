@@ -482,15 +482,18 @@ class TrainDataProcessor(BaseModel):
                                 continue
 
                             if d.huggingface_identifier.artifact_fpath is None:
+                                download_config = DownloadJsonlDatasetHuggingFaceConfig.model_validate(
+                                    {
+                                        "repo_id": d.huggingface_identifier.repo_id,
+                                        "output_fpath": d.jsonl_fpath,
+                                        "split": d.type,
+                                        "hf_token": global_config.get("hf_token"),
+                                    }
+                                )
                                 print(
                                     f"Downloading parquet dataset `{d.name}` from {d.huggingface_identifier.repo_id}..."
                                 )
-                                download_parquet_dataset_as_jsonl(
-                                    repo_id=d.huggingface_identifier.repo_id,
-                                    output_fpath=d.jsonl_fpath,
-                                    split=d.type,
-                                    token=global_config.get("hf_token"),
-                                )
+                                download_parquet_dataset_as_jsonl(download_config)
                             else:
                                 download_config = DownloadJsonlDatasetHuggingFaceConfig.model_validate(
                                     {
