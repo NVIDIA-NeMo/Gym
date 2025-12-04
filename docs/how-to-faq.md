@@ -259,13 +259,23 @@ Gitlab model names are case sensitive. There can be models named 'My_Model' and 
 :::
 
 Downloading a dataset from Huggingface is straightforward:
+
+
+**For JSONL files** (specify `artifact_fpath`):
 ```bash
 ng_download_dataset_from_hf \
-    +repo_id=NVIDIA/NeMo-Gym-Instruction_Following-multineedle-{your dataset name} \
-    +artifact_fpath=multineedle_benchmark.jsonl \
-    +output_fpath=data/multineedle_benchmark_hf.jsonl
+    +repo_id=nvidia/Nemotron-RL-instruction_following \
+    +artifact_fpath=train.jsonl \
+    +output_fpath=data/train.jsonl
 ```
 
+**For parquet datasets** (omit `artifact_fpath`, specify `split`):
+```bash
+ng_download_dataset_from_hf \
+    +repo_id=nvidia/Nemotron-RL-knowledge-mcqa \
+    +output_fpath=data/train.jsonl \
+    +split=train
+```
 
 # How To: Prepare and validate data for PR submission or RL training
 When you use `ng_init_resources_server +entrypoint=resources_servers/example_multi_step` to initialize a resources server, you will get a config.yaml that looks like the below code block. The dataset information for training, validation, and example will be inside the scope of your agent config (e.g. under simple_agent) and is a list of dataset objects.
@@ -317,7 +327,9 @@ A dataset object consists of:
 - Type: train, validation, or example. Train and validation are as used in NeMo RL or other train frameworks. More information about the example type is in the next section.
 - Jsonl fpath: the local file path to your jsonl file for this dataset.
 - Num repeats: optionally repeat each row when preparing or collating data. Defaults to 1 if unspecified.
-- Gitlab identifier: The remote path to the dataset as held in the Gitlab dataset registry. This field is required for train and validation datasets. (Not required for example datasets since those are required to be committed to Git).
+<!-- - Gitlab identifier: The remote path to the dataset as held in the Gitlab dataset registry. This field is required for train and validation datasets. (Not required for example datasets since those are required to be committed to Git). -->
+- Gitlab identifier: (NVIDIA internal) The remote path to the dataset as held in the Gitlab dataset registry. This field is required for train and validation datasets. (Not required for example datasets since those are required to be committed to Git).
+- HuggingFace identifier: (Public) The remote path to the dataset on HuggingFace. A `artifact_fpath` or `split` must be provided for downloads.
 - License: The license of that dataset. Required for train and validation datasets and not required for example datasets, similar in principle to the Gitlab identifier.
 - Start idx, end idx: used for slicing your dataset.
 ```yaml

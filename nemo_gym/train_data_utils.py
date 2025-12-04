@@ -488,7 +488,7 @@ class TrainDataProcessor(BaseModel):
                                 download_parquet_dataset_as_jsonl(
                                     repo_id=d.huggingface_identifier.repo_id,
                                     output_fpath=d.jsonl_fpath,
-                                    split=d.huggingface_identifier.split,
+                                    split=d.type,
                                     token=global_config.get("hf_token"),
                                 )
                             else:

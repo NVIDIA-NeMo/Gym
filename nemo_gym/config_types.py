@@ -147,9 +147,10 @@ class DeleteJsonlDatasetGitlabConfig(BaseNeMoGymCLIConfig):
 
 
 class JsonlDatasetHuggingFaceIdentifer(BaseModel):
-    repo_id: str
-    artifact_fpath: Optional[str] = None
-    split: str = "train"
+    repo_id: str = Field(description="The repo id.")
+    artifact_fpath: Optional[str] = Field(
+        default=None, description="The filepath to the artifact in the repo (for JSONL). Omit for parquet."
+    )
 
 
 class BaseUploadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
@@ -180,12 +181,8 @@ class UploadJsonlDatasetHuggingFaceMaybeDeleteConfig(BaseUploadJsonlDatasetHuggi
 
 
 class DownloadJsonlDatasetHuggingFaceConfig(JsonlDatasetHuggingFaceIdentifer, BaseNeMoGymCLIConfig):
-    repo_id: str = Field(description="The repo id.")
     output_fpath: str = Field(description="Where to save the downloaded dataset (as JSONL).")
-    hf_token: Optional[str] = Field(description="The huggingface token.")
-    artifact_fpath: Optional[str] = Field(
-        default=None, description="The filepath to the artifact in the repo (for JSONL). Omit for parquet."
-    )
+    hf_token: Optional[str] = Field(default=None, description="The huggingface token.")
     split: str = Field(default="train", description="Dataset split (only used for parquet).")
 
 
