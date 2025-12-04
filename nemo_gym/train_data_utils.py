@@ -62,7 +62,7 @@ class TrainDataProcessorConfig(BaseNeMoGymCLIConfig):
         description="Whether or not to download missing datasets. By default, no datasets will be downloaded.",
     )
     data_source: Literal["gitlab", "huggingface"] = Field(
-        default="gitlab",
+        default="huggingface",
         description="Where to download missing datasets from: 'gitlab' (NVIDIA internal) or 'huggingface' (external).",
     )
 
@@ -449,61 +449,64 @@ class TrainDataProcessor(BaseModel):
                 "Missing local datasets. You must provide local datasets since download is disabled. Run with `+should_download=true` to enable downloading."
             )
 
-        backend = config.data_source
-        is_valid, error_msg = validate_backend_credentials(backend)
-        global_config = get_global_config_dict()
-        if not is_valid:
-            print(f"Cannot download datasets: {error_msg}")
-            sys.exit(1)
+        if local_datasets_not_found:
+            backend = config.data_source
+            is_valid, error_msg = validate_backend_credentials(backend)
+            global_config = get_global_config_dict()
+            if not is_valid:
+                print(f"Cannot download datasets: {error_msg}")
+                sys.exit(1)
 
-        for (
-            server_name,
-            datasets,
-        ) in local_datasets_not_found.items():  # pragma: no cover
-            for d in datasets:
-                try:
-                    if backend == "gitlab":
-                        if d.gitlab_identifier is None:
-                            print(f"Dataset `{d.name}` missing gitlab_identifier for GitLab backend")
-                            continue
+            for (
+                server_name,
+                datasets,
+            ) in local_datasets_not_found.items():  # pragma: no cover
+                for d in datasets:
+                    try:
+                        if backend == "gitlab":
+                            if d.gitlab_identifier is None:
+                                print(f"Dataset `{d.name}` missing gitlab_identifier for GitLab backend")
+                                continue
 
-                        download_config = DownloadJsonlDatasetGitlabConfig.model_validate(
-                            d.gitlab_identifier.model_dump() | {"output_fpath": d.jsonl_fpath}
-                        )
-                        print(
-                            f"Downloading dataset `{d.name}` for `{server_name}` from {backend} using {download_config}"
-                        )
-                        download_jsonl_dataset(download_config)
-
-                    elif backend == "huggingface":
-                        if d.huggingface_identifier is None:
-                            print(f"Dataset `{d.name}` missing huggingface_identifier for HuggingFace backend")
-                            continue
-
-                        if d.huggingface_identifier.artifact_fpath is None:
-                            print(f"Downloading parquet dataset `{d.name}` from {d.huggingface_identifier.repo_id}...")
-                            download_parquet_dataset_as_jsonl(
-                                repo_id=d.huggingface_identifier.repo_id,
-                                output_fpath=d.jsonl_fpath,
-                                split="train",
-                                token=global_config.get("hf_token"),
-                            )
-                        else:
-                            download_config = DownloadJsonlDatasetHuggingFaceConfig.model_validate(
-                                {
-                                    "repo_id": d.huggingface_identifier.repo_id,
-                                    "artifact_fpath": d.huggingface_identifier.artifact_fpath,
-                                    "output_fpath": d.jsonl_fpath,
-                                    "hf_token": global_config["hf_token"],
-                                }
+                            download_config = DownloadJsonlDatasetGitlabConfig.model_validate(
+                                d.gitlab_identifier.model_dump() | {"output_fpath": d.jsonl_fpath}
                             )
                             print(
-                                f"Downloading dataset `{d.name}` for `{server_name}` from {backend}: {d.huggingface_identifier.repo_id}"
+                                f"Downloading dataset `{d.name}` for `{server_name}` from {backend} using {download_config}"
                             )
-                            download_jsonl_dataset_from_hf(download_config)
+                            download_jsonl_dataset(download_config)
 
-                except Exception as e:
-                    print(f"Failed to download dataset `{d.name}` from {backend}: {e}")
+                        elif backend == "huggingface":
+                            if d.huggingface_identifier is None:
+                                print(f"Dataset `{d.name}` missing huggingface_identifier for HuggingFace backend")
+                                continue
+
+                            if d.huggingface_identifier.artifact_fpath is None:
+                                print(
+                                    f"Downloading parquet dataset `{d.name}` from {d.huggingface_identifier.repo_id}..."
+                                )
+                                download_parquet_dataset_as_jsonl(
+                                    repo_id=d.huggingface_identifier.repo_id,
+                                    output_fpath=d.jsonl_fpath,
+                                    split=d.huggingface_identifier.split,
+                                    token=global_config.get("hf_token"),
+                                )
+                            else:
+                                download_config = DownloadJsonlDatasetHuggingFaceConfig.model_validate(
+                                    {
+                                        "repo_id": d.huggingface_identifier.repo_id,
+                                        "artifact_fpath": d.huggingface_identifier.artifact_fpath,
+                                        "output_fpath": d.jsonl_fpath,
+                                        "hf_token": global_config["hf_token"],
+                                    }
+                                )
+                                print(
+                                    f"Downloading dataset `{d.name}` for `{server_name}` from {backend}: {d.huggingface_identifier.repo_id}"
+                                )
+                                download_jsonl_dataset_from_hf(download_config)
+
+                    except Exception as e:
+                        print(f"Failed to download dataset `{d.name}` from {backend}: {e}")
 
     ########################################
     # Validate samples and aggregate metrics

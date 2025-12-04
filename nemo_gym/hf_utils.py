@@ -61,7 +61,7 @@ def download_parquet_dataset_as_jsonl(
     output_fpath: str,
     split: str = "train",
     token: Optional[str] = None,
-) -> None:
+) -> None:  # pragma: no cover
     """Download a HF dataset and save as JSONL"""
     try:
         ds = load_dataset(repo_id, split=split, token=token)

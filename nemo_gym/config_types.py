@@ -181,13 +181,16 @@ class UploadJsonlDatasetHuggingFaceMaybeDeleteConfig(BaseUploadJsonlDatasetHuggi
 
 class DownloadJsonlDatasetHuggingFaceConfig(JsonlDatasetHuggingFaceIdentifer, BaseNeMoGymCLIConfig):
     repo_id: str = Field(description="The repo id.")
-    artifact_fpath: str = Field(description="The filepath to the artifact to download.")
-    output_fpath: str = Field(description="Where to save the downloaded dataset.")
+    output_fpath: str = Field(description="Where to save the downloaded dataset (as JSONL).")
     hf_token: str = Field(description="The huggingface token.")
+    artifact_fpath: Optional[str] = Field(
+        default=None, description="The filepath to the artifact in the repo (for JSONL). Omit for parquet."
+    )
+    split: str = Field(default="train", description="Dataset split (only used for parquet).")
 
 
 class PrepareDataConfig(BaseNeMoGymCLIConfig):
-    data_source: Literal["gitlab", "huggingface"] = "gitlab"
+    data_source: Literal["gitlab", "huggingface"] = "huggingface"
 
 
 DatasetType = Union[Literal["train"], Literal["validation"], Literal["example"]]
