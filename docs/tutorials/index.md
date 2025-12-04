@@ -52,3 +52,47 @@ Train a model with NeMo RL. Learn how to set up NeMo Gym and NeMo RL training en
 :::
 
 ::::
+
+
+---
+
+## Training framework integration
+
+Implement NeMo Gym integration into a new training framework. This is only for expert users that cannot use existing training framework integrations with Gym and need to implement their own.
+
+::::{grid} 1 1 1 1
+:gutter: 1 1 1 2
+
+:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` Generation backend and OpenAI-compatible HTTP server
+:link: generation-backend-and-http-server
+:link-type: doc
+OpenAI compatible HTTP server pre-requisites for Gym integration into an RL framework.
++++
+{bdg-secondary}`training` {bdg-secondary}`infra`
+:::
+
+:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` OpenAI-compatible HTTP server On-Policy correction
+:link: rl-training-with-nemo-rl
+:link-type: doc
+Helpful On-Policy fixes for OpenAI-compatible HTTP server implementations in multi step and multi turn scenarios.
++++
+{bdg-secondary}`training` {bdg-secondary}`infra`
+:::
+
+:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` Gym integration footprint and form factor
+:link: rl-training-with-nemo-rl
+:link-type: doc
+Implementation details like footprint and form factor for the actual Gym + RL integration.
++++
+{bdg-secondary}`training` {bdg-secondary}`infra`
+:::
+
+:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` Gym + RL framework integration success criteria
+:link: rl-training-with-nemo-rl
+:link-type: doc
+What success criteria can be used to validate Gym + RL framework integration correctness.
++++
+{bdg-secondary}`training` {bdg-secondary}`infra`
+:::
+
+::::
