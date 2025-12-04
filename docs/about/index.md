@@ -24,7 +24,7 @@ Embedding custom training environments directly within training frameworks is co
 
 ## Core Components
 
-A training environment consists of three components:
+A training environment consists of three server components:
 
 - **Agents**: Orchestrate the rollout lifecycle—calling models, executing tool calls via resources, and coordinating verification.
 - **Models**: Stateless text generation using LLM inference endpoints (OpenAI-compatible or vLLM).
