@@ -37,6 +37,8 @@ Make sure you have:
 - ✅ `env.yaml` configured with your OpenAI API key
 - ✅ Virtual environment activated
 
+**What's in a rollout?** A complete record of a task execution: the input, the model's reasoning and tool calls, the final output, and a verification score.
+
 ---
 
 ## 1. Inspect the Data
