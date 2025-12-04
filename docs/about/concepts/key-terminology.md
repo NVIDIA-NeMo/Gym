@@ -62,7 +62,7 @@ Reward / Reward Signal
 SFT (Supervised Fine-Tuning)
     Training approach using examples of good agent behavior. Shows successful rollouts as training data.
 
-DPO (Direct Preference Optimization)  
+DPO (Direct Preference Optimization)
     Training approach using pairs of rollouts where one is preferred over another. Teaches better vs worse responses.
 
 RL (Reinforcement Learning)

@@ -2,9 +2,9 @@
 
 # NeMo Gym Documentation
 
-NeMo Gym is a framework for building reinforcement learning (RL) training environments large language models (LLMs). Gym provides training environment development scaffolding and training environment patterns such as multi-step, multi-turn, and user modeling scenarios.
+NeMo Gym is a framework for building reinforcement learning (RL) training environments for large language models (LLMs). It provides training environment development scaffolding and training environment patterns for multi-step, multi-turn, and user modeling scenarios.
 
-At the core of NeMo Gym are three server concepts: **Responses API Model servers** are model endpoints, **Resources servers** contain tool implementations and verification logic, and **Response API Agent servers** orchestrate the interaction between models and resources.
+NeMo Gym has three core server types: **Responses API Model servers** provide model endpoints, **Resources servers** contain tool implementations and verification logic, and **Responses API Agent servers** orchestrate interactions between models and resources.
 
 ## Quickstart
 
@@ -37,13 +37,15 @@ uv sync --extra dev --group docs
 
 **Configure Your API Key**
 
-Create an `env.yaml` file that contains your OpenAI API key and the model you want to use. Replace `your-openai-api-key` with your actual key. This file helps keep your secrets out of version control while still making them available to NeMo Gym.
+Create an `env.yaml` file that contains your OpenAI API key and the {term}`Policy Model` you want to use. Replace `your-openai-api-key` with your actual key. This file helps keep your secrets out of version control while still making them available to NeMo Gym.
 
 ```bash
 echo "policy_base_url: https://api.openai.com/v1
 policy_api_key: your-openai-api-key
 policy_model_name: gpt-4.1-2025-04-14" > env.yaml
 ```
+
+> **Note:** We use GPT-4.1 in this quickstart because it provides low latency (no reasoning step) and works reliably out-of-the-box. NeMo Gym is **not limited to OpenAI models**—you can use self-hosted models via vLLM or any OpenAI-compatible inference server that supports function calling. See the setup guide for details.
 
 :::
 
