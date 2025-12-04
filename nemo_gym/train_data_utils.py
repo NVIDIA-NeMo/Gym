@@ -475,6 +475,15 @@ class TrainDataProcessor(BaseModel):
                             print(f"Dataset `{d.name}` missing huggingface_identifier for HuggingFace backend")
                             continue
 
+                        if d.huggingface_identifier.artifact_fpath is None:
+                            print(f"""
+Dataset `{d.name}` has no artifact_fpath in huggingface_identifier.
+NeMo Gym only supports JSONL files. Please ensure the HuggingFace repo
+contains a JSONL file and specify its path in artifact_fpath, or download
+and convert the dataset to JSONL format locally.
+""")
+                            continue
+
                         download_config = DownloadJsonlDatasetHuggingFaceConfig.model_validate(
                             {
                                 "repo_id": d.huggingface_identifier.repo_id,
