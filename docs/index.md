@@ -101,6 +101,30 @@ This generates training data with verification scores!
 :::
 ::::
 
+---
+
+## What's Next?
+
+Now that you can generate rollouts, choose your path:
+
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Use an Existing Training Environment
+:link: https://github.com/NVIDIA-NeMo/Gym#-available-resource-servers
+
+Browse the available resource servers to find a training-ready environment that matches your goals.
+:::
+
+:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build a Custom Training Environment
+:link: tutorials/creating-resource-server
+:link-type: doc
+
+Implement or integrate existing tools and define task verification logic.
+:::
+
+::::
+
 ```{toctree}
 :hidden:
 Home <self>
