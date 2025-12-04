@@ -160,10 +160,7 @@ tutorials/index.md
 tutorials/creating-resource-server
 tutorials/offline-training-w-rollouts
 tutorials/rl-training-with-nemo-rl
-tutorials/generation-backend-and-openai-compatible-http-server
-tutorials/openai-compatible-http-server-on-policy-correction
-tutorials/gym-integration-footprint-and-form-factor
-tutorials/gym-rl-framework-integration-success-criteria
+tutorials/training-framework-integration/index.md
 how-to-faq.md
 ```
 
