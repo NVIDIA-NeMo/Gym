@@ -1,73 +1,65 @@
-# Rollout Collection
+(gs-collecting-rollouts)=
 
-A rollout is complete record of a task instance execution that captures:
-- What the model was asked to do (input)
-- How the model reasoned (internal processing)
-- What tools were used (tool calls and tool responses)
-- How well the task was achieved (verification scores)
-- The final response (output to user)
+# Collecting Rollouts
 
+In the previous tutorial, you set up NeMo Gym and ran your first agent interaction. But to train an agent with reinforcement learning, you need hundreds or thousands of these interactions—each one scored and saved. That's what rollout collection does.
 
-## Generating Your First Rollouts
+:::{card}
 
-Now that you have servers running from the previous tutorial, let's generate rollouts using the **Simple Weather** resource server you already set up.
+**Goal**: Generate your first batch of rollouts and understand how they become training data.
 
-::::{tab-set}
+^^^
 
-:::{tab-item} 1. Inspect data
+**In this tutorial, you will**:
+
+1. Run batch rollout collection
+2. Examine results with the rollout viewer
+3. Learn key parameters for scaling
+
+:::
+
+:::{button-ref} setup-installation
+:color: secondary
+:outline:
+:ref-type: doc
+
+← Previous: Setup and Installation
+:::
+
+---
+
+## Before You Begin
+
+Make sure you have:
+
+- ✅ Completed [Setup and Installation](setup-installation.md)
+- ✅ Servers still running (or ready to restart them)
+- ✅ `env.yaml` configured with your OpenAI API key
+- ✅ Virtual environment activated
+
+**What's in a rollout?** A complete record of a task execution: the input, the model's reasoning and tool calls, the final output, and a verification score.
+
+---
+
+## 1. Inspect the Data
+
+Look at the example dataset included with the Simple Weather resource server:
+
 ```bash
 head -1 resources_servers/example_simple_weather/data/example.jsonl | python -m json.tool
 ```
 
-**What this dataset contains**: Simple weather queries where agents must use the `get_weather` tool to provide weather information.
+Each line contains a `responses_create_params` object with:
 
-Each line in the input JSONL file follows the schema below.
+- **input**: The conversation messages (user query)
+- **tools**: Available tools the agent can use
 
-**Key components**:
-- **responses_create_params**: Original task and available tools. Required
-- **input**: The conversation messages including system prompt and user query
-- **tools**: Available tools the agent can use (in this case, `get_weather`)
+## 2. Verify Servers Are Running
 
-```json
-{
-    "responses_create_params": {
-        "input": [
-            {
-                "content": "what's it like in sf?",
-                "role": "user"
-            }
-        ],
-        "tools": [
-            {
-                "name": "get_weather",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "city": {
-                            "type": "string",
-                            "description": ""
-                        }
-                    },
-                    "required": [
-                        "city"
-                    ],
-                    "additionalProperties": false
-                },
-                "strict": true,
-                "type": "function",
-                "description": ""
-            }
-        ]
-    }
-}
-```
-
-:::
-:::{tab-item} 2. Verify servers are running
-
-If you still have servers running from the [Setup and Installation](setup-installation.md) tutorial, you're ready to proceed to the next step.
+If you still have servers running from the [Setup and Installation](setup-installation.md) tutorial, proceed to the next step.
 
 If not, start them again:
+
 ```bash
 config_paths="resources_servers/example_simple_weather/configs/simple_weather.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml"
@@ -76,11 +68,10 @@ ng_run "+config_paths=[${config_paths}]"
 
 **✅ Success Check**: You should see 3 servers running including the `simple_weather_simple_agent`.
 
-:::
-
-:::{tab-item} 3. Generate Rollouts
+## 3. Generate Rollouts
 
 In a separate terminal, run:
+
 ```bash
 ng_collect_rollouts +agent_name=simple_weather_simple_agent \
     +input_jsonl_fpath=resources_servers/example_simple_weather/data/example.jsonl \
@@ -90,109 +81,69 @@ ng_collect_rollouts +agent_name=simple_weather_simple_agent \
     +num_samples_in_parallel=3
 ```
 
-**What's happening**:
-- `limit=5`: Process only the first 5 examples (for quick testing)
-- `num_repeats=2`: Generate 2 rollouts per example (10 total rollouts)
-- `num_samples_in_parallel=3`: Process 3 requests simultaneously
+```{list-table} Parameters
+:header-rows: 1
+:widths: 35 15 50
 
-:::
+* - Parameter
+  - Type
+  - Description
+* - `+agent_name`
+  - `str`
+  - Which agent to use (required)
+* - `+input_jsonl_fpath`
+  - `str`
+  - Path to input JSONL file (required)
+* - `+output_jsonl_fpath`
+  - `str`
+  - Path to output JSONL file (required)
+* - `+limit`
+  - `int`
+  - Max examples to process (default: `null` = all)
+* - `+num_repeats`
+  - `int`
+  - Rollouts per example (default: `null` = 1)
+* - `+num_samples_in_parallel`
+  - `int`
+  - Concurrent requests (default: `null` = unlimited)
+```
 
-:::{tab-item} 4. View rollouts
+**✅ Success Check**: You should see:
 
-Launch the rollout viewer
+```text
+Collecting rollouts: 100%|████████████████| 5/5 [00:08<00:00,  1.67s/it]
+```
+
+## 4. View Rollouts
+
+Launch the rollout viewer:
+
 ```bash
 ng_viewer +jsonl_fpath=results/simple_weather_rollouts.jsonl
 ```
 
-Then visit http://127.0.0.1:7860
+Then visit <http://127.0.0.1:7860>
 
-**What you'll see**: An interactive viewer showing tool calls and verification scores for each rollout.
+The viewer shows each rollout with:
 
-**Key components**:
-- **reward**: Verification score from the resource server. Required on output
-- **response**: Complete output conversation including tool calls and responses
+- **Input**: The original query and tools
+- **Response**: Tool calls and agent output
+- **Reward**: Verification score (0.0–1.0)
 
-```json
-{
-    "responses_create_params": {
-        "input": [
-            {
-                "content": "You are a helpful personal assistant that aims to be helpful and reduce any pain points the user has.",
-                "role": "developer",
-                "type": "message"
-            },
-            {
-                "content": "what's it like in sf?",
-                "role": "user",
-                "type": "message"
-            }
-        ],
-    },
-    "response": {
-        "output": [
-            {
-                "arguments": "{\"city\":\"San Francisco\"}",
-                "call_id": "call_zuJigUcshS8H02NTWrsI4fcH",
-                "name": "get_weather",
-                "type": "function_call",
-                "id": "fc_026df8ad0671316700692f58eb22cc8193bdd92b0524f0c66c",
-                "status": "completed"
-            },
-            {
-                "call_id": "call_zuJigUcshS8H02NTWrsI4fcH",
-                "output": "{\"city\":\"San Francisco\",\"weather_description\":\"The weather in San Francisco is cold.\"}",
-                "type": "function_call_output",
-                "id": null,
-                "status": null
-            },
-            {
-                "id": "msg_026df8ad0671316700692f58edf44881938cb000ea88577cae",
-                "content": [
-                    {
-                        "annotations": [],
-                        "text": "The weather in San Francisco is currently cold. If you need more specific details or a forecast, just let me know!",
-                        "type": "output_text",
-                        "logprobs": []
-                    }
-                ],
-                "role": "assistant",
-                "status": "completed",
-                "type": "message"
-            }
-        ],
-    },
-    "tools": [
-        {
-            "name": "get_weather",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "city": {
-                        "type": "string",
-                        "description": ""
-                    }
-                },
-                "required": [
-                    "city"
-                ],
-                "additionalProperties": false
-            },
-            "strict": true,
-            "type": "function",
-            "description": null
-        }
-    ],
-    "reward": 1.0
-}
-```
+:::{important}
+**Where Do Reward Scores Come From?**
 
+Scores come from the `verify()` function in your resource server. Each rollout is automatically sent to the `/verify` endpoint during collection. The default returns 1.0, but you can implement custom logic to score based on tool usage, response quality, or task completion.
 :::
-::::
 
+---
 
 ## Rollout Generation Parameters
 
-Essential
+::::{tab-set}
+
+:::{tab-item} Essential
+
 ```bash
 ng_collect_rollouts \
     +agent_name=your_agent_name \              # Which agent to use
@@ -200,16 +151,34 @@ ng_collect_rollouts \
     +output_jsonl_fpath=output/rollouts.jsonl  # Where to save results
 ```
 
-Data Control
+:::
+
+:::{tab-item} Data Control
+
 ```bash
     +limit=100 \                    # Limit examples processed (null = all)
     +num_repeats=3 \                # Rollouts per example (null = 1)
     +num_samples_in_parallel=5      # Concurrent requests (null = default)
 ```
 
-Model Behavior
+:::
+
+:::{tab-item} Model Behavior
+
 ```bash
     +responses_create_params.max_output_tokens=4096 \     # Response length limit
     +responses_create_params.temperature=0.7 \            # Randomness (0-1)
     +responses_create_params.top_p=0.9                    # Nucleus sampling
 ```
+
+:::
+
+::::
+
+---
+
+## Next Steps
+
+You've completed the get-started tutorials. Your `simple_weather_rollouts.jsonl` file is training data ready for RL, SFT, or DPO pipelines.
+
+From here, explore the [Tutorials](../tutorials/index.md) for advanced topics or [Concepts](../about/concepts/index.md) for deeper understanding.
