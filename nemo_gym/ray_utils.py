@@ -30,7 +30,7 @@ from nemo_gym.global_config import (
 )
 
 
-def _prepare_ray_worker_env_vars() -> Dict[str, str]:
+def _prepare_ray_worker_env_vars() -> Dict[str, str]:  # pragma: no cover
     worker_env_vars = {
         **os.environ,
     }
@@ -45,6 +45,24 @@ def _prepare_ray_worker_env_vars() -> Dict[str, str]:
     return worker_env_vars
 
 
+def _start_global_ray_gpu_scheduling_helper(node_id: Optional[str] = None):  # pragma: no cover
+    worker_options = {
+        "name": "_NeMoGymRayGPUSchedulingHelper",
+        "num_cpus": 0,
+    }
+    if node_id is not None:
+        worker_options["scheduling_strategy"] = NodeAffinitySchedulingStrategy(
+            node_id=node_id,
+            soft=True,
+        )
+    worker_options["runtime_env"] = {
+        "py_executable": sys.executable,
+        "env_vars": _prepare_ray_worker_env_vars(),
+    }
+    worker = _NeMoGymRayGPUSchedulingHelper.options(**worker_options).remote()
+    return worker
+
+
 def get_global_ray_gpu_scheduling_helper() -> ActorProxy:  # pragma: no cover
     cfg = get_global_config_dict()
     while True:
@@ -56,31 +74,13 @@ def get_global_ray_gpu_scheduling_helper() -> ActorProxy:  # pragma: no cover
             if ray_namespace is not None:
                 get_actor_args["namespace"] = ray_namespace
             worker = ray.get_actor(**get_actor_args)
+            return worker
         except ValueError:
             sleep(3)
-        return worker
 
 
 @ray.remote
 class _NeMoGymRayGPUSchedulingHelper:  # pragma: no cover
-    @classmethod
-    def _start_global(worker_cls, node_id: Optional[str] = None):
-        worker_options = {
-            "name": "_NeMoGymRayGPUSchedulingHelper",
-            "num_cpus": 0,
-        }
-        if node_id is not None:
-            worker_options["scheduling_strategy"] = NodeAffinitySchedulingStrategy(
-                node_id=node_id,
-                soft=True,
-            )
-        worker_options["runtime_env"] = {
-            "py_executable": sys.executable,
-            "env_vars": _prepare_ray_worker_env_vars(),
-        }
-        worker = worker_cls.options(**worker_options).remote()
-        return worker
-
     def __init__(self, *args, **kwargs):
         self.cfg = get_global_config_dict()
         self.avail_gpus_dict = defaultdict(int)
