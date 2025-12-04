@@ -1,6 +1,6 @@
 # NeMo Gym
 
-NeMo Gym is a framework for building reinforcement learning environments to train large language models. 
+NeMo Gym is a framework for building reinforcement learning (RL) training environments for large language models (LLMs). It provides infrastructure to develop environments, scale rollout collection, and integrate seamlessly with your preferred training framework. 
 
 NeMo Gym is a component of the [NVIDIA NeMo Framework](https://docs.nvidia.com/nemo-framework/), NVIDIA’s GPU-accelerated platform for building and training generative AI models.
 
