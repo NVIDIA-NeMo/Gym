@@ -1,140 +1,149 @@
-# Rollout Collection
+(gs-collecting-rollouts)=
 
-A {term}`rollout <Rollout / Trajectory>` is complete record of a task instance execution that captures:
-- What the model was asked to do (input)
-- How the model reasoned (internal processing)  
-- What tools were used (tool calls and tool responses)
-- How well the task was achieved (verification scores)
-- The final response (output to user)
+# Collecting Rollouts
 
+In the previous tutorial, you set up NeMo Gym and ran your first agent interaction. But to train an agent with reinforcement learning, you need hundreds or thousands of these interactions—each one scored and saved. That's what rollout collection does.
 
-## Generating Your First Rollouts
+:::{card}
 
-Let's generate rollouts using the **Example Multi Step** resource server, which tests reading comprehension across long documents.
+**Goal**: Generate your first batch of rollouts and understand how they become training data.
 
-::::{tab-set}
+^^^
 
-:::{tab-item} 1. Inspect data
-```bash
-head -1 resources_servers/example_multi_step/data/example.jsonl | python -m json.tool
-```
+**In this tutorial, you will**:
 
-**What this dataset contains**: Complex reading comprehension tasks where agents must find specific information ("needles") within long documents ("haystacks").
-
-Each line in the input JSONL file follows the schema below.
-
-**Key components**:
-- **responses_create_params**: Original task and available tools. Required
-- **metadata** (e.g. `expected_synonyms`, `minefield_label`, etc): Additional metadata used by the resources server to either setup or perform verification
-
-```json
-{
-    "responses_create_params": {
-        "input": [
-            {
-                "role": "user",
-                "content": "What factors contribute to a region experiencing extremely high temperatures, and how do these factors interact?"
-            }
-        ]
-    },
-    "expected_synonyms": [
-        "Blazing",
-        "Warm"
-    ],
-    "minefield_label": "Hot"
-}
-```
+1. Run batch rollout collection
+2. Examine results with the rollout viewer
+3. Learn key parameters for scaling
 
 :::
-:::{tab-item} 2. Start servers
-Start the example_multi_step agent server
+
+:::{button-ref} setup-installation
+:color: secondary
+:outline:
+:ref-type: doc
+
+← Previous: Setup and Installation
+:::
+
+---
+
+## Before You Begin
+
+Make sure you have:
+
+- ✅ Completed [Setup and Installation](setup-installation.md)
+- ✅ Servers still running (or ready to restart them)
+- ✅ `env.yaml` configured with your OpenAI API key
+- ✅ Virtual environment activated
+
+**What's in a rollout?** A complete record of a task execution: the input, the model's reasoning and tool calls, the final output, and a verification score.
+
+---
+
+## 1. Inspect the Data
+
+Look at the example dataset included with the Simple Weather resource server:
+
 ```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/example_multi_step/configs/example_multi_step.yaml"
+head -1 resources_servers/example_simple_weather/data/example.jsonl | python -m json.tool
+```
+
+Each line contains a `responses_create_params` object with:
+
+- **input**: The conversation messages (user query)
+- **tools**: Available tools the agent can use
+
+## 2. Verify Servers Are Running
+
+If you still have servers running from the [Setup and Installation](setup-installation.md) tutorial, proceed to the next step.
+
+If not, start them again:
+
+```bash
+config_paths="resources_servers/example_simple_weather/configs/simple_weather.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml"
 ng_run "+config_paths=[${config_paths}]"
 ```
 
-**✅ Success Check**: You should see 3 servers running including the `example_multi_step_simple_agent`.
+**✅ Success Check**: You should see 3 servers running including the `simple_weather_simple_agent`.
 
-:::
-
-:::{tab-item} 3. Generate Rollouts
+## 3. Generate Rollouts
 
 In a separate terminal, run:
+
 ```bash
-ng_collect_rollouts +agent_name=example_multi_step_simple_agent \
-    +input_jsonl_fpath=resources_servers/example_multi_step/data/example.jsonl \
-    +output_jsonl_fpath=results/example_multi_step_rollouts.jsonl \
+ng_collect_rollouts +agent_name=simple_weather_simple_agent \
+    +input_jsonl_fpath=resources_servers/example_simple_weather/data/example.jsonl \
+    +output_jsonl_fpath=results/simple_weather_rollouts.jsonl \
     +limit=5 \
     +num_repeats=2 \
-    +num_samples_in_parallel=3 \
-    +responses_create_params.max_output_tokens=8192
+    +num_samples_in_parallel=3
 ```
 
-**What's happening**:
-- `limit=5`: Process only the first 5 examples (for quick testing)
-- `num_repeats=2`: Generate 2 rollouts per example (10 total rollouts)
-- `num_samples_in_parallel=3`: Process 3 requests simultaneously
-- `max_output_tokens=8192`: Allow longer responses for complex reasoning
+```{list-table} Parameters
+:header-rows: 1
+:widths: 35 15 50
 
-:::
+* - Parameter
+  - Type
+  - Description
+* - `+agent_name`
+  - `str`
+  - Which agent to use (required)
+* - `+input_jsonl_fpath`
+  - `str`
+  - Path to input JSONL file (required)
+* - `+output_jsonl_fpath`
+  - `str`
+  - Path to output JSONL file (required)
+* - `+limit`
+  - `int`
+  - Max examples to process (default: `null` = all)
+* - `+num_repeats`
+  - `int`
+  - Rollouts per example (default: `null` = 1)
+* - `+num_samples_in_parallel`
+  - `int`
+  - Concurrent requests (default: `null` = unlimited)
+```
 
-:::{tab-item} 4. View rollouts
+**✅ Success Check**: You should see:
 
-Launch the rollout viewer
+```text
+Collecting rollouts: 100%|████████████████| 5/5 [00:08<00:00,  1.67s/it]
+```
+
+## 4. View Rollouts
+
+Launch the rollout viewer:
+
 ```bash
-ng_viewer +jsonl_fpath=results/example_multi_step_rollouts.jsonl
+ng_viewer +jsonl_fpath=results/simple_weather_rollouts.jsonl
 ```
 
-Then visit http://127.0.0.1:7860
+Then visit <http://127.0.0.1:7860>
 
-**What you'll see**: An interactive viewer showing reasoning, tool calls, and verification scores for each rollout.
+The viewer shows each rollout with:
 
-**Key components**:
-- **{term}`reward <Reward / Reward Signal>`**: Verification score from the resource server. Required on output
-- **response**: Complete output conversation including tool calls and responses
-- **metadata** (`parsed_synonym_values`, `set_overlap`, etc): Additional metrics for analysis
+- **Input**: The original query and tools
+- **Response**: Tool calls and agent output
+- **Reward**: Verification score (0.0–1.0)
 
-```json
-{
-    "responses_create_params": {
-        "input": [
-            {
-                "content": "What factors contribute to a region experiencing extremely high temperatures, and how do these factors interact?",
-                "role": "user",
-                "type": "message"
-            }
-        ]
-    },
-    "response": {
-        "output": [
-            {
-                "arguments": "{\"synonym\":\"Blazing\"}",
-                "name": "get_synonym_value",
-                "type": "function_call",
-            },
-            "..."
-        ]
-    },
-    "reward": 1.0,
-    "parsed_synonym_values": [
-        711,
-        407
-    ],
-    "accuracy": true,
-    "set_overlap": 1.0,
-    "original_term_minefield_hit": false,
-    "order_instruction_following_failure": false
-}
-```
+:::{important}
+**Where Do Reward Scores Come From?**
 
+Scores come from the `verify()` function in your resource server. Each rollout is automatically sent to the `/verify` endpoint during collection. The default returns 1.0, but you can implement custom logic to score based on tool usage, response quality, or task completion.
 :::
-::::
 
+---
 
 ## Rollout Generation Parameters
 
-Essential
+::::{tab-set}
+
+:::{tab-item} Essential
+
 ```bash
 ng_collect_rollouts \
     +agent_name=your_agent_name \              # Which agent to use
@@ -142,16 +151,34 @@ ng_collect_rollouts \
     +output_jsonl_fpath=output/rollouts.jsonl  # Where to save results
 ```
 
-Data Control
+:::
+
+:::{tab-item} Data Control
+
 ```bash
     +limit=100 \                    # Limit examples processed (null = all)
-    +num_repeats=3 \                # Rollouts per example (null = 1)  
+    +num_repeats=3 \                # Rollouts per example (null = 1)
     +num_samples_in_parallel=5      # Concurrent requests (null = default)
 ```
 
-Model Behavior
+:::
+
+:::{tab-item} Model Behavior
+
 ```bash
     +responses_create_params.max_output_tokens=4096 \     # Response length limit
     +responses_create_params.temperature=0.7 \            # Randomness (0-1)
     +responses_create_params.top_p=0.9                    # Nucleus sampling
 ```
+
+:::
+
+::::
+
+---
+
+## Next Steps
+
+You've completed the get-started tutorials. Your `simple_weather_rollouts.jsonl` file is training data ready for RL, SFT, or DPO pipelines.
+
+From here, explore the [Tutorials](../tutorials/index.md) for advanced topics or [Concepts](../about/concepts/index.md) for deeper understanding.
