@@ -23,4 +23,4 @@ The [NeMo Framework](https://github.com/NVIDIA-NeMo) is NVIDIA's GPU-accelerated
 * **NeMo Guardrails**: Programmable safety guardrails
 * And more...
 
-**NeMo Gym's Role**: Within this ecosystem, Gym focuses specifically on standardizing scalable rollout collection for RL training. It provides unified interfaces to heterogeneous RL environments and curated resource servers with verification logic, making it practical to generate large-scale, high-quality training data that feeds into NeMo RL and other training frameworks.
+**NeMo Gym's Role**: Within this ecosystem, Gym focuses on standardizing scalable rollout collection for RL training. It provides unified interfaces to heterogeneous RL environments and curated resource servers with verification logic. This makes it practical to generate large-scale, high-quality training data for NeMo RL and other training frameworks.

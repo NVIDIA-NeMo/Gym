@@ -18,7 +18,7 @@ This allows for:
 
 :::{tab-item} 1. Server YAML Config Files
 
-These are your base configurations that define server structures and default values. Later files override earlier files.
+These base configurations define server structures and default values, with later files overriding earlier ones.
 
 Example: Multi-Server Configuration
 ```bash
@@ -91,7 +91,7 @@ ng_run '+config_paths=${simple_weather_config_paths}'
 
 :::{tab-item} 3. Command Line Arguments
 
-**Runtime overrides** using Hydra syntax for maximum flexibility. These runtime command line have the highest priority, meaning they can override any previous setting set in the config.yaml or env.yaml files.
+**Runtime overrides** using Hydra syntax for maximum flexibility. These command line arguments have the highest priority and can override any settings from config.yaml or env.yaml files.
 
 Basic Overrides
 ```bash
