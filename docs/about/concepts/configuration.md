@@ -2,30 +2,47 @@
 
 # Configuration System
 
-NeMo Gym uses YAML configuration files to define which servers to run. Understanding the config structure helps you avoid common confusion when setting up training environments.
+NeMo Gym uses YAML configuration files to define [Model, Resources, and Agent servers](./core-abstractions). Each server gets its own configuration block, providing modular control over the entire training environment.
 
-## The Three-Level Pattern
+## How Servers Connect
 
-Every server definition follows this pattern:
+A training environment typically includes all three server types working together. The Agent server config specifies which Model and Resources servers to use by referencing their server IDs. This wiring is what ties each training environment together — the Agent knows which Model to call and which Resources to use.
 
-```yaml
-server_id:              # What YOU call it (your choice)
-  server_type:          # What KIND of server (matches a folder)
-    implementation:     # Which CODE to run (matches a subfolder)
-      entrypoint: ...
+## Config File Locations
+
+Each server type has a dedicated directory with its implementations and their configs:
+
+```text
+# Model Server Config
+responses_api_models/
+  └── openai_model/
+      └── configs/openai_model.yaml
+
+# Resources Server Config
+resources_servers/
+  └── example_simple_weather/
+      └── configs/simple_weather.yaml
+
+# Agent Server Config
+responses_api_agents/
+  └── simple_agent/
+      └── configs/simple_agent.yaml
 ```
 
-**Why three levels?** Each level serves a different purpose:
+## Server Block Structure
 
-| Level | You Control | Must Match |
-|-------|-------------|------------|
-| **Server ID** | ✅ Yes - name it anything | Nothing - it's your identifier |
-| **Server Type** | ❌ Pick from 3 options | `responses_api_models`, `resources_servers`, or `responses_api_agents` |
-| **Implementation** | ❌ Pick existing implementation | A folder inside that server type |
+Each config file defines a server using this structure:
+```yaml
+server_id:                    # Your unique name for this server
+  server_type:                # responses_api_models | resources_servers | responses_api_agents
+    implementation:           # Directory name inside the server type directory
+      entrypoint: app.py      # Python file to run
+      # ... additional fields vary by server type
+```
 
-### Understanding the Naming Pattern
+Different server types have additional required fields (e.g., `domain` for resources servers, `resources_server` and `model_server` for agents). See {doc}`/reference/configuration` for complete field specifications.
 
-In many examples, you'll see the same name appear twice:
+In many config files in NeMo Gym, you'll see the same name used for both server ID and implementation:
 
 ```yaml
 example_simple_weather:        # ← Server ID
@@ -41,20 +58,10 @@ These serve different purposes:
 
 Examples often use matching names for simplicity, but the two values are independent choices.
 
-## Policy Model Variables
-
-NeMo Gym provides three standard placeholders for "the model being trained":
-
-- `policy_base_url` - Model API endpoint
-- `policy_api_key` - Authentication key
-- `policy_model_name` - Model identifier
-
-These let you reference the training model consistently across configs without hardcoding values. Define them once in `env.yaml`, then use `${variable_name}` syntax anywhere you need them.
-
 ---
 
 :::{seealso}
 - {doc}`/reference/configuration` for complete syntax and field specifications
-- {doc}`/troubleshooting/configuration` for common errors
+- {doc}`/troubleshooting/configuration` for troubleshooting configuration related errors
 :::
 
