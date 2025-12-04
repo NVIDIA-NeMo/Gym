@@ -1,8 +1,8 @@
-(core-abstractions)=
+(core-components)=
 
-# Core Abstractions
+# Core Components
 
-Before diving into code, let's understand the three core abstractions in NeMo Gym.
+Before diving into code, let's understand the three core components in NeMo Gym.
 
 > If you are new to reinforcement learning for LLMs, we recommend you refer to **[Key Terminology](./key-terminology)** first.
 
