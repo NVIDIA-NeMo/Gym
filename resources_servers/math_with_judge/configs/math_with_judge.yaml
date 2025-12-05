@@ -23,6 +23,8 @@ math_with_judge_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
+      huggingface_identifier:
+        repo_id: nvidia/Nemotron-RL-math-OpenMathReasoning
       datasets:
       - name: train
         type: train
@@ -32,9 +34,6 @@ math_with_judge_simple_agent:
           version: 0.0.1
           artifact_fpath: open_math_reasoning_problems.jsonl
         license: Creative Commons Attribution 4.0 International
-        huggingface_identifier:
-          repo_id: nvidia/Nemotron-RL-math-OpenMathReasoning
-          artifact_fpath: open_math_reasoning_problems.jsonl
       - name: validation
         type: validation
         jsonl_fpath: resources_servers/math_with_judge/data/aime24_validation.jsonl

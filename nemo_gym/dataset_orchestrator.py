@@ -20,8 +20,7 @@ from nemo_gym.config_types import (
     UploadJsonlDatasetHuggingFaceMaybeDeleteConfig,
 )
 from nemo_gym.gitlab_utils import delete_model_from_gitlab, is_model_in_gitlab
-from nemo_gym.hf_utils import download_jsonl_dataset as download_jsonl_dataset_from_hf
-from nemo_gym.hf_utils import download_parquet_dataset_as_jsonl
+from nemo_gym.hf_utils import download_hf_dataset_as_jsonl
 from nemo_gym.hf_utils import upload_jsonl_dataset as upload_jsonl_dataset_to_hf
 from nemo_gym.server_utils import get_global_config_dict
 
@@ -75,17 +74,13 @@ def download_jsonl_dataset_from_hf_cli() -> None:  # pragma: no cover
     global_config = get_global_config_dict()
     config = DownloadJsonlDatasetHuggingFaceConfig.model_validate(global_config)
 
-    if config.artifact_fpath:
-        download_jsonl_dataset_from_hf(config)
-    else:
-        print(
-            f"""\
-[Nemo-Gym] - No artifact_fpath provided.
+    print(
+        f"""\
 Downloading the entire '{config.split}' split from '{config.repo_id}'
 and saving as JSONL at '{config.output_fpath}'.
 """
-        )
-        download_parquet_dataset_as_jsonl(config)
+    )
+    download_hf_dataset_as_jsonl(config)
 
 
 def delete_jsonl_dataset_from_gitlab_cli() -> None:  # pragma: no cover

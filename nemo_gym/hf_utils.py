@@ -17,12 +17,11 @@ from pathlib import Path
 
 import yaml
 from datasets import load_dataset
-from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub import HfApi
 from huggingface_hub.utils import HfHubHTTPError
 from scripts.update_resource_servers import visit_resource_server
 
 from nemo_gym.config_types import DownloadJsonlDatasetHuggingFaceConfig, UploadJsonlDatasetHuggingFaceConfig
-from nemo_gym.server_utils import get_global_config_dict
 
 
 def create_huggingface_client(token: str) -> HfApi:  # pragma: no cover
@@ -55,14 +54,24 @@ def check_jsonl_format(file_path: str) -> bool:  # pragma: no cover
     return True
 
 
-def download_parquet_dataset_as_jsonl(
+def download_hf_dataset_as_jsonl(
     config: DownloadJsonlDatasetHuggingFaceConfig,
 ) -> None:  # pragma: no cover
     """Download a HF dataset and save as JSONL"""
     try:
-        ds = load_dataset(config.repo_id, split=config.split, token=config.hf_token)
-        ds.to_json(config.output_fpath)
-        print(f"[Nemo-Gym] - Downloaded and converted dataset to: {config.output_fpath}")
+        if config.split is None:
+            # Download all splits
+            ds = load_dataset(config.repo_id, token=config.hf_token)
+            output_path = Path(config.output_fpath)
+            output_path.mkdir(parents=True, exist_ok=True)
+            for split_name, split_data in ds.items():
+                split_file = output_path / f"{split_name}.jsonl"
+                split_data.to_json(str(split_file))
+                print(f"[Nemo-Gym] - Downloaded {split_name} split to: {split_file}")
+        else:
+            ds = load_dataset(config.repo_id, split=config.split, token=config.hf_token)
+            ds.to_json(config.output_fpath)
+            print(f"[Nemo-Gym] - Downloaded {config.split} split to: {config.output_fpath}")
     except Exception as e:
         print(f"[Nemo-Gym] - Error downloading/converting dataset: {e}")
         raise
@@ -122,22 +131,3 @@ def upload_jsonl_dataset(
     except HfHubHTTPError as e:
         print(f"[Nemo-Gym] - Error uploading file: {e}")
         raise
-
-
-def download_jsonl_dataset(config: DownloadJsonlDatasetHuggingFaceConfig) -> None:  # pragma: no cover
-    try:
-        downloaded_path = hf_hub_download(
-            repo_id=config.repo_id,
-            repo_type="dataset",
-            filename=config.artifact_fpath,
-            token=config.hf_token,
-        )
-        Path(config.output_fpath).write_bytes(Path(downloaded_path).read_bytes())
-    except HfHubHTTPError as e:
-        print(f"[Nemo-Gym] - Error downloading file: {e}")
-
-
-def download_jsonl_dataset_cli() -> None:  # pragma: no cover
-    global_config = get_global_config_dict()
-    config = DownloadJsonlDatasetHuggingFaceConfig.model_validate(global_config)
-    download_jsonl_dataset(config)

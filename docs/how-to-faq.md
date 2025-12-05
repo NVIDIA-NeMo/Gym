@@ -260,21 +260,19 @@ Gitlab model names are case sensitive. There can be models named 'My_Model' and 
 
 Downloading a dataset from Huggingface is straightforward:
 
-
-**For JSONL files** (specify `artifact_fpath`):
-```bash
-ng_download_dataset_from_hf \
-    +repo_id=nvidia/Nemotron-RL-instruction_following \
-    +output_fpath=data/train.jsonl \
-    +artifact_fpath=train.jsonl
-```
-
-**For parquet datasets** (omit `artifact_fpath`, specify `split`):
 ```bash
 ng_download_dataset_from_hf \
     +repo_id=nvidia/Nemotron-RL-knowledge-mcqa \
-    +output_fpath=data/train.jsonl \
-    +split=train
+    +output_fpath=data/train.jsonl
+```
+
+The `split` parameter is optional and defaults to `train`. To download a different split:
+
+```bash
+ng_download_dataset_from_hf \
+    +repo_id=nvidia/Nemotron-RL-knowledge-mcqa \
+    +output_fpath=data/validation.jsonl \
+    +split=validation
 ```
 
 # How To: Prepare and validate data for PR submission or RL training

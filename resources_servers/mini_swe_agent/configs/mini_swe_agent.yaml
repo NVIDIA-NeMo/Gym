@@ -16,12 +16,12 @@ mini_swe_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
+      huggingface_identifier:
+        repo_id: princeton-nlp/SWE-bench_Verified
       datasets:
       - name: train
         type: train
         jsonl_fpath: resources_servers/mini_swe_agent/data/train.jsonl
-        huggingface_identifier:
-          repo_id: princeton-nlp/SWE-bench_Verified
         gitlab_identifier:
           dataset_name: mini_swe_agent
           version: 0.0.1

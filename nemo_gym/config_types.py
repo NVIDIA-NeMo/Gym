@@ -148,9 +148,6 @@ class DeleteJsonlDatasetGitlabConfig(BaseNeMoGymCLIConfig):
 
 class JsonlDatasetHuggingFaceIdentifer(BaseModel):
     repo_id: str = Field(description="The repo id.")
-    artifact_fpath: Optional[str] = Field(
-        default=None, description="The filepath to the artifact in the repo (for JSONL). Omit for parquet."
-    )
 
 
 class BaseUploadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
@@ -183,7 +180,9 @@ class UploadJsonlDatasetHuggingFaceMaybeDeleteConfig(BaseUploadJsonlDatasetHuggi
 class DownloadJsonlDatasetHuggingFaceConfig(JsonlDatasetHuggingFaceIdentifer, BaseNeMoGymCLIConfig):
     output_fpath: str = Field(description="Where to save the downloaded dataset (as JSONL).")
     hf_token: Optional[str] = Field(default=None, description="The huggingface token.")
-    split: str = Field(default="train", description="Dataset split (only used for parquet).")
+    split: Optional[Literal["train", "validation", "test"]] = Field(
+        default=None, description="Dataset split to download. Omit to download all available splits."
+    )
 
 
 class PrepareDataConfig(BaseNeMoGymCLIConfig):
@@ -200,7 +199,6 @@ class DatasetConfig(BaseModel):
 
     num_repeats: int = Field(default=1, ge=1)
     gitlab_identifier: Optional[JsonlDatasetGitlabIdentifer] = None
-    huggingface_identifier: Optional[JsonlDatasetHuggingFaceIdentifer] = None
     license: Optional[
         Union[
             Literal["Apache 2.0"],
@@ -264,6 +262,7 @@ class BaseRunServerTypeConfig(BaseRunServerConfig):
     port: Optional[int] = None
 
     datasets: Optional[List[DatasetConfig]] = None
+    huggingface_identifier: Optional[JsonlDatasetHuggingFaceIdentifer] = None
 
 
 class BaseServerTypeConfig(BaseModel):
