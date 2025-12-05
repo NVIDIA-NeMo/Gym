@@ -85,20 +85,25 @@ Gitlab model names are case sensitive. There can be models named 'My_Model' and 
 
 Downloading a dataset from Huggingface is straightforward:
 
-```bash
-ng_download_dataset_from_hf \
-    +repo_id=nvidia/Nemotron-RL-knowledge-mcqa \
-    +output_dirpath=data/mcqa
-```
-
-The `split` parameter is optional. If omitted, all splits will be downloaded. To download a specific split:
-
+**For structured datasets (with train/validation/test splits):**
 ```bash
 ng_download_dataset_from_hf \
     +repo_id=nvidia/Nemotron-RL-knowledge-mcqa \
     +output_dirpath=data/mcqa \
-    +split=validation
+    +split=train
 ```
+The `split` parameter is optional. If omitted, all available splits will be downloaded as separate JSONL files.
+
+
+**For raw file repositories (with specific JSONL files):**
+```bash
+ng_download_dataset_from_hf \
+    +repo_id=nvidia/Nemotron-RL-instruction_following \
+    +output_dirpath=data/instruction_following \
+    +artifact_fpath=instruction_following.jsonl
+```
+Use `artifact_fpath` when the HuggingFace repo contains raw/arbitrary JSONL files rather than structured dataset splits. You cannot specify both `split` and `artifact_fpath`.
+
 
 # How To: Prepare and validate data for PR submission or RL training
 When you use `ng_init_resources_server +entrypoint=resources_servers/example_multi_step` to initialize a resources server, you will get a config.yaml that looks like the below code block. The dataset information for training, validation, and example will be inside the scope of your agent config (e.g. under simple_agent) and is a list of dataset objects.
@@ -128,6 +133,9 @@ example_multi_step_simple_agent:
           dataset_name: example_multi_step
           version: 0.0.1
           artifact_fpath: example_multi_step/train.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-instruction_following
+          artifact_fpath: instruction_following.jsonl
         license: Apache 2.0
       - name: validation
         type: validation
@@ -138,6 +146,9 @@ example_multi_step_simple_agent:
           dataset_name: example_multi_step
           version: 0.0.1
           artifact_fpath: example_multi_step/validation.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-instruction_following
+          artifact_fpath: if_validation.jsonl
         license: Apache 2.0
       - name: example
         type: example
@@ -151,7 +162,7 @@ A dataset object consists of:
 - Jsonl fpath: the local file path to your jsonl file for this dataset.
 - Num repeats: optionally repeat each row when preparing or collating data. Defaults to 1 if unspecified.
 - Gitlab identifier: (NVIDIA internal) The remote path to the dataset as held in the Gitlab dataset registry. This field is required for train and validation datasets. (Not required for example datasets since those are required to be committed to Git).
-- HuggingFace identifier: (Public) The remote path to the dataset on HuggingFace. A `artifact_fpath` or `split` must be provided for downloads.
+- HuggingFace identifier: (Public) The remote path to the dataset on HuggingFace. Contains `repo_id` (required) and optionally `artifact_fpath` for raw file repos. If `artifact_fpath` is omitted, the datasets library will infer the `split` from the dataset `type`.
 - License: The license of that dataset. Required for train and validation datasets and not required for example datasets, similar in principle to the Gitlab identifier.
 - Start idx, end idx: used for slicing your dataset.
 ```yaml
@@ -162,6 +173,9 @@ A dataset object consists of:
     dataset_name: example_multi_step
     version: 0.0.1
     artifact_fpath: example_multi_step/validation.jsonl
+  huggingface_identifier:
+    repo_id: nvidia/example_multi_step
+    artifact_fpath: example_validation.jsonl
   license: Apache 2.0
 ```
 
@@ -174,10 +188,31 @@ responses_api_models/openai_model/configs/openai_model.yaml"
 ng_prepare_data "+config_paths=[$config_paths]" \
     +output_dirpath=data/example_multi_step \
     +mode=example_validation
+```
 
-# Run NeMo Gym servers the exact same way with the same configs!
+To download missing datasets automatically, add +should_download=true. By default, datasets are downloaded from HuggingFace:
+```bash
+ng_prepare_data "+config_paths=[$config_paths]" \
+    +output_dirpath=data/example_multi_step \
+    +mode=train_preparation \
+    +should_download=true
+```
+
+For NVIDIA internal users, you can download from GitLab instead:
+
+```bash
+ng_prepare_data "+config_paths=[$config_paths]" \
+    +output_dirpath=data/example_multi_step \
+    +mode=train_preparation \
+    +should_download=true \
+    +data_source=gitlab
+```
+
+Run NeMo Gym servers the exact same way with the same configs!
+```bash
 ng_run "+config_paths=[$config_paths]"
 ```
+
 
 The `ng_prepare_data` command will:
 1. Attempt to load all the datasets you specified from disk. Missing datasets will be reported before any processing is done.
