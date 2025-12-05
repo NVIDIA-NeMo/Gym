@@ -125,8 +125,6 @@ equivalence_llm_judge_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      huggingface_identifier:
-        repo_id: nvidia/Nemotron-RL-knowledge-openQA
       datasets:
       - name: example
         type: example
@@ -140,4 +138,5 @@ equivalence_llm_judge_simple_agent:
         type: train
         license: Apache 2.0
         jsonl_fpath: resources_servers/equivalence_llm_judge/data/train.jsonl
-
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-knowledge-openQA

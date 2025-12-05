@@ -16,8 +16,6 @@ structured_outputs_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      huggingface_identifier:
-        repo_id: nvidia/Nemotron-RL-instruction_following-structured_outputs
       datasets:
       - name: train
         type: train
@@ -25,6 +23,9 @@ structured_outputs_simple_agent:
         gitlab_identifier:
           dataset_name: structured_outputs_251027_nano_v3_sdg_json_train
           version: 0.0.2
+          artifact_fpath: structured_outputs_251027_nano_v3_sdg_json_train.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-instruction_following-structured_outputs
           artifact_fpath: structured_outputs_251027_nano_v3_sdg_json_train.jsonl
         license: Apache 2.0
       - name: validation

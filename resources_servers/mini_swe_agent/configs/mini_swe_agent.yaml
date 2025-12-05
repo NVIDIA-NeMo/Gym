@@ -16,8 +16,6 @@ mini_swe_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      huggingface_identifier:
-        repo_id: princeton-nlp/SWE-bench_Verified
       datasets:
       - name: train
         type: train
@@ -26,6 +24,8 @@ mini_swe_simple_agent:
           dataset_name: mini_swe_agent
           version: 0.0.1
           artifact_fpath: train.jsonl
+        huggingface_identifier:
+          repo_id: SWE-Gym/SWE-Gym
         license: MIT
       - name: validation
         type: validation
@@ -34,6 +34,8 @@ mini_swe_simple_agent:
           dataset_name: mini_swe_agent
           version: 0.0.1
           artifact_fpath: validation.jsonl
+        huggingface_identifier:
+          repo_id: princeton-nlp/SWE-bench_Verified
         license: MIT
       - name: example
         type: example

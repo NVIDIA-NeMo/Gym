@@ -474,8 +474,7 @@ class TrainDataProcessor(BaseModel):
                             download_jsonl_dataset(download_config)
 
                         elif backend == "huggingface":
-                            inner_config = c.get_inner_run_server_config()
-                            hf_identifier = getattr(inner_config, "huggingface_identifier", None)
+                            hf_identifier = d.huggingface_identifier
 
                             if hf_identifier is None:
                                 print(f"Dataset `{d.name}` missing huggingface_identifier for HuggingFace backend")
@@ -484,6 +483,7 @@ class TrainDataProcessor(BaseModel):
                             download_config = DownloadJsonlDatasetHuggingFaceConfig.model_validate(
                                 {
                                     "repo_id": hf_identifier.repo_id,
+                                    "artifact_fpath": hf_identifier.artifact_fpath,
                                     "output_fpath": d.jsonl_fpath,
                                     "split": d.type,
                                     "hf_token": global_config.get("hf_token"),

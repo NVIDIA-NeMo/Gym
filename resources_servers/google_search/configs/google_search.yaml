@@ -16,8 +16,6 @@ google_search_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      huggingface_identifier:
-        repo_id: nvidia/Nemotron-RL-knowledge-web_search-mcqa
       datasets:
       - name: train
         type: train
@@ -26,6 +24,9 @@ google_search_simple_agent:
           dataset_name: search_STEM_syn_gpqa_v1_2_difficulty_filtered
           version: 0.0.1
           artifact_fpath: MCQA_syn_gpqa_1_2_difficulty_filtered_responses_api.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-knowledge-web_search-mcqa
+          artifact_fpath: mcqa_search.jsonl
         license: Apache 2.0
       - name: example
         type: example

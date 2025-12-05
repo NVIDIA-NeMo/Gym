@@ -16,8 +16,6 @@ math_advanced_calculations_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      huggingface_identifier:
-        repo_id: nvidia/Nemotron-RL-math-advanced_calculations
       datasets:
         - name: train
           type: train
@@ -26,6 +24,8 @@ math_advanced_calculations_simple_agent:
             dataset_name: math_advanced_calculations
             version: 0.0.1
             artifact_fpath: train.jsonl
+          huggingface_identifier:
+            repo_id: nvidia/Nemotron-RL-math-advanced_calculations
           license: Apache 2.0
         - name: example
           type: example

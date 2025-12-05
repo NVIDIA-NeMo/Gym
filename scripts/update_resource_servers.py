@@ -195,10 +195,6 @@ def visit_agent_datasets(data: dict) -> AgentDatasetsMetadata:  # pragma: no cov
                 # Look for any agent key
                 for agent_key, v3 in v2.items():
                     if isinstance(v3, dict):
-                        hf_id = v3.get("huggingface_identifier")
-                        if hf_id and isinstance(hf_id, dict):
-                            agent.huggingface_repo_id = hf_id.get("repo_id")
-
                         datasets = v3.get("datasets")
                         if isinstance(datasets, list):
                             for entry in datasets:
@@ -206,6 +202,9 @@ def visit_agent_datasets(data: dict) -> AgentDatasetsMetadata:  # pragma: no cov
                                     agent.types.append(entry.get("type"))
                                     if entry.get("type") == "train":
                                         agent.license = entry.get("license")
+                                        hf_id = entry.get("huggingface_identifier")
+                                        if hf_id and isinstance(hf_id, dict):
+                                            agent.huggingface_repo_id = hf_id.get("repo_id")
     return agent
 
 
@@ -223,12 +222,13 @@ def extract_config_metadata(yaml_path: Path) -> ConfigMetadata:  # pragma: no co
         {something}_simple_agent:
             responses_api_agents:
                 simple_agent:
-                    huggingface_identifier:
-                        repo_id: {example_repo_id_1}
                     datasets:
                         - name: train
                           type: {example_type_1}
                           license: {example_license_1}
+                          huggingface_identifier:
+                            repo_id: {example_repo_id_1}
+                            artifact_fpath: {example_artifact_fpath_1}
                         - name: validation
                           type: {example_type_2}
                           license: {example_license_2}
