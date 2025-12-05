@@ -28,7 +28,7 @@ from signal import SIGINT
 from subprocess import Popen
 from threading import Thread
 from time import sleep
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import psutil
 import rich
@@ -48,6 +48,9 @@ from nemo_gym.global_config import (
     PYTHON_VERSION_KEY_NAME,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
+)
+from nemo_gym.ray_utils import (
+    _start_global_ray_gpu_scheduling_helper,
 )
 from nemo_gym.server_utils import (
     HEAD_SERVER_KEY_NAME,
@@ -119,6 +122,7 @@ class ServerInstanceDisplayConfig(BaseModel):
 class RunHelper:  # pragma: no cover
     _head_server: uvicorn.Server
     _head_server_thread: Thread
+    _head_ray_gpu_helper: Any
 
     _processes: Dict[str, Popen]
     _server_instance_display_configs: List[ServerInstanceDisplayConfig]
@@ -130,6 +134,8 @@ class RunHelper:  # pragma: no cover
         # Initialize Ray cluster in the main process
         # Note: This function will modify the global config dict - update `ray_head_node_address`
         initialize_ray()
+
+        self._head_ray_gpu_helper = _start_global_ray_gpu_scheduling_helper()
 
         # Assume Nemo Gym Run is for a single agent.
         escaped_config_dict_yaml_str = shlex.quote(OmegaConf.to_yaml(global_config_dict))
@@ -243,11 +249,18 @@ class RunHelper:  # pragma: no cover
             self.poll()
             statuses = self.check_http_server_statuses()
 
-            num_spun_up = statuses.count("success")
+            num_spun_up = 0
+            waiting = []
+            for name, status in statuses:
+                if status == "success":
+                    num_spun_up += 1
+                else:
+                    waiting.append(name)
             if len(statuses) != num_spun_up:
                 print(
                     f"""{num_spun_up} / {len(statuses)} servers ready ({statuses.count("timeout")} timed out, {statuses.count("connection_error")} connection errored, {statuses.count("unknown_error")} had unknown errors).
-Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
+Waiting for servers to spin up: {waiting}
+Sleeping {sleep_interval}s..."""
                 )
             else:
                 print(f"All {num_spun_up} / {len(statuses)} servers ready! Polling every 60s")
@@ -289,7 +302,7 @@ Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
         finally:
             self.shutdown()
 
-    def check_http_server_statuses(self) -> List[ServerStatus]:
+    def check_http_server_statuses(self) -> List[Tuple[str, ServerStatus]]:
         print(
             "Checking for HTTP server statuses (you should see some HTTP requests to `/` that may 404. This is expected.)"
         )
@@ -297,7 +310,7 @@ Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
         for server_instance_display_config in self._server_instance_display_configs:
             name = server_instance_display_config.config_path
             status = self._server_client.poll_for_status(name)
-            statuses.append(status)
+            statuses.append((name, status))
 
         return statuses
 
