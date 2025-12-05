@@ -87,9 +87,8 @@ Each example shows what **task** the agent solves, what **actions** are availabl
 
 Responses API Agent servers {term}`orchestrate <Orchestration>` the rollout lifecycle—the full cycle of task execution and verification.
 
-- Execute tool calls by routing model requests to resources
-- Run multi-step and multi-turn agentic loops (model → tool execution → repeat)
-- Manage session state across servers
+- Implement multi-step and multi-turn agentic systems
+- Orchestrate the model server and resources server(s) to collect complete trajectories
 
 NeMo Gym provides several agent patterns covering multi-step, multi-turn, and user modeling scenarios.
 
