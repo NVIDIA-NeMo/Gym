@@ -1,7 +1,7 @@
 {
-    "name": "example",
+    "name": "example_openqa",
     "type": "example",
-    "jsonl_fpath": "resources_servers/equivalence_llm_judge/data/example.jsonl",
+    "jsonl_fpath": "resources_servers/equivalence_llm_judge/data/example_openqa.jsonl",
     "num_repeats": 1,
     "gitlab_identifier": null,
     "huggingface_identifier": null,
@@ -17,11 +17,11 @@
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 5,
-        "Average": 34.6,
-        "Min": 29.0,
-        "Max": 44.0,
-        "Median": 32.0,
-        "Standard deviation": 6.31
+        "Average": 41.2,
+        "Min": 32.0,
+        "Max": 53.0,
+        "Median": 40.0,
+        "Standard deviation": 7.73
     },
     "Number of turns": {
         "Total # non-null values": 5,
@@ -39,11 +39,11 @@
         "Median": 0.0,
         "Standard deviation": 0.0
     },
-    "question": {
+    "expected_answer": {
         "unique_count": 5,
         "total_count": 5
     },
-    "expected_answer": {
+    "uuid": {
         "unique_count": 5,
         "total_count": 5
     }

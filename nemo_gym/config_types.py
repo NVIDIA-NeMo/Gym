@@ -146,6 +146,14 @@ class DeleteJsonlDatasetGitlabConfig(BaseNeMoGymCLIConfig):
     dataset_name: str
 
 
+class JsonlDatasetHuggingFaceIdentifer(BaseModel):
+    repo_id: str = Field(description="The repo id.")
+    artifact_fpath: Optional[str] = Field(
+        default=None,
+        description="Path to specific file in repo (e.g., 'train.jsonl'). If omitted, uses load_dataset() with split.",
+    )
+
+
 class BaseUploadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
     hf_token: str
     hf_organization: str
@@ -173,11 +181,28 @@ class UploadJsonlDatasetHuggingFaceMaybeDeleteConfig(BaseUploadJsonlDatasetHuggi
     delete_from_gitlab: Optional[bool] = False
 
 
-class DownloadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
-    output_fpath: str
-    hf_token: str
-    artifact_fpath: str
-    repo_id: str
+class DownloadJsonlDatasetHuggingFaceConfig(JsonlDatasetHuggingFaceIdentifer, BaseNeMoGymCLIConfig):
+    output_dirpath: Optional[str] = Field(
+        default=None, description="Directory to save the downloaded dataset. Files named {split}.jsonl."
+    )
+    output_fpath: Optional[str] = Field(
+        default=None, description="Exact file path to save the downloaded dataset. Overrides output_dirpath."
+    )
+
+    hf_token: Optional[str] = Field(default=None, description="The huggingface token.")
+    split: Optional[Literal["train", "validation", "test"]] = Field(
+        default=None, description="Dataset split to download. Omit to download all available splits."
+    )
+
+    @model_validator(mode="after")
+    def check_output_path(self) -> "DownloadJsonlDatasetHuggingFaceConfig":
+        if not self.output_dirpath and not self.output_fpath:
+            raise ValueError("Either output_dirpath or output_fpath must be provided")
+        if self.artifact_fpath and self.split:
+            raise ValueError(
+                "Cannot specify both artifact_fpath and split. Use artifact_fpath for targeting a raw file, or split for structured datasets."
+            )
+        return self
 
 
 DatasetType = Union[Literal["train"], Literal["validation"], Literal["example"]]
@@ -190,6 +215,7 @@ class DatasetConfig(BaseModel):
 
     num_repeats: int = Field(default=1, ge=1)
     gitlab_identifier: Optional[JsonlDatasetGitlabIdentifer] = None
+    huggingface_identifier: Optional[JsonlDatasetHuggingFaceIdentifer] = None
     license: Optional[
         Union[
             Literal["Apache 2.0"],
@@ -204,7 +230,6 @@ class DatasetConfig(BaseModel):
     @model_validator(mode="after")
     def check_train_validation_sets(self) -> "DatasetConfig":
         if self.type in ["train", "validation"]:
-            assert self.gitlab_identifier is not None, f"A Gitlab path is required for {self.name}"
             assert self.license is not None, f"A license is required for {self.name}"
 
         return self

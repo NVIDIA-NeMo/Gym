@@ -24,8 +24,9 @@ math_advanced_calculations_simple_agent:
             dataset_name: math_advanced_calculations
             version: 0.0.1
             artifact_fpath: train.jsonl
+          huggingface_identifier:
+            repo_id: nvidia/Nemotron-RL-math-advanced_calculations
           license: Apache 2.0
-          dataset_url: https://huggingface.co/datasets/nvidia/Nemotron-RL-math-advanced_calculations
         - name: example
           type: example
           jsonl_fpath: resources_servers/math_advanced_calculations/data/example.jsonl

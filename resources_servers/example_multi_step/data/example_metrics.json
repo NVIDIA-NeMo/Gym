@@ -4,6 +4,7 @@
     "jsonl_fpath": "resources_servers/example_multi_step/data/example.jsonl",
     "num_repeats": 1,
     "gitlab_identifier": null,
+    "huggingface_identifier": null,
     "license": null,
     "Number of examples": 5,
     "Number of tools": {
@@ -71,4 +72,3 @@
         "Standard deviation": 0.0
     }
 }
-

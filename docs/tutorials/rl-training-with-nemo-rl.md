@@ -77,6 +77,9 @@ ng_prepare_data "+config_paths=[${config_paths}]" \
     +output_dirpath=data/bytedtsinghua_dapo17k \
     +mode=train_preparation +should_download=true
 
+# Note: Datasets are downloaded from HuggingFace by default.
+# For NVIDIA internal users, add +data_source=gitlab to download from GitLab instead.    
+
 # Return to NeMo RL directory and Python env
 cd ../../.. && source /opt/nemo_rl_venv/bin/activate
 ```
