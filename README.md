@@ -147,6 +147,7 @@ If you use NeMo Gym in your research, please cite it using the following BibTeX 
 @misc{nemo-gym,
   title = {NeMo Gym: An Open Source Framework for Scaling Reinforcement Learning Environments for LLM},
   howpublished = {\url{https://github.com/NVIDIA-NeMo/Gym}},
+  author={NVIDIA},
   year = {2025},
   note = {GitHub repository},
 }
