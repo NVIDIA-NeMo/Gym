@@ -420,19 +420,19 @@ Now that you have a working resource server:
 1. **Add training data**: Collect rollouts and prepare datasets for RL training
 2. **Add complex verification**: Add reward shaping and detailed performance metrics
 3. **Scale up**: Add more tools and more sophisticated business logic
-4. **Integrate with RL**: Use {doc}`rl-training-with-nemo-rl` to train agents on your tasks
+4. **Integrate with RL**: Use {doc}`integrate-training-frameworks/train-with-nemo-rl` to train agents on your tasks
 
 ::::{grid} 2
 :gutter: 3
 
-:::{grid-item-card} {octicon}`database;1.5em;sd-mr-1` Collect Rollouts
-:link: offline-training-w-rollouts
+:::{grid-item-card} {octicon}`database;1.5em;sd-mr-1` Train Offline with TRL
+:link: integrate-training-frameworks/train-with-trl
 :link-type: doc
-Learn how to collect and process rollouts for training data.
+Transform rollouts into SFT/DPO training data for TRL.
 :::
 
 :::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` Train with NeMo RL
-:link: rl-training-with-nemo-rl
+:link: integrate-training-frameworks/train-with-nemo-rl
 :link-type: doc
 Train agents using your resource server with NeMo RL.
 :::

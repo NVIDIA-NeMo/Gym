@@ -2,53 +2,94 @@
 
 # NeMo Gym Tutorials
 
-Hands-on learning experiences that guide you through building, training, and deploying AI agents with NeMo Gym.
+Build, train, and deploy AI agents with NeMo Gym through hands-on guided experiences.
 
 :::{tip}
 **New to NeMo Gym?** Begin with the {doc}`Get Started <../get-started/index>` section for a guided tutorial from installation through your first verified agent. Return here afterward to learn about advanced topics like additional rollout collection methods and training data generation. You can find the project repository on [GitHub](https://github.com/NVIDIA-NeMo/Gym).
 :::
 ---
 
-## Building Custom Components
+## Integrate a Training Framework
 
-Create custom resource servers and implement tool-based agent interactions.
+Connect Gym to popular training frameworks for end-to-end model improvement.
 
-::::{grid} 1 1 1 1
+::::{grid} 1 1 2 2
 :gutter: 1 1 1 2
 
-:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Creating a Resource Server
-:link: creating-resource-server
+:::{grid-item-card} {octicon}`hubot;1.5em;sd-mr-1` Train with TRL (Offline)
+:link: integrate-training-frameworks/train-with-trl
 :link-type: doc
-Build custom resource servers with tools, verification logic, and business logic for your AI agents.
+Use Hugging Face's TRL library for SFT, DPO, or GRPO training.
 +++
-{bdg-primary}`beginner` {bdg-secondary}`30 min`
+{bdg-secondary}`offline` {bdg-secondary}`hugging-face`
 :::
+
+:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` Train with NeMo RL
+:link: integrate-training-frameworks/train-with-nemo-rl
+:link-type: doc
+Use NVIDIA's NeMo RL for distributed on-policy training with NeMo 2.0 models.
++++
+{bdg-secondary}`nvidia` {bdg-secondary}`multi-node`
+:::
+
+:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` Train with VeRL
+:link: integrate-training-frameworks/train-with-verl
+:link-type: doc
+Use VeRL's Ray-based distributed training with flexible backend support.
++++
+{bdg-secondary}`ray` {bdg-secondary}`multi-backend`
+:::
+
 
 ::::
 
 ---
 
-## Rollout Collection and Training Data
+## Create Resource Servers
 
-Implement rollout generation and training data preparation for RL, SFT, and DPO.
+Build custom resource servers with tools, verification logic, and domain-specific functionality.
 
-::::{grid} 1 1 1 1
+::::{grid} 1 1 2 2
 :gutter: 1 1 1 2
 
-:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` Offline Training with Rollouts
-:link: offline-training-w-rollouts
+:::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Weather API Server
+:link: resource-servers/simple-tool-calling
 :link-type: doc
-Transform rollouts into training data for {term}`supervised fine-tuning (SFT) <SFT (Supervised Fine-Tuning)>` and {term}`direct preference optimization (DPO) <DPO (Direct Preference Optimization)>`.
+Build a single-tool weather server with deterministic verification.
 +++
-{bdg-secondary}`sft` {bdg-secondary}`dpo`
+{bdg-secondary}`single-tool`
 :::
 
-:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` RL Training with NeMo RL
-:link: rl-training-with-nemo-rl
+:::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` Data Extraction Server
+:link: resource-servers/multi-step-interactions
 :link-type: doc
-Train a model with NeMo RL. Learn how to set up NeMo Gym and NeMo RL training environments, run tests, prepare data, and launch single-node and multi-node training runs.
+Build a multi-step server where agents query multiple data sources.
 +++
-{bdg-secondary}`rl` {bdg-secondary}`training`
+{bdg-secondary}`multi-step`
+:::
+
+:::{grid-item-card} {octicon}`database;1.5em;sd-mr-1` Counter Game Server
+:link: resource-servers/stateful-sessions
+:link-type: doc
+Build a stateful server where tools modify persistent state.
++++
+{bdg-secondary}`stateful`
+:::
+
+:::{grid-item-card} {octicon}`law;1.5em;sd-mr-1` Math Verifier Server
+:link: resource-servers/llm-as-judge
+:link-type: doc
+Build a math server with LLM-based answer verification.
++++
+{bdg-secondary}`llm-judge`
+:::
+
+:::{grid-item-card} {octicon}`code;1.5em;sd-mr-1` Code Testing Server
+:link: resource-servers/code-execution
+:link-type: doc
+Build a server that verifies code by executing test cases.
++++
+{bdg-secondary}`code-exec`
 :::
 
 ::::
