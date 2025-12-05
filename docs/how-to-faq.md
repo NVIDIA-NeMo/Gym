@@ -263,15 +263,15 @@ Downloading a dataset from Huggingface is straightforward:
 ```bash
 ng_download_dataset_from_hf \
     +repo_id=nvidia/Nemotron-RL-knowledge-mcqa \
-    +output_fpath=data/train.jsonl
+    +output_dirpath=data/mcqa
 ```
 
-The `split` parameter is optional and defaults to `train`. To download a different split:
+The `split` parameter is optional. If omitted, all splits will be downloaded. To download a specific split:
 
 ```bash
 ng_download_dataset_from_hf \
     +repo_id=nvidia/Nemotron-RL-knowledge-mcqa \
-    +output_fpath=data/validation.jsonl \
+    +output_dirpath=data/mcqa \
     +split=validation
 ```
 

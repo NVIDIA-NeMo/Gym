@@ -178,11 +178,22 @@ class UploadJsonlDatasetHuggingFaceMaybeDeleteConfig(BaseUploadJsonlDatasetHuggi
 
 
 class DownloadJsonlDatasetHuggingFaceConfig(JsonlDatasetHuggingFaceIdentifer, BaseNeMoGymCLIConfig):
-    output_fpath: str = Field(description="Where to save the downloaded dataset (as JSONL).")
+    output_dirpath: Optional[str] = Field(
+        default=None, description="Directory to save the downloaded dataset. Files named {split}.jsonl."
+    )
+    output_fpath: Optional[str] = Field(
+        default=None, description="Exact file path to save the downloaded dataset. Overrides output_dirpath."
+    )
     hf_token: Optional[str] = Field(default=None, description="The huggingface token.")
     split: Optional[Literal["train", "validation", "test"]] = Field(
         default=None, description="Dataset split to download. Omit to download all available splits."
     )
+
+    @model_validator(mode="after")
+    def check_output_path(self) -> "DownloadJsonlDatasetHuggingFaceConfig":
+        if not self.output_dirpath and not self.output_fpath:
+            raise ValueError("Either output_dirpath or output_fpath must be provided")
+        return self
 
 
 class PrepareDataConfig(BaseNeMoGymCLIConfig):

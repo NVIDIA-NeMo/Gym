@@ -489,7 +489,7 @@ class TrainDataProcessor(BaseModel):
                                     "hf_token": global_config.get("hf_token"),
                                 }
                             )
-                            print(f"Downloading dataset `{d.name}` (split={d.type}) from {hf_identifier.repo_id}...")
+                            print(f"Downloading '{d.type}' split from {hf_identifier.repo_id} to {d.jsonl_fpath}...")
                             download_hf_dataset_as_jsonl(download_config)
 
                     except Exception as e:

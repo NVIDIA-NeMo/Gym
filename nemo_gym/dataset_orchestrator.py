@@ -74,12 +74,7 @@ def download_jsonl_dataset_from_hf_cli() -> None:  # pragma: no cover
     global_config = get_global_config_dict()
     config = DownloadJsonlDatasetHuggingFaceConfig.model_validate(global_config)
 
-    print(
-        f"""\
-Downloading the entire '{config.split}' split from '{config.repo_id}'
-and saving as JSONL at '{config.output_fpath}'.
-"""
-    )
+    print(f"Downloading '{config.split or 'all'}' split(s) from '{config.repo_id}' to '{config.output_dirpath}/'.")
     download_hf_dataset_as_jsonl(config)
 
 

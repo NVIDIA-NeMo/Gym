@@ -59,19 +59,30 @@ def download_hf_dataset_as_jsonl(
 ) -> None:  # pragma: no cover
     """Download a HF dataset and save as JSONL"""
     try:
+        if config.output_fpath:
+            # Exact file path provided (used by ng_prepare_data)
+            Path(config.output_fpath).parent.mkdir(parents=True, exist_ok=True)
+            ds = load_dataset(config.repo_id, split=config.split, token=config.hf_token)
+            ds.to_json(config.output_fpath)
+            print(f"[Nemo-Gym] - Downloaded {config.split} split to: {config.output_fpath}")
+        else:
+            # Directory path provided (used by ng_download_dataset_from_hf CLI)
+            output_path = Path(config.output_dirpath)
+            output_path.mkdir(parents=True, exist_ok=True)
+
         if config.split is None:
             # Download all splits
             ds = load_dataset(config.repo_id, token=config.hf_token)
-            output_path = Path(config.output_fpath)
-            output_path.mkdir(parents=True, exist_ok=True)
             for split_name, split_data in ds.items():
                 split_file = output_path / f"{split_name}.jsonl"
                 split_data.to_json(str(split_file))
                 print(f"[Nemo-Gym] - Downloaded {split_name} split to: {split_file}")
         else:
+            # Download single split
             ds = load_dataset(config.repo_id, split=config.split, token=config.hf_token)
-            ds.to_json(config.output_fpath)
-            print(f"[Nemo-Gym] - Downloaded {config.split} split to: {config.output_fpath}")
+            split_file = output_path / f"{config.split}.jsonl"
+            ds.to_json(str(split_file))
+            print(f"[Nemo-Gym] - Downloaded {config.split} split to: {split_file}")
     except Exception as e:
         print(f"[Nemo-Gym] - Error downloading/converting dataset: {e}")
         raise
