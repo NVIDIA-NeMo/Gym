@@ -1,8 +1,8 @@
-(tutorial-multi-step-interactions)=
+(tutorial-data-extraction-server)=
 
-# Multi-Step Interactions
+# Build a Data Extraction Server
 
-In {doc}`Simple Tool Calling <simple-tool-calling>`, you built a server for single-step tool use. Now you'll orchestrate multiple sequential tool calls to complete complex extraction tasks.
+In {doc}`Build a Weather API Server <simple-tool-calling>`, you built a single-tool server. Now you'll build a data extraction server where agents must call multiple tools to gather and synthesize information.
 
 :::{card}
 
@@ -12,10 +12,10 @@ In {doc}`Simple Tool Calling <simple-tool-calling>`, you built a server for sing
 
 **In this tutorial, you will**:
 
-1. Define multiple related tools
-2. Design data that requires sequential queries
-3. Implement aggregation verification
-4. Test multi-step rollouts
+1. Create multiple related tools (`get_synonyms`, `get_value`)
+2. Design tasks requiring sequential tool calls
+3. Implement verification that checks all required data was gathered
+4. Walk away with a server for multi-step extraction tasks
 
 :::
 
@@ -37,7 +37,7 @@ Make sure you have:
 - ✅ Understanding of tool sequencing concepts
 - ✅ NeMo Gym installed and working
 
-**What you'll build**: An extraction server where agents must query multiple data sources sequentially and aggregate results into a final answer.
+**What you'll build**: A data extraction server where agents must look up synonyms for a term, then retrieve values for each synonym, and aggregate the results.
 
 :::{tip}
 **Reference implementation**: `resources_servers/example_multi_step/`
@@ -45,117 +45,205 @@ Make sure you have:
 
 ---
 
-## 1. Understand the Pattern
+## 1. Understand What We're Building
 
-<!-- SME: Explain multi-step vs single-step -->
+The extraction task requires multiple steps:
 
-Multi-step interactions are needed when:
-
-- Tasks require information from multiple sources
-- Results from one tool inform the next query
-- The agent must synthesize multiple outputs
+1. User asks: "Get all values for 'happiness'"
+2. Agent calls `get_synonyms("happiness")` → returns `["joy", "delight", "pleasure"]`
+3. Agent calls `get_value("joy")` → returns `42`
+4. Agent calls `get_value("delight")` → returns `38`
+5. Agent calls `get_value("pleasure")` → returns `45`
+6. Agent reports: "The values are: joy=42, delight=38, pleasure=45"
+7. Verification checks: Did the agent get ALL values?
 
 ```{mermaid}
 sequenceDiagram
     participant Agent
-    participant ResourceServer
-    Agent->>ResourceServer: Call tool 1
-    ResourceServer-->>Agent: Result 1
-    Agent->>ResourceServer: Call tool 2
-    ResourceServer-->>Agent: Result 2
-    Agent->>ResourceServer: Call tool 3
-    ResourceServer-->>Agent: Result 3
-    Agent->>ResourceServer: Submit aggregated answer
-    ResourceServer-->>Agent: Verification score
+    participant Server
+    Agent->>Server: get_synonyms("happiness")
+    Server-->>Agent: ["joy", "delight", "pleasure"]
+    Agent->>Server: get_value("joy")
+    Server-->>Agent: 42
+    Agent->>Server: get_value("delight")
+    Server-->>Agent: 38
+    Agent->>Server: get_value("pleasure")
+    Server-->>Agent: 45
+    Agent->>Server: Final answer with all values
+    Server-->>Agent: ✅ reward=1.0 (all 3 found)
 ```
 
-**✅ Success Check**: You understand when multi-step is necessary vs. single-step.
+**✅ Success Check**: You understand why this requires multiple sequential calls.
 
 ---
 
-## 2. Define Multiple Tools
+## 2. Create the Tools
 
-<!-- SME: Show tool definitions from example_multi_step/app.py -->
+<!-- SME: Extract and adapt from example_multi_step/app.py -->
 
 ```python
-# TODO: Tool definitions from example_multi_step/app.py
+# app.py
+from nemo_gym.base_resources_server import SimpleResourcesServer, BaseResourcesServerConfig
+
+class ExtractionServerConfig(BaseResourcesServerConfig):
+    pass
+
+class ExtractionServer(SimpleResourcesServer):
+    
+    def __init__(self, config: ExtractionServerConfig):
+        super().__init__(config)
+        
+        # Data: term → synonyms
+        self.synonyms = {
+            "happiness": ["joy", "delight", "pleasure"],
+            "sadness": ["sorrow", "grief", "melancholy"],
+            "anger": ["rage", "fury", "wrath"],
+        }
+        
+        # Data: synonym → value
+        self.values = {
+            "joy": 42, "delight": 38, "pleasure": 45,
+            "sorrow": 12, "grief": 8, "melancholy": 15,
+            "rage": 88, "fury": 92, "wrath": 85,
+        }
+    
+    def get_tools(self):
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_synonyms",
+                    "description": "Get synonyms for a term",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "term": {"type": "string", "description": "The term to find synonyms for"}
+                        },
+                        "required": ["term"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_value",
+                    "description": "Get the numeric value for a specific word",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "word": {"type": "string", "description": "The word to get the value for"}
+                        },
+                        "required": ["word"]
+                    }
+                }
+            }
+        ]
+    
+    def call_tool(self, tool_name: str, tool_args: dict) -> str:
+        if tool_name == "get_synonyms":
+            term = tool_args.get("term", "").lower()
+            synonyms = self.synonyms.get(term, [])
+            return f"Synonyms: {', '.join(synonyms)}" if synonyms else "No synonyms found"
+        
+        elif tool_name == "get_value":
+            word = tool_args.get("word", "").lower()
+            value = self.values.get(word)
+            return f"Value for '{word}': {value}" if value else f"No value found for '{word}'"
+        
+        return "Unknown tool"
 ```
 
-```{list-table} Tool Definitions
-:header-rows: 1
-:widths: 25 75
-
-* - Tool
-  - Purpose
-* - <!-- SME: Add tools -->
-  - 
-```
-
-**✅ Success Check**: <!-- SME: Verification -->
+**✅ Success Check**: You have two tools that work together.
 
 ---
 
-## 3. Design Sequential Data
+## 3. Implement Multi-Step Verification
 
-<!-- SME: Show how to structure data that requires multiple steps -->
+Verification must check that the agent gathered ALL required values:
+
+```python
+# Add to app.py
+
+def verify(self, responses_create_params: dict, output: list) -> float:
+    """Verify all synonym values were extracted."""
+    
+    # Find which term was asked about
+    user_message = responses_create_params["input"][0]["content"].lower()
+    
+    asked_term = None
+    for term in self.synonyms:
+        if term in user_message:
+            asked_term = term
+            break
+    
+    if not asked_term:
+        return 0.0
+    
+    # Get expected synonyms and their values
+    expected_synonyms = self.synonyms[asked_term]
+    expected_values = {syn: self.values[syn] for syn in expected_synonyms}
+    
+    # Extract final response
+    final_response = ""
+    for msg in reversed(output):
+        if msg.get("role") == "assistant" and msg.get("content"):
+            final_response = msg["content"].lower()
+            break
+    
+    # Count how many values were correctly reported
+    found_count = 0
+    for synonym, value in expected_values.items():
+        # Check if both the synonym and its value appear
+        if synonym in final_response and str(value) in final_response:
+            found_count += 1
+    
+    # Reward based on completeness
+    return found_count / len(expected_values)
+```
+
+**✅ Success Check**: Returns 1.0 only if ALL synonym values are reported.
+
+---
+
+## 4. Create Test Data
+
+Create `data/example.jsonl`:
 
 ```json
-// TODO: Example from example_multi_step/data/example.jsonl
+{"responses_create_params": {"input": [{"role": "user", "content": "Find all values for the synonyms of 'happiness'"}], "model": "gpt-4"}}
+{"responses_create_params": {"input": [{"role": "user", "content": "Look up the values for each synonym of 'sadness'"}], "model": "gpt-4"}}
+{"responses_create_params": {"input": [{"role": "user", "content": "Get the numeric values for all words related to 'anger'"}], "model": "gpt-4"}}
 ```
-
-**✅ Success Check**: Each example requires 2+ tool calls to solve correctly.
-
----
-
-## 4. Implement Aggregation Verification
-
-<!-- SME: Show verification that checks all steps -->
-
-```python
-# TODO: Verification logic from example_multi_step/app.py
-```
-
-```{list-table} Verification Logic
-:header-rows: 1
-:widths: 30 70
-
-* - Check
-  - Description
-* - <!-- SME: Add checks -->
-  - 
-```
-
-**✅ Success Check**: <!-- SME: Verification criteria -->
 
 ---
 
 ## 5. Run and Test
 
-<!-- SME: Commands to run and test -->
-
 ```bash
-# TODO: Commands to run and test
+ng_collect_rollouts +agent_name=extraction_simple_agent \
+    +input_jsonl_fpath=resources_servers/extraction/data/example.jsonl \
+    +output_jsonl_fpath=results/extraction_rollouts.jsonl \
+    +limit=3
 ```
 
-**✅ Success Check**: Agent successfully completes multi-step examples with correct aggregation.
+**✅ Success Check**: Reward=1.0 means agent called all necessary tools and reported all values.
 
 ---
 
-## Troubleshooting
+## Adapt for Your Use Case
 
-<!-- SME: Add common issues and solutions -->
+This pattern works for any multi-step data gathering:
 
-:::{dropdown} Agent stops after first tool call
-<!-- SME: Solution -->
-:::
+- **Research assistant**: `search(query)` → `get_details(result_id)` for each result
+- **Inventory check**: `list_warehouses()` → `check_stock(warehouse_id)` for each
+- **Document analysis**: `list_sections(doc)` → `extract_entities(section)` for each
 
-:::{dropdown} Agent calls tools in wrong order
-<!-- SME: Solution -->
-:::
+---
 
-:::{dropdown} Verification doesn't account for all steps
-<!-- SME: Solution -->
-:::
+## Learn More
+
+- {doc}`/training/verification/index` — Designing reward functions for multi-step tasks
+- {doc}`/training/rollout-collection/configure-sampling` — Sampling for multi-step rollouts
 
 ---
 
@@ -164,18 +252,18 @@ sequenceDiagram
 ::::{grid} 1 1 2 2
 :gutter: 3
 
-:::{grid-item-card} {octicon}`database;1.5em;sd-mr-1` Stateful Sessions
-:link: stateful-sessions
+:::{grid-item-card} {octicon}`database;1.5em;sd-mr-1` Stateful Counter
+:link: counter-game-server
 :link-type: doc
 
-Add state management when tools modify shared data.
+Add state that persists across tool calls.
 :::
 
-:::{grid-item-card} {octicon}`law;1.5em;sd-mr-1` LLM-as-Judge
-:link: llm-as-judge
+:::{grid-item-card} {octicon}`law;1.5em;sd-mr-1` Math Verifier
+:link: math-verifier-server
 :link-type: doc
 
-When deterministic verification isn't possible.
+Use an LLM to verify open-ended outputs.
 :::
 
 ::::

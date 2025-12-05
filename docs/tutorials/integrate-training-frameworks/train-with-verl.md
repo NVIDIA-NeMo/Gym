@@ -249,6 +249,16 @@ After training:
 
 ---
 
+## Learn More
+
+For deeper understanding of the concepts used in this tutorial:
+
+- {doc}`/training/integrate/expose-openai-endpoint` — Configuring the HTTP endpoint VeRL connects to
+- {doc}`/training/integrate/index` — Integration architecture and patterns
+- {doc}`/about/concepts/training-integration-architecture` — Request lifecycle and data flow
+
+---
+
 ## What's Next?
 
 ::::{grid} 1 1 2 2

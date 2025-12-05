@@ -306,6 +306,16 @@ Set `NRL_FORCE_REBUILD_VENVS=true` to rebuild virtual environments.
 
 ---
 
+## Learn More
+
+For deeper understanding of the concepts used in this tutorial:
+
+- {doc}`/training/datasets/prepare-data` — Details on `ng_prepare_data` and dataset configuration
+- {doc}`/training/integrate/index` — HTTP integration architecture for custom frameworks
+- {doc}`/about/concepts/training-integration-architecture` — Request lifecycle and token alignment
+
+---
+
 ## What's Next?
 
 ::::{grid} 1 1 2 2

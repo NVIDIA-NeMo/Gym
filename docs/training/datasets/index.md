@@ -81,19 +81,12 @@ Look up format specifications and schema requirements.
 :gutter: 1 1 1 2
 
 :::{grid-item-card} {octicon}`file-code;1.5em;sd-mr-1` Format Specification
-:class-card: sd-card-placeholder
+:link: format-specification
+:link-type: doc
 
-Required fields and schema for each training objective.
+Schema definitions for SFT, DPO, and RL training data formats.
 +++
-{bdg-light}`planned`
-:::
-
-:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Output Formats
-:class-card: sd-card-placeholder
-
-Format specifications for RL, SFT, and DPO objectives.
-+++
-{bdg-light}`planned`
+{bdg-secondary}`reference`
 :::
 
 ::::
@@ -106,5 +99,6 @@ Format specifications for RL, SFT, and DPO objectives.
 
 prepare-data
 huggingface-integration
+format-specification
 ```
 

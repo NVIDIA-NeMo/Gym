@@ -6,73 +6,82 @@ Build custom resource servers that provide tools, verification logic, and domain
 
 ---
 
-## Getting Started
+## Build Servers by Example
 
-New to resource servers? Start here to understand the fundamentals.
+Learn by building concrete, working servers. Each tutorial results in a server you can run and adapt.
 
 ::::{grid} 1 1 2 2
 :gutter: 1 1 1 2
 
-:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Your First Resource Server
-:link: /tutorials/creating-resource-server
+:::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Weather API Server
+:link: simple-tool-calling
 :link-type: doc
-Initialize a resource server, implement tools and verification, and test end-to-end.
+Build a single-tool weather server with deterministic verification.
 +++
-{bdg-primary}`beginner` {bdg-secondary}`30 min`
+{bdg-secondary}`single-tool`
+:::
+
+:::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` Data Extraction Server
+:link: multi-step-interactions
+:link-type: doc
+Build a multi-step server where agents query multiple data sources.
++++
+{bdg-secondary}`multi-step`
+:::
+
+:::{grid-item-card} {octicon}`database;1.5em;sd-mr-1` Counter Game Server
+:link: stateful-sessions
+:link-type: doc
+Build a stateful server where tools modify persistent state.
++++
+{bdg-secondary}`stateful`
+:::
+
+:::{grid-item-card} {octicon}`law;1.5em;sd-mr-1` Math Verifier Server
+:link: llm-as-judge
+:link-type: doc
+Build a math server with LLM-based answer verification.
++++
+{bdg-secondary}`llm-judge`
+:::
+
+:::{grid-item-card} {octicon}`code;1.5em;sd-mr-1` Code Testing Server
+:link: code-execution
+:link-type: doc
+Build a server that verifies code by executing test cases.
++++
+{bdg-secondary}`code-exec`
 :::
 
 ::::
 
 ---
 
-## Patterns and Recipes
+## Patterns Reference
 
-Learn common patterns through concrete examples from the codebase.
+<!-- 
+NOTE FOR FUTURE: These patterns could become their own section in training/ or a dedicated 
+resource-server/ how-to section. The abstractions are:
 
-::::{grid} 1 1 2 2
-:gutter: 1 1 1 2
+- Single-tool calling: One tool, deterministic verification
+- Multi-step interactions: Sequential tool calls, aggregation verification  
+- Stateful sessions: Persistent state across calls, state-based verification
+- LLM-as-judge: Rule-based + LLM fallback verification
+- Code execution: Sandbox execution, test-based verification
 
-:::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Simple Tool Calling
-:link: simple-tool-calling
-:link-type: doc
-Single-step tool interactions with deterministic verification.
-+++
-{bdg-secondary}`example_simple_weather`
-:::
+Each pattern has distinct JTBD dimensions around tool design, state management, 
+and verification strategy.
+-->
 
-:::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` Multi-Step Interactions
-:link: multi-step-interactions
-:link-type: doc
-Orchestrate multiple tool calls to complete complex tasks.
-+++
-{bdg-secondary}`example_multi_step`
-:::
+Each tutorial demonstrates a pattern you can apply to your own domains:
 
-:::{grid-item-card} {octicon}`database;1.5em;sd-mr-1` Stateful Sessions
-:link: stateful-sessions
-:link-type: doc
-Manage session state across multiple interactions.
-+++
-{bdg-secondary}`example_stateful_counter`
-:::
-
-:::{grid-item-card} {octicon}`law;1.5em;sd-mr-1` LLM-as-Judge Verification
-:link: llm-as-judge
-:link-type: doc
-Use language models to verify open-ended outputs.
-+++
-{bdg-secondary}`math_with_judge`
-:::
-
-:::{grid-item-card} {octicon}`code;1.5em;sd-mr-1` Code Execution
-:link: code-execution
-:link-type: doc
-Execute and verify generated code safely.
-+++
-{bdg-secondary}`code_gen`
-:::
-
-::::
+| Pattern | Example Server | Key Concept |
+|---------|---------------|-------------|
+| **Single-tool** | Weather API | One tool call, deterministic verify |
+| **Multi-step** | Data Extraction | Sequential calls, aggregate results |
+| **Stateful** | Counter Game | Persistent state, state-based verify |
+| **LLM-judge** | Math Verifier | Rule-based + LLM fallback |
+| **Code-exec** | Code Tester | Sandbox execution, test cases |
 
 ---
 
@@ -80,10 +89,9 @@ Execute and verify generated code safely.
 :maxdepth: 1
 :hidden:
 
-simple-tool-calling
-multi-step-interactions
-stateful-sessions
-llm-as-judge
-code-execution
+Weather API <simple-tool-calling>
+Data Extraction <multi-step-interactions>
+Counter Game <stateful-sessions>
+LLM Judge Math Verifier <llm-as-judge>
+Code Testing <code-execution>
 ```
-

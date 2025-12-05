@@ -21,14 +21,13 @@ Select the training framework that best fits your infrastructure and requirement
 ::::{grid} 1 1 2 2
 :gutter: 3
 
-:::{grid-item-card} {octicon}`hubot;1.5em;sd-mr-1` Train with TRL
+:::{grid-item-card} {octicon}`hubot;1.5em;sd-mr-1` Train with TRL (Offline)
 :link: train-with-trl
 :link-type: doc
 
 Use Hugging Face's Transformer Reinforcement Learning library for SFT, DPO, or GRPO training.
 +++
-{bdg-primary}`recommended`
-{bdg-secondary}`hugging-face`
+{bdg-secondary}`offline` {bdg-secondary}`hugging-face`
 :::
 
 :::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` Train with NeMo RL
@@ -68,8 +67,7 @@ Want to understand how Gym integrates with training frameworks before diving in?
 :hidden:
 
 TRL <train-with-trl>
-RL <train-with-nemo-rl>
+NeMo RL <train-with-nemo-rl>
 VeRL <train-with-verl>
-Offline Data <offline-training-w-rollouts>
 ```
 

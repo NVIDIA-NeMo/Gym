@@ -16,12 +16,12 @@ Connect Gym to popular training frameworks for end-to-end model improvement.
 ::::{grid} 1 1 2 2
 :gutter: 1 1 1 2
 
-:::{grid-item-card} {octicon}`hubot;1.5em;sd-mr-1` Train with TRL
+:::{grid-item-card} {octicon}`hubot;1.5em;sd-mr-1` Train with TRL (Offline)
 :link: integrate-training-frameworks/train-with-trl
 :link-type: doc
 Use Hugging Face's TRL library for SFT, DPO, or GRPO training.
 +++
-{bdg-primary}`recommended` {bdg-secondary}`hugging-face`
+{bdg-secondary}`offline` {bdg-secondary}`hugging-face`
 :::
 
 :::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` Train with NeMo RL
@@ -40,13 +40,6 @@ Use VeRL's Ray-based distributed training with flexible backend support.
 {bdg-secondary}`ray` {bdg-secondary}`multi-backend`
 :::
 
-:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Prepare Offline Training Data
-:link: integrate-training-frameworks/offline-training-w-rollouts
-:link-type: doc
-Transform rollouts into SFT or DPO datasets for offline training.
-+++
-{bdg-secondary}`sft` {bdg-secondary}`dpo`
-:::
 
 ::::
 
@@ -59,52 +52,44 @@ Build custom resource servers with tools, verification logic, and domain-specifi
 ::::{grid} 1 1 2 2
 :gutter: 1 1 1 2
 
-:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Your First Resource Server
-:link: creating-resource-server
-:link-type: doc
-Initialize, implement, and test a resource server from scratch.
-+++
-{bdg-primary}`beginner` {bdg-secondary}`30 min`
-:::
-
-:::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Simple Tool Calling
+:::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Weather API Server
 :link: resource-servers/simple-tool-calling
 :link-type: doc
-Single-step tool interactions with deterministic verification.
+Build a single-tool weather server with deterministic verification.
 +++
-{bdg-secondary}`pattern`
+{bdg-secondary}`single-tool`
 :::
 
-:::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` Multi-Step Interactions
+:::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` Data Extraction Server
 :link: resource-servers/multi-step-interactions
 :link-type: doc
-Orchestrate multiple tool calls for complex tasks.
+Build a multi-step server where agents query multiple data sources.
 +++
-{bdg-secondary}`pattern`
+{bdg-secondary}`multi-step`
 :::
 
-:::{grid-item-card} {octicon}`database;1.5em;sd-mr-1` Stateful Sessions
+:::{grid-item-card} {octicon}`database;1.5em;sd-mr-1` Counter Game Server
 :link: resource-servers/stateful-sessions
 :link-type: doc
-Manage session state across interactions.
+Build a stateful server where tools modify persistent state.
 +++
-{bdg-secondary}`pattern`
+{bdg-secondary}`stateful`
 :::
 
-:::{grid-item-card} {octicon}`law;1.5em;sd-mr-1` LLM-as-Judge
+:::{grid-item-card} {octicon}`law;1.5em;sd-mr-1` Math Verifier Server
 :link: resource-servers/llm-as-judge
 :link-type: doc
-Use LLMs to verify open-ended outputs.
+Build a math server with LLM-based answer verification.
 +++
-{bdg-secondary}`pattern`
+{bdg-secondary}`llm-judge`
 :::
 
-:::{grid-item-card} {octicon}`code;1.5em;sd-mr-1` Code Execution
+:::{grid-item-card} {octicon}`code;1.5em;sd-mr-1` Code Testing Server
 :link: resource-servers/code-execution
 :link-type: doc
-Execute and verify generated code safely.
+Build a server that verifies code by executing test cases.
 +++
-{bdg-secondary}`pattern`
+{bdg-secondary}`code-exec`
 :::
 
 ::::
