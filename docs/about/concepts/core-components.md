@@ -30,14 +30,14 @@ Responses API Model servers are stateless model endpoints that perform single-ca
 
 :::{tab-item} Resources
 
-Resource servers host the components and logic of environments including multi-step state persistence, tool and reward function implementations. Resource servers are responsible for returning observations, such as tool results or updated game state, and rewards as a result of actions taken by the policy model. Actions can be moves in a game, tool calls, text generation, or anything an agent can do. NeMo Gym contains a variety of NVIDIA and community contributed resource servers that you can use during training. We also have tutorials on how to add your own resource server.
+Resource servers host the components and logic of environments including multi-step state persistence, tool and reward function implementations. Resource servers are responsible for returning observations, such as tool results or updated environment state, and rewards as a result of actions taken by the policy model. Actions can be moves in a game, tool calls, or anything an agent can do. NeMo Gym contains a variety of NVIDIA and community contributed resource servers that you can use during training. We also have tutorials on how to add your own resource server.
 
 **Examples of Resources**
 
 A resource server usually provides tasks, possible actions, and {term}`verification <Verifier>` logic:
 
 - **Tasks**: Problems or prompts that agents solve during rollouts
-- **Actions**: Actions agents can take during rollouts
+- **Actions**: Actions agents can take during rollouts, including tool calling
 - **Verification logic**: Scoring logic that evaluates performance (returns {term}`reward signals <Reward / Reward Signal>` for training)
 
 **Example Resource Servers**
