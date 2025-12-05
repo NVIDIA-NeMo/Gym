@@ -30,53 +30,53 @@ Responses API Model servers are stateless model endpoints that perform single-ca
 
 :::{tab-item} Resources
 
-Resource servers define tasks, provide tool implementations, and verification logic that measures task performance. NeMo Gym contains a variety of NVIDIA and community contributed resource servers that you can use during training. We also have tutorials on how to add your own resource server.
+Resource servers host the components and logic of environments including multi-step state persistence, tool and reward function implementations. Resource servers are responsible for returning observations, such as tool results or updated environment state, and rewards as a result of actions taken by the policy model. Actions can be moves in a game, tool calls, or anything an agent can do. NeMo Gym contains a variety of NVIDIA and community contributed resource servers that you can use during training. We also have tutorials on how to add your own resource server.
 
-**What Resources Provide**
+**Examples of Resources**
 
-Each resource server combines tasks, tools, and {term}`verification <Verifier>` logic:
+A resource server usually provides tasks, possible actions, and {term}`verification <Verifier>` logic:
 
 - **Tasks**: Problems or prompts that agents solve during rollouts
-- **Tools**: Functions agents can call during task execution
+- **Actions**: Actions agents can take during rollouts, including tool calling
 - **Verification logic**: Scoring logic that evaluates performance (returns {term}`reward signals <Reward / Reward Signal>` for training)
 
 **Example Resource Servers**
 
-Each example shows what **task** the agent solves, what **tools** are available, and what **verification logic** measures success:
+Each example shows what **task** the agent solves, what **actions** are available, and what **verification logic** measures success:
 
 - **[`google_search`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/google_search)**: Web search with verification
   - **Task**: Answer knowledge questions using web search
-  - **Tools**: `search()` queries Google API; `browse()` extracts webpage content
+  - **Actions**: `search()` queries Google API; `browse()` extracts webpage content
   - **Verification logic**: Checks if final answer matches expected result for MCQA questions
 
 - **[`math_with_code`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_code)**: Mathematical reasoning with code execution
   - **Task**: Solve math problems using Python
-  - **Tools**: `execute_python()` runs Python code with numpy, scipy, pandas
+  - **Actions**: `execute_python()` runs Python code with numpy, scipy, pandas
   - **Verification logic**: Extracts boxed answer and checks mathematical correctness
 
 - **[`code_gen`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/code_gen)**: Competitive programming problems
   - **Task**: Implement solutions to coding problems
-  - **Tools**: None (agent generates code directly)
+  - **Actions**: None (agent generates code directly)
   - **Verification logic**: Executes generated code against unit test inputs/outputs
 
 - **[`math_with_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_judge)**: Mathematical problem solving
   - **Task**: Solve math problems
-  - **Tools**: None (or can be combined with `math_with_code`)
+  - **Actions**: None (or can be combined with `math_with_code`)
   - **Verification logic**: Uses math library + LLM judge to verify answer equivalence
 
 - **[`mcqa`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/mcqa)**: Multiple choice question answering
   - **Task**: Answer multiple choice questions
-  - **Tools**: None (knowledge-based reasoning)
+  - **Actions**: None (knowledge-based reasoning)
   - **Verification logic**: Checks if selected option matches ground truth
 
 - **[`instruction_following`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/instruction_following)**: Instruction compliance evaluation
   - **Task**: Follow specified instructions
-  - **Tools**: None (evaluates response format/content)
+  - **Actions**: None (evaluates response format/content)
   - **Verification logic**: Checks if response follows all specified instructions
 
 - **[`simple_weather`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_simple_weather)**: Mock weather API
   - **Task**: Report weather information
-  - **Tools**: `get_weather()` returns mock weather data
+  - **Actions**: `get_weather()` returns mock weather data
   - **Verification logic**: Checks if weather tool was called correctly
 
 **Configuration**: Refer to resource-specific config files in `resources_servers/*/configs/`
@@ -87,9 +87,8 @@ Each example shows what **task** the agent solves, what **tools** are available,
 
 Responses API Agent servers {term}`orchestrate <Orchestration>` the rollout lifecycle—the full cycle of task execution and verification.
 
-- Execute tool calls by routing model requests to resources
-- Run multi-step and multi-turn agentic loops (model → tool execution → repeat)
-- Manage session state across servers
+- Implement multi-step and multi-turn agentic systems
+- Orchestrate the model server and resources server(s) to collect complete trajectories
 
 NeMo Gym provides several agent patterns covering multi-step, multi-turn, and user modeling scenarios.
 
