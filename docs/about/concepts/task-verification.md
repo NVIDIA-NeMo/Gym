@@ -177,7 +177,7 @@ reward = await expensive_api_call(predicted, expected)
 ## What You've Learned
 
 This verification system is what makes NeMo Gym powerful for model training:
-- **Resource servers** provide both tools AND scoring systems
+- **Resource servers** provide verification logic
 - **Verification patterns** vary by domain but follow common principles
 - **Reward signals** from verification drive model improvement through RL
 - **Good verification** is reliable, meaningful, and scalable
