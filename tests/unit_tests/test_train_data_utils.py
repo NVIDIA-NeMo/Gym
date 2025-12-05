@@ -74,6 +74,7 @@ class TestLoadAndValidateServerInstanceConfigs:
                 "responses_api_agents": {
                     "simple_agent": {
                         "host": "127.0.0.1",
+                        "huggingface_identifier": None,
                         "port": 12345,
                         "entrypoint": "app.py",
                         "datasets": [
