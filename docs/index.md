@@ -156,13 +156,25 @@ get-started/rollout-collection.md
 :hidden:
 :maxdepth: 1
 
-tutorials/index.md
-tutorials/creating-resource-server
-tutorials/offline-training-w-rollouts
-tutorials/rl-training-with-nemo-rl
-tutorials/training-framework-integration/index.md
+Overview <tutorials/index.md>
+Integrate Training <tutorials/integrate-training-frameworks/index>
+Train Offline <tutorials/offline-training-w-rollouts>
+Create a Resource Server <tutorials/creating-resource-server>
 how-to-faq.md
 ```
+
+```{toctree}
+:caption: Training
+:hidden:
+:maxdepth: 2
+
+Overview <training/index>
+Integrate <training/integrate/index>
+Collect Rollouts <training/rollout-collection/index>
+Verify Rollouts <training/verification/index>
+Prepare Datasets <training/datasets/index>
+```
+
 
 
 ```{toctree}

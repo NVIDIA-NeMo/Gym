@@ -44,6 +44,12 @@ Explore how resource servers score agent outputs with `verify()` implementations
 Essential vocabulary for agent training, RL workflows, and NeMo Gym. This glossary defines terms you'll encounter throughout the tutorials and documentation.
 :::
 
+:::{grid-item-card} {octicon}`plug;1.5em;sd-mr-1` Training Integration Architecture
+:link: training-integration-architecture
+:link-type: ref
+Understand how Gym connects to RL training frameworks, including the request lifecycle, retokenization challenges, and integration patterns.
+:::
+
 ::::
 
 ---
@@ -56,4 +62,5 @@ Core Abstractions <core-abstractions>
 Configuration System <configuration-system>
 Task Verification <task-verification>
 Key Terminology <key-terminology>
+Training Integration Architecture <training-integration-architecture>
 ```
