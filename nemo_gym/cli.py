@@ -28,7 +28,7 @@ from signal import SIGINT
 from subprocess import Popen
 from threading import Thread
 from time import sleep
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import psutil
 import rich
@@ -59,20 +59,47 @@ from nemo_gym.server_utils import (
 
 
 def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  # pragma: no cover
-    install_cmd = "uv pip install -r requirements.txt"
     head_server_deps = global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]
-    install_cmd += " " + " ".join(head_server_deps)
 
-    return f"""cd {dir_path} \\
-    && uv venv --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} \\
+    uv_venv_cmd = f"uv venv --seed --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} .venv"
+
+    pyproject_toml = False
+    requirements_txt = False
+    try:
+        with open(f"{dir_path / 'pyproject.toml'}", "r") as _f:
+            pyproject_toml = True
+    except OSError:
+        pass
+    try:
+        with open(f"{dir_path / 'requirements.txt'}", "r") as _f:
+            requirements_txt = True
+    except OSError:
+        pass
+
+    if pyproject_toml:
+        install_cmd = f"""uv pip install '-e .' {" ".join(head_server_deps)}"""
+    elif requirements_txt:
+        install_cmd = f"""uv pip install -r requirements.txt {" ".join(head_server_deps)}"""
+    else:
+        raise RuntimeError(f"Missing pyproject.toml or requirements.txt for uv venv setup in server dir: {dir_path}")
+
+    cmd = f"""cd {dir_path} \\
+    && {uv_venv_cmd} \\
     && source .venv/bin/activate \\
     && {install_cmd} \\
-   """
+    """
+
+    return cmd
 
 
-def _run_command(command: str, working_directory: Path) -> Popen:  # pragma: no cover
+def _run_command(command: str, working_dir_path: Path) -> Popen:  # pragma: no cover
+    work_dir = f"{working_dir_path.absolute()}"
     custom_env = environ.copy()
-    custom_env["PYTHONPATH"] = f"{working_directory.absolute()}:{custom_env.get('PYTHONPATH', '')}"
+    py_path = custom_env.get("PYTHONPATH", None)
+    if py_path is not None:
+        custom_env["PYTHONPATH"] = f"{work_dir}:{py_path}"
+    else:
+        custom_env["PYTHONPATH"] = work_dir
     return Popen(command, executable="/bin/bash", shell=True, env=custom_env)
 
 
@@ -233,6 +260,18 @@ class RunHelper:  # pragma: no cover
 
         for process_name, process in self._processes.items():
             if process.poll() is not None:
+                proc_out, proc_err = process.communicate()
+                print(f"Process `{process_name}` finished unexpectedly!")
+                print(f"Process `{process_name}` stdout:", flush=True)
+                if isinstance(proc_out, bytes):
+                    print(proc_out.decode("utf-8"), flush=True)
+                else:
+                    print(proc_out, flush=True)
+                print(f"Process `{process_name}` stderr:", flush=True)
+                if isinstance(proc_err, bytes):
+                    print(proc_err.decode("utf-8"), flush=True)
+                else:
+                    print(proc_err, flush=True)
                 raise RuntimeError(f"Process `{process_name}` finished unexpectedly!")
 
     def wait_for_spinup(self) -> None:
@@ -243,11 +282,18 @@ class RunHelper:  # pragma: no cover
             self.poll()
             statuses = self.check_http_server_statuses()
 
-            num_spun_up = statuses.count("success")
+            num_spun_up = 0
+            waiting = []
+            for name, status in statuses:
+                if status == "success":
+                    num_spun_up += 1
+                else:
+                    waiting.append(name)
             if len(statuses) != num_spun_up:
                 print(
                     f"""{num_spun_up} / {len(statuses)} servers ready ({statuses.count("timeout")} timed out, {statuses.count("connection_error")} connection errored, {statuses.count("unknown_error")} had unknown errors).
-Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
+Waiting for servers to spin up: {waiting}
+Sleeping {sleep_interval}s..."""
                 )
             else:
                 print(f"All {num_spun_up} / {len(statuses)} servers ready! Polling every 60s")
@@ -289,7 +335,7 @@ Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
         finally:
             self.shutdown()
 
-    def check_http_server_statuses(self) -> List[ServerStatus]:
+    def check_http_server_statuses(self) -> List[Tuple[str, ServerStatus]]:
         print(
             "Checking for HTTP server statuses (you should see some HTTP requests to `/` that may 404. This is expected.)"
         )
@@ -297,7 +343,7 @@ Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
         for server_instance_display_config in self._server_instance_display_configs:
             name = server_instance_display_config.config_path
             status = self._server_client.poll_for_status(name)
-            statuses.append(status)
+            statuses.append((name, status))
 
         return statuses
 

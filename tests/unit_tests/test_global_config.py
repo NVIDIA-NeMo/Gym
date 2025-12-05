@@ -42,7 +42,7 @@ class TestServerUtils:
         monkeypatch.setattr(nemo_gym.global_config, "python_version", python_version_mock)
 
         return {
-            "head_server_deps": ["ray==test ray version", "openai==test openai version"],
+            "head_server_deps": ["ray[default]==test ray version", "openai==test openai version"],
             "python_version": "test python version",
         }
 
