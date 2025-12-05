@@ -160,6 +160,7 @@ tutorials/index.md
 tutorials/creating-resource-server
 tutorials/offline-training-w-rollouts
 tutorials/rl-training-with-nemo-rl
+tutorials/training-framework-integration/index.md
 how-to-faq.md
 ```
 
