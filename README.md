@@ -1,6 +1,6 @@
 # NeMo Gym
 
-NeMo Gym is a framework for building reinforcement learning environments to train large language models. 
+NeMo Gym is a framework for building reinforcement learning (RL) training environments for large language models (LLMs). It provides infrastructure to develop environments, scale rollout collection, and integrate seamlessly with your preferred training framework. 
 
 NeMo Gym is a component of the [NVIDIA NeMo Framework](https://docs.nvidia.com/nemo-framework/), NVIDIA’s GPU-accelerated platform for building and training generative AI models.
 
@@ -65,13 +65,16 @@ uv sync --extra dev --group docs
 ```
 
 ### Configure Your API Key
-Create an `env.yaml` file that contains your OpenAI API key and the model you want to use. Replace `your-openai-api-key` with your actual key. This file helps keep your secrets out of version control while still making them available to NeMo Gym.
+Create an `env.yaml` file that contains your OpenAI API key and the [policy model](https://docs.nvidia.com/nemo/gym/latest/about/concepts/key-terminology.html#term-Policy-Model) you want to use. Replace `your-openai-api-key` with your actual key. This file helps keep your secrets out of version control while still making them available to NeMo Gym.
 
 ```bash
 echo "policy_base_url: https://api.openai.com/v1
 policy_api_key: your-openai-api-key
 policy_model_name: gpt-4.1-2025-04-14" > env.yaml
 ```
+
+> [!NOTE]
+> We use GPT-4.1 in this quickstart because it provides low latency (no reasoning step) and works reliably out-of-the-box. NeMo Gym is **not limited to OpenAI models**—you can use self-hosted models via vLLM or any OpenAI-compatible inference server. See the [documentation](https://docs.nvidia.com/nemo/gym/latest/get-started/setup-installation.html) for details.
 
 ### Start Servers
 
@@ -114,6 +117,14 @@ This generates training data with verification scores!
 
 **Terminal 1** with the running servers: Ctrl+C to stop the ng_run process.
 
+### What's Next?
+
+Now that you can generate rollouts, choose your path:
+
+- **Use an existing training environment** — Browse the [Available Resource Servers](#-available-resource-servers) below to find a training-ready environment that matches your goals.
+
+- **Build a custom training environment** — Implement or integrate existing tools and define task verification logic. Get started with the [Creating a Resource Server](https://docs.nvidia.com/nemo/gym/latest/tutorials/creating-resource-server.html) tutorial.
+
 
 ## 📖 Documentation
 
@@ -136,6 +147,7 @@ If you use NeMo Gym in your research, please cite it using the following BibTeX 
 @misc{nemo-gym,
   title = {NeMo Gym: An Open Source Framework for Scaling Reinforcement Learning Environments for LLM},
   howpublished = {\url{https://github.com/NVIDIA-NeMo/Gym}},
+  author={NVIDIA},
   year = {2025},
   note = {GitHub repository},
 }

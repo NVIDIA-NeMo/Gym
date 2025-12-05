@@ -546,6 +546,7 @@ def init_resources_server():  # pragma: no cover
   {server_type}:
     {server_type_name}:
       entrypoint: app.py
+      domain: other
 {server_type_name}_simple_agent:
   responses_api_agents:
     simple_agent:
