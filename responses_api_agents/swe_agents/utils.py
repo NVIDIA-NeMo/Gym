@@ -18,9 +18,11 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-import uuid
+
+from openai.types.responses.function_tool import FunctionTool
 
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -33,47 +35,36 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.server_utils import ServerClient, get_first_server_config_dict
 from responses_api_agents.swe_agents.run_openhands import (
-    SweBenchGenerationConfig,
-    SupportedAgentFrameworks,
-    SweBenchInferenceConfig,
     RunOpenHandsAgent,
+    SupportedAgentFrameworks,
+    SweBenchGenerationConfig,
+    SweBenchInferenceConfig,
 )
 
 
 LOG = logging.getLogger(__name__)
 
 
-def extract_problem_info(body: NeMoGymResponseCreateParamsNonStreaming, container_formatter: str) -> Dict:
-    """Extract SWE-bench problem information from request.
-
-    Args:
-        body: Request body with parameters
-        container_formatter: Container path template
-
-    Returns:
-        Dictionary with problem information
-    """
-
-    # Get metadata
-    metadata = getattr(body, "metadata", {})
-
-    # Build problem info
-    problem_info = {
-        "problem_statement": metadata["problem_statement"],
-        "instance_id": metadata["instance_id"],
-        "base_commit": metadata["base_commit"],
-        "dataset_name": metadata["dataset_name"],
-        "split": metadata["split"],
-        # TODO (sugam): refactor this to a cleaner approach
-        "instance_dict": metadata["instance_dict"],
-        "container_formatter": container_formatter,
-    }
-
-    return problem_info
+### Trajectory Conversion Utils ###
 
 
-def extract_input_messages_from_trajectory(response_output: List) -> Tuple[List[NeMoGymEasyInputMessage], List]:
+def _extract_text_from_message(item) -> Optional[str]:
+    """Helper to extract text content from a message item."""
+    if not (hasattr(item, "content") and item.content):
+        return None
+
+    for content_item in item.content:
+        if isinstance(content_item, dict) and content_item.get("type") == "input_text":
+            return content_item.get("text", "")
+
+    return None
+
+
+def extract_input_messages_from_trajectory(
+    response_output: List,
+) -> Tuple[List[NeMoGymEasyInputMessage], List]:
     """Extract initial input messages from response output and return filtered output.
 
     These are the system/user messages that were actually sent to the agent,
@@ -91,16 +82,19 @@ def extract_input_messages_from_trajectory(response_output: List) -> Tuple[List[
     filtered_output = []
 
     if not response_output:
-        return input_messages, []
+        return [], []
 
     # Find where the assistant/function calls start
+    # TODO (sugam): check if we need the function call check.
     for i, item in enumerate(response_output):
         # Check if this is an assistant message or function call
         is_assistant = hasattr(item, "role") and item.role == "assistant"
-        is_function = hasattr(item, "type") and item.type in ["function_call", "function_call_output"]
+        is_function = hasattr(item, "type") and item.type in [
+            "function_call",
+            "function_call_output",
+        ]
 
         if is_assistant or is_function:
-            # Add all remaining items starting from this one
             filtered_output.extend(response_output[i:])
             break
 
@@ -109,30 +103,23 @@ def extract_input_messages_from_trajectory(response_output: List) -> Tuple[List[
             # Try to extract text content
             text_content = _extract_text_from_message(item)
             if text_content:
-                input_messages.append(NeMoGymEasyInputMessage(role=item.role, content=text_content, type="message"))
-                # Skip adding to filtered output (we're removing these)
+                input_messages.append(
+                    NeMoGymEasyInputMessage(
+                        role=item.role,
+                        content=text_content,
+                        type="message",
+                    )
+                )
                 continue
 
-        # Add any other items to filtered output (edge case handling)
         filtered_output.append(item)
 
     return input_messages, filtered_output
 
 
-def _extract_text_from_message(item) -> Optional[str]:
-    """Helper to extract text content from a message item."""
-    if not (hasattr(item, "content") and item.content):
-        return None
-
-    for content_item in item.content:
-        if isinstance(content_item, dict) and content_item.get("type") == "input_text":
-            return content_item.get("text", "")
-
-    return None
-
-
 def convert_trajectory_to_output_items(
-    trajectory: List[Any], problem_info: Dict, agent_framework: str
+    trajectory: List[Any],
+    agent_framework: str,
 ) -> List[NeMoGymResponseOutputItem]:
     """Convert trajectory data to NeMoGym output items.
 
@@ -150,8 +137,7 @@ def convert_trajectory_to_output_items(
     if agent_framework == "openhands" and isinstance(trajectory, list):
         for item in trajectory:
             if isinstance(item, dict):
-                role = item.get("role", "")
-
+                role = item["role"]
                 if role in ["user", "system", "developer"]:
                     # Create input message
                     content_data = item.get("content", "")
@@ -192,7 +178,11 @@ def convert_trajectory_to_output_items(
                             NeMoGymResponseOutputMessageForTraining(
                                 id=f"msg-{len(output_items)}",
                                 content=[
-                                    NeMoGymResponseOutputText(type="output_text", text=content_data, annotations=[])
+                                    NeMoGymResponseOutputText(
+                                        type="output_text",
+                                        text=content_data,
+                                        annotations=[],
+                                    )
                                 ],
                                 role="assistant",
                                 status="completed",
@@ -226,7 +216,6 @@ def convert_trajectory_to_output_items(
                     if not tool_call_id and "tool_call_ids" in item:
                         tool_call_ids = item.get("tool_call_ids", [])
                         tool_call_id = tool_call_ids[0] if tool_call_ids else None
-
                     if tool_call_id:
                         output_items.append(
                             NeMoGymFunctionCallOutput(
@@ -326,234 +315,102 @@ def convert_trajectory_to_output_items(
     return output_items
 
 
-def get_model_endpoint(model_server_name: Optional[str]) -> str:
-    """Determine the model API endpoint.
-
-    Args:
-        model_server_name: Name of the model server
-
-    Returns:
-        Model API endpoint URL
-
-    Raises:
-        RuntimeError: If endpoint cannot be determined
-    """
-    try:
-        from nemo_gym.server_utils import ServerClient, get_first_server_config_dict
-
-        global_config_dict = ServerClient.load_from_global_config().global_config_dict
-
-        model_server_config = get_first_server_config_dict(
-            global_config_dict,
-            model_server_name or "openai_model",
-        )
-
-        base_url = f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
-        return base_url
-
-    except Exception as e:
-        LOG.error(f"Failed to get server config for {model_server_name}: {e}")
-        raise RuntimeError(f"Could not determine model endpoint for server '{model_server_name}': {e}")
-
-
-async def run_swebench_evaluation(
-    problem_info: Dict,
-    model_endpoint: str,
-    body: NeMoGymResponseCreateParamsNonStreaming,
+def get_trajectory_and_tools(
+    trajectories_dir: Path,
+    instance_id: str,
     agent_framework: str,
-    agent_config: Optional[str],
-    agent_tools_file: Optional[str],
-    agent_max_turns: int,
-    swebench_tests_timeout: int,
-    nemo_skills_config: Dict[str, Any],
-    agent_framework_repo: Optional[str] = None,
-    agent_framework_commit: str = "HEAD",
-    openhands_setup_dir: Optional[Path] = None,
-    swebench_setup_dir: Optional[Path] = None,
-    dataset_path: Optional[str] = None,
-) -> Dict:
-    """Run SWE-bench evaluation using NeMo-Skills.
+    agent_tools_file: Optional[str] = None,
+) -> tuple:
+    """Get trajectory and tools from evaluation results.
 
     Args:
-        problem_info: Problem information
-        model_endpoint: Model API endpoint
-        body: Request body
-        agent_framework: Agent framework (swe_agent or openhands)
-        agent_config: Path to agent configuration file
-        agent_tools_file: Path to tools JSON file (for SWE-agent)
-        agent_max_turns: Maximum iterations for the agent
-        swebench_tests_timeout: Timeout for running tests
-        nemo_skills_config: Additional NeMo-Skills configuration
-        agent_framework_repo: URL of the agent framework repo to clone (optional)
-        agent_framework_commit: Commit/branch to use when cloning (default: HEAD)
-        openhands_setup_dir: Path to pre-built OpenHands directory (optional)
-        swebench_setup_dir: Path to pre-built SWE-bench directory (optional)
-
-    Returns:
-        Evaluation results dictionary
-
-    Raises:
-        RuntimeError: If evaluation fails
-    """
-    # Create persistent directory for I/O and logs in local workspace
-    workspace_root = Path(os.path.dirname(os.path.abspath(__file__))).parent.parent  # Go up to nemo-gym root
-    instance_id = problem_info.get("instance_id", "unknown")
-    timestamp = int(time.time() * 1000)  # Millisecond timestamp for uniqueness
-    persistent_dir = workspace_root / "temp_swebench" / f"{instance_id}_{timestamp}_{uuid.uuid4()}"
-    persistent_dir.mkdir(parents=True, exist_ok=True)
-
-    input_file = persistent_dir / "input.jsonl"
-    output_file = persistent_dir / "output.jsonl"
-
-    # Write input file
-    with open(input_file, "w") as f:
-        json.dump(problem_info, f)
-        f.write("\n")
-
-    inference_params = {}
-    model_name = getattr(body, "model", "gpt-4.1-2025-04-14")
-
-    if hasattr(body, "temperature") and body.temperature is not None:
-        inference_params["temperature"] = body.temperature
-    if hasattr(body, "top_p") and body.top_p is not None:
-        inference_params["top_p"] = body.top_p
-    if hasattr(body, "max_output_tokens") and body.max_output_tokens is not None:
-        inference_params["tokens_to_generate"] = body.max_output_tokens
-
-    inference_config = SweBenchInferenceConfig(**inference_params)
-    server = {
-        "model": model_name,
-        "base_url": model_endpoint,
-    }
-
-    cfg = SweBenchGenerationConfig(
-        input_file=input_file,
-        output_file=output_file,
-        agent_framework=SupportedAgentFrameworks.openhands,
-        agent_framework_repo=agent_framework_repo,
-        agent_framework_commit=agent_framework_commit,
-        agent_config=agent_config,
-        agent_max_turns=agent_max_turns,
-        swebench_tests_timeout=swebench_tests_timeout,
-        inference=inference_config,
-        server=server,
-        **nemo_skills_config,
-    )
-
-    run_oh = RunOpenHandsAgent(
-        cfg=cfg,
-        openhands_setup_dir=openhands_setup_dir,
-        swebench_setup_dir=swebench_setup_dir,
-        dataset_path=dataset_path,
-    )
-    result = await run_oh.process_single_datapoint(problem_info)
-    print(f"Process completed for {instance_id}", flush=True)
-
-    try:
-        with open(output_file, "w") as f:
-            json.dump(result, f)
-    except Exception as e:
-        LOG.error(f"Failed to write result to {output_file}: {e}")
-        raise e
-
-    # Read results
-    if not output_file.exists():
-        raise RuntimeError(f"No output file generated: {output_file}")
-
-    # Try to find and include trajectory file
-    trajectories_dir = persistent_dir / "trajectories"
-    trajectory_data, tools = get_trajectory_and_tools(
-        trajectories_dir, instance_id, agent_framework, agent_tools_file if agent_framework == "swe_agent" else None
-    )
-
-    # Add trajectory and tools to result if found
-    if trajectory_data:
-        result["trajectory"] = trajectory_data
-        LOG.info("Added trajectory data to result")
-    if tools:
-        result["tools"] = tools
-        LOG.info(f"Added {len(tools)} tools to result")
-
-    return result
-
-
-def build_nemo_skills_command(
-    input_file: Path,
-    output_file: Path,
-    model_endpoint: str,
-    body: NeMoGymResponseCreateParamsNonStreaming,
-    agent_framework: str,
-    agent_config: Optional[str],
-    agent_max_turns: int,
-    swebench_tests_timeout: int,
-    nemo_skills_config: Dict[str, Any],
-    agent_framework_repo: Optional[str] = None,
-    agent_framework_commit: str = "HEAD",
-) -> list:
-    """Build command to run NeMo-Skills SWE-bench evaluation.
-
-    Args:
-        input_file: Input JSONL file path
-        output_file: Output JSONL file path
-        model_endpoint: Model API endpoint
-        body: Request body
+        trajectories_dir: Directory containing trajectories
+        instance_id: Instance ID
         agent_framework: Agent framework
-        agent_config: Path to agent configuration file
-        agent_max_turns: Maximum iterations
-        swebench_tests_timeout: Test timeout
-        nemo_skills_config: Additional configuration
-        agent_framework_repo: URL of the agent framework repo to clone (optional)
-        agent_framework_commit: Commit/branch to use when cloning (default: HEAD)
+        agent_tools_file: Path to tools JSON file (for SWE-agent)
 
     Returns:
-        Command as list of strings
+        Tuple of (trajectory_data, tools)
     """
-    # Extract model name from endpoint or body
-    model_name = getattr(body, "model", "gpt-4.1-2025-04-14")
+    trajectory_data = None
+    tools = []
 
-    # Build base command
-    cmd = [
-        sys.executable,
-        "-m",
-        "nemo_skills.inference.eval.swebench",
-        f"++input_file={input_file}",
-        f"++output_file={output_file}",
-        f"++agent_framework={agent_framework}",
-        f"++server.model={model_name}",
-        f"++server.base_url={model_endpoint}",
-        f"++agent_max_turns={agent_max_turns}",
-        f"++swebench_tests_timeout={swebench_tests_timeout}",
-    ]
+    if agent_framework == "openhands":
+        trajectory_data, tools = get_openhands_trajectory_from_completions(trajectories_dir, instance_id)
+        if trajectory_data:
+            print(
+                f"Loaded OpenHands trajectory from llm_completions ({len(trajectory_data)} messages)",
+                flush=True,
+            )
+        else:
+            print(f"No trajectory files found in {trajectories_dir}", flush=True)
 
-    # Add agent config if specified
-    if agent_config:
-        cmd.append(f"++agent_config={agent_config}")
+    elif agent_framework == "swe_agent":
+        # For SWE-agent, look for .traj files
+        if trajectories_dir.exists():
+            traj_files = [f for f in trajectories_dir.glob("**/*.traj") if "demonstrations" not in str(f)]
 
-    # Add agent framework repo and commit if specified
-    if agent_framework_repo:
-        cmd.append(f"++agent_framework_repo={agent_framework_repo}")
-    if agent_framework_commit:
-        cmd.append(f"++agent_framework_commit={agent_framework_commit}")
+            if traj_files:
+                # Read the first trajectory file found
+                try:
+                    with open(traj_files[0], "r") as f:
+                        traj_content = json.load(f)
+                        history = traj_content["history"]
+                        trajectory_steps = traj_content["trajectory"]
+                        trajectory_data = extract_data_from_trajectory(trajectory_steps, history)
+                    LOG.info(f"Found and loaded SWE-agent trajectory file: {traj_files[0]}")
+                except Exception as e:
+                    LOG.warning(f"Failed to read trajectory file {traj_files[0]}: {e}")
 
-    # Add inference parameters
-    inference_params = getattr(body, "inference", {})
-    if hasattr(body, "temperature") and body.temperature is not None:
-        inference_params["temperature"] = body.temperature
-    if hasattr(body, "top_p") and body.top_p is not None:
-        inference_params["top_p"] = body.top_p
-    if hasattr(body, "max_output_tokens") and body.max_output_tokens is not None:
-        inference_params["tokens_to_generate"] = body.max_output_tokens
+                # Load SWE-agent tools from the configured JSON file
+                if agent_tools_file:
+                    tools_file = Path(__file__).parent / agent_tools_file
+                    if tools_file.exists():
+                        with open(tools_file, "r") as f:
+                            tools_data = json.load(f)
+                            tools = tools_data.get("tools", [])
+                            LOG.info(f"Loaded SWE-agent tools from {tools_file}")
+                    else:
+                        LOG.warning(f"SWE-agent tools file not found: {tools_file}")
+                else:
+                    LOG.warning("No agent_tools_file configured for SWE-agent")
+        else:
+            LOG.warning(f"No trajectory files found in {trajectories_dir}")
+    else:
+        LOG.warning(f"Unsupported agent framework: {agent_framework}")
 
-    for key, value in inference_params.items():
-        cmd.append(f"++inference.{key}={value}")
+    return trajectory_data, tools
 
-    # Add any additional NeMo-Skills config
-    for key, value in nemo_skills_config.items():
-        # Skip None/null values - let NeMo-Skills use its defaults or don't pass the param
-        if value is not None:
-            cmd.append(f"++{key}={value}")
 
-    return cmd
+def convert_tools_to_function_format(raw_tools: List[Dict]) -> List:
+    """Convert tools from ChatCompletion format to Response FunctionTool format.
+
+    Args:
+        raw_tools: List of tools in ChatCompletion format
+
+    Returns:
+        List of FunctionTool objects
+    """
+
+    tools = []
+    for tool in raw_tools:
+        # Tools from SWE-agent are in ChatCompletion format with nested structure
+        # Convert to Response FunctionTool format which is flat
+        if tool.get("type") == "function" and "function" in tool:
+            func_def = tool["function"]
+            # Create FunctionTool object with flat structure
+            function_tool = FunctionTool(
+                type="function",
+                name=func_def.get("name", ""),
+                description=func_def.get("description"),
+                parameters=func_def.get("parameters"),
+                strict=func_def.get("strict"),  # May be None
+            )
+            tools.append(function_tool)
+    return tools
+
+
+### SWE Agent Harness Utils ###
 
 
 def extract_messages(trajectory_item) -> List[Dict]:
@@ -656,70 +513,13 @@ def extract_data_from_trajectory(
     return final_trajectory
 
 
-def get_trajectory_and_tools(
-    trajectories_dir: Path, instance_id: str, agent_framework: str, agent_tools_file: Optional[str] = None
+### OpenHands Harness Utils ###
+
+
+def get_openhands_trajectory_from_completions(
+    trajectories_dir: Path,
+    instance_id: str,
 ) -> tuple:
-    """Get trajectory and tools from evaluation results.
-
-    Args:
-        trajectories_dir: Directory containing trajectories
-        instance_id: Instance ID
-        agent_framework: Agent framework
-        agent_tools_file: Path to tools JSON file (for SWE-agent)
-
-    Returns:
-        Tuple of (trajectory_data, tools)
-    """
-    trajectory_data = None
-    tools = []
-
-    # Handle different agent frameworks' trajectory storage
-    if agent_framework == "openhands":
-        # Get trajectory from completion files (complete and in OpenAI format)
-        trajectory_data, tools = get_openhands_trajectory_from_completions(trajectories_dir, instance_id)
-        if trajectory_data:
-            LOG.info(f"Loaded OpenHands trajectory from llm_completions ({len(trajectory_data)} messages)")
-        else:
-            LOG.warning(f"No trajectory files found in {trajectories_dir}")
-
-    elif agent_framework == "swe_agent":
-        # For SWE-agent, look for .traj files
-        if trajectories_dir.exists():
-            traj_files = [f for f in trajectories_dir.glob("**/*.traj") if "demonstrations" not in str(f)]
-
-            if traj_files:
-                # Read the first trajectory file found
-                try:
-                    with open(traj_files[0], "r") as f:
-                        traj_content = json.load(f)
-                        history = traj_content["history"]
-                        trajectory_steps = traj_content["trajectory"]
-                        trajectory_data = extract_data_from_trajectory(trajectory_steps, history)
-                    LOG.info(f"Found and loaded SWE-agent trajectory file: {traj_files[0]}")
-                except Exception as e:
-                    LOG.warning(f"Failed to read trajectory file {traj_files[0]}: {e}")
-
-                # Load SWE-agent tools from the configured JSON file
-                if agent_tools_file:
-                    tools_file = Path(__file__).parent / agent_tools_file
-                    if tools_file.exists():
-                        with open(tools_file, "r") as f:
-                            tools_data = json.load(f)
-                            tools = tools_data.get("tools", [])
-                            LOG.info(f"Loaded SWE-agent tools from {tools_file}")
-                    else:
-                        LOG.warning(f"SWE-agent tools file not found: {tools_file}")
-                else:
-                    LOG.warning("No agent_tools_file configured for SWE-agent")
-        else:
-            LOG.warning(f"No trajectory files found in {trajectories_dir}")
-    else:
-        LOG.warning(f"Unsupported agent framework: {agent_framework}")
-
-    return trajectory_data, tools
-
-
-def get_openhands_trajectory_from_completions(trajectories_dir: Path, instance_id: str) -> tuple:
     """Get trajectory from llm_completions directory for OpenHands.
 
     Args:
@@ -734,27 +534,22 @@ def get_openhands_trajectory_from_completions(trajectories_dir: Path, instance_i
     completions_dir = trajectories_dir / instance_id / "llm_completions" / instance_id
 
     if not completions_dir.exists():
-        LOG.warning(f"No llm_completions directory found: {completions_dir}")
+        print(f"No llm_completions directory found: {completions_dir}", flush=True)
         return messages, tools
 
-    # Get all completion files sorted by timestamp
     completion_files = sorted(completions_dir.glob("*.json"))
 
     if not completion_files:
-        LOG.warning(f"No completion files found in: {completions_dir}")
+        print(f"No completion files found in: {completions_dir}", flush=True)
         return messages, tools
 
-    # Use the last file for messages since it contains the cumulative conversation
     last_file = completion_files[-1]
 
     try:
         with open(last_file, "r") as f:
             data = json.load(f)
 
-        # Get all messages from the last file
         messages = data["messages"]
-
-        # Add the final assistant response
         provider_specific_fields = data.get("provider_specific_fields", {})
         final_assistant_message = data["response"]["choices"][0]["message"]
 
@@ -765,26 +560,25 @@ def get_openhands_trajectory_from_completions(trajectories_dir: Path, instance_i
         if final_assistant_message.get("content") or final_assistant_message.get("tool_calls"):
             messages.append(final_assistant_message)
 
-        # Get tools (they should be the same across all turns)
         tools = data.get("kwargs", {}).get("tools", [])
 
-        LOG.info(f"Loaded {len(messages)} messages from last completion file: {last_file.name}")
+        print(
+            f"Loaded {len(messages)} messages from last completion file: {last_file}",
+            flush=True,
+        )
 
     except Exception as e:
-        LOG.error(f"Failed to read completion file {last_file}: {e}")
+        print(f"Failed to read completion file {last_file}: {e}", flush=True)
         return [], []
 
-    # Convert content format if needed (OpenHands uses list of dicts for content)
     for msg in messages:
         if "content" in msg:
-            if msg["content"] is None:
-                msg["content"] = ""
-            elif isinstance(msg["content"], list):
+            msg["content"] = msg["content"] or ""
+            if isinstance(msg["content"], list):
                 # Handle empty content lists (e.g., assistant messages with only tool calls)
                 if len(msg["content"]) == 0:
                     msg["content"] = ""
                 elif len(msg["content"]) == 1:
-                    # Extract the single text item
                     item = msg["content"][0]
                     if not isinstance(item, dict) or item.get("type") != "text" or "text" not in item:
                         raise ValueError(f"Expected content item to be {{type: 'text', text: '...'}}, got {item}")
@@ -797,111 +591,233 @@ def get_openhands_trajectory_from_completions(trajectories_dir: Path, instance_i
     return messages, tools
 
 
-def convert_tools_to_function_format(raw_tools: List[Dict]) -> List:
-    """Convert tools from ChatCompletion format to Response FunctionTool format.
+### Run SWE Harness Utils ###
 
-    Args:
-        raw_tools: List of tools in ChatCompletion format
 
-    Returns:
-        List of FunctionTool objects
-    """
-    from openai.types.responses.function_tool import FunctionTool
+def extract_problem_info(
+    body: NeMoGymResponseCreateParamsNonStreaming,
+    container_formatter: str,
+) -> Dict:
+    # Get metadata
+    metadata = body.metadata
 
-    tools = []
-    for tool in raw_tools:
-        # Tools from SWE-agent are in ChatCompletion format with nested structure
-        # Convert to Response FunctionTool format which is flat
-        if tool.get("type") == "function" and "function" in tool:
-            func_def = tool["function"]
-            # Create FunctionTool object with flat structure
-            function_tool = FunctionTool(
-                type="function",
-                name=func_def.get("name", ""),
-                description=func_def.get("description"),
-                parameters=func_def.get("parameters"),
-                strict=func_def.get("strict"),  # May be None
-            )
-            tools.append(function_tool)
-    return tools
+    # Build problem info
+    problem_info = {
+        "problem_statement": metadata["problem_statement"],
+        "instance_id": metadata["instance_id"],
+        "base_commit": metadata["base_commit"],
+        "dataset_name": metadata["dataset_name"],
+        "split": metadata["split"],
+        # TODO (sugam): refactor this to a cleaner approach
+        "instance_dict": metadata["instance_dict"],
+        "container_formatter": container_formatter,
+    }
+
+    return problem_info
+
+
+def get_model_endpoint(model_server_name: str) -> str:
+    global_config_dict = ServerClient.load_from_global_config().global_config_dict
+
+    model_server_config = get_first_server_config_dict(
+        global_config_dict,
+        model_server_name,
+    )
+
+    base_url = f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
+    return base_url
+
+
+async def run_swebench_evaluation(
+    problem_info: Dict,
+    model_endpoint: str,
+    body: NeMoGymResponseCreateParamsNonStreaming,
+    run_session_id: str,
+    agent_framework: str,
+    agent_config: Optional[str],
+    agent_tools_file: Optional[str],
+    agent_max_turns: int,
+    swebench_tests_timeout: int,
+    agent_framework_repo: Optional[str] = None,
+    agent_framework_commit: str = "HEAD",
+    openhands_setup_dir: Optional[Path] = None,
+    swebench_setup_dir: Optional[Path] = None,
+    dataset_path: Optional[str] = None,
+) -> Dict:
+    # Create persistent directory for I/O and logs in local workspace
+    workspace_root = Path(os.path.dirname(os.path.abspath(__file__)))
+    instance_id = problem_info.get("instance_id", "unknown")
+    instance_dir = f"{instance_id}_{int(time.time() * 1000)}_{uuid.uuid4()}"
+    persistent_dir = workspace_root / f"swebench_results_{run_session_id}" / instance_dir
+    persistent_dir.mkdir(parents=True, exist_ok=True)
+    output_file = persistent_dir / "output.jsonl"
+
+    inference_params = {}
+
+    for param, key in [
+        ("temperature", "temperature"),
+        ("top_p", "top_p"),
+        ("max_output_tokens", "tokens_to_generate"),
+    ]:
+        value = getattr(body, param, None)
+        if value is not None:
+            inference_params[key] = value
+
+    inference_config = SweBenchInferenceConfig(**inference_params)
+    server = {
+        "model": body.model,
+        "base_url": model_endpoint,
+    }
+
+    cfg = SweBenchGenerationConfig(
+        output_file=output_file,
+        agent_framework=SupportedAgentFrameworks.openhands,
+        agent_framework_repo=agent_framework_repo,
+        agent_framework_commit=agent_framework_commit,
+        agent_config=agent_config,
+        agent_max_turns=agent_max_turns,
+        swebench_tests_timeout=swebench_tests_timeout,
+        inference=inference_config,
+        server=server,
+    )
+
+    run_oh = RunOpenHandsAgent(
+        cfg=cfg,
+        openhands_setup_dir=openhands_setup_dir,
+        swebench_setup_dir=swebench_setup_dir,
+        dataset_path=dataset_path,
+    )
+    result = await run_oh.process_single_datapoint(problem_info)
+    print(f"Process completed for {instance_id}", flush=True)
+
+    try:
+        with open(output_file, "w") as f:
+            json.dump(result, f)
+    except Exception as e:
+        LOG.error(f"Failed to write result to {output_file}: {e}")
+        raise e
+
+    # Read results
+    if not output_file.exists():
+        raise RuntimeError(f"No output file generated: {output_file}")
+
+    # Try to find and include trajectory file
+    trajectories_dir = persistent_dir / "trajectories"
+    trajectory_data, tools = get_trajectory_and_tools(
+        trajectories_dir,
+        instance_id,
+        agent_framework,
+        agent_tools_file if agent_framework == "swe_agent" else None,
+    )
+
+    # Add trajectory and tools to result if found
+    if trajectory_data:
+        result["trajectory"] = trajectory_data
+    if tools:
+        result["tools"] = tools
+
+    return result
+
+
+### Harness and Evaluation Setup Utils ###
+
+
+def _get_workspace_root() -> Path:
+    return Path(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _resolve_setup_directory(provided_dir: Optional[Path], default_subdir: str) -> Path:
+    base_dir = provided_dir or (_get_workspace_root() / default_subdir)
+    return base_dir.resolve()
+
+
+def _run_setup_shell_script(
+    setup_dir: Path,
+    script_name: str,
+    script_content: str,
+    timeout_seconds: int,
+    label: str,
+    timeout_error_message: Optional[str] = None,
+) -> None:
+    script_path = setup_dir / script_name
+
+    with open(script_path, "w") as f:
+        f.write(script_content)
+    script_path.chmod(0o755)
+
+    print(f"Running {label} setup script...", flush=True)
+    print(f"Setup script: {script_path}", flush=True)
+
+    process = None
+    try:
+        process = subprocess.Popen(
+            [str(script_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+
+        output_lines: List[str] = []
+        if process.stdout is None:
+            raise RuntimeError("Failed to capture script output")
+
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            output_lines.append(line)
+
+        process.wait(timeout=timeout_seconds)
+
+        if process.returncode != 0:
+            full_output = "".join(output_lines)
+            raise RuntimeError(f"{label} setup failed with return code {process.returncode}:\n{full_output}")
+
+        print(f"{label} setup completed successfully!", flush=True)
+    except subprocess.TimeoutExpired:
+        if process:
+            process.kill()
+        message = timeout_error_message or f"{label} setup timed out after {timeout_seconds} seconds"
+        raise RuntimeError(message)
+    except Exception as exc:
+        if isinstance(exc, RuntimeError):
+            raise
+        raise RuntimeError(f"{label} setup failed: {exc}") from exc
+    finally:
+        if process and process.stdout:
+            process.stdout.close()
 
 
 def setup_swebench_environment(
-    swebench_repo: Optional[str] = None,
+    swebench_repo: Optional[str] = "https://github.com/HeyyyyyyG/SWE-bench.git",
     swebench_commit: str = "HEAD",
     setup_dir: Optional[Path] = None,
 ) -> Path:
-    """Set up SWE-bench environment once during initialization.
-
-    This function builds SWE-bench in a persistent location that can be mounted
-    into Apptainer containers, avoiding repeated setup for each request.
-
-    Args:
-        swebench_repo: URL of the SWE-bench repo (default: HeyyyyyyG/SWE-bench)
-        swebench_commit: Commit/branch to use (default: HEAD)
-        setup_dir: Directory to set up SWE-bench (default: workspace_root/swe_swebench_setup)
-
-    Returns:
-        Path to the built SWE-bench directory
-
-    Raises:
-        RuntimeError: If setup fails
-    """
-    if swebench_repo is None:
-        swebench_repo = "https://github.com/HeyyyyyyG/SWE-bench.git"
-
-    # Determine setup directory
-    if setup_dir is None:
-        workspace_root = Path(os.path.dirname(os.path.abspath(__file__))).parent.parent
-        setup_dir = workspace_root / "swe_swebench_setup"
-
-    # Resolve to absolute path to handle symlinks
-    setup_dir = setup_dir.resolve()
+    setup_dir = _resolve_setup_directory(setup_dir, "swe_swebench_setup")
 
     swebench_dir = setup_dir / "SWE-bench"
     uv_dir = setup_dir / "uv"
     python_dir = setup_dir / "python"
 
-    # Check if already set up (validate all critical components exist)
-    if (
-        swebench_dir.exists()
-        # and (swebench_dir / "pyproject.toml").exists()
-        # and (swebench_dir / "venv" / "bin" / "python").exists()
-        # # and (swebench_dir / "venv" / "pyvenv.cfg").exists()
-        # and (uv_dir / "bin" / "uv").exists()
-        # and python_dir.exists()
-    ):
-        LOG.info(f"SWE-bench already set up at {setup_dir}")
-        LOG.info(f"  - SWE-bench: {swebench_dir}")
-        LOG.info(f"  - venv: {swebench_dir / 'venv'}")
-        LOG.info(f"  - uv: {uv_dir}")
-        LOG.info(f"  - Python: {python_dir}")
-        return setup_dir  # Return parent directory, not SWE-bench subdirectory
+    if swebench_dir.exists():
+        print(f"SWE-bench already set up at {setup_dir}", flush=True)
+        print(f"  - SWE-bench: {swebench_dir}", flush=True)
+        print(f"  - venv: {swebench_dir / 'venv'}", flush=True)
+        print(f"  - uv: {uv_dir}", flush=True)
+        print(f"  - Python: {python_dir}", flush=True)
+        return setup_dir
 
-    # If partial setup exists, log that we'll rebuild
-    if setup_dir.exists():
-        LOG.warning(f"Incomplete setup detected at {setup_dir}, will rebuild/complete setup...")
-
-    LOG.info(f"Setting up SWE-bench environment at {setup_dir}...")
+    print(f"Setting up SWE-bench environment at {setup_dir}...", flush=True)
     setup_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create setup script
-    setup_script = setup_dir / "setup_swebench.sh"
-    uv_dir = setup_dir / "uv"
-    python_dir = setup_dir / "python"  # Portable Python installation directory
+    script_name = "setup_swebench.sh"
     script_content = f"""#!/bin/bash
 set -e
-set -x  # Enable debug output
+set -x
 
 cd {setup_dir}
 
-# Set UV_INSTALL_DIR to install uv in the swebench setup directory
 export UV_INSTALL_DIR="{uv_dir}"
-
-# Set UV_PYTHON_INSTALL_DIR to install Python in a portable location
 export UV_PYTHON_INSTALL_DIR="{python_dir}"
-
-# Install uv if not already installed
 if [ ! -f "{uv_dir}/bin/uv" ]; then
     echo "Installing uv to {uv_dir}..."
     curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -909,10 +825,7 @@ else
     echo "uv already installed at {uv_dir}"
 fi
 
-# Add uv to PATH
 export PATH="{uv_dir}/bin:$PATH"
-
-# Verify uv is available
 echo "Verifying uv installation..."
 which uv
 uv --version
@@ -931,25 +844,19 @@ cd {swebench_dir}
 echo "Checking out {swebench_commit}..."
 git checkout {swebench_commit}
 
-# First, explicitly install Python 3.12 to the portable location
 echo "Installing Python 3.12 to portable location..."
 uv python install 3.12
 
-# Verify Python was installed in the right place
 echo "Python installations:"
 uv python list
 
-# Create virtual environment with uv using the portable Python
 echo "Creating virtual environment with uv..."
-# Remove any existing venv first
 rm -rf venv
 uv venv --python 3.12 venv
 
-# Install SWE-bench in editable mode
 echo "Installing SWE-bench..."
 uv pip install -p {swebench_dir}/venv/bin/python -e .
 
-echo "Verifying venv was created..."
 if [ -d venv ] && [ -f venv/bin/python ]; then
     echo "✓ venv created at $(pwd)/venv"
     echo "✓ Python version: $(venv/bin/python --version)"
@@ -961,110 +868,44 @@ fi
 echo "SWE-bench setup complete!"
 """
 
-    with open(setup_script, "w") as f:
-        f.write(script_content)
+    _run_setup_shell_script(
+        setup_dir=setup_dir,
+        script_name=script_name,
+        script_content=script_content,
+        timeout_seconds=600,
+        label="SWE-bench",
+        timeout_error_message="SWE-bench setup timed out after 10 minutes",
+    )
 
-    setup_script.chmod(0o755)
+    print(f"Setup directory: {setup_dir}", flush=True)
+    print(f"  - SWE-bench: {swebench_dir}", flush=True)
+    print(f"  - venv: {swebench_dir / 'venv'}", flush=True)
+    print(f"  - uv: {uv_dir}", flush=True)
+    print(f"  - Python: {python_dir}", flush=True)
 
-    LOG.info("Running SWE-bench setup script...")
-    LOG.info(f"Setup script: {setup_script}")
-    LOG.info("=" * 80)
-
-    process = None
-    try:
-        process = subprocess.Popen(
-            [str(setup_script)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-
-        output_lines = []
-        for line in process.stdout:
-            print(line, end="", flush=True)
-            output_lines.append(line)
-
-        process.wait(timeout=600)
-
-        if process.returncode != 0:
-            full_output = "".join(output_lines)
-            raise RuntimeError(f"SWE-bench setup failed with return code {process.returncode}:\n{full_output}")
-
-        LOG.info("=" * 80)
-        LOG.info(f"SWE-bench setup completed successfully!")
-        LOG.info(f"Setup directory: {setup_dir}")
-        LOG.info(f"  - SWE-bench: {swebench_dir}")
-        LOG.info(f"  - venv: {swebench_dir / 'venv'}")
-        LOG.info(f"  - uv: {uv_dir}")
-        LOG.info(f"  - Python: {python_dir}")
-
-        return setup_dir
-
-    except subprocess.TimeoutExpired:
-        if process:
-            process.kill()
-        raise RuntimeError("SWE-bench setup timed out after 10 minutes")
-    except Exception as e:
-        raise RuntimeError(f"SWE-bench setup failed: {e}")
+    return setup_dir
 
 
 def setup_openhands_environment(
-    agent_framework_repo: Optional[str] = None,
-    agent_framework_commit: str = "HEAD",
+    agent_framework_repo: Optional[str] = "https://github.com/sdevare-nv/nv-OpenHands.git",
+    agent_framework_commit: str = "gym",
     setup_dir: Optional[Path] = None,
 ) -> Path:
-    """Set up OpenHands environment once during initialization.
-
-    This function builds OpenHands in a persistent location that can be mounted
-    into Apptainer containers, avoiding repeated setup for each request.
-
-    Args:
-        agent_framework_repo: URL of the OpenHands repo (default: official repo)
-        agent_framework_commit: Commit/branch to use (default: HEAD)
-        setup_dir: Directory to set up OpenHands (default: workspace_root/swe_openhands_setup)
-
-    Returns:
-        Path to the built OpenHands directory
-
-    Raises:
-        RuntimeError: If setup fails
-    """
-    if agent_framework_repo is None:
-        agent_framework_repo = "https://github.com/All-Hands-AI/OpenHands.git"
-
-    # Determine setup directory
-    if setup_dir is None:
-        workspace_root = Path(os.path.dirname(os.path.abspath(__file__))).parent.parent
-        setup_dir = workspace_root / "swe_openhands_setup"
-
-    # Resolve to absolute path to handle symlinks
-    setup_dir = setup_dir.resolve()
+    setup_dir = _resolve_setup_directory(setup_dir, "swe_openhands_setup")
 
     openhands_dir = setup_dir / "OpenHands"
     miniforge_dir = setup_dir / "miniforge3"
 
-    # Check if already set up (validate all critical components exist)
-    if (
-        openhands_dir.exists()
-        and (openhands_dir / "pyproject.toml").exists()
-        and (miniforge_dir / "bin" / "conda").exists()
-        and (miniforge_dir / "bin" / "mamba").exists()
-    ):
-        LOG.info(f"OpenHands already set up at {setup_dir}")
-        LOG.info(f"  - Miniforge: {miniforge_dir}")
-        LOG.info(f"  - OpenHands: {openhands_dir}")
+    if openhands_dir.exists():
+        print(f"OpenHands already set up at {setup_dir}", flush=True)
+        print(f"  - Miniforge: {miniforge_dir}", flush=True)
+        print(f"  - OpenHands: {openhands_dir}", flush=True)
         return setup_dir
 
-    # If partial setup exists, log that we'll rebuild
-    if setup_dir.exists():
-        LOG.warning(f"Incomplete setup detected at {setup_dir}, will rebuild/complete setup...")
-
-    LOG.info(f"Setting up OpenHands environment at {setup_dir}...")
+    print(f"Setting up OpenHands environment at {setup_dir}...", flush=True)
     setup_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create setup script
-    setup_script = setup_dir / "setup_openhands.sh"
+    script_name = "setup_openhands.sh"
     script_content = f"""#!/bin/bash
 set -e
 set -x  # Enable debug output
@@ -1112,9 +953,6 @@ echo "Verifying package installations..."
 which python
 which node
 which poetry
-python --version
-node --version
-poetry --version
 
 # Clone OpenHands
 if [ ! -d "{openhands_dir}/.git" ]; then
@@ -1139,7 +977,7 @@ export INSTALL_DOCKER=0
 echo "Removing any cached poetry virtualenvs..."
 rm -rf ~/.cache/pypoetry/virtualenvs/openhands-* || true
 
-# CRITICAL: Unset any active virtualenv from the host (Penguin .venv)
+# CRITICAL: Unset any active virtualenv from the host .venv
 # This prevents poetry from getting confused about which venv to use
 echo "Unsetting host virtualenv to avoid poetry confusion..."
 unset VIRTUAL_ENV
@@ -1150,7 +988,43 @@ export PATH=$(echo "$PATH" | tr ':' '\\n' | grep -v '\\.venv' | tr '\\n' ':' | s
 # Configure poetry to create virtualenv in the project directory (so it's mounted in container)
 export POETRY_VIRTUALENVS_IN_PROJECT=true
 
-make build
+# Retry `make build` with a timeout guard on the first attempt
+MAX_MAKE_BUILD_ATTEMPTS=2
+MAKE_BUILD_TIMEOUT_SECONDS=$((2 * 60))
+MAKE_BUILD_TIMEOUT_MINUTES=$((MAKE_BUILD_TIMEOUT_SECONDS / 60))
+
+attempt=1
+while [ "$attempt" -le "$MAX_MAKE_BUILD_ATTEMPTS" ]; do
+    echo "Running make build (attempt $attempt/$MAX_MAKE_BUILD_ATTEMPTS)..."
+
+    if [ "$attempt" -lt "$MAX_MAKE_BUILD_ATTEMPTS" ]; then
+        if timeout "$MAKE_BUILD_TIMEOUT_SECONDS" make build; then
+            echo "make build completed successfully."
+            break
+        fi
+
+        exit_code=$?
+        if [ "$exit_code" -eq 124 ]; then
+            echo "make build timed out after $MAKE_BUILD_TIMEOUT_MINUTES minutes."
+        else
+            echo "make build failed with exit code $exit_code."
+        fi
+
+        echo "Retrying make build after cleanup..."
+        make clean || true
+        attempt=$((attempt + 1))
+        continue
+    fi
+
+    if make build; then
+        echo "make build completed successfully."
+        break
+    fi
+
+    exit_code=$?
+    echo "make build failed on the final attempt with exit code $exit_code."
+done
+
 
 # Install Python dependencies with poetry
 echo "Installing Python dependencies (creating .venv in OpenHands directory)..."
@@ -1171,48 +1045,17 @@ fi
 echo "OpenHands setup complete!"
 """
 
-    with open(setup_script, "w") as f:
-        f.write(script_content)
+    _run_setup_shell_script(
+        setup_dir=setup_dir,
+        script_name=script_name,
+        script_content=script_content,
+        timeout_seconds=1800,
+        label="OpenHands",
+        timeout_error_message="OpenHands setup timed out after 30 minutes",
+    )
 
-    setup_script.chmod(0o755)
+    print(f"Setup directory: {setup_dir}", flush=True)
+    print(f"  - Miniforge: {miniforge_dir}", flush=True)
+    print(f"  - OpenHands: {openhands_dir}", flush=True)
 
-    # Run setup script with live output
-    LOG.info("Running OpenHands setup script...")
-    LOG.info(f"Setup script: {setup_script}")
-    LOG.info("=" * 80)
-
-    process = None
-    try:
-        process = subprocess.Popen(
-            [str(setup_script)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-
-        output_lines = []
-        for line in process.stdout:
-            print(line, end="", flush=True)
-            output_lines.append(line)
-
-        process.wait(timeout=1800)
-
-        if process.returncode != 0:
-            full_output = "".join(output_lines)
-            raise RuntimeError(f"OpenHands setup failed with return code {process.returncode}:\n{full_output}")
-
-        LOG.info("=" * 80)
-        LOG.info(f"OpenHands setup completed successfully!")
-        LOG.info(f"Setup directory: {setup_dir}")
-        LOG.info(f"  - Miniforge: {miniforge_dir}")
-        LOG.info(f"  - OpenHands: {openhands_dir}")
-
-        return setup_dir
-
-    except subprocess.TimeoutExpired:
-        if process:
-            process.kill()
-        raise RuntimeError("OpenHands setup timed out after 30 minutes")
-    except Exception as e:
-        raise RuntimeError(f"OpenHands setup failed: {e}")
+    return setup_dir

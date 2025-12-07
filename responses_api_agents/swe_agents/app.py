@@ -13,10 +13,9 @@
 # limitations under the License.
 import asyncio
 import json
-import logging
-import subprocess
 import sys
 import time
+import uuid
 from asyncio import Semaphore
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -41,8 +40,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-
-# Import utility functions from local utils module
 from responses_api_agents.swe_agents.utils import (
     convert_tools_to_function_format,
     convert_trajectory_to_output_items,
@@ -55,11 +52,6 @@ from responses_api_agents.swe_agents.utils import (
 )
 
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-LOG = logging.getLogger(__name__)
-
-
 @ray.remote(
     scheduling_strategy="SPREAD",
     runtime_env={
@@ -67,22 +59,11 @@ LOG = logging.getLogger(__name__)
     },
 )
 def runner_ray_remote(runner: Callable, params: dict[str, Any]) -> Any:
-    """Execute runner function in Ray worker.
-
-    Note: agent_config paths should either be:
-    1. Paths within the agent framework repo (e.g., "eval/swe-bench/swe-agent/default_one_tool")
-    2. Absolute paths accessible from all nodes
-    3. Files that will be mounted in the Apptainer container via /nemo_run/code
-    """
-    result = runner(**params)
-    # If the result is a coroutine (async function), run it with asyncio
-    if asyncio.iscoroutine(result):
-        result = asyncio.run(result)
-    return result
+    return asyncio.run(runner(**params))
 
 
 class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
-    """Configuration for SWE-bench wrapper agent."""
+    model_server: ModelServerRef
 
     # Agent framework configuration
     agent_framework: str = Field(default="swe_agent", description="Agent framework to use: swe_agent or openhands")
@@ -106,12 +87,6 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
     swebench_tests_timeout: int = Field(default=1800, description="Timeout for running tests (seconds)")
 
     # Model server reference (optional - can also be passed in request)
-    model_server: Optional[ModelServerRef] = None
-
-    # Additional NeMo-Skills config options
-    nemo_skills_config: Dict[str, Any] = Field(
-        default_factory=dict, description="Additional configuration to pass to NeMo-Skills"
-    )
 
     # Concurrency control
     concurrency: int = Field(default=256, description="Maximum number of concurrent SWE-bench runs")
@@ -135,11 +110,15 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         description="Path to the dataset for SWE-bench evaluation",
     )
 
+    run_session_id: str = Field(
+        default=None,
+        description="Session ID for the run",
+    )
+
 
 class SWEBenchRunRequest(BaseRunRequest):
     """Request format for SWE-bench runs."""
 
-    # Allow extra fields for flexibility
     model_config = {"extra": "allow"}
 
 
@@ -171,39 +150,32 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
-        """Initialize the wrapper and check dependencies."""
         self.sem = Semaphore(self.config.concurrency)
-        print(f"Semaphore initialized with {self.config.concurrency} tokens")
-        LOG.info("in init for swe bench")
-        LOG.info(f"Agent framework: {self.config.agent_framework}")
-        LOG.info(f"Concurrency: {self.config.concurrency}")
 
         # Pre-build OpenHands environment if using openhands framework
         if self.config.agent_framework == "openhands":
-            LOG.info("Setting up OpenHands environment during initialization...")
             try:
                 self.config.openhands_setup_dir = setup_openhands_environment(
                     agent_framework_repo=self.config.agent_framework_repo,
                     agent_framework_commit=self.config.agent_framework_commit,
                 )
-                LOG.info(f"OpenHands environment ready at: {self.config.openhands_setup_dir}")
+                print(f"OpenHands environment ready at: {self.config.openhands_setup_dir}", flush=True)
             except Exception as e:
-                LOG.error(f"Failed to set up OpenHands environment: {e}")
-                raise
+                print(f"Failed to set up OpenHands environment: {e}", flush=True)
+                raise e
 
-        # Pre-build SWE-bench environment (needed for evaluation regardless of agent framework)
-        LOG.info("Setting up SWE-bench environment during initialization...")
+        print("Setting up SWE-bench environment during initialization...", flush=True)
         try:
             self.config.swebench_setup_dir = setup_swebench_environment()
-            LOG.info(f"SWE-bench environment ready at: {self.config.swebench_setup_dir}")
+            print(f"SWE-bench environment ready at: {self.config.swebench_setup_dir}", flush=True)
         except Exception as e:
-            LOG.error(f"Failed to set up SWE-bench environment: {e}")
+            print(f"Failed to set up SWE-bench environment: {e}", flush=True)
             raise
 
-    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
-        """Run NeMo-Skills SWE-bench evaluation."""
+        self.config.run_session_id = f"{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
 
-        LOG.info(f"Starting SWE-bench evaluation with framework: {self.config.agent_framework}")
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        print(f"Starting SWE-bench evaluation with framework: {self.config.agent_framework}", flush=True)
 
         # Extract problem information from request
         problem_info = extract_problem_info(
@@ -211,8 +183,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             self.config.container_formatter,
         )
 
-        # Determine model endpoint
-        model_endpoint = get_model_endpoint(self.config.model_server.name if self.config.model_server else None)
+        # Get model endpoint
+        model_endpoint = get_model_endpoint(self.config.model_server.name)
 
         # Run SWE-bench evaluation
         try:
@@ -220,12 +192,12 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "problem_info": problem_info,
                 "model_endpoint": model_endpoint,
                 "body": body,
+                "run_session_id": self.config.run_session_id,
                 "agent_framework": self.config.agent_framework,
                 "agent_config": self.config.agent_config,
                 "agent_tools_file": self.config.agent_tools_file,
                 "agent_max_turns": self.config.agent_max_turns,
                 "swebench_tests_timeout": self.config.swebench_tests_timeout,
-                "nemo_skills_config": self.config.nemo_skills_config,
                 "agent_framework_repo": self.config.agent_framework_repo,
                 "agent_framework_commit": self.config.agent_framework_commit,
                 "openhands_setup_dir": self.config.openhands_setup_dir,
@@ -246,7 +218,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # Convert trajectory to NeMoGym output items
             if trajectory:
                 output_items = convert_trajectory_to_output_items(
-                    trajectory, problem_info, self.config.agent_framework
+                    trajectory,
+                    self.config.agent_framework,
                 )
 
             # If no trajectory or empty output, create a summary message
@@ -273,7 +246,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # Note: metadata values must be strings for NeMoGymResponse
             metadata = {
                 "agent_framework": self.config.agent_framework,
-                "has_trajectory": str(bool(trajectory)),
+                "has_trajectory": str(trajectory is not None),
                 "instance_id": result.get("instance_id", problem_info.get("instance_id", "unknown")),
             }
 
@@ -299,7 +272,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             )
 
         except Exception as e:
-            LOG.error(f"SWE-bench evaluation failed: {str(e)}")
+            print(f"SWE-bench evaluation failed: {str(e)}", flush=True)
             # Return error response
             error_message = NeMoGymResponseOutputMessage(
                 id=f"msg-{problem_info.get('instance_id', 'unknown')}-error",
@@ -326,11 +299,12 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         async with self.sem:
             # Fix None values in responses_create_params to use defaults
             # This is needed because the pydantic model has non-Optional fields with defaults
+
             update_dict = {}
             # SWE-agent processes tool calls sequentially, OpenHands can do parallel
             update_dict["parallel_tool_calls"] = False if self.config.agent_framework == "swe_agent" else True
             if body.responses_create_params.tool_choice is None:
-                update_dict["tool_choice"] = "auto"  # OpenAI default
+                update_dict["tool_choice"] = "auto"
 
             # Create a copy with the fixed values if needed
             fixed_params = (
@@ -374,12 +348,12 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
             # Build verification response with top-level numeric fields for statistics
             return SWEBenchVerifyResponse(
-                responses_create_params=params_with_input,  # Include the input messages
+                responses_create_params=params_with_input,
                 response=response,
                 reward=reward,
-                resolved=1.0 if resolved else 0.0,  # Top-level numeric field
-                patch_exists=1.0 if patch_exists else 0.0,  # Top-level numeric field
-                patch_successfully_applied=1.0 if patch_applied else 0.0,  # Top-level numeric field
+                resolved=1.0 if resolved else 0.0,
+                patch_exists=1.0 if patch_exists else 0.0,
+                patch_successfully_applied=1.0 if patch_applied else 0.0,
                 swebench_metrics=metrics,
                 metadata={
                     "instance_id": metadata.get("instance_id", "unknown"),

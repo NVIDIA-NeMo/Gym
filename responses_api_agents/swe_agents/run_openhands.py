@@ -8,6 +8,7 @@ import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import Any, Optional
 
 import tomlkit
 
@@ -19,7 +20,7 @@ class SupportedAgentFrameworks(str, Enum):
 
 @dataclass
 class SweBenchInferenceConfig:
-    temperature: float = 0.0  # Temperature of 0 means greedy decoding
+    temperature: float = 0.0
     top_k: int | None = None
     top_p: float = 0.95
     min_p: float | None = None
@@ -31,75 +32,37 @@ class SweBenchInferenceConfig:
 
 @dataclass
 class SweBenchGenerationConfig:
-    input_file: str  # Path to the input file with data
-    output_file: str  # Where to save the generations
-
-    agent_framework: SupportedAgentFrameworks  # Which agentic framework to use
-
-    # URL of the SWE-agent/OpenHands repo to pass to git clone. If None, will use the official repo
+    output_file: Path
+    agent_framework: SupportedAgentFrameworks
     agent_framework_repo: str | None = None
-    agent_framework_commit: str = "HEAD"  # Which commit to use when cloning the SWE-agent/OpenHands repo
-
-    # SWE-agent/OpenHands configuration file path. Can be specified in the same way as ns prompt configs
-    # If None, will use the default for the chosen framework
+    agent_framework_commit: str = "HEAD"
     agent_config: str | None = None
-    agent_max_turns: int = 100  # Max iterations for the agent
-
-    swebench_tests_timeout: int = 60 * 30  # Timeout for the tests after applying the patch, in seconds
-
-    inference: SweBenchInferenceConfig = field(default_factory=SweBenchInferenceConfig)  # LLM call parameters
-    # Inference server configuration {server_params}
+    agent_max_turns: int = 100
+    swebench_tests_timeout: int = 60 * 30
+    inference: SweBenchInferenceConfig = field(default_factory=SweBenchInferenceConfig)
     server: dict = field(default_factory=dict)
-
-    max_samples: int = -1  # If > 0, will stop after generating this many samples. Useful for debugging
-    skip_filled: bool = False  # If True, will skip the generations that are already in the output file
-
-    # maximum number of concurrent requests to the server for the async loop
-    # if sync loop is used, this is the batch size
-    max_concurrent_requests: int = 512
-    # chunk the dataset into equal sized parts and index into them
-    num_chunks: int | None = None  # if specified, will split the data into chunks and only generate for one chunk
-    chunk_id: int | None = None  # if specified, will index the specified chunk only
-
-    # if False, will not add num_generated_tokens and generation_time values.
-    # Useful when running judge jobs to keep the original generation statistics
-    add_generation_stats: bool = True
-    generation_key: str = "generation"
-    async_position_key: str = "_async_position"  # key to use for preserving position in async loop in data dict
-    dry_run: bool = False
-
-    # if True, will move full generation to _full_generation key and keep cfg.generation_key without thinking tokens
-    remove_thinking: bool = False
-    thinking_begin: str = "<think>"
-    thinking_end: str = "</think>"
 
 
 # Converts the parameter names above to the corresponding OpenAI parameter names.
 NS_TO_OPENAI_PARAM = {
-    # Officially part of the OpenAI Chat Completions API.
     "tokens_to_generate": "max_tokens",
     "top_logprobs": "top_logprobs",
     "random_seed": "seed",
-    # Not in the official API, but still supported by some servers, e.g. vllm.
     "top_k": "top_k",
     "min_p": "min_p",
     "repetition_penalty": "repetition_penalty",
-    # temperature and top_p are passed as separate SWE-agent parameters.
 }
 
 
 # Converts the parameter names above to the corresponding parameters in OpenHands's LLM config.
 # https://github.com/All-Hands-AI/OpenHands/blob/main/openhands/core/config/llm_config.py#L12
 NS_TO_OPENHANDS_PARAM = {
-    # Supported on OpenHands's side. top_k is not OpenAI-compatible and so may break some servers.
     "tokens_to_generate": "max_output_tokens",
     "top_k": "top_k",
     "random_seed": "seed",
-    # Not supported by OpenHands. Nemo-Skills will raise an error if they are passed.
     "min_p": None,
     "repetition_penalty": None,
     "top_logprobs": None,
-    # temperature and top_p are passed separately.
 }
 
 
@@ -180,19 +143,22 @@ class RunOpenHandsAgent:
 
         return pred_jsonl_file
 
-    async def _run_openhands(self, data_point, api_base, run_id, dataset_mount_path):
+    async def _run_openhands(
+        self,
+        data_point: dict[str, Any],
+        api_base: str,
+        agent_run_id: str,
+        dataset_mount_path: Optional[str] = None,
+    ):
         """
         Runs OpenHands on one instance.
         Returns the absolute (not mounted) path to a .jsonl file in the SWE-bench evaluation format.
         """
-        if self.cfg.agent_config is None:
-            self.cfg.agent_config = "eval/swe-bench/openhands/default"
-        if self.cfg.agent_framework_repo is None:
-            self.cfg.agent_framework_repo = "https://github.com/All-Hands-AI/OpenHands.git"
+        agent_config = self.cfg.agent_config or "eval/swe-bench/openhands/default"
 
         # Add parameters to config.toml
-
-        with open(self.cfg.agent_config, "r") as f:
+        # TODO(sugam): is there a better way to do this?
+        with open(agent_config, "r") as f:
             config = tomlkit.parse(f.read())
 
         config["llm"]["model"] |= {
@@ -203,24 +169,25 @@ class RunOpenHandsAgent:
         }
 
         for ns_param, oh_param in NS_TO_OPENHANDS_PARAM.items():
-            if getattr(self.cfg.inference, ns_param) is not None:
-                if oh_param is not None:
-                    config["llm"]["model"][oh_param] = getattr(self.cfg.inference, ns_param)
-                else:
-                    supported_params = [key for key, value in NS_TO_OPENHANDS_PARAM.items() if value is not None]
-                    raise ValueError(
-                        f"Inference parameter {ns_param} is not supported by OpenHands. "
-                        f"Supported inference parameters: temperature, top_p, {', '.join(supported_params)}."
-                    )
+            if not getattr(self.cfg.inference, ns_param):
+                continue
+            if oh_param:
+                config["llm"]["model"][oh_param] = getattr(self.cfg.inference, ns_param)
+            else:
+                supported_params = [key for key, value in NS_TO_OPENHANDS_PARAM.items() if value is not None]
+                raise ValueError(
+                    f"Inference parameter {ns_param} is not supported by OpenHands. "
+                    f"Supported inference parameters: temperature, top_p, {', '.join(supported_params)}."
+                )
 
         config_str = tomlkit.dumps(config)
 
-        eval_dir_in_openhands = f"evaluation/oh/{run_id}"
+        eval_dir_in_openhands = f"evaluation/oh/{agent_run_id}"
+        local_dataset_path = "/root/dataset/data.jsonl"
 
         assert self.openhands_setup_dir is not None, "OpenHands setup directory is not set"
 
         openhands_cmd = (
-            # make sure /workspace isn't mounted as a safety precaution
             "if [ -d /workspace ]; then "
             "    echo 'Exiting because /workspace is mounted.' && "
             "    echo 'Please make sure /workspace is not mounted inside of Apptainer before running OpenHands.' && "
@@ -270,8 +237,7 @@ class RunOpenHandsAgent:
             f"    {data_point['split']} "  # dataset split
             f"    {eval_dir_in_openhands} "
             f"    {data_point['instance_id']} "
-            # f"    {shlex.quote(data_point['instance_dict'])} && "
-            f"    /root/dataset/data.jsonl && "
+            f"    {local_dataset_path} && "
             # move outputs to the mounted directory
             f"mkdir -p /trajectories_mount/trajectories && "
             f"cp -r {eval_dir_in_openhands}/*/*/* /trajectories_mount/trajectories/{data_point['instance_id']}/ && "
@@ -279,17 +245,18 @@ class RunOpenHandsAgent:
             f"rm -rf {eval_dir_in_openhands}"
         )
 
-        # Execute OpenHands command
         search_path = os.path.join(
             self.output_dir / "trajectories",
             "**",
             data_point["instance_id"],
             "output.jsonl",
         )
+
+        # Execute OpenHands command
         out_file = await self._execute_container_command(
-            data_point,
-            openhands_cmd,
-            search_path,
+            data_point=data_point,
+            command=openhands_cmd,
+            expected_file_pattern=search_path,
             mode="agent",
             dataset_mount_path=dataset_mount_path,
         )
@@ -315,10 +282,13 @@ class RunOpenHandsAgent:
             )
         return pred_file
 
-    def _write_instance_dataset(self, data_point, run_id):
+    def _write_instance_dataset(self, data_point: dict[str, Any], agent_run_id: str) -> Path:
+        """
+        To avoid making HF dataset API calls, we write the instance dictionary to a file and mount it in the container.
+        """
         instance_dataset_dir = Path(self.output_dir) / "instance_datasets"
         instance_dataset_dir.mkdir(parents=True, exist_ok=True)
-        instance_dataset_path = instance_dataset_dir / f"{run_id}.jsonl"
+        instance_dataset_path = instance_dataset_dir / f"{agent_run_id}.jsonl"
         with open(instance_dataset_path, "w") as f:
             f.write(data_point["instance_dict"] + "\n")
         return instance_dataset_path
@@ -337,95 +307,73 @@ class RunOpenHandsAgent:
         except OSError:
             pass
 
-    def _find_container(self, data_point):
-        """Find the container file using multiple strategies.
+    def _find_container(self, data_point: dict) -> str:
+        """Find the container file using multiple strategies (Exact match > Fuzzy match).
 
-        Tries in order:
-        1. Exact match with "__" replaced by "_1776_"
-        2. Exact match with "__" replaced by "_s_"
-        3. Fuzzy search in container directory for files with either replacement
+        Strategies:
+        1. Replace "__" with "_1776_" (Original case, then Lowercase)
+        2. Replace "__" with "_s_" (Original case, then Lowercase)
+        3. Fuzzy search directory for .sif files matching above patterns.
 
         Returns:
-            str: Path to the container file (may not exist if all strategies fail)
+            str: Path to the container file.
+
+        Raises:
+            FileNotFoundError: If no matching container file is found.
         """
         instance_id = data_point["instance_id"]
         container_formatter = data_point["container_formatter"]
 
-        # Strategy 1: Try _1776_ replacement (original case and lowercase)
-        container_name = container_formatter.format(instance_id=instance_id.replace("__", "_1776_"))
-        if os.path.exists(container_name):
-            return container_name
+        replacements = ["_1776_", "_s_"]
 
-        # Try lowercase version
-        container_name_lower = container_formatter.format(instance_id=instance_id.replace("__", "_1776_").lower())
-        if os.path.exists(container_name_lower):
-            print(
-                f"Using _1776_ replacement (lowercase): {container_name_lower}",
-                flush=True,
-            )
-            return container_name_lower
+        # Generate all candidate IDs in order of priority
+        candidate_ids = [instance_id]
+        for replacement in replacements:
+            replaced_id = instance_id.replace("__", replacement)
+            candidate_ids.append(replaced_id)
+            candidate_ids.append(replaced_id.lower())
 
-        # Strategy 2: Try _s_ replacement (original case and lowercase)
-        container_name_s = container_formatter.format(instance_id=instance_id.replace("__", "_s_"))
-        if os.path.exists(container_name_s):
-            print(f"Using _s_ replacement: {container_name_s}", flush=True)
-            return container_name_s
+        # Phase 1: Exact Matches
+        for candidate_id in candidate_ids:
+            path = container_formatter.format(instance_id=candidate_id)
+            if os.path.exists(path):
+                return path
 
-        # Try lowercase version
-        container_name_s_lower = container_formatter.format(instance_id=instance_id.replace("__", "_s_").lower())
-        if os.path.exists(container_name_s_lower):
-            print(
-                f"Using _s_ replacement (lowercase): {container_name_s_lower}",
-                flush=True,
-            )
-            return container_name_s_lower
+        # Define the default fallback path (Strategy 1, original case)
+        fallback_path = container_formatter.format(instance_id=instance_id.replace("__", replacements[0]))
+        container_dir = os.path.dirname(fallback_path)
 
-        # Strategy 3: Fuzzy search in container directory
-        container_dir = os.path.dirname(container_name)
+        # Phase 2: Fuzzy Search
         if os.path.exists(container_dir):
-            # Build search patterns for both replacements
-            replaced_id_1776 = instance_id.replace("__", "_1776_")
-            replaced_id_s = instance_id.replace("__", "_s_")
+            # Create glob patterns for all candidates plus the original instance_id
+            search_terms = [instance_id] + candidate_ids
 
-            # Search for .sif files with either replacement pattern (case-insensitive)
-            # Include both original case and lowercase versions
-            patterns = [
-                os.path.join(container_dir, f"*{replaced_id_1776}*.sif"),
-                os.path.join(container_dir, f"*{replaced_id_s}*.sif"),
-                os.path.join(container_dir, f"*{replaced_id_1776.lower()}*.sif"),
-                os.path.join(container_dir, f"*{replaced_id_s.lower()}*.sif"),
-            ]
+            for term in search_terms:
+                pattern = os.path.join(container_dir, f"*{term}*.sif")
+                matches = glob.glob(pattern)
+                if matches:
+                    return matches[0]
 
-            matching_files = []
-            for pattern in patterns:
-                matching_files.extend(glob.glob(pattern))
-
-            if matching_files:
-                # Use the first matching file found
-                container_path = matching_files[0]
-                print(f"Using fuzzy match: {container_path}", flush=True)
-                return container_path
-            else:
-                print(
-                    f"No container found with instance_id replacements "
-                    f"'{replaced_id_1776}' or '{replaced_id_s}' in {container_dir}"
-                )
+            print(f"No container found with replacements {replacements} in {container_dir}", flush=True)
         else:
-            print(f"Container directory {container_dir} does not exist")
+            print(f"Container directory {container_dir} does not exist", flush=True)
 
-        # Return the original name as fallback (even though it doesn't exist)
-        print(f"Using non-existent container path: {container_name}", flush=True)
-        return container_name
+        # Phase 3: Fallback
+        raise FileNotFoundError(
+            f"No container file found for instance_id {instance_id}. "
+            f"Tried the following candidate IDs: {candidate_ids}. "
+            f"Also looked for .sif files in {container_dir}."
+        )
 
     async def _execute_container_command(
         self,
-        data_point,
-        command,
-        expected_file_pattern,
-        mode,
-        max_retries=5,
-        timeout=100000,
-        dataset_mount_path=None,
+        data_point: dict[str, Any],
+        command: str,
+        expected_file_pattern: str,
+        mode: str,
+        max_retries: int = 5,
+        timeout: int = 100000,
+        dataset_mount_path: Optional[str] = None,
     ):
         """Execute a command in an Apptainer container with retry logic."""
         # Find the container using multiple strategies
@@ -436,13 +384,11 @@ class RunOpenHandsAgent:
             raise ValueError("Dataset path is not set")
         dataset_path_to_mount = str(dataset_path_to_mount)
 
-        # Create logs directory if it doesn't exist
         logs_dir = self.output_dir / "apptainer_logs"
         logs_dir.mkdir(exist_ok=True)
         log_file_path = logs_dir / f"{data_point['instance_id']}_{mode}.log"
         print(
-            "Starting execution of an apptainer command. Logs are available at %s",
-            log_file_path,
+            f"Starting execution of an apptainer command. Logs are available at {log_file_path}",
         )
 
         # Fix localhost URLs not working sometimes
@@ -454,18 +400,18 @@ class RunOpenHandsAgent:
         ]
 
         # Add OpenHands setup directory mount if available (for OpenHands)
-        if mode == "agent" and self.openhands_setup_dir is not None:
+        if mode == "agent" and self.cfg.agent_framework == SupportedAgentFrameworks.openhands:
             # Mount the entire setup directory at both /openhands_setup and its original absolute path
-            # This is needed because poetry and other tools have hardcoded absolute paths in their wrappers
+            # This is needed because poetry and other tools have hardcoded absolute paths
             print(f"Mounting pre-built OpenHands from: {self.openhands_setup_dir}", flush=True)
             mount_args.append(f"--mount type=bind,src={self.openhands_setup_dir},dst=/openhands_setup")
             mount_args.append(f"--mount type=bind,src={self.openhands_setup_dir},dst={self.openhands_setup_dir}")
             mount_args.append(f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl")
 
         # Add SWE-bench setup directory mount if available (for evaluation)
-        if mode == "eval" and self.swebench_setup_dir is not None:
+        if mode == "eval":
             # Mount the entire setup directory at both /swebench_setup and its original absolute path
-            # This is needed because uv venv has hardcoded absolute paths in its wrappers
+            # This is needed because uv venv has hardcoded absolute paths
             print(f"Mounting pre-built SWE-bench from: {self.swebench_setup_dir}", flush=True)
             mount_args.append(f"--mount type=bind,src={self.swebench_setup_dir},dst=/swebench_setup")
             mount_args.append(f"--mount type=bind,src={self.swebench_setup_dir},dst={self.swebench_setup_dir}")
@@ -508,7 +454,6 @@ class RunOpenHandsAgent:
                 pred_files = glob.glob(expected_file_pattern, recursive=True)
 
                 if len(pred_files) == 1:
-                    # Success, break out of retry loop
                     return pred_files[0]
                 else:
                     raise ValueError(
@@ -537,29 +482,37 @@ class RunOpenHandsAgent:
                         f"found {len(pred_files) if 'pred_files' in locals() else 'unknown'}."
                     )
 
-    async def process_single_datapoint(self, data_point):
-        """Will do all necessary generations to get a single answer for the data point."""
+    async def process_single_datapoint(self, data_point: dict[str, Any]):
         self.output_dir = Path(self.cfg.output_file).parent
 
-        run_id = f"{data_point['instance_id']}_{int(time.time())}_{str(uuid.uuid4())[:8]}"
-        instance_dataset_path = self._write_instance_dataset(data_point, run_id)
+        agent_run_id = f"{data_point['instance_id']}_{int(time.time())}_{str(uuid.uuid4())[:8]}"
+        instance_dataset_path = self._write_instance_dataset(data_point, agent_run_id)
+        api_base = self.cfg.server["base_url"]
 
-        # TODO: what's the right way to support api models, so that our standard parameters for that can be used?
-        # TODO: use self.cfg.server.base_url, etc. Can we pass in API key?
-
-        if "base_url" in self.cfg.server:
-            api_base = self.cfg.server["base_url"]
-
+        start_time = asyncio.get_running_loop().time()
+        generation_time = None
+        evaluation_time = None
         try:
             if self.cfg.agent_framework == SupportedAgentFrameworks.swe_agent:
-                pred_file = await self._run_swe_agent(data_point, api_base, instance_dataset_path)
+                pred_file = await self._run_swe_agent(
+                    data_point,
+                    api_base,
+                    instance_dataset_path,
+                )
             elif self.cfg.agent_framework == SupportedAgentFrameworks.openhands:
-                pred_file = await self._run_openhands(data_point, api_base, run_id, instance_dataset_path)
+                pred_file = await self._run_openhands(
+                    data_point,
+                    api_base,
+                    agent_run_id,
+                    instance_dataset_path,
+                )
             else:
                 raise ValueError(
                     f"Unsupported agent framework: {self.cfg.agent_framework}. "
                     f"Supported frameworks: {', '.join(SupportedAgentFrameworks)}."
                 )
+
+            generation_time = asyncio.get_running_loop().time() - start_time
 
             pred_mounted_path = pred_file.replace(str(self.output_dir), "/trajectories_mount")
             with open(pred_file, "r") as f:
@@ -568,20 +521,22 @@ class RunOpenHandsAgent:
             # Check if the trajectory has an empty patch before running evaluation
             has_patch = trajectory_dict["model_patch"] is not None
 
-            assert self.swebench_setup_dir is not None, "SWE-bench setup directory is not set"
-            assert self.dataset_path is not None, "Dataset path is not set"
-
             if not has_patch:
                 report_json = {
                     data_point["instance_id"]: {
                         "resolved": False,
                         "patch_exists": False,
                         "patch_successfully_applied": False,
+                        "generation_time": generation_time,
+                        "evaluation_time": evaluation_time,
                     }
                 }
 
             else:
                 # Run full evaluation with streaming output
+                start_time = asyncio.get_running_loop().time()
+                assert self.swebench_setup_dir is not None, "SWE-bench setup directory is not set"
+                assert self.dataset_path is not None, "Dataset path is not set"
                 swebench_cmd = (
                     # Use pre-built SWE-bench
                     "cd /swebench_setup/SWE-bench && "
@@ -596,19 +551,17 @@ class RunOpenHandsAgent:
                     f"    --predictions_path {pred_mounted_path} "
                     f"    --instance_ids {data_point['instance_id']} "
                     f"    --timeout {self.cfg.swebench_tests_timeout} "
-                    # TODO: use a correct way to pass the dataset path
                     f"    --dataset_name /root/dataset/data.jsonl "
                     f"    --split {data_point['split']} "
-                    f"    --run_id {run_id} && "
-                    f"cp -r logs/run_evaluation/{run_id} /trajectories_mount/ && "
-                    # remove the logs directory after the evaluation is done
-                    f"rm -rf logs/run_evaluation/{run_id}"
+                    f"    --run_id {agent_run_id} && "
+                    f"cp -r logs/run_evaluation/{agent_run_id} /trajectories_mount/ && "
+                    f"rm -rf logs/run_evaluation/{agent_run_id}"
                 )
 
                 # Execute SWE-bench evaluation command
                 search_path = os.path.join(
                     self.output_dir,
-                    run_id,
+                    agent_run_id,
                     "**",
                     f"{data_point['instance_id']}/report.json",
                 )
@@ -622,6 +575,7 @@ class RunOpenHandsAgent:
                         timeout=self.cfg.swebench_tests_timeout + 120,
                         dataset_mount_path=instance_dataset_path,
                     )
+                    evaluation_time = asyncio.get_running_loop().time() - start_time
                 except ValueError:
                     print(
                         f"Failed to execute SWE-bench evaluation command for {data_point['instance_id']}",
@@ -632,6 +586,8 @@ class RunOpenHandsAgent:
                             "resolved": False,
                             "patch_exists": True,
                             "patch_successfully_applied": False,
+                            "generation_time": generation_time,
+                            "evaluation_time": evaluation_time,
                         }
                     }
                     report_file = None
@@ -644,6 +600,8 @@ class RunOpenHandsAgent:
                 "swe-bench-metrics": report_json[data_point["instance_id"]],
                 "swe-bench-outputs": trajectory_dict,
                 "generation": "",  # required TODO: we should fix this
+                "generation_time": generation_time,
+                "evaluation_time": evaluation_time,
             }
 
             return output_dict
