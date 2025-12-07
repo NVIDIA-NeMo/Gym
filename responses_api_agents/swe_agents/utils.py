@@ -12,13 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import copy
+import fcntl
 import json
 import logging
 import os
 import subprocess
-import sys
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -31,7 +32,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputItem,
-    NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
 )
@@ -731,6 +731,22 @@ def _resolve_setup_directory(provided_dir: Optional[Path], default_subdir: str) 
     return base_dir.resolve()
 
 
+@contextmanager
+def _setup_directory_lock(setup_dir: Path, label: str):
+    """File-based lock to ensure only one process performs the setup."""
+    lock_dir = setup_dir.parent
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f".{setup_dir.name}.lock"
+
+    with open(lock_path, "w") as lock_file:
+        print(f"Acquiring {label} setup lock at {lock_path}", flush=True)
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
 def _run_setup_shell_script(
     setup_dir: Path,
     script_name: str,
@@ -794,23 +810,24 @@ def setup_swebench_environment(
 ) -> Path:
     setup_dir = _resolve_setup_directory(setup_dir, "swe_swebench_setup")
 
-    swebench_dir = setup_dir / "SWE-bench"
-    uv_dir = setup_dir / "uv"
-    python_dir = setup_dir / "python"
+    with _setup_directory_lock(setup_dir, "SWE-bench"):
+        swebench_dir = setup_dir / "SWE-bench"
+        uv_dir = setup_dir / "uv"
+        python_dir = setup_dir / "python"
 
-    if swebench_dir.exists():
-        print(f"SWE-bench already set up at {setup_dir}", flush=True)
-        print(f"  - SWE-bench: {swebench_dir}", flush=True)
-        print(f"  - venv: {swebench_dir / 'venv'}", flush=True)
-        print(f"  - uv: {uv_dir}", flush=True)
-        print(f"  - Python: {python_dir}", flush=True)
-        return setup_dir
+        if swebench_dir.exists():
+            print(f"SWE-bench already set up at {setup_dir}", flush=True)
+            print(f"  - SWE-bench: {swebench_dir}", flush=True)
+            print(f"  - venv: {swebench_dir / 'venv'}", flush=True)
+            print(f"  - uv: {uv_dir}", flush=True)
+            print(f"  - Python: {python_dir}", flush=True)
+            return setup_dir
 
-    print(f"Setting up SWE-bench environment at {setup_dir}...", flush=True)
-    setup_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Setting up SWE-bench environment at {setup_dir}...", flush=True)
+        setup_dir.mkdir(parents=True, exist_ok=True)
 
-    script_name = "setup_swebench.sh"
-    script_content = f"""#!/bin/bash
+        script_name = "setup_swebench.sh"
+        script_content = f"""#!/bin/bash
 set -e
 set -x
 
@@ -868,22 +885,22 @@ fi
 echo "SWE-bench setup complete!"
 """
 
-    _run_setup_shell_script(
-        setup_dir=setup_dir,
-        script_name=script_name,
-        script_content=script_content,
-        timeout_seconds=600,
-        label="SWE-bench",
-        timeout_error_message="SWE-bench setup timed out after 10 minutes",
-    )
+        _run_setup_shell_script(
+            setup_dir=setup_dir,
+            script_name=script_name,
+            script_content=script_content,
+            timeout_seconds=600,
+            label="SWE-bench",
+            timeout_error_message="SWE-bench setup timed out after 10 minutes",
+        )
 
-    print(f"Setup directory: {setup_dir}", flush=True)
-    print(f"  - SWE-bench: {swebench_dir}", flush=True)
-    print(f"  - venv: {swebench_dir / 'venv'}", flush=True)
-    print(f"  - uv: {uv_dir}", flush=True)
-    print(f"  - Python: {python_dir}", flush=True)
+        print(f"Setup directory: {setup_dir}", flush=True)
+        print(f"  - SWE-bench: {swebench_dir}", flush=True)
+        print(f"  - venv: {swebench_dir / 'venv'}", flush=True)
+        print(f"  - uv: {uv_dir}", flush=True)
+        print(f"  - Python: {python_dir}", flush=True)
 
-    return setup_dir
+        return setup_dir
 
 
 def setup_openhands_environment(
@@ -893,20 +910,21 @@ def setup_openhands_environment(
 ) -> Path:
     setup_dir = _resolve_setup_directory(setup_dir, "swe_openhands_setup")
 
-    openhands_dir = setup_dir / "OpenHands"
-    miniforge_dir = setup_dir / "miniforge3"
+    with _setup_directory_lock(setup_dir, "OpenHands"):
+        openhands_dir = setup_dir / "OpenHands"
+        miniforge_dir = setup_dir / "miniforge3"
 
-    if openhands_dir.exists():
-        print(f"OpenHands already set up at {setup_dir}", flush=True)
-        print(f"  - Miniforge: {miniforge_dir}", flush=True)
-        print(f"  - OpenHands: {openhands_dir}", flush=True)
-        return setup_dir
+        if openhands_dir.exists():
+            print(f"OpenHands already set up at {setup_dir}", flush=True)
+            print(f"  - Miniforge: {miniforge_dir}", flush=True)
+            print(f"  - OpenHands: {openhands_dir}", flush=True)
+            return setup_dir
 
-    print(f"Setting up OpenHands environment at {setup_dir}...", flush=True)
-    setup_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Setting up OpenHands environment at {setup_dir}...", flush=True)
+        setup_dir.mkdir(parents=True, exist_ok=True)
 
-    script_name = "setup_openhands.sh"
-    script_content = f"""#!/bin/bash
+        script_name = "setup_openhands.sh"
+        script_content = f"""#!/bin/bash
 set -e
 set -x  # Enable debug output
 
@@ -1045,17 +1063,17 @@ fi
 echo "OpenHands setup complete!"
 """
 
-    _run_setup_shell_script(
-        setup_dir=setup_dir,
-        script_name=script_name,
-        script_content=script_content,
-        timeout_seconds=1800,
-        label="OpenHands",
-        timeout_error_message="OpenHands setup timed out after 30 minutes",
-    )
+        _run_setup_shell_script(
+            setup_dir=setup_dir,
+            script_name=script_name,
+            script_content=script_content,
+            timeout_seconds=1800,
+            label="OpenHands",
+            timeout_error_message="OpenHands setup timed out after 30 minutes",
+        )
 
-    print(f"Setup directory: {setup_dir}", flush=True)
-    print(f"  - Miniforge: {miniforge_dir}", flush=True)
-    print(f"  - OpenHands: {openhands_dir}", flush=True)
+        print(f"Setup directory: {setup_dir}", flush=True)
+        print(f"  - Miniforge: {miniforge_dir}", flush=True)
+        print(f"  - OpenHands: {openhands_dir}", flush=True)
 
-    return setup_dir
+        return setup_dir
