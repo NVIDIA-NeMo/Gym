@@ -16,7 +16,7 @@ import os
 import sys
 from collections import defaultdict
 from time import sleep
-from typing import Dict, Optional, Set
+from typing import Dict, Optional
 
 import ray
 import ray.util.state
@@ -45,22 +45,20 @@ def _prepare_ray_worker_env_vars() -> Dict[str, str]:  # pragma: no cover
     return worker_env_vars
 
 
-def _start_global_ray_gpu_scheduling_helper(node_id: Optional[str] = None):  # pragma: no cover
-    worker_options = {
+def _start_global_ray_gpu_scheduling_helper(node_id: Optional[str] = None) -> ActorProxy:  # pragma: no cover
+    cfg = get_global_config_dict()
+    helper_options = {
         "name": "_NeMoGymRayGPUSchedulingHelper",
         "num_cpus": 0,
     }
     if node_id is not None:
-        worker_options["scheduling_strategy"] = NodeAffinitySchedulingStrategy(
+        helper_options["scheduling_strategy"] = NodeAffinitySchedulingStrategy(
             node_id=node_id,
             soft=True,
         )
-    worker_options["runtime_env"] = {
-        "py_executable": sys.executable,
-        "env_vars": _prepare_ray_worker_env_vars(),
-    }
-    worker = _NeMoGymRayGPUSchedulingHelper.options(**worker_options).remote()
-    return worker
+    helper = _NeMoGymRayGPUSchedulingHelper.options(**helper_options).remote(cfg)
+    ray.get(helper._post_init.remote())
+    return helper
 
 
 def get_global_ray_gpu_scheduling_helper() -> ActorProxy:  # pragma: no cover
@@ -71,8 +69,9 @@ def get_global_ray_gpu_scheduling_helper() -> ActorProxy:  # pragma: no cover
                 "name": "_NeMoGymRayGPUSchedulingHelper",
             }
             ray_namespace = cfg.get("ray_namespace", None)
-            if ray_namespace is not None:
-                get_actor_args["namespace"] = ray_namespace
+            if ray_namespace is None:
+                ray_namespace = "nemo_gym"
+            get_actor_args["namespace"] = ray_namespace
             worker = ray.get_actor(**get_actor_args)
             return worker
         except ValueError:
@@ -81,11 +80,12 @@ def get_global_ray_gpu_scheduling_helper() -> ActorProxy:  # pragma: no cover
 
 @ray.remote
 class _NeMoGymRayGPUSchedulingHelper:  # pragma: no cover
-    def __init__(self, *args, **kwargs):
-        self.cfg = get_global_config_dict()
+    def __init__(self, cfg):
+        self.cfg = cfg
         self.avail_gpus_dict = defaultdict(int)
         self.used_gpus_dict = defaultdict(int)
 
+    def _post_init(self) -> None:
         # If value of RAY_GPU_NODES_KEY_NAME is None, then Gym will use all Ray GPU nodes
         # for scheduling GPU actors.
         # Otherwise if value of RAY_GPU_NODES_KEY_NAME is a list, then Gym will only use
@@ -98,9 +98,9 @@ class _NeMoGymRayGPUSchedulingHelper:  # pragma: no cover
         node_states = ray.util.state.list_nodes(head, detail=True)
         for state in node_states:
             assert state.node_id is not None
+            avail_num_gpus = state.resources_total.get("GPU", 0)
             if allowed_gpu_nodes is not None and state.node_id not in allowed_gpu_nodes:
                 continue
-            avail_num_gpus = state.resources_total.get("GPU", 0)
             self.avail_gpus_dict[state.node_id] += avail_num_gpus
 
     def alloc_gpu_node(self, num_gpus: int) -> Optional[str]:
@@ -128,43 +128,6 @@ def lookup_current_ray_node_id() -> str:  # pragma: no cover
 
 def lookup_current_ray_node_ip() -> str:  # pragma: no cover
     return lookup_ray_node_id_to_ip_dict()[lookup_current_ray_node_id()]
-
-
-def _lookup_ray_node_with_free_gpus(
-    num_gpus: int, allowed_gpu_nodes: Optional[Set[str]] = None
-) -> Optional[str]:  # pragma: no cover
-    cfg = get_global_config_dict()
-    head = cfg["ray_head_node_address"]
-
-    node_avail_gpu_dict = defaultdict(int)
-    node_states = ray.util.state.list_nodes(head, detail=True)
-    for state in node_states:
-        assert state.node_id is not None
-        if allowed_gpu_nodes is not None and state.node_id not in allowed_gpu_nodes:
-            continue
-        node_avail_gpu_dict[state.node_id] += state.resources_total.get("GPU", 0)
-
-    while True:
-        retry = False
-        node_used_gpu_dict = defaultdict(int)
-        actor_states = ray.util.state.list_actors(head, detail=True)
-        for state in actor_states:
-            if state.state == "DEAD":
-                continue
-            if state.state == "PENDING_CREATION" or state.node_id is None:
-                retry = True
-                break
-            node_used_gpu_dict[state.node_id] += state.required_resources.get("GPU", 0)
-        if retry:
-            sleep(2)
-            continue
-        break
-
-    for node_id, avail_num_gpus in node_avail_gpu_dict.items():
-        used_num_gpus = node_used_gpu_dict[node_id]
-        if used_num_gpus + num_gpus <= avail_num_gpus:
-            return node_id
-    return None
 
 
 def spinup_single_ray_gpu_node_worker(
