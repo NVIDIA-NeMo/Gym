@@ -30,9 +30,12 @@ The [NeMo Framework](https://github.com/NVIDIA-NeMo) is NVIDIA's GPU-accelerated
 
 ## NeMo Gym and NeMo Data Designer
 
-[NeMo Data Designer](https://nvidia-nemo.github.io/DataDesigner/) is a general framework for synthetic data generation from scratch or using seed data. It helps you generate high quality and diversity data.
+[NeMo Data Designer](https://nvidia-nemo.github.io/DataDesigner/) is a general framework for synthetic data generation from scratch or using seed data.
 
-Gym is a training environment framework with an emphasis on training environment developer experience. It helps you develop a training environment and use it in downstream RL training.
+When to use each tool:
+- You need to generate high quality and diversity data → NeMo Data Designer
+- You need to develop a training environment and use it in downstream RL training → NeMo Gym
+
 
 :::{seealso}
 - [NeMo Data Designer Documentation](https://nvidia-nemo.github.io/DataDesigner/)
