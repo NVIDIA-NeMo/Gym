@@ -163,6 +163,13 @@ tutorials/rl-training-with-nemo-rl
 how-to-faq.md
 ```
 
+```{toctree}
+:caption: Reference
+:hidden:
+:maxdepth: 1
+
+reference/cli-commands.md
+```
 
 ```{toctree}
 :caption: Development
