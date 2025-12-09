@@ -21,6 +21,6 @@ The [NeMo Framework](https://github.com/NVIDIA-NeMo) is NVIDIA's GPU-accelerated
 * **NeMo Curator**: Data preprocessing and curation
 * **NeMo Evaluator**: Model evaluation and benchmarking
 * **NeMo Guardrails**: Programmable safety guardrails
-* And more...
+* **NeMo Data Designer**: Synthetic data generation from scratch or seed datasets
 
 **NeMo Gym's Role**: Within this ecosystem, Gym focuses on standardizing scalable rollout collection for RL training. It provides unified interfaces to heterogeneous RL environments and curated resource servers with verification logic. This makes it practical to generate large-scale, high-quality training data for NeMo RL and other training frameworks.
