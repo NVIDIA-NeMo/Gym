@@ -19,7 +19,7 @@ version = "0.2.0rc0"
 requires-python = ">=3.12"
 dependencies = [
     "nemo-gym[dev]",
-    "vllm",
+    "vllm>=0.11.2",
 ]
 
 [build-system]
