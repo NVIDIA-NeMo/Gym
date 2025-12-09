@@ -92,7 +92,7 @@ class _NeMoGymRayGPUSchedulingHelper:  # pragma: no cover
         # the listed Ray GPU nodes for scheduling GPU actors.
         allowed_gpu_nodes = self.cfg.get(RAY_GPU_NODES_KEY_NAME, None)
         if allowed_gpu_nodes is not None:
-            allowed_gpu_nodes = set([node["node_id"] if "node_id" in node else node for node in allowed_gpu_nodes])
+            allowed_gpu_nodes = set(allowed_gpu_nodes)
 
         head = self.cfg["ray_head_node_address"]
         node_states = ray.util.state.list_nodes(head, detail=True)
