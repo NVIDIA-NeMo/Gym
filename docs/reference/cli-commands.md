@@ -68,28 +68,45 @@ ng config --help             # Show config commands
 
 ## Tab Completion
 
-The NeMo Gym CLI supports tab completion for bash, zsh, and fish. To enable it:
+The NeMo Gym CLI supports tab completion for bash, zsh, and fish.
 
-**Bash:**
+### Setup
+
+**Option 1: Automatic Installation (Recommended)**
+
 ```bash
-_NG_COMPLETE=bash_source ng > ~/.ng-complete.bash
-echo ". ~/.ng-complete.bash" >> ~/.bashrc
-source ~/.bashrc
+# Bash
+ng generate-shell-completion bash --install
+
+# Zsh
+ng generate-shell-completion zsh --install
+
+# Fish
+ng generate-shell-completion fish --install
 ```
 
-**Zsh:**
+This creates a completion script file and adds it to your shell's RC file.
+After installation, restart your shell or run `source ~/.bashrc` (or `~/.zshrc`).
+
+**Option 2: Manual Setup**
+
+Add to your shell RC file:
+
 ```bash
-_NG_COMPLETE=zsh_source ng > ~/.ng-complete.zsh
-echo ". ~/.ng-complete.zsh" >> ~/.zshrc
-source ~/.zshrc
+# Bash (~/.bashrc)
+eval "$(ng generate-shell-completion bash)"
+
+# Zsh (~/.zshrc)
+eval "$(ng generate-shell-completion zsh)"
+
+# Fish (~/.config/fish/config.fish)
+ng generate-shell-completion fish > ~/.config/fish/completions/ng.fish
 ```
 
-**Fish:**
-```bash
-_NG_COMPLETE=fish_source ng > ~/.config/fish/completions/ng.fish
-```
+### Usage
 
-After enabling, you can use tab completion:
+After enabling completion, you can use TAB to autocomplete commands and options:
+
 ```bash
 ng <TAB>              # Shows: server, data, dataset, config, test, version
 ng server <TAB>       # Shows: run, init
