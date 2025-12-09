@@ -37,6 +37,18 @@ from nemo_gym.server_utils import (
 class RolloutCollectionConfig(BaseNeMoGymCLIConfig):
     """
     Perform a batch of rollout collection.
+
+    Examples:
+
+    ```bash
+    ng_collect_rollouts \
+        +agent_name=simple_weather_simple_agent \
+        +input_jsonl_fpath=weather_query.jsonl \
+        +output_jsonl_fpath=weather_rollouts.jsonl \
+        +limit=100 \
+        +num_repeats=4 \
+        +num_samples_in_parallel=10
+    ```
     """
 
     agent_name: str = Field(description="The agent to collect rollouts from.")

@@ -50,13 +50,27 @@ from nemo_gym.hf_utils import (
 
 
 class TrainDataProcessorConfig(BaseNeMoGymCLIConfig):
-    output_dirpath: str = Field(description="Path to the directory to save the outputs.")
+    """
+    Prepare and validate training data, generating metrics and statistics for datasets.
+
+    Examples:
+
+    ```bash
+    config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\\
+    responses_api_models/openai_model/configs/openai_model.yaml"
+    ng_prepare_data "+config_paths=[${config_paths}]" \
+        +output_dirpath=data/example_multi_step \
+        +mode=example_validation
+    ```
+    """
+
+    output_dirpath: str = Field(description="Directory path where processed datasets and metrics will be saved.")
     mode: Union[Literal["train_preparation"], Literal["example_validation"]] = Field(
-        description="Whether to do train_preparation or example_validation."
+        description="Processing mode: 'train_preparation' prepares train/validation datasets for training, 'example_validation' validates example data for PR submission."
     )
     should_download: bool = Field(
         default=False,
-        description="Whether or not to download missing datasets. By default, no datasets will be downloaded.",
+        description="Whether to automatically download missing datasets from remote registries (default: False).",
     )
     data_source: Literal["gitlab", "huggingface"] = Field(
         default="huggingface",
@@ -485,7 +499,8 @@ class TrainDataProcessor(BaseModel):
                                     "repo_id": hf_identifier.repo_id,
                                     "artifact_fpath": hf_identifier.artifact_fpath,
                                     "output_fpath": d.jsonl_fpath,
-                                    "split": d.type,
+                                    # Only pass split if artifact_fpath is not set
+                                    **({"split": d.type} if not hf_identifier.artifact_fpath else {}),
                                     "hf_token": global_config.get("hf_token"),
                                 }
                             )
@@ -778,7 +793,9 @@ def validate_backend_credentials(backend: str) -> tuple[bool, str]:
             )
 
     elif backend == "huggingface":
-        if "hf_token" not in global_config or not global_config["hf_token"]:
+        required = ["hf_token"]
+        missing = [k for k in required if k not in global_config or not global_config[k]]
+        if missing:
             return False, (
                 f"HuggingFace backend selected but missing credentials: {missing}\n"
                 f"Add to env.yaml:\n"
