@@ -34,34 +34,29 @@ The [NeMo Framework](https://github.com/NVIDIA-NeMo) is NVIDIA's GPU-accelerated
 
 ### Key Differences
 
-::::{grid} 1 1 2 2
-:gutter: 3
+```{list-table}
+:header-rows: 1
+:widths: 20 40 40
 
-:::{grid-item-card} NeMo Data Designer
-**Synthetic data generation**
-
-Generates training data using LLM prompting combined with statistical samplers. Data Designer excels at creating diverse datasets with controlled distributions, meaningful correlations between fields, and built-in validation.
-
-**Best for:**
-- Generating diverse post-training datasets at scale
-- Creating data with specific statistical properties
-- Simulating tool call patterns and responses
-- Rapid iteration on data characteristics
-:::
-
-:::{grid-item-card} NeMo Gym
-**Real environment interactions**
-
-Generates training data through actual interactions with live environments. Gym executes real tool calls, runs actual verification logic, and produces reward scores from genuine environment feedback.
-
-**Best for:**
-- Collecting rollouts with verified reward signals
-- Training agents that need real tool execution
-- Environments requiring actual API calls or code execution
-- RL training with ground-truth verification
-:::
-
-::::
+* - Aspect
+  - NeMo Data Designer
+  - NeMo Gym
+* - **Approach**
+  - Synthetic data generation using LLM prompting combined with statistical samplers
+  - Real environment interactions with live tool execution
+* - **Tool Calls**
+  - Simulates tool calling patterns and responses
+  - Executes actual tool calls against real systems
+* - **Verification**
+  - Built-in validation with quality checks
+  - Ground-truth verification from live environments
+* - **Rewards**
+  - Validation-based scoring
+  - Reward signals from genuine environment feedback
+* - **Best For**
+  - Generating diverse post-training datasets at scale, creating data with specific statistical properties, rapid prototyping
+  - Collecting RL rollouts with verified rewards, training agents on real APIs or code execution
+```
 
 ### When to Use Each Tool
 
