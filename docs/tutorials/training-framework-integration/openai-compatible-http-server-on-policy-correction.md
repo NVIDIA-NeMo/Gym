@@ -45,6 +45,9 @@ Larger mismatches lead to further off-policyness during training. While policy o
 
 ## Problems
 
+We observe several problems in practice when using an OpenAI-compatible HTTP server during training that cause train and generation time log probability mismatch, leading to significant off-policyness.
+
+
 ### Problem 1: Re-tokenization
 Observe that going from LF5 of the previous model call to LF3 of the current model call (i.e. across model calls) implies that we lose information that was once held in token IDs.
 
@@ -68,6 +71,32 @@ This isn't just because the chat template is esoteric or incorrect. Due to the s
 
 
 ### Problem 3: Non-monotonically increasing history
+Sometimes developers will intentionally change the history of a rollout.
+1. Agentic coding harnesses will sometimes summarize or truncate entirely prior history as a rollout gets longer and longer over steps.
+2. Various model chat templates will remove reasoning from the input prompt across turns.
+
+This directly changes the prompt token IDs the model sees at the current model call and differs from the final prompt token IDs used for training.
 
 
+## Current solution
+We solve the problems above using two components:
+1. For Problems 1 and 2, we will perform the following on-policy token IDs fix in the vLLM OpenAI HTTP server https://github.com/NVIDIA-NeMo/RL/blob/64ab08df3edf25131959fc474b44ed5e36a1600b/nemo_rl/models/generation/vllm/vllm_worker_async.py#L40
+2. For Problem 3, we will disable reasoning truncation across turns using the chat template.
+   1. It's an open research question on how to train on these types of scenarios.
 
+The on-policy token IDs fix in the vLLM OpenAI HTTP server assumes the following prerequisites:
+1. `model_prefix_token_ids`: The ground truth prompt token IDs concatenated with the generation token IDs from the previous model call.
+2. `template_prefix_token_ids`: The re-templated and re-tokenized token IDs up to and not including the final assistant message.
+3. `template_token_ids`: The re-templated and re-tokenized token IDs for the entire rollouts.
+   1. We assume that `template_prefix_token_ids` is a strict prefix of `template_token_ids` (specifically we need to circumvent Problem 3).
+
+Our fix will find the position of the right EOS token ID in the `template_token_ids` and splice in the `model_prefix_token_ids`.
+
+For example:
+1. Let's assume the current request in LF1 contains the following rollout structure: `U A T A U A T`
+2. The variables here would be:
+   1. `model_prefix_token_ids`: Ground truth token IDs that correspond to `U A T A U A`.
+   2. `template_prefix_token_ids`: Re-templated and re-tokenized token IDs that correspond to `U A T A U A`.
+   3. `template_token_ids`: Re-templated and re-tokenized token IDs that correspond to `U A T A U A T`.
+3. We will use `template_prefix_token_ids` to find the position of the EOS token ID corresponding to the content represented in `model_prefix_token_ids`.
+4. Splice the prefix of `template_token_ids` and replace it with `model_prefix_token_ids`.
