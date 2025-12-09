@@ -2,9 +2,9 @@
 
 # NeMo Gym Documentation
 
-NeMo Gym is a framework for building reinforcement learning (RL) training environments large language models (LLMs). Gym provides training environment development scaffolding and training environment patterns such as multi-step, multi-turn, and user modeling scenarios.
+[NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) is a framework for building reinforcement learning (RL) training environments for large language models (LLMs). It provides infrastructure to develop environments, scale rollout collection, and integrate seamlessly with your preferred training framework.
 
-At the core of NeMo Gym are three server concepts: **Responses API Model servers** are model endpoints, **Resources servers** contain tool implementations and verification logic, and **Response API Agent servers** orchestrate the interaction between models and resources.
+A training environment consists of three server components: **Agents** orchestrate the rollout lifecycle—calling models, executing tool calls via resources, and coordinating verification. **Models** provide stateless text generation using LLM inference endpoints. **Resources** define tasks, tool implementations, and verification logic.
 
 ## Quickstart
 
@@ -37,13 +37,15 @@ uv sync --extra dev --group docs
 
 **Configure Your API Key**
 
-Create an `env.yaml` file that contains your OpenAI API key and the model you want to use. Replace `your-openai-api-key` with your actual key. This file helps keep your secrets out of version control while still making them available to NeMo Gym.
+Create an `env.yaml` file that contains your OpenAI API key and the {term}`Policy Model` you want to use. Replace `your-openai-api-key` with your actual key. This file helps keep your secrets out of version control while still making them available to NeMo Gym.
 
 ```bash
 echo "policy_base_url: https://api.openai.com/v1
 policy_api_key: your-openai-api-key
 policy_model_name: gpt-4.1-2025-04-14" > env.yaml
 ```
+
+> **Note:** We use GPT-4.1 in this quickstart because it provides low latency (no reasoning step) and works reliably out-of-the-box. NeMo Gym is **not limited to OpenAI models**—you can use self-hosted models via vLLM or any OpenAI-compatible inference server that supports function calling. See the setup guide for details.
 
 :::
 
@@ -99,6 +101,30 @@ This generates training data with verification scores!
 :::
 ::::
 
+---
+
+## What's Next?
+
+Now that you can generate rollouts, choose your path:
+
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Use an Existing Training Environment
+:link: https://github.com/NVIDIA-NeMo/Gym#-available-resource-servers
+
+Browse the available resource servers to find a training-ready environment that matches your goals.
+:::
+
+:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build a Custom Training Environment
+:link: tutorials/creating-resource-server
+:link-type: doc
+
+Implement or integrate existing tools and define task verification logic.
+:::
+
+::::
+
 ```{toctree}
 :hidden:
 Home <self>
@@ -131,11 +157,19 @@ get-started/rollout-collection.md
 :maxdepth: 1
 
 tutorials/index.md
+tutorials/creating-resource-server
 tutorials/offline-training-w-rollouts
 tutorials/rl-training-with-nemo-rl
 how-to-faq.md
 ```
 
+```{toctree}
+:caption: Reference
+:hidden:
+:maxdepth: 1
+
+reference/cli-commands.md
+```
 
 ```{toctree}
 :caption: Development

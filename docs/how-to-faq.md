@@ -1,7 +1,7 @@
-# How-To's and FAQ's
+# How-Tos and FAQs
 
 :::{warning}
-This document is a smattering of How-To's and FAQs that have not made their way into an official tutorial yet. The following guides are **experimental** and may contain bugs. Proceed with caution.
+This document is a collection of How-Tos and FAQs that have not made their way into an official tutorial yet. The following guides are **experimental** and may contain bugs. Proceed with caution.
 :::
 
 # How To: Run tests for simple agent
@@ -11,181 +11,6 @@ ng_test +entrypoint=responses_api_agents/simple_agent
 ```
 
 Tests are strongly encouraged and you must have at least one test for every server you make. Test coverage is not explicitly required which means that **YOU ARE RESPONSIBLE FOR YOUR OWN SERVER CORRECTNESS AND FUNCTION**.
-
-
-# How To: Add a resource server
-Reading time: 5 mins
-Date: Tue Aug 05, 2025
-
-Resource servers are used to abstract out any business logic of tool implementations and verifiers. Each resource server must implement a `verify` function.
-
-Resource servers live in the `resources_servers` folder. Initialize a resource server now. For this example, we will be writing a dummy test weather server.
-```bash
-ng_init_resources_server +entrypoint=resources_servers/test_weather
-```
-
-For the purposes of this example, we don't have any external dependencies, but if you want to add server-specific requirements, you would do so in the `requirements.txt` file. You can add requirements for external PyPI packages or Github repos.
-```
--e nemo-gym[dev] @ ../../
-{additional dependencies here}
-```
-
-
-Implement a tool for your agent to use in `app.py`. Start by adding your request and response schemas
-```python
-...
-class TestWeatherResourcesServerConfig(BaseResourcesServerConfig):
-    pass
-
-
-class GetWeatherRequest(BaseModel):
-    city: str
-
-
-class GetWeatherResponse(BaseModel):
-    city: str
-    weather_description: str
-
-
-class TestWeatherResourcesServer(SimpleResourcesServer):
-    config: TestWeatherResourcesServerConfig
-
-...
-```
-Implement a `get_weather` function under the `TestWeatherResourcesServer` class. For now we will just always say it is cold.
-```python
-...
-        # app.post("/get_weather")(self.get_weather)
-
-        return app
-
-    async def get_weather(self, body: GetWeatherRequest) -> GetWeatherResponse:
-        return GetWeatherResponse(
-            city=body.city, weather_description=f"The weather in {body.city} is cold."
-        )
-
-    async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
-        return BaseVerifyResponse(**body.model_dump(), reward=1.0)
-...
-```
-Register your new `get_weather` function as a FastAPI route.
-```python
-...
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-
-        # Additional server routes go here! e.g.:
-        app.post("/get_weather")(self.get_weather)
-
-        return app
-...
-```
-
-Refer to a complete example of `app.py` in `resources_servers/example_simple_weather/app.py`.
-
-Run an agent with your new server!
-```bash
-config_paths="responses_api_agents/simple_agent/configs/simple_agent.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/example_simple_weather/configs/simple_weather.yaml"
-ng_run "+config_paths=[$config_paths]" \
-    +simple_agent.responses_api_agents.simple_agent.resources_server.name=test_weather
-```
-
-Run a query with your new resources server! Your agent should say that it's cold in SF :)
-```bash
-python responses_api_agents/simple_agent/client.py
-```
-
-After you implement your server, make sure to update the README.md with appropriate licensing information. Your PR will not be merged unless licensing information is present and accurate.
-
-
-Run the tests for your server
-```bash
-ng_test +entrypoint=resources_servers/example_simple_weather
-```
-
-
-You can also run detailed tests after running tests the first time
-```bash
-cd resources_servers/example_simple_weather
-source .venv/bin/activate
-pytest
-```
-
-At some point, you will want to actually add data that can be used to query your server. Follow the instructions for [How To: Prepare and validate data for PR submission or RL training](#how-to-prepare-and-validate-data-for-pr-submission-or-rl-training).
-
-
-If you need some dataset preprocessing or formatting scripts, place them in your resources server directory, for example `resources_servers/example_simple_weather/my_preprocess_script.py`.
-
-
-You are required to have the following 3 files in your resources server data folder:
-1. example.jsonl - contains 5 example inputs to an agent server that uses your resources server. These examples need to be created on your own using whatever data processing script you want. It's highly suggested to store the data processing scripts in each folder if possible.
-2. example_metrics.json - the metrics for the examples above, as output by `ng_prepare_data` in the data validation flow above.
-3. example_rollouts.jsonl - rollouts through your resources server for the 5 example inputs in example.jsonl.
-
-
-## TLDR final expected artifacts
-1. All the artifacts produced by `ng_init_resources_server +entrypoint=resources_servers/test_weather`. Your agent and resources server must be runnable.
-```bash
-example_multi_step_config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/example_multi_step/configs/example_multi_step.yaml"
-ng_run "+config_paths=[${example_multi_step_config_paths}]"
-```
-2. At least 1 test at `resources_servers/test_weather/tests/test_app.py`.
-3. 5 examples found at `resources_servers/test_weather/data/examples.jsonl`
-4. Example metrics as output by `ng_prepare_data` found at `resources_servers/test_weather/data/example_metrics.json`
-```bash
-example_multi_step_config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/example_multi_step/configs/example_multi_step.yaml"
-ng_prepare_data "+config_paths=[${example_multi_step_config_paths}]" \
-    +output_dirpath=data/example_multi_step \
-    +mode=example_validation
-```
-5. Example rollouts as output by `ng_collect_rollouts` found at `resources_servers/test_weather/data/example_rollouts.jsonl`
-```bash
-ng_collect_rollouts +agent_name=example_multi_step_simple_agent \
-    +input_jsonl_fpath=resources_servers/example_multi_step/data/example.jsonl \
-    +output_jsonl_fpath=resources_servers/example_multi_step/data/example_rollouts.jsonl \
-    +limit=null \
-    +num_repeats=null \
-    +num_samples_in_parallel=null
-```
-
-
-# How To: Upload and download a dataset from Gitlab
-We want to track and version golden versions of our datasets so that we always know what data is being trained on and that the data we are training on is high quality. Major versions of all training datasets should be tracked in NeMo Gym. For example, the HelpSteer dataset https://huggingface.co/datasets/nvidia/HelpSteer3 has 3 major versions 1, 2, and 3. Each of these major versions would be uploaded and tracked in NeMo Gym.
-
-Right now, NeMo Gym is hosted in NVIDIA Gitlab and we use Gitlab's model artifact registry to store datasets. https://gitlab-master.nvidia.com/bxyu/nemo-gym/-/ml/models?first=30&orderBy=created_at&sort=desc#/
-
-Gitlab uses MLFlow to interface with its model artifact registry. You will need:
-1. The NeMo Gym repository Gitlab URI.
-   1. Go to the Model Registry page, click the "..." next to "Create model", then click "Using the MLFlow client".
-   2. The URI will look something like `https://gitlab-master.nvidia.com/api/v4/projects/191584/ml/mlflow/`
-2. Your Gitlab token. Your Gitlab token must have the `api` and `read_api` scopes.
-
-Provide your MLFlow credentials in `env.yaml`.
-```yaml
-mlflow_tracking_uri: {your NeMo Gym Gitlab URI}
-mlflow_tracking_token: {your Gitlab PAT}
-```
-
-Upload a dataset to Gitlab model artifact registry. Dataset name will be your model artifact name. Version must be a str in the format `x.x.x`.
-```bash
-ng_upload_dataset_to_gitlab \
-    +dataset_name=example_multi_step \
-    +version=0.0.1 \
-    +input_jsonl_fpath=data/example_multi_step_benchmark.jsonl
-```
-
-Download a dataset from Gitlab model artifact registry.
-```bash
-ng_download_dataset_from_gitlab \
-    +dataset_name=example_multi_step \
-    +version=0.0.1 \
-    +artifact_fpath=example_multi_step_benchmark.jsonl \
-    +output_fpath=data/example_multi_step_benchmark.jsonl
-```
 
 
 # How To: Upload and download a dataset from HuggingFace
@@ -906,7 +731,7 @@ TODO @bxyu-nvidia: expand on this later.
 
 # FAQ: NeMo Gym what CI/CD do I need to pass?
 
-NeMo Gym has an E2E suite of CI/CD in the form of Github actions workflows. Some of these are critical to PR merge and some of the mare not.
+NeMo Gym has an E2E suite of CI/CD in the form of Github actions workflows. Some of these are critical to PR merge and some of them are not.
 
 For the majority of PRs, there are 5 checks that need to pass:
 1. DCO
@@ -920,7 +745,7 @@ Examples of PR checks that most PRs do not need to wait for to pass:
 2. CICD NeMo / Nemo_CICD_Test (push)
 ...
 
-# FAQ: Why aiohttp backend and not httpx/httpcore for async http?
+# FAQ: Why use aiohttp backend instead of httpx/httpcore for async http?
 
 TL;DR: httpx is O(n^2) runtime where n is the number of queued requests (i.e. for each request, we check all other queued requests). This is terribly inefficient and results in major slowdowns.
 
