@@ -21,14 +21,14 @@ import sys
 import tomllib
 from glob import glob
 from importlib.metadata import version as md_version
-from os import environ, makedirs
+from os import environ, getcwd, makedirs
 from os.path import exists
 from pathlib import Path
 from signal import SIGINT
 from subprocess import Popen
 from threading import Thread
 from time import sleep
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import psutil
 import rich
@@ -49,6 +49,9 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
+from nemo_gym.ray_utils import (
+    _start_global_ray_gpu_scheduling_helper,
+)
 from nemo_gym.server_utils import (
     HEAD_SERVER_KEY_NAME,
     HeadServer,
@@ -59,21 +62,62 @@ from nemo_gym.server_utils import (
 
 
 def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  # pragma: no cover
-    install_cmd = "uv pip install -r requirements.txt"
     head_server_deps = global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]
-    install_cmd += " " + " ".join(head_server_deps)
 
-    return f"""cd {dir_path} \\
-    && uv venv --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} \\
+    uv_venv_cmd = f"uv venv --seed --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} .venv"
+
+    pyproject_toml = False
+    requirements_txt = False
+    try:
+        with open(f"{dir_path / 'pyproject.toml'}", "r") as _f:
+            pyproject_toml = True
+    except OSError:
+        pass
+    try:
+        with open(f"{dir_path / 'requirements.txt'}", "r") as _f:
+            requirements_txt = True
+    except OSError:
+        pass
+
+    if pyproject_toml:
+        install_cmd = f"""uv pip install '-e .' {" ".join(head_server_deps)}"""
+    elif requirements_txt:
+        install_cmd = f"""uv pip install -r requirements.txt {" ".join(head_server_deps)}"""
+    else:
+        raise RuntimeError(f"Missing pyproject.toml or requirements.txt for uv venv setup in server dir: {dir_path}")
+
+    cmd = f"""cd {dir_path} \\
+    && {uv_venv_cmd} > {dir_path}/venv.out.log 2> {dir_path}/venv.err.log \\
     && source .venv/bin/activate \\
     && {install_cmd} \\
-   """
+    """
+
+    print(f"DEBUG: _setup_env_command: cmd = {cmd}", flush=True)
+
+    return cmd
 
 
-def _run_command(command: str, working_directory: Path) -> Popen:  # pragma: no cover
+def _run_command(command: str, working_dir_path: Path, name: Optional[str] = None) -> Popen:  # pragma: no cover
+    work_dir = f"{working_dir_path.absolute()}"
+    print(f"DEBUG: _run_command: cwd      = {getcwd()}", flush=True)
+    print(f"DEBUG: _run_command: work dir = {work_dir}", flush=True)
     custom_env = environ.copy()
-    custom_env["PYTHONPATH"] = f"{working_directory.absolute()}:{custom_env.get('PYTHONPATH', '')}"
-    return Popen(command, executable="/bin/bash", shell=True, env=custom_env)
+    py_path = custom_env.get("PYTHONPATH", None)
+    if py_path is not None:
+        custom_env["PYTHONPATH"] = f"{work_dir}:{py_path}"
+    else:
+        custom_env["PYTHONPATH"] = work_dir
+    if name is not None:
+        out_log_file = open(f"{work_dir}/run-{name}.out.log", "a")
+        err_log_file = open(f"{work_dir}/run-{name}.err.log", "a")
+    return Popen(
+        command,
+        executable="/bin/bash",
+        shell=True,
+        env=custom_env,
+        stdout=out_log_file,
+        stderr=err_log_file,
+    )
 
 
 class RunConfig(BaseNeMoGymCLIConfig):
@@ -141,17 +185,22 @@ class ServerInstanceDisplayConfig(BaseModel):
 class RunHelper:  # pragma: no cover
     _head_server: uvicorn.Server
     _head_server_thread: Thread
+    _head_ray_gpu_helper: Any
 
     _processes: Dict[str, Popen]
     _server_instance_display_configs: List[ServerInstanceDisplayConfig]
     _server_client: ServerClient
 
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
+        print(f"DEBUG: RunHelper.start: ...", flush=True)
+
         global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
 
         # Initialize Ray cluster in the main process
         # Note: This function will modify the global config dict - update `ray_head_node_address`
         initialize_ray()
+
+        self._head_ray_gpu_helper = _start_global_ray_gpu_scheduling_helper()
 
         # Assume Nemo Gym Run is for a single agent.
         escaped_config_dict_yaml_str = shlex.quote(OmegaConf.to_yaml(global_config_dict))
@@ -188,12 +237,25 @@ class RunHelper:  # pragma: no cover
 
             dir_path = PARENT_DIR / Path(first_key, second_key)
 
+            print(f"DEBUG: RunHelper: 1st key  = {first_key}", flush=True)
+            print(f"DEBUG: RunHelper: 2nd key  = {second_key}", flush=True)
+            print(f"DEBUG: RunHelper: dir path = {dir_path}", flush=True)
+            if (
+                f"{dir_path}".endswith("/bin/python") or
+                f"{dir_path}".endswith("/bin/python3")
+            ):
+                dir_path = dir_path.parent
+                dir_path = dir_path.parent
+                print(f"DEBUG: RunHelper: dir path = {dir_path} (rewrite)", flush=True)
+
+            print(f"DEBUG: RunHelper: entry    = {str(entrypoint_fpath)}", flush=True)
+
             command = f"""{_setup_env_command(dir_path, global_config_dict)} \\
     && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
     {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(top_level_path)} \\
     python {str(entrypoint_fpath)}"""
 
-            process = _run_command(command, dir_path)
+            process = _run_command(command, dir_path, top_level_path)
             self._processes[top_level_path] = process
 
             host = server_config_dict.get("host")
@@ -255,6 +317,18 @@ class RunHelper:  # pragma: no cover
 
         for process_name, process in self._processes.items():
             if process.poll() is not None:
+                proc_out, proc_err = process.communicate()
+                print(f"Process `{process_name}` finished unexpectedly!")
+                print(f"Process `{process_name}` stdout:", flush=True)
+                if isinstance(proc_out, bytes):
+                    print(proc_out.decode("utf-8"), flush=True)
+                else:
+                    print(proc_out, flush=True)
+                print(f"Process `{process_name}` stderr:", flush=True)
+                if isinstance(proc_err, bytes):
+                    print(proc_err.decode("utf-8"), flush=True)
+                else:
+                    print(proc_err, flush=True)
                 raise RuntimeError(f"Process `{process_name}` finished unexpectedly!")
 
     def wait_for_spinup(self) -> None:
@@ -265,11 +339,18 @@ class RunHelper:  # pragma: no cover
             self.poll()
             statuses = self.check_http_server_statuses()
 
-            num_spun_up = statuses.count("success")
+            num_spun_up = 0
+            waiting = []
+            for name, status in statuses:
+                if status == "success":
+                    num_spun_up += 1
+                else:
+                    waiting.append(name)
             if len(statuses) != num_spun_up:
                 print(
                     f"""{num_spun_up} / {len(statuses)} servers ready ({statuses.count("timeout")} timed out, {statuses.count("connection_error")} connection errored, {statuses.count("unknown_error")} had unknown errors).
-Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
+Waiting for servers to spin up: {waiting}
+Sleeping {sleep_interval}s..."""
                 )
             else:
                 print(f"All {num_spun_up} / {len(statuses)} servers ready! Polling every 60s")
@@ -311,7 +392,7 @@ Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
         finally:
             self.shutdown()
 
-    def check_http_server_statuses(self) -> List[ServerStatus]:
+    def check_http_server_statuses(self) -> List[Tuple[str, ServerStatus]]:
         print(
             "Checking for HTTP server statuses (you should see some HTTP requests to `/` that may 404. This is expected.)"
         )
@@ -319,7 +400,7 @@ Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
         for server_instance_display_config in self._server_instance_display_configs:
             name = server_instance_display_config.config_path
             status = self._server_client.poll_for_status(name)
-            statuses.append(status)
+            statuses.append((name, status))
 
         return statuses
 

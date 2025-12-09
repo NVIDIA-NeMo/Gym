@@ -467,7 +467,8 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
     async def _raise_for_status(self, response: ClientResponse, request_kwargs: Dict[str, Any]) -> None:
         if not response.ok:
-            print(f"Request kwargs: {json.dumps(request_kwargs)}")
+            print(f"Response status: {response.status}", flush=True)
+            # print(f"Request kwargs: {json.dumps(request_kwargs)}")
 
         await raise_for_status(response)
 

@@ -45,6 +45,8 @@ HEAD_SERVER_KEY_NAME = "head_server"
 DISALLOWED_PORTS_KEY_NAME = "disallowed_ports"
 HEAD_SERVER_DEPS_KEY_NAME = "head_server_deps"
 PYTHON_VERSION_KEY_NAME = "python_version"
+RAY_GPU_NODES_KEY_NAME = "ray_gpu_nodes"
+RAY_NUM_GPUS_PER_NODE_KEY_NAME = "ray_num_gpus_per_node"
 USE_ABSOLUTE_IP = "use_absolute_ip"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
@@ -54,6 +56,8 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     DISALLOWED_PORTS_KEY_NAME,
     HEAD_SERVER_DEPS_KEY_NAME,
     PYTHON_VERSION_KEY_NAME,
+    RAY_GPU_NODES_KEY_NAME,
+    RAY_NUM_GPUS_PER_NODE_KEY_NAME,
     USE_ABSOLUTE_IP,
 ]
 
@@ -261,7 +265,8 @@ class GlobalConfigDictParser(BaseModel):
             # Constrain sensitive package versions
             global_config_dict[HEAD_SERVER_DEPS_KEY_NAME] = [
                 # The ray version is very sensitive. The children ray versions must exactly match those of the parent ray.
-                f"ray=={ray_version}",
+                # The ray extra [default] should also exactly match the extra in the top-level Gym pyproject.toml.
+                f"ray[default]=={ray_version}",
                 # OpenAI version is also sensitive since it changes so often and may introduce subtle incompatibilities.
                 f"openai=={openai_version}",
             ]

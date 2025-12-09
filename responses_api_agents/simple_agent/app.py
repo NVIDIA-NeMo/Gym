@@ -43,7 +43,8 @@ from nemo_gym.server_utils import raise_for_status
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
-    max_steps: int = None
+    max_steps: int = 1
+    # max_steps: int = None
 
 
 class SimpleAgentRunRequest(BaseRunRequest):
@@ -60,6 +61,10 @@ class SimpleAgentVerifyResponse(BaseVerifyResponse):
 
 class SimpleAgent(SimpleResponsesAPIAgent):
     config: SimpleAgentConfig
+
+    def model_post_init(self, context):
+        print(f"DEBUG: SimpleAgent: config = {self.config}", flush=True)
+        return super().model_post_init(context)
 
     async def responses(
         self,

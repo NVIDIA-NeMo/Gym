@@ -1,0 +1,2 @@
+-e nemo-gym[dev] @ ../../
+metricx @ git+https://github.com/hrossnv/metricx.git@main
