@@ -2,7 +2,10 @@
 
 # Get Started with NeMo Gym
 
-Run a training environment and start collecting rollouts for training in under 5 minutes.
+This guide helps you install NeMo Gym, run a training environment, and collect your first rollouts. Choose your path:
+
+- **[Quickstart](#gs-quickstart)**: Get running in under 5 minutes with a single-page walkthrough.
+- **[Detailed Setup Guide](#detailed-setup-guide)**: Step-by-step tutorials with deeper explanations of each component.
 
 ## Before You Start
 
@@ -14,6 +17,7 @@ Make sure you have these prerequisites ready:
 
 ---
 
+(gs-quickstart)=
 ## Quickstart
 
 ### Steps

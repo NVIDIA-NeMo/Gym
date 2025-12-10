@@ -25,12 +25,12 @@ NeMo Gym is a framework for building reinforcement learning (RL) training enviro
 At the core of NeMo Gym are three server concepts: **Responses API Model servers** are model endpoints, **Resources servers** contain tool implementations and verification logic, and **Response API Agent servers** orchestrate the interaction between models and resources.
 
 ````{div} sd-d-flex-row
-```{button-ref} get-started/index
-:ref-type: doc
+```{button-ref} gs-quickstart
+:ref-type: ref
 :color: primary
 :class: sd-rounded-pill sd-mr-3
 
-Get Started
+Quickstart
 ```
 
 ```{button-ref} tutorials/index
@@ -165,7 +165,7 @@ Ecosystem <about/ecosystem>
 :hidden:
 :maxdepth: 1
 
-Quickstart <get-started/index>
+Overview <get-started/index>
 get-started/setup-installation.md
 get-started/rollout-collection.md
 ```
