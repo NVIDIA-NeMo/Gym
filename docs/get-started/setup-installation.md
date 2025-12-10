@@ -23,7 +23,7 @@
 
 NeMo Gym is designed to run on standard development machines without specialized hardware:
 
-- **GPU**: Not required for NeMo Gym framework operation
+- **GPU**: Not required for NeMo Gym library operation
   - GPU may be needed for specific resource servers or model inference (see individual server documentation). E.g. if you are intending to train your model with NeMo-RL, GPU resources are required (see training documentation)
 - **CPU**: Any modern x86_64 or ARM64 processor (e.g., Intel, AMD, Apple Silicon)
 - **RAM**: Minimum 8 GB (16 GB+ recommended for larger environments and datasets)
@@ -327,7 +327,7 @@ Your directory should look like this:
 Gym/
 ├── env.yaml                    # Your API credentials (git-ignored)
 ├── .venv/                      # Virtual environment (git-ignored)
-├── nemo_gym/                   # Core framework code
+├── nemo_gym/                   # Core library code
 ├── resources_servers/          # Tools and environments
 ├── responses_api_models/       # Model integrations  
 ├── responses_api_agents/       # Agent implementations
