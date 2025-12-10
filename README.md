@@ -164,7 +164,7 @@ Purpose: Demonstrate NeMo Gym patterns and concepts.
 <!-- START_EXAMPLE_ONLY_SERVERS_TABLE -->
 | Name             | Demonstrates                         | Config                                                                                                       | README                                                                    |
 | ---------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------- |
-| Multi Step       | Instruction_Following example        | <a href='resources_servers/example_multi_step/configs/example_multi_step.yaml'>example_multi_step.yaml</a>   | <a href='resources_servers/example_multi_step/README.md'>README</a>       |
+| Multi Step       | Multi-step tool calling              | <a href='resources_servers/example_multi_step/configs/example_multi_step.yaml'>example_multi_step.yaml</a>   | <a href='resources_servers/example_multi_step/README.md'>README</a>       |
 | Simple Weather   | Basic single-step tool calling       | <a href='resources_servers/example_simple_weather/configs/simple_weather.yaml'>simple_weather.yaml</a>       | <a href='resources_servers/example_simple_weather/README.md'>README</a>   |
 | Stateful Counter | Session state management (in-memory) | <a href='resources_servers/example_stateful_counter/configs/stateful_counter.yaml'>stateful_counter.yaml</a> | <a href='resources_servers/example_stateful_counter/README.md'>README</a> |
 <!-- END_EXAMPLE_ONLY_SERVERS_TABLE -->
