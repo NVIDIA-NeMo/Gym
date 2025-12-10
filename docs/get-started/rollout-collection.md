@@ -184,7 +184,9 @@ Congratulations! You now have a working NeMo Gym installation and understand how
 :::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Use an Existing Training Environment
 :link: https://github.com/NVIDIA-NeMo/Gym#-available-resource-servers
 
-Browse the available resource servers to find a training-ready environment that matches your goals.
+Browse the available resource servers on GitHub to find a training-ready environment that matches your goals.
++++
+{bdg-secondary}`github` {bdg-secondary}`resource-servers`
 :::
 
 :::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build a Custom Training Environment
@@ -192,6 +194,8 @@ Browse the available resource servers to find a training-ready environment that 
 :link-type: doc
 
 Implement or integrate existing tools and define task verification logic.
++++
+{bdg-secondary}`tutorial` {bdg-secondary}`custom-tools`
 :::
 
 ::::

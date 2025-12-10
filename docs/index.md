@@ -1,129 +1,149 @@
+---
+description: "NeMo Gym is an open-source library for building reinforcement learning (RL) training environments for large language models (LLMs)"
+categories:
+  - documentation
+  - home
+tags:
+  - reinforcement-learning
+  - llm-training
+  - rollout-collection
+  - agent-environments
+personas:
+  - Data Scientists
+  - Machine Learning Engineers
+  - RL Researchers
+difficulty: beginner
+content_type: index
+---
+
 (gym-home)=
 
 # NeMo Gym Documentation
 
-[NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) is a library for building reinforcement learning (RL) training environments for large language models (LLMs). It provides infrastructure to develop environments, scale rollout collection, and integrate seamlessly with your preferred training framework.
+NeMo Gym is a framework for building reinforcement learning (RL) training environments large language models (LLMs). Gym provides training environment development scaffolding and training environment patterns such as multi-step, multi-turn, and user modeling scenarios.
 
-A training environment consists of three server components: **Agents** orchestrate the rollout lifecycle—calling models, executing tool calls via resources, and coordinating verification. **Models** provide stateless text generation using LLM inference endpoints. **Resources** define tasks, tool implementations, and verification logic.
+At the core of NeMo Gym are three server concepts: **Responses API Model servers** are model endpoints, **Resources servers** contain tool implementations and verification logic, and **Response API Agent servers** orchestrate the interaction between models and resources.
 
-## Quickstart
+````{div} sd-d-flex-row
+```{button-ref} get-started/index
+:ref-type: doc
+:color: primary
+:class: sd-rounded-pill sd-mr-3
 
-Run a training environment and start collecting rollouts for training in under 5 minutes.
-
-::::{tab-set}
-
-:::{tab-item} 1. Set Up
-
-**Install NeMo Gym**
-
-Get NeMo Gym installed and ready to use:
-
-```bash
-# Clone the repository
-git clone git@github.com:NVIDIA-NeMo/Gym.git
-cd Gym
-
-# Install UV (Python package manager)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-source $HOME/.local/bin/env
-
-# Create virtual environment
-uv venv --python 3.12
-source .venv/bin/activate
-
-# Install NeMo Gym
-uv sync --extra dev --group docs
+Get Started
 ```
 
-**Configure Your API Key**
+```{button-ref} tutorials/index
+:ref-type: doc
+:color: secondary
+:class: sd-rounded-pill
 
-Create an `env.yaml` file that contains your OpenAI API key and the {term}`Policy Model` you want to use. Replace `your-openai-api-key` with your actual key. This file helps keep your secrets out of version control while still making them available to NeMo Gym.
-
-```bash
-echo "policy_base_url: https://api.openai.com/v1
-policy_api_key: your-openai-api-key
-policy_model_name: gpt-4.1-2025-04-14" > env.yaml
+Explore Tutorials
 ```
-
-> **Note:** We use GPT-4.1 in this quickstart because it provides low latency (no reasoning step) and works reliably out-of-the-box. NeMo Gym is **not limited to OpenAI models**—you can use self-hosted models via vLLM or any OpenAI-compatible inference server that supports function calling. See the setup guide for details.
-
-:::
-
-:::{tab-item} 2. Start Servers
-
-**Terminal 1** (start servers):
-
-```bash
-# Start servers (this will keep running)
-config_paths="resources_servers/example_simple_weather/configs/simple_weather.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
-ng_run "+config_paths=[${config_paths}]"
-```
-
-**Terminal 2** (interact with agent):
-
-```bash
-# In a NEW terminal, activate environment
-source .venv/bin/activate
-
-# Interact with your agent
-python responses_api_agents/simple_agent/client.py
-```
-
-:::
-
-:::{tab-item} 3. Collect Rollouts
-
-**Terminal 2** (keep servers running in Terminal 1):
-
-```bash
-# Create a simple dataset with one query
-echo '{"responses_create_params":{"input":[{"role":"developer","content":"You are a helpful assistant."},{"role":"user","content":"What is the weather in Seattle?"}]}}' > weather_query.jsonl
-
-# Collect verified rollouts
-ng_collect_rollouts \
-    +agent_name=simple_weather_simple_agent \
-    +input_jsonl_fpath=weather_query.jsonl \
-    +output_jsonl_fpath=weather_rollouts.jsonl
-
-# View the result
-cat weather_rollouts.jsonl | python -m json.tool
-```
-
-This generates training data with verification scores!
-
-:::
-
-:::{tab-item} 4. Clean Up Servers
-
-**Terminal 1** with the running servers: Ctrl+C to stop the `ng_run` process.
-
-:::
-::::
+````
 
 ---
 
-## What's Next?
+## Introduction to Gym
 
-Now that you can generate rollouts, choose your path:
+Learn about NeMo Gym, how it works at a high level, and the key concepts.
 
-::::{grid} 1 1 2 2
-:gutter: 3
+::::{grid} 1 2 2 2
+:gutter: 1 1 1 2
 
-:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Use an Existing Training Environment
-:link: https://github.com/NVIDIA-NeMo/Gym#-available-resource-servers
-
-Browse the available resource servers to find a training-ready environment that matches your goals.
+:::{grid-item-card} {octicon}`book;1.5em;sd-mr-1` About Gym
+:link: about/index
+:link-type: doc
+Overview of NeMo Gym and its capabilities for building RL training environments.
++++
+{bdg-secondary}`target-users` {bdg-secondary}`how-it-works`
 :::
 
-:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build a Custom Training Environment
-:link: tutorials/creating-resource-server
+:::{grid-item-card} {octicon}`gear;1.5em;sd-mr-1` Concepts
+:link: about/concepts/index
 :link-type: doc
+Explore the core components: Agents, Models, and Resources.
++++
+{bdg-secondary}`agents` {bdg-secondary}`models` {bdg-secondary}`resources`
+:::
 
-Implement or integrate existing tools and define task verification logic.
+:::{grid-item-card} {octicon}`globe;1.5em;sd-mr-1` Ecosystem
+:link: about/ecosystem
+:link-type: doc
+Understand how NeMo Gym integrates with NeMo RL and other training frameworks.
++++
+{bdg-secondary}`nemo-rl` {bdg-secondary}`integrations`
 :::
 
 ::::
+
+## Get Started
+
+Install and run NeMo Gym to start collecting rollouts.
+
+::::{grid} 1 2 2 2
+:gutter: 1 1 1 2
+
+:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` Quickstart
+:link: get-started/index
+:link-type: doc
+Run a training environment and start collecting rollouts in under 5 minutes.
++++
+{bdg-primary}`beginner`
+:::
+
+:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Setup and Installation
+:link: get-started/setup-installation
+:link-type: doc
+Complete guide with requirements, model provider options, and troubleshooting.
++++
+{bdg-secondary}`environment` {bdg-secondary}`configuration`
+:::
+
+:::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` Rollout Collection
+:link: get-started/rollout-collection
+:link-type: doc
+Batch processing, parameter tuning, and the rollout viewer tool.
++++
+{bdg-secondary}`training-data` {bdg-secondary}`scale`
+:::
+
+::::
+
+## Tutorials
+
+Hands-on tutorials to build and customize your training environments.
+
+::::{grid} 1 2 2 2
+:gutter: 1 1 1 2
+
+:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build a Resource Server
+:link: tutorials/creating-resource-server
+:link-type: doc
+Implement custom tools and define task verification logic.
++++
+{bdg-secondary}`custom-environments` {bdg-secondary}`tools`
+:::
+
+:::{grid-item-card} {octicon}`database;1.5em;sd-mr-1` Offline Training
+:link: tutorials/offline-training-w-rollouts
+:link-type: doc
+Train models offline using collected rollouts.
++++
+{bdg-secondary}`training` {bdg-secondary}`datasets`
+:::
+
+:::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` RL Training with NeMo RL
+:link: tutorials/rl-training-with-nemo-rl
+:link-type: doc
+Integrate NeMo Gym with NeMo RL for end-to-end RL training.
++++
+{bdg-secondary}`nemo-rl` {bdg-secondary}`integration`
+:::
+
+::::
+
+---
 
 ```{toctree}
 :hidden:
@@ -145,11 +165,10 @@ Ecosystem <about/ecosystem>
 :hidden:
 :maxdepth: 1
 
-Overview <get-started/index>
+Quickstart <get-started/index>
 get-started/setup-installation.md
 get-started/rollout-collection.md
 ```
-
 
 ```{toctree}
 :caption: Tutorials
