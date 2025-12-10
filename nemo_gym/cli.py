@@ -25,7 +25,7 @@ from os import environ, makedirs
 from os.path import exists
 from pathlib import Path
 from signal import SIGINT
-from subprocess import Popen
+from subprocess import Popen, PIPE
 from threading import Thread
 from time import sleep
 from typing import Dict, List, Optional, Tuple
@@ -92,7 +92,9 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
     return cmd
 
 
-def _run_command(command: str, working_dir_path: Path) -> Popen:  # pragma: no cover
+def _run_command(
+    command: str, working_dir_path: Path, top_level_path: Optional[str] = None
+) -> Popen:  # pragma: no cover
     work_dir = f"{working_dir_path.absolute()}"
     custom_env = environ.copy()
     py_path = custom_env.get("PYTHONPATH", None)
@@ -100,7 +102,19 @@ def _run_command(command: str, working_dir_path: Path) -> Popen:  # pragma: no c
         custom_env["PYTHONPATH"] = f"{work_dir}:{py_path}"
     else:
         custom_env["PYTHONPATH"] = work_dir
-    return Popen(command, executable="/bin/bash", shell=True, env=custom_env)
+    redirect_stdout = None
+    redirect_stderr = None
+    if top_level_path:
+        redirect_stdout = PIPE
+        redirect_stderr = PIPE
+    return Popen(
+        command,
+        executable="/bin/bash",
+        shell=True,
+        env=custom_env,
+        stdout=redirect_stdout,
+        stderr=redirect_stderr,
+    )
 
 
 class RunConfig(BaseNeMoGymCLIConfig):
@@ -220,7 +234,7 @@ class RunHelper:  # pragma: no cover
     {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(top_level_path)} \\
     python {str(entrypoint_fpath)}"""
 
-            process = _run_command(command, dir_path)
+            process = _run_command(command, dir_path, top_level_path)
             self._processes[top_level_path] = process
 
             host = server_config_dict.get("host")
