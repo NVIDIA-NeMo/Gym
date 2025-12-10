@@ -6,6 +6,9 @@ resolution-markers = [
     "python_full_version < '3.13'",
 ]
 
+[manifest]
+overrides = [{ name = "mecab-ko", specifier = "==1.0.2" }]
+
 [[package]]
 name = "accessible-pygments"
 version = "0.0.5"

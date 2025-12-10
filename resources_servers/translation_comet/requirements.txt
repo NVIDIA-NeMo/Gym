@@ -1,1 +1,2 @@
 -e nemo-gym[dev] @ ../../
+unbabel-comet>=2.2.4

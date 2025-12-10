@@ -43,7 +43,7 @@ from nemo_gym.server_utils import raise_for_status
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
-    max_steps: int = None
+    max_steps: int = 1
 
 
 class SimpleAgentRunRequest(BaseRunRequest):
@@ -77,18 +77,26 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         model_server_cookies = None  # update the cookies on every model response
         resources_server_cookies = request.cookies  # update the cookies on every resources server response
 
+        last_good_model_response: NeMoGymResponse | None = None
+
         while True:
             step += 1
             new_body = body.model_copy(update={"input": body.input + new_outputs})
 
-            model_response = await self.server_client.post(
-                server_name=self.config.model_server.name,
-                url_path="/v1/responses",
-                json=new_body,
-                cookies=model_server_cookies,
-            )
-            # We raise for status here since we expect model calls to always work.
-            await raise_for_status(model_response)
+            try:
+                model_response = await self.server_client.post(
+                    server_name=self.config.model_server.name,
+                    url_path="/v1/responses",
+                    json=new_body,
+                    cookies=model_server_cookies,
+                )
+                # We raise for status here since we expect model calls to always work.
+                await raise_for_status(model_response)
+            except Exception:
+                # If the model server errors (e.g., context too long), stop the loop
+                # and return whatever we have so far. This yields zero reward downstream.
+                break
+
             model_response_json = await model_response.json()
             model_server_cookies = model_response.cookies
             try:
@@ -100,6 +108,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
             output = model_response.output
             new_outputs.extend(output)
+            last_good_model_response = model_response
 
             all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
             all_output_messages: List[NeMoGymResponseOutputMessage] = [
@@ -133,8 +142,35 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         for k, v in (*resources_server_cookies.items(), *model_server_cookies.items()):
             response.set_cookie(k, v)
 
-        model_response.output = new_outputs
-        return model_response
+        # Use the last successful model response if available; otherwise, return an empty response shell.
+        final_response = last_good_model_response or NeMoGymResponse(
+            id="resp_error",
+            created_at=0,
+            model=body.model or "",
+            object="response",
+            output=[],
+            tool_choice=getattr(body, "tool_choice", "auto"),
+            parallel_tool_calls=body.parallel_tool_calls,
+            tools=body.tools,
+            temperature=body.temperature,
+            top_p=body.top_p,
+            background=body.background,
+            max_output_tokens=body.max_output_tokens,
+            max_tool_calls=body.max_tool_calls,
+            previous_response_id=body.previous_response_id,
+            prompt=body.prompt,
+            reasoning=body.reasoning,
+            service_tier=body.service_tier,
+            text=body.text,
+            top_logprobs=body.top_logprobs,
+            truncation=body.truncation,
+            metadata=body.metadata,
+            instructions=body.instructions,
+            user=body.user,
+        )
+
+        final_response.output = new_outputs
+        return final_response
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
         cookies = request.cookies
