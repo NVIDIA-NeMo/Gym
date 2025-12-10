@@ -574,8 +574,19 @@ class RunOpenHandsAgent:
     ) -> str:
         nv_internal_eval_cmd = await self.prepare_nv_internal_eval(data_point, model_patch)
         instance_dict = json.loads(data_point["instance_dict"])
-        f2p = json.loads(instance_dict.get("fail_to_pass_select", instance_dict.get("fail_to_pass", "[]")))
-        p2p = json.loads(instance_dict.get("pass_to_pass_select", instance_dict.get("pass_to_pass", "[]")))
+
+        fail_to_pass_str = instance_dict.get("fail_to_pass_select", instance_dict.get("fail_to_pass", "[]"))
+        pass_to_pass_str = instance_dict.get("pass_to_pass_select", instance_dict.get("pass_to_pass", "[]"))
+
+        if isinstance(fail_to_pass_str, str):
+            f2p = set(json.loads(fail_to_pass_str))
+        else:
+            f2p = set(fail_to_pass_str)
+
+        if isinstance(pass_to_pass_str, str):
+            p2p = set(json.loads(pass_to_pass_str))
+        else:
+            p2p = set(pass_to_pass_str)
 
         search_path = os.path.join(
             self.output_dir,
@@ -593,7 +604,11 @@ class RunOpenHandsAgent:
 
         with open(report_file, "r+") as f:
             test_results = json.loads(f.read())
-            is_resolved = self.check_tests_passed(test_results, data_point)
+            is_resolved = self.check_tests_passed(
+                test_results,
+                f2p,
+                p2p,
+            )
             report_dict = dict(
                 resolved=is_resolved,
                 patch_exists=True,
@@ -707,8 +722,7 @@ class RunOpenHandsAgent:
 
             return output_dict
         finally:
-            # self._cleanup_instance_dataset(instance_dataset_path)
-            pass
+            self._cleanup_instance_dataset(instance_dataset_path)
 
     async def prepare_nv_internal_eval(self, data_point: dict[str, Any], model_patch: str):
         instance_dict = json.loads(data_point["instance_dict"])
@@ -792,28 +806,17 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
 
         return cmd
 
-    def check_tests_passed(self, output: dict[str, Any], instance_dict: dict[str, Any]) -> bool:
-        if not output:
+    def check_tests_passed(
+        self,
+        test_results: dict[str, Any],
+        f2p: set[str],
+        p2p: set[str],
+    ) -> bool:
+        if not test_results:
             return False
 
-        # Get passed test names
-        passed_tests = {test["name"] for test in output.get("tests", []) if test.get("status") == "PASSED"}
-
-        # Get required test sets
-        fail_to_pass_str = instance_dict.get("fail_to_pass_select", instance_dict.get("fail_to_pass", "[]"))
-        pass_to_pass_str = instance_dict.get("pass_to_pass_select", instance_dict.get("pass_to_pass", "[]"))
-
-        if isinstance(fail_to_pass_str, str):
-            fail_to_pass = set(json.loads(fail_to_pass_str))
-        else:
-            fail_to_pass = set(fail_to_pass_str)
-
-        if isinstance(pass_to_pass_str, str):
-            pass_to_pass = set(json.loads(pass_to_pass_str))
-        else:
-            pass_to_pass = set(pass_to_pass_str)
-
-        required_tests = fail_to_pass.union(pass_to_pass)
+        passed_tests = {test["name"] for test in test_results.get("tests", []) if test.get("status") == "PASSED"}
+        required_tests = f2p.union(p2p)
 
         # Check if all required tests passed
         if len(passed_tests) == 0 or len(required_tests) == 0:
