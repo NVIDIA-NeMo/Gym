@@ -224,8 +224,14 @@ class RunOpenHandsAgent:
             # Use pre-built OpenHands
             "cd /openhands_setup/OpenHands && "
             "export RUNTIME=local && "
-            "export LOG_LEVEL=DEBUG && "
-            "export LOG_TO_FILE=true && "
+            # "export LOG_LEVEL=DEBUG && "
+            # "export LOG_TO_FILE=true && "
+            "export LOG_LEVEL=CRITICAL && "
+            "export DEBUG=False && "
+            "export DEBUG_LLM=False && "
+            "export LOG_TO_FILE=False && "
+            "export LOG_ALL_EVENTS=False && "
+            "export DEBUG_RUNTIME=False && "
             "export VIRTUAL_ENV=/openhands_setup/OpenHands/.venv && "
             "export PATH=$PATH:/openhands_setup/OpenHands/.venv/bin && "
             # CRITICAL: Configure poetry to only use the OpenHands venv (ignore external venvs)
@@ -434,11 +440,15 @@ class RunOpenHandsAgent:
             )
             mount_args.append(f"--mount type=bind,src={self.openhands_setup_dir},dst=/openhands_setup")
             mount_args.append(f"--mount type=bind,src={self.openhands_setup_dir},dst={self.openhands_setup_dir}")
-            # Mount only the venv as read-only to prevent mutation while keeping the rest writable
+            # Mount only the venv and miniforge as read-only to prevent mutation while keeping the rest writable
             venv_path = Path(self.openhands_setup_dir) / "OpenHands/.venv"
             mount_args.append(f"--mount type=bind,src={venv_path},dst=/openhands_setup/OpenHands/.venv,ro")
             mount_args.append(f"--mount type=bind,src={venv_path},dst={venv_path},ro")
             mount_args.append(f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl")
+
+            miniforge3_path = Path(self.openhands_setup_dir) / "miniforge3"
+            mount_args.append(f"--mount type=bind,src={miniforge3_path},dst=/openhands_setup/miniforge3,ro")
+            mount_args.append(f"--mount type=bind,src={miniforge3_path},dst={miniforge3_path},ro")
 
         # Add SWE-bench setup directory mount if available (for evaluation)
         if mode == "eval" and data_point["dataset_name"] != "nv-internal-1":
