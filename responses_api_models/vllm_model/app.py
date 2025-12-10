@@ -92,7 +92,7 @@ def _start_vllm_server(config: VLLMModelConfig, server_host: str, server_port: i
     import vllm.engine.arg_utils
     import vllm.entrypoints.openai.api_server
     import vllm.entrypoints.openai.cli_args
-    import vllm.utils
+    import vllm.utils.argparse_utils
 
     argv = []
     argv.append("--model")
@@ -118,7 +118,7 @@ def _start_vllm_server(config: VLLMModelConfig, server_host: str, server_port: i
             argv.append(arg_key)
             argv.append(f"{v}")
 
-    server_args = vllm.utils.FlexibleArgumentParser()
+    server_args = vllm.utils.argparse_utils.FlexibleArgumentParser()
     server_args = vllm.entrypoints.openai.cli_args.make_arg_parser(server_args)
     server_args = server_args.parse_args(argv)
     vllm.entrypoints.openai.cli_args.validate_parsed_serve_args(server_args)
