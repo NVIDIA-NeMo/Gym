@@ -100,7 +100,6 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
             output = model_response.output
             new_outputs.extend(output)
-            last_good_model_response = model_response
 
             all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
             all_output_messages: List[NeMoGymResponseOutputMessage] = [
@@ -134,7 +133,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         for k, v in (*resources_server_cookies.items(), *model_server_cookies.items()):
             response.set_cookie(k, v)
 
-        model_response.outputs = new_outputs
+        model_response.output = new_outputs
 
         return model_response
 
