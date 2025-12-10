@@ -59,7 +59,7 @@ ng_upload_dataset_to_hf \
 
 There will be a confirmation dialog to confirm the deletion:
 ```bash
-[Nemo-Gym] - Dataset uploaded successful
+[Nemo-Gym] - Dataset upload successful
 [Nemo-Gym] - Found model 'fs-test' in the registry. Are you sure you want to delete it from Gitlab? [y/N]:
 ```
 
@@ -77,6 +77,17 @@ If you've already uploaded to Huggingface and just want to do a standalone delet
 ```bash
 ng_delete_dataset_from_gitlab \
     +dataset_name={your dataset name}
+```
+
+By default, the `split` parameter for uploading is set to `train`, which will run a check on the required fields `{"responses_create_params", "reward_profiles", "expected_answer"}`. Specifying `validation` or `test` bypasses this check:
+
+```bash
+resource_config_path="resources_servers/multineedle/configs/multineedle.yaml"
+ng_gitlab_to_hf_dataset \
+    +dataset_name=my-dataset \
+    +input_jsonl_fpath=data/multineedle_benchmark_validation.jsonl \
+    +resource_config_path=${resource_config_path} \
+    +split=validation
 ```
 
 :::{important}

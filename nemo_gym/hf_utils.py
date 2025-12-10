@@ -123,15 +123,22 @@ def upload_jsonl_dataset(
     with open(config.resource_config_path, "r") as f:
         data = yaml.safe_load(f)
 
-    domain = d.title() if (d := visit_resource_server(data).to_dict().get("domain")) else None
+    domain = d.lower() if (d := visit_resource_server(data).to_dict().get("domain")) else ""
     resource_server = config.resource_config_path.split("/")[1]
     dataset_name = config.dataset_name
     prefix = config.hf_dataset_prefix + "-" if config.hf_dataset_prefix else ""
-    repo_id = f"{config.hf_organization}/{prefix}{domain}-{resource_server}-{dataset_name}"
-    collection_id = f"{config.hf_organization}/{config.hf_collection_name}-{config.hf_collection_slug}"
+    collection_id = (
+        f"{config.hf_organization}/{config.hf_collection_name.lower().replace(' ', '-')}-{config.hf_collection_slug}"
+    )
 
-    # Dataset format check
-    if not check_jsonl_format(config.input_jsonl_fpath):
+    if dataset_name:
+        repo_id = f"{config.hf_organization}/{prefix}{domain}-{dataset_name}"
+    else:
+        repo_id = f"{config.hf_organization}/{prefix}{domain}-{resource_server}"
+
+    # Dataset format check - only strict check for training data
+    is_training = config.split.lower() == "train"
+    if is_training and not check_jsonl_format(config.input_jsonl_fpath):
         print("[Nemo-Gym] - JSONL file format check failed.")
         return
 
@@ -166,7 +173,7 @@ def upload_jsonl_dataset(
             token=config.hf_token,
             repo_type="dataset",
         )
-        print("[Nemo-Gym] - Dataset uploaded successful")
+        print("[Nemo-Gym] - Dataset upload successful")
     except HfHubHTTPError as e:
         print(f"[Nemo-Gym] - Error uploading file: {e}")
         raise
