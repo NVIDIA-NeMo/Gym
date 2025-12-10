@@ -28,6 +28,10 @@ Embedding custom training environments directly within training frameworks is co
 - Interoperable with existing environments, systems, and RL training frameworks
 - Growing collection of training environments and datasets for Reinforcement Learning from Verifiable Reward (RLVR)
 
+:::{tip}
+The name "NeMo Gym" comes from historical reinforcement learning literature, where the word "Gym" refers to a collection of RL training environments!
+:::
+
 ## Core Components
 
 A training environment consists of three server components:
