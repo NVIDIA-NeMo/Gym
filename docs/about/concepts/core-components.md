@@ -74,7 +74,7 @@ Each example shows what **task** the agent solves, what **actions** are availabl
   - **Actions**: None (evaluates response format/content)
   - **Verification logic**: Checks if response follows all specified instructions
 
-- **[`simple_weather`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_simple_weather)**: Mock weather API
+- **[`example_single_tool_call`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_single_tool_call)**: Mock weather API
   - **Task**: Report weather information
   - **Actions**: `get_weather()` returns mock weather data
   - **Verification logic**: Checks if weather tool was called correctly
@@ -104,9 +104,9 @@ your_agent_name:                     # server ID
     your_agent_name:                 # agent type. name of the folder inside the server type folder 
       entrypoint: app.py             # server entrypoint path, relative to the agent type folder 
       resources_server:              # which resource server to use
-        name: simple_weather         
+        name: example_single_tool_call
       model_server:                  # which model server to use
-        name: policy_model           
+        name: policy_model
 ```
 
 :::

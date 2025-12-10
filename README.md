@@ -81,7 +81,7 @@ policy_model_name: gpt-4.1-2025-04-14" > env.yaml
 **Terminal 1 (start servers)**:
 ```bash
 # Start servers (this will keep running)
-config_paths="resources_servers/example_simple_weather/configs/simple_weather.yaml,\
+config_paths="resources_servers/example_single_tool_call/configs/single_tool_call.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml"
 ng_run "+config_paths=[${config_paths}]"
 ```
@@ -104,7 +104,7 @@ echo '{"responses_create_params":{"input":[{"role":"developer","content":"You ar
 
 # Collect verified rollouts
 ng_collect_rollouts \
-    +agent_name=simple_weather_simple_agent \
+    +agent_name=single_tool_call_simple_agent \
     +input_jsonl_fpath=weather_query.jsonl \
     +output_jsonl_fpath=weather_rollouts.jsonl
 
@@ -162,11 +162,11 @@ NeMo Gym includes a curated collection of resource servers for training and eval
 Purpose: Demonstrate NeMo Gym patterns and concepts.
 
 <!-- START_EXAMPLE_ONLY_SERVERS_TABLE -->
-| Name             | Demonstrates                         | Config                                                                                                       | README                                                                    |
-| ---------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------- |
-| Multi Step       | Multi-step tool calling              | <a href='resources_servers/example_multi_step/configs/example_multi_step.yaml'>example_multi_step.yaml</a>   | <a href='resources_servers/example_multi_step/README.md'>README</a>       |
-| Simple Weather   | Basic single-step tool calling       | <a href='resources_servers/example_simple_weather/configs/simple_weather.yaml'>simple_weather.yaml</a>       | <a href='resources_servers/example_simple_weather/README.md'>README</a>   |
-| Stateful Counter | Session state management (in-memory) | <a href='resources_servers/example_stateful_counter/configs/stateful_counter.yaml'>stateful_counter.yaml</a> | <a href='resources_servers/example_stateful_counter/README.md'>README</a> |
+| Name               | Demonstrates                         | Config                                                                                                                             | README                                                                      |
+| ------------------ | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| Multi Step         | Multi-step tool calling              | <a href='resources_servers/example_multi_step/configs/example_multi_step.yaml'>example_multi_step.yaml</a>                         | <a href='resources_servers/example_multi_step/README.md'>README</a>         |
+| Session State Mgmt | Session state management (in-memory) | <a href='resources_servers/example_session_state_mgmt/configs/example_session_state_mgmt.yaml'>example_session_state_mgmt.yaml</a> | <a href='resources_servers/example_session_state_mgmt/README.md'>README</a> |
+| Single Tool Call   | Basic single-step tool calling       | <a href='resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml'>example_single_tool_call.yaml</a>       | <a href='resources_servers/example_single_tool_call/README.md'>README</a>   |
 <!-- END_EXAMPLE_ONLY_SERVERS_TABLE -->
 
 ### Table 2: Resource Servers for Training

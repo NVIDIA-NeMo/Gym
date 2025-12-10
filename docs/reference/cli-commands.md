@@ -47,7 +47,7 @@ This command reads configuration from YAML files specified via `+config_paths` a
 
 ```bash
 # Start servers with specific configs
-config_paths="resources_servers/example_simple_weather/configs/simple_weather.yaml,\
+config_paths="resources_servers/example_single_tool_call/configs/single_tool_call.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml"
 ng_run "+config_paths=[${config_paths}]"
 ```
@@ -78,7 +78,7 @@ Test a specific server module by running its pytest suite and optionally validat
 **Example**
 
 ```bash
-ng_test +entrypoint=resources_servers/example_simple_weather
+ng_test +entrypoint=resources_servers/example_single_tool_call
 ```
 
 ---
@@ -177,7 +177,7 @@ Perform a batch of rollout collection.
 
 ```bash
 ng_collect_rollouts \
-    +agent_name=simple_weather_simple_agent \
+    +agent_name=single_tool_call_simple_agent \
     +input_jsonl_fpath=weather_query.jsonl \
     +output_jsonl_fpath=weather_rollouts.jsonl \
     +limit=100 \

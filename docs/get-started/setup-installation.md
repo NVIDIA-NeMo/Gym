@@ -177,7 +177,7 @@ Check your `env.yaml` file has the correct API key format.
 
 ```bash
 # Define which servers to start
-config_paths="resources_servers/example_simple_weather/configs/simple_weather.yaml,\
+config_paths="resources_servers/example_single_tool_call/configs/single_tool_call.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml"
 
 # Start all servers

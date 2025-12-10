@@ -21,7 +21,7 @@ from nemo_gym.server_utils import ServerClient
 
 server_client = ServerClient.load_from_global_config()
 task = server_client.post(
-    server_name="stateful_counter_simple_agent",
+    server_name="example_session_state_mgmt_simple_agent",
     url_path="/run",
     json={
         "responses_create_params": NeMoGymResponseCreateParamsNonStreaming(
