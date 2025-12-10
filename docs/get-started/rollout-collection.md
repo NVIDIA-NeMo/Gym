@@ -127,7 +127,7 @@ The viewer starts on port 7860 and accepts requests only from localhost by defau
 :::{tip}
 **Configuring Network Access**
 
-By default, the viewer accepts requests only from localhost (`server_host=127.0.0.1`). To make it accessible on your local network:
+By default, the viewer accepts requests only from localhost (`server_host=127.0.0.1`). To make it accessible from a different machine:
 
 ```bash
 # Accept requests from anywhere (e.g., for remote access)
