@@ -231,17 +231,18 @@ class RunOpenHandsAgent:
             "export POETRY_VIRTUALENVS_IN_PROJECT=true && "
             "export POETRY_VIRTUALENVS_CREATE=false && "
             "export POETRY_VIRTUALENVS_PATH=/openhands_setup/OpenHands && "
-            # Reinstall cryptography inside the container (via poetry's venv) using a compatible wheel
-            # Clean any broken installs to avoid missing-file errors, then force a wheel-only reinstall
-            "site_packages_dir=/openhands_setup/OpenHands/.venv/lib/python3.12/site-packages && "
-            'if [ -d "$site_packages_dir" ]; then '
-            '    find "$site_packages_dir" -maxdepth 1 -name "cryptography*" -exec rm -rf {} +; '
-            "fi && "
-            "poetry run python -m pip install --index-url https://pypi.org/simple "
-            "    --trusted-host pypi.org --trusted-host files.pythonhosted.org "
-            "    --only-binary cryptography --no-deps --force-reinstall 'cryptography==42.0.8' && "
+            # TODO (sugam): fix cryptography issue
+            # "override_dir=$(mktemp -d /tmp/cryptography_override.XXXX) && "
+            # # Reinstall cryptography inside the container (via poetry's venv) using a compatible wheel
+            # # Clean any broken installs to avoid missing-file errors, then force a wheel-only reinstall
+            # "site_packages_dir=/openhands_setup/OpenHands/.venv/lib/python3.12/site-packages && "
+            # 'if [ -d "$site_packages_dir" ]; then '
+            # '    find "$site_packages_dir" -maxdepth 1 -name "cryptography*" -exec rm -rf {} +; '
+            # "fi && "
+            # "poetry run python -m pip install --index-url https://pypi.org/simple "
+            # "    --trusted-host pypi.org --trusted-host files.pythonhosted.org "
+            # "    --only-binary cryptography --no-deps --force-reinstall 'cryptography==42.0.8' && "
             # disable logging to file in the oh repo
-            "export LOG_TO_FILE=false && "
             # set up config files
             f"echo {shlex.quote(config_str)} >config.toml && "
             # f" export EVAL_OUTPUT_DIR={eval_dir_in_openhands} && "
