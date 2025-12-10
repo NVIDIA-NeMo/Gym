@@ -202,7 +202,7 @@ When you ran `ng_run`, it started all the servers you configured:
 - **Head server:** coordinating all components
 - **Resources server:** defining tools and verification
 - **Model server:** providing LLM inference
-- **Agent server:** orchestrating how the model interacts with the resources
+- **Agent server:** orchestrating how the model interacts with the resources. The agent server calls the model and resources servers using REST requests.
 
 :::{dropdown} Troubleshooting: "command not found: ng_run"
 Make sure you activated the virtual environment:
