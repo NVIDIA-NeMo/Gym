@@ -23,7 +23,7 @@
 
 NeMo Gym is designed to run on standard development machines without specialized hardware:
 
-- **GPU**: Not required for NeMo Gym framework operation
+- **GPU**: Not required for NeMo Gym library operation
   - GPU may be needed for specific resource servers or model inference (see individual server documentation). E.g. if you are intending to train your model with NeMo-RL, GPU resources are required (see training documentation)
 - **CPU**: Any modern x86_64 or ARM64 processor (e.g., Intel, AMD, Apple Silicon)
 - **RAM**: Minimum 8 GB (16 GB+ recommended for larger environments and datasets)
@@ -123,6 +123,8 @@ Replace `sk-your-actual-openai-api-key-here` with your real OpenAI API key. This
 - The model must support function calling (most GPT-4 models do)
 - Refer to [OpenAI's models documentation](https://platform.openai.com/docs/models) 🔗 for available models
 
+Refer to {doc}`/reference/configuration` for additional `env.yaml` options.
+
 **Why GPT-4.1?** We use GPT-4.1 for getting started because it provides low latency (no reasoning step) and reliable function calling support out-of-the-box, letting you focus on learning NeMo Gym without configuration complexity.
 
 **Can I use my own model?** Yes! NeMo Gym works with any OpenAI-compatible inference server that supports function calling:
@@ -130,7 +132,6 @@ Replace `sk-your-actual-openai-api-key-here` with your real OpenAI API key. This
 - **Other providers**: Any inference server that implements the OpenAI API specification
 
 Simply update `policy_base_url`, `policy_api_key`, and `policy_model_name` in your `env.yaml` to point to your chosen endpoint.
-
 :::
 
 :::{dropdown} Optional: Validate your API key before proceeding
@@ -201,7 +202,7 @@ When you ran `ng_run`, it started all the servers you configured:
 - **Head server:** coordinating all components
 - **Resources server:** defining tools and verification
 - **Model server:** providing LLM inference
-- **Agent server:** orchestrating how the model interacts with the resources
+- **Agent server:** orchestrating how the model interacts with the resources. The agent server calls the model and resources servers using REST requests.
 
 :::{dropdown} Troubleshooting: "command not found: ng_run"
 Make sure you activated the virtual environment:
@@ -327,7 +328,7 @@ Your directory should look like this:
 Gym/
 ├── env.yaml                    # Your API credentials (git-ignored)
 ├── .venv/                      # Virtual environment (git-ignored)
-├── nemo_gym/                   # Core framework code
+├── nemo_gym/                   # Core library code
 ├── resources_servers/          # Tools and environments
 ├── responses_api_models/       # Model integrations  
 ├── responses_api_agents/       # Agent implementations

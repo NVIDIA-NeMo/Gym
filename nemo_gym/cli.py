@@ -62,20 +62,41 @@ from nemo_gym.server_utils import (
 
 
 def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  # pragma: no cover
-    install_cmd = "uv pip install -r requirements.txt"
     head_server_deps = global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]
-    install_cmd += " " + " ".join(head_server_deps)
 
-    return f"""cd {dir_path} \\
-    && uv venv --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} \\
+    uv_venv_cmd = f"uv venv --seed --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} .venv"
+
+    has_pyproject_toml = exists(f"{dir_path / 'pyproject.toml'}")
+    has_requirements_txt = exists(f"{dir_path / 'requirements.txt'}")
+
+    if has_pyproject_toml and has_requirements_txt:
+        raise RuntimeError(
+            f"Found both pyproject.toml and requirements.txt for uv venv setup in server dir: {dir_path}. Please only use one or the other!"
+        )
+    elif has_pyproject_toml:
+        install_cmd = f"""uv pip install '-e .' {" ".join(head_server_deps)}"""
+    elif has_requirements_txt:
+        install_cmd = f"""uv pip install -r requirements.txt {" ".join(head_server_deps)}"""
+    else:
+        raise RuntimeError(f"Missing pyproject.toml or requirements.txt for uv venv setup in server dir: {dir_path}")
+
+    cmd = f"""cd {dir_path} \\
+    && {uv_venv_cmd} \\
     && source .venv/bin/activate \\
     && {install_cmd} \\
-   """
+    """
+
+    return cmd
 
 
-def _run_command(command: str, working_directory: Path) -> Popen:  # pragma: no cover
+def _run_command(command: str, working_dir_path: Path) -> Popen:  # pragma: no cover
+    work_dir = f"{working_dir_path.absolute()}"
     custom_env = environ.copy()
-    custom_env["PYTHONPATH"] = f"{working_directory.absolute()}:{custom_env.get('PYTHONPATH', '')}"
+    py_path = custom_env.get("PYTHONPATH", None)
+    if py_path is not None:
+        custom_env["PYTHONPATH"] = f"{work_dir}:{py_path}"
+    else:
+        custom_env["PYTHONPATH"] = work_dir
     return Popen(command, executable="/bin/bash", shell=True, env=custom_env)
 
 
@@ -261,7 +282,22 @@ class RunHelper:  # pragma: no cover
 
         for process_name, process in self._processes.items():
             if process.poll() is not None:
-                raise RuntimeError(f"Process `{process_name}` finished unexpectedly!")
+                proc_out, proc_err = process.communicate()
+                print_str = f"Process `{process_name}` finished unexpectedly!"
+
+                if isinstance(proc_out, bytes):
+                    proc_out = proc_out.decode("utf-8")
+                    print_str = f"""{print_str}
+Process `{process_name}` stdout:
+{proc_out}
+"""
+                if isinstance(proc_err, bytes):
+                    proc_err = proc_err.decode("utf-8")
+                    print_str = f"""{print_str}
+Process `{process_name}` stderr:
+{proc_err}"""
+
+                raise RuntimeError(print_str)
 
     def wait_for_spinup(self) -> None:
         sleep_interval = 3

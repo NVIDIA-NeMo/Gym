@@ -1,1 +1,2 @@
 -e nemo-gym[dev] @ ../../
+rich

@@ -1,6 +1,6 @@
 # NeMo Gym
 
-NeMo Gym is a framework for building reinforcement learning (RL) training environments for large language models (LLMs). It provides infrastructure to develop environments, scale rollout collection, and integrate seamlessly with your preferred training framework. 
+NeMo Gym is a library for building reinforcement learning (RL) training environments for large language models (LLMs). It provides infrastructure to develop environments, scale rollout collection, and integrate seamlessly with your preferred training framework. 
 
 NeMo Gym is a component of the [NVIDIA NeMo Framework](https://docs.nvidia.com/nemo-framework/), NVIDIA’s GPU-accelerated platform for building and training generative AI models.
 
@@ -9,9 +9,9 @@ NeMo Gym is a component of the [NVIDIA NeMo Framework](https://docs.nvidia.com/n
 
 - Scaffolding and patterns to accelerate environment development: multi-step, multi-turn, and user modeling scenarios
 - Contribute environments without expert knowledge of the entire RL training loop
-- Test environment and throughput end-to-end independent of the RL training loop
-- Interoperable with existing environments, systems and RL training frameworks
-- Growing collection of training environments and datasets to enable Reinforcement Learning from Verifiable Reward (RLVR)
+- Test environments and throughput end-to-end, independent of the RL training loop
+- Interoperable with existing environments, systems, and RL training frameworks
+- Growing collection of training environments and datasets for Reinforcement Learning from Verifiable Reward (RLVR)
 
 > [!IMPORTANT]
 > NeMo Gym is currently in early development. You should expect evolving APIs, incomplete documentation, and occasional bugs. We welcome contributions and feedback - for any changes, please open an issue first to kick off discussion!
@@ -22,7 +22,7 @@ NeMo Gym is a component of the [NVIDIA NeMo Framework](https://docs.nvidia.com/n
 
 NeMo Gym is designed to run on standard development machines:
 
-- **GPU**: Not required for NeMo Gym framework operation
+- **GPU**: Not required for NeMo Gym library operation
   - GPU may be needed for specific resource servers or model inference (see individual server documentation)
 - **CPU**: Any modern x86_64 or ARM64 processor (e.g., Intel, AMD, Apple Silicon)
 - **RAM**: Minimum 8 GB (16 GB+ recommended for larger environments)
@@ -145,7 +145,7 @@ If you use NeMo Gym in your research, please cite it using the following BibTeX 
 
 ```bibtex
 @misc{nemo-gym,
-  title = {NeMo Gym: An Open Source Framework for Scaling Reinforcement Learning Environments for LLM},
+  title = {NeMo Gym: An Open Source Library for Scaling Reinforcement Learning Environments for LLM},
   howpublished = {\url{https://github.com/NVIDIA-NeMo/Gym}},
   author={NVIDIA},
   year = {2025},
@@ -164,7 +164,7 @@ Purpose: Demonstrate NeMo Gym patterns and concepts.
 <!-- START_EXAMPLE_ONLY_SERVERS_TABLE -->
 | Name             | Demonstrates                         | Config                                                                                                       | README                                                                    |
 | ---------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------- |
-| Multi Step       | Instruction_Following example        | <a href='resources_servers/example_multi_step/configs/example_multi_step.yaml'>example_multi_step.yaml</a>   | <a href='resources_servers/example_multi_step/README.md'>README</a>       |
+| Multi Step       | Multi-step tool calling              | <a href='resources_servers/example_multi_step/configs/example_multi_step.yaml'>example_multi_step.yaml</a>   | <a href='resources_servers/example_multi_step/README.md'>README</a>       |
 | Simple Weather   | Basic single-step tool calling       | <a href='resources_servers/example_simple_weather/configs/simple_weather.yaml'>simple_weather.yaml</a>       | <a href='resources_servers/example_simple_weather/README.md'>README</a>   |
 | Stateful Counter | Session state management (in-memory) | <a href='resources_servers/example_stateful_counter/configs/stateful_counter.yaml'>stateful_counter.yaml</a> | <a href='resources_servers/example_stateful_counter/README.md'>README</a> |
 <!-- END_EXAMPLE_ONLY_SERVERS_TABLE -->

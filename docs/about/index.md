@@ -22,6 +22,16 @@ Embedding custom training environments directly within training frameworks is co
 
 [NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) decouples environment development from training, letting you build and iterate on environments independently. It provides the infrastructure to develop agentic training environments and scale rollout collection, enabling seamless integration with your preferred training framework.
 
+- Scaffolding and patterns to accelerate environment development: multi-step, multi-turn, and user modeling scenarios
+- Contribute environments without expert knowledge of the entire RL training loop
+- Test environments and throughput end-to-end, independent of the RL training loop
+- Interoperable with existing environments, systems, and RL training frameworks
+- Growing collection of training environments and datasets for Reinforcement Learning from Verifiable Reward (RLVR)
+
+:::{tip}
+The name "NeMo Gym" comes from historical reinforcement learning literature, where the word "Gym" refers to a collection of RL training environments!
+:::
+
 ## Core Components
 
 A training environment consists of three server components:

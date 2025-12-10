@@ -26,12 +26,6 @@ Each explainer below covers one foundational idea and links to deeper material.
 Understand how Models, Resources, and Agents remain decoupled yet coordinated as independent HTTP services, including which endpoints each component exposes.
 :::
 
-:::{grid-item-card} {octicon}`gear;1.5em;sd-mr-1` Configuration System
-:link: configuration-management
-:link-type: ref
-Learn how NeMo Gym's three-tier configuration system (YAML → env.yaml → CLI) enables secure secrets management and flexible multi-environment deployments.
-:::
-
 :::{grid-item-card} {octicon}`check-circle;1.5em;sd-mr-1` Task Verification
 :link: task-verification
 :link-type: ref
@@ -44,6 +38,12 @@ Explore how resource servers score agent outputs with `verify()` implementations
 Essential vocabulary for agent training, RL workflows, and NeMo Gym. This glossary defines terms you'll encounter throughout the tutorials and documentation.
 :::
 
+:::{grid-item-card} {octicon}`gear;1.5em;sd-mr-1` Configuration System
+:link: configuration-concepts
+:link-type: ref
+Understand the three-level config pattern and why server IDs and implementations are independent choices.
+:::
+
 ::::
 
 ---
@@ -53,7 +53,7 @@ Essential vocabulary for agent training, RL workflows, and NeMo Gym. This glossa
 :maxdepth: 1
 
 Core Components <core-components>
-Configuration System <configuration-system>
+Configuration System <configuration>
 Task Verification <task-verification>
 Key Terminology <key-terminology>
 ```
