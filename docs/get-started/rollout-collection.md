@@ -122,7 +122,21 @@ Launch the rollout viewer:
 ng_viewer +jsonl_fpath=results/simple_weather_rollouts.jsonl
 ```
 
-Then visit <http://127.0.0.1:7860>
+The viewer starts on port 7860 and accepts requests only from localhost by default. Visit <http://127.0.0.1:7860> in your browser.
+
+:::{tip}
+**Configuring Network Access**
+
+By default, the viewer accepts requests only from localhost (`server_host=127.0.0.1`). To make it accessible from a different machine:
+
+```bash
+# Accept requests from anywhere (e.g., for remote access)
+ng_viewer +jsonl_fpath=results/simple_weather_rollouts.jsonl +server_host=0.0.0.0
+
+# Use a custom port
+ng_viewer +jsonl_fpath=results/simple_weather_rollouts.jsonl +server_port=8080
+```
+:::
 
 The viewer shows each rollout with:
 

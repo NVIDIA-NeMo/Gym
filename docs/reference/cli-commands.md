@@ -243,12 +243,25 @@ Launch a Gradio interface to view and explore dataset rollouts interactively.
 * - `jsonl_fpath`
   - str
   - Filepath to a local JSONL file to view.
+* - `server_host`
+  - str
+  - Network address where the viewer accepts requests. Defaults to `"127.0.0.1"` (localhost only). Set to `"0.0.0.0"` to accept requests from anywhere.
+* - `server_port`
+  - int
+  - Port where the viewer accepts requests. Defaults to `7860`. If the specified port is unavailable, Gradio will search for the next available port.
 ```
 
-**Example**
+**Examples**
 
 ```bash
+# Launch viewer with default settings (accessible from localhost only)
 ng_viewer +jsonl_fpath=weather_rollouts.jsonl
+
+# Accept requests from anywhere (e.g., for remote access)
+ng_viewer +jsonl_fpath=weather_rollouts.jsonl +server_host=0.0.0.0
+
+# Use a custom port
+ng_viewer +jsonl_fpath=weather_rollouts.jsonl +server_port=8080
 ```
 
 ---
