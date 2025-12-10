@@ -8,7 +8,7 @@ This tutorial is **experimental** and may contain bugs. Proceed with caution.
 
 **Goal**: Train a model with NeMo RL. Learn how to set up NeMo Gym + NeMo RL training environment, run tests, prepare data, and launch single and multi-node training runs!
 
-Multinode Slurm script and run command are at the bottom of this document. Do the single node setup first. Do not skip it. Throughout this tutorial, you can see mentions of "Penguin". This refers to Gym's codename before it was fully open-sourced.
+Multinode Slurm script and run command are at the bottom of this document. Complete the single-node setup first before proceeding to multi-node training. Throughout this tutorial, you may see mentions of "Penguin", which refers to Gym's codename before it was fully open-sourced.
 
 ## Single GPU node setup to ensure correctness
 

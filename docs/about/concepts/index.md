@@ -20,10 +20,10 @@ Each explainer below covers one foundational idea and links to deeper material.
 ::::{grid} 1 1 1 2
 :gutter: 1 1 1 2
 
-:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Core Abstractions
-:link: core-abstractions
+:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Core Components
+:link: core-components
 :link-type: ref
-Understand how Models, Resources, and Agents remain decoupled yet coordinated as independent HTTP services, including which endpoints each abstraction exposes.
+Understand how Models, Resources, and Agents remain decoupled yet coordinated as independent HTTP services, including which endpoints each component exposes.
 :::
 
 :::{grid-item-card} {octicon}`check-circle;1.5em;sd-mr-1` Task Verification
@@ -52,7 +52,8 @@ Understand the three-level config pattern and why server IDs and implementations
 :hidden:
 :maxdepth: 1
 
-Core Abstractions <core-abstractions>
+Core Components <core-components>
+Configuration System <configuration-system>
 Task Verification <task-verification>
 Key Terminology <key-terminology>
 Configuration System <configuration>

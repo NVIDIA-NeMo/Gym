@@ -206,6 +206,16 @@ def extra_info_to_messages(d: DatasetViewerVerifyResponse) -> List[ChatMessage]:
 
 
 class JsonlDatasetViewerConfig(BaseNeMoGymCLIConfig):
+    """
+    Launch a Gradio interface to view and explore dataset rollouts interactively.
+
+    Examples:
+
+    ```bash
+    ng_viewer +jsonl_fpath=weather_rollouts.jsonl
+    ```
+    """
+
     jsonl_fpath: str = Field(description="Filepath to a local jsonl file to view.")
 
 

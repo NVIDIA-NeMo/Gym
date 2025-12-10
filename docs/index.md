@@ -2,9 +2,9 @@
 
 # NeMo Gym Documentation
 
-NeMo Gym is a framework for building reinforcement learning (RL) training environments large language models (LLMs). Gym provides training environment development scaffolding and training environment patterns such as multi-step, multi-turn, and user modeling scenarios.
+[NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) is a library for building reinforcement learning (RL) training environments for large language models (LLMs). It provides infrastructure to develop environments, scale rollout collection, and integrate seamlessly with your preferred training framework.
 
-At the core of NeMo Gym are three server concepts: **Responses API Model servers** are model endpoints, **Resources servers** contain tool implementations and verification logic, and **Response API Agent servers** orchestrate the interaction between models and resources.
+A training environment consists of three server components: **Agents** orchestrate the rollout lifecycle—calling models, executing tool calls via resources, and coordinating verification. **Models** provide stateless text generation using LLM inference endpoints. **Resources** define tasks, tool implementations, and verification logic.
 
 ## Quickstart
 
@@ -101,6 +101,30 @@ This generates training data with verification scores!
 :::
 ::::
 
+---
+
+## What's Next?
+
+Now that you can generate rollouts, choose your path:
+
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Use an Existing Training Environment
+:link: https://github.com/NVIDIA-NeMo/Gym#-available-resource-servers
+
+Browse the available resource servers to find a training-ready environment that matches your goals.
+:::
+
+:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build a Custom Training Environment
+:link: tutorials/creating-resource-server
+:link-type: doc
+
+Implement or integrate existing tools and define task verification logic.
+:::
+
+::::
+
 ```{toctree}
 :hidden:
 Home <self>
@@ -139,6 +163,13 @@ tutorials/rl-training-with-nemo-rl
 how-to-faq.md
 ```
 
+```{toctree}
+:caption: Reference
+:hidden:
+:maxdepth: 1
+
+reference/cli-commands.md
+```
 
 ```{toctree}
 :caption: Reference
