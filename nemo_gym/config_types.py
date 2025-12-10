@@ -222,15 +222,19 @@ class BaseUploadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
     hf_organization: str = Field(description="HuggingFace organization name where dataset will be uploaded.")
     hf_collection_name: str = Field(description="HuggingFace collection name for organizing datasets.")
     hf_collection_slug: str = Field(description="Alphanumeric collection slug found at the end of collection URI.")
-    dataset_name: str = Field(
-        description="Name of the dataset (will be combined with domain and resource server name)."
+    dataset_name: Optional[str] = Field(
+        default=None, description="Name of the dataset (will be combined with domain and resource server name)."
     )
     input_jsonl_fpath: str = Field(description="Path to the local jsonl file to upload.")
     resource_config_path: str = Field(
         description="Path to resource server config file (used to extract domain for naming convention)."
     )
     hf_dataset_prefix: str = Field(
-        default="NeMo-Gym", description="Prefix prepended to dataset name (default: 'NeMo-Gym')."
+        default="Nemotron-RL", description="Prefix prepended to dataset name (default: 'NeMo-Gym')."
+    )
+    split: Optional[Literal["train", "validation", "test"]] = Field(
+        default="train",
+        description="Dataset split type (e.g., 'train', 'validation', 'test'). Format validation only applies to 'train' splits.",
     )
 
 
