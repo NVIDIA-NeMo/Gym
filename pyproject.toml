@@ -286,7 +286,7 @@ ng_version = "nemo_gym.cli:version"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["resources_servers", "responses_api_agents", "responses_api_models", "nemo_gym", "penguin"]
+include = ["resources_servers", "responses_api_agents", "responses_api_models", "nemo_gym"]
 
 ################################################
 # Testing
