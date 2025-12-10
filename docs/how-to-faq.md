@@ -14,7 +14,7 @@ Tests are strongly encouraged and you must have at least one test for every serv
 
 
 # How To: Upload and download a dataset from HuggingFace
-The huggingface client requires that your credentials are in `env.yaml`, along with some other pertinent details needed to upload to the designated place. 
+The huggingface client requires that your credentials are in `env.yaml`, along with some other pertinent details needed to upload to the designated place.
 ```yaml
 hf_token: {your huggingface token}
 hf_organization: {your huggingface org}
@@ -22,19 +22,19 @@ hf_collection_name: {your collection}
 hf_collection_slug: {your collection slug}  # alphanumeric string found at the end of a collection URI
 
 # optional:
-hf_dataset_prefix: str  # field to override the default value "NeMo-Gym" prepended to the dataset name
+hf_dataset_prefix: str  # field to override the default value "Nemotron-RL" prepended to the dataset name
 ```
 
 Naming convention for Huggingface datasets is as follows.
 
-`{hf_organization}/{hf_dataset_prefix}-{domain}–{resource_server_name}-{your dataset name}`
+`{hf_organization}/{hf_dataset_prefix}-{domain}–{resource_server OR dataset_name}`
 
 E.g.:
 
-`NVIDIA/Nemo-Gym-Math-math_with_judge-dapo17k`
+`nvidia/Nemotron-RL-math-OpenMathReasoning`
 
 
-You will only need to manually input the `{your dataset name}` portion of the above when inputting the `dataset_name` flag in the upload command (refer to the command below). Everything preceding it will be automatically populated using your config prior to upload.
+You will only need to manually input the `{dataset_name}` portion of the above when inputting the `dataset_name` flag in the upload command (refer to the command below). Everything preceding it will be automatically populated using your config prior to upload. Note that it is optional, and overrides `resource_server` if used.
 
 To upload to Huggingface, use the below command:
 ```bash
@@ -47,6 +47,42 @@ ng_upload_dataset_to_hf \
 
 Because of the required dataset nomenclature, the resource server config path is required when uploading. Specifically, `domain` is used in the naming of a dataset in Huggingface.
 
+By default, the `split` parameter for uploading is set to `train`, which will run a check on the required fields `{"responses_create_params", "reward_profiles", "expected_answer"}`. Specifying `validation` or `test` bypasses this check:
+
+```bash
+resource_config_path="resources_servers/multineedle/configs/multineedle.yaml"
+ng_gitlab_to_hf_dataset \
+    +dataset_name={your dataset name} \
+    +input_jsonl_fpath=data/multineedle_benchmark_validation.jsonl \
+    +resource_config_path=${resource_config_path} \
+    +split=validation
+```
+
+## Uploading with Pull Request workflow
+When uploading to an organization repository where you don't have direct write access (e.g., nvidia/), use the `+create_pr=true` flag to create a Pull Request instead of pushing directly. You can also customize the commit message and description:
+
+```bash
+ng_upload_dataset_to_hf \
+    +dataset_name=OpenMathReasoning \
+    +input_jsonl_fpath=data/validation.jsonl \
+    +resource_config_path=${resource_config_path} \
+    +split=validation \
+    +create_pr=true \
+    +commit_message="Add validation set" \
+    +commit_description="Includes 545 examples"
+```
+
+The command will output a link to the created Pull Request:
+```bash
+[Nemo-Gym] - Pull Request created: https://huggingface.co/datasets/nvidia/Nemotron-RL-math-OpenMathReasoning/discussions/1
+```
+
+:::{note}
+The commit_message and commit_description parameters work for both direct pushes and Pull Requests. If not provided, HuggingFace auto-generates a commit message based on the filename.
+:::
+
+
+## Deleting Datasets from Gitlab
 You can optionally pass a `+delete_from_gitlab=true` flag to the above command, which will delete the model and all of its artifacts from Gitlab. By default, this is set to `False`.
 ```bash
 resource_config_path="resources_servers/multineedle/configs/multineedle.yaml"
@@ -79,21 +115,12 @@ ng_delete_dataset_from_gitlab \
     +dataset_name={your dataset name}
 ```
 
-By default, the `split` parameter for uploading is set to `train`, which will run a check on the required fields `{"responses_create_params", "reward_profiles", "expected_answer"}`. Specifying `validation` or `test` bypasses this check:
-
-```bash
-resource_config_path="resources_servers/multineedle/configs/multineedle.yaml"
-ng_gitlab_to_hf_dataset \
-    +dataset_name=my-dataset \
-    +input_jsonl_fpath=data/multineedle_benchmark_validation.jsonl \
-    +resource_config_path=${resource_config_path} \
-    +split=validation
-```
-
 :::{important}
 Gitlab model names are case sensitive. There can be models named 'My_Model' and 'my_model' living simultaneously in the registry. When uploading to Huggingface with the intention of deleting Gitlab artifacts, be sure the casing of your Huggingface dataset name matches that of Gitlab's.
 :::
 
+
+## Downloading Datasets from Huggingface
 Downloading a dataset from Huggingface is straightforward:
 
 **For structured datasets (with train/validation/test splits):**
