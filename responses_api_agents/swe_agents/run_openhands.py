@@ -200,6 +200,7 @@ class RunOpenHandsAgent:
 
         eval_dir_in_openhands = f"evaluation/oh/{agent_run_id}"
         local_dataset_path = "/root/dataset/data.jsonl"
+        config_file_path = f"config_{agent_run_id}.toml"
 
         assert self.openhands_setup_dir is not None, "OpenHands setup directory is not set"
 
@@ -244,7 +245,7 @@ class RunOpenHandsAgent:
             # "    --only-binary cryptography --no-deps --force-reinstall 'cryptography==42.0.8' && "
             # disable logging to file in the oh repo
             # set up config files
-            f"echo {shlex.quote(config_str)} >config.toml && "
+            f"echo {shlex.quote(config_str)} >{config_file_path} && "
             # f" export EVAL_OUTPUT_DIR={eval_dir_in_openhands} && "
             f"./evaluation/benchmarks/swe_bench/scripts/run_infer.sh "
             f"    llm.model "  # name of llm config section in config.toml
@@ -257,12 +258,13 @@ class RunOpenHandsAgent:
             f"    {data_point['split']} "  # dataset split
             f"    {eval_dir_in_openhands} "
             f"    {data_point['instance_id']} "
-            f"    {local_dataset_path} && "
+            f"    {local_dataset_path} "
+            f"    {config_file_path} && "
             # move outputs to the mounted directory
             f"mkdir -p /trajectories_mount/trajectories && "
             f"cp -r {eval_dir_in_openhands}/*/*/* /trajectories_mount/trajectories/{data_point['instance_id']}/ && "
             # remove the eval_dir_in_openhands directory after the evaluation is done
-            f"rm -rf {eval_dir_in_openhands}"
+            f"rm -rf {eval_dir_in_openhands} && rm -rf {config_file_path}"
         )
 
         search_path = os.path.join(
@@ -432,6 +434,10 @@ class RunOpenHandsAgent:
             )
             mount_args.append(f"--mount type=bind,src={self.openhands_setup_dir},dst=/openhands_setup")
             mount_args.append(f"--mount type=bind,src={self.openhands_setup_dir},dst={self.openhands_setup_dir}")
+            # Mount only the venv as read-only to prevent mutation while keeping the rest writable
+            venv_path = Path(self.openhands_setup_dir) / "OpenHands/.venv"
+            mount_args.append(f"--mount type=bind,src={venv_path},dst=/openhands_setup/OpenHands/.venv,ro")
+            mount_args.append(f"--mount type=bind,src={venv_path},dst={venv_path},ro")
             mount_args.append(f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl")
 
         # Add SWE-bench setup directory mount if available (for evaluation)

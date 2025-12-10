@@ -22,6 +22,8 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+import shutil
+
 
 from openai.types.responses.function_tool import FunctionTool
 
@@ -914,13 +916,14 @@ def setup_openhands_environment(
         openhands_dir = setup_dir / "OpenHands"
         miniforge_dir = setup_dir / "miniforge3"
 
-        if openhands_dir.exists():
+        if openhands_dir.exists() and Path(openhands_dir / ".venv" / "bin" / "python").exists():
             print(f"OpenHands already set up at {setup_dir}", flush=True)
             print(f"  - Miniforge: {miniforge_dir}", flush=True)
             print(f"  - OpenHands: {openhands_dir}", flush=True)
             return setup_dir
 
         print(f"Setting up OpenHands environment at {setup_dir}...", flush=True)
+        shutil.rmtree(setup_dir, ignore_errors=True)
         setup_dir.mkdir(parents=True, exist_ok=True)
 
         script_name = "setup_openhands.sh"
