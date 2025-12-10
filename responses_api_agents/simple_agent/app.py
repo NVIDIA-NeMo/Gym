@@ -134,7 +134,6 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             response.set_cookie(k, v)
 
         model_response.output = new_outputs
-
         return model_response
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
