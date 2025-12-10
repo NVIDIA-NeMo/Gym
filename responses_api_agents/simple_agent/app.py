@@ -35,7 +35,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
-    NeMoGymResponseOutputMessage,
 )
 from nemo_gym.server_utils import raise_for_status
 
@@ -102,10 +101,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             new_outputs.extend(output)
 
             all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
-            all_output_messages: List[NeMoGymResponseOutputMessage] = [
-                o for o in output if o.type == "message" and o.role == "assistant"
-            ]
-            if not all_fn_calls and all_output_messages:
+            all_assistant_output = [o for o in output if o.role == "assistant"]
+            if not all_fn_calls and all_assistant_output:
                 break
 
             for output_function_call in all_fn_calls:
