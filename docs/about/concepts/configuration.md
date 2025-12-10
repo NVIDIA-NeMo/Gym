@@ -2,7 +2,7 @@
 
 # Configuration System
 
-NeMo Gym uses YAML configuration files to define [Model, Resources, and Agent servers](./core-abstractions). Each server gets its own configuration block, providing modular control over the entire training environment.
+NeMo Gym uses YAML configuration files to define [Model, Resources, and Agent servers](./core-components.md). Each server gets its own configuration block, providing modular control over the entire training environment.
 
 ## How Servers Connect
 
