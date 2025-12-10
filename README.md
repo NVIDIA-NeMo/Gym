@@ -9,9 +9,9 @@ NeMo Gym is a component of the [NVIDIA NeMo Framework](https://docs.nvidia.com/n
 
 - Scaffolding and patterns to accelerate environment development: multi-step, multi-turn, and user modeling scenarios
 - Contribute environments without expert knowledge of the entire RL training loop
-- Test environment and throughput end-to-end independent of the RL training loop
-- Interoperable with existing environments, systems and RL training frameworks
-- Growing collection of training environments and datasets to enable Reinforcement Learning from Verifiable Reward (RLVR)
+- Test environments and throughput end-to-end, independent of the RL training loop
+- Interoperable with existing environments, systems, and RL training frameworks
+- Growing collection of training environments and datasets for Reinforcement Learning from Verifiable Reward (RLVR)
 
 > [!IMPORTANT]
 > NeMo Gym is currently in early development. You should expect evolving APIs, incomplete documentation, and occasional bugs. We welcome contributions and feedback - for any changes, please open an issue first to kick off discussion!
