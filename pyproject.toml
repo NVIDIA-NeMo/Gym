@@ -214,18 +214,13 @@ build-backend = "setuptools.build_meta"
 
 [tool.uv]
 managed = true
-override-dependencies = [
-  # For Translation BLEU verifier, to force compatibility with Python 3.12
-  # (sacrebleu depends on mecab-ko==1.0.1 but there is no wheel available for 3.12)
-  "mecab-ko==1.0.2"
-]
 
 [tool.setuptools.dynamic]
 version = {attr = "nemo_gym.__version__"}
 readme = {file = "README.md", content-type = "text/markdown"}
 
 [tool.distutils.egg_info]
-egg_base = "."
+egg_base = "cache"
 
 [project.urls]
 Download = "https://github.com/NVIDIA-NeMo/NeMo-Gym/releases"
