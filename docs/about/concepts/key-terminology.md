@@ -85,8 +85,8 @@ Online vs Offline Training
 Multi-turn
     Conversations spanning multiple exchanges where context and state persist across turns.
 
-Multi-step  
-    Complex tasks requiring models to break problems into sequential steps, often using tools and intermediate reasoning.
+Multi-step
+    Complex tasks requiring agents to break problems into sequential steps, often using tools and intermediate reasoning.
 
 Tool Use / Function Calling
     Models invoking external capabilities (APIs, calculators, databases) to accomplish tasks beyond text generation.

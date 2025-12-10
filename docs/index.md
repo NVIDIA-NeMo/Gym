@@ -172,6 +172,16 @@ reference/cli-commands.md
 ```
 
 ```{toctree}
+:caption: Training
+:hidden:
+:maxdepth: 1
+
+training/index
+training/rl-framework-integration/index.md
+```
+
+
+```{toctree}
 :caption: Reference
 :hidden:
 :maxdepth: 1
