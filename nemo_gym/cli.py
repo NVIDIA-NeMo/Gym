@@ -277,17 +277,20 @@ class RunHelper:  # pragma: no cover
         for process_name, process in self._processes.items():
             if process.poll() is not None:
                 proc_out, proc_err = process.communicate()
+                print_str = f"Process `{process_name}` finished unexpectedly!"
+
                 if isinstance(proc_out, bytes):
                     proc_out = proc_out.decode("utf-8")
-                if isinstance(proc_err, bytes):
-                    proc_err = proc_err.decode("utf-8")
-
-                print_str = f"""Process `{process_name}` finished unexpectedly!
+                    print_str = f"""{print_str}
 Process `{process_name}` stdout:
 {proc_out}
-
+"""
+                if isinstance(proc_err, bytes):
+                    proc_err = proc_err.decode("utf-8")
+                    print_str = f"""{print_str}
 Process `{process_name}` stderr:
 {proc_err}"""
+
                 raise RuntimeError(print_str)
 
     def wait_for_spinup(self) -> None:
