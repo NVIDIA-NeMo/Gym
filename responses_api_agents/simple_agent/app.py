@@ -43,8 +43,7 @@ from nemo_gym.server_utils import raise_for_status
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
-    # max_steps: int = None
-    max_steps: int = 1
+    max_steps: int = None
 
 
 class SimpleAgentRunRequest(BaseRunRequest):
@@ -101,6 +100,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
             output = model_response.output
             new_outputs.extend(output)
+
+            if model_response.incomplete_details and model_response.incomplete_details.reason == "max_output_tokens":
+                break
 
             all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
             all_output_messages: List[NeMoGymResponseOutputMessage] = [
