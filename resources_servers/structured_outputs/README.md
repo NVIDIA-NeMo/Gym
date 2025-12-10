@@ -8,6 +8,9 @@ Each problem consists three components:
 2. Output Formatting Instruction (Schema)
 3. Question
 
+The dataset can be found at https://huggingface.co/datasets/nvidia/Nemotron-RL-instruction_following-structured_outputs 
+
+
 We recommend formatting the dataset to test the model's ability to follow instructions under the following circumstances:
 1. Different Instruction Locations
    1. The instruction can be in the system or user message, and can be before or after the question.
@@ -36,20 +39,7 @@ resources_servers/structured_outputs/configs/structured_outputs_json.yaml"
 ng_run "+config_paths=[$config_paths]"
 ```
 
-To download the Structured Outputs dataset, the following command can be run:
-```bash
-ng_download_dataset_from_gitlab \
-    +dataset_name=structured_outputs_251027_nano_v3_sdg_json_train \
-    +version=0.0.2\
-    +artifact_fpath=structured_outputs_251027_nano_v3_sdg_json_train.jsonl \
-    +output_fpath=resources_servers/structured_outputs/data/structured_outputs_251027_nano_v3_sdg_json_train.jsonl
-
-ng_download_dataset_from_gitlab \
-    +dataset_name=structured_outputs_251027_nano_v3_sdg_json_val \
-    +version=0.0.2 \
-    +artifact_fpath=structured_outputs_251027_nano_v3_sdg_json_val.jsonl \
-    +output_fpath=resources_servers/structured_outputs/data/structured_outputs_251027_nano_v3_sdg_json_val.jsonl
-```
+The dataset can be found at https://huggingface.co/datasets/nvidia/Nemotron-RL-instruction_following-structured_outputs 
 
 Then, rollouts can be collected using a command such as the following:
 ```bash
@@ -70,11 +60,9 @@ ng_prepare_data "+config_paths=[${config_paths}]" \
 ```
 
 # Licensing information
-Code: Apache 2.0<br>
-Data:
-- Structured Outputs: Apache 2.0
-  - [Dataset Seed 1](https://huggingface.co/datasets/nvidia/structured-dataset-nanov3)
-  - [Dataset Seed 2](https://huggingface.co/datasets/nvidia/structured-dataset-nanov3-reasoning/viewer/default/train?row=20&views%5B%5D=train)
+Code: Apache 2.0
+
+Data: CC BY 4.0
 
 Dependencies
 - nemo_gym: Apache 2.0

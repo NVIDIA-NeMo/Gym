@@ -148,16 +148,24 @@ dependencies = [
     # Updated Fri Oct 18, 2025 with ray[default]==2.46.0
     # License: Apache 2.0 https://github.com/ray-project/ray/blob/master/LICENSE
     "ray[default]",
+
+    # psutil: Cross-platform process and system utilities
+    # Updated: Fri Nov 07, 2025 with psutil==6.1.1
+    # License: BSD 3-Clause https://github.com/giampaolo/psutil/blob/master/LICENSE
+    "psutil",
 ]
 
 [dependency-groups]
 docs = [
-    "myst-parser>=4.0.1",
-    "nvidia-sphinx-theme>=0.0.8",
-    "sphinx>=8.1.3",
-    "sphinx-autobuild>=2024.10.3",
-    "sphinx-autodoc2>=0.5.0",
-    "sphinx-copybutton>=0.5.2",
+    "sphinx>=8.2.3",
+    "sphinx-autobuild>=2025.8.25",    # For live doc serving while editing docs
+    "sphinx-autodoc2>=0.5.0",         # For documenting Python API
+    "sphinx-copybutton>=0.5.2",       # Adds a copy button for code blocks
+    "myst-parser>=4.0.1",             # For our markdown docs
+    "nvidia-sphinx-theme>=0.0.8",     # Our NVIDIA theme
+    "sphinxcontrib-mermaid>=1.0.0",   # For mermaid diagrams
+    "sphinx-design>=0.6.1",           # For our design elements
+    "swagger-plugin-for-sphinx>=6.0.0", # For Swagger API documentation
 ]
 
 [project.optional-dependencies]
@@ -270,6 +278,10 @@ ng_dump_config = "nemo_gym.cli:dump_config"
 # Display help
 nemo_gym_help = "nemo_gym.cli:display_help"
 ng_help = "nemo_gym.cli:display_help"
+
+# Display version
+nemo_gym_version = "nemo_gym.cli:version"
+ng_version = "nemo_gym.cli:version"
 
 
 [tool.setuptools.packages.find]

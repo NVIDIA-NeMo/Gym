@@ -1,0 +1,42 @@
+code_gen:
+  resources_servers:
+    code_gen:
+      entrypoint: app.py
+      domain: coding
+      verified: true
+      verified_url: https://wandb.ai/nvidia/bxyu-nemo-gym-rl-integration-20250926/runs/54uzarwq
+      num_processes: 8
+      unit_test_timeout_secs: 10
+      debug: false
+code_gen_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: code_gen
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: opencodereasoning_filtered_train
+        type: train
+        jsonl_fpath: resources_servers/code_gen/data/opencodereasoning_filtered_25k_train.jsonl
+        gitlab_identifier:
+          dataset_name: opencodereasoning_filtered
+          version: 0.0.1
+          artifact_fpath: opencodereasoning_filtered_25k_train.jsonl
+        license: Apache 2.0
+        num_repeats: 1
+      - name: livecodebench_v5_validation
+        type: validation
+        jsonl_fpath: resources_servers/code_gen/data/livecodebench_v5_2024-07-01_2025-02-01_validation.jsonl
+        gitlab_identifier:
+          dataset_name: livecodebench
+          version: 0.0.1
+          artifact_fpath: livecodebench_v5_2024-07-01_2025-02-01_validation.jsonl
+        license: MIT
+        num_repeats: 10  # Use livecodebench setting, even if sampling parameters differ.
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/code_gen/data/example.jsonl

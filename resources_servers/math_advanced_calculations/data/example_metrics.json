@@ -1,0 +1,68 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/math_advanced_calculations/data/example.jsonl",
+    "gitlab_identifier": null,
+    "license": null,
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 5,
+        "Average": 11.0,
+        "Min": 11.0,
+        "Max": 11.0,
+        "Median": 11.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 410.4,
+        "Min": 402.0,
+        "Max": 429.0,
+        "Median": 408.0,
+        "Standard deviation": 10.78
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
+    },
+    "id": {
+        "Total # non-null values": 5,
+        "Average": 2.0,
+        "Min": 0.0,
+        "Max": 4.0,
+        "Median": 2.0,
+        "Standard deviation": 1.58
+    },
+    "ground_truth": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "depth": {
+        "Total # non-null values": 5,
+        "Average": 2.4,
+        "Min": 1.0,
+        "Max": 4.0,
+        "Median": 2.0,
+        "Standard deviation": 1.52
+    },
+    "breadth": {
+        "Total # non-null values": 5,
+        "Average": 3.0,
+        "Min": 1.0,
+        "Max": 5.0,
+        "Median": 3.25,
+        "Standard deviation": 1.87
+    }
+}

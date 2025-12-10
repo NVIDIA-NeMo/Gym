@@ -5,6 +5,9 @@ Uses an LLM as a judge to compare a model’s generated answer against the expec
 
 Prompt and labels are configurable via config.
 
+An example dataset for this resource server can be found at:
+https://huggingface.co/datasets/nvidia/Nemotron-RL-knowledge-openqa 
+
 ### Key config fields
 - `judge_system_message`: optional system message. If omitted, no system message is added.
 - `judge_prompt_template` (required): user prompt template. Placeholders: `{question}`, `{expected_answer}`, `{generated_answer}`.

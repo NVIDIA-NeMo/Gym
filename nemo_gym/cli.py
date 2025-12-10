@@ -14,9 +14,13 @@
 # limitations under the License.
 import asyncio
 import json
+import os
+import platform
 import shlex
+import sys
 import tomllib
 from glob import glob
+from importlib.metadata import version as md_version
 from os import environ, makedirs
 from os.path import exists
 from pathlib import Path
@@ -26,6 +30,7 @@ from threading import Thread
 from time import sleep
 from typing import Dict, List, Optional
 
+import psutil
 import rich
 import uvicorn
 from devtools import pprint
@@ -33,7 +38,7 @@ from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, Field
 from tqdm.auto import tqdm
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import PARENT_DIR, __version__
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
     HEAD_SERVER_DEPS_KEY_NAME,
@@ -72,12 +77,34 @@ def _run_command(command: str, working_directory: Path) -> Popen:  # pragma: no 
 
 
 class RunConfig(BaseNeMoGymCLIConfig):
+    """
+    Start NeMo Gym servers for agents, models, and resources.
+
+    Examples:
+
+    ```bash
+    config_paths="resources_servers/example_simple_weather/configs/simple_weather.yaml,\\
+    responses_api_models/openai_model/configs/openai_model.yaml"
+    ng_run "+config_paths=[${config_paths}]"
+    ```
+    """
+
     entrypoint: str = Field(
         description="Entrypoint for this command. This must be a relative path with 2 parts. Should look something like `responses_api_agents/simple_agent`."
     )
 
 
 class TestConfig(RunConfig):
+    """
+    Test a specific server module by running its pytest suite and optionally validating example data.
+
+    Examples:
+
+    ```bash
+    ng_test +entrypoint=resources_servers/example_simple_weather
+    ```
+    """
+
     should_validate_data: bool = Field(
         default=False,
         description="Whether or not to validate the example data (examples, metrics, rollouts, etc) for this server.",
@@ -300,6 +327,24 @@ Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
 def run(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
 ):  # pragma: no cover
+    """
+    Start NeMo Gym servers for agents, models, and resources.
+
+    This command reads configuration from YAML files specified via `+config_paths` and starts all configured servers.
+    The configuration files should define server instances with their entrypoints and settings.
+
+    Configuration Parameter:
+        config_paths (List[str]): Paths to YAML configuration files. Specify via Hydra: `+config_paths="[file1.yaml,file2.yaml]"`
+
+    Examples:
+
+    ```bash
+    # Start servers with specific configs
+    config_paths="resources_servers/example_simple_weather/configs/simple_weather.yaml,\\
+    responses_api_models/openai_model/configs/openai_model.yaml"
+    ng_run "+config_paths=[${config_paths}]"
+    ```
+    """
     global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
     # Just here for help
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
@@ -339,17 +384,17 @@ ng_prepare_data "+config_paths=[responses_api_models/openai_model/configs/openai
 ```
 and your config must include an agent server config with an example dataset like:
 ```yaml
-multineedle_simple_agent:
+example_multi_step_simple_agent:
   responses_api_agents:
     simple_agent:
       ...
       datasets:
       - name: example
         type: example
-        jsonl_fpath: resources_servers/multineedle/data/example.jsonl
+        jsonl_fpath: resources_servers/example_multi_step/data/example.jsonl
 ```
 
-See `resources_servers/multineedle/configs/multineedle.yaml` for a full config example.
+See `resources_servers/example_multi_step/configs/example_multi_step.yaml` for a full config example.
 """
     with open(example_metrics_fpath) as f:
         example_metrics = json.load(f)
@@ -367,18 +412,18 @@ See `resources_servers/multineedle/configs/multineedle.yaml` for a full config e
 Your commands should look something like:
 ```bash
 # Server spinup
-multineedle_config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/multineedle/configs/multineedle.yaml"
-ng_run "+config_paths=[${{multineedle_config_paths}}]"
+example_multi_step_config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/example_multi_step/configs/example_multi_step.yaml"
+ng_run "+config_paths=[${{example_multi_step_config_paths}}]"
 
 # Collect the rollouts
-ng_collect_rollouts +agent_name=multineedle_simple_agent \
-    +input_jsonl_fpath=resources_servers/multineedle/data/example.jsonl \
-    +output_jsonl_fpath=resources_servers/multineedle/data/example_rollouts.jsonl \
+ng_collect_rollouts +agent_name=example_multi_step_simple_agent \
+    +input_jsonl_fpath=resources_servers/example_multi_step/data/example.jsonl \
+    +output_jsonl_fpath=resources_servers/example_multi_step/data/example_rollouts.jsonl \
     +limit=null
 
 # View your rollouts
-ng_viewer +jsonl_fpath=resources_servers/multineedle/data/example_rollouts.jsonl
+ng_viewer +jsonl_fpath=resources_servers/example_multi_step/data/example_rollouts.jsonl
 ```
 """
     with open(example_rollouts_fpath) as f:
@@ -417,9 +462,19 @@ def _format_pct(count: int, total: int) -> str:  # pragma: no cover
 
 
 class TestAllConfig(BaseNeMoGymCLIConfig):
+    """
+    Run tests for all server modules in the project.
+
+    Examples:
+
+    ```bash
+    ng_test_all
+    ```
+    """
+
     fail_on_total_and_test_mismatch: bool = Field(
         default=False,
-        description="There may be situations where there are an un-equal number of servers that exist vs have tests. This flag will fail the test job if this mismatch exists.",
+        description="Fail if the number of server modules doesn't match the number with tests (default: False).",
     )
 
 
@@ -507,6 +562,15 @@ Extra candidate paths:{_display_list_of_paths(extra_candidates)}"""
 
 
 def dev_test():  # pragma: no cover
+    """
+    Run core NeMo Gym tests with coverage reporting (runs pytest with --cov flag).
+
+    Examples:
+
+    ```bash
+    ng_dev_test
+    ```
+    """
     global_config_dict = get_global_config_dict()
     # Just here for help
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
@@ -516,6 +580,15 @@ def dev_test():  # pragma: no cover
 
 
 def init_resources_server():  # pragma: no cover
+    """
+    Initialize a new resources server with template files and directory structure.
+
+    Examples:
+
+    ```bash
+    ng_init_resources_server +entrypoint=resources_servers/my_server
+    ```
+    """
     config_dict = get_global_config_dict()
     run_config = RunConfig.model_validate(config_dict)
 
@@ -541,6 +614,7 @@ def init_resources_server():  # pragma: no cover
   {server_type}:
     {server_type_name}:
       entrypoint: app.py
+      domain: other
 {server_type_name}_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -579,7 +653,7 @@ def init_resources_server():  # pragma: no cover
     app_fpath = dirpath / "app.py"
     with open("resources/resources_server_template.py") as f:
         app_template = f.read()
-    app_content = app_template.replace("MultiNeedle", server_type_title)
+    app_content = app_template.replace("ExampleMultiStep", server_type_title)
     with open(app_fpath, "w") as f:
         f.write(app_content)
 
@@ -589,7 +663,7 @@ def init_resources_server():  # pragma: no cover
     tests_fpath = tests_dirpath / "test_app.py"
     with open("resources/resources_server_test_template.py") as f:
         tests_template = f.read()
-    tests_content = tests_template.replace("MultiNeedle", server_type_title)
+    tests_content = tests_template.replace("ExampleMultiStep", server_type_title)
     tests_content = tests_content.replace("from app", f"from resources_servers.{server_type_name}.app")
     with open(tests_fpath, "w") as f:
         f.write(tests_content)
@@ -628,6 +702,15 @@ Dependencies
 
 
 def dump_config():  # pragma: no cover
+    """
+    Display the resolved Hydra configuration for debugging purposes.
+
+    Examples:
+
+    ```bash
+    ng_dump_config "+config_paths=[<config1>,<config2>]"
+    ```
+    """
     global_config_dict = get_global_config_dict()
     # Just here for help
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
@@ -636,6 +719,15 @@ def dump_config():  # pragma: no cover
 
 
 def display_help():  # pragma: no cover
+    """
+    Display a list of available NeMo Gym CLI commands.
+
+    Examples:
+
+    ```bash
+    ng_help
+    ```
+    """
     global_config_dict = get_global_config_dict()
     # Just here for help
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
@@ -654,3 +746,85 @@ def display_help():  # pragma: no cover
             continue
 
         print(script)
+
+
+class VersionConfig(BaseNeMoGymCLIConfig):
+    """
+    Display gym version and system information.
+
+    Examples:
+
+    ```bash
+    # Display version information
+    ng_version
+
+    # Output as JSON
+    ng_version +json=true
+    ```
+    """
+
+    json_format: bool = Field(default=False, alias="json", description="Output in JSON format for programmatic use.")
+
+
+def version():  # pragma: no cover
+    """Display gym version and system information."""
+    global_config_dict = get_global_config_dict()
+    config = VersionConfig.model_validate(global_config_dict)
+
+    json_output = config.json_format
+
+    version_info = {
+        "nemo_gym": __version__,
+        "python": platform.python_version(),
+        "python_path": sys.executable,
+        "installation_path": str(PARENT_DIR),
+    }
+
+    key_deps = [
+        "openai",
+        "ray",
+    ]
+
+    dependencies = {dep: md_version(dep) for dep in key_deps}
+
+    version_info["dependencies"] = dependencies
+
+    # System info
+    version_info["system"] = {
+        "os": f"{platform.system()} {platform.release()}",
+        "platform": platform.platform(),
+        "architecture": platform.machine(),
+        "processor": platform.processor() or "unknown",
+        "cpus": os.cpu_count(),
+    }
+
+    # Memory info
+    mem = psutil.virtual_memory()
+    version_info["system"]["memory_gb"] = round(mem.total / (1024**3), 2)
+
+    # Output
+    if json_output:
+        print(json.dumps(version_info))
+    else:
+        output = f"""\
+NeMo Gym v{version_info["nemo_gym"]}
+Python {version_info["python"]} ({version_info["python_path"]})
+Installation: {version_info["installation_path"]}"""
+
+        if "dependencies" in version_info:
+            deps_lines = "\n".join(f"  {dep}: {ver}" for dep, ver in version_info["dependencies"].items())
+            sys_info = version_info["system"]
+            output += f"""
+
+Key Dependencies:
+{deps_lines}
+
+System:
+  OS: {sys_info["os"]}
+  Platform: {sys_info["platform"]}
+  Architecture: {sys_info["architecture"]}
+  Processor: {sys_info["processor"]}
+  CPUs: {sys_info["cpus"]}
+  Memory: {sys_info["memory_gb"]} GB"""
+
+        print(output)

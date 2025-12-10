@@ -61,7 +61,7 @@ def upload_jsonl_dataset(
     with open(config.resource_config_path, "r") as f:
         data = yaml.safe_load(f)
 
-    domain = d.title() if (d := visit_resource_server(data)[0]) else None
+    domain = d.title() if (d := visit_resource_server(data).to_dict().get("domain")) else None
     resource_server = config.resource_config_path.split("/")[1]
     dataset_name = config.dataset_name
     prefix = config.hf_dataset_prefix + "-" if config.hf_dataset_prefix else ""

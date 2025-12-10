@@ -15,7 +15,9 @@
 import re
 import sys
 import unicodedata
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 import yaml
 
@@ -25,30 +27,166 @@ README_PATH = Path("README.md")
 TARGET_FOLDER = Path("resources_servers")
 
 
-def visit_resource_server(
-    data: dict, level: int = 1
-) -> tuple[str | None, str | None, bool, str | None]:  # pragma: no cover
-    domain = None
-    description = None
-    verified = False
-    verified_url = None
+@dataclass
+class ResourceServerMetadata:
+    """Metadata extracted from resource server YAML config."""
+
+    domain: Optional[str] = None
+    description: Optional[str] = None
+    verified: bool = False
+    verified_url: Optional[str] = None
+    value: Optional[str] = None
+
+    def to_dict(self) -> dict[str, str | bool | None]:  # pragma: no cover
+        """Convert to dict for backward compatibility with hf_utils.py"""
+        return {
+            "domain": self.domain,
+            "description": self.description,
+            "verified": self.verified,
+            "verified_url": self.verified_url,
+            "value": self.value,
+        }
+
+
+@dataclass
+class AgentDatasetsMetadata:
+    """Metadata extracted from agent datasets configuration."""
+
+    license: str | None = None
+    types: list[str] = field(default_factory=list)
+    dataset_url: Optional[str] = None
+
+    def to_dict(self) -> dict[str, str | list[str] | None]:  # pragma: no cover
+        """Convert to dict for backward compatibility."""
+        return {
+            "dataset_url": self.dataset_url,
+            "license": self.license,
+            "types": self.types,
+        }
+
+
+@dataclass
+class ConfigMetadata:
+    """Combined metadata from YAML configuration file."""
+
+    dataset_url: Optional[str] = None
+    domain: Optional[str] = None
+    description: Optional[str] = None
+    verified: bool = False
+    verified_url: Optional[str] = None
+    value: Optional[str] = None
+    license: Optional[str] = None
+    types: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_yaml_data(
+        cls, resource: ResourceServerMetadata, agent: AgentDatasetsMetadata
+    ) -> "ConfigMetadata":  # pragma: no cover
+        """Combine resource server and agent datasets metadata."""
+        return cls(
+            domain=resource.domain,
+            description=resource.description,
+            verified=resource.verified,
+            verified_url=resource.verified_url,
+            value=resource.value,
+            dataset_url=agent.dataset_url,
+            license=agent.license,
+            types=agent.types,
+        )
+
+
+@dataclass
+class ServerInfo:
+    """Information about a resource server for table generation."""
+
+    name: str
+    display_name: str
+    config_metadata: ConfigMetadata
+    config_path: str
+    config_filename: str
+    readme_path: str
+    yaml_file: Path
+
+    @property
+    def dataset_url(self) -> str | None:  # pragma: no cover
+        return self.config_metadata.dataset_url
+
+    @property
+    def domain(self) -> str | None:  # pragma: no cover
+        return self.config_metadata.domain
+
+    @property
+    def types(self) -> list[str]:  # pragma: no cover
+        return self.config_metadata.types
+
+    def get_description_for_example_table(self) -> str:  # pragma: no cover
+        if self.config_metadata.description:
+            return self.config_metadata.description
+        elif self.config_metadata.domain:
+            return f"{self.config_metadata.domain.title()} example"
+        else:
+            return "Example resource server"
+
+    def get_domain_or_empty(self) -> str:  # pragma: no cover
+        return self.config_metadata.domain or ""
+
+    def get_description_or_dash(self) -> str:  # pragma: no cover
+        return self.config_metadata.description or "-"
+
+    def get_value_or_dash(self) -> str:  # pragma: no cover
+        return self.config_metadata.value or "-"
+
+    def get_license_or_dash(self) -> str:  # pragma: no cover
+        return self.config_metadata.license or "-"
+
+    def get_verified_mark(self) -> str:  # pragma: no cover
+        if self.config_metadata.verified and self.config_metadata.verified_url:
+            return f"<a href='{self.config_metadata.verified_url}'>✓</a>"
+        elif self.config_metadata.verified:
+            return "✓"
+        else:
+            return "-"
+
+    def get_train_mark(self) -> str:  # pragma: no cover
+        return "✓" if "train" in set(self.config_metadata.types) else "-"
+
+    def get_validation_mark(self) -> str:  # pragma: no cover
+        return "✓" if "validation" in set(self.config_metadata.types) else "-"
+
+    def get_dataset_link(self) -> str:  # pragma: no cover
+        if not self.config_metadata.dataset_url:
+            return "-"
+        dataset_name = self.config_metadata.dataset_url.split("/")[-1]
+        return f"<a href='{self.config_metadata.dataset_url}'>{dataset_name}</a>"
+
+    def get_config_link(self, use_filename: bool = True) -> str:  # pragma: no cover
+        return f"<a href='{self.config_path}'>{self.config_filename if use_filename else 'config'}</a>"
+
+    def get_readme_link(self) -> str:  # pragma: no cover
+        return f"<a href='{self.readme_path}'>README</a>"
+
+
+def visit_resource_server(data: dict, level: int = 1) -> ResourceServerMetadata:  # pragma: no cover
+    """Extract resource server metadata from YAML data."""
+    resource = ResourceServerMetadata()
     if level == 4:
-        domain = data.get("domain")
-        description = data.get("description")
-        verified = data.get("verified", False)
-        verified_url = data.get("verified_url")
-        return domain, description, verified, verified_url
+        resource.dataset_url = data.get("dataset_url")
+        resource.domain = data.get("domain")
+        resource.description = data.get("description")
+        resource.verified = data.get("verified", False)
+        resource.verified_url = data.get("verified_url")
+        resource.value = data.get("value")
+        return resource
     else:
         for k, v in data.items():
             if level == 2 and k != "resources_servers":
                 continue
             return visit_resource_server(v, level + 1)
-    return None, None, False, None
+    return resource
 
 
-def visit_agent_datasets(data: dict) -> tuple[str | None, list[str]]:  # pragma: no cover
-    license = None
-    types = []
+def visit_agent_datasets(data: dict) -> AgentDatasetsMetadata:  # pragma: no cover
+    agent = AgentDatasetsMetadata()
     for k1, v1 in data.items():
         if k1.endswith("_simple_agent") and isinstance(v1, dict):
             v2 = v1.get("responses_api_agents")
@@ -60,15 +198,14 @@ def visit_agent_datasets(data: dict) -> tuple[str | None, list[str]]:  # pragma:
                         if isinstance(datasets, list):
                             for entry in datasets:
                                 if isinstance(entry, dict):
-                                    types.append(entry.get("type"))
+                                    agent.types.append(entry.get("type"))
                                     if entry.get("type") == "train":
-                                        license = entry.get("license")
-    return license, types
+                                        agent.license = entry.get("license")
+                                        agent.dataset_url = entry.get("dataset_url")
+    return agent
 
 
-def extract_config_metadata(
-    yaml_path: Path,
-) -> tuple[str | None, str | None, str | None, list[str], bool, str | None]:  # pragma: no cover
+def extract_config_metadata(yaml_path: Path) -> ConfigMetadata:  # pragma: no cover
     """
     Domain:
         {name}_resources_server:
@@ -76,6 +213,8 @@ def extract_config_metadata(
                 {name}:
                     domain: {example_domain}
                     verified: {true/false}
+                    description: {example_description}
+                    value: {example_value}
                     ...
         {something}_simple_agent:
             responses_api_agents:
@@ -84,6 +223,7 @@ def extract_config_metadata(
                         - name: train
                           type: {example_type_1}
                           license: {example_license_1}
+                          dataset_url: {example_dataset_url}
                         - name: validation
                           type: {example_type_2}
                           license: {example_license_2}
@@ -91,13 +231,13 @@ def extract_config_metadata(
     with yaml_path.open() as f:
         data = yaml.safe_load(f)
 
-    domain, description, verified, verified_url = visit_resource_server(data)
-    license, types = visit_agent_datasets(data)
+    resource_data = visit_resource_server(data)
+    agent_data = visit_agent_datasets(data)
 
-    return domain, description, license, types, verified, verified_url
+    return ConfigMetadata.from_yaml_data(resource_data, agent_data)
 
 
-def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:  # pragma: no cover
+def get_example_and_training_server_info() -> tuple[list[ServerInfo], list[ServerInfo]]:  # pragma: no cover
     """Categorize servers into example-only and training-ready with metadata."""
     example_only_servers = []
     training_servers = []
@@ -115,125 +255,121 @@ def get_example_and_training_server_info() -> tuple[list[dict], list[dict]]:  # 
             continue
 
         for yaml_file in yaml_files:
-            domain, description, license, types, verified, verified_url = extract_config_metadata(yaml_file)
+            yaml_data = extract_config_metadata(yaml_file)
 
             server_name = subdir.name
-            example_only_prefix = "example_"
-            is_example_only_prefix = server_name.startswith(example_only_prefix)
+            is_example_only = server_name.startswith("example_")
+
+            if not is_example_only and not yaml_data.dataset_url:
+                continue
 
             display_name = (
-                (server_name[len(example_only_prefix) :] if is_example_only_prefix else server_name)
-                .replace("_", " ")
-                .title()
+                (server_name[len("example_") :] if is_example_only else server_name).replace("_", " ").title()
             )
 
             config_path = f"{TARGET_FOLDER.name}/{server_name}/configs/{yaml_file.name}"
             readme_path = f"{TARGET_FOLDER.name}/{server_name}/README.md"
 
-            server_info = {
-                "name": server_name,
-                "display_name": display_name,
-                "domain": domain,
-                "verified": verified,
-                "verified_url": verified_url,
-                "description": description,
-                "config_path": config_path,
-                "config_filename": yaml_file.name,
-                "readme_path": readme_path,
-                "types": types,
-                "license": license,
-                "yaml_file": yaml_file,
-            }
-
-            example_only_servers.append(server_info) if is_example_only_prefix else training_servers.append(
-                server_info
+            server_info = ServerInfo(
+                name=server_name,
+                display_name=display_name,
+                config_metadata=yaml_data,
+                config_path=config_path,
+                config_filename=yaml_file.name,
+                readme_path=readme_path,
+                yaml_file=yaml_file,
             )
+
+            if is_example_only:
+                example_only_servers.append(server_info)
+            else:
+                training_servers.append(server_info)
 
     return example_only_servers, training_servers
 
 
-def generate_example_only_table(servers: list[dict]) -> str:  # pragma: no cover
+def generate_example_only_table(servers: list[ServerInfo]) -> str:  # pragma: no cover
     """Generate table for example-only resource servers."""
-    if not servers:
-        return "| Name | Demonstrates | Config | README |\n| ---- | ------------------- | ----------- | ------ |\n"
-
     col_names = ["Name", "Demonstrates", "Config", "README"]
-    rows = []
 
-    for server in servers:
-        name = server["display_name"]
-
-        # Optional {description} -> Required '{domain} example' -> Fallback: 'Example resource server'
-        description = (
-            server["description"] or f"{server.get('domain').title()} example"
-            if server.get("domain")
-            else "Example resource server"
-        )
-
-        config_link = f"<a href='{server['config_path']}'>{server['config_filename']}</a>"
-        readme_link = f"<a href='{server['readme_path']}'>README</a>"
-
-        rows.append([name, description, config_link, readme_link])
-
-    rows.sort(
-        key=lambda r: (
-            normalize_str(r[0]),
-            normalize_str(r[1]),
-            normalize_str(r[2]),
-            normalize_str(r[3]),
-        )
-    )
-
-    table = [col_names, ["-" for _ in col_names]] + rows
-    return format_table(table)
-
-
-def generate_training_table(servers: list[dict]) -> str:  # pragma: no cover
-    """Generate table for training resource servers."""
     if not servers:
-        return "| Domain | Resource Server | Train | Validation | Verified | Config | License |\n| ------ | --------------- | ----- | ---------- | --------| ------ | ------- |\n"
+        return handle_empty_table(col_names)
 
-    col_names = ["Domain", "Resource Server", "Train", "Validation", "Verified", "Config", "License"]
     rows = []
 
     for server in servers:
-        domain = server["domain"] if server["domain"] else ""
-        name = server["display_name"]
+        rows.append(
+            [
+                server.display_name,
+                server.get_description_for_example_table(),
+                server.get_config_link(),
+                server.get_readme_link(),
+            ]
+        )
 
-        types_set = set(server["types"]) if server["types"] else set()
-        train_mark = "✓" if "train" in types_set else "-"
-        val_mark = "✓" if "validation" in types_set else "-"
+    rows.sort(key=lambda r: tuple(normalize_str(cell) for cell in r))
 
-        # Add verified status with URL if available
-        is_verified = server.get("verified", False)
-        verified_url = server.get("verified_url", "")
-        if is_verified and verified_url:
-            verified_mark = f"<a href='{verified_url}'>✓</a>"
-        elif is_verified:
-            verified_mark = "✓"
-        else:
-            verified_mark = "-"
+    table = [col_names, ["-" for _ in col_names]] + rows
+    return format_table(table)
 
-        config_link = f"<a href='{server['config_path']}'>{server['config_filename']}</a>"
 
-        license_str = server["license"] if server["license"] else "-"
+def generate_training_table(servers: list[ServerInfo]) -> str:  # pragma: no cover
+    """Generate table for training resource servers."""
+    col_names = [
+        "Resource Server",
+        "Domain",
+        "Dataset",
+        "Description",
+        "Value",
+        "Config",
+        "Train",
+        "Validation",
+        # TODO: Add back in when we can verify resource servers
+        # "Verified",
+        "License",
+    ]
+    if not servers:
+        return handle_empty_table(col_names)
 
-        rows.append([domain, name, train_mark, val_mark, verified_mark, config_link, license_str])
+    rows = []
+
+    for server in servers:
+        # TODO: Add back in when we can verify resource servers
+        # verified_mark = server.get_verified_mark()
+
+        rows.append(
+            [
+                server.display_name,
+                server.get_domain_or_empty(),
+                server.get_dataset_link(),
+                server.get_description_or_dash(),
+                server.get_value_or_dash(),
+                server.get_config_link(use_filename=False),
+                server.get_train_mark(),
+                server.get_validation_mark(),
+                # TODO: Add back in when we can verify resource servers
+                # verified_mark,
+                server.get_license_or_dash(),
+            ]
+        )
 
     rows.sort(
         key=lambda r: (
-            0 if "✓" in r[4] else 1,  # verified (reverse order for checkmarks first)
-            normalize_str(r[0]),  # domain
-            normalize_str(r[1]),  # name
-            normalize_str(r[2]),  # train
-            normalize_str(r[3]),  # val
-            normalize_str(r[5]),  # config
-            normalize_str(r[6]),  # license
+            normalize_str(r[1]),  # domain
+            # TODO: Add back in when we can verify resource servers
+            # 0 if "✓" in r[8] else 1,  # verified first (reverse order for checkmarks...hyphens)
+            tuple(normalize_str(cell) for cell in r),
         )
     )
 
     table = [col_names, ["-" for _ in col_names]] + rows
     return format_table(table)
+
+
+def handle_empty_table(col_names: list[str]) -> str:  # pragma: no cover
+    """Generate an empty table when there are no servers."""
+    separator = ["-" * len(col_name) for col_name in col_names]
+    return format_table([col_names, separator])
 
 
 def normalize_str(s: str) -> str:  # pragma: no cover
@@ -242,7 +378,7 @@ def normalize_str(s: str) -> str:  # pragma: no cover
     between local and CI runs. We normalize text and
     use all columns as tie-breakers to ensure deterministic sorting.
     """
-    if not s:
+    if not s or not isinstance(s, str):
         return ""
     return unicodedata.normalize("NFKD", s).casefold().strip()
 
