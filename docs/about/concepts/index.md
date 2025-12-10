@@ -53,7 +53,7 @@ Understand the three-level config pattern and why server IDs and implementations
 :maxdepth: 1
 
 Core Components <core-components>
+Configuration System <configuration>
 Task Verification <task-verification>
 Key Terminology <key-terminology>
-Configuration System <configuration>
 ```
