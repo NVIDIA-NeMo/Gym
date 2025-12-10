@@ -20,9 +20,9 @@ content_type: index
 
 # NeMo Gym Documentation
 
-NeMo Gym is a framework for building reinforcement learning (RL) training environments large language models (LLMs). Gym provides training environment development scaffolding and training environment patterns such as multi-step, multi-turn, and user modeling scenarios.
+[NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) is a library for building reinforcement learning (RL) training environments for large language models (LLMs). NeMo Gym provides infrastructure to develop environments, scale rollout collection, and integrate seamlessly with your preferred training framework.
 
-At the core of NeMo Gym are three server concepts: **Responses API Model servers** are model endpoints, **Resources servers** contain tool implementations and verification logic, and **Response API Agent servers** orchestrate the interaction between models and resources.
+A training environment consists of three server components: **Agents** orchestrate the rollout lifecycle—calling models, executing tool calls via resources, and coordinating verification. **Models** provide stateless text generation using LLM inference endpoints. **Resources** define tasks, tool implementations, and verification logic.
 
 ````{div} sd-d-flex-row
 ```{button-ref} gs-quickstart
@@ -54,9 +54,9 @@ Learn about NeMo Gym, how it works at a high level, and the key concepts.
 :::{grid-item-card} {octicon}`book;1.5em;sd-mr-1` About Gym
 :link: about/index
 :link-type: doc
-Overview of NeMo Gym and its capabilities for building RL training environments.
+Motivation, benefits, and core components of NeMo Gym.
 +++
-{bdg-secondary}`target-users` {bdg-secondary}`how-it-works`
+{bdg-secondary}`motivation` {bdg-secondary}`core-components`
 :::
 
 :::{grid-item-card} {octicon}`gear;1.5em;sd-mr-1` Concepts
@@ -70,9 +70,9 @@ Explore the core components: Agents, Models, and Resources.
 :::{grid-item-card} {octicon}`globe;1.5em;sd-mr-1` Ecosystem
 :link: about/ecosystem
 :link-type: doc
-Understand how NeMo Gym integrates with NeMo RL and other training frameworks.
+Understand how NeMo Gym fits within the NVIDIA NeMo Framework.
 +++
-{bdg-secondary}`nemo-rl` {bdg-secondary}`integrations`
+{bdg-secondary}`nemo-framework`
 :::
 
 ::::
@@ -88,14 +88,12 @@ Install and run NeMo Gym to start collecting rollouts.
 :link: get-started/index
 :link-type: doc
 Run a training environment and start collecting rollouts in under 5 minutes.
-+++
-{bdg-primary}`beginner`
 :::
 
 :::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Setup and Installation
 :link: get-started/setup-installation
 :link-type: doc
-Complete guide with requirements, model provider options, and troubleshooting.
+Install NeMo Gym and run your first training environment.
 +++
 {bdg-secondary}`environment` {bdg-secondary}`configuration`
 :::
@@ -125,20 +123,20 @@ Implement custom tools and define task verification logic.
 {bdg-secondary}`custom-environments` {bdg-secondary}`tools`
 :::
 
-:::{grid-item-card} {octicon}`database;1.5em;sd-mr-1` Offline Training
+:::{grid-item-card} {octicon}`database;1.5em;sd-mr-1` Offline Training (SFT, DPO)
 :link: tutorials/offline-training-w-rollouts
 :link-type: doc
-Train models offline using collected rollouts.
+Train with SFT or DPO using collected rollouts.
 +++
-{bdg-secondary}`training` {bdg-secondary}`datasets`
+{bdg-secondary}`sft` {bdg-secondary}`dpo`
 :::
 
 :::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` RL Training with NeMo RL
 :link: tutorials/rl-training-with-nemo-rl
 :link-type: doc
-Integrate NeMo Gym with NeMo RL for end-to-end RL training.
+Train with GRPO using NeMo RL and NeMo Gym.
 +++
-{bdg-secondary}`nemo-rl` {bdg-secondary}`integration`
+{bdg-secondary}`grpo` {bdg-secondary}`nemo-rl`
 :::
 
 ::::
