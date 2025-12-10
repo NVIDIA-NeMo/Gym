@@ -615,8 +615,8 @@ class RunOpenHandsAgent:
                 patch_successfully_applied=is_resolved,
                 metadata={
                     "test_results": test_results,
-                    "f2p": f2p,
-                    "p2p": p2p,
+                    "f2p": list(f2p),
+                    "p2p": list(p2p),
                 },
             )
             f.seek(0)
