@@ -1,27 +1,61 @@
 (openai-compatible-http-server-on-policy-correction)=
 
-# OpenAI-compatible HTTP server On-Policy correction
-In addition to OpenAI-compatible HTTP server functionality, a fundamental issue exists in {term}`multi-step <Multi-step>` and {term}`multi-turn <Multi-turn>` scenarios.
+# On-Policy Corrections
+
+When using an OpenAI-compatible HTTP server for RL training, fundamental issues arise in {term}`multi-step <Multi-step>` and {term}`multi-turn <Multi-turn>` scenarios. This page explains these problems and the corrections required for on-policy training.
+
+## Overview
+
+Policy optimization algorithms calculate and backpropagate through a loss calculated using log probabilities (logprobs). When rollout logprobs and token selections differ from those calculated at train time, training becomes off-policy. While algorithms can tolerate small amounts of off-policyness, excessive mismatch typically causes training runs to crash.
+
+This page covers:
+
+1. **Preliminaries**: Understanding HTTP request lifecycles and rollout structure
+2. **Problems**: Three causes of train-generation mismatch
+3. **Solutions**: Token ID fixes implemented in the generation server
 
 ## Preliminaries
 
-### Preliminary 1: Life cycle of an OpenAI HTTP request
-The life cycle of a single OpenAI HTTP request is as follows. Each step produces a single output.
-1. "Request": A JSON payload representing a rollout is sent to the HTTP server endpoint.
-   1. The schema here is typically in Responses input items or Chat Completions messages. For the rest of the sequence, we will assume Responses input items.
-2. "Input prompt": The Responses input items are "chat templated" i.e. converted from objects into a single string.
-3. "Prompt token IDs": The input prompt is "tokenized" i.e. converted from a string into a sequence of model-understandable token IDs.
-4. "Generation token IDs": The prompt token IDs are sent to the model and the model generations a new sequence of token IDs.
-5. "Generation": The generation token IDs are "de-tokenized" into a string.
-6. "Response": The generation is "parsed" into a sequence of Responses output items and returned.
+### HTTP Request Lifecycle
 
-We refer to the above life cycle steps 1-6 as LF1 - LF6.
+A single OpenAI HTTP request follows this lifecycle, where each step produces a single output:
 
-### Preliminary 2: Life cycle of a rollout
-A single multi-step or multi-turn rollout will make multiple requests in sequence to model endpoint.
-For example, a multi-step multi-turn rollout with 2 turns may look like:
+```{list-table}
+:header-rows: 1
+:widths: 10 20 70
+
+* - Step
+  - Name
+  - Description
+* - LF1
+  - Request
+  - JSON payload representing a rollout sent to the HTTP server endpoint (Responses input items or Chat Completions messages)
+* - LF2
+  - Input prompt
+  - Responses input items are "chat templated" (converted from objects into a single string)
+* - LF3
+  - Prompt token IDs
+  - Input prompt is "tokenized" (converted from string into model-understandable token IDs)
+* - LF4
+  - Generation token IDs
+  - Prompt token IDs are sent to the model, which generates a new sequence of token IDs
+* - LF5
+  - Generation
+  - Generation token IDs are "de-tokenized" into a string
+* - LF6
+  - Response
+  - Generation is "parsed" into Responses output items and returned
+```
+
+### Rollout Structure
+
+A multi-step or multi-turn rollout makes multiple sequential requests to the model endpoint. For example, a multi-step multi-turn rollout with two turns:
+
+:::{dropdown} Example: Multi-Turn Rollout Sequence
+:icon: list-ordered
+
 1. [First turn] User message
-2. Assistant Reasoning message (typically shortened to just Reasoning)
+2. Assistant Reasoning message
 3. Assistant Chat
 4. Assistant Tool Call
 5. Tool response
@@ -33,70 +67,128 @@ For example, a multi-step multi-turn rollout with 2 turns may look like:
 11. [Second turn] User message
 12. ...
 
-For the purposes of this doc, we will abbreviate rollouts like above by message type: U R C TC T R C TC T C U. U and T messages are obtained entirely independently of the model endpoint. R, C, and TC messages are obtained from the model endpoint.
+**Abbreviated notation**: `U R C TC T R C TC T C U`
 
-Today, most model endpoints will return [R C TC] messages in a single response. So in effect, the rollout can be viewed as U [R C TC] T [R C TC] T [C] U, where items in brackets [] indicate a single model call (MC).
+- **U**: User message (independent of model)
+- **T**: Tool response (independent of model)
+- **R, C, TC**: Reasoning, Chat, Tool Call (from model endpoint)
 
-### Preliminary 3: Train and generation time log probability mismatch
-Policy optimization algorithms typically have rollout and train phases within a single step. Policy optimization algorithms calculate and backpropagate through a loss calculated using log probabilities (logprobs). This leads to situations where the rollout logprobs and token selections may differ from the actual logprobs calculated at train time, leading to off-policy training. This phenomenon is typically described as "train-generation mismatch".
-
-Larger mismatches lead to further off-policyness during training. While policy optimization algorithms can tolerate a small amount of off-policyness, too much typically leads to training run crashes.
-
+Most model endpoints return `[R C TC]` messages in a single response, so the rollout can be viewed as:
+`U [R C TC] T [R C TC] T [C] U`, where brackets indicate a single model call.
+:::
 
 ## Problems
 
-We observe several problems in practice when using an OpenAI-compatible HTTP server during training that cause train and generation time log probability mismatch, leading to significant off-policyness.
+Three problems cause train-generation log probability mismatch when using an OpenAI-compatible HTTP server.
 
+### Problem 1: Re-Tokenization
 
-### Problem 1: Re-tokenization
-Observe that going from LF5 of the previous model call to LF3 of the current model call (i.e. across model calls) implies that we lose information that was once held in token IDs.
+**Cause**: Information loss when converting from token IDs (LF5) back to token IDs (LF3) across model calls.
 
-For example, in the previous model call, the model may have produced token IDs 1 and 2 which were detokenized into `_Skinny` in LF5. Then in step LF3, we could re-tokenize `_Skinny` into token ID 3.
+:::{dropdown} Technical Details: Re-Tokenization
+:icon: code-square
 
-At the previous model call generation time, the logprobs for the tokens following those for `_Skinny` will be calculated using token ID 1 and token ID 2. Then, when we go to train, the logprobs for the tokens following `_Skinny` will be calculated using token ID 3, leading to a logprob mismatch.
+In the previous model call, the model may produce token IDs 1 and 2 which de-tokenize to `_Skinny` in LF5. Then in LF3 of the next call, `_Skinny` might re-tokenize to token ID 3.
 
-We've seen the following situations:
-1. Merging upon re-tokenization: model produces token IDs 1 and 2 which is later re-tokenized to a single token ID 3 e.g. "_Ski" + "nny" -> "_Skinny".
-2. Different re-tokenization: model produces token IDs 1 and 2 which is later re-tokenized to two different token IDs 3 and 4 e.g. "_Ski" + "nny" -> "_Skin" + "ny".
+At generation time, logprobs for tokens following `_Skinny` are calculated using token IDs 1 and 2. At train time, the same logprobs are calculated using token ID 3, creating a mismatch.
 
+**Observed scenarios**:
 
-### Problem 2: Re-chat templating
-Observe that going from LF6 of the previous model call to LF2 of the current model call implies that we lose information that was once held in the generation.
+1. **Merging**: Token IDs 1 and 2 re-tokenize to single token ID 3
+   - Example: `"_Ski" + "nny"` → `"_Skinny"`
+2. **Different split**: Token IDs 1 and 2 re-tokenize to different token IDs 3 and 4
+   - Example: `"_Ski" + "nny"` → `"_Skin" + "ny"`
+:::
 
-For example, in the previous model call at LF6, the model may have produced token IDs that were de-tokenized into `<tool_call><name>get_weather</name><parameters>{"city": "SF"}</parameters></tool_call>`. This is then converted to an OpenAI tool call i.e. `{"type": "function", "function": "get_weather", "arguments": "{\"city\": \"SF\"}"}`.
+### Problem 2: Re-Chat Templating
 
-Then in LF2, we will re-chat-template this OpenAI tool call into a string. But the way the chat template represents this tool call may differ from what the model actually produced e.g. `<tool_call>\n<name>\nget_weather\n</name>\n<parameters>\n{"city": "SF"}\n</parameters>\n</tool_call>\n` adding newlines in between each opening and closing XML tag.
+**Cause**: Information loss when converting from generation string (LF6) back to templated string (LF2) across model calls.
 
-This isn't just because the chat template is esoteric or incorrect. Due to the stochastic nature of models today, we have no guarantee that the model will produce the same exact format as the deterministic process of the chat template.
+:::{dropdown} Technical Details: Re-Chat Templating
+:icon: code-square
 
+At LF6, the model may produce token IDs that de-tokenize to:
 
-### Problem 3: Non-monotonically increasing history
-Sometimes developers will intentionally change the history of a rollout.
-1. Agentic coding harnesses will sometimes summarize or truncate entirely prior history as a rollout gets longer and longer over steps.
-2. Various model chat templates will remove reasoning from the input prompt across turns.
+```xml
+<tool_call><name>get_weather</name><parameters>{"city": "SF"}</parameters></tool_call>
+```
 
-This directly changes the prompt token IDs the model sees at the current model call and differs from the final prompt token IDs used for training.
+This converts to an OpenAI tool call object:
 
+```json
+{"type": "function", "function": "get_weather", "arguments": "{\"city\": \"SF\"}"}
+```
 
-## Current solution
-We solve the problems above using two components:
-1. For Problems 1 and 2, we will perform the following on-policy token IDs fix in the vLLM OpenAI HTTP server https://github.com/NVIDIA-NeMo/RL/blob/64ab08df3edf25131959fc474b44ed5e36a1600b/nemo_rl/models/generation/vllm/vllm_worker_async.py#L40
-2. For Problem 3, we will disable reasoning truncation across turns using the chat template.
-   1. It's an open research question on how to train on these types of scenarios.
+At LF2 in the next call, the chat template may render this differently:
 
-The on-policy token IDs fix in the vLLM OpenAI HTTP server assumes the following prerequisites:
-1. `model_prefix_token_ids`: The ground truth prompt token IDs concatenated with the generation token IDs from the previous model call.
-2. `template_prefix_token_ids`: The re-templated and re-tokenized token IDs up to and not including the final assistant message.
-3. `template_token_ids`: The re-templated and re-tokenized token IDs for the entire rollouts.
-   1. We assume that `template_prefix_token_ids` is a strict prefix of `template_token_ids` (specifically we need to circumvent Problem 3).
+```xml
+<tool_call>
+<name>
+get_weather
+</name>
+<parameters>
+{"city": "SF"}
+</parameters>
+</tool_call>
+```
 
-Our fix will find the position of the right EOS token ID in the `template_token_ids` and splice in the `model_prefix_token_ids`.
+The deterministic chat template cannot match the stochastic model output format exactly.
+:::
 
-For example:
-1. Let's assume the current request in LF1 contains the following rollout structure: `U A T A U A T`
-2. The variables here would be:
-   1. `model_prefix_token_ids`: Ground truth token IDs that correspond to `U A T A U A`.
-   2. `template_prefix_token_ids`: Re-templated and re-tokenized token IDs that correspond to `U A T A U A`.
-   3. `template_token_ids`: Re-templated and re-tokenized token IDs that correspond to `U A T A U A T`.
-3. We will use `template_prefix_token_ids` to find the position of the EOS token ID corresponding to the content represented in `model_prefix_token_ids`.
-4. Splice the prefix of `template_token_ids` and replace it with `model_prefix_token_ids`.
+### Problem 3: Non-Monotonically Increasing History
+
+**Cause**: Intentional modifications to rollout history during execution.
+
+:::{dropdown} Technical Details: History Modification
+:icon: code-square
+
+Developers sometimes modify rollout history:
+
+1. **Agentic coding harnesses**: Summarize or truncate prior history as rollouts grow longer
+2. **Model chat templates**: Remove reasoning from input prompt across turns
+
+These changes alter the prompt token IDs the model sees at the current call, differing from the final prompt token IDs used for training.
+:::
+
+## Solution
+
+Two components address these problems:
+
+### On-Policy Token ID Fix
+
+For Problems 1 and 2, implement the on-policy token ID fix in the vLLM OpenAI HTTP server. Refer to the [NeMo RL implementation](https://github.com/NVIDIA-NeMo/RL/blob/64ab08df3edf25131959fc474b44ed5e36a1600b/nemo_rl/models/generation/vllm/vllm_worker_async.py#L40).
+
+:::{dropdown} Implementation Details: Token ID Fix
+:icon: code-square
+
+**Prerequisites**:
+
+- `model_prefix_token_ids`: Ground truth prompt token IDs concatenated with generation token IDs from the previous model call
+- `template_prefix_token_ids`: Re-templated and re-tokenized token IDs up to (not including) the final assistant message
+- `template_token_ids`: Re-templated and re-tokenized token IDs for the entire rollout
+
+**Assumption**: `template_prefix_token_ids` is a strict prefix of `template_token_ids` (requires circumventing Problem 3).
+
+**Algorithm**:
+
+The fix finds the position of the correct EOS token ID in `template_token_ids` and splices in `model_prefix_token_ids`.
+
+**Example**:
+
+1. Current request (LF1) contains rollout structure: `U A T A U A T`
+2. Variables:
+   - `model_prefix_token_ids`: Ground truth token IDs for `U A T A U A`
+   - `template_prefix_token_ids`: Re-templated token IDs for `U A T A U A`
+   - `template_token_ids`: Re-templated token IDs for `U A T A U A T`
+3. Use `template_prefix_token_ids` to find the EOS token position corresponding to `model_prefix_token_ids`
+4. Splice `template_token_ids` prefix with `model_prefix_token_ids`
+:::
+
+### Reasoning Truncation Handling
+
+For Problem 3, disable reasoning truncation across turns using the chat template. Handling non-monotonic history during training remains an open research question.
+
+## Related Topics
+
+- {doc}`generation-backend-and-openai-compatible-http-server` - Generation backend requirements
+- {doc}`gym-integration-footprint-and-form-factor` - Full integration component breakdown

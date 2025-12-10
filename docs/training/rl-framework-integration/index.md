@@ -1,53 +1,98 @@
 (training-framework-integration)=
 
-# Training framework integration
+# Training Framework Integration
 
-Implement NeMo Gym integration into a new training framework. This is only for expert users that cannot use existing training framework integrations with Gym and need to implement their own.
+This section covers how to integrate NeMo Gym into a new training framework. This content is for expert users who cannot use existing training framework integrations and need to implement their own.
 
-::::{grid} 1 1 1 1
+:::{note}
+Most users should use an existing integration such as NeMo RL. Refer to these guides only if you are developing a custom RL training framework or need to understand the integration requirements.
+:::
+
+## Prerequisites
+
+Before integrating Gym into your training framework, ensure you have:
+
+- An RL training framework with policy optimization support (PPO, GRPO, or similar)
+- A generation backend (vLLM, SGLang, or equivalent)
+- Familiarity with OpenAI-compatible HTTP server APIs
+
+## Integration Components
+
+Gym integration requires implementing the following components in your training framework:
+
+::::{grid} 1 1 2 2
 :gutter: 1 1 1 2
 
-:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` Generation backend and OpenAI-compatible HTTP server
+:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` Generation Backend
 :link: generation-backend-and-openai-compatible-http-server
 :link-type: doc
-OpenAI compatible HTTP server pre-requisites for Gym integration into an RL framework.
+
+OpenAI-compatible HTTP server requirements and existing implementations across RL frameworks.
 +++
-{bdg-secondary}`training` {bdg-secondary}`infra`
+{bdg-primary}`prerequisite`
 :::
 
-:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` OpenAI-compatible HTTP server On-Policy correction
+:::{grid-item-card} {octicon}`sync;1.5em;sd-mr-1` On-Policy Corrections
 :link: openai-compatible-http-server-on-policy-correction
 :link-type: doc
-Helpful On-Policy fixes for OpenAI-compatible HTTP server implementations in {term}`multi-step <Multi-step>` and {term}`multi-turn <Multi-turn>` scenarios.
+
+Fixes for on-policy training in multi-step and multi-turn scenarios to prevent train-generation mismatch.
 +++
-{bdg-secondary}`training` {bdg-secondary}`infra`
+{bdg-primary}`prerequisite`
 :::
 
-:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` Gym integration footprint and form factor
+:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Integration Footprint
 :link: gym-integration-footprint-and-form-factor
 :link-type: doc
-Implementation details like footprint and form factor for the actual Gym + RL integration.
+
+Implementation components, form factor, and reference implementations from NeMo RL.
 +++
-{bdg-secondary}`training` {bdg-secondary}`infra`
+{bdg-secondary}`implementation`
 :::
 
-:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` Gym + RL framework integration success criteria
+:::{grid-item-card} {octicon}`check-circle;1.5em;sd-mr-1` Success Criteria
 :link: gym-rl-framework-integration-success-criteria
 :link-type: doc
-What success criteria can be used to validate Gym + RL framework integration correctness.
+
+Validation criteria and benchmarks to verify correct Gym integration.
 +++
-{bdg-secondary}`training` {bdg-secondary}`infra`
+{bdg-secondary}`validation`
 :::
 
 ::::
 
+## Integration Workflow
+
+The typical integration workflow follows this sequence:
+
+```{list-table}
+:header-rows: 1
+:widths: 10 30 60
+
+* - Step
+  - Component
+  - Description
+* - 1
+  - Generation backend
+  - Expose your generation engine (vLLM, SGLang) as an OpenAI-compatible HTTP server
+* - 2
+  - On-policy corrections
+  - Implement token ID fixes to prevent re-tokenization and re-templating issues
+* - 3
+  - Gym integration
+  - Connect Gym to your training loop using the rollout orchestration APIs
+* - 4
+  - Validation
+  - Verify integration using the success criteria benchmarks
+```
+
 ```{toctree}
-:caption: Training framework integration
+:caption: Training Framework Integration
 :hidden:
 :maxdepth: 1
 
-generation-backend-and-openai-compatible-http-server
-openai-compatible-http-server-on-policy-correction
-gym-integration-footprint-and-form-factor
-gym-rl-framework-integration-success-criteria
+Generation Backend <generation-backend-and-openai-compatible-http-server>
+On-Policy Corrections <openai-compatible-http-server-on-policy-correction>
+Integration Footprint <gym-integration-footprint-and-form-factor>
+Success Criteria <gym-rl-framework-integration-success-criteria>
 ```
