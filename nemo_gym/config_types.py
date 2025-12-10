@@ -232,9 +232,19 @@ class BaseUploadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
     hf_dataset_prefix: str = Field(
         default="Nemotron-RL", description="Prefix prepended to dataset name (default: 'NeMo-Gym')."
     )
-    split: Optional[Literal["train", "validation", "test"]] = Field(
+    split: Literal["train", "validation", "test"] = Field(
         default="train",
         description="Dataset split type (e.g., 'train', 'validation', 'test'). Format validation only applies to 'train' splits.",
+    )
+    create_pr: bool = Field(
+        default=False,
+        description="Create a pull request instead of pushing directly. Required for repos where you do not have write access.",
+    )
+    commit_message: Optional[str] = Field(
+        default=None, description="Custom commit message. If not provided, HuggingFace auto-generates one."
+    )
+    commit_description: Optional[str] = Field(
+        default=None, description="Optional commit description with additional context."
     )
 
 

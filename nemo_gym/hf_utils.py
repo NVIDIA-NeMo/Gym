@@ -49,7 +49,7 @@ def check_jsonl_format(file_path: str) -> bool:  # pragma: no cover
             return False
 
     except (FileNotFoundError, json.JSONDecodeError) as e:
-        print(f"[Nemo-Gym] - Error reading or prasing the JSON file: {e}")
+        print(f"[Nemo-Gym] - Error reading or parsing the JSON file: {e}")
         return False
 
     return True
@@ -123,18 +123,15 @@ def upload_jsonl_dataset(
     with open(config.resource_config_path, "r") as f:
         data = yaml.safe_load(f)
 
-    domain = d.lower() if (d := visit_resource_server(data).to_dict().get("domain")) else ""
+    domain = d.lower() + "-" if (d := visit_resource_server(data).to_dict().get("domain")) else ""
     resource_server = config.resource_config_path.split("/")[1]
-    dataset_name = config.dataset_name
+    dataset_name = config.dataset_name or resource_server
     prefix = config.hf_dataset_prefix + "-" if config.hf_dataset_prefix else ""
     collection_id = (
         f"{config.hf_organization}/{config.hf_collection_name.lower().replace(' ', '-')}-{config.hf_collection_slug}"
     )
 
-    if dataset_name:
-        repo_id = f"{config.hf_organization}/{prefix}{domain}-{dataset_name}"
-    else:
-        repo_id = f"{config.hf_organization}/{prefix}{domain}-{resource_server}"
+    repo_id = f"{config.hf_organization}/{prefix}{domain}{dataset_name}"
 
     # Dataset format check - only strict check for training data
     is_training = config.split.lower() == "train"
@@ -147,8 +144,11 @@ def upload_jsonl_dataset(
         client.create_repo(repo_id=repo_id, token=config.hf_token, repo_type="dataset", private=True, exist_ok=True)
         print(f"[Nemo-Gym] - Repo '{repo_id}' is ready for use")
     except HfHubHTTPError as e:
-        print(f"[Nemo-Gym] - Error creating repo: {e}")
-        raise
+        if config.create_pr and "403" in str(e):
+            print(f"[Nemo-Gym] - Repo '{repo_id}' exists (no create permission, will create PR)")
+        else:
+            print(f"[Nemo-Gym] - Error creating repo: {e}")
+            raise
 
     # Collection id + addition
     try:
@@ -166,14 +166,20 @@ def upload_jsonl_dataset(
 
     # File upload
     try:
-        client.upload_file(
+        commit_info = client.upload_file(
             path_or_fileobj=config.input_jsonl_fpath,
             path_in_repo=Path(config.input_jsonl_fpath).name,
             repo_id=repo_id,
             token=config.hf_token,
             repo_type="dataset",
+            create_pr=config.create_pr,
+            commit_message=config.commit_message,
+            commit_description=config.commit_description,
         )
-        print("[Nemo-Gym] - Dataset upload successful")
+        if config.create_pr:
+            print(f"[Nemo-Gym] - Pull Request created: {commit_info.pr_url}")
+        else:
+            print("[Nemo-Gym] - Dataset upload successful")
     except HfHubHTTPError as e:
         print(f"[Nemo-Gym] - Error uploading file: {e}")
         raise
