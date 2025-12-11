@@ -1,42 +1,79 @@
+---
+description: "Verify your training framework integration works correctly end-to-end"
+categories: ["how-to-guides"]
+tags: ["validation", "testing", "integration", "troubleshooting", "debugging"]
+personas: ["mle-focused"]
+difficulty: "intermediate"
+content_type: "how-to"
+---
+
 (integrate-validate-integration)=
 
 # Validate Your Integration
 
-Verify your training framework integration works correctly end-to-end.
+Run a validation suite to verify your training framework integration works correctly end-to-end.
 
-::::{grid} 2
-:gutter: 3
+## How It Works
 
-:::{grid-item-card} {octicon}`clock;1em;` **Time**
-15 minutes
-:::
+The validation suite tests each layer of the integration:
 
-:::{grid-item-card} {octicon}`bookmark;1em;` **Prerequisites**
+1. **HTTP endpoint** — Verify the OpenAI-compatible server responds correctly
+2. **Token stability** — Ensure tokenization round-trips are consistent
+3. **Rollout collection** — Confirm Gym returns complete rollouts with rewards
+4. **Token continuity** — Validate token sequences align across turns
+5. **Gradient flow** — Test that training data produces valid gradients
 
-- Completed previous guides in this section
-- Working rollout collection and processing
+## Before You Start
 
-:::
+**Prerequisites**:
 
-::::
+- Completed {doc}`expose-openai-endpoint` and {doc}`connect-gym-to-training`
+- Working rollout collection
+- Access to your tokenizer and model (for gradient tests)
 
 ---
 
 ## Validation Checklist
 
-Run through this checklist to verify your integration is correct:
+```{list-table}
+:header-rows: 1
+:widths: 30 50 20
 
-- [ ] HTTP endpoint responds correctly
-- [ ] Token round-trips are stable
-- [ ] Rollouts complete with rewards
-- [ ] Token sequences are contiguous
-- [ ] Training gradients flow correctly
+* - Test
+  - What It Validates
+  - Required
+* - HTTP Endpoint
+  - `/v1/models` and `/v1/chat/completions` respond
+  - Yes
+* - Token Round-Trip
+  - Encode → decode → re-encode produces same IDs
+  - Yes
+* - Rollout Collection
+  - Gym returns rollouts with rewards and token data
+  - Yes
+* - Token Continuity
+  - Token sequences are contiguous across turns
+  - Yes
+* - Gradient Flow
+  - Processed rollouts produce valid gradients
+  - Optional
+```
 
 ---
 
-## Test HTTP Endpoint
+## Run Validation
 
-Verify your OpenAI-compatible endpoint handles all required operations:
+### Test HTTP Endpoint
+
+Verify your OpenAI-compatible endpoint handles required operations:
+
+```bash
+# Quick test
+curl http://localhost:8000/v1/models
+```
+
+:::{dropdown} Full Endpoint Test (Python)
+:icon: code
 
 ```python
 import aiohttp
@@ -68,7 +105,7 @@ async def test_endpoint(base_url: str):
             assert "choices" in result, "No choices in response"
             print("✅ Chat completions work")
         
-        # Test 3: Tokenization (if available)
+        # Test 3: Tokenization (optional)
         async with session.post(
             f"{base_url}/tokenize",
             json={"prompt": "Hello world"}
@@ -79,23 +116,17 @@ async def test_endpoint(base_url: str):
                 print("⚠️  Tokenization endpoint not available (optional)")
 
 
-# Run the test
 asyncio.run(test_endpoint("http://localhost:8000"))
 ```
 
-**✅ Expected output**:
+:::
 
-```text
-✅ Model listing works
-✅ Chat completions work
-✅ Tokenization endpoint works
-```
+### Test Token Round-Trip Stability
 
----
+Verify tokenization is stable across encode/decode cycles:
 
-## Test Token Round-Trip Stability
-
-Verify that tokenization is stable across encode/decode cycles:
+:::{dropdown} Token Round-Trip Test
+:icon: code
 
 ```python
 def test_token_roundtrip(tokenizer, test_strings: list[str]):
@@ -103,13 +134,8 @@ def test_token_roundtrip(tokenizer, test_strings: list[str]):
     failures = []
     
     for text in test_strings:
-        # Encode
         token_ids = tokenizer.encode(text, add_special_tokens=False)
-        
-        # Decode
         decoded = tokenizer.decode(token_ids)
-        
-        # Re-encode
         re_encoded = tokenizer.encode(decoded, add_special_tokens=False)
         
         if token_ids != re_encoded:
@@ -122,7 +148,7 @@ def test_token_roundtrip(tokenizer, test_strings: list[str]):
     
     if failures:
         print(f"❌ {len(failures)} round-trip failures:")
-        for f in failures[:3]:  # Show first 3
+        for f in failures[:3]:
             print(f"   '{f['original']}' -> {f['token_ids']} -> '{f['decoded']}' -> {f['re_encoded']}")
         return False
     
@@ -130,28 +156,28 @@ def test_token_roundtrip(tokenizer, test_strings: list[str]):
     return True
 
 
-# Test with various strings
 test_strings = [
     "Hello, world!",
     "The answer is 42.",
     "```python\nprint('hello')\n```",
     "Multi\nline\ntext",
-    "Special chars: @#$%",
 ]
 test_token_roundtrip(tokenizer, test_strings)
 ```
 
----
+:::
 
-## Test End-to-End Rollout
+### Test End-to-End Rollout
 
-Collect a rollout and verify all fields are present:
+Collect a rollout and verify all required fields:
+
+:::{dropdown} Rollout Collection Test
+:icon: code
 
 ```python
 async def test_rollout_collection(gym: GymIntegration):
     """Test complete rollout collection."""
     
-    # Simple test example
     example = {
         "responses_create_params": {
             "input": [{"type": "message", "role": "user", "content": "What is 2+2?"}],
@@ -160,14 +186,11 @@ async def test_rollout_collection(gym: GymIntegration):
         "agent_ref": "your_agent_name",
     }
     
-    # Collect rollout
     async for rollout in gym.collect_rollouts([example]):
         # Verify structure
         assert "response" in rollout, "Missing response"
         assert "output" in rollout["response"], "Missing output"
         assert "reward" in rollout, "Missing reward"
-        
-        # Verify reward is valid
         assert 0.0 <= rollout["reward"] <= 1.0, f"Invalid reward: {rollout['reward']}"
         
         # Check for trainable outputs
@@ -184,11 +207,14 @@ async def test_rollout_collection(gym: GymIntegration):
         return rollout
 ```
 
----
+:::
 
-## Test Token Continuity
+### Test Token Continuity
 
-Verify token sequences align correctly:
+Verify token sequences align correctly across turns:
+
+:::{dropdown} Token Continuity Test
+:icon: code
 
 ```python
 def test_token_continuity(rollout: dict, tokenizer):
@@ -205,23 +231,22 @@ def test_token_continuity(rollout: dict, tokenizer):
         return False
 ```
 
----
+:::
 
-## Test Training Gradient Flow
+### Test Gradient Flow (Optional)
 
-Verify that processed rollouts produce valid gradients:
+Verify processed rollouts produce valid gradients:
+
+:::{dropdown} Gradient Flow Test
+:icon: code
 
 ```python
 import torch
 
 
-def test_gradient_flow(
-    processed_rollout: dict,
-    model: torch.nn.Module,
-):
+def test_gradient_flow(processed_rollout: dict, model: torch.nn.Module):
     """Test that gradients flow correctly through processed data."""
     
-    # Concatenate all trainable token IDs
     trainable_ids = []
     for msg in processed_rollout["message_log"]:
         if msg.get("trainable", False):
@@ -231,18 +256,13 @@ def test_gradient_flow(
         print("⚠️  No trainable tokens in rollout")
         return False
     
-    # Create a simple forward pass
     input_ids = torch.tensor([trainable_ids])
     
-    # Forward pass (adjust for your model interface)
     model.train()
     outputs = model(input_ids, labels=input_ids)
     loss = outputs.loss
-    
-    # Backward pass
     loss.backward()
     
-    # Check that gradients exist
     has_gradients = any(
         p.grad is not None and p.grad.abs().sum() > 0
         for p in model.parameters()
@@ -256,11 +276,16 @@ def test_gradient_flow(
         return False
 ```
 
+:::
+
 ---
 
-## Run Full Validation Suite
+## Full Validation Suite
 
-Combine all tests into a validation script:
+Run all tests together:
+
+:::{dropdown} Complete Validation Script
+:icon: play
 
 ```python
 async def run_validation_suite(
@@ -310,7 +335,7 @@ async def run_validation_suite(
         else:
             results["token_continuity"] = "❌ FAIL"
         
-        # Test 5: Gradient Flow (if model provided)
+        # Test 5: Gradient Flow (optional)
         if model:
             print("\n📈 Testing gradient flow...")
             processed = process_rollout_for_training(rollout, tokenizer)
@@ -342,9 +367,11 @@ async def run_validation_suite(
 # asyncio.run(run_validation_suite(base_url, gym, tokenizer, model))
 ```
 
+:::
+
 ---
 
-## Expected Results
+## Expected Output
 
 A successful validation produces:
 
@@ -356,7 +383,6 @@ Training Framework Integration Validation
 📡 Testing HTTP endpoint...
 ✅ Model listing works
 ✅ Chat completions work
-✅ Tokenization endpoint works
 
 🔄 Testing token round-trips...
 ✅ All 3 round-trips stable
@@ -369,9 +395,6 @@ Training Framework Integration Validation
 🔗 Testing token continuity...
 ✅ Token continuity validated across 2 turns
 
-📈 Testing gradient flow...
-✅ Gradients flow correctly (loss=2.3456)
-
 ==================================================
 VALIDATION SUMMARY
 ==================================================
@@ -379,7 +402,6 @@ VALIDATION SUMMARY
   token_roundtrip: ✅ PASS
   rollout_collection: ✅ PASS
   token_continuity: ✅ PASS
-  gradient_flow: ✅ PASS
 
 🎉 All validations passed! Your integration is ready.
 ```
@@ -388,68 +410,73 @@ VALIDATION SUMMARY
 
 ## Troubleshooting
 
-### HTTP endpoint tests fail
+:::{dropdown} HTTP Endpoint Tests Fail
+:icon: alert
 
-Refer to {doc}`expose-openai-endpoint` and verify your vLLM configuration.
+**Solutions**:
+- Refer to {doc}`expose-openai-endpoint`
+- Verify vLLM configuration has `expose_http_server: true`
+- Check that the server has fully initialized
 
-### Token round-trips unstable
+:::
 
-Some tokenizers behave inconsistently. Consider:
-- Using `add_special_tokens=False` consistently
-- Stripping whitespace before comparison
-- Filing an issue with the tokenizer maintainers
+:::{dropdown} Token Round-Trips Unstable
+:icon: alert
 
-### Rollout collection fails
+Some tokenizers behave inconsistently.
 
-Refer to {doc}`connect-gym-to-training` and check:
-- Gym servers are running
-- Agent configuration is correct
-- Network connectivity between components
+**Solutions**:
+- Use `add_special_tokens=False` consistently
+- Strip whitespace before comparison
+- File an issue with tokenizer maintainers if persistent
 
-### Token continuity fails
+:::
 
-Refer to {doc}`process-multi-turn-rollouts` for debugging steps.
+:::{dropdown} Rollout Collection Fails
+:icon: alert
+
+**Solutions**:
+- Refer to {doc}`connect-gym-to-training`
+- Verify Gym servers are running
+- Check agent configuration is correct
+- Test network connectivity between components
+
+:::
+
+:::{dropdown} Token Continuity Fails
+:icon: alert
+
+**Solutions**:
+- Refer to {doc}`/training/rollout-collection/process-multi-turn-rollouts`
+- Check that trainable turns have correct `prompt_token_ids`
+- Verify no tokens are missing between turns
+
+:::
 
 ---
 
 ## Integration Complete
 
-Congratulations! 🎉 Your training framework integration is validated and ready for production use.
+Your training framework integration is validated and ready for production use.
 
-**Completed**:
+**Completed steps**:
 
 1. ✅ {doc}`expose-openai-endpoint` — HTTP endpoint configured
 2. ✅ {doc}`connect-gym-to-training` — Gym integrated into training loop
-3. ✅ {doc}`process-multi-turn-rollouts` — Rollouts processed correctly
-4. ✅ {doc}`validate-integration` — Integration validated
+3. ✅ {doc}`validate-integration` — Integration validated
+
+:::{tip}
+For multi-turn agentic tasks, refer to {doc}`/training/rollout-collection/process-multi-turn-rollouts` to handle token alignment across turns.
+:::
 
 ---
 
 ## Next Steps
 
-::::{grid} 1 1 2 2
-:gutter: 3
+- **Scale up training** — Refer to {doc}`/tutorials/integrate-training-frameworks/train-with-nemo-rl` to see how NeMo RL scales Gym integration to multi-node training
+- **Build custom resources** — Refer to {doc}`/tutorials/creating-resource-server` to create custom resource servers for your specific tasks
 
-:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` Scale Up Training
-:link: /tutorials/integrate-training-frameworks/train-with-nemo-rl
-:link-type: doc
-
-See how NeMo RL scales Gym integration to multi-node training.
-:::
-
-:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build Custom Resources
-:link: /tutorials/creating-resource-server
-:link-type: doc
-
-Create custom resource servers for your specific tasks.
-:::
-
-::::
-
----
-
-## Reference
+## Resources
 
 - {doc}`/about/concepts/training-integration-architecture`
 - [NeMo RL Gym tests](https://github.com/NVIDIA-NeMo/RL/blob/main/tests/unit/models/generation/test_vllm_generation.py)
-

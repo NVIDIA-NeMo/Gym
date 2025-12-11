@@ -1,4 +1,4 @@
-(integrate-process-multi-turn-rollouts)=
+(rollout-collection-process-multi-turn)=
 
 # Process Multi-Turn Rollouts
 
@@ -13,8 +13,7 @@ Convert Gym rollout results into training-ready token sequences with correct ali
 
 :::{grid-item-card} {octicon}`bookmark;1em;` **Prerequisites**
 
-- Completed {doc}`connect-gym-to-training`
-- Gym rollouts being collected
+- Gym rollouts being collected (via `ng_collect_rollouts` or programmatic API)
 - Understanding of your tokenizer behavior
 
 :::
@@ -403,19 +402,6 @@ print("Actual:", tokenizer.decode(prompt_ids[:20]))
 **Symptom**: `process_rollout_for_training` returns `None`
 
 **Fix**: Ensure your rollouts include model outputs with `generation_token_ids`. Check that your resource server isn't filtering these fields.
-
----
-
-## Next Step
-
-Your rollouts are now training-ready. Next, validate that your entire integration works correctly.
-
-:::{button-ref} validate-integration
-:color: primary
-:outline:
-
-Next: Validate Your Integration →
-:::
 
 ---
 

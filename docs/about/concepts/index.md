@@ -50,6 +50,12 @@ Essential vocabulary for agent training, RL workflows, and NeMo Gym. This glossa
 Understand how Gym connects to RL training frameworks, including the request lifecycle, retokenization challenges, and integration patterns.
 :::
 
+:::{grid-item-card} {octicon}`sync;1.5em;sd-mr-1` On-Policy Token Alignment
+:link: openai-compatible-http-server-on-policy-correction
+:link-type: ref
+Why token alignment matters for multi-turn RL training: re-tokenization, re-chat-templating, and the on-policy fix.
+:::
+
 ::::
 
 ---
@@ -63,4 +69,7 @@ Configuration System <configuration-system>
 Task Verification <task-verification>
 Key Terminology <key-terminology>
 Training Integration Architecture <training-integration-architecture>
+On-Policy Token Alignment <on-policy-token-alignment>
 ```
+
+<!-- Note: on-policy-token-alignment uses ref label openai-compatible-http-server-on-policy-correction -->

@@ -72,6 +72,27 @@ Post-process rollouts: filter by reward, create DPO pairs, format for training.
 
 ---
 
+## Process for Training
+
+Prepare rollouts for your training framework.
+
+::::{grid} 1 1 2 2
+:gutter: 1 1 1 2
+
+:::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` Process Multi-Turn Rollouts
+:link: process-multi-turn-rollouts
+:link-type: doc
+
+Handle token alignment across multi-turn interactions for correct gradient computation.
++++
+{bdg-secondary}`tokens`
+{bdg-secondary}`alignment`
+:::
+
+::::
+
+---
+
 ## Optimize Performance
 
 Scale rollout collection for production training runs.
@@ -106,6 +127,7 @@ Configure `num_samples_in_parallel` and connection limits for optimal throughput
 :hidden:
 
 configure-sampling
+process-multi-turn-rollouts
 profile-collection
 tune-parallelism
 ```
