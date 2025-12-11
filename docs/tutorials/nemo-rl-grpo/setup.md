@@ -8,7 +8,7 @@
 
 **Estimated Time:** ~5 minutes
 
-Launch an interactive Slurm session to run training commands. See the [NeMo RL Cluster Setup documentation](https://docs.nvidia.com/nemo/rl/latest/cluster.html#interactive-launching) for more details.
+Launch an interactive Slurm session to run training commands. Refer to the [NeMo RL Cluster Setup documentation](https://docs.nvidia.com/nemo/rl/latest/cluster.html#interactive-launching) for more details.
 
 ```bash
 NUM_ACTOR_NODES=1

@@ -2,9 +2,7 @@
 
 # Single Node Training
 
-TODO STILL
-
-### Single Node Training (interactive mode)
+### Single-Node Training (Interactive Mode)
 
 **Estimated Time:** ~2-4 hours
 
@@ -27,8 +25,6 @@ CONFIG_PATH=examples/penguin/grpo_workplace_assistant_nemotron_nano_v2_9b.yaml
 #   HF_TOKEN: Your Hugging Face token for model downloads
 #   WANDB_API_KEY: Your Weights & Biases API key for logging
 #   TORCH_CUDA_ARCH_LIST: CUDA architectures compute capability
-<!-- @import "[TOC]" {cmd="toc" depthFrom=1 depthTo=6 orderedList=false} -->
-
 #   NRL_FORCE_REBUILD_VENVS: Set to true on first run to rebuild venvs
 TORCH_CUDA_ARCH_LIST="9.0 10.0" \
 HF_HOME=.cache/ \
@@ -84,9 +80,9 @@ Training is successful when:
 
 ### Measuring Real-World Improvement
 
-The Workplace Assistant environment's tool-calling tasks correlate with performance on the [Berkeley Function Calling Leaderboard (BFCL) v3](https://gorilla.cs.berkeley.edu/leaderboard.html) benchmark. To measure improvement, evaluate the Nemotron Nano v2 9B model on BFCL v3 before and after training and compare.  You should observe measurable improvement in tool-calling accuracy
+The Workplace Assistant environment's tool-calling tasks correlate with performance on the [Berkeley Function Calling Leaderboard (BFCL) v3](https://gorilla.cs.berkeley.edu/leaderboard.html) benchmark. To measure improvement, evaluate the Nemotron Nano v2 9B model on BFCL v3 before and after training, and compare the results. You should observe measurable improvement in tool-calling accuracy.
 
-You can run BFCL v3 evaluations using [NeMo Evaluator](https://github.com/NVIDIA-NeMo/Evaluator), which supports BFCL v3. See the [NeMo Evaluator docs](https://github.com/NVIDIA-NeMo/Evaluator#-supported-benchmarks-and-evaluation-harnesses) for full setup instructions and supported benchmarks.
+You can run BFCL v3 evaluations using [NeMo Evaluator](https://github.com/NVIDIA-NeMo/Evaluator), which supports BFCL v3. Refer to the [NeMo Evaluator docs](https://github.com/NVIDIA-NeMo/Evaluator#-supported-benchmarks-and-evaluation-harnesses) for full setup instructions and supported benchmarks.
 
 ---
 
@@ -112,7 +108,7 @@ results/<EXP_NAME>/                                  # Checkpoints and metrics
 
 
 
-### Single node training
+### Single-Node Training
 
 Now you're ready to launch a single-node training run to verify your setup works correctly before scaling to multi-node training.
 
@@ -120,7 +116,7 @@ Now you're ready to launch a single-node training run to verify your setup works
 
 1. Completed the `ng_prepare_data` command above (data should be in `data/bytedtsinghua_dapo17k/`)
 2. W&B API key (see [Prerequisites](#prerequisites) section above)
-3. HuggingFace token configured (see setup steps above)
+3. HuggingFace token configured (refer to setup steps above)
 
 
 ```bash

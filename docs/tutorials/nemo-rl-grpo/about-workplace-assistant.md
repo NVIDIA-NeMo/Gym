@@ -2,22 +2,22 @@
 
 # About the Workplace Assistant Training Environment
 
-The Workplace Assistant is a **{term}`multi-step <Multi-step>` agentic {term}`tool-use <Tool Use / Function Calling>` {term}`training environment <Training environment>`** that tests an model's ability to execute business tasks in a simulated workplace setting.
+The Workplace Assistant is a **{term}`multi-step <Multi-step>` agentic {term}`tool-use <Tool Use / Function Calling>` {term}`training environment <Training environment>`** that tests a model's ability to execute business tasks in a simulated workplace setting.
 
 **Generally, the model must:**
 1. Understand the user's intent from natural language
 2. Determine which tools to call and in what order
-3. Infer correct parameters (e.g., look up email addresses, find matching customer records)
+3. Infer correct parameters (for example, look up email addresses or find matching customer records)
 4. Execute all necessary steps to complete the task
 
 
-## Task examples
+## Task Examples
 
 Each task is a natural language request that the model must complete using the available tools. All tasks share the same set of tools that allow to model to retrieve more information or perform actions. Each {term}`task instance <Task Instance>` uses a separate set of database instances so that information retrieved or actions performed are specific to that task instance only. The model needs to accomplish the task within 6 {term}`steps <Multi-step>`.
 
 - **Databases**: Email, Calendar, Analytics, Project Management, Customer Relationship Manager (CRM)
 - **Tools**: distributed across these databases
-- **Tasks**: common business activities (e.g., sending emails, scheduling meetings, managing projects)
+- **Tasks**: common business activities (such as sending emails, scheduling meetings, and managing projects)
 
 In the examples below, you will see the exact {term}`Responses create params <Responses API>` that will be provided to the model. The model is provided with:
 1. Surrounding contextual information in the system prompt (first input with role `system`) like what the current day is.
@@ -85,7 +85,7 @@ The `email_send_email` tool will be executed with the above parameters. Within t
 6. `customer_relationship_manager_update_customer(customer_id="00000035", field="assigned_to_email", new_value="john.smith@atlas.com")`
 
 
-## Key implementation details
+## Key Implementation Details
 The environment is implemented as a FastAPI-based resource server that executes tools and verification. Here's how it works:
 
 ### Session Management
@@ -108,7 +108,7 @@ async def seed_session(self, request: Request, body: BaseSeedSessionRequest):
 
 This ensures each task starts with a clean slate and tool calls from different rollouts don't interfere.
 
-### Tool implementations
+### Tool Implementations
 
 Tool calls are routed to Python functions:
 
@@ -172,7 +172,7 @@ def is_correct(predicted_actions, ground_truth_actions, error):
     )
 ```
 
-**Why State-matching verification?**:
+**Why State-Matching Verification?**
 - **Flexibility**: Multiple valid solution paths exist for the same task
 - **Robustness**: Model can recover from mistakes mid-trajectory
 - **Goal-oriented**: Focuses on outcomes, not specific procedures

@@ -34,7 +34,7 @@ In this tutorial, you will:
 
 :::{tab-item} Hardware Requirements
 
-**Minimum** 1 node of 8× NVIDIA GPUs with 80GB or more memory each (e.g., H100, A100) is required.
+**Minimum** 1 node of 8× NVIDIA GPUs with 80GB or more memory each (such as H100 or A100) is required.
 
 NeMo Gym does not require GPUs. GPUs are only necessary for GRPO training with NeMo RL.
 
