@@ -98,6 +98,94 @@ Set the `domain` field in your configuration to categorize your resource server:
   - General purpose or uncategorized
 ```
 
+## Technical Requirements
+
+Your resource server implementation must follow these design patterns to ensure compatibility with NeMo Gym's training infrastructure.
+
+### Async-First Design
+
+All endpoint handlers must be asynchronous. This is critical for handling concurrent requests during large-scale training.
+
+```python
+# Correct: async function
+async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+    return BaseVerifyResponse(**body.model_dump(), reward=1.0)
+
+# Incorrect: synchronous function will block other requests
+def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+    return BaseVerifyResponse(**body.model_dump(), reward=1.0)
+```
+
+Avoid spawning additional threads or processes unless necessary. A single Gym instance can handle tens of thousands of concurrent requests when properly implemented.
+
+### Use NeMo Gym OpenAI Utilities
+
+Use the NeMo Gym OpenAI client and data models from `nemo_gym.openai_utils` rather than external clients such as LiteLLM or the standard OpenAI SDK:
+
+```python
+from nemo_gym.openai_utils import (
+    NeMoGymAsyncOpenAI,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
+```
+
+The NeMo Gym client is optimized for scale and provides consistent behavior. External clients often preprocess or postprocess inputs and outputs in ways that interfere with training data collection.
+
+### Pydantic Models for Validation
+
+Use Pydantic models for request and response validation. Extend the base classes from `nemo_gym.base_resources_server`:
+
+```python
+from pydantic import BaseModel
+from nemo_gym.base_resources_server import BaseVerifyRequest, BaseVerifyResponse
+
+class MyVerifyRequest(BaseVerifyRequest):
+    expected_result: str
+    difficulty: int
+
+class MyVerifyResponse(BaseVerifyResponse):
+    reasoning: str
+```
+
+### Error Handling
+
+Tool execution errors must be propagated back to the model rather than crashing the server. This enables the model to learn from and correct its mistakes:
+
+```python
+async def execute_tool(self, path: str, body: ToolRequest) -> ToolResponse:
+    try:
+        result = self.tool_functions[path](**body.model_dump())
+        return ToolResponse(output=result)
+    except Exception as e:
+        # Return error to model so it can correct itself
+        return ToolResponse(output=f"Error executing tool '{path}': {str(e)}")
+```
+
+Only raise `HTTPException` for invalid session states or malformed requests—not for tool execution failures that the model should learn from.
+
+### Configuration via Config Files
+
+Pass configuration through NeMo Gym config files rather than environment variables. This ensures reproducibility and makes debugging easier:
+
+```yaml
+# configs/my_server.yaml
+host: 0.0.0.0
+port: 8000
+domain: agent
+# Add server-specific configuration here
+```
+
+### Multi-Step Rollout Support
+
+For multi-step or multi-turn scenarios, the model returns additional training information on response messages:
+
+- `prompt_token_ids`
+- `generation_token_ids`
+- `generation_log_probs`
+
+When constructing messages for subsequent model calls, propagate this information from previous responses to maintain the training data chain.
+
 ## Quality Requirements
 
 ### PR Description Requirements
@@ -128,7 +216,21 @@ Run inference to validate your reward distribution:
 2. Use Qwen3 30B A3B or equivalent model
 3. Generate 16 responses per prompt
 4. Report reward distribution statistics
-5. **For tool calling**: Provide tool call metrics and correlation with rewards
+
+**Expected reward distribution**
+
+Environments should meaningfully separate model capabilities:
+
+- Weaker models (30B-class): Target pass rate below 30%
+- Stronger models (frontier-class): Target pass rate around 70-75%
+
+**For tool-calling environments**
+
+Provide tool call metrics and correlation analysis:
+
+- Average tool calls per trajectory (target: more than two to three calls)
+- Correlation between tool call count and reward
+- Distribution of tool call types
 :::
 
 ### Training-Based Validation
@@ -139,9 +241,22 @@ Demonstrate meaningful training signal:
 :icon: rocket
 
 1. Train with GRPO on Qwen 30B A3B Instruct (or equivalent)
-2. Use VeRL or NeMo RL + Gym
+2. Use NeMo RL + Gym
 3. Include training accuracy curve
 4. Include test benchmark accuracy curve (if applicable)
+
+**Acceptance criteria**
+
+Your environment should demonstrate:
+
+- **Reward separation**: Environment meaningfully separates strong and weak models
+- **Reward fidelity**: Similar-capability models perform consistently across model families
+- **Tool use correlation**: For agent environments, higher tool call counts should correlate with improved rewards
+- **Training improvement**: Model performance should improve during training
+:::
+
+:::{tip}
+Review 10 to 20 collected trajectories manually before submission. Verify that the reward signal correctly identifies successful completions and that tool calls follow a logical progression toward the goal.
 :::
 
 ## README Template
@@ -168,6 +283,7 @@ Dependencies
 - nemo_gym: Apache 2.0
 - [Other dependencies with licenses]
 ```
+
 :::
 
 :::{tip}
@@ -221,6 +337,7 @@ Add this header to all new Python files:
 # See the License for the specific language governing permissions and
 # limitations under the License.
 ```
+
 :::
 
 ## PR Review Process
