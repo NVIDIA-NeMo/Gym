@@ -22,7 +22,7 @@ Quality standards and PR requirements for new training environments.
 :link-type: ref
 Implement NeMo Gym integration into a new training framework.
 +++
-{bdg-primary}`advanced` {bdg-secondary}`infra`
+{bdg-primary}`advanced`
 :::
 
 ::::
