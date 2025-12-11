@@ -107,7 +107,7 @@ class RunConfig(BaseNeMoGymCLIConfig):
     Examples:
 
     ```bash
-    config_paths="resources_servers/example_simple_weather/configs/simple_weather.yaml,\\
+    config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\\
     responses_api_models/openai_model/configs/openai_model.yaml"
     ng_run "+config_paths=[${config_paths}]"
     ```
@@ -125,7 +125,7 @@ class TestConfig(RunConfig):
     Examples:
 
     ```bash
-    ng_test +entrypoint=resources_servers/example_simple_weather
+    ng_test +entrypoint=resources_servers/example_single_tool_call
     ```
     """
 
@@ -389,7 +389,7 @@ def run(
 
     ```bash
     # Start servers with specific configs
-    config_paths="resources_servers/example_simple_weather/configs/simple_weather.yaml,\\
+    config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\\
     responses_api_models/openai_model/configs/openai_model.yaml"
     ng_run "+config_paths=[${config_paths}]"
     ```

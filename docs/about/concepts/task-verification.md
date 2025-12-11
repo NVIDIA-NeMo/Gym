@@ -1,6 +1,6 @@
 (task-verification)=
 
-# Task verification
+# Task Verification
 
 **Goal**: Understand what task verification is and how rewards drive model training.
 

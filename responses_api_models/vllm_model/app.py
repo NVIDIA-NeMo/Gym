@@ -303,6 +303,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             metadata=body.metadata,
             instructions=body.instructions,
             user=body.user,
+            incomplete_details={"reason": "max_output_tokens"} if choice.finish_reason == "length" else None,
         )
 
     async def chat_completions(

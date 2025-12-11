@@ -223,8 +223,8 @@ readme = {file = "README.md", content-type = "text/markdown"}
 egg_base = "cache"
 
 [project.urls]
-Download = "https://github.com/NVIDIA-NeMo/NeMo-Gym/releases"
-Homepage = "https://github.com/NVIDIA-NeMo/NeMo-Gym"
+Download = "https://github.com/NVIDIA-NeMo/Gym/releases"
+Homepage = "https://github.com/NVIDIA-NeMo/Gym"
 
 [project.scripts]
 # Run/test scripts for servers.
