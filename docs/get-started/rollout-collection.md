@@ -61,7 +61,7 @@ If you still have servers running from the [Setup and Installation](setup-instal
 If not, start them again:
 
 ```bash
-config_paths="resources_servers/example_single_tool_call/configs/single_tool_call.yaml,\
+config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml"
 ng_run "+config_paths=[${config_paths}]"
 ```
@@ -75,7 +75,7 @@ In a separate terminal, run:
 ```bash
 ng_collect_rollouts +agent_name=single_tool_call_simple_agent \
     +input_jsonl_fpath=resources_servers/example_single_tool_call/data/example.jsonl \
-    +output_jsonl_fpath=results/single_tool_call_rollouts.jsonl \
+    +output_jsonl_fpath=results/example_single_tool_call_rollouts.jsonl \
     +limit=5 \
     +num_repeats=2 \
     +num_samples_in_parallel=3
@@ -119,7 +119,7 @@ Collecting rollouts: 100%|████████████████| 5/5 
 Launch the rollout viewer:
 
 ```bash
-ng_viewer +jsonl_fpath=results/single_tool_call_rollouts.jsonl
+ng_viewer +jsonl_fpath=results/example_single_tool_call_rollouts.jsonl
 ```
 
 The viewer starts on port 7860 and accepts requests only from localhost by default. Visit <http://127.0.0.1:7860> in your browser.
