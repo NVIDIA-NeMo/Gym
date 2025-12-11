@@ -1,50 +1,5 @@
 # GRPO Training with NeMo RL: Multi-step tool calling  on Nemotron Nano v2 9B
 
-## Overview
-
-This tutorial trains NVIDIA [Nemotron Nano 9B v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2) to improve its **multi-step tool-calling** capability using **GRPO (Group Relative Policy Optimization)** algorithm on the **Workplace Assistant** environment. Workplace Assistant is a realistic office simulation (calendar, email, project management, etc.) with complex multi-step tasks, providing a strong data distribution for training enterprise-ready tool-using assistants.
-
-**Total time estimate:** ~3-5 hours (including environment setup, data preparation, and training)
-
-> **TL;DR:** Want to jump straight to running commands? Skip to [Setup Instructions](#setup-instructions) or [Running Training](#running-training).
-
----
-
-## Objectives
-
-In this tutorial, you will:
-
-1. Set up NeMo RL and NeMo Gym for Reinforcement Learning (RL) training
-2. Understand the Workplace Assistant environment and its multi-step tool calling capability
-3. Configure and run GRPO training on Nemotron Nano v2 9B using this environment in Gym
-4. Monitor training progress via Weights & Biases (W&B)
-
----
-
-## Prerequisites
-
-### Required Knowledge
-
-- You should be comfortable with Python, LLM fine-tuning, and basic reinforcement learning concepts such as policy optimization, rewards, and rollouts. While in-depth knowledge of Reinforcement Learning with Verifiable Rewards (RLVR) and the GRPO algorithm is not required, a high-level understanding is helpful.
-- Some basic familiarity with Slurm is useful, but you can follow along using the example commands provided below.
-
-### Hardware Requirements
-
-**Minimum** 1 node of 8× NVIDIA GPUs with 80GB or more memory each (e.g., H100, A100) is required.
-
-NeMo Gym does not require GPUs. GPUs are only necessary for GRPO training with NeMo RL.
-
-
-### Required Accounts & Tokens
-| Service                | Purpose                  | How to Obtain                         |
-|------------------------|--------------------------|---------------------------------------|
-| Hugging Face (HF)      | Model and data downloads | [Create account](https://huggingface.co/join) |
-| Weights & Biases (W&B) | Training metrics logging (optional but recommended) | [Create account](https://wandb.ai/signup)      |
-
-> **Note:** W&B is optional but recommended for tracking training metrics and visualizing progress.
-
----
-
 ## About the Environment and Dataset
 
 The Workplace Assistant is a **multi-step agentic tool-use environment** that tests an AI agent's ability to execute business tasks in a simulated workplace setting.
