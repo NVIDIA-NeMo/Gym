@@ -2,7 +2,7 @@
 
 # NeMo Gym Tutorials
 
-Hands-on learning experiences that guide you through building, training, and deploying AI agents with NeMo Gym.
+Hands-on tutorials to build and customize your training environments.
 
 :::{tip}
 **New to NeMo Gym?** Begin with the {doc}`Get Started <../get-started/index>` section for a guided tutorial from installation through your first verified agent. Return here afterward to learn about advanced topics like additional rollout collection methods and training data generation. You can find the project repository on [GitHub](https://github.com/NVIDIA-NeMo/Gym).
@@ -19,9 +19,9 @@ Create custom resource servers and implement tool-based agent interactions.
 :::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Creating a Resource Server
 :link: creating-resource-server
 :link-type: doc
-Build custom resource servers with tools, verification logic, and business logic for your AI agents.
+Implement or integrate existing tools and define task verification logic.
 +++
-{bdg-primary}`beginner` {bdg-secondary}`30 min`
+{bdg-primary}`beginner` {bdg-secondary}`30 min` {bdg-secondary}`custom-environments` {bdg-secondary}`tools`
 :::
 
 ::::

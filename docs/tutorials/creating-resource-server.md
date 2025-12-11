@@ -2,7 +2,7 @@
 
 # Creating a Resource Server
 
-Learn how to create a custom resource server to implement tools, verifiers, and business logic for your AI agents.
+Learn how to create a custom resource server to implement tools, verifiers, and business logic for your training environment.
 
 ::::{grid} 2
 :gutter: 3

@@ -2,7 +2,7 @@
 
 ## About the Environment and Dataset
 
-The Workplace Assistant is a **multi-step agentic tool-use environment** that tests an AI agent's ability to execute business tasks in a simulated workplace setting.
+The Workplace Assistant is a **multi-step agentic tool-use environment** that tests an model's ability to execute business tasks in a simulated workplace setting.
 
 ### Overview
 

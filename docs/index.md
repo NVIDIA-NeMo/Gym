@@ -108,6 +108,7 @@ Collect and view rollouts
 
 ::::
 
+<!-- This section needs to match the content in docs/tutorials/index.md -->
 ## Tutorials
 
 Hands-on tutorials to build and customize your training environments.
@@ -120,23 +121,23 @@ Hands-on tutorials to build and customize your training environments.
 :link-type: doc
 Implement or integrate existing tools and define task verification logic.
 +++
-{bdg-secondary}`custom-environments` {bdg-secondary}`tools`
+{bdg-primary}`beginner` {bdg-secondary}`30 min` {bdg-secondary}`custom-environments` {bdg-secondary}`tools`
 :::
 
-:::{grid-item-card} {octicon}`database;1.5em;sd-mr-1` Offline Training (SFT, DPO)
-:link: tutorials/offline-training-w-rollouts
+:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` Offline Training with Rollouts
+:link: offline-training-w-rollouts
 :link-type: doc
-Train with SFT or DPO using collected rollouts.
+Transform rollouts into training data for {term}`supervised fine-tuning (SFT) <SFT (Supervised Fine-Tuning)>` and {term}`direct preference optimization (DPO) <DPO (Direct Preference Optimization)>`.
 +++
 {bdg-secondary}`sft` {bdg-secondary}`dpo`
 :::
 
-:::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` RL Training with NeMo RL
-:link: tutorials/rl-training-with-nemo-rl
-:link-type: doc
-Train with GRPO using NeMo RL and NeMo Gym.
+:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` GRPO with NeMo RL
+:link: training-nemo-rl-grpo-index
+:link-type: ref
+Run RL training through NeMo RL using the GRPO algorithm and the Workplace Assistant Training Environment to train a model. Learn how to set up NeMo Gym and NeMo RL training environments, run tests, prepare data, and launch single-node and multi-node training runs.
 +++
-{bdg-secondary}`grpo` {bdg-secondary}`nemo-rl`
+{bdg-primary}`training` {bdg-secondary}`rl` {bdg-secondary}`grpo`
 :::
 
 ::::
