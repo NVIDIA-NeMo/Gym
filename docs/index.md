@@ -175,8 +175,8 @@ Rollout Collection <get-started/rollout-collection.md>
 
 tutorials/index.md
 tutorials/creating-resource-server
+tutorials/nemo-rl-grpo/index.md
 tutorials/offline-training-w-rollouts
-tutorials/rl-training-with-nemo-rl
 how-to-faq.md
 ```
 
