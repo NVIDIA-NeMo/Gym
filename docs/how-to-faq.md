@@ -1,4 +1,4 @@
-# How-Tos and FAQs
+# FAQ
 
 :::{warning}
 This document is a collection of How-Tos and FAQs that have not made their way into an official tutorial yet. The following guides are **experimental** and may contain bugs. Proceed with caution.
