@@ -20,7 +20,7 @@ from nemo_gym.server_utils import ServerClient
 
 server_client = ServerClient.load_from_global_config()
 task = server_client.post(
-    server_name="my_single_tool_call_server",
+    server_name="example_single_tool_call",
     url_path="/get_weather",
     json={
         "city": "San Francisco, CA",

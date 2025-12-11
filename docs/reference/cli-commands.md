@@ -177,7 +177,7 @@ Perform a batch of rollout collection.
 
 ```bash
 ng_collect_rollouts \
-    +agent_name=single_tool_call_simple_agent \
+    +agent_name=example_single_tool_call_simple_agent \
     +input_jsonl_fpath=weather_query.jsonl \
     +output_jsonl_fpath=weather_rollouts.jsonl \
     +limit=100 \

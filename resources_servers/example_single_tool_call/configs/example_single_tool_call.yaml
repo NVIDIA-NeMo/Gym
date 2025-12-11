@@ -5,7 +5,7 @@ example_single_tool_call:
       domain: agent
       verified: false
       description: Basic single-step tool calling
-single_tool_call_simple_agent:
+example_single_tool_call_simple_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py

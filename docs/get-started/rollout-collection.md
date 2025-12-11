@@ -66,14 +66,14 @@ responses_api_models/openai_model/configs/openai_model.yaml"
 ng_run "+config_paths=[${config_paths}]"
 ```
 
-**✅ Success Check**: You should see 3 Gym servers running including the `single_tool_call_simple_agent`, along with the head server.
+**✅ Success Check**: You should see 3 Gym servers running including the `example_single_tool_call_simple_agent`, along with the head server.
 
 ## 3. Generate Rollouts
 
 In a separate terminal, run:
 
 ```bash
-ng_collect_rollouts +agent_name=single_tool_call_simple_agent \
+ng_collect_rollouts +agent_name=example_single_tool_call_simple_agent \
     +input_jsonl_fpath=resources_servers/example_single_tool_call/data/example.jsonl \
     +output_jsonl_fpath=results/example_single_tool_call_rollouts.jsonl \
     +limit=5 \
@@ -131,10 +131,10 @@ By default, the viewer accepts requests only from localhost (`server_host=127.0.
 
 ```bash
 # Accept requests from anywhere (e.g., for remote access)
-ng_viewer +jsonl_fpath=results/simple_weather_rollouts.jsonl +server_host=0.0.0.0
+ng_viewer +jsonl_fpath=results/example_single_tool_call_rollouts.jsonl +server_host=0.0.0.0
 
 # Use a custom port
-ng_viewer +jsonl_fpath=results/simple_weather_rollouts.jsonl +server_port=8080
+ng_viewer +jsonl_fpath=results/example_single_tool_call_rollouts.jsonl +server_port=8080
 ```
 :::
 
