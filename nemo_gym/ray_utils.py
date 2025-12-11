@@ -21,6 +21,7 @@ from typing import Dict, Optional
 import ray
 import ray.util.state
 from ray.actor import ActorClass, ActorProxy
+from ray.util import get_node_ip_address
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from nemo_gym.global_config import (
@@ -127,7 +128,7 @@ def lookup_current_ray_node_id() -> str:  # pragma: no cover
 
 
 def lookup_current_ray_node_ip() -> str:  # pragma: no cover
-    return lookup_ray_node_id_to_ip_dict()[lookup_current_ray_node_id()]
+    return get_node_ip_address()
 
 
 def spinup_single_ray_gpu_node_worker(
