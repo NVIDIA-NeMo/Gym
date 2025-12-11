@@ -23,12 +23,16 @@ In this tutorial, you will:
 
 ## Prerequisites
 
-### Required Knowledge
+::::{tab-set}
+
+:::{tab-item} Required Knowledge
 
 - You should be comfortable with Python, LLM fine-tuning, and basic reinforcement learning concepts such as policy optimization, rewards, and rollouts. While in-depth knowledge of Reinforcement Learning with Verifiable Rewards (RLVR) and the GRPO algorithm is not required, a high-level understanding is helpful.
 - Some basic familiarity with Slurm is useful, but you can follow along using the example commands provided below.
 
-### Hardware Requirements
+:::
+
+:::{tab-item} Hardware Requirements
 
 **Minimum** 1 node of 8× NVIDIA GPUs with 80GB or more memory each (e.g., H100, A100) is required.
 
@@ -44,7 +48,10 @@ NeMo Gym does not require GPUs. GPUs are only necessary for GRPO training with N
   - Model checkpoints and training artifacts
   - Dataset storage (DAPO 17K and prepared data)
 
-### Required Accounts & Tokens
+:::
+
+:::{tab-item} Required Accounts & Tokens
+
 - **Weights & Biases (W&B) API Key** (optional): For experiment tracking and visualization; Training metrics logging
   - [Create account](https://wandb.ai/signup)
   - Find your API key at [wandb.ai/authorize](https://wandb.ai/authorize)
@@ -55,7 +62,9 @@ NeMo Gym does not require GPUs. GPUs are only necessary for GRPO training with N
   - Recommended to avoid rate limits when downloading models and datasets
   - Ensure you have accepted the model license for Qwen 3 4B Instruct
 
-### Software Requirements
+:::
+
+:::{tab-item} Software Requirements
 
 - **Operating System**: Linux (Ubuntu 20.04+ or equivalent)
 - **Python**: 3.12 or higher
@@ -65,17 +74,23 @@ NeMo Gym does not require GPUs. GPUs are only necessary for GRPO training with N
 - **Git**: For cloning repositories
 - **UV Package Manager**: Python package manager (installed during setup)
 
-### Filesystem Access
+:::
+
+:::{tab-item} Filesystem Access
 
 - **Shared Filesystem**: Required for multi-node training
   - Example: `/shared/filesystem` mounted and accessible from all compute nodes
   - Used for storing code, data, checkpoints, and results
 
+:::
+
+::::
+
 ---
 
 ## RL Training Workflow
 
-The typical RL training workflow follows this sequence:
+This tutorial will guide you through the entire RL training workflow using the following steps:
 
 ::::{grid} 1
 :gutter: 1
