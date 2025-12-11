@@ -148,7 +148,15 @@ Contribute to NeMo Gym development.
 ::::{grid} 1 2 2 2
 :gutter: 1 1 1 2
 
-:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` Integrate Gym into RL Frameworks
+:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` Contribute Resource Servers
+:link: contribute/resource-servers/index
+:link-type: doc
+Quality standards and PR requirements for new training environments.
++++
+{bdg-primary}`environments`
+:::
+
+:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` Integrate RL Frameworks
 :link: contribute/rl-framework-integration/index
 :link-type: doc
 Implement NeMo Gym integration into a new training framework.
@@ -202,6 +210,7 @@ tutorials/rl-training-with-nemo-rl
 :maxdepth: 1
 
 Overview <contribute/index>
+Resource Servers <contribute/resource-servers/index>
 Integrate RL Frameworks <contribute/rl-framework-integration/index>
 ```
 
