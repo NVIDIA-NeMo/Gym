@@ -153,7 +153,7 @@ Contribute to NeMo Gym development.
 :link-type: doc
 Implement NeMo Gym integration into a new training framework.
 +++
-{bdg-primary}`advanced` {bdg-secondary}`infra`
+{bdg-primary}`advanced`
 :::
 
 ::::
