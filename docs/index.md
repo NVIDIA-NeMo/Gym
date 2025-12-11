@@ -177,7 +177,6 @@ tutorials/index.md
 tutorials/creating-resource-server
 tutorials/offline-training-w-rollouts
 tutorials/rl-training-with-nemo-rl
-how-to-faq.md
 ```
 
 ```{toctree}
@@ -195,6 +194,7 @@ training/rl-framework-integration/index.md
 :hidden:
 :maxdepth: 1
 
+FAQ <how-to-faq.md>
 Configuration <reference/configuration>
 reference/cli-commands.md
 apidocs/index.rst
