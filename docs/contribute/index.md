@@ -9,7 +9,6 @@ Welcome! We're excited to have you contribute to NeMo Gym. Whether you're adding
 ## Ways to Contribute
 
 :::{dropdown} {octicon}`server;1.5em;sd-mr-1` Add Environments
-:open:
 
 New environments expand Gym's training capabilities.
 
@@ -17,14 +16,9 @@ New environments expand Gym's training capabilities.
 - Benchmark integrations (e.g. SWE-Bench, Tau Bench)
 :::
 
-:::{dropdown} {octicon}`workflow;1.5em;sd-mr-1` Integrate RL Training Frameworks
-:open:
+:::{dropdown} {octicon}`workflow;1.5em;sd-mr-1` Integrate RL Frameworks
 
-Connect NeMo Gym to new RL training frameworks.
-
-- Connectors to RL libraries (TRL, SkyRL, etc.)
-- Training loop implementations
-- Reward signal processing
+Have a preferred training framework? Help integrate it with NeMo Gym.
 
 → See {ref}`training-framework-integration` for integration guides.
 :::
@@ -38,25 +32,19 @@ Connect NeMo Gym to new RL training frameworks.
 
 :::{dropdown} {octicon}`bug;1.5em;sd-mr-1` Report Bugs & Fix Issues
 
-- Detailed reproduction steps appreciated
-- Include environment details and minimal examples
-- Check [open issues](https://github.com/NVIDIA-NeMo/Gym/issues) first
-
-**Note:** Changing existing environment behavior requires careful consideration—it makes results hard to compare across versions.
+- Found a bug? [Open an issue](https://github.com/NVIDIA-NeMo/Gym/issues/new?template=bug.md) with reproduction steps.
+- Want to fix one? Check [open issues](https://github.com/NVIDIA-NeMo/Gym/issues) for bugs to tackle.
 :::
 
 :::{dropdown} {octicon}`tools;1.5em;sd-mr-1` Features & Enhancements
 
-- New agent capabilities and tools
-- Developer experience improvements
-- Testing and debugging utilities
-- Configuration and deployment features
+Have an idea for a new feature or improvement? [Open an issue](https://github.com/NVIDIA-NeMo/Gym/issues/new?template=feature.md) to start a discussion!
 :::
 
 ---
 
 ## Before You Start
 
-All contributions require signed commits and DCO sign-off. See [CONTRIBUTING.md](https://github.com/NVIDIA-NeMo/Gym/blob/main/CONTRIBUTING.md) for detailed setup instructions and CI/CD requirements.
+All contributions require signed commits and DCO sign-off. See {ref}`development-setup` for environment setup, CI/CD requirements, and commit signing instructions.
 
 **Not sure where to start?** Check our [open issues](https://github.com/NVIDIA-NeMo/Gym/issues) or create a new issue to discuss your idea.

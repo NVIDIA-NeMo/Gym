@@ -202,6 +202,7 @@ tutorials/rl-training-with-nemo-rl
 :maxdepth: 1
 
 Overview <contribute/index>
+Development Setup <contribute/development-setup>
 Integrate RL Frameworks <contribute/rl-framework-integration/index>
 ```
 
