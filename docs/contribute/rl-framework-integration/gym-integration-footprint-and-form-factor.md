@@ -1,14 +1,6 @@
----
-orphan: true
----
-
-(gym-integration-footprint-and-form-factor-old)=
+(gym-integration-footprint-and-form-factor)=
 
 # Integration Footprint
-
-:::{note}
-This content has moved to {doc}`/contribute/rl-framework-integration/gym-integration-footprint-and-form-factor`.
-:::
 
 This page provides a reference for the components required to integrate Gym into your training framework. Each component includes links to the NeMo RL reference implementation and corresponding tests.
 

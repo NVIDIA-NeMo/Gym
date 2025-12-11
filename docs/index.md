@@ -141,6 +141,23 @@ Train with GRPO using NeMo RL and NeMo Gym.
 
 ::::
 
+## Contribute
+
+Contribute to NeMo Gym development.
+
+::::{grid} 1 2 2 2
+:gutter: 1 1 1 2
+
+:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` Integrate Gym into RL Frameworks
+:link: contribute/rl-framework-integration/index
+:link-type: doc
+Implement NeMo Gym integration into a new training framework.
++++
+{bdg-primary}`advanced` {bdg-secondary}`infra`
+:::
+
+::::
+
 ---
 
 ```{toctree}
@@ -181,14 +198,13 @@ how-to-faq.md
 ```
 
 ```{toctree}
-:caption: Training
+:caption: Contribute
 :hidden:
 :maxdepth: 1
 
-training/index
-training/rl-framework-integration/index.md
+Overview <contribute/index>
+Integrate RL Frameworks <contribute/rl-framework-integration/index>
 ```
-
 
 ```{toctree}
 :caption: Reference

@@ -1,14 +1,6 @@
----
-orphan: true
----
-
-(generation-backend-and-openai-compatible-http-server-old)=
+(generation-backend-and-openai-compatible-http-server)=
 
 # Generation Backend
-
-:::{note}
-This content has moved to {doc}`/contribute/rl-framework-integration/generation-backend-and-openai-compatible-http-server`.
-:::
 
 Gym requires an OpenAI-compatible HTTP server to handle model generations during training. This page covers the server requirements and existing implementations across popular RL frameworks.
 
