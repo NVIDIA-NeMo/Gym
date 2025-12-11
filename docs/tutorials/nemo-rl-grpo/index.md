@@ -2,7 +2,7 @@
 
 # RL Training with NeMo RL using GRPO
 
-This tutorial trains NVIDIA [Nemotron Nano 9B v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2) to improve its **multi-step tool-calling** capability using **GRPO (Group Relative Policy Optimization)** algorithm on the **Workplace Assistant** environment. Workplace Assistant is a realistic office simulation (calendar, email, project management, etc.) with complex multi-step tasks, providing a strong data distribution for training enterprise-ready tool-using assistants.
+This tutorial trains NVIDIA [Nemotron Nano 9B v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2) to improve its **{term}`multi-step <Multi-step>` {term}`tool-calling <Tool Use / Function Calling>`** capability using **{term}`GRPO (Group Relative Policy Optimization) <GRPO (Group Relative Policy Optimization)>`** algorithm on the **Workplace Assistant** environment. Workplace Assistant is a realistic office simulation (calendar, email, project management, etc.) with complex multi-step tasks, providing a strong data distribution for training enterprise-ready tool-using assistants.
 
 **Total time estimate:** ~3-5 hours (including environment setup, data preparation, and training)
 
