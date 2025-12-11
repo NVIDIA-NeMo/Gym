@@ -31,7 +31,6 @@ from nemo_gym.global_config import (
 )
 
 
-@ray.remote
 class _NeMoGymRayGPUSchedulingHelper:  # pragma: no cover
     def __init__(self, cfg):
         self.cfg = cfg
