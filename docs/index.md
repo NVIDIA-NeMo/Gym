@@ -126,7 +126,7 @@ Implement or integrate existing tools and define task verification logic.
 
 :::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` Offline Training with Rollouts
 :link: offline-training-w-rollouts
-:link-type: doc
+:link-type: ref
 Transform rollouts into training data for {term}`supervised fine-tuning (SFT) <SFT (Supervised Fine-Tuning)>` and {term}`direct preference optimization (DPO) <DPO (Direct Preference Optimization)>`.
 +++
 {bdg-secondary}`sft` {bdg-secondary}`dpo`

@@ -142,7 +142,7 @@ Perform a single node GRPO training run with success criteria.
 
 :::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` Multi Node Training
 :link: training-nemo-rl-grpo-multi-node-training
-:link-type: doc
+:link-type: ref
 
 Perform a multi node GRPO training run.
 +++

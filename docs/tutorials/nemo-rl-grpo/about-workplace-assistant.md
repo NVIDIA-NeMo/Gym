@@ -42,7 +42,7 @@ All tasks can be found in the [Workplace Assistant Huggingface dataset](https://
     ],
     "tools": [
       {"type": "function", "name": "email_send_email", "description": "Sends an email to a recipient.", "parameters": {"type": "object", "properties": {"recipient": {"type": "string"}, "subject": {"type": "string"}, "body": {"type": "string"}}, "required": ["recipient", "subject", "body"]}},
-      {"type": "function", "name": "email_search_emails", "description": "Searches for emails matching the given query...", "parameters": {...}},
+      {"type": "function", "name": "email_search_emails", "description": "Searches for emails matching the given query...", "parameters": {"...": "..."}},
       {"type": "function", "name": "calendar_create_event", "...": "..."},
       // ... other tools (calendar, analytics, project_management, CRM)
     ],
