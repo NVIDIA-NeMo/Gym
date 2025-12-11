@@ -1,6 +1,6 @@
-(gs-setup-installation)=
+(gs-detailed-setup)=
 
-# Setup and Installation
+# Detailed Setup Guide
 
 :::{card}
 
