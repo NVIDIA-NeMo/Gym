@@ -8,10 +8,6 @@ This tutorial trains NVIDIA [Nemotron Nano 9B v2](https://huggingface.co/nvidia/
 
 > **TL;DR:** Want to jump straight to running commands? Skip to {doc}`Setup Instructions <setup>`.
 
-:::{important}
-**Do the single node setup first. Do not skip it.** The single-node setup validates that your environment is configured correctly before attempting multi-node training.
-:::
-
 ---
 
 ## Objectives
