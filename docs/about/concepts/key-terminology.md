@@ -68,15 +68,18 @@ Reward / Reward Signal
 SFT (Supervised Fine-Tuning)
     Training approach using examples of good model behavior. Shows successful rollouts as training data.
 
-DPO (Direct Preference Optimization)
-    Training approach using pairs of rollouts where one is preferred over another. Teaches better vs worse responses.
-
 RL (Reinforcement Learning)
     Training approach where models learn through trial-and-error interaction with environments using reward signals.
 
 Online vs Offline Training
-    - **Online**: Model learns while interacting with environment in real-time (RL)
-    - **Offline**: Model learns from pre-collected rollout data (SFT/DPO)
+    - **Online**: Model learns while interacting with environment in real-time
+    - **Offline**: Model learns from pre-collected rollout data
+
+DPO (Direct Preference Optimization)
+    An offline RL training approach using pairs of rollouts where one is preferred over another. Teaches better vs worse responses.
+
+GRPO (Group Relative Policy Optimization)
+    Reinforcement learning algorithm that optimizes policies by comparing groups of rollouts relative to each other. Used for online RL training with language models.
 ```
 
 ## Interaction Patterns
