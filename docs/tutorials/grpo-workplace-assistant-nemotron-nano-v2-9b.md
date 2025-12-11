@@ -2,9 +2,7 @@
 
 ## Overview
 
-This tutorial demonstrates how to train NVIDIA [Nemotron Nano v2 9B](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2) model using **GRPO (Group Relative Policy Optimization)** with the **Workplace Assistant** environment in NeMo Gym. By the end of this tutorial, you will have trained a language model to perform multi-step tool-calling tasks in a realistic office productivity setting.
-
-**Why this matters:** Tool-calling is a critical capability for enterprise AI assistants. The Workplace Assistant environment provides a realistic simulation with various different tools (calendar, email, file management, etc.), enabling you to train models that can complete complex multi-step office tasks.
+This tutorial trains NVIDIA [Nemotron Nano 9B v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2) to improve its **multi-step tool-calling** capability using **GRPO (Group Relative Policy Optimization)** algorithm on the **Workplace Assistant** environment. Workplace Assistant is a realistic office simulation (calendar, email, project management, etc.) with complex multi-step tasks, providing a strong data distribution for training enterprise-ready tool-using assistants.
 
 **Total time estimate:** ~3-5 hours (including environment setup, data preparation, and training)
 
@@ -25,11 +23,10 @@ In this tutorial, you will:
 
 ## Prerequisites
 
-### Required Knowledge: 
+### Required Knowledge
 
-- This tutorial applies to users of Intermediate technical level
-- You should be comfortable with Python, LLM fine-tuning, and basic reinforcement learning concepts such as policy optimization, rewards, and rollouts. While detailed knowledge of RLVR and the GRPO algorithm is not required, a general understanding is helpful.
-- Some basic knowledge of Slurm is helpful. That said, example commands are provided below.
+- You should be comfortable with Python, LLM fine-tuning, and basic reinforcement learning concepts such as policy optimization, rewards, and rollouts. While in-depth knowledge of Reinforcement Learning with Verifiable Rewards (RLVR) and the GRPO algorithm is not required, a high-level understanding is helpful.
+- Some basic familiarity with Slurm is useful, but you can follow along using the example commands provided below.
 
 ### Hardware Requirements
 
@@ -48,7 +45,7 @@ NeMo Gym does not require GPUs. GPUs are only necessary for GRPO training with N
 
 ---
 
-## About the Environment
+## About the Environment and Dataset
 
 The Workplace Assistant is a **multi-step agentic tool-use environment** that tests an AI agent's ability to execute business tasks in a simulated workplace setting.
 
@@ -59,7 +56,7 @@ The Workplace Assistant is a **multi-step agentic tool-use environment** that te
 - **690 tasks** representing common business activities (e.g., sending emails, scheduling meetings, managing projects)
 - **State-based verification**: Evaluates task completion by comparing final database states rather than exact action sequences
 
-### Resource Server (`app.py`)
+### Environment: Resource Server (`app.py`)
 
 The environment is implemented as a FastAPI-based resource server that manages tool execution and verification. Here's how it works:
 
@@ -129,18 +126,15 @@ The `is_correct` function implements the state-matching logic:
 
 ```python
 def is_correct(predicted_actions, ground_truth_actions, error):
-    """
-    Checks if prediction is correct by comparing the state change 
-    after executing the actions.
-    """
-    if error:
-        return False
+    ..
     
     # Execute both sequences in fresh environments
     predict_env = execute_actions_and_reset_state(predicted_actions)
     ground_truth_env = execute_actions_and_reset_state(ground_truth_actions)
     
-    # Compare final states of all 5 databases (case-insensitive for most fields)
+    .. # Extract specific state info
+
+    # Compare final states of all 5 databases
     return (
         predicted_calendar_state.equals(ground_truth_calendar_state) and
         predicted_email_state.equals(ground_truth_email_state) and
@@ -158,11 +152,9 @@ def is_correct(predicted_actions, ground_truth_actions, error):
 
 ---
 
-## Dataset Description
-
 ### Workplace Assistant Dataset
 
- [`The Workplace Assistant`](https://huggingface.co/datasets/nvidia/Nemotron-RL-agent-workplace_assistant) dataset contains **690 unique tasks** with a full dataset of **1,260 prompts** that simulate realistic office productivity scenarios requiring multi-step tool usage. Each task is presented as a natural language request that the model must decompose into appropriate tool calls (up to 6 steps per task). Tasks are evaluated using a **binary reward** (0 or 1) based on state matching.
+ [`The Workplace Assistant`](https://huggingface.co/datasets/nvidia/Nemotron-RL-agent-workplace_assistant) dataset associated with this environment contains **690 unique tasks** with a full dataset of **1,260 prompts** that simulate realistic office productivity scenarios requiring multi-step tool usage. Each task is presented as a natural language request that the model must decompose into appropriate tool calls (up to 6 steps per task).
 
 ### Dataset Structure
 
@@ -256,8 +248,6 @@ Each task is a natural language request that the model must complete using the a
 - **Search with multiple filters**: Finding customers by assignee, product interest, and status
 - **Batch updates**: Iterating through results to update multiple records
 - **State verification**: Final database state will match ground truth even if different search parameters or ordering were used
-
-
 
 **Generally, the model must:**
 1. Understand the user's intent from natural language
@@ -549,11 +539,11 @@ You can run BFCL v3 evaluations using [NeMo Evaluator](https://github.com/NVIDIA
 
 | Issue | Solution |
 |-------|----------|
-| HuggingFace rate limits | Add `HF_HUB_OFFLINE=1` after initial download |
+| HuggingFace rate limits | Specify your HF API token and/or add `HF_HUB_OFFLINE=1` after the initial download |
 | vLLM process not shutting down | Run `pkill -f VllmAsyncGenerationWorker` before training |
 | Ray cluster issues | Run `ray stop --force` before training |
-| CUDA OOM | Reduce `num_prompts_per_step` or increase `tensor_parallel_size` |
-| Slow initial startup | Set `NRL_FORCE_REBUILD_VENVS=true` on first run only |
+| CUDA OOM | Increase `tensor_parallel_size`, lower batch sizes |
+| Slow initial startup | Set `NRL_FORCE_REBUILD_VENVS=true` on first run only; if `uv` gets rate limited, set this back to `false` |
 
 ### Log Locations
 
@@ -583,11 +573,8 @@ After completing this tutorial, explore:
 
 ## References
 
-- **NeMo RL Repository**: [github.com/NVIDIA-NeMo/RL](https://github.com/NVIDIA-NeMo/RL){:target="_blank"}
-- **NeMo Gym Repository**: [github.com/NVIDIA-NeMo/Gym](https://github.com/NVIDIA-NeMo/Gym){:target="_blank"}
-- **Nemotron Nano v2 9B Model**: [huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2){:target="_blank"}
-- **GRPO Paper**: [Group Relative Policy Optimization](https://arxiv.org/abs/2402.03300){:target="_blank"}
-- **Weights & Biases**: [wandb.ai](https://wandb.ai){:target="_blank"}
+- **NeMo RL Repository**: [github.com/NVIDIA-NeMo/RL](https://github.com/NVIDIA-NeMo/RL)
+- **NeMo Gym Repository**: [github.com/NVIDIA-NeMo/Gym](https://github.com/NVIDIA-NeMo/Gym)
 
 ---
 
