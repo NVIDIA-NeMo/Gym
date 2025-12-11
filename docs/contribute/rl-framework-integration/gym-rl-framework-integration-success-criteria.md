@@ -1,14 +1,6 @@
----
-orphan: true
----
-
-(gym-rl-framework-integration-success-criteria-old)=
+(gym-rl-framework-integration-success-criteria)=
 
 # Success Criteria
-
-:::{note}
-This content has moved to {doc}`/contribute/rl-framework-integration/gym-rl-framework-integration-success-criteria`.
-:::
 
 Use these criteria to validate that your Gym integration is working correctly. A successful integration must pass all validation benchmarks.
 

@@ -1,14 +1,6 @@
----
-orphan: true
----
-
-(openai-compatible-http-server-on-policy-correction-old)=
+(openai-compatible-http-server-on-policy-correction)=
 
 # On-Policy Corrections
-
-:::{note}
-This content has moved to {doc}`/contribute/rl-framework-integration/openai-compatible-http-server-on-policy-correction`.
-:::
 
 When using an OpenAI-compatible HTTP server for RL training, fundamental issues arise in {term}`multi-step <Multi-step>` and {term}`multi-turn <Multi-turn>` scenarios. This page explains these problems and the corrections required for on-policy training.
 
