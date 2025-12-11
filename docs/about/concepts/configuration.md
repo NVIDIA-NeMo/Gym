@@ -21,7 +21,7 @@ responses_api_models/
 # Resources Server Config
 resources_servers/
   └── example_single_tool_call/
-      └── configs/single_tool_call.yaml
+      └── configs/example_single_tool_call.yaml
 
 # Agent Server Config
 responses_api_agents/

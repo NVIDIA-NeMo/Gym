@@ -47,7 +47,7 @@ This command reads configuration from YAML files specified via `+config_paths` a
 
 ```bash
 # Start servers with specific configs
-config_paths="resources_servers/example_single_tool_call/configs/single_tool_call.yaml,\
+config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml"
 ng_run "+config_paths=[${config_paths}]"
 ```

@@ -126,7 +126,7 @@ policy_model_name: gpt-4o-2024-11-20
 # Optional: store config paths for reuse
 my_config_paths:
   - responses_api_models/openai_model/configs/openai_model.yaml
-  - resources_servers/example_single_tool_call/configs/single_tool_call.yaml
+  - resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml
 
 # Optional: validation behavior
 error_on_almost_servers: true   # Exit on invalid configs (default: true)

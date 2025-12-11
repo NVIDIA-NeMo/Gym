@@ -55,7 +55,7 @@ policy_model_name: gpt-4.1-2025-04-14" > env.yaml
 
 ```bash
 # Start servers (this will keep running)
-config_paths="resources_servers/example_single_tool_call/configs/single_tool_call.yaml,\
+config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml"
 ng_run "+config_paths=[${config_paths}]"
 ```
