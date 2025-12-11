@@ -71,49 +71,70 @@ NeMo Gym does not require GPUs. GPUs are only necessary for GRPO training with N
   - Example: `/shared/filesystem` mounted and accessible from all compute nodes
   - Used for storing code, data, checkpoints, and results
 
+---
 
-## Integration Components
+## RL Training Workflow
 
-Gym integration requires implementing the following components in your training framework:
+The typical RL training workflow follows this sequence:
 
-::::{grid} 1 1 2 2
-:gutter: 1 1 1 2
+::::{grid} 1
+:gutter: 1
 
-:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` Generation Backend
-:link: generation-backend-and-openai-compatible-http-server
-:link-type: doc
+:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` About the Workplace Assistant Training Environment
+:link: training-nemo-rl-grpo-about-workplace-assistant
+:link-type: ref
 
-OpenAI-compatible HTTP server requirements and existing implementations across RL frameworks.
+Understand the dataset you will train on and the capabilities it corresponds to.
++++
+{bdg-primary}`prerequisite` {bdg-secondary}`dataset`
+:::
+
+:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` NeMo Gym Configuration for RL Training
+:link: training-nemo-rl-grpo-gym-configuration
+:link-type: ref
+
+Understand the Gym configuration component in the NeMo RL training config file.
++++
+{bdg-secondary}`configuration`
+:::
+
+:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` NeMo RL Configuration for RL Training
+:link: training-nemo-rl-grpo-nemo-rl-configuration
+:link-type: ref
+
+Understand the GRPO and NeMo RL configuration components in the NeMo RL training config file.
++++
+{bdg-secondary}`configuration`
+:::
+
+:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` Setup
+:link: training-nemo-rl-grpo-setup
+:link-type: ref
+
+Necessary NeMo RL and NeMo Gym setup instructions.
 +++
 {bdg-primary}`prerequisite`
 :::
 
+:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` Single Node Training
+:link: training-nemo-rl-grpo-single-node-training
+:link-type: ref
+
+Perform a single node GRPO training run with success criteria.
++++
+{bdg-primary}`training` {bdg-secondary}`single-node`
+:::
+
+:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` Multi Node Training
+:link: training-nemo-rl-grpo-multi-node-training
+:link-type: doc
+
+Perform a multi node GRPO training run.
++++
+{bdg-primary}`training` {bdg-secondary}`multi-node`
+:::
+
 ::::
-
-## Integration Workflow
-
-The typical integration workflow follows this sequence:
-
-```{list-table}
-:header-rows: 1
-:widths: 10 30 60
-
-* - Step
-  - Component
-  - Description
-* - 1
-  - Generation backend
-  - Expose your generation engine (vLLM, SGLang) as an OpenAI-compatible HTTP server
-* - 2
-  - On-policy corrections
-  - Implement token ID fixes to prevent re-tokenization and re-templating issues
-* - 3
-  - Gym integration
-  - Connect Gym to your training loop using the rollout orchestration APIs
-* - 4
-  - Validation
-  - Verify integration using the success criteria benchmarks
-```
 
 ```{toctree}
 :caption: NeMo RL GRPO
@@ -121,9 +142,9 @@ The typical integration workflow follows this sequence:
 :maxdepth: 1
 
 about-workplace-assistant.md
-setup.md
 gym-configuration.md
 nemo-rl-configuration.md
+setup.md
 single-node-training.md
 multi-node-training.md
 ```
