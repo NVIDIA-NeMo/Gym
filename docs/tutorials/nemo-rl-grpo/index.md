@@ -62,9 +62,9 @@ The typical integration workflow follows this sequence:
 :maxdepth: 1
 
 about-workplace-assistant.md
-gym-configuration.md
-multi-node-training.md
-nemo-rl-configuration.md
 setup.md
+gym-configuration.md
+nemo-rl-configuration.md
 single-node-training.md
+multi-node-training.md
 ```
