@@ -164,14 +164,6 @@ how-to-faq.md
 ```
 
 ```{toctree}
-:caption: Reference
-:hidden:
-:maxdepth: 1
-
-reference/cli-commands.md
-```
-
-```{toctree}
 :caption: Training
 :hidden:
 :maxdepth: 1
@@ -187,6 +179,7 @@ training/rl-framework-integration/index.md
 :maxdepth: 1
 
 Configuration <reference/configuration>
+reference/cli-commands.md
 apidocs/index.rst
 ```
 
