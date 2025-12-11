@@ -31,54 +31,6 @@ from nemo_gym.global_config import (
 )
 
 
-def _prepare_ray_worker_env_vars() -> Dict[str, str]:  # pragma: no cover
-    worker_env_vars = {
-        **os.environ,
-    }
-    pop_env_vars = [
-        "CUDA_VISIBLE_DEVICES",
-        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
-        "RAY_JOB_ID",
-        "RAY_RAYLET_PID",
-    ]
-    for k in pop_env_vars:
-        worker_env_vars.pop(k, None)
-    return worker_env_vars
-
-
-def _start_global_ray_gpu_scheduling_helper(node_id: Optional[str] = None) -> ActorProxy:  # pragma: no cover
-    cfg = get_global_config_dict()
-    helper_options = {
-        "name": "_NeMoGymRayGPUSchedulingHelper",
-        "num_cpus": 0,
-    }
-    if node_id is not None:
-        helper_options["scheduling_strategy"] = NodeAffinitySchedulingStrategy(
-            node_id=node_id,
-            soft=True,
-        )
-    helper = _NeMoGymRayGPUSchedulingHelper.options(**helper_options).remote(cfg)
-    ray.get(helper._post_init.remote())
-    return helper
-
-
-def get_global_ray_gpu_scheduling_helper() -> ActorProxy:  # pragma: no cover
-    cfg = get_global_config_dict()
-    while True:
-        try:
-            get_actor_args = {
-                "name": "_NeMoGymRayGPUSchedulingHelper",
-            }
-            ray_namespace = cfg.get("ray_namespace", None)
-            if ray_namespace is None:
-                ray_namespace = "nemo_gym"
-            get_actor_args["namespace"] = ray_namespace
-            worker = ray.get_actor(**get_actor_args)
-            return worker
-        except ValueError:
-            sleep(3)
-
-
 @ray.remote
 class _NeMoGymRayGPUSchedulingHelper:  # pragma: no cover
     def __init__(self, cfg):
@@ -86,6 +38,7 @@ class _NeMoGymRayGPUSchedulingHelper:  # pragma: no cover
         self.avail_gpus_dict = defaultdict(int)
         self.used_gpus_dict = defaultdict(int)
 
+    @ray.method
     def _post_init(self) -> None:
         # If value of RAY_GPU_NODES_KEY_NAME is None, then Gym will use all Ray GPU nodes
         # for scheduling GPU actors.
@@ -113,6 +66,47 @@ class _NeMoGymRayGPUSchedulingHelper:  # pragma: no cover
         return None
 
 
+_NeMoGymRayGPUSchedulingHelperActor: ActorClass[_NeMoGymRayGPUSchedulingHelper] = ray.remote(
+    _NeMoGymRayGPUSchedulingHelper
+)  # pragma: no cover
+_NeMoGymRayGPUSchedulingHelperActorProxy = ActorProxy[_NeMoGymRayGPUSchedulingHelper]  # pragma: no cover
+
+
+def _start_global_ray_gpu_scheduling_helper(
+    node_id: Optional[str] = None,
+) -> _NeMoGymRayGPUSchedulingHelperActorProxy:  # pragma: no cover
+    cfg = get_global_config_dict()
+    helper_options = {
+        "name": "_NeMoGymRayGPUSchedulingHelper",
+        "num_cpus": 0,
+    }
+    if node_id is not None:
+        helper_options["scheduling_strategy"] = NodeAffinitySchedulingStrategy(
+            node_id=node_id,
+            soft=True,
+        )
+    helper = _NeMoGymRayGPUSchedulingHelperActor.options(**helper_options).remote(cfg)
+    ray.get(helper._post_init.remote())
+    return helper
+
+
+def get_global_ray_gpu_scheduling_helper() -> _NeMoGymRayGPUSchedulingHelperActorProxy:  # pragma: no cover
+    cfg = get_global_config_dict()
+    while True:
+        try:
+            get_actor_args = {
+                "name": "_NeMoGymRayGPUSchedulingHelper",
+            }
+            ray_namespace = cfg.get("ray_namespace", None)
+            if ray_namespace is None:
+                ray_namespace = "nemo_gym"
+            get_actor_args["namespace"] = ray_namespace
+            worker = ray.get_actor(**get_actor_args)
+            return worker
+        except ValueError:
+            sleep(3)
+
+
 def lookup_ray_node_id_to_ip_dict() -> Dict[str, str]:  # pragma: no cover
     cfg = get_global_config_dict()
     head = cfg["ray_head_node_address"]
@@ -129,6 +123,21 @@ def lookup_current_ray_node_id() -> str:  # pragma: no cover
 
 def lookup_current_ray_node_ip() -> str:  # pragma: no cover
     return get_node_ip_address()
+
+
+def _prepare_ray_worker_env_vars() -> Dict[str, str]:  # pragma: no cover
+    worker_env_vars = {
+        **os.environ,
+    }
+    pop_env_vars = [
+        "CUDA_VISIBLE_DEVICES",
+        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
+        "RAY_JOB_ID",
+        "RAY_RAYLET_PID",
+    ]
+    for k in pop_env_vars:
+        worker_env_vars.pop(k, None)
+    return worker_env_vars
 
 
 def spinup_single_ray_gpu_node_worker(

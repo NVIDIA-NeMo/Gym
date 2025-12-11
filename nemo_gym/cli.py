@@ -28,7 +28,7 @@ from signal import SIGINT
 from subprocess import Popen
 from threading import Thread
 from time import sleep
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import psutil
 import rich
@@ -50,6 +50,7 @@ from nemo_gym.global_config import (
     get_global_config_dict,
 )
 from nemo_gym.ray_utils import (
+    _NeMoGymRayGPUSchedulingHelperActorProxy,
     _start_global_ray_gpu_scheduling_helper,
 )
 from nemo_gym.server_utils import (
@@ -165,7 +166,7 @@ class ServerInstanceDisplayConfig(BaseModel):
 class RunHelper:  # pragma: no cover
     _head_server: uvicorn.Server
     _head_server_thread: Thread
-    _head_ray_gpu_helper: Any
+    _head_ray_gpu_helper: _NeMoGymRayGPUSchedulingHelperActorProxy
 
     _processes: Dict[str, Popen]
     _server_instance_display_configs: List[ServerInstanceDisplayConfig]
