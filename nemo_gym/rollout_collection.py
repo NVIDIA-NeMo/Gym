@@ -1,10 +1,11 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -36,6 +37,18 @@ from nemo_gym.server_utils import (
 class RolloutCollectionConfig(BaseNeMoGymCLIConfig):
     """
     Perform a batch of rollout collection.
+
+    Examples:
+
+    ```bash
+    ng_collect_rollouts \
+        +agent_name=example_single_tool_call_simple_agent \
+        +input_jsonl_fpath=weather_query.jsonl \
+        +output_jsonl_fpath=weather_rollouts.jsonl \
+        +limit=100 \
+        +num_repeats=4 \
+        +num_samples_in_parallel=10
+    ```
     """
 
     agent_name: str = Field(description="The agent to collect rollouts from.")

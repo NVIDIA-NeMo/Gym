@@ -1,0 +1,74 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/example_multi_step/data/example.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": null,
+    "license": null,
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 5,
+        "Average": 2.0,
+        "Min": 2.0,
+        "Max": 2.0,
+        "Median": 2.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 1504.0,
+        "Min": 1499.0,
+        "Max": 1509.0,
+        "Median": 1505.0,
+        "Standard deviation": 4.0
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "id": {
+        "Total # non-null values": 5,
+        "Average": 2.0,
+        "Min": 0.0,
+        "Max": 4.0,
+        "Median": 2.0,
+        "Standard deviation": 1.58
+    },
+    "expected_synonyms": {
+        "unique_count": 2,
+        "total_count": 10
+    },
+    "expected_synonym_values": {
+        "Total # non-null values": 10,
+        "Average": 559.0,
+        "Min": 407.0,
+        "Max": 711.0,
+        "Median": 559.0,
+        "Standard deviation": 160.22
+    },
+    "minefield_label": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "minefield_label_value": {
+        "Total # non-null values": 5,
+        "Average": 299.0,
+        "Min": 299.0,
+        "Max": 299.0,
+        "Median": 299.0,
+        "Standard deviation": 0.0
+    }
+}
+

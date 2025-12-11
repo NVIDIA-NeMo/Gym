@@ -1,10 +1,11 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -270,7 +271,6 @@ class VLLMModel(SimpleResponsesAPIModel):
                     tokenize_body_dict[key] = body_dict[key]
 
             # The base url has /v1 at the end but vLLM's tokenize endpoint does not have v1, hence the ..
-            # I can't believe the path is resolved correctly LOL
             tokenize_response = await client.create_tokenize(**tokenize_body_dict)
             """
             END
@@ -521,11 +521,11 @@ class VLLMConverter(BaseModel):
         state: VLLMConverterResponsesToChatCompletionsState,
     ) -> None:
         """
-        Collects text from 'reasoning' messages and appends it to a buffer.
+        Collects text from 'reasoning' messages in responses api and appends it to a buffer.
 
         This is done to group together one (or multiple) reasoning message(s) into a single,
         cohesive block, later prepending it to a subsequent assistant message.
-        See: https://gitlab-master.nvidia.com/bxyu/nemo-gym#reasoning-in-the-response-api
+        See: https://github.com/NVIDIA-NeMo/Gym/blob/main/docs/how-to-faq.md#faq-openai-responses-vs-chat-completions-api for an example of reasoning in responses api.
         """
         if "summary" in m and m["summary"]:
             texts = [s["text"] for s in m["summary"]]

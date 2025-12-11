@@ -1,10 +1,11 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -44,13 +45,27 @@ from nemo_gym.global_config import (
 
 
 class TrainDataProcessorConfig(BaseNeMoGymCLIConfig):
-    output_dirpath: str = Field(description="Path to the directory to save the outputs.")
+    """
+    Prepare and validate training data, generating metrics and statistics for datasets.
+
+    Examples:
+
+    ```bash
+    config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\\
+    responses_api_models/openai_model/configs/openai_model.yaml"
+    ng_prepare_data "+config_paths=[${config_paths}]" \
+        +output_dirpath=data/example_multi_step \
+        +mode=example_validation
+    ```
+    """
+
+    output_dirpath: str = Field(description="Directory path where processed datasets and metrics will be saved.")
     mode: Union[Literal["train_preparation"], Literal["example_validation"]] = Field(
-        description="Whether to do train_preparation or example_validation."
+        description="Processing mode: 'train_preparation' prepares train/validation datasets for training, 'example_validation' validates example data for PR submission."
     )
     should_download: bool = Field(
         default=False,
-        description="Whether or not to download missing datasets. By default, no datasets will be downloaded.",
+        description="Whether to automatically download missing datasets from remote registries (default: False).",
     )
 
     @property
