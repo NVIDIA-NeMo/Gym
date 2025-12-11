@@ -1,11 +1,8 @@
 (gs-index)=
 
-# Get Started with NeMo Gym
+# Quickstart
 
-This guide helps you install NeMo Gym, run a training environment, and collect your first rollouts. Choose your path:
-
-- **[Quickstart](#gs-quickstart)**: Get running in under 5 minutes with a single-page walkthrough.
-- **[Detailed Setup Guide](#detailed-setup-guide)**: Step-by-step tutorials with deeper explanations of each component.
+This is the quickstart—get running in under 5 minutes. For a more detailed walkthrough, see the [Detailed Setup Guide](detailed-setup.md).
 
 ## Before You Start
 
@@ -13,14 +10,11 @@ Make sure you have these prerequisites ready:
 
 - **Git** for cloning the repository
 - **OpenAI API key** with available credits (requires ~$0.01-0.10 for all tutorials)
-- Basic command-line familiarity
 
 ---
 
 (gs-quickstart)=
 ## Quickstart
-
-### Steps
 
 Follow the tabs sequentially to install NeMo Gym, start the servers, and collect your first verified rollouts for RL training.
 
@@ -59,7 +53,7 @@ policy_api_key: your-openai-api-key
 policy_model_name: gpt-4.1-2025-04-14" > env.yaml
 ```
 
-> **Note:** We use GPT-4.1 in this quickstart because it provides low latency (no reasoning step) and works reliably out-of-the-box. NeMo Gym is **not limited to OpenAI models**—you can use self-hosted models via vLLM or any OpenAI-compatible inference server that supports function calling. Refer to the [setup guide](setup-installation.md) for details.
+> **Note:** We use GPT-4.1 in this quickstart because it provides low latency (no reasoning step) and works reliably out-of-the-box. NeMo Gym is **not limited to OpenAI models**—you can use self-hosted models via vLLM or any OpenAI-compatible inference server that supports function calling. Refer to the [Detailed Setup Guide](detailed-setup.md) for details.
 
 :::
 
@@ -115,7 +109,7 @@ This generates training data with verification scores!
 :::
 ::::
 
-### What's Next?
+## What's Next?
 
 Now that you can generate rollouts, choose your path:
 
@@ -141,38 +135,3 @@ Implement or integrate existing tools and define task verification logic.
 
 ::::
 
----
-
-## Detailed Setup Guide
-
-For a more comprehensive setup experience, follow these tutorials in sequence:
-
-::::{grid} 1 1 1 1
-:gutter: 3
-
-:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` 1. Setup and Installation
-:link: setup-installation
-:link-type: doc
-
-Get NeMo Gym installed and servers running with your first successful agent interaction.
-+++
-{bdg-secondary}`environment` {bdg-secondary}`first-run`
-:::
-
-:::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` 2. Rollout Collection
-:link: rollout-collection
-:link-type: doc
-
-Generate your first batch of rollouts and understand how they become training data.
-+++
-{bdg-secondary}`training-data` {bdg-secondary}`scale`
-:::
-
-::::
-
-:::{tip}
-**New to reinforcement learning?** Do not worry—these tutorials introduce RL concepts naturally as you learn rollout collection.
-
-- For deeper conceptual understanding, explore the [About](../about/index.md) section.
-- For quick definitions, refer to the [Glossary](../about/concepts/key-terminology.md).
-:::

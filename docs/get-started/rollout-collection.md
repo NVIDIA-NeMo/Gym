@@ -1,6 +1,6 @@
 (gs-collecting-rollouts)=
 
-# Collecting Rollouts
+# Rollout Collection
 
 In the previous tutorial, you set up NeMo Gym and ran your first agent interaction. But to train an agent with reinforcement learning, you need hundreds or thousands of these interactions—each one scored and saved. That's what rollout collection does.
 
@@ -18,12 +18,12 @@ In the previous tutorial, you set up NeMo Gym and ran your first agent interacti
 
 :::
 
-:::{button-ref} setup-installation
+:::{button-ref} detailed-setup
 :color: secondary
 :outline:
 :ref-type: doc
 
-← Previous: Setup and Installation
+← Previous: Detailed Setup Guide
 :::
 
 ---
@@ -32,7 +32,7 @@ In the previous tutorial, you set up NeMo Gym and ran your first agent interacti
 
 Make sure you have:
 
-- ✅ Completed [Setup and Installation](setup-installation.md)
+- ✅ Completed [Detailed Setup Guide](detailed-setup.md)
 - ✅ Servers still running (or ready to restart them)
 - ✅ `env.yaml` configured with your OpenAI API key
 - ✅ Virtual environment activated
@@ -56,7 +56,7 @@ Each line contains a `responses_create_params` object with:
 
 ## 2. Verify Servers Are Running
 
-If you still have servers running from the [Setup and Installation](setup-installation.md) tutorial, proceed to the next step.
+If you still have servers running from the [Detailed Setup Guide](detailed-setup.md) tutorial, proceed to the next step.
 
 If not, start them again:
 

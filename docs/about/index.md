@@ -28,13 +28,12 @@ Embedding custom training environments directly within training frameworks is co
 - Interoperable with existing environments, systems, and RL training frameworks
 - Growing collection of training environments and datasets for Reinforcement Learning from Verifiable Reward (RLVR)
 
+NeMo Gym achieves this through a modular, server-based architecture.
+
 ## Core Components
 
-A training environment consists of three server components:
+A training environment in NeMo Gym consists of three server components:
 
 - **Agents**: Orchestrate the rollout lifecycle—calling models, executing tool calls via resources, and coordinating verification.
 - **Models**: Stateless text generation using LLM inference endpoints (OpenAI-compatible or vLLM).
 - **Resources**: Define tasks, tool implementations, and verification logic. Provide what agents need to run and score rollouts.
-  - **Example - Web Search**: Task = answer knowledge questions; Tools = `search()` and `browse()`; Verification = checks if answer matches expected result
-  - **Example - Math with Code**: Task = solve math problems; Tool = `execute_python()`; Verification = checks if final answer is mathematically correct
-  - **Example - Code Generation**: Task = implement solution to coding problem; Tools = none; Verification = runs unit tests against generated code

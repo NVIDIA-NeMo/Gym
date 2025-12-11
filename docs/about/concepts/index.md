@@ -23,25 +23,25 @@ Each explainer below covers one foundational idea and links to deeper material.
 :::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Core Components
 :link: core-components
 :link-type: ref
-Understand how Models, Resources, and Agents remain decoupled yet coordinated as independent HTTP services, including which endpoints each component exposes.
-:::
-
-:::{grid-item-card} {octicon}`check-circle;1.5em;sd-mr-1` Task Verification
-:link: task-verification
-:link-type: ref
-Explore how resource servers score agent outputs with `verify()` implementations that transform correctness, quality, and efficiency checks into reward signals.
-:::
-
-:::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` Key Terminology
-:link: key-terminology
-:link-type: ref
-Essential vocabulary for agent training, RL workflows, and NeMo Gym. This glossary defines terms you'll encounter throughout the tutorials and documentation.
+Understand the three server components that make up a training environment.
 :::
 
 :::{grid-item-card} {octicon}`gear;1.5em;sd-mr-1` Configuration System
 :link: configuration-concepts
 :link-type: ref
-Understand the three-level config pattern and why server IDs and implementations are independent choices.
+Understand how servers are configured and connected.
+:::
+
+:::{grid-item-card} {octicon}`check-circle;1.5em;sd-mr-1` Task Verification
+:link: task-verification
+:link-type: ref
+Understand the importance of verification and common implementation patterns.
+:::
+
+:::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` Key Terminology
+:link: key-terminology
+:link-type: ref
+Essential vocabulary for agent training, RL workflows, and NeMo Gym.
 :::
 
 ::::

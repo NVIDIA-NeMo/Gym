@@ -44,25 +44,25 @@ Explore Tutorials
 
 ---
 
-## Introduction to Gym
+## Introduction to NeMo Gym
 
-Learn about NeMo Gym, how it works at a high level, and the key concepts.
+Understand NeMo Gym's purpose and core components before diving into tutorials.
 
 ::::{grid} 1 2 2 2
 :gutter: 1 1 1 2
 
-:::{grid-item-card} {octicon}`book;1.5em;sd-mr-1` About Gym
+:::{grid-item-card} {octicon}`book;1.5em;sd-mr-1` About NeMo Gym
 :link: about/index
 :link-type: doc
-Motivation, benefits, and core components of NeMo Gym.
+Motivation and benefits of NeMo Gym.
 +++
-{bdg-secondary}`motivation` {bdg-secondary}`core-components`
+{bdg-secondary}`motivation` {bdg-secondary}`benefits`
 :::
 
 :::{grid-item-card} {octicon}`gear;1.5em;sd-mr-1` Concepts
 :link: about/concepts/index
 :link-type: doc
-Explore the core components: Agents, Models, and Resources.
+Core components, configuration, verification and RL terminology.
 +++
 {bdg-secondary}`agents` {bdg-secondary}`models` {bdg-secondary}`resources`
 :::
@@ -90,10 +90,10 @@ Install and run NeMo Gym to start collecting rollouts.
 Run a training environment and start collecting rollouts in under 5 minutes.
 :::
 
-:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Setup and Installation
-:link: get-started/setup-installation
+:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Detailed Setup Guide
+:link: get-started/detailed-setup
 :link-type: doc
-Install NeMo Gym and run your first training environment.
+Detailed walkthrough of running your first training environment.
 +++
 {bdg-secondary}`environment` {bdg-secondary}`configuration`
 :::
@@ -101,9 +101,9 @@ Install NeMo Gym and run your first training environment.
 :::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` Rollout Collection
 :link: get-started/rollout-collection
 :link-type: doc
-Batch processing, parameter tuning, and the rollout viewer tool.
+Collect and view rollouts
 +++
-{bdg-secondary}`training-data` {bdg-secondary}`scale`
+{bdg-secondary}`rollouts` {bdg-secondary}`training-data`
 :::
 
 ::::
@@ -118,7 +118,7 @@ Hands-on tutorials to build and customize your training environments.
 :::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build a Resource Server
 :link: tutorials/creating-resource-server
 :link-type: doc
-Implement custom tools and define task verification logic.
+Implement or integrate existing tools and define task verification logic.
 +++
 {bdg-secondary}`custom-environments` {bdg-secondary}`tools`
 :::
@@ -153,7 +153,7 @@ Home <self>
 :hidden:
 :maxdepth: 2
 
-about/index.md
+Overview <about/index.md>
 Concepts <about/concepts/index>
 Ecosystem <about/ecosystem>
 ```
@@ -163,9 +163,9 @@ Ecosystem <about/ecosystem>
 :hidden:
 :maxdepth: 1
 
-Overview <get-started/index>
-get-started/setup-installation.md
-get-started/rollout-collection.md
+Quickstart <get-started/index>
+Detailed Setup Guide <get-started/detailed-setup.md>
+Rollout Collection <get-started/rollout-collection.md>
 ```
 
 ```{toctree}
