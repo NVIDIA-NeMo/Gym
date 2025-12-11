@@ -111,7 +111,7 @@ ng_collect_rollouts +agent_name=single_tool_call_simple_agent \
 **✅ Success Check**: You should see:
 
 ```text
-Collecting rollouts: 100%|████████████████| 5/5 [00:08<00:00,  1.67s/it]
+Collecting rollouts: 100%|████████████████| 10/10 [00:08<00:00,  1.67s/it]
 ```
 
 ## 4. View Rollouts
