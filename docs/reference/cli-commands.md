@@ -1,4 +1,4 @@
-# CLI Command Reference
+# CLI Commands
 
 This page documents all available NeMo Gym CLI commands.
 
@@ -47,7 +47,7 @@ This command reads configuration from YAML files specified via `+config_paths` a
 
 ```bash
 # Start servers with specific configs
-config_paths="resources_servers/example_simple_weather/configs/simple_weather.yaml,\
+config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml"
 ng_run "+config_paths=[${config_paths}]"
 ```
@@ -78,7 +78,7 @@ Test a specific server module by running its pytest suite and optionally validat
 **Example**
 
 ```bash
-ng_test +entrypoint=resources_servers/example_simple_weather
+ng_test +entrypoint=resources_servers/example_single_tool_call
 ```
 
 ---
@@ -177,7 +177,7 @@ Perform a batch of rollout collection.
 
 ```bash
 ng_collect_rollouts \
-    +agent_name=simple_weather_simple_agent \
+    +agent_name=single_tool_call_simple_agent \
     +input_jsonl_fpath=weather_query.jsonl \
     +output_jsonl_fpath=weather_rollouts.jsonl \
     +limit=100 \
@@ -243,12 +243,25 @@ Launch a Gradio interface to view and explore dataset rollouts interactively.
 * - `jsonl_fpath`
   - str
   - Filepath to a local JSONL file to view.
+* - `server_host`
+  - str
+  - Network address where the viewer accepts requests. Defaults to `"127.0.0.1"` (localhost only). Set to `"0.0.0.0"` to accept requests from anywhere.
+* - `server_port`
+  - int
+  - Port where the viewer accepts requests. Defaults to `7860`. If the specified port is unavailable, Gradio will search for the next available port.
 ```
 
-**Example**
+**Examples**
 
 ```bash
+# Launch viewer with default settings (accessible from localhost only)
 ng_viewer +jsonl_fpath=weather_rollouts.jsonl
+
+# Accept requests from anywhere (e.g., for remote access)
+ng_viewer +jsonl_fpath=weather_rollouts.jsonl +server_host=0.0.0.0
+
+# Use a custom port
+ng_viewer +jsonl_fpath=weather_rollouts.jsonl +server_port=8080
 ```
 
 ---
