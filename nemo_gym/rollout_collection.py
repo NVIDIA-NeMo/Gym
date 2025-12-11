@@ -18,7 +18,7 @@ from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
 from itertools import chain, repeat
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
@@ -129,10 +129,10 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
         """
         server_client = self.setup_server_client(head_server_config)
 
-        async def _post_subroutine(row: Dict) -> Dict:
-            res = await server_client.post(server_name=row.pop("agent_ref")["name"], url_path="/run", json=row)
+        async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
+            res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
             await raise_for_status(res)
-            return await res.json()
+            return row, await res.json()
 
         return tqdm.as_completed(
             map(_post_subroutine, examples), desc="Collecting rollouts", miniters=10, total=len(examples)
