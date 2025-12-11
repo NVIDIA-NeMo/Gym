@@ -125,7 +125,7 @@ Run inference to validate your reward distribution:
 :icon: graph
 
 1. Use a ~500 sample subset (minimum)
-2. Use Qwen 3 30B A3B or equivalent model
+2. Use Qwen3 30B A3B or equivalent model
 3. Generate 16 responses per prompt
 4. Report reward distribution statistics
 5. **For tool calling**: Provide tool call metrics and correlation with rewards
