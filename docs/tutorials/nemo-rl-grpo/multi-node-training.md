@@ -2,8 +2,6 @@
 
 # Multi-Node Training
 
-TODO STILL
-
 :::{important}
 **Do the {doc}`Single Node Training <single-node-training>` first. Do not skip it.** The single-node setup validates that your environment is configured correctly before attempting multi-node training.
 :::
@@ -14,7 +12,7 @@ TODO STILL
 
 For production training, scale to multiple nodes by changing `cluster.num_nodes`. This example uses **batch mode** (the `COMMAND` variable specifies what to run automatically when the job starts).
 
-> **Note**: Run this command from the **Slurm login/head node**, not from inside the interactive container from Step 1. This submits a new batch job that will run independently.
+> **Note**: Run this command from the **Slurm login/head node**, not from inside the interactive container through Step 1. This submits a new batch job that will run independently.
 
 ```bash
 # Set experiment name
@@ -39,7 +37,7 @@ sbatch \
 ```
 
 
-## Multi node
+## Multi-Node
 
 We will run a multi-node training job on a Slurm cluster. First, we will write our Slurm job launch script and then run it.
 
