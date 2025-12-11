@@ -19,7 +19,11 @@ version = "0.2.0rc0"
 requires-python = ">=3.12"
 dependencies = [
     "nemo-gym[dev]",
-    "vllm>=0.11.2",
+
+    # We specifically pin the vllm dependency because we have tested on this version.
+    # Updated Thu Dec 11 2025 with vllm==0.11.2
+    # License: Apache 2.0 https://github.com/vllm-project/vllm/blob/89988ec8c2a0c3e18e63767d9df5ca8f6b8ff21c/LICENSE
+    "vllm==0.11.2",
 ]
 
 [build-system]
