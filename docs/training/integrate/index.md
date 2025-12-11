@@ -1,18 +1,18 @@
 (training-integrate-overview)=
 
-# Integrate Custom Training Frameworks
+# Integrate External Training Frameworks
 
-Connect NeMo Gym to custom RL training pipelines using OpenAI-compatible HTTP endpoints. These guides are for users who cannot use NeMo RL's native integration and need to implement their own.
+Connect NeMo Gym to external training frameworks using OpenAI-compatible HTTP endpoints. These guides are for partners integrating existing frameworks (such as VeRL or TRL) with NeMo Gym as an alternative to NeMo RL.
 
 :::{tip}
-**Using NeMo RL?** Skip these guides and use {doc}`/tutorials/integrate-training-frameworks/train-with-nemo-rl` instead — integration is handled automatically.
+**Using NeMo RL?** Skip these guides — NeMo RL handles Gym integration automatically. Refer to {doc}`/tutorials/integrate-training-frameworks/train-with-nemo-rl` instead.
 :::
 
 ---
 
 ## How-To Guides
 
-Work through these sequentially for a new integration, or jump to the guide you need.
+Work through these sequentially when integrating a new framework, or jump to the guide you need.
 
 ::::{grid} 1 1 2 2
 :gutter: 1 1 1 2
@@ -30,7 +30,7 @@ Configure your generation backend to serve an HTTP endpoint that Gym can connect
 :::{grid-item-card} {octicon}`plug;1.5em;sd-mr-1` Connect Gym to Your Training Loop
 :link: connect-gym-to-training
 :link-type: doc
-Integrate Gym's rollout collection into your custom training pipeline.
+Integrate Gym's rollout collection into your framework's training loop.
 +++
 {bdg-secondary}`RunHelper`
 {bdg-secondary}`rollouts`
@@ -51,7 +51,7 @@ Verify your integration works correctly end-to-end.
 
 ## Reference
 
-Technical reference for integration implementers.
+Technical reference for framework integration implementers.
 
 ::::{grid} 1 1 2 2
 :gutter: 1 1 1 2
@@ -59,7 +59,7 @@ Technical reference for integration implementers.
 :::{grid-item-card} {octicon}`list-unordered;1.5em;sd-mr-1` Generation Backends
 :link: reference/generation-backends
 :link-type: doc
-OpenAI-compatible HTTP servers across RL frameworks.
+OpenAI-compatible HTTP servers across training frameworks.
 +++
 {bdg-secondary}`landscape`
 :::
