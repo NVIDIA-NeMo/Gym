@@ -2,7 +2,7 @@
 
 # Contribute to NeMo Gym
 
-Welcome! We're excited to have you contribute to NeMo Gym. Whether you're adding new training environments, integrating RL frameworks, improving documentation, or fixing bugs, your contributions help advance RL training.
+Welcome! We are excited to have you contribute to NeMo Gym. Whether you are adding new training environments, integrating RL frameworks, improving documentation, or fixing bugs, your contributions help advance RL training.
 
 ---
 
@@ -12,15 +12,15 @@ Welcome! We're excited to have you contribute to NeMo Gym. Whether you're adding
 
 New environments expand Gym's training capabilities.
 
-- Novel training environments (coding, reasoning, tool use, games, etc.)
-- Benchmark integrations (e.g. SWE-Bench, Tau Bench)
+- Novel training environments (coding, reasoning, tool use, games, and so on)
+- Benchmark integrations (such as SWE-Bench and Tau Bench)
 :::
 
 :::{dropdown} {octicon}`workflow;1.5em;sd-mr-1` Integrate RL Frameworks
 
 Have a preferred training framework? Help integrate it with NeMo Gym.
 
-→ See {ref}`training-framework-integration` for integration guides.
+→ Refer to {ref}`training-framework-integration` for integration guides.
 :::
 
 :::{dropdown} {octicon}`book;1.5em;sd-mr-1` Improve Documentation
@@ -45,6 +45,6 @@ Have an idea for a new feature or improvement? [Open an issue](https://github.co
 
 ## Before You Start
 
-All contributions require signed commits and DCO sign-off. See {ref}`development-setup` for environment setup, CI/CD requirements, and commit signing instructions.
+All contributions require signed commits and DCO sign-off. Refer to {ref}`development-setup` for environment setup, CI/CD requirements, and commit signing instructions.
 
 **Not sure where to start?** Check our [open issues](https://github.com/NVIDIA-NeMo/Gym/issues) or create a new issue to discuss your idea.

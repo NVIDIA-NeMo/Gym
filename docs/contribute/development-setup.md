@@ -54,7 +54,7 @@ All contributions must pass these automated checks:
 
 **Test Requirements**:
 - At least one test per server you contribute
-- Tests must run via `ng_test +entrypoint=your_server_path`
+- Tests must run using `ng_test +entrypoint=your_server_path`
 - Use pytest for async testing patterns
 
 ### Build Docs CI Failures
@@ -173,14 +173,14 @@ ssh-add -l
 ```
 
 **Problem**: "Signing key not found on GitHub"
-- Ensure you copied the **complete** public key including `ssh-ed25519` prefix
+- Ensure you copied the complete public key including the `ssh-ed25519` prefix
 - Add the key as a **Signing Key** (not Authentication Key) on GitHub
 - Wait a few minutes for GitHub to process the new key
 
 **Problem**: IDE not signing commits
 - Restart your IDE after configuring Git
 - Check IDE Git settings match the command line configuration
-- Try committing via command line first to verify setup
+- Try committing through the command line first to verify setup
 
 **Problem**: "DCO sign-off missing"
 ```bash
@@ -204,7 +204,7 @@ gpg --list-secret-keys --keyid-format=long
 
 # Configure Git to use GPG
 git config --global user.signingkey YOUR_GPG_KEY_ID
-# Don't set gpg.format (defaults to gpg)
+# Do not set gpg.format (defaults to gpg)
 
 # Add GPG key to GitHub
 gpg --armor --export YOUR_GPG_KEY_ID
