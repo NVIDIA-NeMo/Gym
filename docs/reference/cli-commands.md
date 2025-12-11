@@ -1,4 +1,4 @@
-# CLI Command Reference
+# CLI Commands
 
 This page documents all available NeMo Gym CLI commands.
 

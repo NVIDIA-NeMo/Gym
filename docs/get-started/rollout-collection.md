@@ -1,6 +1,6 @@
 (gs-collecting-rollouts)=
 
-# Collecting Rollouts
+# Rollout Collection
 
 In the previous tutorial, you set up NeMo Gym and ran your first agent interaction. But to train an agent with reinforcement learning, you need hundreds or thousands of these interactions—each one scored and saved. That's what rollout collection does.
 
@@ -18,12 +18,12 @@ In the previous tutorial, you set up NeMo Gym and ran your first agent interacti
 
 :::
 
-:::{button-ref} setup-installation
+:::{button-ref} detailed-setup
 :color: secondary
 :outline:
 :ref-type: doc
 
-← Previous: Setup and Installation
+← Previous: Detailed Setup Guide
 :::
 
 ---
@@ -32,7 +32,7 @@ In the previous tutorial, you set up NeMo Gym and ran your first agent interacti
 
 Make sure you have:
 
-- ✅ Completed [Setup and Installation](setup-installation.md)
+- ✅ Completed [Detailed Setup Guide](detailed-setup.md)
 - ✅ Servers still running (or ready to restart them)
 - ✅ `env.yaml` configured with your OpenAI API key
 - ✅ Virtual environment activated
@@ -56,7 +56,7 @@ Each line contains a `responses_create_params` object with:
 
 ## 2. Verify Servers Are Running
 
-If you still have servers running from the [Setup and Installation](setup-installation.md) tutorial, proceed to the next step.
+If you still have servers running from the [Detailed Setup Guide](detailed-setup.md) tutorial, proceed to the next step.
 
 If not, start them again:
 
@@ -111,7 +111,7 @@ ng_collect_rollouts +agent_name=single_tool_call_simple_agent \
 **✅ Success Check**: You should see:
 
 ```text
-Collecting rollouts: 100%|████████████████| 5/5 [00:08<00:00,  1.67s/it]
+Collecting rollouts: 100%|████████████████| 10/10 [00:08<00:00,  1.67s/it]
 ```
 
 ## 4. View Rollouts
@@ -198,7 +198,9 @@ Congratulations! You now have a working NeMo Gym installation and understand how
 :::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Use an Existing Training Environment
 :link: https://github.com/NVIDIA-NeMo/Gym#-available-resource-servers
 
-Browse the available resource servers to find a training-ready environment that matches your goals.
+Browse the available resource servers on GitHub to find a training-ready environment that matches your goals.
++++
+{bdg-secondary}`github` {bdg-secondary}`resource-servers`
 :::
 
 :::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build a Custom Training Environment
@@ -206,6 +208,8 @@ Browse the available resource servers to find a training-ready environment that 
 :link-type: doc
 
 Implement or integrate existing tools and define task verification logic.
++++
+{bdg-secondary}`tutorial` {bdg-secondary}`custom-tools`
 :::
 
 ::::
