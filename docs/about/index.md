@@ -30,6 +30,10 @@ Embedding custom training environments directly within training frameworks is co
 
 NeMo Gym achieves this through a modular, server-based architecture.
 
+:::{tip}
+The name "NeMo Gym" comes from historical reinforcement learning literature, where the word "Gym" refers to a collection of RL training environments!
+:::
+
 ## Core Components
 
 A training environment in NeMo Gym consists of three server components:

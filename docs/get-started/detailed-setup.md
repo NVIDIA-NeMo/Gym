@@ -177,7 +177,7 @@ Check your `env.yaml` file has the correct API key format.
 
 ```bash
 # Define which servers to start
-config_paths="resources_servers/example_simple_weather/configs/simple_weather.yaml,\
+config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml"
 
 # Start all servers
@@ -202,7 +202,7 @@ When you ran `ng_run`, it started all the servers you configured:
 - **Head server:** coordinating all components
 - **Resources server:** defining tools and verification
 - **Model server:** providing LLM inference
-- **Agent server:** orchestrating how the model interacts with the resources
+- **Agent server:** orchestrating how the model interacts with the resources. The agent server calls the model and resources servers using REST requests.
 
 :::{dropdown} Troubleshooting: "command not found: ng_run"
 Make sure you activated the virtual environment:
