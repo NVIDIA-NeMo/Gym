@@ -11,7 +11,6 @@ Launch an interactive Slurm session to run training commands. Refer to the [NeMo
 ```bash
 NUM_ACTOR_NODES=1
 ACCOUNT=<ACCOUNT_NAME>
-JOB_NAME=<JOB_NAME>
 PARTITION=<PARTITION>
 
 # Use the official NeMo RL container from NGC
@@ -23,7 +22,6 @@ srun \
     --nodes=${NUM_ACTOR_NODES} \
     --ntasks=1 \
     --account=${ACCOUNT} \
-    --job-name=${JOB_NAME} \
     --partition=${PARTITION} \
     --time=04:00:00 \
     --gres=gpu:8 \
