@@ -491,33 +491,6 @@ One way I like to think about these things is:
 Tying back to NeMo Gym, NeMo gym can be used to create synthetic data for SFT training by running strong teacher models on the different environments. Critically, it will also be used as the source of data during RL training.
 
 
-# FAQ: Error: Found files with missing copyright
-If you get an error like this on your PR:
-```
-Error: Found files with missing copyright:
-path= ./resources_servers/code_gen/scripts/validate_dataset.py
-path= ./resources_servers/code_gen/scripts/build_examples.py
-path= ./resources_servers/code_gen/app.py
-```
-
-Add the following copyright snippet to the top of the files listed:
-```python
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-```
-
 
 # FAQ: PermissionError when starting NeMo Gym in sandboxed environments
 
@@ -593,22 +566,6 @@ So, the OpenAI compatible model server in a training framework needs to be able 
 
 TODO @bxyu-nvidia: expand on this later.
 
-
-# FAQ: NeMo Gym what CI/CD do I need to pass?
-
-NeMo Gym has an E2E suite of CI/CD in the form of Github actions workflows. Some of these are critical to PR merge and some of them are not.
-
-For the majority of PRs, there are 5 checks that need to pass:
-1. DCO
-2. Code linting / Lint check (pull_request)
-3. Copyright check / copyright-check / main (pull_request)
-4. Secrets detector / secrets-detector / secrets-detector (pull_request)
-5. Unit tests / Test (pull_request)
-
-Examples of PR checks that most PRs do not need to wait for to pass:
-1. CICD NeMo / cicd-container-build / build / main (push)
-2. CICD NeMo / Nemo_CICD_Test (push)
-...
 
 # FAQ: Why use aiohttp backend instead of httpx/httpcore for async http?
 
