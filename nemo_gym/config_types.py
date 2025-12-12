@@ -240,6 +240,10 @@ class BaseUploadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
         default=False,
         description="Create a pull request instead of pushing directly. Required for repos where you do not have write access.",
     )
+    revision: Optional[str] = Field(
+        default=None,
+        description="Git revision (branch name) to upload to. Use the same revision for multiple files to upload to the same PR. If not provided with create_pr=True, a new branch/PR will be created automatically.",
+    )
     commit_message: Optional[str] = Field(
         default=None, description="Custom commit message. If not provided, HuggingFace auto-generates one."
     )

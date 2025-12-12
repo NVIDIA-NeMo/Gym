@@ -59,7 +59,9 @@ ng_gitlab_to_hf_dataset \
 ```
 
 ## Uploading with Pull Request workflow
-When uploading to an organization repository where you don't have direct write access (e.g., nvidia/), use the `+create_pr=true` flag to create a Pull Request instead of pushing directly. You can also customize the commit message and description:
+When uploading to an organization repository where you don't have direct write access (e.g., nvidia/), use the `+create_pr=true` flag to create a Pull Request instead of pushing directly. You can also customize the commit message and description.
+
+If you want to specify the revision (branch name), you can add the `+revision={your branch name}` flag. Excluding `create_pr` (or setting it to `false`) assumes you are committing to an existing branch. Including it assumes it will be a brand new branch.
 
 ```bash
 ng_upload_dataset_to_hf \
@@ -68,6 +70,7 @@ ng_upload_dataset_to_hf \
     +resource_config_path=${resource_config_path} \
     +split=validation \
     +create_pr=true \
+    +revision=my-branch-name \
     +commit_message="Add validation set" \
     +commit_description="Includes 545 examples"
 ```

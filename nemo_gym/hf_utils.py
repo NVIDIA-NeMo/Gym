@@ -173,6 +173,7 @@ def upload_jsonl_dataset(
             token=config.hf_token,
             repo_type="dataset",
             create_pr=config.create_pr,
+            revision=config.revision,
             commit_message=config.commit_message,
             commit_description=config.commit_description,
         )
