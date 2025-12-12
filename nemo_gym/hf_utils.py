@@ -13,7 +13,6 @@
 # limitations under the License.
 import json
 import shutil
-from os import environ
 from pathlib import Path
 
 import yaml
@@ -26,8 +25,7 @@ from nemo_gym.config_types import DownloadJsonlDatasetHuggingFaceConfig, UploadJ
 
 
 def create_huggingface_client(token: str) -> HfApi:  # pragma: no cover
-    environ["HF_TOKEN"] = token
-    client = HfApi()
+    client = HfApi(token=token)
     return client
 
 
