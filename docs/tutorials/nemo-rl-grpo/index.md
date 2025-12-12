@@ -46,7 +46,7 @@ NeMo Gym does not require GPUs. GPUs are only necessary for GRPO training with N
 - **Storage**: 100 GB+ free disk space for:
   - NeMo RL repository and dependencies
   - Model checkpoints and training artifacts
-  - Dataset storage (DAPO 17K and prepared data)
+  - Dataset storage
 
 :::
 
@@ -68,8 +68,6 @@ NeMo Gym does not require GPUs. GPUs are only necessary for GRPO training with N
 
 - **Operating System**: Linux (Ubuntu 20.04+ or equivalent)
 - **Python**: 3.12 or higher
-- **NeMo RL Container**: Pre-built container image with NeMo RL dependencies
-  - Path example: `/path/to/nemo-rl/container` (update with your actual container path)
 - **Slurm**: For multi-node training on GPU clusters
 - **Git**: For cloning repositories
 - **UV Package Manager**: Python package manager (installed during setup)
