@@ -89,7 +89,7 @@ Build your resource server:
 
 - Run `ng_init_resources_server +entrypoint=resources_servers/my_server` to scaffold the new resource server
 - Follow the {doc}`/tutorials/creating-resource-server` guide to implement your specific logic
-- Implement verification logic for your tasks by defining the verify() function
+- Implement verification logic for your tasks by defining the `verify()` function
 - Set the `domain` field in your resource server configuration (see {py:class}`~nemo_gym.config_types.Domain`).
 - Complete the auto-generated `README.md` with licensing information
 
@@ -104,7 +104,7 @@ Write and run tests for your resource server:
 
 Verify basic functionality and generate example rollouts:
 
-- Document the command used to start your server (e.g., `ng_run +entrypoint=resources_servers/my_server`)
+- Document the command used to start your server, for example, `ng_run +entrypoint=resources_servers/my_server`
 - Generate rollouts and save 5 example outputs to `data/example_rollouts.jsonl` to demonstrate correct reward signals
 
 ### 5. Reward Profiling
@@ -132,7 +132,7 @@ Include the following in your pull request description:
 - Description of the environment
 - Description of the verification logic
 - Description of the prompts/tasks: What is the source? Which domain does it cover?
-- Provide relevant license information for data and software. If models were used for synthetic data generation please note this
+- Provide relevant license information for data and software. If models were used for synthetic data generation, note this in your PR description
 
 ### 8. PR Review Process
 

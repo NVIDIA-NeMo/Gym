@@ -20,7 +20,7 @@ Build novel training environments for coding, reasoning, tool use, games, and mo
 :::{grid-item-card} {octicon}`repo;1.5em;sd-mr-1` Benchmark Integrations
 :link: https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/mini_swe_agent
 :link-type: url
-Integrate existing benchmarks (SWE-Bench, Tau Bench, etc.) into NeMo Gym.
+Integrate existing benchmarks (SWE-Bench, Tau Bench, and so on) into NeMo Gym.
 
 → View mini-swe-agent with SWE-Bench as a reference implementation
 

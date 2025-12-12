@@ -151,7 +151,7 @@ Contribute to NeMo Gym development.
 :::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` Contribute Environments
 :link: contribute/environments/index
 :link-type: doc
-Contributing new environments or integrate existing benchmarks.
+Contribute new environments or integrate existing benchmarks.
 +++
 {bdg-primary}`environments`
 :::
