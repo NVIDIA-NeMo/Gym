@@ -48,7 +48,7 @@ srun \
 
 ## Clone and Setup NeMo RL + NeMo Gym
 
-**Estimated Time:** ~5 minutes
+**Estimated Time:** ~5-10 minutes
 
 For the first setup on your local filesystem:
 ```bash
@@ -117,7 +117,7 @@ cd ../../.. && source /opt/nemo_rl_venv/bin/activate
 
 ## Run Sanity Tests
 
-**Estimated Time:** ~10-15 minutes
+**Estimated Time:** ~5-10 minutes
 
 Download the model used in the following tests:
 ```bash
@@ -129,7 +129,6 @@ HF_TOKEN={your HF token} \
 Validate your setup before training.
 ```bash
 HF_HOME=$PWD/.cache/ \
-HF_HUB_OFFLINE=1 \
     ./examples/nemo_gym/run_nemo_gym_single_node_sanity_tests.sh
 ```
 
