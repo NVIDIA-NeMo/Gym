@@ -364,8 +364,8 @@ class DatasetConfig(BaseModel):
             Literal["MIT"],
             Literal["Creative Commons Attribution 4.0 International"],
             Literal["Creative Commons Attribution-ShareAlike 4.0 International"],
+            Literal["NVIDIA Internal Use Only, Do Not Distribute"],
             Literal["TBD"],
-            Literal["MIT"],
         ]
     ] = None
 
@@ -391,6 +391,7 @@ class Domain(str, Enum):
     LONG_CONTEXT = "long_context"
     SAFETY = "safety"
     GAMES = "games"
+    TRANSLATION = "translation"
     E2E = "e2e"
     OTHER = "other"
 
