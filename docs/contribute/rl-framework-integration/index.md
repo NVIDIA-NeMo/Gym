@@ -77,7 +77,7 @@ The typical integration workflow follows this sequence:
   - Description
 * - 1
   - Generation backend
-  - Expose your generation engine (vLLM, SGLang) as an OpenAI-compatible HTTP server
+  - Expose your generation engine, such as vLLM or SGLang, as an OpenAI-compatible HTTP server
 * - 2
   - On-policy corrections
   - Implement token ID fixes to prevent re-tokenization and re-templating issues

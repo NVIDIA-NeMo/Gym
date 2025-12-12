@@ -47,7 +47,7 @@ All contributions must pass these automated checks:
 
 **Required Checks**:
 - **Unit Tests**: All existing tests must pass
-- **Build Docs**: Documentation must build without errors  
+- **Build Docs**: Documentation must build without errors
 - **Copyright Check**: All files must have proper copyright headers
 - **DCO Signing**: All commits must be signed off
 - **Pre-commit Hooks**: Code formatting and linting
@@ -238,7 +238,7 @@ pre-commit autoupdate             # Update hook versions
 
 **Common fixes**:
 - `ruff check --fix .` for linting
-- `ruff format .` for formatting  
+- `ruff format .` for formatting
 - Add copyright headers to new files
 
 ---
