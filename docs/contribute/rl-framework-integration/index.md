@@ -2,10 +2,10 @@
 
 # Training Framework Integration
 
-These guides cover how to integrate NeMo Gym into a new RL training framework. Use them if you're:
+These guides cover how to integrate NeMo Gym into a new RL training framework. Use them if you are:
 
 - A training framework maintainer adding NeMo Gym support
-- Contributing NeMo Gym integration for a training framework that doesn't have one yet
+- Contributing NeMo Gym integration for a training framework that does not have one yet
 
 :::{tip}
 Just want to train models? Use {ref}`NeMo RL <rl-training-with-nemo-rl>` instead.

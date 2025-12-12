@@ -22,7 +22,7 @@ content_type: index
 
 [NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) is a library for building reinforcement learning (RL) training environments for large language models (LLMs). NeMo Gym provides infrastructure to develop environments, scale rollout collection, and integrate seamlessly with your preferred training framework.
 
-A training environment consists of three server components: **Agents** orchestrate the rollout lifecycle—calling models, executing tool calls via resources, and coordinating verification. **Models** provide stateless text generation using LLM inference endpoints. **Resources** define tasks, tool implementations, and verification logic.
+A training environment consists of three server components: **Agents** orchestrate the rollout lifecycle—calling models, executing tool calls through resources, and coordinating verification. **Models** provide stateless text generation using LLM inference endpoints. **Resources** define tasks, tool implementations, and verification logic.
 
 ````{div} sd-d-flex-row
 ```{button-ref} gs-quickstart
@@ -210,6 +210,8 @@ tutorials/rl-training-with-nemo-rl
 :maxdepth: 1
 
 Overview <contribute/index>
+Development Setup <contribute/development-setup>
+Environments <contribute/resource-servers/index>
 Resource Servers <contribute/resource-servers/index>
 Integrate RL Frameworks <contribute/rl-framework-integration/index>
 ```
