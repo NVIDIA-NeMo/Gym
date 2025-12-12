@@ -35,6 +35,9 @@ workplace_assistant_simple_agent:
             dataset_name: workplace_assistant
             version: 0.0.4
             artifact_fpath: validation.jsonl
+          huggingface_identifier:
+            repo_id: nvidia/Nemotron-RL-agent-workplace_assistant
+            artifact_fpath: validation.jsonl
           license: Apache 2.0
         - name: example
           type: example

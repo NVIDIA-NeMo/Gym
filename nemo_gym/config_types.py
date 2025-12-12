@@ -222,15 +222,33 @@ class BaseUploadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
     hf_organization: str = Field(description="HuggingFace organization name where dataset will be uploaded.")
     hf_collection_name: str = Field(description="HuggingFace collection name for organizing datasets.")
     hf_collection_slug: str = Field(description="Alphanumeric collection slug found at the end of collection URI.")
-    dataset_name: str = Field(
-        description="Name of the dataset (will be combined with domain and resource server name)."
+    dataset_name: Optional[str] = Field(
+        default=None, description="Name of the dataset (will be combined with domain and resource server name)."
     )
     input_jsonl_fpath: str = Field(description="Path to the local jsonl file to upload.")
     resource_config_path: str = Field(
         description="Path to resource server config file (used to extract domain for naming convention)."
     )
     hf_dataset_prefix: str = Field(
-        default="NeMo-Gym", description="Prefix prepended to dataset name (default: 'NeMo-Gym')."
+        default="Nemotron-RL", description="Prefix prepended to dataset name (default: 'NeMo-Gym')."
+    )
+    split: Literal["train", "validation", "test"] = Field(
+        default="train",
+        description="Dataset split type (e.g., 'train', 'validation', 'test'). Format validation only applies to 'train' splits.",
+    )
+    create_pr: bool = Field(
+        default=False,
+        description="Create a pull request instead of pushing directly. Required for repos where you do not have write access.",
+    )
+    revision: Optional[str] = Field(
+        default=None,
+        description="Git revision (branch name) to upload to. Use the same revision for multiple files to upload to the same PR. If not provided with create_pr=True, a new branch/PR will be created automatically.",
+    )
+    commit_message: Optional[str] = Field(
+        default=None, description="Custom commit message. If not provided, HuggingFace auto-generates one."
+    )
+    commit_description: Optional[str] = Field(
+        default=None, description="Optional commit description with additional context."
     )
 
 
