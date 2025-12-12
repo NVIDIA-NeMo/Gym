@@ -15,10 +15,10 @@ ray stop --force
 python -c "import ray; ray.shutdown()"
 
 # Set experiment name with timestamp
-EXP_NAME="$(date +%Y%m%d)/penguin_grpo/nemotron_nano_v2_9b/workplace_assistant_001"
+EXP_NAME="$(date +%Y%m%d)/nemo_gym_grpo/nemotron_nano_v2_9b/workplace_assistant_001"
 
 # Configuration file path
-CONFIG_PATH=examples/penguin/grpo_workplace_assistant_nemotron_nano_v2_9b.yaml
+CONFIG_PATH=examples/nemo_gym/grpo_workplace_assistant_nemotron_nano_v2_9b.yaml
 
 # Launch training
 # Set these environment variables before running:
@@ -29,7 +29,7 @@ HF_HOME=.cache/ \
 HF_TOKEN={your HF token} \
 WANDB_API_KEY={your W&B API key} \
 NRL_FORCE_REBUILD_VENVS=true \
-uv run python examples/penguin/run_grpo_penguin.py \
+uv run python examples/nemo_gym/run_grpo_nemo_gym.py \
     --config=$CONFIG_PATH \
     logger.wandb.project="${USER}-nemo-gym-rl-integration" \
     logger.wandb.name=$EXP_NAME \
