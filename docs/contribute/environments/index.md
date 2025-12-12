@@ -10,9 +10,11 @@ Help advance RL training for the community by contributing new environments. The
 :gutter: 1 1 1 2
 
 :::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` New Environments
-:link: resource-servers
+:link: new-environment
 :link-type: doc
 Build novel training environments for coding, reasoning, tool use, games, and more.
++++
+{bdg-secondary}`new-environment`
 :::
 
 :::{grid-item-card} {octicon}`repo;1.5em;sd-mr-1` Benchmark Integrations
@@ -28,4 +30,12 @@ Integrate existing benchmarks (SWE-Bench, Tau Bench, etc.) into NeMo Gym.
 :::
 
 ::::
+
+```{toctree}
+:caption: Contributing Environments
+:hidden:
+:maxdepth: 1
+
+New Environment <new-environment>
+```
 
