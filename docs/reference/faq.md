@@ -1,7 +1,7 @@
 # FAQ
 
-:::{warning}
-This document is a collection of How-Tos and FAQs that have not made their way into an official tutorial yet. The following guides are **experimental** and may contain bugs. Proceed with caution.
+:::{note}
+This page provides quick answers to commonly asked questions. Over time, these topics will be integrated into the structured product documentation (tutorials, guides, and reference sections) as we expand coverage. We've documented them here to provide immediate help while more comprehensive documentation is in progress.
 :::
 
 # How To: Run tests for simple agent
@@ -211,61 +211,6 @@ ng_dump_config "+config_paths=[$config_paths]"
 ```
 
 
-# How To: ng_version - Check NeMo Gym version and system information
-Check your NeMo Gym installation version and environment details for troubleshooting or support.
-
-**Standard format:**
-```bash
-ng_version
-```
-
-**Example output:**
-```bash
-NeMo Gym v0.2.0rc0
-Python 3.13.5 (/Users/user/nemo-gym/.venv/bin/python3)
-Installation: /Users/user/nemo-gym
-
-Key Dependencies:
-  openai: 2.6.1
-  ray: 2.50.1
-
-System:
-  OS: Darwin 25.1.0
-  Platform: macOS-26.1-arm64-arm-64bit-Mach-O
-  Architecture: arm64
-  Processor: arm
-  CPUs: 14
-  Memory: 48.0 GB
-```
-
-**Machine-readable JSON format:**
-```bash
-ng_version +json=true
-```
-
-**Example output:**
-```bash
-{
-  "nemo_gym": "0.2.0rc0",
-  "python": "3.13.5",
-  "python_path": "/Users/user/nemo-gym/.venv/bin/python3",
-  "installation_path": "/Users/user/nemo-gym",
-  "dependencies": {
-    "openai": "2.6.1",
-    "ray": "2.50.1"
-  },
-  "system": {
-    "os": "Darwin 25.1.0",
-    "platform": "macOS-26.1-arm64-arm-64bit-Mach-O",
-    "architecture": "arm64",
-    "processor": "arm",
-    "cpus": 14,
-    "memory_gb": 48.0
-  }
-}
-```
-
-
 # How To: Use NeMo Gym with a non-Responses compatible API endpoint like vLLM
 As of Sep 05, 2025, not many models have been trained with middlewares or chat templates that are easily parseable to OpenAI Responses API schema, with the notable exception of OpenAI's own open source model GPT-OSS. Since Gym is first-party Responses API, this makes Gym very difficult to use with basically any model.
 
@@ -411,58 +356,6 @@ And you have to ensure that when you make a request with your custom client that
 It's an analogous story for Responses-compatible APIs.
 
 
-# How To: Detailed anatony of a Gym config
-Let's break down the anatomy of a Gym config further and help clarify some things.
-
-TODO: bxyu-nvidia
-
-```yaml
-# `math_with_judge` here at the top most level is the unique name of your resources server. This must be unique across your config.
-# When you or other servers call this server, they will do so using the ServerClient and its name.
-math_with_judge:
-  # `resources_servers` here at the second level is the server type. There are 3 server types in gym: agent, model, or resources.
-  resources_servers:
-    # This is the resources server type. This is not unique at runtime, and you can spin up multiple instances of this with different configs if you wish!
-    math_with_judge:
-      entrypoint: app.py
-      judge_model_server:
-        type: responses_api_models
-        name: ???
-      judge_responses_create_params: {
-        input: []
-      }
-      should_use_judge: false
-math_with_judge_simple_agent:
-  responses_api_agents:
-    simple_agent:
-      entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: math_with_judge
-      model_server:
-        type: responses_api_models
-        name: policy_model
-      datasets:
-      - name: train
-        type: train
-        jsonl_fpath: resources_servers/math_with_judge/data/dapo17k_bytedtsinghua_train.jsonl
-        gitlab_identifier:
-          dataset_name: bytedtsinghua_dapo17k
-          version: 0.0.1
-          artifact_fpath: dapo17k_bytedtsinghua_train.jsonl
-        license: Apache 2.0
-      - name: validation
-        type: validation
-        jsonl_fpath: resources_servers/math_with_judge/data/aime24_bytedtsinghua_validation.jsonl
-        gitlab_identifier:
-          dataset_name: bytedtsinghua_dapo17k
-          version: 0.0.1
-          artifact_fpath: aime24_bytedtsinghua_validation.jsonl
-        license: Apache 2.0
-```
-
-
-
 # How To: Use Ray for parallelizing CPU-intensive tasks
 
 NeMo Gym automatically sets up Ray for distributed computing for CPU-intensive tasks.
@@ -580,34 +473,6 @@ Response(
 Reasoning traces (`Reasoning` items) are parsed before the verifier processes the output. The parsing is **model-specific**, and the verifier does not need to worry about the extracting or interpreting reasoning traces. The verifier receives these items already separated and clearly typed.
 
 
-# FAQ: DCO and commit signing VSCode and Git setup
-Here are some suggestions for easier development using the VSCode code editor.
-
-VSCode workspace settings at `.vscode/settings.json`
-```
-{
-    "git.enableCommitSigning": true,
-    "git.alwaysSignOff": true
-}
-```
-
-Set up your Github signing keys! https://docs.github.com/en/authentication/managing-commit-signature-verification/about-commit-signature-verification#ssh-commit-signature-verification
-
-Specifically, if you visit https://github.com/settings/keys while logged into your account, you should see the following items:
-1. Under the "SSH keys" major section, there are 2 subsections
-   1. Authentication keys
-   2. Signing key
-
-More often than not, the SHA256 displayed by Github (SHA256:xxxx) should be the same for the two keys above since you probably want to just use the same SSH key for both purposes. If you do not see the following, follow the signing keys link above.
-
-
-For developers that sign commits using SSH keys, this is configuration so that VSCode source control is able to sign commits properly.
-```bash
-git config gpg.format ssh
-git config user.signingkey ~/.ssh/id_ed25519.pub
-```
-
-
 # FAQ: SFT and RL
 Reading time: 5 mins
 Date: Fri Aug 15, 2025
@@ -625,33 +490,6 @@ One way I like to think about these things is:
 
 Tying back to NeMo Gym, NeMo gym can be used to create synthetic data for SFT training by running strong teacher models on the different environments. Critically, it will also be used as the source of data during RL training.
 
-
-# FAQ: Error: Found files with missing copyright
-If you get an error like this on your PR:
-```
-Error: Found files with missing copyright:
-path= ./resources_servers/code_gen/scripts/validate_dataset.py
-path= ./resources_servers/code_gen/scripts/build_examples.py
-path= ./resources_servers/code_gen/app.py
-```
-
-Add the following copyright snippet to the top of the files listed:
-```python
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-```
 
 
 # FAQ: PermissionError when starting NeMo Gym in sandboxed environments
@@ -728,22 +566,6 @@ So, the OpenAI compatible model server in a training framework needs to be able 
 
 TODO @bxyu-nvidia: expand on this later.
 
-
-# FAQ: NeMo Gym what CI/CD do I need to pass?
-
-NeMo Gym has an E2E suite of CI/CD in the form of Github actions workflows. Some of these are critical to PR merge and some of them are not.
-
-For the majority of PRs, there are 5 checks that need to pass:
-1. DCO
-2. Code linting / Lint check (pull_request)
-3. Copyright check / copyright-check / main (pull_request)
-4. Secrets detector / secrets-detector / secrets-detector (pull_request)
-5. Unit tests / Test (pull_request)
-
-Examples of PR checks that most PRs do not need to wait for to pass:
-1. CICD NeMo / cicd-container-build / build / main (push)
-2. CICD NeMo / Nemo_CICD_Test (push)
-...
 
 # FAQ: Why use aiohttp backend instead of httpx/httpcore for async http?
 
