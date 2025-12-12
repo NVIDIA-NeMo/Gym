@@ -194,7 +194,9 @@ class TestServerUtils:
 
         ray_is_initialized_mock.assert_called_once()
         get_global_config_dict_mock.assert_called_once()
-        ray_init_mock.assert_called_once_with(address="ray://test-address:10001", ignore_reinit_error=True)
+        ray_init_mock.assert_called_once_with(
+            address="ray://test-address:10001", ignore_reinit_error=True, namespace="nemo_gym"
+        )
 
     def test_initialize_ray_without_address(self, monkeypatch: MonkeyPatch) -> None:
         ray_is_initialized_mock = self._mock_ray_return_value(monkeypatch, False)
@@ -217,5 +219,5 @@ class TestServerUtils:
 
         ray_is_initialized_mock.assert_called_once()
         get_global_config_dict_mock.assert_called_once()
-        ray_init_mock.assert_called_once_with(ignore_reinit_error=True)
+        ray_init_mock.assert_called_once_with(ignore_reinit_error=True, namespace="nemo_gym")
         ray_get_runtime_context_mock.assert_called_once()
