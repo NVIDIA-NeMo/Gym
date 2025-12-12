@@ -2,11 +2,11 @@
 
 # Single Node Training
 
-### Single-Node Training (Interactive Mode)
+Now that you've completed the {doc}`Setup Instructions <setup>`, you're ready to launch a single-node training run!
 
 **Estimated Time:** ~2-4 hours
 
-Run these commands **from inside the container** after attaching via the interactive session from Step 1:
+Run these commands **from inside the container**.
 
 ```bash
 # Clean up any existing Ray/vLLM processes
@@ -24,20 +24,20 @@ CONFIG_PATH=examples/penguin/grpo_workplace_assistant_nemotron_nano_v2_9b.yaml
 # Set these environment variables before running:
 #   HF_TOKEN: Your Hugging Face token for model downloads
 #   WANDB_API_KEY: Your Weights & Biases API key for logging
-#   TORCH_CUDA_ARCH_LIST: CUDA architectures compute capability
-#   NRL_FORCE_REBUILD_VENVS: Set to true on first run to rebuild venvs
 TORCH_CUDA_ARCH_LIST="9.0 10.0" \
 HF_HOME=.cache/ \
-HF_TOKEN="your_hugging_face_token" \
-WANDB_API_KEY="your_wandb_api_key" \
+HF_TOKEN={your HF token} \
+WANDB_API_KEY={your W&B API key} \
 NRL_FORCE_REBUILD_VENVS=true \
 uv run python examples/penguin/run_grpo_penguin.py \
     --config=$CONFIG_PATH \
     logger.wandb.project="${USER}-nemo-gym-rl-integration" \
     logger.wandb.name=$EXP_NAME \
-    logger.log_dir=results/$EXP_NAME
+    logger.log_dir=results/$EXP_NAME \
+    ++grpo.num_prompts_per_step=4 \
+    ++grpo.max_num_steps=3 \
+    checkpointing.checkpoint_dir=results/$EXP_NAME &
 ```
-
 
 ## Expected Results
 
@@ -97,48 +97,3 @@ You can run BFCL v3 evaluations using [NeMo Evaluator](https://github.com/NVIDIA
 | Ray cluster issues | Run `ray stop --force` before training |
 | CUDA OOM | Increase `tensor_parallel_size`, lower batch sizes |
 | Slow initial startup | Set `NRL_FORCE_REBUILD_VENVS=true` on first run only; if `uv` gets rate limited, set this back to `false` |
-
-### Log Locations
-
-```
-logs/grpo-workplace-assistant-nemotron-nano-v2-9b/  # Training logs
-results/<EXP_NAME>/                                  # Checkpoints and metrics
-.cache/                                              # HuggingFace model cache
-```
-
-
-
-### Single-Node Training
-
-Now you're ready to launch a single-node training run to verify your setup works correctly before scaling to multi-node training.
-
-**Prerequisites for this step**:
-
-1. Completed the `ng_prepare_data` command above (data should be in `data/bytedtsinghua_dapo17k/`)
-2. W&B API key (see [Prerequisites](#prerequisites) section above)
-3. HuggingFace token configured (refer to setup steps above)
-
-
-```bash
-# Run example training config for single node
-pkill -f VllmAsyncGenerationWorker
-ray stop --force
-python -c "import ray; ray.shutdown()"
-EXP_NAME="$(date +%Y%m%d)/penguin_grpo/qwen3_4binstruct/dapo17k_bytedtsinghua_test_001"
-CONFIG_PATH=examples/penguin/grpo_dapo17k_bytedtsinghua_qwen3_4binstruct_nf.yaml
-HF_HOME=.cache/ \
-WANDB_API_KEY={your W&B API key} \
-NRL_FORCE_REBUILD_VENVS=true \
-uv run python examples/penguin/run_grpo_penguin.py \
-    --config=$CONFIG_PATH \
-    logger.wandb.project="{your username}-nemo-gym-rl-integration" \
-    logger.wandb.name=$EXP_NAME \
-    logger.log_dir=results/$EXP_NAME \
-    grpo.val_at_start=false \
-    ++grpo.num_prompts_per_step=4 \
-    ++grpo.max_num_steps=3 \
-    ++policy.dtensor_cfg.clear_cache_every_n_steps=1 \
-    ++cluster.num_nodes=1 \
-    checkpointing.checkpoint_dir=results/$EXP_NAME &
-```
-
