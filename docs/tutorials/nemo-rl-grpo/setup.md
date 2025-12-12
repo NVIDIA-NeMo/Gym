@@ -2,9 +2,7 @@
 
 # Setup
 
-## Setup Instructions
-
-### Step 1: Enter a GPU Node
+## Enter a GPU Node
 
 **Estimated Time:** ~5 minutes
 
@@ -37,7 +35,7 @@ srun \
     --pty /bin/bash
 ```
 
-### Step 2: Clone and Setup NeMo RL + NeMo Gym
+## Clone and Setup NeMo RL + NeMo Gym
 
 **Estimated Time:** ~15-20 minutes
 
@@ -59,7 +57,7 @@ source /opt/nemo_rl_venv/bin/activate
 uv sync --group={build,docs,dev,test} --extra nemo_gym
 ```
 
-### Step 3: Prepare NeMo Gym Data
+## Prepare NeMo Gym Data
 
 **Estimated Time:** ~5-10 minutes
 
@@ -86,7 +84,7 @@ ng_prepare_data "+config_paths=[${config_paths}]" \
 cd ../../.. && source /opt/nemo_rl_venv/bin/activate
 ```
 
-### Step 4: Run Sanity Tests (optional but recommended)
+## Run Sanity Tests
 
 **Estimated Time:** ~10-15 minutes
 
