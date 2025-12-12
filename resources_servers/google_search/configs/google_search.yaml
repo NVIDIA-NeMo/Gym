@@ -24,8 +24,10 @@ google_search_simple_agent:
           dataset_name: search_STEM_syn_gpqa_v1_2_difficulty_filtered
           version: 0.0.1
           artifact_fpath: MCQA_syn_gpqa_1_2_difficulty_filtered_responses_api.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-knowledge-web_search-mcqa
+          artifact_fpath: mcqa_search.jsonl
         license: Apache 2.0
-        dataset_url: https://huggingface.co/datasets/nvidia/Nemotron-RL-knowledge-web_search-mcqa
       - name: example
         type: example
         jsonl_fpath: resources_servers/google_search/data/example.jsonl
