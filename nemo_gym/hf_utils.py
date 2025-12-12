@@ -31,7 +31,7 @@ def create_huggingface_client(token: str) -> HfApi:  # pragma: no cover
 
 def check_jsonl_format(file_path: str) -> bool:  # pragma: no cover
     """Check for the presence of the expected keys in the dataset"""
-    required_keys = {"responses_create_params", "reward_profiles", "expected_answer"}
+    required_keys = {"responses_create_params"}
     missing_keys_info = []
 
     try:
