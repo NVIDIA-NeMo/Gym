@@ -14,7 +14,7 @@ Tests are strongly encouraged and you must have at least one test for every serv
 
 
 # How To: Upload and download a dataset from HuggingFace
-The huggingface client requires that your credentials are in `env.yaml`, along with some other pertinent details needed to upload to the designated place. 
+The huggingface client requires that your credentials are in `env.yaml`, along with some other pertinent details needed to upload to the designated place.
 ```yaml
 hf_token: {your huggingface token}
 hf_organization: {your huggingface org}
@@ -22,19 +22,19 @@ hf_collection_name: {your collection}
 hf_collection_slug: {your collection slug}  # alphanumeric string found at the end of a collection URI
 
 # optional:
-hf_dataset_prefix: str  # field to override the default value "NeMo-Gym" prepended to the dataset name
+hf_dataset_prefix: str  # field to override the default value "Nemotron-RL" prepended to the dataset name
 ```
 
 Naming convention for Huggingface datasets is as follows.
 
-`{hf_organization}/{hf_dataset_prefix}-{domain}–{resource_server_name}-{your dataset name}`
+`{hf_organization}/{hf_dataset_prefix}-{domain}–{resource_server OR dataset_name}`
 
 E.g.:
 
-`NVIDIA/Nemo-Gym-Math-math_with_judge-dapo17k`
+`nvidia/Nemotron-RL-math-OpenMathReasoning`
 
 
-You will only need to manually input the `{your dataset name}` portion of the above when inputting the `dataset_name` flag in the upload command (refer to the command below). Everything preceding it will be automatically populated using your config prior to upload.
+You will only need to manually input the `{dataset_name}` portion of the above when inputting the `dataset_name` flag in the upload command (refer to the command below). Everything preceding it will be automatically populated using your config prior to upload. Note that it is optional, and overrides `resource_server` if used.
 
 To upload to Huggingface, use the below command:
 ```bash
@@ -47,6 +47,45 @@ ng_upload_dataset_to_hf \
 
 Because of the required dataset nomenclature, the resource server config path is required when uploading. Specifically, `domain` is used in the naming of a dataset in Huggingface.
 
+By default, the `split` parameter for uploading is set to `train`, which will run a check on the required fields `{"responses_create_params", "reward_profiles", "expected_answer"}`. Specifying `validation` or `test` bypasses this check:
+
+```bash
+resource_config_path="resources_servers/multineedle/configs/multineedle.yaml"
+ng_gitlab_to_hf_dataset \
+    +dataset_name={your dataset name} \
+    +input_jsonl_fpath=data/multineedle_benchmark_validation.jsonl \
+    +resource_config_path=${resource_config_path} \
+    +split=validation
+```
+
+## Uploading with Pull Request workflow
+When uploading to an organization repository where you don't have direct write access (e.g., nvidia/), use the `+create_pr=true` flag to create a Pull Request instead of pushing directly. You can also customize the commit message and description.
+
+If you want to specify the revision (branch name), you can add the `+revision={your branch name}` flag. Excluding `create_pr` (or setting it to `false`) assumes you are committing to an existing branch. Including it assumes it will be a brand new branch.
+
+```bash
+ng_upload_dataset_to_hf \
+    +dataset_name=OpenMathReasoning \
+    +input_jsonl_fpath=data/validation.jsonl \
+    +resource_config_path=${resource_config_path} \
+    +split=validation \
+    +create_pr=true \
+    +revision=my-branch-name \
+    +commit_message="Add validation set" \
+    +commit_description="Includes 545 examples"
+```
+
+The command will output a link to the created Pull Request:
+```bash
+[Nemo-Gym] - Pull Request created: https://huggingface.co/datasets/nvidia/Nemotron-RL-math-OpenMathReasoning/discussions/1
+```
+
+:::{note}
+The commit_message and commit_description parameters work for both direct pushes and Pull Requests. If not provided, HuggingFace auto-generates a commit message based on the filename.
+:::
+
+
+## Deleting Datasets from Gitlab
 You can optionally pass a `+delete_from_gitlab=true` flag to the above command, which will delete the model and all of its artifacts from Gitlab. By default, this is set to `False`.
 ```bash
 resource_config_path="resources_servers/multineedle/configs/multineedle.yaml"
@@ -59,7 +98,7 @@ ng_upload_dataset_to_hf \
 
 There will be a confirmation dialog to confirm the deletion:
 ```bash
-[Nemo-Gym] - Dataset uploaded successful
+[Nemo-Gym] - Dataset upload successful
 [Nemo-Gym] - Found model 'fs-test' in the registry. Are you sure you want to delete it from Gitlab? [y/N]:
 ```
 
@@ -83,13 +122,28 @@ ng_delete_dataset_from_gitlab \
 Gitlab model names are case sensitive. There can be models named 'My_Model' and 'my_model' living simultaneously in the registry. When uploading to Huggingface with the intention of deleting Gitlab artifacts, be sure the casing of your Huggingface dataset name matches that of Gitlab's.
 :::
 
+
+## Downloading Datasets from Huggingface
 Downloading a dataset from Huggingface is straightforward:
+
+**For structured datasets (with train/validation/test splits):**
 ```bash
 ng_download_dataset_from_hf \
-    +repo_id=NVIDIA/NeMo-Gym-Instruction_Following-multineedle-{your dataset name} \
-    +artifact_fpath=multineedle_benchmark.jsonl \
-    +output_fpath=data/multineedle_benchmark_hf.jsonl
+    +repo_id=nvidia/Nemotron-RL-knowledge-mcqa \
+    +output_dirpath=data/mcqa \
+    +split=train
 ```
+The `split` parameter is optional. If omitted, all available splits will be downloaded as separate JSONL files.
+
+
+**For raw file repositories (with specific JSONL files):**
+```bash
+ng_download_dataset_from_hf \
+    +repo_id=nvidia/Nemotron-RL-instruction_following \
+    +output_dirpath=data/instruction_following \
+    +artifact_fpath=instruction_following.jsonl
+```
+Use `artifact_fpath` when the HuggingFace repo contains raw/arbitrary JSONL files rather than structured dataset splits. You cannot specify both `split` and `artifact_fpath`.
 
 
 # How To: Prepare and validate data for PR submission or RL training
@@ -120,6 +174,9 @@ example_multi_step_simple_agent:
           dataset_name: example_multi_step
           version: 0.0.1
           artifact_fpath: example_multi_step/train.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-instruction_following
+          artifact_fpath: instruction_following.jsonl
         license: Apache 2.0
       - name: validation
         type: validation
@@ -130,6 +187,9 @@ example_multi_step_simple_agent:
           dataset_name: example_multi_step
           version: 0.0.1
           artifact_fpath: example_multi_step/validation.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-instruction_following
+          artifact_fpath: if_validation.jsonl
         license: Apache 2.0
       - name: example
         type: example
@@ -142,7 +202,8 @@ A dataset object consists of:
 - Type: train, validation, or example. Train and validation are as used in NeMo RL or other train frameworks. More information about the example type is in the next section.
 - Jsonl fpath: the local file path to your jsonl file for this dataset.
 - Num repeats: optionally repeat each row when preparing or collating data. Defaults to 1 if unspecified.
-- Gitlab identifier: The remote path to the dataset as held in the Gitlab dataset registry. This field is required for train and validation datasets. (Not required for example datasets since those are required to be committed to Git).
+- Gitlab identifier: (NVIDIA internal) The remote path to the dataset as held in the Gitlab dataset registry. This field is required for train and validation datasets. (Not required for example datasets since those are required to be committed to Git).
+- HuggingFace identifier: (Public) The remote path to the dataset on HuggingFace. Contains `repo_id` (required) and optionally `artifact_fpath` for raw file repos. If `artifact_fpath` is omitted, the datasets library will infer the `split` from the dataset `type`.
 - License: The license of that dataset. Required for train and validation datasets and not required for example datasets, similar in principle to the Gitlab identifier.
 - Start idx, end idx: used for slicing your dataset.
 ```yaml
@@ -153,6 +214,9 @@ A dataset object consists of:
     dataset_name: example_multi_step
     version: 0.0.1
     artifact_fpath: example_multi_step/validation.jsonl
+  huggingface_identifier:
+    repo_id: nvidia/example_multi_step
+    artifact_fpath: example_validation.jsonl
   license: Apache 2.0
 ```
 
@@ -165,10 +229,31 @@ responses_api_models/openai_model/configs/openai_model.yaml"
 ng_prepare_data "+config_paths=[$config_paths]" \
     +output_dirpath=data/example_multi_step \
     +mode=example_validation
+```
 
-# Run NeMo Gym servers the exact same way with the same configs!
+To download missing datasets automatically, add +should_download=true. By default, datasets are downloaded from HuggingFace:
+```bash
+ng_prepare_data "+config_paths=[$config_paths]" \
+    +output_dirpath=data/example_multi_step \
+    +mode=train_preparation \
+    +should_download=true
+```
+
+For NVIDIA internal users, you can download from GitLab instead:
+
+```bash
+ng_prepare_data "+config_paths=[$config_paths]" \
+    +output_dirpath=data/example_multi_step \
+    +mode=train_preparation \
+    +should_download=true \
+    +data_source=gitlab
+```
+
+Run NeMo Gym servers the exact same way with the same configs!
+```bash
 ng_run "+config_paths=[$config_paths]"
 ```
+
 
 The `ng_prepare_data` command will:
 1. Attempt to load all the datasets you specified from disk. Missing datasets will be reported before any processing is done.
