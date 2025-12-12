@@ -205,17 +205,6 @@ tutorials/rl-training-with-nemo-rl
 ```
 
 ```{toctree}
-:caption: Contribute
-:hidden:
-:maxdepth: 1
-
-Overview <contribute/index>
-Development Setup <contribute/development-setup>
-Environments <contribute/environments/index>
-Integrate RL Frameworks <contribute/rl-framework-integration/index>
-```
-
-```{toctree}
 :caption: Reference
 :hidden:
 :maxdepth: 1
@@ -232,4 +221,15 @@ apidocs/index.rst
 :maxdepth: 1
 
 troubleshooting/configuration.md
+```
+
+```{toctree}
+:caption: Contribute
+:hidden:
+:maxdepth: 1
+
+Overview <contribute/index>
+Development Setup <contribute/development-setup>
+Environments <contribute/environments/index>
+Integrate RL Frameworks <contribute/rl-framework-integration/index>
 ```
