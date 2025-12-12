@@ -64,7 +64,7 @@ All tasks are available in the [Workplace Assistant HuggingFace dataset](https:/
 **Expected tool call**:
 ```python
 email_send_email(
-    recipient="alex.martinez@atlas.com",
+    recipient="john.smith@atlas.com",
     subject="Team Meeting",
     body="Let's meet tomorrow at 2pm to discuss the project."
 )
@@ -93,26 +93,51 @@ The tool adds a new email to the emails database.
 
 Each task is a `responses_create_params` object:
 
-```text
+```json
 {
   "responses_create_params": {
     "input": [
       {
         "role": "system",
-        "content": "Today's date is Thursday, 2023-11-30..."
+        "content": "Today's date is Thursday, 2023-11-30 and the current time is 23:59:00. Remember the current date and time when answering queries. Meetings must not start before 9am or end after 6pm."
       },
       {
-        "role": "user", 
-        "content": "Send an email to john.smith@atlas.com..."
+        "role": "user",
+        "content": "John is taking over all of Akira's leads that are interested in software. Can you reassign them in the CRM?"
       }
     ],
     "tools": [
-      {"type": "function", "name": "email_send_email", ...},
-      {"type": "function", "name": "calendar_create_event", ...}
+      {
+        "type": "function",
+        "name": "email_send_email",
+        "description": "Sends an email to the specified recipient.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "recipient": {
+              "type": "string",
+              "description": "Email address of the recipient"
+            },
+            "subject": {
+              "type": "string",
+              "description": "Subject line of the email"
+            },
+            "body": {
+              "type": "string",
+              "description": "Body content of the email"
+            }
+          },
+          "required": ["recipient", "subject", "body"],
+          "additionalProperties": false
+        },
+        "strict": false
+      }
     ]
   }
 }
 ```
+
+The full task includes all 27 tools across the 5 databases.
 
 :::
 
@@ -141,13 +166,22 @@ async def verify(self, body: WorkbenchVerifyRequest) -> WorkbenchVerifyResponse:
     ground_truth = body.ground_truth
     response = body.response.output
 
-    # Convert ResponseFunctionToolCall objects into dictionaries
+    total_score = 0.0
+
+    # Convert list of ResponseFunctionToolCall objects into list of dictionaries
     predicted_function_calls = []
+
     for message in response:
         if message.type == "function_call":
             predicted_function_calls.append(message.model_dump())
 
-    total_score = is_correct(predicted_function_calls, ground_truth, None) * 1.0
+    predicted_chat_content = []
+
+    for message in response:
+        if message.type == "output_text":
+            predicted_chat_content.append(message.model_dump())
+
+    total_score += is_correct(predicted_function_calls, ground_truth, None) * 1.0
     return WorkbenchVerifyResponse(**body.model_dump(), reward=total_score)
 ```
 
@@ -155,17 +189,21 @@ The `is_correct` function implements the state-matching logic:
 
 ```python
 def is_correct(predicted_actions, ground_truth_actions, error):
+    ...
+    
     # Execute both sequences in fresh environments
     predict_env = execute_actions_and_reset_state(predicted_actions)
     ground_truth_env = execute_actions_and_reset_state(ground_truth_actions)
     
+    ... # Extract specific state info
+
     # Compare final states of all 5 databases
     return (
-        predicted_calendar_state.equals(ground_truth_calendar_state) and
-        predicted_email_state.equals(ground_truth_email_state) and
-        predicted_analytics_state.equals(ground_truth_analytics_state) and
-        predicted_project_management_state.equals(ground_truth_project_management_state) and
-        predicted_customer_relationship_manager_state.equals(ground_truth_customer_relationship_manager_state)
+        predicted_calendar_state.equals(ground_truth_calendar_state)
+        and predicted_email_state.equals(ground_truth_email_state)
+        and predicted_analytics_state.equals(ground_truth_analytics_state)
+        and predicted_project_management_state.equals(ground_truth_project_management_state)
+        and predicted_customer_relationship_manager_state.equals(ground_truth_customer_relationship_manager_state)
     )
 ```
 
@@ -176,13 +214,18 @@ def is_correct(predicted_actions, ground_truth_actions, error):
 Tool execution errors are returned to the model (not terminating the rollout), allowing self-correction:
 
 ```python
-def route_to_python_function(tool_name, arguments):
+async def route_to_python_function(self, path, body, request):
+    ...
+    tool_env = self.session_id_to_tool_env[session_id]
+    args = body.model_dump(exclude_unset=True)
+
     try:
-        result = tool_env["functions"][tool_name](**arguments)
+        function = tool_env["functions"][path]
+        result = function(**args)
         return WorkbenchResponse(output=result)
     except Exception as e:
         # Return error to model so it can self-correct
-        return WorkbenchResponse(output=f"Error executing tool: {str(e)}")
+        return WorkbenchResponse(output=f"Error executing tool '{path}': {str(e)}")
 ```
 
 :::
