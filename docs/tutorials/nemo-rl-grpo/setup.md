@@ -98,7 +98,8 @@ resources_servers/workplace_assistant/configs/workplace_assistant.yaml"
 ng_prepare_data "+config_paths=[${config_paths}]" \
     +output_dirpath=data/workplace_assistant \
     +mode=train_preparation \
-    +should_download=true
+    +should_download=true \
+    +data_source=huggingface
 ```
 
 Return to NeMo RL directory and Python env
