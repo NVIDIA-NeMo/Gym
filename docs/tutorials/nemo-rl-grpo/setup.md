@@ -2,11 +2,48 @@
 
 # Setup
 
-## Enter a GPU Node
+This section guides you through setting up NeMo RL and NeMo Gym for GRPO training.
 
-**Estimated Time:** ~5 minutes
+:::{card}
 
-Launch an interactive Slurm session to run training commands. Refer to the [NeMo RL Cluster Setup documentation](https://docs.nvidia.com/nemo/rl/latest/cluster.html#interactive-launching) for more details.
+**Goal**: Set up your environment for GRPO training with NeMo RL and NeMo Gym.
+
+^^^
+
+**In this section, you will**:
+
+1. Launch an interactive GPU session
+2. Clone and install NeMo RL and NeMo Gym
+3. Prepare the Workplace Assistant dataset
+4. Run sanity tests to validate the setup
+
+:::
+
+:::{button-ref} training-nemo-rl-grpo-nemo-rl-configuration
+:color: secondary
+:outline:
+:ref-type: ref
+
+← Previous: NeMo RL Configuration
+:::
+
+---
+
+## Before You Begin
+
+Make sure you have:
+
+- ✅ Access to a Slurm cluster with GPU nodes
+- ✅ A shared filesystem accessible from all nodes
+- ✅ (Optional) HuggingFace token for downloading models
+
+---
+
+## 1. Enter a GPU Node
+
+**Estimated time**: ~5 minutes
+
+Launch an interactive Slurm session. Refer to the [NeMo RL Cluster Setup documentation](https://docs.nvidia.com/nemo/rl/latest/cluster.html#interactive-launching) for more details.
 
 ```bash
 NUM_ACTOR_NODES=1
@@ -35,9 +72,13 @@ srun \
     --pty /bin/bash
 ```
 
-## Clone and Setup NeMo RL + NeMo Gym
+**✅ Success Check**: You should be inside the container with a bash prompt.
 
-**Estimated Time:** ~15-20 minutes
+---
+
+## 2. Clone and Install NeMo RL + NeMo Gym
+
+**Estimated time**: ~15-20 minutes
 
 ```bash
 # Clone NeMo RL repository
@@ -57,13 +98,15 @@ source /opt/nemo_rl_venv/bin/activate
 uv sync --group={build,docs,dev,test} --extra nemo_gym
 ```
 
-## Prepare NeMo Gym Data
+**✅ Success Check**: No errors during installation and `uv sync` completes successfully.
 
-**Estimated Time:** ~5-10 minutes
+---
 
-The Workplace Assistant dataset must be downloaded from HuggingFace and prepared for training. This is a two-step process:
+## 3. Prepare NeMo Gym Data
 
-This runs `ng_prepare_data` to download and validate the dataset, and to add an `agent_ref` property to each example that tells NeMo Gym which agent server should handle that example.
+**Estimated time**: ~5-10 minutes
+
+The Workplace Assistant dataset must be downloaded from HuggingFace and prepared for training. This runs `ng_prepare_data` to download and validate the dataset, adding an `agent_ref` property to each example.
 
 ```bash
 # Setup Gym local venv
@@ -84,9 +127,13 @@ ng_prepare_data "+config_paths=[${config_paths}]" \
 cd ../../.. && source /opt/nemo_rl_venv/bin/activate
 ```
 
-## Run Sanity Tests
+**✅ Success Check**: Dataset files are created in `3rdparty/Gym-workspace/Gym/data/workplace_assistant/`.
 
-**Estimated Time:** ~10-15 minutes
+---
+
+## 4. Run Sanity Tests
+
+**Estimated time**: ~10-15 minutes
 
 Validate your setup before training:
 
@@ -96,4 +143,17 @@ HF_TOKEN=${HF_TOKEN} \
     ./examples/nemo_gym/run_nemo_gym_single_node_sanity_tests.sh
 ```
 
-> **Note**: If you've run these tests before and encounter HuggingFace rate limit errors, add `HF_HUB_OFFLINE=1` to the command.
+**✅ Success Check**: All tests pass without errors.
+
+:::{tip}
+If you've run these tests before and encounter HuggingFace rate limit errors, add `HF_HUB_OFFLINE=1` to the command.
+:::
+
+---
+
+:::{button-ref} training-nemo-rl-grpo-single-node-training
+:color: primary
+:ref-type: ref
+
+Next: Single Node Training →
+:::

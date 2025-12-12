@@ -2,18 +2,64 @@
 
 # Single Node Training
 
-Now that you've completed the {doc}`Setup Instructions <setup>`, you're ready to launch a single-node training run!
+This section guides you through running a single-node GRPO training job.
 
-**Estimated Time:** ~2-4 hours
+:::{card}
 
-Run these commands **from inside the container**.
+**Goal**: Run a single-node GRPO training job and validate that training is progressing correctly.
+
+^^^
+
+**In this section, you will**:
+
+1. Clean up existing processes
+2. Launch single-node training
+3. Monitor training metrics
+4. Verify training success
+
+:::
+
+:::{button-ref} training-nemo-rl-grpo-setup
+:color: secondary
+:outline:
+:ref-type: ref
+
+← Previous: Setup
+:::
+
+---
+
+## Before You Begin
+
+Make sure you have:
+
+- ✅ Completed {doc}`Setup <setup>`
+- ✅ Inside the container on a GPU node
+- ✅ (Optional) W&B API key for logging
+
+**Estimated time**: ~2-4 hours
+
+---
+
+## 1. Clean Up Existing Processes
+
+Before launching training, clean up any existing Ray or vLLM processes:
 
 ```bash
-# Clean up any existing Ray/vLLM processes
 pkill -f VllmAsyncGenerationWorker
 ray stop --force
 python -c "import ray; ray.shutdown()"
+```
 
+**✅ Success Check**: No errors (warnings about no processes found are fine).
+
+---
+
+## 2. Launch Training
+
+Run these commands from inside the container:
+
+```bash
 # Set experiment name with timestamp
 EXP_NAME="$(date +%Y%m%d)/nemo_gym_grpo/nemotron_nano_v2_9b/workplace_assistant_001"
 
@@ -21,9 +67,7 @@ EXP_NAME="$(date +%Y%m%d)/nemo_gym_grpo/nemotron_nano_v2_9b/workplace_assistant_
 CONFIG_PATH=examples/nemo_gym/grpo_workplace_assistant_nemotron_nano_v2_9b.yaml
 
 # Launch training
-# Set these environment variables before running:
-#   HF_TOKEN: Your Hugging Face token for model downloads
-#   WANDB_API_KEY: Your Weights & Biases API key for logging
+# Replace {your HF token} and {your W&B API key} with your actual values
 TORCH_CUDA_ARCH_LIST="9.0 10.0" \
 HF_HOME=.cache/ \
 HF_TOKEN={your HF token} \
@@ -39,11 +83,13 @@ uv run python examples/nemo_gym/run_grpo_nemo_gym.py \
     checkpointing.checkpoint_dir=results/$EXP_NAME &
 ```
 
-## Expected Results
+**✅ Success Check**: Training starts and begins logging metrics.
 
-### Training Metrics
+---
 
-Monitor these metrics in W&B to track progress:
+## 3. Monitor Training Metrics
+
+Track these metrics in W&B to monitor progress:
 
 | Metric | Initial | After 1 Epoch | Description |
 |--------|---------|---------------|-------------|
@@ -51,9 +97,12 @@ Monitor these metrics in W&B to track progress:
 | `val:accuracy` | ~0.15 | ~0.5-0.6 | Validation task completion rate |
 | `train:loss` | ~0.5 | ~0.2-0.3 | GRPO policy loss |
 
-### Checkpoint Outputs
+---
+
+## 4. Verify Checkpoints
 
 Checkpoints are saved to:
+
 ```
 results/<EXP_NAME>/
 ├── step_6/
@@ -64,31 +113,32 @@ results/<EXP_NAME>/
 
 The best checkpoint (highest `val:accuracy`) is retained based on `checkpointing.keep_top_k: 3`.
 
-### Success Criteria
+---
+
+## Success Criteria
 
 Training is successful when:
-- Reward mean increases consistently over steps
-- Validation accuracy improves from baseline (~15%) to 50%+
-- No OOM (Out of Memory) errors
-- Checkpoints are saved at specified intervals
 
-### Validation Reward Plot
+- ✅ Reward mean increases consistently over steps
+- ✅ Validation accuracy improves from baseline (~15%) to 50%+
+- ✅ No OOM (Out of Memory) errors
+- ✅ Checkpoints are saved at specified intervals
 
-<!-- TODO: Add validation reward plot showing improvement over training steps -->
-![Validation Reward Plot](images/val_reward_placeholder.png)
-*Expected: Validation reward increasing from ~0.15 to ~0.5+ over the course of training.*
+---
 
-### Measuring Real-World Improvement
+## Measuring Real-World Improvement
 
-The Workplace Assistant environment's tool-calling tasks correlate with performance on the [Berkeley Function Calling Leaderboard (BFCL) v3](https://gorilla.cs.berkeley.edu/leaderboard.html) benchmark. To measure improvement, evaluate the Nemotron Nano v2 9B model on BFCL v3 before and after training, and compare the results. You should observe measurable improvement in tool-calling accuracy.
+The Workplace Assistant tasks correlate with performance on the [Berkeley Function Calling Leaderboard (BFCL) v3](https://gorilla.cs.berkeley.edu/leaderboard.html). To measure improvement:
 
-You can run BFCL v3 evaluations using [NeMo Evaluator](https://github.com/NVIDIA-NeMo/Evaluator), which supports BFCL v3. Refer to the [NeMo Evaluator docs](https://github.com/NVIDIA-NeMo/Evaluator#-supported-benchmarks-and-evaluation-harnesses) for full setup instructions and supported benchmarks.
+1. Evaluate Nemotron Nano v2 9B on BFCL v3 **before** training
+2. Evaluate the trained model on BFCL v3 **after** training
+3. Compare the results
+
+You can run BFCL v3 evaluations using [NeMo Evaluator](https://github.com/NVIDIA-NeMo/Evaluator). Refer to the [NeMo Evaluator docs](https://github.com/NVIDIA-NeMo/Evaluator#-supported-benchmarks-and-evaluation-harnesses) for setup instructions.
 
 ---
 
 ## Troubleshooting
-
-### Common Issues
 
 | Issue | Solution |
 |-------|----------|
@@ -96,4 +146,13 @@ You can run BFCL v3 evaluations using [NeMo Evaluator](https://github.com/NVIDIA
 | vLLM process not shutting down | Run `pkill -f VllmAsyncGenerationWorker` before training |
 | Ray cluster issues | Run `ray stop --force` before training |
 | CUDA OOM | Increase `tensor_parallel_size`, lower batch sizes |
-| Slow initial startup | Set `NRL_FORCE_REBUILD_VENVS=true` on first run only; if `uv` gets rate limited, set this back to `false` |
+| Slow initial startup | Set `NRL_FORCE_REBUILD_VENVS=true` on first run only; set back to `false` if rate limited |
+
+---
+
+:::{button-ref} training-nemo-rl-grpo-multi-node-training
+:color: primary
+:ref-type: ref
+
+Next: Multi-Node Training →
+:::
