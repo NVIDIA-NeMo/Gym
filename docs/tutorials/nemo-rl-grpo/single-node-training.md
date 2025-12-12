@@ -126,15 +126,25 @@ Training is successful when:
 
 ---
 
+## Validation Reward Plot
+
+<!-- TODO: Add validation reward plot showing improvement over training steps -->
+
+*Expected: Validation reward increasing from ~0.15 to ~0.5+ over the course of training.*
+
+---
+
 ## Measuring Real-World Improvement
 
-The Workplace Assistant tasks correlate with performance on the [Berkeley Function Calling Leaderboard (BFCL) v3](https://gorilla.cs.berkeley.edu/leaderboard.html). To measure improvement:
+The Workplace Assistant environment's tool-calling tasks correlate with performance on the [Berkeley Function Calling Leaderboard (BFCL) v3](https://gorilla.cs.berkeley.edu/leaderboard.html) benchmark. To measure improvement:
 
 1. Evaluate Nemotron Nano v2 9B on BFCL v3 **before** training
 2. Evaluate the trained model on BFCL v3 **after** training
 3. Compare the results
 
-You can run BFCL v3 evaluations using [NeMo Evaluator](https://github.com/NVIDIA-NeMo/Evaluator). Refer to the [NeMo Evaluator docs](https://github.com/NVIDIA-NeMo/Evaluator#-supported-benchmarks-and-evaluation-harnesses) for setup instructions.
+You should observe measurable improvement in tool-calling accuracy.
+
+You can run BFCL v3 evaluations using [NeMo Evaluator](https://github.com/NVIDIA-NeMo/Evaluator), which supports BFCL v3. Refer to the [NeMo Evaluator docs](https://github.com/NVIDIA-NeMo/Evaluator#-supported-benchmarks-and-evaluation-harnesses) for full setup instructions and supported benchmarks.
 
 ---
 

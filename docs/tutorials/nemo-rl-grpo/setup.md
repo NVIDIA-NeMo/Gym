@@ -43,7 +43,7 @@ Make sure you have:
 
 **Estimated time**: ~5 minutes
 
-Launch an interactive Slurm session. Refer to the [NeMo RL Cluster Setup documentation](https://docs.nvidia.com/nemo/rl/latest/cluster.html#interactive-launching) for more details.
+Launch an interactive Slurm session to run training commands. Refer to the [NeMo RL Cluster Setup documentation](https://docs.nvidia.com/nemo/rl/latest/cluster.html#interactive-launching) for more details.
 
 ```bash
 NUM_ACTOR_NODES=1
@@ -76,7 +76,7 @@ srun \
 
 ---
 
-## 2. Clone and Install NeMo RL + NeMo Gym
+## 2. Clone and Setup NeMo RL + NeMo Gym
 
 **Estimated time**: ~15-20 minutes
 
@@ -106,7 +106,9 @@ uv sync --group={build,docs,dev,test} --extra nemo_gym
 
 **Estimated time**: ~5-10 minutes
 
-The Workplace Assistant dataset must be downloaded from HuggingFace and prepared for training. This runs `ng_prepare_data` to download and validate the dataset, adding an `agent_ref` property to each example.
+The Workplace Assistant dataset must be downloaded from HuggingFace and prepared for training. This is a two-step process:
+
+This runs `ng_prepare_data` to download and validate the dataset, and to add an `agent_ref` property to each example that tells NeMo Gym which agent server should handle that example.
 
 ```bash
 # Setup Gym local venv

@@ -72,7 +72,8 @@ env:
 | Parameter | Description |
 |-----------|-------------|
 | `should_use_nemo_gym` | Set to `true` to enable Gym |
-| `nemo_gym.config_paths` | Gym config files to load |
+| `nemo_gym` | Everything under this key is a Gym config |
+| `nemo_gym.config_paths` | Gym config files: vLLM model config and Workplace Assistant agent/resources config |
 | `max_steps` | Maximum tool-calling steps per task (6 for Workplace Assistant) |
 
 :::{important}

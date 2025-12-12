@@ -43,15 +43,11 @@ The model has **6 steps** to accomplish each task.
 
 ## Available Databases and Tools
 
-Each {term}`task instance <Task Instance>` uses isolated database instances so actions from different rollouts don't interfere.
+Each task is a natural language request that the model must complete using the available tools. All tasks share the same set of tools that allow the model to retrieve more information or perform actions. Each {term}`task instance <Task Instance>` uses isolated database instances so actions from different rollouts don't interfere.
 
-| Database | Example Tools |
-|----------|---------------|
-| Email | `email_send_email`, `email_search_emails` |
-| Calendar | `calendar_create_event`, `calendar_get_events` |
-| Analytics | `analytics_get_report`, `analytics_run_query` |
-| Project Management | `project_create_task`, `project_update_status` |
-| CRM | `customer_relationship_manager_search_customers`, `customer_relationship_manager_update_customer` |
+- **Databases**: Email, Calendar, Analytics, Project Management, Customer Relationship Manager (CRM)
+- **Tools**: Distributed across these databases
+- **Tasks**: Common business activities (such as sending emails, scheduling meetings, and managing projects)
 
 All tasks are available in the [Workplace Assistant HuggingFace dataset](https://huggingface.co/datasets/nvidia/Nemotron-RL-agent-workplace_assistant).
 
@@ -86,10 +82,10 @@ The tool adds a new email to the emails database.
 
 1. `company_directory_find_email_address(name="Akira")` → Returns `"akira.tanaka@atlas.com"`
 2. `company_directory_find_email_address(name="John")` → Returns `"john.smith@atlas.com"`
-3. `customer_relationship_manager_search_customers(...)` → Returns 3 matching leads
-4. `customer_relationship_manager_update_customer(customer_id="00000095", ...)` 
-5. `customer_relationship_manager_update_customer(customer_id="00000080", ...)`
-6. `customer_relationship_manager_update_customer(customer_id="00000035", ...)`
+3. `customer_relationship_manager_search_customers(assigned_to_email="akira.tanaka@atlas.com", product_interest="software", status="lead")` → Returns 3 matching leads
+4. `customer_relationship_manager_update_customer(customer_id="00000095", field="assigned_to_email", new_value="john.smith@atlas.com")`
+5. `customer_relationship_manager_update_customer(customer_id="00000080", field="assigned_to_email", new_value="john.smith@atlas.com")`
+6. `customer_relationship_manager_update_customer(customer_id="00000035", field="assigned_to_email", new_value="john.smith@atlas.com")`
 
 :::
 
@@ -97,7 +93,7 @@ The tool adds a new email to the emails database.
 
 Each task is a `responses_create_params` object:
 
-```json
+```text
 {
   "responses_create_params": {
     "input": [
@@ -126,7 +122,7 @@ Each task is a `responses_create_params` object:
 
 ## How Verification Works
 
-The environment uses **state-matching verification**: instead of requiring exact tool sequences, it compares final database states.
+The environment is implemented as a FastAPI-based resource server that executes tools and verification. It uses **state-matching verification**: instead of requiring exact tool sequences, it compares final database states.
 
 ::::{tab-set}
 
@@ -141,6 +137,23 @@ The environment uses **state-matching verification**: instead of requiring exact
 :::{tab-item} Verification Process
 
 ```python
+async def verify(self, body: WorkbenchVerifyRequest) -> WorkbenchVerifyResponse:
+    ground_truth = body.ground_truth
+    response = body.response.output
+
+    # Convert ResponseFunctionToolCall objects into dictionaries
+    predicted_function_calls = []
+    for message in response:
+        if message.type == "function_call":
+            predicted_function_calls.append(message.model_dump())
+
+    total_score = is_correct(predicted_function_calls, ground_truth, None) * 1.0
+    return WorkbenchVerifyResponse(**body.model_dump(), reward=total_score)
+```
+
+The `is_correct` function implements the state-matching logic:
+
+```python
 def is_correct(predicted_actions, ground_truth_actions, error):
     # Execute both sequences in fresh environments
     predict_env = execute_actions_and_reset_state(predicted_actions)
@@ -150,7 +163,9 @@ def is_correct(predicted_actions, ground_truth_actions, error):
     return (
         predicted_calendar_state.equals(ground_truth_calendar_state) and
         predicted_email_state.equals(ground_truth_email_state) and
-        # ... (all 5 databases)
+        predicted_analytics_state.equals(ground_truth_analytics_state) and
+        predicted_project_management_state.equals(ground_truth_project_management_state) and
+        predicted_customer_relationship_manager_state.equals(ground_truth_customer_relationship_manager_state)
     )
 ```
 

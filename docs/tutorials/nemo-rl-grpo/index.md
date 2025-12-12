@@ -4,6 +4,8 @@
 
 This tutorial trains NVIDIA [Nemotron Nano 9B v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2) to improve its **{term}`multi-step <Multi-step>` {term}`tool-calling <Tool Use / Function Calling>`** capability using the **{term}`GRPO (Group Relative Policy Optimization) <GRPO (Group Relative Policy Optimization)>`** algorithm on the **Workplace Assistant** environment.
 
+Workplace Assistant is a realistic office simulation (calendar, email, project management, etc.) with complex multi-step tasks, providing a strong data distribution for training enterprise-ready tool-using assistants.
+
 :::{card}
 
 **Goal**: Train a model for multi-step tool calling using GRPO on the Workplace Assistant environment.
@@ -28,14 +30,21 @@ This tutorial trains NVIDIA [Nemotron Nano 9B v2](https://huggingface.co/nvidia/
 Make sure you have these prerequisites ready:
 
 - ✅ **Hardware**: 1+ nodes with 8× NVIDIA GPUs (80GB+ each, such as H100 or A100)
+  - Single-node testing: 1 node with 8 GPUs
+  - Multi-node production: 8+ nodes with 8 GPUs each recommended
+  - RAM: 64 GB+ per node
 - ✅ **Storage**: 100 GB+ free disk space on a shared filesystem
 - ✅ **Software**: Linux, Python 3.12+, Git, Slurm for multi-node training
-- ✅ **Familiarity**: Python, LLM fine-tuning, basic RL concepts
+- ✅ **Familiarity**: Python, LLM fine-tuning, basic RL concepts (in-depth RLVR/GRPO knowledge not required)
+
+:::{note}
+NeMo Gym does not require GPUs. GPUs are only necessary for GRPO training with NeMo RL.
+:::
 
 **Optional accounts**:
 
-- **Weights & Biases (W&B)**: For experiment tracking ([sign up](https://wandb.ai/signup), [get API key](https://wandb.ai/authorize))
-- **HuggingFace**: For downloading models ([create token](https://huggingface.co/settings/tokens))
+- **Weights & Biases (W&B)**: For experiment tracking ([sign up](https://wandb.ai/signup), [get API key](https://wandb.ai/authorize)). Training proceeds without W&B if not configured.
+- **HuggingFace**: For downloading models ([create token](https://huggingface.co/settings/tokens)). Recommended to avoid rate limits.
 
 **Total time estimate**: ~3-5 hours (including environment setup, data preparation, and training)
 

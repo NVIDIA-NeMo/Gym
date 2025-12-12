@@ -47,6 +47,8 @@ Run these commands from the **Slurm login/head node**, not from inside the inter
 
 ## 1. Create the Submit Script
 
+This script uses **batch mode**—the `COMMAND` variable specifies what runs automatically when the job starts.
+
 Place this script (for example, `temp_nemo_gym_submit.sh`) in the NeMo RL root directory:
 
 ```bash
