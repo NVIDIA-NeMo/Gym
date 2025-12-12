@@ -63,7 +63,7 @@ policy_model_name: gpt-4.1-2025-04-14" > env.yaml
 
 ```bash
 # Start servers (this will keep running)
-config_paths="resources_servers/example_simple_weather/configs/simple_weather.yaml,\
+config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml"
 ng_run "+config_paths=[${config_paths}]"
 ```
@@ -90,7 +90,7 @@ echo '{"responses_create_params":{"input":[{"role":"developer","content":"You ar
 
 # Collect verified rollouts
 ng_collect_rollouts \
-    +agent_name=simple_weather_simple_agent \
+    +agent_name=example_single_tool_call_simple_agent \
     +input_jsonl_fpath=weather_query.jsonl \
     +output_jsonl_fpath=weather_rollouts.jsonl
 

@@ -22,7 +22,7 @@ content_type: index
 
 [NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) is a library for building reinforcement learning (RL) training environments for large language models (LLMs). NeMo Gym provides infrastructure to develop environments, scale rollout collection, and integrate seamlessly with your preferred training framework.
 
-A training environment consists of three server components: **Agents** orchestrate the rollout lifecycle—calling models, executing tool calls via resources, and coordinating verification. **Models** provide stateless text generation using LLM inference endpoints. **Resources** define tasks, tool implementations, and verification logic.
+A training environment consists of three server components: **Agents** orchestrate the rollout lifecycle—calling models, executing tool calls through resources, and coordinating verification. **Models** provide stateless text generation using LLM inference endpoints. **Resources** define tasks, tool implementations, and verification logic.
 
 ````{div} sd-d-flex-row
 ```{button-ref} gs-quickstart
@@ -142,6 +142,23 @@ Learn how to set up NeMo Gym and NeMo RL training environments, run tests, prepa
 
 ::::
 
+## Contribute
+
+Contribute to NeMo Gym development.
+
+::::{grid} 1 2 2 2
+:gutter: 1 1 1 2
+
+:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` Integrate Gym into RL Frameworks
+:link: contribute/rl-framework-integration/index
+:link-type: doc
+Implement NeMo Gym integration into a new training framework.
++++
+{bdg-primary}`advanced`
+:::
+
+::::
+
 ---
 
 ```{toctree}
@@ -178,24 +195,24 @@ tutorials/index.md
 tutorials/creating-resource-server
 tutorials/nemo-rl-grpo/index.md
 tutorials/offline-training-w-rollouts
-how-to-faq.md
 ```
 
 ```{toctree}
-:caption: Training
+:caption: Contribute
 :hidden:
 :maxdepth: 1
 
-training/index
-training/rl-framework-integration/index.md
+Overview <contribute/index>
+Development Setup <contribute/development-setup>
+Integrate RL Frameworks <contribute/rl-framework-integration/index>
 ```
-
 
 ```{toctree}
 :caption: Reference
 :hidden:
 :maxdepth: 1
 
+FAQ <how-to-faq.md>
 Configuration <reference/configuration>
 reference/cli-commands.md
 apidocs/index.rst
