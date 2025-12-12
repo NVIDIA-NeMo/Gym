@@ -211,7 +211,7 @@ tutorials/rl-training-with-nemo-rl
 
 Overview <contribute/index>
 Development Setup <contribute/development-setup>
-Environments <contribute/resource-servers/index>
+Environments <contribute/environments/index>
 Resource Servers <contribute/resource-servers/index>
 Integrate RL Frameworks <contribute/rl-framework-integration/index>
 ```
