@@ -50,6 +50,7 @@ srun \
 
 **Estimated Time:** ~5 minutes
 
+For the first setup on your local filesystem:
 ```bash
 # Clone NeMo RL repository
 git clone https://github.com/NVIDIA-NeMo/RL
@@ -57,6 +58,12 @@ cd RL
 
 # Clone NeMo Gym as a submodule
 git clone https://github.com/NVIDIA-NeMo/Gym.git 3rdparty/Gym-workspace/Gym
+```
+
+Every time you enter a new container:
+```bash
+# CD into your NeMo RL folder
+cd /path/to/nemo/rl
 
 # Initialize all submodules (Megatron, AutoModel, etc.)
 git submodule update --init --recursive
@@ -64,8 +71,9 @@ git submodule update --init --recursive
 # Activate the NeMo RL virtual environment
 source /opt/nemo_rl_venv/bin/activate
 
-# Install dependencies
+# Install dependencies. This may take may take 5-10 minutes!
 uv sync --group={build,docs,dev,test} --extra nemo_gym
+uv run nemo_rl/utils/prefetch_venvs.py
 ```
 
 ## Prepare NeMo Gym Data
@@ -80,7 +88,7 @@ Clone and setup Gym Python environment
 ```bash
 # Setup Gym local venv
 cd 3rdparty/Gym-workspace/Gym
-uv venv --python 3.12 --allow-existing
+uv venv --python 3.12 --allow-existing .venv
 source .venv/bin/activate
 uv sync --active --extra dev
 ```
@@ -111,11 +119,17 @@ cd ../../.. && source /opt/nemo_rl_venv/bin/activate
 
 **Estimated Time:** ~10-15 minutes
 
-Validate your setup before training:
-
+Download the model used in the following tests:
 ```bash
-HF_HOME=.cache/ \
-HF_TOKEN=${HF_TOKEN} \
+HF_HOME=$PWD/.cache/ \
+HF_TOKEN={your HF token} \
+    hf download Qwen/Qwen3-0.6B
+```
+
+Validate your setup before training.
+```bash
+HF_HOME=$PWD/.cache/ \
+HF_HUB_OFFLINE=1 \
     ./examples/nemo_gym/run_nemo_gym_single_node_sanity_tests.sh
 ```
 

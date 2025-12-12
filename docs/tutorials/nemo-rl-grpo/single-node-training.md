@@ -25,7 +25,7 @@ CONFIG_PATH=examples/nemo_gym/grpo_workplace_assistant_nemotron_nano_v2_9b.yaml
 #   HF_TOKEN: Your Hugging Face token for model downloads
 #   WANDB_API_KEY: Your Weights & Biases API key for logging
 TORCH_CUDA_ARCH_LIST="9.0 10.0" \
-HF_HOME=.cache/ \
+HF_HOME=$PWD/.cache/ \
 HF_TOKEN={your HF token} \
 WANDB_API_KEY={your W&B API key} \
 NRL_FORCE_REBUILD_VENVS=true \
