@@ -126,33 +126,6 @@ Now that you can generate rollouts, choose your path:
 - **Build a custom training environment** — Implement or integrate existing tools and define task verification logic. Get started with the [Creating a Resource Server](https://docs.nvidia.com/nemo/gym/latest/tutorials/creating-resource-server.html) tutorial.
 
 
-## 📖 Documentation
-
-- **[Documentation](https://docs.nvidia.com/nemo/gym/latest/index.html)** - Technical reference docs
-- **[Tutorials](https://docs.nvidia.com/nemo/gym/latest/tutorials/index.html)** - Hands-on tutorials and practical examples
- 
-
-## 🤝 Community & Support
-
-We'd love your contributions! Here's how to get involved:
-
-- **[Report Issues](https://github.com/NVIDIA-NeMo/Gym/issues)** - Bug reports and feature requests
-- **[Contributing Guide](https://github.com/NVIDIA-NeMo/Gym/blob/main/CONTRIBUTING.md)** - How to contribute code, docs, or new environments
-
-## 📚 Citations
-
-If you use NeMo Gym in your research, please cite it using the following BibTeX entry:
-
-```bibtex
-@misc{nemo-gym,
-  title = {NeMo Gym: An Open Source Library for Scaling Reinforcement Learning Environments for LLM},
-  howpublished = {\url{https://github.com/NVIDIA-NeMo/Gym}},
-  author={NVIDIA},
-  year = {2025},
-  note = {GitHub repository},
-}
-```
-
 ## 📦 Available Resource Servers
 
 NeMo Gym includes a curated collection of resource servers for training and evaluation across multiple domains:
@@ -189,3 +162,30 @@ Purpose: Training-ready environments with curated datasets.
 | Mcqa                       | knowledge             | <a href='https://huggingface.co/datasets/nvidia/Nemotron-RL-knowledge-mcqa'>Nemotron-RL-knowledge-mcqa</a>                                                     | Multi-choice question answering problems                                                             | Improve benchmarks like MMLU / GPQA / HLE                                | <a href='resources_servers/mcqa/configs/mcqa.yaml'>config</a>                                             | ✓     | -          | Apache 2.0                                     |
 | Math With Judge            | math                  | <a href='https://huggingface.co/datasets/nvidia/Nemotron-RL-math-OpenMathReasoning'>Nemotron-RL-math-OpenMathReasoning</a>                                     | Math dataset with math-verify and LLM-as-a-judge                                                     | Improve math capabilities including AIME 24 / 25                         | <a href='resources_servers/math_with_judge/configs/math_with_judge.yaml'>config</a>                       | ✓     | ✓          | Creative Commons Attribution 4.0 International |
 <!-- END_TRAINING_SERVERS_TABLE -->
+
+## 📖 Documentation
+
+- **[Documentation](https://docs.nvidia.com/nemo/gym/latest/index.html)** - Technical reference docs
+- **[Tutorials](https://docs.nvidia.com/nemo/gym/latest/tutorials/index.html)** - Hands-on tutorials and practical examples
+ 
+
+## 🤝 Community & Support
+
+We'd love your contributions! Here's how to get involved:
+
+- **[Report Issues](https://github.com/NVIDIA-NeMo/Gym/issues)** - Bug reports and feature requests
+- **[Contributing Guide](https://docs.nvidia.com/nemo/gym/latest/contribute/index.html)** - How to contribute code, docs, new environments, or training framework integrations
+
+## 📚 Citations
+
+If you use NeMo Gym in your research, please cite it using the following BibTeX entry:
+
+```bibtex
+@misc{nemo-gym,
+  title = {NeMo Gym: An Open Source Library for Scaling Reinforcement Learning Environments for LLM},
+  howpublished = {\url{https://github.com/NVIDIA-NeMo/Gym}},
+  author={NVIDIA},
+  year = {2025},
+  note = {GitHub repository},
+}
+```
