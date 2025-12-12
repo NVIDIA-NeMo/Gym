@@ -8,7 +8,7 @@ These guides cover how to integrate NeMo Gym into a new RL training framework. U
 - Contributing NeMo Gym integration for a training framework that does not have one yet
 
 :::{tip}
-Just want to train models? Use {ref}`NeMo RL <rl-training-with-nemo-rl>` instead.
+Just want to train models? Use {ref}`NeMo RL <training-nemo-rl-grpo-index>` instead.
 :::
 
 ## Prerequisites
