@@ -87,7 +87,7 @@ uv sync --active --extra dev
 
 Add your HuggingFace token to download Gym datasets from HuggingFace. This command will store your HF token in a file that is excluded from Git, so it will never be committed or pushed!
 ```bash
-echo "hf_token: {your HF token}" > env.yaml
+echo "hf_token: {your HF token}" >> env.yaml
 ```
 
 Prepare data
@@ -96,7 +96,7 @@ config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.ya
 resources_servers/workplace_assistant/configs/workplace_assistant.yaml"
 
 ng_prepare_data "+config_paths=[${config_paths}]" \
-    +output_dirpath=resources_servers/workplace_assistant/data \
+    +output_dirpath=data/workplace_assistant \
     +mode=train_preparation \
     +should_download=true
 ```
