@@ -4,6 +4,7 @@ example_multi_step_resources_server:
       entrypoint: app.py
       domain: instruction_following
       verified: false
+      description: Multi-step tool calling
 example_multi_step_simple_agent:
   responses_api_agents:
     simple_agent:

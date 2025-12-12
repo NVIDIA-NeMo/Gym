@@ -212,11 +212,26 @@ class JsonlDatasetViewerConfig(BaseNeMoGymCLIConfig):
     Examples:
 
     ```bash
+    # Launch viewer with default settings (accessible from localhost only)
     ng_viewer +jsonl_fpath=weather_rollouts.jsonl
+
+    # Accept requests from anywhere (e.g., for remote access)
+    ng_viewer +jsonl_fpath=weather_rollouts.jsonl +server_host=0.0.0.0
+
+    # Use a custom port
+    ng_viewer +jsonl_fpath=weather_rollouts.jsonl +server_port=8080
     ```
     """
 
     jsonl_fpath: str = Field(description="Filepath to a local jsonl file to view.")
+    server_host: str | None = Field(
+        default=None,
+        description='Network address where the viewer accepts requests. Defaults to "127.0.0.1" (localhost only). Set to "0.0.0.0" to accept requests from anywhere.',
+    )
+    server_port: int | None = Field(
+        default=None,
+        description="Port where the viewer accepts requests. Defaults to 7860. If the specified port is unavailable, Gradio will search for the next available port.",
+    )
 
 
 def get_aggregate_metrics(data: List[DatasetViewerVerifyResponse]) -> Dict[str, Any]:
@@ -281,4 +296,4 @@ def build_jsonl_dataset_viewer(config: JsonlDatasetViewerConfig) -> Blocks:
 def main():  # pragma: no cover
     config = JsonlDatasetViewerConfig.model_validate(get_global_config_dict())
     demo = build_jsonl_dataset_viewer(config)
-    demo.launch(enable_monitoring=False)
+    demo.launch(server_name=config.server_host, server_port=config.server_port, enable_monitoring=False)
