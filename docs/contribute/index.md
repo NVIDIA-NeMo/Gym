@@ -15,7 +15,7 @@ New environments expand Gym's training capabilities.
 - Novel training environments (coding, reasoning, tool use, games, and so on)
 - Benchmark integrations (such as SWE-Bench and Tau Bench)
 
-→ Refer to {ref}`contribute-environments` for contribution guides.
+→ Refer to {ref}`contribute-environments` for guidance.
 :::
 
 :::{dropdown} {octicon}`workflow;1.5em;sd-mr-1` Integrate RL Frameworks
