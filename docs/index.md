@@ -211,10 +211,10 @@ Integrate RL Frameworks <contribute/rl-framework-integration/index>
 :hidden:
 :maxdepth: 1
 
-FAQ <how-to-faq.md>
 Configuration <reference/configuration>
 reference/cli-commands.md
 apidocs/index.rst
+FAQ <reference/faq>
 ```
 
 ```{toctree}
