@@ -14,7 +14,7 @@
 # limitations under the License.
 import re
 from time import time
-from typing import ClassVar, Dict, List, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
 from aiohttp.client_exceptions import ClientResponseError
@@ -65,6 +65,9 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     uses_reasoning_parser: bool
     replace_developer_role_with_system: bool = False
+
+    # Corresponds to the extra_body of OpenAI Client.
+    extra_body: Optional[Dict[str, Any]] = None
 
     def model_post_init(self, context):
         if isinstance(self.base_url, str):
@@ -198,6 +201,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                     pass
                 else:
                     raise NotImplementedError
+
+        if self.config.extra_body:
+            create_params = self.config.extra_body | create_params
 
         try:
             chat_completion_dict = await client.create_chat_completion(**create_params)
