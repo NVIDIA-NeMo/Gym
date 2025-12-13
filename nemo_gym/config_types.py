@@ -195,6 +195,14 @@ class DeleteJsonlDatasetGitlabConfig(BaseNeMoGymCLIConfig):
     dataset_name: str = Field(description="Name of the dataset to delete from GitLab.")
 
 
+class JsonlDatasetHuggingFaceIdentifer(BaseModel):
+    repo_id: str = Field(description="The repo id.")
+    artifact_fpath: Optional[str] = Field(
+        default=None,
+        description="Path to specific file in HuggingFace repo (e.g., 'train.jsonl'). If omitted, load_dataset will be used with split.",
+    )
+
+
 class BaseUploadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
     """
     Upload a JSONL dataset to HuggingFace Hub with automatic naming based on domain and resource server.
@@ -276,7 +284,7 @@ class UploadJsonlDatasetHuggingFaceMaybeDeleteConfig(BaseUploadJsonlDatasetHuggi
     )
 
 
-class DownloadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
+class DownloadJsonlDatasetHuggingFaceConfig(JsonlDatasetHuggingFaceIdentifer, BaseNeMoGymCLIConfig):
     """
     Download a JSONL dataset from HuggingFace Hub to local filesystem.
 
@@ -290,10 +298,35 @@ class DownloadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
     ```
     """
 
-    output_fpath: str = Field(description="Local file path where the downloaded dataset will be saved.")
-    hf_token: str = Field(description="HuggingFace API token for authentication.")
-    artifact_fpath: str = Field(description="Name of the artifact file to download from the repository.")
-    repo_id: str = Field(description="HuggingFace repository ID in format 'organization/dataset-name'.")
+    output_dirpath: Optional[str] = Field(
+        default=None,
+        description="Directory to save the downloaded dataset. Files will be named {split}.jsonl. If split is omitted, all available splits are downloaded.",
+    )
+    output_fpath: Optional[str] = Field(
+        default=None,
+        description="Exact local file path where the downloaded dataset will be saved. Requires `artifact_fpath` or `split`. Overrides output_dirpath.",
+    )
+    hf_token: Optional[str] = Field(default=None, description="HuggingFace API token for authentication.")
+    split: Optional[Literal["train", "validation", "test"]] = Field(
+        default=None, description="Dataset split to download. Omit to download all available splits."
+    )
+
+    @model_validator(mode="after")
+    def check_output_path(self) -> "DownloadJsonlDatasetHuggingFaceConfig":
+        if not self.output_dirpath and not self.output_fpath:
+            raise ValueError("Either output_dirpath or output_fpath must be provided")
+        if self.output_dirpath and self.output_fpath:
+            raise ValueError("Cannot specify both output_dirpath and output_fpath")
+        if self.artifact_fpath and self.split:
+            raise ValueError(
+                "Cannot specify both artifact_fpath and split. Use artifact_fpath for targeting a raw file, or split for structured datasets."
+            )
+        # Prevent output_fpath without split when not using artifact_fpath
+        if self.output_fpath and not self.split and not self.artifact_fpath:
+            raise ValueError(
+                "When using output_fpath without artifact_fpath, split must be specified. Use output_dirpath to download all splits."
+            )
+        return self
 
 
 DatasetType = Union[Literal["train"], Literal["validation"], Literal["example"]]
@@ -306,6 +339,7 @@ class DatasetConfig(BaseModel):
 
     num_repeats: int = Field(default=1, ge=1)
     gitlab_identifier: Optional[JsonlDatasetGitlabIdentifer] = None
+    huggingface_identifier: Optional[JsonlDatasetHuggingFaceIdentifer] = None
     license: Optional[
         Union[
             Literal["Apache 2.0"],
@@ -320,7 +354,6 @@ class DatasetConfig(BaseModel):
     @model_validator(mode="after")
     def check_train_validation_sets(self) -> "DatasetConfig":
         if self.type in ["train", "validation"]:
-            assert self.gitlab_identifier is not None, f"A Gitlab path is required for {self.name}"
             assert self.license is not None, f"A license is required for {self.name}"
 
         return self

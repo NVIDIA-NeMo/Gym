@@ -24,8 +24,10 @@ instruction_following_simple_agent:
           dataset_name: instruction_following
           version: 0.0.1
           artifact_fpath: instruction_following.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-instruction_following
+          artifact_fpath: instruction_following.jsonl
         license: Apache 2.0
-        dataset_url: https://huggingface.co/datasets/nvidia/Nemotron-RL-instruction_following
       - name: example
         type: example
         jsonl_fpath: resources_servers/instruction_following/data/example.jsonl

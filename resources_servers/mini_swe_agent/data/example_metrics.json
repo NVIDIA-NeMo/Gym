@@ -3,6 +3,7 @@
     "type": "example",
     "jsonl_fpath": "resources_servers/mini_swe_agent/data/example.jsonl",
     "gitlab_identifier": null,
+    "huggingface_identifier": null,
     "license": null,
     "Number of examples": 5,
     "Number of tools": {

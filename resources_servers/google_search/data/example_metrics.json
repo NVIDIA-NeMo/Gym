@@ -2,7 +2,9 @@
     "name": "example",
     "type": "example",
     "jsonl_fpath": "resources_servers/google_search/data/example.jsonl",
+    "num_repeats": 1,
     "gitlab_identifier": null,
+    "huggingface_identifier": null,
     "license": null,
     "Number of examples": 5,
     "Number of tools": {
