@@ -72,44 +72,25 @@ The end of the command above will do the following
 
 ## Expected Results
 
-### Training Metrics
-
 Monitor these metrics in W&B to track progress:
+1. `train:reward_mean`: The average reward of your model on this training environment. The reward may be noisy, but it should go up.
+2. `val:accuracy`: The validation performance of your model on this training environment. This should go up steadily.
 
-| Metric | Initial | After 1 Epoch | Description |
-|--------|---------|---------------|-------------|
-| `train:reward_mean` | ~0.1-0.2 | ~0.5-0.7 | Average reward per batch |
-| `val:accuracy` | ~0.15 | ~0.5-0.6 | Validation task completion rate |
-| `train:loss` | ~0.5 | ~0.2-0.3 | GRPO policy loss |
-
-### Checkpoint Outputs
-
-Checkpoints are saved to:
-```
-results/<EXP_NAME>/
-├── step_6/
-├── step_12/
-├── step_18/
-└── ...
+The best checkpoint (highest `val:accuracy`) is retained based on `checkpointing.keep_top_k: 3`. You can find checkpoints at the following path:
+```bash
+ls results/$EXP_NAME
 ```
 
-The best checkpoint (highest `val:accuracy`) is retained based on `checkpointing.keep_top_k: 3`.
-
-### Success Criteria
 
 Training is successful when:
-- Reward mean increases consistently over steps
-- Validation accuracy improves from baseline (~15%) to 50%+
-- No OOM (Out of Memory) errors
-- Checkpoints are saved at specified intervals
+- Reward mean increases consistently over steps.
+- Validation accuracy consistently improves.
+- No OOM (Out of Memory) errors.
+- Checkpoints are saved at specified intervals.
 
-### Validation Reward Plot
+---
 
-<!-- TODO: Add validation reward plot showing improvement over training steps -->
-![Validation Reward Plot](images/val_reward_placeholder.png)
-*Expected: Validation reward increasing from ~0.15 to ~0.5+ over the course of training.*
-
-### Measuring Real-World Improvement
+## Measuring Real-World Improvement
 
 The Workplace Assistant environment's tool-calling tasks correlate with performance on the [Berkeley Function Calling Leaderboard (BFCL) v3](https://gorilla.cs.berkeley.edu/leaderboard.html) benchmark. To measure improvement, evaluate the Nemotron Nano v2 9B model on BFCL v3 before and after training, and compare the results. You should observe measurable improvement in tool-calling accuracy.
 
@@ -118,8 +99,6 @@ You can run BFCL v3 evaluations using [NeMo Evaluator](https://github.com/NVIDIA
 ---
 
 ## Troubleshooting
-
-### Common Issues
 
 | Issue | Solution |
 |-------|----------|
