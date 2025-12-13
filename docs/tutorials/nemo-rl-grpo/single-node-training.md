@@ -54,16 +54,21 @@ uv run python examples/nemo_gym/run_grpo_nemo_gym.py \
     ++policy.generation.vllm_cfg.tool_parser_plugin=$(find $PWD/.cache -name nemotron_toolcall_parser_no_streaming.py) \
     ++grpo.num_prompts_per_step=4 \
     ++grpo.max_num_steps=3 \
-    checkpointing.checkpoint_dir=results/$EXP_NAME
+    checkpointing.checkpoint_dir=results/$EXP_NAME &> results/$EXP_NAME/output.log &
+
+# Watch the logs
+tail -f results/$EXP_NAME/output.log
 ```
 
 :::{tip}
-You can find the full logs of the run after it finishes successfully or errors using:
+The end of the command above will do the following
 ```bash
-nano $(ls results/$EXP_NAME/exp_00*/wandb/wandb/latest-run/files/output.log | tail -1)
+&> results/$EXP_NAME/output.log &
 ```
-:::
 
+1. `&> results/$EXP_NAME/output.log`: Pipe the terminal outputs into a file at `results/$EXP_NAME/output.log` that you can view.
+2. `&`: This final ampersand will run the job in the background, which frees up your terminal to do other things. You can view all the background jobs using the `jobs` command. If you need to quit the training run, you can use the `fg` command to bring the job from the background into the foreground and then ctrl+c like normal!
+:::
 
 ## Expected Results
 
