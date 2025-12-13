@@ -76,6 +76,26 @@ uv sync --group={build,docs,dev,test} --extra nemo_gym
 uv run nemo_rl/utils/prefetch_venvs.py
 ```
 
+## Run Sanity Tests
+
+**Estimated Time:** ~5-10 minutes
+
+Download the model used in the following tests:
+```bash
+HF_HOME=$PWD/.cache/ \
+HF_TOKEN={your HF token} \
+    hf download Qwen/Qwen3-0.6B
+```
+
+Validate your setup before training.
+```bash
+HF_HOME=$PWD/.cache/ \
+    ./examples/nemo_gym/run_nemo_gym_single_node_sanity_tests.sh
+```
+
+> **Note**: If you've run these tests before and encounter HuggingFace rate limit errors, try adding `HF_HUB_OFFLINE=1` to the command.
+
+
 ## Prepare NeMo Gym Data
 
 **Estimated Time:** ~5 minutes
@@ -114,22 +134,3 @@ Return to NeMo RL directory and Python env
 ```bash
 cd ../../.. && source /opt/nemo_rl_venv/bin/activate
 ```
-
-## Run Sanity Tests
-
-**Estimated Time:** ~5-10 minutes
-
-Download the model used in the following tests:
-```bash
-HF_HOME=$PWD/.cache/ \
-HF_TOKEN={your HF token} \
-    hf download Qwen/Qwen3-0.6B
-```
-
-Validate your setup before training.
-```bash
-HF_HOME=$PWD/.cache/ \
-    ./examples/nemo_gym/run_nemo_gym_single_node_sanity_tests.sh
-```
-
-> **Note**: If you've run these tests before and encounter HuggingFace rate limit errors, try adding `HF_HUB_OFFLINE=1` to the command.
