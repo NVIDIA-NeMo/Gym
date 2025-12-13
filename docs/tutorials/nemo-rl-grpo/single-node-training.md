@@ -46,17 +46,24 @@ TORCH_CUDA_ARCH_LIST="9.0 10.0" \
 HF_HOME=$PWD/.cache/ \
 HF_TOKEN={your HF token} \
 WANDB_API_KEY={your W&B API key} \
-NRL_FORCE_REBUILD_VENVS=true \
 uv run python examples/nemo_gym/run_grpo_nemo_gym.py \
     --config=$CONFIG_PATH \
     logger.wandb.project="${USER}-nemo-gym-rl-integration" \
     logger.wandb.name=$EXP_NAME \
     logger.log_dir=results/$EXP_NAME \
-    ++policy.generation.vllm_cfg.tool_parser_plugin=$(find .cache -name nemotron_toolcall_parser_no_streaming.py) \
+    ++policy.generation.vllm_cfg.tool_parser_plugin=$(find $PWD/.cache -name nemotron_toolcall_parser_no_streaming.py) \
     ++grpo.num_prompts_per_step=4 \
     ++grpo.max_num_steps=3 \
     checkpointing.checkpoint_dir=results/$EXP_NAME
 ```
+
+:::{tip}
+You can find the full logs of the run after it finishes successfully or errors using:
+```bash
+nano $(ls results/$EXP_NAME/exp_00*/wandb/wandb/latest-run/files/output.log | tail -1)
+```
+:::
+
 
 ## Expected Results
 
