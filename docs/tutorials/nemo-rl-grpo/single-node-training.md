@@ -9,7 +9,7 @@ Now that you've completed the {doc}`Setup Instructions <setup>`, you're ready to
 Run these commands **from inside the container**.
 
 :::{tip}
-If you are performing these steps in a new container with existing code, just run these commands for the setup!
+Coming back from a break on a pre-existing filesystem setup? Just run these commands below once you enter the container.
 ```bash
 source /opt/nemo_rl_venv/bin/activate
 uv sync --group={build,docs,dev,test} --extra nemo_gym
