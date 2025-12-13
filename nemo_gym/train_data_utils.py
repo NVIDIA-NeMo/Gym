@@ -460,55 +460,56 @@ class TrainDataProcessor(BaseModel):
                 "Missing local datasets. You must provide local datasets since download is disabled. Run with `+should_download=true` to enable downloading."
             )
 
-        if local_datasets_not_found:
-            backend = config.data_source
-            is_valid, error_msg = validate_backend_credentials(backend)
-            global_config = get_global_config_dict()
-            if not is_valid:
-                print(f"Cannot download datasets: {error_msg}")
-                sys.exit(1)
+        if not local_datasets_not_found:
+            return
+        backend = config.data_source
+        is_valid, error_msg = validate_backend_credentials(backend)
+        global_config = get_global_config_dict()
+        if not is_valid:
+            print(f"Cannot download datasets: {error_msg}")
+            sys.exit(1)
 
-            for (
-                server_name,
-                datasets,
-            ) in local_datasets_not_found.items():  # pragma: no cover
-                for d in datasets:
-                    try:
-                        if backend == "gitlab":
-                            if d.gitlab_identifier is None:
-                                print(f"Dataset `{d.name}` missing gitlab_identifier for GitLab backend")
-                                continue
+        for (
+            server_name,
+            datasets,
+        ) in local_datasets_not_found.items():  # pragma: no cover
+            for d in datasets:
+                try:
+                    if backend == "gitlab":
+                        if d.gitlab_identifier is None:
+                            print(f"Dataset `{d.name}` missing gitlab_identifier for GitLab backend")
+                            continue
 
-                            download_config = DownloadJsonlDatasetGitlabConfig.model_validate(
-                                d.gitlab_identifier.model_dump() | {"output_fpath": d.jsonl_fpath}
-                            )
-                            print(
-                                f"Downloading dataset `{d.name}` for `{server_name}` from {backend} using {download_config}"
-                            )
-                            download_jsonl_dataset(download_config)
+                        download_config = DownloadJsonlDatasetGitlabConfig.model_validate(
+                            d.gitlab_identifier.model_dump() | {"output_fpath": d.jsonl_fpath}
+                        )
+                        print(
+                            f"Downloading dataset `{d.name}` for `{server_name}` from {backend} using {download_config}"
+                        )
+                        download_jsonl_dataset(download_config)
 
-                        elif backend == "huggingface":
-                            hf_identifier = d.huggingface_identifier
+                    elif backend == "huggingface":
+                        hf_identifier = d.huggingface_identifier
 
-                            if hf_identifier is None:
-                                print(f"Dataset `{d.name}` missing huggingface_identifier for HuggingFace backend")
-                                continue
+                        if hf_identifier is None:
+                            print(f"Dataset `{d.name}` missing huggingface_identifier for HuggingFace backend")
+                            continue
 
-                            download_config = DownloadJsonlDatasetHuggingFaceConfig.model_validate(
-                                {
-                                    "repo_id": hf_identifier.repo_id,
-                                    "artifact_fpath": hf_identifier.artifact_fpath,
-                                    "output_fpath": d.jsonl_fpath,
-                                    # Only pass split if artifact_fpath is not set
-                                    **({"split": d.type} if not hf_identifier.artifact_fpath else {}),
-                                    "hf_token": global_config.get("hf_token"),
-                                }
-                            )
-                            print(f"Downloading '{d.type}' split from {hf_identifier.repo_id} to {d.jsonl_fpath}...")
-                            download_hf_dataset_as_jsonl(download_config)
+                        download_config = DownloadJsonlDatasetHuggingFaceConfig.model_validate(
+                            {
+                                "repo_id": hf_identifier.repo_id,
+                                "artifact_fpath": hf_identifier.artifact_fpath,
+                                "output_fpath": d.jsonl_fpath,
+                                # Only pass split if artifact_fpath is not set
+                                **({"split": d.type} if not hf_identifier.artifact_fpath else {}),
+                                "hf_token": global_config.get("hf_token"),
+                            }
+                        )
+                        print(f"Downloading '{d.type}' split from {hf_identifier.repo_id} to {d.jsonl_fpath}...")
+                        download_hf_dataset_as_jsonl(download_config)
 
-                    except Exception as e:
-                        print(f"Failed to download dataset `{d.name}` from {backend}: {e}")
+                except Exception as e:
+                    print(f"Failed to download dataset `{d.name}` from {backend}: {e}")
 
     ########################################
     # Validate samples and aggregate metrics
@@ -560,89 +561,91 @@ class TrainDataProcessor(BaseModel):
         """
         Returns the conflicting metrics fpath if invalid. Else returns None
         """
-        if metrics_fpath.exists():
-            with open(metrics_fpath) as f:
-                previous_aggregate_metrics_dict = json.load(f)
+        if not metrics_fpath.exists():
+            return
 
-            def numeric_close(a: float, b: float) -> bool:
-                """Helper to compare numbers with a tolerance"""
-                if a == b:
-                    return True
+        with open(metrics_fpath) as f:
+            previous_aggregate_metrics_dict = json.load(f)
+
+        def numeric_close(a: float, b: float) -> bool:
+            """Helper to compare numbers with a tolerance"""
+            if a == b:
+                return True
+            try:
+                a_f = float(a)
+                b_f = float(b)
+            except Exception:
+                return False
+            scale = max(abs(a_f), abs(b_f))  # Adjuster for tolerance
+
+            # may need to adjust this threshold:
+            tol = 5e-3 if scale >= 1 else 5e-4  # Higher threshold for larger numbers
+            return abs(a_f - b_f) <= max(tol, 1e-9)  # Allow small differences
+
+        def diff_values(prev_v, new_v, path: str, diffs: List[str]) -> None:
+            """
+            Recursively compare values at the given path.
+            Keys from previous dict must be present in new dict.
+            Additional fields in new dict are allowed.
+            """
+            if isinstance(prev_v, dict) and isinstance(new_v, dict):
+                for k in prev_v.keys():
+                    sub_path = f"{path}.{k}" if path else k
+                    if k not in new_v:
+                        diffs.append(f"Missing key in new metrics: {sub_path}")
+                        continue
+                    diff_values(prev_v[k], new_v[k], sub_path, diffs)
+                return
+
+            # Lists: Check for equality regardless of order
+            if isinstance(prev_v, list) and isinstance(new_v, list):
+                if len(prev_v) != len(new_v):
+                    diffs.append(f"List length differs at {path}: {len(prev_v)} != {len(new_v)}")
+                    return
                 try:
-                    a_f = float(a)
-                    b_f = float(b)
-                except Exception:
-                    return False
-                scale = max(abs(a_f), abs(b_f))  # Adjuster for tolerance
-
-                # may need to adjust this threshold:
-                tol = 5e-3 if scale >= 1 else 5e-4  # Higher threshold for larger numbers
-                return abs(a_f - b_f) <= max(tol, 1e-9)  # Allow small differences
-
-            def diff_values(prev_v, new_v, path: str, diffs: List[str]) -> None:
-                """
-                Recursively compare values at the given path.
-                Keys from previous dict must be present in new dict.
-                Additional fields in new dict are allowed.
-                """
-                if isinstance(prev_v, dict) and isinstance(new_v, dict):
-                    for k in prev_v.keys():
-                        sub_path = f"{path}.{k}" if path else k
-                        if k not in new_v:
-                            diffs.append(f"Missing key in new metrics: {sub_path}")
-                            continue
-                        diff_values(prev_v[k], new_v[k], sub_path, diffs)
+                    prev_counter = Counter(prev_v)
+                    new_counter = Counter(new_v)
+                    if prev_counter != new_counter:
+                        diffs.append(f"Multiset mismatch at {path}: {prev_counter} != {new_counter}")
+                    return
+                except TypeError:
+                    # Manual fallback for unhashable elements
+                    used = set()
+                    for i, pv in enumerate(prev_v):
+                        found = False
+                        for j, nv in enumerate(new_v):
+                            if j in used:
+                                continue
+                            sub_diffs = []
+                            diff_values(pv, nv, f"{path}[{i}]", sub_diffs)
+                            if not sub_diffs:
+                                used.add(j)
+                                found = True
+                                break
+                        if not found:
+                            diffs.append(f"No matching element for {path}[{i}] in new metrics (unordered)")
                     return
 
-                # Lists: Check for equality regardless of order
-                if isinstance(prev_v, list) and isinstance(new_v, list):
-                    if len(prev_v) != len(new_v):
-                        diffs.append(f"List length differs at {path}: {len(prev_v)} != {len(new_v)}")
-                        return
-                    try:
-                        prev_counter = Counter(prev_v)
-                        new_counter = Counter(new_v)
-                        if prev_counter != new_counter:
-                            diffs.append(f"Multiset mismatch at {path}: {prev_counter} != {new_counter}")
-                        return
-                    except TypeError:
-                        # Manual fallback for unhashable elements
-                        used = set()
-                        for i, pv in enumerate(prev_v):
-                            found = False
-                            for j, nv in enumerate(new_v):
-                                if j in used:
-                                    continue
-                                sub_diffs = []
-                                diff_values(pv, nv, f"{path}[{i}]", sub_diffs)
-                                if not sub_diffs:
-                                    used.add(j)
-                                    found = True
-                                    break
-                            if not found:
-                                diffs.append(f"No matching element for {path}[{i}] in new metrics (unordered)")
-                        return
+            if isinstance(prev_v, float) and isinstance(new_v, float):
+                if not numeric_close(prev_v, new_v):
+                    diffs.append(f"Numeric mismatch at {path}: {prev_v} != {new_v}")
+                return
 
-                if isinstance(prev_v, float) and isinstance(new_v, float):
-                    if not numeric_close(prev_v, new_v):
-                        diffs.append(f"Numeric mismatch at {path}: {prev_v} != {new_v}")
-                    return
+            if prev_v != new_v:
+                diffs.append(f"Value differs at {path}: {prev_v} != {new_v}")
 
-                if prev_v != new_v:
-                    diffs.append(f"Value differs at {path}: {prev_v} != {new_v}")
+        diffs: List[str] = []
+        diff_values(previous_aggregate_metrics_dict, aggregate_metrics_dict, path="", diffs=diffs)
 
-            diffs: List[str] = []
-            diff_values(previous_aggregate_metrics_dict, aggregate_metrics_dict, path="", diffs=diffs)
+        if diffs:
+            print("Differences found in aggregate metrics:")
+            pprint(diffs)
 
-            if diffs:
-                print("Differences found in aggregate metrics:")
-                pprint(diffs)
+            conflicting_metrics_fpath = metrics_fpath.with_name(f"{metrics_fpath.stem}_conflict.json")
+            with open(conflicting_metrics_fpath, "w") as f:
+                json.dump(aggregate_metrics_dict, f, indent=4)
 
-                conflicting_metrics_fpath = metrics_fpath.with_name(f"{metrics_fpath.stem}_conflict.json")
-                with open(conflicting_metrics_fpath, "w") as f:
-                    json.dump(aggregate_metrics_dict, f, indent=4)
-
-                return conflicting_metrics_fpath
+            return conflicting_metrics_fpath
 
     def validate_samples_and_aggregate_metrics(
         self, server_instance_configs: List[ServerInstanceConfig]

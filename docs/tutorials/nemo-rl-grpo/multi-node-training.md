@@ -26,7 +26,7 @@ CONTAINER_IMAGE_PATH=/path/to/nemo-rl/container
 read -r -d '' COMMAND <<EOF
 cd ${REPO_LOCATION}
 
-HF_HOME=.cache/ \
+HF_HOME=$PWD/.cache/ \
 HF_HUB_OFFLINE=1 \
 WANDB_API_KEY=$WANDB_API_KEY \
 NRL_FORCE_REBUILD_VENVS=true \

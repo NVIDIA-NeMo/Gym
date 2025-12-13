@@ -2,107 +2,71 @@
 
 # RL Training with NeMo RL using GRPO
 
-This tutorial trains NVIDIA [Nemotron Nano 9B v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2) to improve its **{term}`multi-step <Multi-step>` {term}`tool-calling <Tool Use / Function Calling>`** capability using **{term}`GRPO (Group Relative Policy Optimization) <GRPO (Group Relative Policy Optimization)>`** algorithm on the **Workplace Assistant** environment. Workplace Assistant is a realistic office simulation (calendar, email, project management, etc.) with complex multi-step tasks, providing a strong data distribution for training enterprise-ready tool-using assistants.
+This tutorial trains NVIDIA [Nemotron Nano 9B v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2) to improve its **{term}`multi-step <Multi-step>` {term}`tool-calling <Tool Use / Function Calling>`** capability using the **{term}`GRPO (Group Relative Policy Optimization) <GRPO (Group Relative Policy Optimization)>`** algorithm on the **Workplace Assistant** environment.
 
-**Total time estimate:** ~3-5 hours (including environment setup, data preparation, and training)
+Workplace Assistant is a realistic office simulation (calendar, email, project management, etc.) with complex multi-step tasks, providing a strong data distribution for training enterprise-ready tool-using assistants.
 
-> **TL;DR:** Want to jump straight to running commands? Skip to {doc}`Setup Instructions <setup>`.
+:::{card}
 
----
+**Goal**: Train a model for multi-step tool calling using GRPO on the Workplace Assistant environment.
 
-## Objectives
+^^^
 
-In this tutorial, you will:
+**In this tutorial, you will**:
 
 1. Set up NeMo RL and NeMo Gym for {term}`reinforcement learning <RL (Reinforcement Learning)>` training
-2. Understand the Workplace Assistant environment and its multi-step tool calling capability
-3. Configure and run GRPO training on Nemotron Nano v2 9B using this environment in Gym
+2. Understand the Workplace Assistant environment and its multi-step tool calling tasks
+3. Configure and run GRPO training on Nemotron Nano v2 9B
 4. Monitor training progress via Weights & Biases (W&B)
 
----
-
-## Prerequisites
-
-::::{tab-set}
-
-:::{tab-item} Required Knowledge
-
-- You should be comfortable with Python, LLM fine-tuning, and basic reinforcement learning concepts such as policy optimization, rewards, and rollouts. While in-depth knowledge of Reinforcement Learning with Verifiable Rewards (RLVR) and the GRPO algorithm is not required, a high-level understanding is helpful.
-- Some basic familiarity with Slurm is useful, but you can follow along using the example commands provided below.
-
 :::
 
-:::{tab-item} Hardware Requirements
+> **TL;DR:** Want to jump straight to running commands? Skip to {doc}`Setup <setup>`.
 
-**Minimum** 1 node of 8× NVIDIA GPUs with 80GB or more memory each (such as H100 or A100) is required.
+---
 
+## Before You Begin
+
+Make sure you have these prerequisites ready:
+
+- ✅ **Hardware**: 1+ nodes with 8× NVIDIA GPUs (80GB+ each, such as H100 or A100)
+  - Single-node testing: 1 node with 8 GPUs
+  - Multi-node production: 8+ nodes with 8 GPUs each recommended
+  - RAM: 64 GB+ per node
+- ✅ **Storage**: 100 GB+ free disk space on a shared filesystem
+- ✅ **Software**: Linux, Python 3.12+, Git, Slurm for multi-node training
+- ✅ **Familiarity**: Python, LLM fine-tuning, basic RL concepts (in-depth RLVR/GRPO knowledge not required)
+
+:::{note}
 NeMo Gym does not require GPUs. GPUs are only necessary for GRPO training with NeMo RL.
-
-- **GPU**: Multi-GPU setup required for RL training
-  - **Single-node testing**: 1 node with 8 GPUs (e.g., 8x A100 or H100 GPUs)
-  - **Multi-node training**: 8+ nodes with 8 GPUs each recommended for production training
-- **CPU**: Modern x86_64 processor
-- **RAM**: 64 GB+ recommended per node
-- **Storage**: 100 GB+ free disk space for:
-  - NeMo RL repository and dependencies
-  - Model checkpoints and training artifacts
-  - Dataset storage
-
 :::
 
-:::{tab-item} Required Accounts & Tokens
+**Optional accounts**:
 
-- **Weights & Biases (W&B) API Key** (optional): For experiment tracking and visualization; Training metrics logging
-  - [Create account](https://wandb.ai/signup)
-  - Find your API key at [wandb.ai/authorize](https://wandb.ai/authorize)
-  - If not provided, training will proceed without W&B logging
-- **HuggingFace Token** (optional): For downloading models and datasets
-  - [Create account](https://huggingface.co/join)
-  - Create a token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
-  - Recommended to avoid rate limits when downloading models and datasets
-  - Ensure you have accepted the model license for Qwen 3 4B Instruct
+- **Weights & Biases (W&B)**: For experiment tracking ([sign up](https://wandb.ai/signup), [get API key](https://wandb.ai/authorize)). Training proceeds without W&B if not configured.
+- **HuggingFace**: For downloading models ([create token](https://huggingface.co/settings/tokens)). Recommended to avoid rate limits.
 
-:::
-
-:::{tab-item} Software Requirements
-
-- **Operating System**: Linux (Ubuntu 20.04+ or equivalent)
-- **Python**: 3.12 or higher
-- **Slurm**: For multi-node training on GPU clusters
-- **Git**: For cloning repositories
-- **UV Package Manager**: Python package manager (installed during setup)
-
-:::
-
-:::{tab-item} Filesystem Access
-
-- **Shared Filesystem**: Required for multi-node training
-  - Example: `/shared/filesystem` mounted and accessible from all compute nodes
-  - Used for storing code, data, checkpoints, and results
-
-:::
-
-::::
+**Total time estimate**: ~3-5 hours (including environment setup, data preparation, and training)
 
 ---
 
-## RL Training Workflow
+## Tutorial Steps
 
-This tutorial will guide you through the entire RL training workflow using the following steps:
+Follow these steps sequentially to complete the tutorial:
 
 ::::{grid} 1
-:gutter: 1
+:gutter: 2
 
-:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` About the Workplace Assistant Training Environment
+:::{grid-item-card} 1. About the Workplace Assistant Training Environment
 :link: training-nemo-rl-grpo-about-workplace-assistant
 :link-type: ref
 
-Understand the dataset you will train on and the capabilities it corresponds to.
+Understand the dataset you will train on and its multi-step tool calling tasks.
 +++
-{bdg-primary}`prerequisite` {bdg-secondary}`dataset`
+{bdg-secondary}`background`
 :::
 
-:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` NeMo Gym Configuration for RL Training
+:::{grid-item-card} 2. Gym Configuration
 :link: training-nemo-rl-grpo-gym-configuration
 :link-type: ref
 
@@ -111,40 +75,68 @@ Understand the Gym configuration component in the NeMo RL training config file.
 {bdg-secondary}`configuration`
 :::
 
-:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` NeMo RL Configuration for RL Training
+:::{grid-item-card} 3. NeMo RL Configuration
 :link: training-nemo-rl-grpo-nemo-rl-configuration
 :link-type: ref
 
-Understand the GRPO and NeMo RL configuration components in the NeMo RL training config file.
+Understand the GRPO and NeMo RL configuration components in the training config file.
 +++
 {bdg-secondary}`configuration`
 :::
 
-:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` Setup
+:::{grid-item-card} 4. Setup
 :link: training-nemo-rl-grpo-setup
 :link-type: ref
 
-Necessary NeMo RL and NeMo Gym setup instructions.
+Clone repositories, install dependencies, and prepare the training data.
 +++
 {bdg-primary}`prerequisite`
 :::
 
-:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` Single Node Training
+:::{grid-item-card} 5. Single Node Training
 :link: training-nemo-rl-grpo-single-node-training
 :link-type: ref
 
 Perform a single node GRPO training run with success criteria.
 +++
-{bdg-primary}`training` {bdg-secondary}`single-node`
+{bdg-primary}`training`
 :::
 
-:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` Multi Node Training
+:::{grid-item-card} 6. Multi-Node Training
 :link: training-nemo-rl-grpo-multi-node-training
 :link-type: ref
 
-Perform a multi node GRPO training run.
+Scale to multi-node GRPO training for production.
 +++
-{bdg-primary}`training` {bdg-secondary}`multi-node`
+{bdg-primary}`training`
+:::
+
+::::
+
+---
+
+## What's Next?
+
+After completing this tutorial, explore these options:
+
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Use Other Training Environments
+:link: https://github.com/NVIDIA-NeMo/Gym#-available-resource-servers
+
+Browse available resource servers on GitHub to find other training environments.
++++
+{bdg-secondary}`github` {bdg-secondary}`resource-servers`
+:::
+
+:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build a Custom Training Environment
+:link: ../creating-resource-server
+:link-type: doc
+
+Create your own resource server with custom tools and verification logic.
++++
+{bdg-secondary}`tutorial` {bdg-secondary}`custom-tools`
 :::
 
 ::::

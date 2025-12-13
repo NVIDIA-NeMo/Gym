@@ -2,9 +2,10 @@
     "name": "train",
     "type": "train",
     "jsonl_fpath": "resources_servers/workplace_assistant/data/train.jsonl",
-    "gitlab_identifier": {
-        "dataset_name": "workplace_assistant",
-        "version": "0.0.4",
+    "num_repeats": 1,
+    "gitlab_identifier": null,
+    "huggingface_identifier": {
+        "repo_id": "nvidia/Nemotron-RL-agent-workplace_assistant",
         "artifact_fpath": "train.jsonl"
     },
     "license": "Apache 2.0",

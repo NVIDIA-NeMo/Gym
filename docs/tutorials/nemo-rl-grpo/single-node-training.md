@@ -8,12 +8,30 @@ Now that you've completed the {doc}`Setup Instructions <setup>`, you're ready to
 
 Run these commands **from inside the container**.
 
+:::{tip}
+Coming back from a break on a pre-existing filesystem setup? Just run these commands below once you enter the container.
 ```bash
-# Clean up any existing Ray/vLLM processes
+source /opt/nemo_rl_venv/bin/activate
+uv sync --group={build,docs,dev,test} --extra nemo_gym
+uv run nemo_rl/utils/prefetch_venvs.py
+```
+:::
+
+Download NVIDIA [Nemotron Nano 9B v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2)
+```bash
+HF_HOME=$PWD/.cache/ \
+HF_TOKEN={your HF token} \
+    hf download nvidia/NVIDIA-Nemotron-Nano-9B-v2
+```
+
+Clean up any existing or leftover Ray/vLLM processes
+```bash
 pkill -f VllmAsyncGenerationWorker
 ray stop --force
 python -c "import ray; ray.shutdown()"
+```
 
+```bash
 # Set experiment name with timestamp
 EXP_NAME="$(date +%Y%m%d)/nemo_gym_grpo/nemotron_nano_v2_9b/workplace_assistant_001"
 
@@ -25,7 +43,7 @@ CONFIG_PATH=examples/nemo_gym/grpo_workplace_assistant_nemotron_nano_v2_9b.yaml
 #   HF_TOKEN: Your Hugging Face token for model downloads
 #   WANDB_API_KEY: Your Weights & Biases API key for logging
 TORCH_CUDA_ARCH_LIST="9.0 10.0" \
-HF_HOME=.cache/ \
+HF_HOME=$PWD/.cache/ \
 HF_TOKEN={your HF token} \
 WANDB_API_KEY={your W&B API key} \
 NRL_FORCE_REBUILD_VENVS=true \
@@ -34,9 +52,10 @@ uv run python examples/nemo_gym/run_grpo_nemo_gym.py \
     logger.wandb.project="${USER}-nemo-gym-rl-integration" \
     logger.wandb.name=$EXP_NAME \
     logger.log_dir=results/$EXP_NAME \
+    ++policy.generation.vllm_cfg.tool_parser_plugin=$(find .cache -name nemotron_toolcall_parser_no_streaming.py) \
     ++grpo.num_prompts_per_step=4 \
     ++grpo.max_num_steps=3 \
-    checkpointing.checkpoint_dir=results/$EXP_NAME &
+    checkpointing.checkpoint_dir=results/$EXP_NAME
 ```
 
 ## Expected Results
