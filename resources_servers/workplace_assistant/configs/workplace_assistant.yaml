@@ -20,10 +20,6 @@ workplace_assistant_simple_agent:
         - name: train
           type: train
           jsonl_fpath: resources_servers/workplace_assistant/data/train.jsonl
-          gitlab_identifier:
-            dataset_name: workplace_assistant
-            version: 0.0.4
-            artifact_fpath: train.jsonl
           huggingface_identifier:
             repo_id: nvidia/Nemotron-RL-agent-workplace_assistant
             artifact_fpath: train.jsonl
@@ -31,9 +27,8 @@ workplace_assistant_simple_agent:
         - name: validation
           type: validation
           jsonl_fpath: resources_servers/workplace_assistant/data/validation.jsonl
-          gitlab_identifier:
-            dataset_name: workplace_assistant
-            version: 0.0.4
+          huggingface_identifier:
+            repo_id: nvidia/Nemotron-RL-agent-workplace_assistant
             artifact_fpath: validation.jsonl
           license: Apache 2.0
         - name: example
