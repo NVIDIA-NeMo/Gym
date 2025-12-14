@@ -14,7 +14,6 @@ Your single-node test run confirmed that the environment, model, and training lo
 
 1. Launch a multi-node training job using Slurm batch mode
 2. Monitor training metrics in Weights & Biases
-3. Evaluate model improvement on real-world benchmarks
 
 :::
 
