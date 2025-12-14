@@ -17,16 +17,19 @@ uv run nemo_rl/utils/prefetch_venvs.py
 ```
 :::
 
-Download NVIDIA [Nemotron Nano 9B v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2) and setup the chat template we will be using for training.
+Download NVIDIA [Nemotron Nano 9B v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2).
 ```bash
 HF_HOME=$PWD/.cache/ \
 HF_TOKEN={your HF token} \
     hf download nvidia/NVIDIA-Nemotron-Nano-9B-v2
-
-tokenizer_config_path=$(find $PWD/.cache/hub/models--nvidia--NVIDIA-Nemotron-Nano-9B-v2 -name tokenizer_config.json)
-cat $tokenizer_config_path | jq -r '.chat_template' | sed 's/enable_thinking=true/enable_thinking=false/g' > nemotron_nano_v2_chat_template.jinja
 ```
 
+The Nemotron Nano 9B v2 model uses a custom chat template that we need to modify in order to support modern RL training. This step will setup the chat template we will be using for training. Please note that we are modifying the cached version of the chat template!
+```bash
+tokenizer_config_path=$(find $PWD/.cache/hub/models--nvidia--NVIDIA-Nemotron-Nano-9B-v2 -name tokenizer_config.json)
+sed -i 's/enable_thinking=true/enable_thinking=false/g' $tokenizer_config_path
+sed -i 's/{%- if messages\[-1\]\['\''role'\''\] == '\''assistant'\'' -%}{%- set ns.last_turn_assistant_content = messages\[-1\]\['\''content'\''\].strip() -%}{%- set messages = messages\[:-1\] -%}{%- endif -%}//g' $tokenizer_config_path
+```
 
 Clean up any existing or leftover Ray/vLLM processes
 ```bash
@@ -48,7 +51,7 @@ CONFIG_PATH=examples/nemo_gym/grpo_workplace_assistant_nemotron_nano_v2_9b.yaml
 #   WANDB_API_KEY: Your Weights & Biases API key for logging
 TORCH_CUDA_ARCH_LIST="9.0 10.0" \
 HF_HOME=$PWD/.cache/ \
-HF_TOKEN={your HF token} \
+HF_HUB_OFFLINE=1 \
 WANDB_API_KEY={your W&B API key} \
 uv run python examples/nemo_gym/run_grpo_nemo_gym.py \
     --config=$CONFIG_PATH \
@@ -56,7 +59,6 @@ uv run python examples/nemo_gym/run_grpo_nemo_gym.py \
     logger.wandb.name=$EXP_NAME \
     logger.log_dir=results/$EXP_NAME \
     ++policy.generation.vllm_cfg.tool_parser_plugin=$(find $PWD/.cache -name nemotron_toolcall_parser_no_streaming.py) \
-    ++policy.generation.vllm_cfg.http_server_serving_chat_kwargs.chat_template=$(cat nemotron_nano_v2_chat_template.jinja) \
     ++grpo.num_prompts_per_step=4 \
     ++grpo.max_num_steps=3 \
     checkpointing.checkpoint_dir=results/$EXP_NAME &> results/$EXP_NAME/output.log &
