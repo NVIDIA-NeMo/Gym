@@ -41,6 +41,7 @@ python -c "import ray; ray.shutdown()"
 ```bash
 # Set experiment name with timestamp
 EXP_NAME="$(date +%Y%m%d)/nemo_gym_grpo/nemotron_nano_v2_9b/workplace_assistant_001"
+mkdir -p results/$EXP_NAME
 
 # Configuration file path
 CONFIG_PATH=examples/nemo_gym/grpo_workplace_assistant_nemotron_nano_v2_9b.yaml
@@ -55,13 +56,12 @@ HF_HUB_OFFLINE=1 \
 WANDB_API_KEY={your W&B API key} \
 uv run python examples/nemo_gym/run_grpo_nemo_gym.py \
     --config=$CONFIG_PATH \
-    logger.wandb.project="${Your Username}-nemo-gym-rl-integration" \
-    logger.wandb.name=$EXP_NAME \
-    logger.log_dir=results/$EXP_NAME \
+    ++logger.wandb.project="${Your Username}-nemo-gym-rl-integration" \
+    ++logger.wandb.name=$EXP_NAME \
+    ++logger.log_dir=results/$EXP_NAME \
     ++policy.generation.vllm_cfg.tool_parser_plugin=$(find $PWD/.cache -name nemotron_toolcall_parser_no_streaming.py) \
-    ++grpo.num_prompts_per_step=4 \
     ++grpo.max_num_steps=3 \
-    checkpointing.checkpoint_dir=results/$EXP_NAME &> results/$EXP_NAME/output.log &
+    ++checkpointing.checkpoint_dir=results/$EXP_NAME &> results/$EXP_NAME/output.log &
 
 # Watch the logs
 tail -f results/$EXP_NAME/output.log
