@@ -4,7 +4,7 @@
 
 Now that you've completed the {doc}`Setup Instructions <setup>`, you're ready to launch a single-node training run!
 
-**Estimated Time:** ~15 minutes
+**Estimated Time:** ~15-30 minutes
 
 Run these commands **from inside the container**.
 
