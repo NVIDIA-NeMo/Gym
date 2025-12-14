@@ -153,6 +153,11 @@ dependencies = [
     # Updated: Fri Nov 07, 2025 with psutil==6.1.1
     # License: BSD 3-Clause https://github.com/giampaolo/psutil/blob/master/LICENSE
     "psutil",
+
+    # HuggingFace datasets: for loading and converting parquet datasets
+    # Updated Thu Dec 04, 2025 with datasets==4.4.1
+    # License: Apache 2.0 https://github.com/huggingface/datasets/blob/main/LICENSE
+    "datasets",
 ]
 
 [dependency-groups]

@@ -1,10 +1,42 @@
 (training-nemo-rl-grpo-nemo-rl-configuration)=
 
 # NeMo RL Configuration
-:::{tip}
-The full NeMo RL training configuration file is located at: `examples/nemo_gym/grpo_workplace_assistant_nemotron_nano_v2_9b.yaml`
+
+With the Gym configuration in place, the next step is understanding the core training parameters. These control the GRPO algorithm, model behavior, and optimization settings that determine how your model learns.
+
+:::{card}
+
+**Goal**: Understand the GRPO and model hyperparameters for RL training.
+
+^^^
+
+**In this section, you will learn**:
+
+1. Model configuration parameters
+2. GRPO hyperparameters
+3. Optimizer settings
+
 :::
 
+:::{button-ref} training-nemo-rl-grpo-gym-configuration
+:color: secondary
+:outline:
+:ref-type: ref
+
+← Previous: Gym Configuration
+:::
+
+---
+
+## Configuration File Location
+
+The full training configuration file is located at:
+
+```
+examples/nemo_gym/grpo_workplace_assistant_nemotron_nano_v2_9b.yaml
+```
+
+---
 
 ## Model Configuration
 
@@ -14,6 +46,8 @@ The full NeMo RL training configuration file is located at: `examples/nemo_gym/g
 | `max_total_sequence_length` | 32768 | Maximum context length |
 | `precision` | bfloat16 | Training precision |
 | `tensor_model_parallel_size` | 8 | Tensor parallelism across GPUs |
+
+---
 
 ## GRPO Hyperparameters
 
@@ -25,6 +59,8 @@ The full NeMo RL training configuration file is located at: `examples/nemo_gym/g
 | `use_leave_one_out_baseline` | true | Variance reduction technique |
 | `normalize_rewards` | true | Normalize rewards across batch |
 
+---
+
 ## Optimizer Settings
 
 | Parameter | Value | Description |
@@ -35,3 +71,12 @@ The full NeMo RL training configuration file is located at: `examples/nemo_gym/g
 | `weight_decay` | 0.01 | Weight decay |
 | `adam_beta1` / `adam_beta2` | 0.9 / 0.999 | Adam hyperparameters |
 | `clip_grad` | 1.0 | Gradient clipping threshold |
+
+---
+
+:::{button-ref} training-nemo-rl-grpo-setup
+:color: primary
+:ref-type: ref
+
+Next: Setup →
+:::
