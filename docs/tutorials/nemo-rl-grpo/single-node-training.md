@@ -17,12 +17,16 @@ uv run nemo_rl/utils/prefetch_venvs.py
 ```
 :::
 
-Download NVIDIA [Nemotron Nano 9B v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2)
+Download NVIDIA [Nemotron Nano 9B v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2) and setup the chat template we will be using for training.
 ```bash
 HF_HOME=$PWD/.cache/ \
 HF_TOKEN={your HF token} \
     hf download nvidia/NVIDIA-Nemotron-Nano-9B-v2
+
+tokenizer_config_path=$(find $PWD/.cache/hub/models--nvidia--NVIDIA-Nemotron-Nano-9B-v2 -name tokenizer_config.json)
+cat $tokenizer_config_path | jq -r '.chat_template' | sed 's/enable_thinking=true/enable_thinking=false/g' > nemotron_nano_v2_chat_template.jinja
 ```
+
 
 Clean up any existing or leftover Ray/vLLM processes
 ```bash
@@ -52,6 +56,7 @@ uv run python examples/nemo_gym/run_grpo_nemo_gym.py \
     logger.wandb.name=$EXP_NAME \
     logger.log_dir=results/$EXP_NAME \
     ++policy.generation.vllm_cfg.tool_parser_plugin=$(find $PWD/.cache -name nemotron_toolcall_parser_no_streaming.py) \
+    ++policy.generation.vllm_cfg.http_server_serving_chat_kwargs.chat_template=$(cat nemotron_nano_v2_chat_template.jinja) \
     ++grpo.num_prompts_per_step=4 \
     ++grpo.max_num_steps=3 \
     checkpointing.checkpoint_dir=results/$EXP_NAME &> results/$EXP_NAME/output.log &
