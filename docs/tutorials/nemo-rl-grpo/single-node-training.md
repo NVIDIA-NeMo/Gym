@@ -47,15 +47,15 @@ CONFIG_PATH=examples/nemo_gym/grpo_workplace_assistant_nemotron_nano_v2_9b.yaml
 
 # Launch training
 # Set these environment variables before running:
-#   HF_TOKEN: Your Hugging Face token for model downloads
 #   WANDB_API_KEY: Your Weights & Biases API key for logging
+#   logger.wandb.project: Fill in your username
 TORCH_CUDA_ARCH_LIST="9.0 10.0" \
 HF_HOME=$PWD/.cache/ \
 HF_HUB_OFFLINE=1 \
 WANDB_API_KEY={your W&B API key} \
 uv run python examples/nemo_gym/run_grpo_nemo_gym.py \
     --config=$CONFIG_PATH \
-    logger.wandb.project="${USER}-nemo-gym-rl-integration" \
+    logger.wandb.project="${Your Username}-nemo-gym-rl-integration" \
     logger.wandb.name=$EXP_NAME \
     logger.log_dir=results/$EXP_NAME \
     ++policy.generation.vllm_cfg.tool_parser_plugin=$(find $PWD/.cache -name nemotron_toolcall_parser_no_streaming.py) \
