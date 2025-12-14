@@ -205,11 +205,6 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.extra_body:
             create_params = self.config.extra_body | create_params
 
-        # TODO remove
-        import json
-
-        print(f"FINAL CREATE PARAMS: {json.dumps(create_params)}")
-
         try:
             chat_completion_dict = await client.create_chat_completion(**create_params)
         except ClientResponseError as e:
