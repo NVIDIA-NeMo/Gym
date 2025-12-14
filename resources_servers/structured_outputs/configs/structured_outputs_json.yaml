@@ -35,6 +35,9 @@ structured_outputs_simple_agent:
           dataset_name: structured_outputs_251027_nano_v3_sdg_json_val
           version: 0.0.2
           artifact_fpath: structured_outputs_251027_nano_v3_sdg_json_val.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-instruction_following-structured_outputs
+          artifact_fpath: structured_outputs_251027_nano_v3_sdg_json_val.jsonl
         license: Apache 2.0
       - name: example
         type: example
