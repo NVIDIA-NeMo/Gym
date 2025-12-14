@@ -118,3 +118,27 @@ The Workplace Assistant environment's tool-calling tasks correlate with performa
 You can run BFCL v3 evaluations using [NeMo Evaluator](https://github.com/NVIDIA-NeMo/Evaluator), which supports BFCL v3. Refer to the [NeMo Evaluator docs](https://github.com/NVIDIA-NeMo/Evaluator#-supported-benchmarks-and-evaluation-harnesses) for full setup instructions and supported benchmarks.
 
 **✅ Success Check**: BFCL v3 scores improve after training compared to the baseline model.
+
+---
+
+## What's Next?
+
+Congratulations! You've trained Nemotron Nano 9B v2 for multi-step tool calling using GRPO on the Workplace Assistant environment.
+
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Use Other Training Environments
+:link: https://github.com/NVIDIA-NeMo/Gym#-available-resource-servers
+
+Browse available resource servers on GitHub to find other training environments.
+:::
+
+:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build a Custom Training Environment
+:link: ../creating-resource-server
+:link-type: doc
+
+Create your own resource server with custom tools and verification logic.
+:::
+
+::::
