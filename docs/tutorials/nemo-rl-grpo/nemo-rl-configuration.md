@@ -2,7 +2,7 @@
 
 # NeMo RL Configuration
 
-This section explains the GRPO and model configuration parameters in the NeMo RL training config.
+With the Gym configuration in place, the next step is understanding the core training parameters. These control the GRPO algorithm, model behavior, and optimization settings that determine how your model learns.
 
 :::{card}
 

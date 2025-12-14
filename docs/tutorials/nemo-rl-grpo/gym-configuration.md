@@ -2,7 +2,7 @@
 
 # Gym Configuration
 
-This section explains the Gym-specific configuration sections within the NeMo RL training config.
+Before running GRPO training, you need to configure how NeMo RL connects to NeMo Gym. The training config file contains Gym-specific parameters that control data loading, environment interaction, and validation.
 
 :::{card}
 

@@ -2,7 +2,7 @@
 
 # Multi-Node Training
 
-This section guides you through scaling GRPO training to multiple nodes for production workloads.
+Your single-node test run confirmed that the environment, model, and training loop all work correctly. Now you can scale to multiple nodes for production training, where the full power of distributed computing accelerates your GRPO optimization.
 
 :::{card}
 

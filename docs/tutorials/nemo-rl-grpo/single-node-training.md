@@ -2,7 +2,7 @@
 
 # Single Node Training
 
-This section guides you through running a single-node GRPO training run to validate your setup before scaling to multiple nodes.
+With your environment set up and data prepared, you're ready to run training. But before committing to a multi-hour, multi-node job, it's important to verify everything works correctly on a single node first.
 
 :::{card}
 

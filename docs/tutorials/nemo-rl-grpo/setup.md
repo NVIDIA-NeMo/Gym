@@ -2,7 +2,7 @@
 
 # Setup
 
-This section guides you through setting up NeMo RL and NeMo Gym for GRPO training.
+Now that you understand the configuration parameters for GRPO training, it's time to set up your environment. This involves launching containers, installing dependencies, and preparing your training data—the foundation for everything that follows.
 
 :::{card}
 
