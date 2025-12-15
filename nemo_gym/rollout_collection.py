@@ -14,11 +14,12 @@
 # limitations under the License.
 import asyncio
 import json
+import logging
 from asyncio import Future, Semaphore
-from collections import Counter
+from collections import Counter, defaultdict
 from contextlib import nullcontext
 from itertools import chain, repeat
-from typing import Any, Dict, Iterator, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Set
 
 from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
@@ -32,6 +33,12 @@ from nemo_gym.server_utils import (
     raise_for_status,
     set_global_aiohttp_client,
 )
+
+
+if TYPE_CHECKING:
+    from nemo_gym.comparison_strategies import ComparisonStrategy
+
+logger = logging.getLogger(__name__)
 
 
 class RolloutCollectionConfig(BaseNeMoGymCLIConfig):
@@ -122,12 +129,27 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
         print(json.dumps(avg_metrics, indent=4))
 
     def run_examples(
-        self, examples: List[Dict], head_server_config: Optional[BaseServerConfig] = None
+        self,
+        examples: List[Dict],
+        head_server_config: Optional[BaseServerConfig] = None,
+        comparison_strategy: Optional["ComparisonStrategy"] = None,
     ) -> Iterator[Future]:
         """
-        We provide this function as a lower level interface for running rollout collection.
+        Run rollout collection with optional comparison strategy.
+
+        When comparison_strategy is provided, samples matching strategy.agent_names
+        are processed with generation-only + buffering + comparison, while other
+        samples go through the standard agent /run path. Both run in parallel.
         """
         server_client = self.setup_server_client(head_server_config)
+
+        if comparison_strategy:
+            return self._run_with_comparison_strategy(examples, server_client, comparison_strategy)
+        else:
+            return self._run_standard(examples, server_client)
+
+    def _run_standard(self, examples: List[Dict], server_client: ServerClient) -> Iterator[Future]:
+        """Standard rollout collection - each sample through its agent."""
 
         async def _post_subroutine(row: Dict) -> Dict:
             res = await server_client.post(server_name=row.pop("agent_ref")["name"], url_path="/run", json=row)
@@ -137,6 +159,113 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
         return tqdm.as_completed(
             map(_post_subroutine, examples), desc="Collecting rollouts", miniters=10, total=len(examples)
         )
+
+    def _run_with_comparison_strategy(
+        self,
+        examples: List[Dict],
+        server_client: ServerClient,
+        strategy: "ComparisonStrategy",
+    ) -> Iterator[Future]:
+        """Run with comparison strategy - strategy samples get generation + compare, others get /run."""
+        from nemo_gym.comparison_strategies import (
+            extract_conversation_history,
+            generate_response,
+            get_prompt_key,
+        )
+
+        strategy_agent_names = set(strategy.agent_names)
+        strategy_samples = []
+        standard_samples = []
+
+        for idx, example in enumerate(examples):
+            agent_ref = example.get("agent_ref", {})
+            agent_name = agent_ref.get("name", "") if isinstance(agent_ref, dict) else ""
+            if agent_name in strategy_agent_names:
+                strategy_samples.append((idx, example))
+            else:
+                standard_samples.append((idx, example))
+
+        logger.info(f"Comparison strategy: {len(strategy_samples)} samples, Standard: {len(standard_samples)} samples")
+
+        async def _run_all() -> List[Dict]:
+            results = [None] * len(examples)
+
+            async def process_standard():
+                async def _do(idx: int, ex: Dict):
+                    ex_copy = ex.copy()
+                    agent_name = ex_copy.pop("agent_ref")["name"]
+                    res = await server_client.post(server_name=agent_name, url_path="/run", json=ex_copy)
+                    await raise_for_status(res)
+                    results[idx] = await res.json()
+
+                if standard_samples:
+                    await asyncio.gather(*[_do(idx, ex) for idx, ex in standard_samples])
+
+            async def process_strategy():
+                if not strategy_samples:
+                    return
+                num_gens = strategy.num_generations_per_prompt
+                policy_model = strategy.policy_model_server_name
+                prompt_buffers: Dict[str, List[tuple]] = defaultdict(list)
+                compare_tasks: List[asyncio.Task] = []
+                compared: Set[str] = set()
+                lock = asyncio.Lock()
+
+                async def on_gen_complete(idx: int, example: Dict, gen_result: Dict):
+                    prompt_key = get_prompt_key(example)
+                    async with lock:
+                        prompt_buffers[prompt_key].append((idx, example, gen_result))
+                        if len(prompt_buffers[prompt_key]) == num_gens and prompt_key not in compared:
+                            compared.add(prompt_key)
+                            group = prompt_buffers[prompt_key]
+                            task = asyncio.create_task(_compare_group(prompt_key, group))
+                            compare_tasks.append(task)
+
+                async def _compare_group(prompt_key: str, group: List[tuple]):
+                    first_example = group[0][1]
+                    conv_history = extract_conversation_history(first_example)
+                    # Extract principle from example data for principle-based GenRM
+                    principle = first_example.get("principle")
+
+                    # Debug log: show whether GenRM is using principle-based judging
+                    if principle:
+                        print(f"[GenRM] Judging with PRINCIPLE (len={len(principle)}): {principle}")
+                    else:
+                        print("[GenRM] Judging WITHOUT principle")
+
+                    # Pass raw Response API objects - text extraction happens in genrm_compare
+                    response_objs = [gr for _, _, gr in group]
+                    rewards, genrm_metrics = await strategy.compare(
+                        conv_history, response_objs, server_client, principle=principle
+                    )
+
+                    for i, (idx, _, gen_result) in enumerate(group):
+                        # Include GenRM metrics in each result so they flow back to NeMo-RL
+                        results[idx] = {
+                            "response": gen_result,
+                            "reward": rewards[i],
+                            **{f"genrm_{k}": v for k, v in genrm_metrics.items()},
+                        }
+
+                async def gen_and_notify(idx: int, example: Dict):
+                    gen_result = await generate_response(example, server_client, policy_model)
+                    await on_gen_complete(idx, example, gen_result)
+
+                await asyncio.gather(*[gen_and_notify(idx, ex) for idx, ex in strategy_samples])
+                if compare_tasks:
+                    await asyncio.gather(*compare_tasks)
+
+            await asyncio.gather(process_standard(), process_strategy())
+            return results
+
+        main_future = asyncio.ensure_future(_run_all())
+
+        async def _get_at(idx: int) -> Dict:
+            results = await main_future
+            return results[idx]
+
+        futures = [asyncio.ensure_future(_get_at(i)) for i in range(len(examples))]
+        return tqdm.as_completed(futures, desc="Collecting rollouts", miniters=10, total=len(examples))
 
     def setup_server_client(self, head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:
         server_client = ServerClient.load_from_global_config(head_server_config)

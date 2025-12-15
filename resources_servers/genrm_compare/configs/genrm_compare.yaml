@@ -1,0 +1,76 @@
+# GenRM Pairwise Comparison Resources Server Config
+#
+# This server compares multiple candidate responses using a GenRM model.
+# The GenRM model uses a special chat template with roles 'response_1' and 'response_2'.
+#
+# Expected GenRM output format (JSON):
+# {
+#     "score_1": <1-5>,  # Individual helpfulness score for response 1
+#     "score_2": <1-5>,  # Individual helpfulness score for response 2
+#     "ranking": <1-6>   # 1=R1 much better, 6=R2 much better
+# }
+
+genrm_compare:
+  resources_servers:
+    genrm_compare:
+      entrypoint: app.py
+      
+      # GenRM model server reference
+      # Point this to your GenRM model (e.g., vllm_model with GenRM checkpoint)
+      genrm_model_server:
+        type: responses_api_models
+        name: genrm_model  # Override this to point to your GenRM model server
+      
+      # Generation params for GenRM calls
+      genrm_responses_create_params:
+        input: []
+        max_output_tokens: 16384
+        temperature: 0.6
+        top_p: 0.95
+      
+      # Comparison strategy: "all_pairs" (C(n,2) comparisons) or "circular" (n comparisons)
+      comparison_strategy: circular
+      
+      # Number of judge passes per pair (for majority voting)
+      num_judges_per_comparison: 1
+      
+      # Aggregator method (only "simple_tiebreaker" is currently supported)
+      aggregator_method: simple_tiebreaker
+      
+      # Bonus for shortest reasoning trace if in top percentile
+      reasoning_bonus: 0.0
+      # Bonus for shortest final answer if in top percentile
+      answer_bonus: 0.0
+      # Top percentile threshold (e.g., 0.2 = top 20%)
+      top_percentile: 0.2
+      # Group-relative length penalty coefficients
+      # Shorter responses get bonus, longer get penalty (mean-centered)
+      group_reasoning_length_penalty_coeff: 0.0
+      group_answer_length_penalty_coeff: 0.0
+      
+      # Default scores when parsing fails
+      default_score: 3.0
+      default_ranking: 3.5
+      
+      # Server metadata
+      domain: rlhf
+      verified: false
+      description: GenRM pairwise comparison for RLHF training
+      value: Compare multiple candidate responses using GenRM model
+
+# GenRM Simple Agent - wraps genrm_compare for GRPO training
+genrm_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: genrm_compare
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        license: Apache 2.0
+        jsonl_fpath: resources_servers/genrm_compare/data/example.jsonl

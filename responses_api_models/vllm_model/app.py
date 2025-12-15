@@ -39,6 +39,7 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionAssistantMessageForTrainingParam,
     NeMoGymChatCompletionAssistantMessageParam,
     NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymChatCompletionCustomRoleMessageParam,
     NeMoGymChatCompletionDeveloperMessageParam,
     NeMoGymChatCompletionMessage,
     NeMoGymChatCompletionMessageParam,
@@ -682,6 +683,10 @@ class VLLMConverter(BaseModel):
                         role="developer",
                     )
                 ]
+            # Custom roles (e.g., GenRM response_1/response_2 for pairwise comparison)
+            case "response_1" | "response_2" | "principle":
+                state.flush_assistant()
+                converted = [NeMoGymChatCompletionCustomRoleMessageParam(role=m["role"], content=content)]
             case _:  # pragma: no cover
                 raise NotImplementedError(f"Unrecognized role for message: `{m['role']}`")
 

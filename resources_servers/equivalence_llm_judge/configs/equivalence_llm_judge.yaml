@@ -135,7 +135,7 @@ equivalence_llm_judge_simple_agent:
         license: "TBD"
         jsonl_fpath: resources_servers/equivalence_llm_judge/data/example_openqa.jsonl
       - name: train
-        type: train
+        type: example
         license: Apache 2.0
         jsonl_fpath: resources_servers/equivalence_llm_judge/data/train.jsonl
         dataset_url: https://huggingface.co/datasets/nvidia/Nemotron-RL-knowledge-openQA

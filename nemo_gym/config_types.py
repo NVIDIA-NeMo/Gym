@@ -342,6 +342,7 @@ class Domain(str, Enum):
     GAMES = "games"
     TRANSLATION = "translation"
     E2E = "e2e"
+    RLHF = "rlhf"
     OTHER = "other"
 
 
