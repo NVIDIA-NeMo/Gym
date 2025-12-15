@@ -48,6 +48,7 @@ from responses_api_agents.swe_agents.utils import (
     get_model_endpoint,
     run_swebench_evaluation,
     setup_openhands_environment,
+    setup_r2e_gym_environment,
     setup_swebench_environment,
 )
 
@@ -104,7 +105,12 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         description="Path to pre-built SWE-bench directory (automatically set during initialization)",
         exclude=True,
     )
-
+    # Pre-built R2E-gym directory path (set during initialization)
+    r2e_gym_setup_dir: Optional[Path] = Field(
+        default=None,
+        description="Path to pre-built R2E-gym directory (automatically set during initialization)",
+        exclude=True,
+    )
     dataset_path: Optional[str] = Field(
         default=None,
         description="Path to the dataset for SWE-bench evaluation",
@@ -172,6 +178,14 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             print(f"Failed to set up SWE-bench environment: {e}", flush=True)
             raise
 
+        print("Setting up R2E-gym environment during initialization...", flush=True)
+        try:
+            self.config.r2e_gym_setup_dir = setup_r2e_gym_environment()
+            print(f"R2E-gym environment ready at: {self.config.r2e_gym_setup_dir}", flush=True)
+        except Exception as e:
+            print(f"Failed to set up R2E-gym environment: {e}", flush=True)
+            raise
+
         self.config.run_session_id = f"{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
@@ -202,6 +216,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "agent_framework_commit": self.config.agent_framework_commit,
                 "openhands_setup_dir": self.config.openhands_setup_dir,
                 "swebench_setup_dir": self.config.swebench_setup_dir,
+                "r2e_gym_setup_dir": self.config.r2e_gym_setup_dir,
                 "dataset_path": self.config.dataset_path,
             }
             future = runner_ray_remote.remote(run_swebench_evaluation, params)

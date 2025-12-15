@@ -1,7 +1,9 @@
 import asyncio
 import glob
 import json
+import logging
 import os
+import re
 import shlex
 import time
 import uuid
@@ -9,8 +11,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
-import re
+
 import tomlkit
+
+
+logging.basicConfig(level=logging.INFO)
+LOG = logging.getLogger(__name__)
 
 
 class SupportedAgentFrameworks(str, Enum):
@@ -79,6 +85,7 @@ class RunOpenHandsAgent:
     output_dir: str = None
     openhands_setup_dir: Path | None = None
     swebench_setup_dir: Path | None = None
+    r2e_gym_setup_dir: Path | None = None
     dataset_path: str | None = None
 
     async def _run_swe_agent(self, data_point, api_base):
@@ -309,8 +316,14 @@ class RunOpenHandsAgent:
         instance_dataset_dir = Path(self.output_dir) / "instance_datasets"
         instance_dataset_dir.mkdir(parents=True, exist_ok=True)
         instance_dataset_path = instance_dataset_dir / f"{agent_run_id}.jsonl"
+
+        # Parse instance_dict to ensure repo_name field exists
+        instance_dict = json.loads(data_point["instance_dict"])
+        if "repo" in instance_dict and "repo_name" not in instance_dict:
+            instance_dict["repo_name"] = instance_dict["repo"]
+
         with open(instance_dataset_path, "w") as f:
-            f.write(data_point["instance_dict"] + "\n")
+            f.write(json.dumps(instance_dict) + "\n")
         return instance_dataset_path
 
     def _cleanup_instance_dataset(self, dataset_path):
@@ -343,7 +356,15 @@ class RunOpenHandsAgent:
         """
         instance_id = data_point["instance_id"]
         container_formatter = data_point["container_formatter"]
-
+        if "R2E-Gym" in data_point["dataset_name"]:
+            instance_id_modified = re.sub(
+                r"[^_]+__([^-]+)-", lambda m: m.group(1).lower() + "_final_", data_point["instance_id"]
+            )
+            container_name = data_point["container_formatter"].format(instance_id=instance_id_modified)
+            if os.path.exists(container_name):
+                LOG.info(f"container found: {container_name}")
+                LOG.info(f"container formatter: {data_point['container_formatter']}")
+                return container_name
         replacements = ["_1776_", "_s_"]
 
         # Generate all candidate IDs in order of priority
@@ -415,7 +436,8 @@ class RunOpenHandsAgent:
         )
 
         # Fix localhost URLs not working sometimes
-        command = f"echo '127.0.0.1 localhost' >/etc/hosts && {command}"
+        container_commands = []
+        container_commands.append("echo '127.0.0.1 localhost' >/etc/hosts")
 
         # Build mount arguments
         mount_args = [
@@ -455,13 +477,35 @@ class RunOpenHandsAgent:
             mount_args.append(f"--mount type=bind,src={parsing_script_path},dst=/root/parsing_script.py")
             mount_args.append(f"--mount type=bind,src={model_patch_path},dst=/root/patch.diff")
 
+        if mode == "eval" and "R2E-Gym" in data_point["dataset_name"]:
+            # Mount the entire setup directory at both /r2egym_setup and its original absolute path
+            # This is needed because uv venv has hardcoded absolute paths in its wrappers
+            LOG.info(f"Mounting R2E-Gym setup directory from: {self.r2e_gym_setup_dir}")
+            mount_args.append(f"--mount type=bind,src={self.r2e_gym_setup_dir},dst=/r2egym_setup")
+            mount_args.append(f"--mount type=bind,src={self.r2e_gym_setup_dir},dst={self.r2e_gym_setup_dir}")
+            mount_args.append(f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl")
+
+        if mode == "agent" and "R2E-Gym" in data_point["dataset_name"]:
+            # Remove R2E-Gym test-related files.
+            for root_dir in ["", "/root", "/testbed"]:
+                container_commands.append(
+                    # /r2e_tests contains evaluation tests that the agent should not see.
+                    f"rm -rf {root_dir}/r2e_tests && "
+                    # run_tests.sh launches the tests in /r2e_tests, so the agent should not see this either.
+                    # We check that it contains the substring "r2e_tests"
+                    # to avoid accidentally deleting an unrelated file with that name.
+                    f"if grep -qs r2e_tests {root_dir}/run_tests.sh; then rm -rf {root_dir}/run_tests.sh; fi"
+                )
+        container_commands.append(command)
+        combined_command = " && ".join(container_commands)
+
         mount_str = " ".join(mount_args)
 
         # Launch Apptainer container and execute the command
         apptainer_cmd = (
             f"apptainer exec --writable-tmpfs --no-mount home,tmp,bind-paths "
             f"{mount_str} "
-            f"{container_name} bash -c {shlex.quote(command)}"
+            f" {container_name} bash -c {shlex.quote(combined_command)}"
         )
 
         # Retry apptainer command up to max_retries times
@@ -519,6 +563,51 @@ class RunOpenHandsAgent:
                         f"Expected exactly one file matching {expected_file_pattern}, "
                         f"found {len(pred_files) if 'pred_files' in locals() else 'unknown'}."
                     )
+
+    async def _run_r2e_gym_eval(
+        self,
+        pred_mounted_path: str,
+        data_point: dict[str, Any],
+        agent_run_id: str,
+        instance_dataset_path: str,
+    ):
+        assert self.r2e_gym_setup_dir is not None, "R2E-Gym setup directory is not set"
+        assert self.dataset_path is not None, "Dataset path is not set"
+
+        r2e_gym_cmd = (
+            # Use mounted directory path for cd
+            "cd /r2egym_setup/R2E-Gym && "
+            # Set UV environment variables to use the mounted portable directories
+            f'export UV_INSTALL_DIR="{self.r2e_gym_setup_dir}/uv" && '
+            f'export UV_PYTHON_INSTALL_DIR="{self.r2e_gym_setup_dir}/python" && '
+            f'export PATH="{self.r2e_gym_setup_dir}/uv/bin:$PATH" && '
+            # Run with clean environment to avoid venv contamination
+            # Use the pre-built venv directly with its absolute path
+            f"env -u VIRTUAL_ENV {self.r2e_gym_setup_dir}/R2E-Gym/.venv/bin/python src/r2egym/agenthub/run/run_local_evaluation.py "
+            f"    --predictions_path {pred_mounted_path} "
+            f"    --instance_id {data_point['instance_id']} "
+            f"    --timeout {self.cfg.swebench_tests_timeout} "
+            f"    --dataset /root/dataset/data.jsonl "
+            f"    --output_dir /trajectories_mount/eval-outputs/{agent_run_id}"
+        )
+
+        search_path = os.path.join(
+            self.output_dir,
+            "eval-outputs",
+            agent_run_id,
+            "report.json",
+        )
+        LOG.info(f"Search path: {search_path}")
+        report_file = await self._execute_container_command(
+            data_point,
+            r2e_gym_cmd,
+            search_path,
+            mode="eval",
+            timeout=self.cfg.swebench_tests_timeout + 120,
+            dataset_mount_path=instance_dataset_path,
+        )
+        LOG.info(f"Report file: {report_file}")
+        return report_file
 
     async def _run_swebench_eval(
         self,
@@ -683,6 +772,13 @@ class RunOpenHandsAgent:
                         report_file = await self._run_nv_internal_eval(
                             data_point,
                             trajectory_dict["model_patch"],
+                            instance_dataset_path,
+                        )
+                    elif "R2E-Gym" in data_point["dataset_name"]:
+                        report_file = await self._run_r2e_gym_eval(
+                            pred_mounted_path,
+                            data_point,
+                            agent_run_id,
                             instance_dataset_path,
                         )
                     else:
