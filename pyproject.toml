@@ -23,7 +23,7 @@ dynamic = [
     "version",
     "readme",
 ]
-description = "NeMo Gym is a framework for building reinforcement learning environments"
+description = "NeMo Gym is a library for building reinforcement learning environments"
 license = {file = "LICENSE"}
 requires-python = ">=3.12"
 authors = [{ name = "NVIDIA" }]
@@ -71,7 +71,7 @@ dependencies = [
     # 2. When this dependency was last updated
     # 3. The license of the dependencies.
     #
-    # If you are adding or removing dependencies, please do your due diligience to update this information. PRs to main that modify dependencies will not be accepted unless this information is provided.
+    # If you are adding or removing dependencies, please do your due diligence to update this information. PRs to main that modify dependencies will not be accepted unless this information is provided.
     # The licenses of the below dependencies include: Apache 2.0, MIT, and BSD 3-Clause
     #
     # By design, most (if not all) dependencies are unfrozen here to be easier to consume. The core pieces we need are server infra like FastAPI, etc.
@@ -83,7 +83,7 @@ dependencies = [
     # License: Apache 2.0 https://github.com/openai/openai-python/blob/a8258744cbecf51321587fc870e8920bd2c07809/LICENSE
     "openai<=2.6.1",
 
-    # tqdm: Use for progress tracking on batch operations.
+    # tqdm: Used for progress tracking on batch operations.
     # Updated Fri Jul 25, 2025 with tqdm==4.67.1
     # License: MIT https://github.com/tqdm/tqdm/blob/0ed5d7f18fa3153834cbac0aa57e8092b217cc16/LICENCE
     "tqdm",
@@ -153,6 +153,11 @@ dependencies = [
     # Updated: Fri Nov 07, 2025 with psutil==6.1.1
     # License: BSD 3-Clause https://github.com/giampaolo/psutil/blob/master/LICENSE
     "psutil",
+
+    # HuggingFace datasets: for loading and converting parquet datasets
+    # Updated Thu Dec 04, 2025 with datasets==4.4.1
+    # License: Apache 2.0 https://github.com/huggingface/datasets/blob/main/LICENSE
+    "datasets",
 ]
 
 [dependency-groups]
@@ -202,7 +207,7 @@ dev = [
     "pytest",
     "pytest-asyncio",
 
-    # Requests-mock: Used in pytest asyncio
+    # Requests-mock: Used for mocking HTTP requests in tests
     # Updated: Fri Jul 25, 2025 and requests-mock==1.12.1
     # License: Apache 2.0 https://github.com/jamielennox/requests-mock/blob/9742d02a8cad17276dbeba7b300b6d27ae1b6fb1/LICENSE
     "requests-mock",
@@ -223,8 +228,8 @@ readme = {file = "README.md", content-type = "text/markdown"}
 egg_base = "cache"
 
 [project.urls]
-Download = "https://github.com/NVIDIA-NeMo/NeMo-Gym/releases"
-Homepage = "https://github.com/NVIDIA-NeMo/NeMo-Gym"
+Download = "https://github.com/NVIDIA-NeMo/Gym/releases"
+Homepage = "https://github.com/NVIDIA-NeMo/Gym"
 
 [project.scripts]
 # Run/test scripts for servers.
@@ -263,7 +268,7 @@ ng_upload_dataset_to_hf = "nemo_gym.dataset_orchestrator:upload_jsonl_dataset_to
 nemo_gym_download_dataset_from_hf = "nemo_gym.dataset_orchestrator:download_jsonl_dataset_from_hf_cli"
 ng_download_dataset_from_hf = "nemo_gym.dataset_orchestrator:download_jsonl_dataset_from_hf_cli"
 
-# HF -> Gitlab (upload then delete)
+# Gitlab -> HF (upload then delete)
 nemo_gym_gitlab_to_hf_dataset = "nemo_gym.dataset_orchestrator:upload_jsonl_dataset_to_hf_and_delete_gitlab_cli"
 ng_gitlab_to_hf_dataset = "nemo_gym.dataset_orchestrator:upload_jsonl_dataset_to_hf_and_delete_gitlab_cli"
 
@@ -289,14 +294,14 @@ ng_version = "nemo_gym.cli:version"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["resources_servers", "responses_api_agents", "responses_api_models", "nemo_gym", "penguin"]
+include = ["resources_servers", "responses_api_agents", "responses_api_models", "nemo_gym"]
 
 ################################################
 # Testing
 ################################################
 
 [tool.pytest.ini_options]
-# durations=0 will display all tests execution time, sorted in ascending order starting from from the slowest one.
+# durations=0 will display all tests execution time, sorted in ascending order starting from the slowest one.
 # -vv will also display tests with duration = 0.00s
 addopts = "--verbose --pyargs --durations=0 --strict-markers"  # always add these arguments to pytest
 testpaths = ["tests"]
@@ -330,7 +335,7 @@ markers = [
     "system: marks test working at the highest integration level (deselect with '-m \"not system\"')",
     "acceptance: marks test checking whether the developed product/model passes the user defined acceptance criteria (deselect with '-m \"not acceptance\"')",
     "docs: mark tests related to documentation (deselect with '-m \"not docs\"')",
-    "skipduringci: marks tests that are skipped ci as they are addressed by Jenkins jobs but should be run to test user setups",
+    "skipduringci: marks tests that are skipped during ci as they are addressed by Jenkins jobs but should be run to test user setups",
     "pleasefixme: marks tests that are broken and need fixing",
 ]
 
@@ -371,10 +376,10 @@ exclude_also = [
 omit = []
 
 ################################################
-# Linting, formatting, and QOL
+# Linting, formatting, and QOL (using ruff)
 ################################################
 [tool.ruff]
-# Match black's line length
+# Line length configuration
 line-length = 119
 target-version = "py312"
 
@@ -398,7 +403,7 @@ extend-exclude = [
     "*.ipynb",
 ]
 [tool.ruff.lint]
-# Configure imports sorting to match isort
+# Configure linting rules
 select = [
     "F541",  # f-string without any placeholders
     "F841",  # local variable assigned but never used
@@ -428,7 +433,7 @@ lines-after-imports = 2
 "tests/*.py" = ["D101", "D103"]
 
 [tool.ruff.format]
-# Match black configuration
+# Code formatting configuration
 quote-style = "double"
 skip-magic-trailing-comma = false
 line-ending = "auto"

@@ -24,8 +24,9 @@ mcqa_simple_agent:
           dataset_name: syn_gpqa_v1.1
           version: 1.1.2
           artifact_fpath: filtered_decontaminated.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-knowledge-mcqa
         license: Apache 2.0
-        dataset_url: https://huggingface.co/datasets/nvidia/Nemotron-RL-knowledge-mcqa
       - name: example
         type: example
         jsonl_fpath: resources_servers/mcqa/data/example.jsonl
