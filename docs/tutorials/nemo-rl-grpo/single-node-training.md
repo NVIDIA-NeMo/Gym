@@ -41,8 +41,7 @@ Make sure you have:
 Coming back from a break on a pre-existing filesystem setup? Run these commands once you enter the container:
 
 ```bash
-source /opt/nemo_rl_venv/bin/activate
-uv sync --group={build,docs,dev,test} --extra nemo_gym
+rm -rf /opt/ray_venvs/*
 uv run nemo_rl/utils/prefetch_venvs.py
 ```
 :::

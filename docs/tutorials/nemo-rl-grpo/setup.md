@@ -112,11 +112,8 @@ cd /path/to/nemo/rl
 # Initialize all submodules (Megatron, AutoModel, etc.)
 git submodule update --init --recursive
 
-# Activate the NeMo RL virtual environment
-source /opt/nemo_rl_venv/bin/activate
-
-# Install dependencies. This may take 5-10 minutes!
-uv sync --group={build,docs,dev,test} --extra nemo_gym
+# Clear and install dependencies. This may take 5-10 minutes!
+rm -rf /opt/ray_venvs/*
 uv run nemo_rl/utils/prefetch_venvs.py
 ```
 
@@ -191,10 +188,10 @@ ng_prepare_data "+config_paths=[${config_paths}]" \
     +data_source=huggingface
 ```
 
-Return to the NeMo RL directory and Python environment:
+Return to the NeMo RL directory:
 
 ```bash
-cd ../../.. && source /opt/nemo_rl_venv/bin/activate
+cd ../../..
 ```
 
 **✅ Success Check**: Dataset files are created in `3rdparty/Gym-workspace/Gym/data/workplace_assistant/`.
