@@ -126,7 +126,6 @@ html_extra_path = ["project.json", "versions1.json"]
 redirects = {
     # Get Started section renames
     "get-started/setup-installation.html": "get-started/detailed-setup.html",
-
     # RL Framework Integration moved from training/ to contribute/
     "training/rl-framework-integration/index.html": "contribute/rl-framework-integration/index.html",
     "training/rl-framework-integration/gym-integration-footprint-and-form-factor.html": "contribute/rl-framework-integration/gym-integration-footprint-and-form-factor.html",
@@ -136,11 +135,9 @@ redirects = {
     # Alternate naming conventions for the same pages
     "training/rl-framework-integration/integration-footprint.html": "contribute/rl-framework-integration/gym-integration-footprint-and-form-factor.html",
     "training/rl-framework-integration/on-policy-corrections.html": "contribute/rl-framework-integration/openai-compatible-http-server-on-policy-correction.html",
-
     # About/Concepts section renames
     "about/concepts/core-abstractions.html": "about/concepts/core-components.html",
     "about/concepts/configuration-system.html": "about/concepts/configuration.html",
-
     # Top-level page moves
     "how-to-faq.html": "reference/faq.html",
 }
