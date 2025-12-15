@@ -217,9 +217,7 @@ class AviaryAgent(SimpleResponsesAPIAgent):
                 break
 
         await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/close",
-            json={"env_id": env_id},
+            server_name=self.config.resources_server.name, url_path="/close", json={"env_id": env_id}
         )
 
         assert model_response is not None
@@ -236,7 +234,9 @@ class AviaryAgent(SimpleResponsesAPIAgent):
 
             verify_request = AviaryAgentVerifyRequest.model_validate(body.model_dump() | {"response": response})
             verify_response = await self.server_client.post(
-                server_name=self.config.resources_server.name, url_path="/verify", json=verify_request.model_dump()
+                server_name=self.config.resources_server.name,
+                url_path="/verify",
+                json=verify_request.model_dump(),
             )
 
             return AviaryAgentVerifyResponse.model_validate(await verify_response.json())
