@@ -1,15 +1,5 @@
 {
-    "name": "validation",
-    "type": "validation",
-    "jsonl_fpath": "resources_servers/aviary/data/gsm8k_validation.jsonl",
-    "num_repeats": 1,
-    "gitlab_identifier": {
-        "dataset_name": "PLACEHOLDER",
-        "version": "0.0.1",
-        "artifact_fpath": "train.jsonl"
-    },
-    "license": "Apache 2.0",
-    "Number of examples": 99,
+    "Number of examples": 5,
     "Number of tools": {
         "Total # non-null values": 0,
         "Average": 0.0,
@@ -19,7 +9,7 @@
         "Standard deviation": 0.0
     },
     "Json-dumped number of words (proxy for token count)": {
-        "Total # non-null values": 99,
+        "Total # non-null values": 5,
         "Average": 2.0,
         "Min": 2.0,
         "Max": 2.0,
@@ -43,11 +33,11 @@
         "Standard deviation": 0.0
     },
     "task_idx": {
-        "Total # non-null values": 99,
-        "Average": 5928.0,
-        "Min": 5879.0,
-        "Max": 5977.0,
-        "Median": 5928.0,
-        "Standard deviation": 28.72
+        "Total # non-null values": 5,
+        "Average": 2.0,
+        "Min": 0.0,
+        "Max": 4.0,
+        "Median": 2.0,
+        "Standard deviation": 1.58
     }
 }

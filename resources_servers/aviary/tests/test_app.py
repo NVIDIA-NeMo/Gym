@@ -21,13 +21,13 @@ from aviary.envs.gsm8k import GSM8kDataset, GSM8kDatasetSplit
 from fastapi import Request
 from starlette.testclient import TestClient
 
-from nemo_gym.integrations.aviary import AviaryCloseRequest, AviarySeedSessionRequest, AviaryStepRequest
 from nemo_gym.openai_utils import NeMoGymResponseFunctionToolCall
 from nemo_gym.server_utils import ServerClient
 from resources_servers.aviary.app import AviaryResourcesServerConfig
 from resources_servers.aviary.client_app import AviaryClientResourcesServer, AviaryClientResourcesServerConfig
 from resources_servers.aviary.gsm8k_app import GSM8kResourcesServer
 from resources_servers.aviary.notebook_app import BixBenchResourcesServer
+from resources_servers.aviary.schemas import AviaryCloseRequest, AviarySeedSessionRequest, AviaryStepRequest
 
 
 class TestGSM8kApp:
