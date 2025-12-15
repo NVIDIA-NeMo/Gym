@@ -18,18 +18,16 @@ calendar_simple_agent:
       - name: train
         type: train
         jsonl_fpath: resources_servers/calendar/data/train.jsonl
-        gitlab_identifier:
-          dataset_name: calendar
-          version: 0.0.1
-          artifact_fpath: calendar/train.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-agent-calendar_scheduling
+          artifact_fpath: train.jsonl
         license: Apache 2.0
       - name: validation
         type: validation
         jsonl_fpath: resources_servers/calendar/data/validation.jsonl
-        gitlab_identifier:
-          dataset_name: calendar
-          version: 0.0.1
-          artifact_fpath: calendar/validation.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-agent-calendar_scheduling
+          artifact_fpath: validation.jsonl
         license: Apache 2.0
       - name: example
         type: example

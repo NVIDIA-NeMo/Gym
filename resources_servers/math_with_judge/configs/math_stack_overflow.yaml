@@ -25,16 +25,14 @@ math_with_judge_simple_agent:
       - name: train
         type: train
         jsonl_fpath: resources_servers/math_with_judge/data/math_stack_overflow_train.jsonl
-        gitlab_identifier:
-          dataset_name: math_stack_overflow
-          version: 0.0.1
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-math-stack_overflow
           artifact_fpath: math_stack_overflow_problems.jsonl
         license: Creative Commons Attribution-ShareAlike 4.0 International
       - name: validation
         type: validation
         jsonl_fpath: resources_servers/math_with_judge/data/aime24_validation.jsonl
-        gitlab_identifier:
-          dataset_name: aime24
-          version: 0.0.1
-          artifact_fpath: aime24.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-math-OpenMathReasoning
+          artifact_fpath: aime24_validation.jsonl
         license: Apache 2.0
