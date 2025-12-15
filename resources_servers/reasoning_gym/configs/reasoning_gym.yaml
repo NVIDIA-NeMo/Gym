@@ -2,8 +2,8 @@ reasoning_gym:
   resources_servers:
     reasoning_gym:
       entrypoint: app.py
-      domain: agent
-      verified: false
+      domain: knowledge
+      verified: true
 reasoning_gym_simple_agent:
   responses_api_agents:
     simple_agent:
