@@ -34,7 +34,9 @@ from aviary.core import (
     ToolResponseMessage,
 )
 from nemo_gym.base_resources_server import SimpleResourcesServer
-from nemo_gym.integrations.aviary import (
+from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymFunctionCallOutput
+
+from .schemas import (
     AviaryAgentVerifyRequest,
     AviaryAgentVerifyResponse,
     AviaryCloseRequest,
@@ -46,7 +48,6 @@ from nemo_gym.integrations.aviary import (
     AviaryStepRequest,
     AviaryStepResponse,
 )
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymFunctionCallOutput
 
 
 logger = logging.getLogger(__name__)
