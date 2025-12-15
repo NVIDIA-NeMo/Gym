@@ -57,6 +57,8 @@ class AviaryAgentConfig(BaseResponsesAPIAgentConfig):
     # TODO: see if we can retrieve this from /models endpoint
     max_total_sequence_length: int | None = None
 
+    done_if_no_tool_calls: bool = True
+
     collapse_old_env_states: bool = False
     old_env_state_message: str = "[Previous environment state - hidden]"
 
@@ -174,17 +176,21 @@ class AviaryAgent(SimpleResponsesAPIAgent):
             done = False
 
             if not all_fn_calls and all_output_messages:
-                # Got non-tool-call outputs, so ask the model to try again.
-                obs: Sequence[NeMoGymEasyInputMessage | NeMoGymFunctionCallOutput] = [
-                    NeMoGymEasyInputMessage(
-                        role="user",
-                        content="You did not respond with a valid tool call. "
-                        "This may mean you did not call tools, or you tried to "
-                        "and got the formatting, tool name, or arguments "
-                        "wrong. To proceed, please call at least one tool.",
-                    )
-                ]
-                successful_transition = False
+                if self.config.done_if_no_tool_calls:
+                    done = True
+                    obs = []
+                else:
+                    # Got non-tool-call outputs, so ask the model to try again.
+                    obs: Sequence[NeMoGymEasyInputMessage | NeMoGymFunctionCallOutput] = [
+                        NeMoGymEasyInputMessage(
+                            role="user",
+                            content="You did not respond with a valid tool call. "
+                            "This may mean you did not call tools, or you tried to "
+                            "and got the formatting, tool name, or arguments "
+                            "wrong. To proceed, please call at least one tool.",
+                        )
+                    ]
+                    successful_transition = False
             else:
                 # Apply action to environment
                 raw_env_response = await self.server_client.post(
