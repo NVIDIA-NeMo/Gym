@@ -99,22 +99,8 @@ For the first setup on your local filesystem:
 git clone https://github.com/NVIDIA-NeMo/RL
 cd RL
 
-# Clone NeMo Gym as a submodule
-git clone https://github.com/NVIDIA-NeMo/Gym.git 3rdparty/Gym-workspace/Gym
-```
-
-Every time you enter a new container:
-
-```bash
-# CD into your NeMo RL folder
-cd /path/to/nemo/rl
-
-# Initialize all submodules (Megatron, AutoModel, etc.)
+# Initialize all submodules (Gym, Megatron, AutoModel, etc.)
 git submodule update --init --recursive
-
-# Clear and install dependencies. This may take 5-10 minutes!
-rm -rf /opt/ray_venvs/*
-uv run nemo_rl/utils/prefetch_venvs.py
 ```
 
 **✅ Success Check**: No errors during installation and `uv sync` completes successfully.
@@ -141,6 +127,15 @@ HF_HOME=$PWD/.cache/ \
 ```
 
 **✅ Success Check**: All tests pass without errors.
+
+:::{tip}
+You can clean up any existing or leftover Ray/vLLM processes using the following commands:
+```bash
+pkill -f VLLM
+ray stop --force
+uv run python -c "import ray; ray.shutdown()"
+```
+:::
 
 ---
 
