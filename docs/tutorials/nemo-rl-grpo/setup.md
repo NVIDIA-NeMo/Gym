@@ -142,15 +142,6 @@ HF_HOME=$PWD/.cache/ \
 
 **✅ Success Check**: All tests pass without errors.
 
-:::{tip}
-If you've run these tests before and encounter HuggingFace rate limit errors, try using the following command:
-
-```bash
-HF_HOME=$PWD/.cache/ \
-    ./examples/nemo_gym/run_nemo_gym_single_node_sanity_tests.sh
-```
-:::
-
 ---
 
 ## 4. Prepare NeMo Gym Data
