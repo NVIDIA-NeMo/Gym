@@ -98,23 +98,23 @@ def parse_server_info(proc, cmdline: List[str], env: dict) -> Optional[ServerPro
 class StatusCommand:
     """Main class to check server status"""
 
+    def check_health(self, server_info: ServerProcessInfo) -> ServerStatus:
+        """Check if server is responding"""
+        if not server_info.url:
+            return "unknown_error"
+
+        try:
+            requests.get(server_info.url, timeout=2)
+            return "success"
+        except requests.exceptions.ConnectionError:
+            return "connection_error"
+        except requests.exceptions.Timeout:
+            return "timeout"
+        except Exception:
+            return "unknown_error"
+
     def discover_servers(self) -> List[ServerProcessInfo]:
         """Find all running NeMo Gym server processes"""
-
-        def check_health(server_info: ServerProcessInfo) -> ServerStatus:
-            """Check if server is responding"""
-            if not server_info.url:
-                return "unknown_error"
-
-            try:
-                requests.get(server_info.url, timeout=2)
-                return "success"
-            except requests.exceptions.ConnectionError:
-                return "connection_error"
-            except requests.exceptions.Timeout:
-                return "timeout"
-            except Exception:
-                return "unknown_error"
 
         servers = []
         for proc in psutil.process_iter(["pid", "name", "cmdline", "create_time", "environ"]):
@@ -127,7 +127,7 @@ class StatusCommand:
                 server_info = parse_server_info(proc, cmdline, env)
 
                 if server_info:
-                    server_info.status = check_health(server_info)
+                    server_info.status = self.check_health(server_info)
                     servers.append(server_info)
 
             except (psutil.NoSuchProcess, psutil.AccessDenied):
