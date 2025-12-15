@@ -1,10 +1,11 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,11 +14,11 @@
 # limitations under the License.
 import re
 from time import time
-from typing import ClassVar, Dict, List, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
-from fastapi import FastAPI, Request
-from openai import BaseModel as OpenAIBaseModel
+from aiohttp.client_exceptions import ClientResponseError
+from fastapi import Request
 from pydantic import BaseModel, Field
 
 from nemo_gym.base_responses_api_model import (
@@ -33,6 +34,7 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionAssistantMessageParam,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionDeveloperMessageParam,
+    NeMoGymChatCompletionMessage,
     NeMoGymChatCompletionMessageParam,
     NeMoGymChatCompletionMessageToolCallFunctionParam,
     NeMoGymChatCompletionMessageToolCallParam,
@@ -67,6 +69,10 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     return_token_id_information: bool
 
     uses_reasoning_parser: bool
+    replace_developer_role_with_system: bool = False
+
+    # Corresponds to the extra_body of OpenAI Client.
+    extra_body: Optional[Dict[str, Any]] = None
 
     def model_post_init(self, context):
         if isinstance(self.base_url, str):
@@ -104,8 +110,7 @@ class VLLMModel(SimpleResponsesAPIModel):
     ) -> NeMoGymResponse:
         # Response Create Params -> Chat Completion Create Params
         chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(body)
-        if not body.model:
-            body.model = self.config.model
+        body.model = self.config.model
 
         # Chat Completion Create Params -> Chat Completion
         chat_completion_response = await self.chat_completions(request, chat_completion_create_params)
@@ -140,6 +145,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             metadata=body.metadata,
             instructions=body.instructions,
             user=body.user,
+            incomplete_details={"reason": "max_output_tokens"} if choice.finish_reason == "length" else None,
         )
 
     async def tokenize(
@@ -167,8 +173,13 @@ class VLLMModel(SimpleResponsesAPIModel):
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
+        if self.config.replace_developer_role_with_system:
+            for message in body.messages:
+                if message["role"] == "developer":
+                    message["role"] = "system"
+
         body_dict = body.model_dump(exclude_unset=True)
-        body_dict.setdefault("model", self.config.model)
+        body_dict["model"] = self.config.model
 
         session_id = request.session[SESSION_ID_KEY]
         if session_id not in self._session_id_to_client:
@@ -179,8 +190,6 @@ class VLLMModel(SimpleResponsesAPIModel):
         client = self._session_id_to_client[session_id]
 
         create_params = body_dict
-        # Always disable skip_special_tokens to preserve <think> </think> tags for reasoning parsing
-        create_params |= dict(skip_special_tokens=False)
 
         if self.config.return_token_id_information:
             create_params |= dict(
@@ -225,7 +234,48 @@ class VLLMModel(SimpleResponsesAPIModel):
                 else:
                     raise NotImplementedError
 
-        chat_completion_dict = await client.create_chat_completion(**create_params)
+        if self.config.extra_body:
+            create_params = self.config.extra_body | create_params
+
+        try:
+            chat_completion_dict = await client.create_chat_completion(**create_params)
+        except ClientResponseError as e:
+            """
+            Example messages for out of context length:
+
+            1. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L914
+            ```json
+            {"object":"error","message":"This model\'s maximum context length is 32768 tokens. However, you requested 32818 tokens in the messages, Please reduce the length of the messages. None","type":"BadRequestError","param":null,"code":400}
+            ```
+            2. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L940
+            3. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L948
+            4. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/sampling_params.py#L463
+            """
+            result_content_str = e.response_content.decode()
+
+            is_out_of_context_length = e.status == 400 and (
+                "context length" in result_content_str or "max_tokens" in result_content_str
+            )
+            if is_out_of_context_length:
+                return NeMoGymChatCompletion(
+                    id="chtcmpl-123",
+                    object="chat.completion",
+                    created=int(time()),
+                    model=self.config.model,
+                    choices=[
+                        NeMoGymChoice(
+                            index=0,
+                            finish_reason="stop",
+                            message=NeMoGymChatCompletionMessage(
+                                role="assistant",
+                                content=None,
+                                tool_calls=None,
+                            ),
+                        )
+                    ],
+                )
+            else:
+                raise e
 
         choice_dict = chat_completion_dict["choices"][0]
         if self.config.uses_reasoning_parser:
@@ -260,7 +310,6 @@ class VLLMModel(SimpleResponsesAPIModel):
                     tokenize_body_dict[key] = body_dict[key]
 
             # The base url has /v1 at the end but vLLM's tokenize endpoint does not have v1, hence the ..
-            # I can't believe the path is resolved correctly LOL
             tokenize_response = await client.create_tokenize(**tokenize_body_dict)
             """
             END
@@ -309,7 +358,9 @@ class VLLMConverterResponsesToChatCompletionsState(BaseModel):
             role="assistant",
             tool_calls=self.tool_calls_buffer,
         )
-        if self.return_token_id_information:
+
+        # We check here that self.token_information is non-empty since it's possible that some assistant messages are entirely inputs and are not generated by the model in this trajectory.
+        if self.return_token_id_information and self.token_information:
             message = NeMoGymChatCompletionAssistantMessageForTrainingParam(
                 **shared_params,
                 **self.token_information.model_dump(),
@@ -509,11 +560,11 @@ class VLLMConverter(BaseModel):
         state: VLLMConverterResponsesToChatCompletionsState,
     ) -> None:
         """
-        Collects text from 'reasoning' messages and appends it to a buffer.
+        Collects text from 'reasoning' messages in responses api and appends it to a buffer.
 
         This is done to group together one (or multiple) reasoning message(s) into a single,
         cohesive block, later prepending it to a subsequent assistant message.
-        See: https://gitlab-master.nvidia.com/bxyu/nemo-gym#reasoning-in-the-response-api
+        See: https://github.com/NVIDIA-NeMo/Gym/blob/main/docs/how-to-faq.md#faq-openai-responses-vs-chat-completions-api for an example of reasoning in responses api.
         """
         if "summary" in m and m["summary"]:
             texts = [s["text"] for s in m["summary"]]
@@ -591,11 +642,9 @@ class VLLMConverter(BaseModel):
                 )
             )
 
-        if not response_output:
-            print("COULD NOT CONSTRUCT RESPONSE OUTPUT", flush=True)
-            print(raw_message, flush=True)
-
-        if self.return_token_id_information:
+        # `"prompt_token_ids" in raw_message`: sometimes the model endpoint may go out of context length, in which case we return an empty response
+        # In these cases, there are no token id information provided.
+        if self.return_token_id_information and "prompt_token_ids" in raw_message:
             last_response_output_item = response_output[-1]
             train_cls = RESPONSES_TO_TRAIN[last_response_output_item.__class__]
             response_output[-1] = train_cls(

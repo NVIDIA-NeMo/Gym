@@ -2,6 +2,7 @@
     "name": "train",
     "type": "train",
     "jsonl_fpath": "resources_servers/google_search/data/train.jsonl",
+    "num_repeats": 1,
     "gitlab_identifier": {
         "dataset_name": "search_STEM_syn_gpqa_v1_2_difficulty_filtered",
         "version": "0.0.1",
@@ -13,24 +14,44 @@
         "Total # non-null values": 2907,
         "Average": 2.0,
         "Min": 2.0,
-        "Max": 2.0
+        "Max": 2.0,
+        "Median": 2.0,
+        "Standard deviation": 0.0
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 2907,
-        "Average": 282.97557619539043,
+        "Average": 282.98,
         "Min": 207.0,
-        "Max": 439.0
+        "Max": 439.0,
+        "Median": 280.91,
+        "Standard deviation": 35.33
     },
     "Number of turns": {
         "Total # non-null values": 2907,
         "Average": 1.0,
         "Min": 1.0,
-        "Max": 1.0
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
     },
     "Temperature": {
         "Total # non-null values": 2907,
-        "Average": 0.5999999999999719,
+        "Average": 0.6,
         "Min": 0.6,
-        "Max": 0.6
+        "Max": 0.6,
+        "Median": 0.6,
+        "Standard deviation": 0.0
+    },
+    "expected_answer": {
+        "unique_count": 4,
+        "total_count": 2907
+    },
+    "task_difficulty_qwen3_32b_avg_8": {
+        "Total # non-null values": 2907,
+        "Average": 0.374,
+        "Min": 0.25,
+        "Max": 0.5,
+        "Median": 0.374,
+        "Standard deviation": 0.103
     }
 }
