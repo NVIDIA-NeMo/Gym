@@ -18,7 +18,7 @@ from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
 from aiohttp.client_exceptions import ClientResponseError
-from fastapi import Request
+from fastapi import FastAPI, Request
 from pydantic import BaseModel, Field
 
 from nemo_gym.base_responses_api_model import (

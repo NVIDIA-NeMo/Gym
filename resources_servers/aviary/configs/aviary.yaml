@@ -2,6 +2,7 @@ aviary_resources_server:
   resources_servers:
     aviary:
       entrypoint: app.py
+      verified: false
 aviary_simple_agent:
   responses_api_agents:
     simple_agent:

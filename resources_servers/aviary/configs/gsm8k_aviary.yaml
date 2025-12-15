@@ -3,7 +3,7 @@ gsm8k_aviary_resources_server:
     aviary:
       entrypoint: gsm8k_app.py
       domain: math
-
+      verified: false
 gsm8k_aviary_agent:
   responses_api_agents:
     aviary_agent:
@@ -14,16 +14,14 @@ gsm8k_aviary_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-
       max_steps: 10
-      max_total_sequence_length: 2048 
-
+      max_total_sequence_length: 2048
       datasets:
       - name: train
         type: train
         jsonl_fpath: resources_servers/aviary/data/gsm8k_train.jsonl
         gitlab_identifier:
-          dataset_name: PLACEHOLDER 
+          dataset_name: PLACEHOLDER
           version: 0.0.1
           artifact_fpath: train.jsonl
         license: Apache 2.0
@@ -31,7 +29,7 @@ gsm8k_aviary_agent:
         type: validation
         jsonl_fpath: resources_servers/aviary/data/gsm8k_validation.jsonl
         gitlab_identifier:
-          dataset_name: PLACEHOLDER 
+          dataset_name: PLACEHOLDER
           version: 0.0.1
           artifact_fpath: train.jsonl
         license: Apache 2.0
