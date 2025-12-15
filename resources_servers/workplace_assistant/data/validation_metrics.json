@@ -2,9 +2,10 @@
     "name": "validation",
     "type": "validation",
     "jsonl_fpath": "resources_servers/workplace_assistant/data/validation.jsonl",
-    "gitlab_identifier": {
-        "dataset_name": "workplace_assistant",
-        "version": "0.0.4",
+    "num_repeats": 1,
+    "gitlab_identifier": null,
+    "huggingface_identifier": {
+        "repo_id": "nvidia/Nemotron-RL-agent-workplace_assistant",
         "artifact_fpath": "validation.jsonl"
     },
     "license": "Apache 2.0",
