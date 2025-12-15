@@ -171,6 +171,7 @@ docs = [
     "sphinxcontrib-mermaid>=1.0.0",   # For mermaid diagrams
     "sphinx-design>=0.6.1",           # For our design elements
     "swagger-plugin-for-sphinx>=6.0.0", # For Swagger API documentation
+    "sphinx-reredirects>=0.1.6",      # For URL redirects when pages move
 ]
 
 [project.optional-dependencies]
