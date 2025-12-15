@@ -1,10 +1,11 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -347,10 +348,10 @@ class NeMoGymChatCompletionMessageToolCallParam(ChatCompletionMessageToolCallPar
     function: NeMoGymChatCompletionMessageToolCallFunctionParam
 
 
-class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageParam):
+class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageParam, total=False):
     # Override the iterable which is annoying to work with.
     content: Union[str, List[ContentArrayOfContentPart], None]
-    tool_calls: List[NeMoGymChatCompletionMessageToolCallParam]
+    tool_calls: Optional[List[NeMoGymChatCompletionMessageToolCallParam]] = None
 
 
 class NeMoGymChatCompletionAssistantMessageForTrainingParam(
@@ -421,20 +422,37 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
 # Clients
 ########################################
 
+# See https://platform.openai.com/docs/guides/error-codes/api-errors
+# 500 is internal server error, which may sporadically occur
+# 502 is Bad gateway (when the endpoint is overloaded)
+# 504 is Gateway timeout (when the endpoint config has too low of a gateway timeout setting for the model to finish generating)
+RATE_LIMIT_ERROR_CODES = [429, 502, 503, 504, 520]
+RETRY_ERROR_CODES = RATE_LIMIT_ERROR_CODES + [500]
 
-class NeMoGymAsyncOpenAI(BaseModel):
+
+class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     """This is just a stub class that wraps around aiohttp"""
 
     base_url: str
     api_key: str
 
+    internal: bool = Field(
+        default=False,
+        description="Set this to true if this particular client is only used to call internal NeMo Gym servers.",
+    )
+
     async def _request(self, **request_kwargs: Dict) -> ClientResponse:
+        max_num_tries = MAX_NUM_TRIES
         tries = 0
         while tries < MAX_NUM_TRIES:
             tries += 1
-            response = await request(**request_kwargs)
-            # See https://platform.openai.com/docs/guides/error-codes/api-errors
-            if response.status in (429, 500, 503):
+            response = await request(**(request_kwargs | {"_internal": self.internal}))
+
+            if response.status in RETRY_ERROR_CODES:
+                # If we hit a rate limit, we don't want to hit max num tries, so we increment both.
+                if response.status in RATE_LIMIT_ERROR_CODES:
+                    max_num_tries += 1
+
                 content = (await response.content.read()).decode()
                 print(
                     f"Hit a {response.status} trying to query an OpenAI endpoint (try {tries}). Sleeping 0.5s. Error message: {content}"

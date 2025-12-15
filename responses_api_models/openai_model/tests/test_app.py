@@ -1,10 +1,11 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -87,11 +88,11 @@ class TestApp:
             },
         )
         assert chat_with_model.status_code == 200
-        assert called_args_chat.get("model") == "override_model"
+        assert called_args_chat.get("model") == "dummy_model"
 
         server._client.create_chat_completion.assert_any_await(
             messages=[{"role": "user", "content": "hi"}],
-            model="override_model",
+            model="dummy_model",
         )
 
     async def test_responses(self, monkeypatch: MonkeyPatch) -> None:
@@ -142,6 +143,6 @@ class TestApp:
         # model provided should override config
         res_with_model = client.post("/v1/responses", json={"input": "hello", "model": "override_model"})
         assert res_with_model.status_code == 200
-        assert called_args_response.get("model") == "override_model"
+        assert called_args_response.get("model") == "dummy_model"
 
-        server._client.create_response.assert_any_await(input="hello", model="override_model")
+        server._client.create_response.assert_any_await(input="hello", model="dummy_model")
