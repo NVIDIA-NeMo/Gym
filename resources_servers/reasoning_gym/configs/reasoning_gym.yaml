@@ -3,7 +3,7 @@ reasoning_gym:
     reasoning_gym:
       entrypoint: app.py
       domain: agent
-
+      verified: false
 reasoning_gym_simple_agent:
   responses_api_agents:
     simple_agent:
