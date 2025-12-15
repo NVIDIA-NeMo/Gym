@@ -12,15 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
+from aviary.dataset_server import TaskDatasetServer
+from aviary.envs.gsm8k import GSM8kDataset, GSM8kDatasetSplit
 from fastapi import Request
+from starlette.testclient import TestClient
 
 from nemo_gym.integrations.aviary import AviaryCloseRequest, AviarySeedSessionRequest, AviaryStepRequest
 from nemo_gym.openai_utils import NeMoGymResponseFunctionToolCall
 from nemo_gym.server_utils import ServerClient
 from resources_servers.aviary.app import AviaryResourcesServerConfig
+from resources_servers.aviary.client_app import AviaryClientResourcesServer, AviaryClientResourcesServerConfig
 from resources_servers.aviary.gsm8k_app import GSM8kResourcesServer
 from resources_servers.aviary.notebook_app import BixBenchResourcesServer
 
@@ -102,3 +107,43 @@ class TestNotebookApp:
         close_resp = await server.close(mock_request, AviaryCloseRequest(env_id=seed_resp.env_id))
         assert close_resp.success, "Expected success"
         assert not server.env_id_to_env, "Expected no environments"
+
+
+class TestClientApp:
+    @pytest.mark.asyncio
+    async def test_client_server_lifecycle(self) -> None:
+        dataset = GSM8kDataset(GSM8kDatasetSplit.train)
+        task_server = TaskDatasetServer(dataset=dataset, port=8042)
+
+        test_client = TestClient(task_server.app)
+
+        def create_async_client(*args, **kwargs):
+            return httpx.AsyncClient(transport=httpx.ASGITransport(app=task_server.app), base_url="http://testserver")
+
+        with (
+            patch("httpx.Client") as mock_client_class,
+            patch("httpx_aiohttp.HttpxAiohttpClient", side_effect=create_async_client),
+        ):
+            mock_client_class.return_value = test_client
+
+            config = AviaryClientResourcesServerConfig(
+                name="",
+                host="0.0.0.0",
+                port=8081,
+                entrypoint="",
+                server_url="http://testserver",
+            )
+            client_server = AviaryClientResourcesServer(
+                config=config,
+                server_client=MagicMock(spec=ServerClient),
+            )
+
+            mock_request = MagicMock(spec=Request)
+            seed_resp = await client_server.seed_session(mock_request, AviarySeedSessionRequest(task_idx=0))
+
+            assert seed_resp.obs, "Expected non-empty observations"
+            assert seed_resp.tools, "Expected non-empty tools"
+            assert seed_resp.env_id, "Expected environment ID"
+
+            assert len(task_server.envs) == 1, "Expected 1 environment in TaskDatasetServer"
+            assert len(client_server.env_id_to_env) == 1, "Expected 1 environment in AviaryClientResourcesServer"

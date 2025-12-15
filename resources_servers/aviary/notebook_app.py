@@ -100,6 +100,12 @@ class BixBenchEnv(NBEnvironment):
 
 
 class BixBenchDataset(TaskDataset[BixBenchEnv]):
+    """
+    Implements the BixBench dataset (https://arxiv.org/abs/2503.00096).
+
+    Each question is turned into an environment containing a Jupyter notebook.
+    """
+
     def __init__(self, split: str = "train"):
         bixbench_repo_id = "futurehouse/BixBench"
         dataset = cast(Dataset, load_dataset(bixbench_repo_id, split=split))

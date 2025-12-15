@@ -15,7 +15,6 @@ gsm8k_aviary_agent:
         type: responses_api_models
         name: policy_model
       max_steps: 10
-      max_total_sequence_length: 2048
       datasets:
       - name: train
         type: train
