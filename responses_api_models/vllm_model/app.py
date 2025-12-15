@@ -57,8 +57,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.server_utils import SESSION_ID_KEY
 
 
-# This needs to be OpenAI BaseModel since it is casted to below by the OpenAI client.
-class VLLMTokenizeResponse(OpenAIBaseModel):
+class VLLMTokenizeResponse(BaseModel):
     tokens: List[int]
 
 
