@@ -149,7 +149,6 @@ HF_HOME=$PWD/.cache/ \
 If you've run these tests before and encounter HuggingFace rate limit errors, try using the following command:
 
 ```bash
-HF_HUB_OFFLINE=1 \
 HF_HOME=$PWD/.cache/ \
     ./examples/nemo_gym/run_nemo_gym_single_node_sanity_tests.sh
 ```

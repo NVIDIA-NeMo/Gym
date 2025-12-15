@@ -117,7 +117,6 @@ CONFIG_PATH=examples/nemo_gym/grpo_workplace_assistant_nemotron_nano_v2_9b.yaml
 #   logger.wandb.project: Fill in your username
 TORCH_CUDA_ARCH_LIST="9.0 10.0" \
 HF_HOME=$PWD/.cache/ \
-HF_HUB_OFFLINE=1 \
 WANDB_API_KEY={your W&B API key} \
 uv run python examples/nemo_gym/run_grpo_nemo_gym.py \
     --config=$CONFIG_PATH \
