@@ -132,15 +132,12 @@ class AviaryAgent(SimpleResponsesAPIAgent):
         step = 0
         while True:
             if self.config.max_steps is not None and step >= self.config.max_steps:
-                print("Done, max steps reached", flush=True)
                 break
             step += 1
             successful_transition = True
 
             # Sample action from model
             try:
-                # TODO: don't send this request if token count already exceeds configured limit
-                # Instead, break the loop at the bottom.
                 raw_model_response = await self.server_client.post(
                     server_name=self.config.model_server.name,
                     url_path="/v1/responses",
@@ -209,11 +206,9 @@ class AviaryAgent(SimpleResponsesAPIAgent):
                 )
                 tokenize_response_json = await tokenize_response.json()
                 if tokenize_response_json["count"] >= self.config.max_total_sequence_length:
-                    print("Done, max sequence length reached", flush=True)
                     break
 
             if done:
-                print("Done, last tool call:", [c.name for c in all_fn_calls], flush=True)
                 break
 
         await self.server_client.post(
