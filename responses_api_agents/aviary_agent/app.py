@@ -22,14 +22,6 @@ from tenacity import retry, stop_after_attempt, wait_exponential_jitter
 from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.integrations.aviary import (
-    AviaryAgentVerifyRequest,
-    AviaryAgentVerifyResponse,
-    AviaryEnvStateEasyInputMessage,
-    AviaryNeMoGymResponse,
-    AviarySeedSessionResponse,
-    AviaryStepResponse,
-)
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -38,6 +30,14 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseInput,
     NeMoGymResponseOutputMessage,
+)
+from resources_servers.aviary.schemas import (
+    AviaryAgentVerifyRequest,
+    AviaryAgentVerifyResponse,
+    AviaryEnvStateEasyInputMessage,
+    AviaryNeMoGymResponse,
+    AviarySeedSessionResponse,
+    AviaryStepResponse,
 )
 
 
