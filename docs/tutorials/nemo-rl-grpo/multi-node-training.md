@@ -71,6 +71,7 @@ SLURM_ACCOUNT={your Slurm account} \
 SLURM_PARTITION={your Slurm partition} \
     examples/nemo_gym/launch_nemo_gym_multinode_training.sh \
     --config=examples/nemo_gym/grpo_workplace_assistant_nemotron_nano_v2_9b.yaml \
+    ++policy.generation.vllm_cfg.tool_parser_plugin=$(find $PWD/.cache -name nemotron_toolcall_parser_no_streaming.py) \
     logger.wandb.project="$USER-nemo-gym-rl-integration"
 ```
 
