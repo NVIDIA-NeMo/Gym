@@ -25,6 +25,8 @@ from pydantic import (
     ValidationError,
     model_validator,
 )
+from pydantic_core import PydanticUndefined
+from rich.markdown import Markdown
 from rich.text import Text
 
 
@@ -49,6 +51,9 @@ class BaseNeMoGymCLIConfig(BaseModel):
 -----------
 {class_doc.strip()}
 """)
+            # Render docstring as Markdown
+            md = Markdown(class_doc.strip())
+            rich.print(md)
 
         fields = cls.model_fields.items()
         if fields:
@@ -65,6 +70,17 @@ class BaseNeMoGymCLIConfig(BaseModel):
                     field.annotation.__name__ if isinstance(field.annotation, type) else str(field.annotation)
                 )
                 annotation_str = annotation_str.replace("typing.", "")
+
+                # Add default value information if available
+                if field.default is not PydanticUndefined and field.default is not None:
+                    default_str = f" [default: {field.default}]"
+                    description_str = description_str + default_str if description_str else default_str.strip()
+                elif field.default_factory is not None:
+                    default_str = " [default: <factory>]"
+                    description_str = description_str + default_str if description_str else default_str.strip()
+                elif field.default is PydanticUndefined and field.is_required():
+                    default_str = " [required]"
+                    description_str = description_str + default_str if description_str else default_str.strip()
 
                 prefixes.append(Text.from_markup(f"- [blue]{field_name}[/blue] [yellow]({annotation_str})[/yellow]"))
                 suffixes.append(description_str)
@@ -122,6 +138,15 @@ def is_server_ref(config_dict: DictConfig) -> Optional[ServerRef]:
 class UploadJsonlDatasetGitlabConfig(BaseNeMoGymCLIConfig):
     """
     Upload a local jsonl dataset artifact to Gitlab.
+
+    Examples:
+
+    ```bash
+    ng_upload_dataset_to_gitlab \
+        +dataset_name=example_multi_step \
+        +version=0.0.1 \
+        +input_jsonl_fpath=data/train.jsonl
+    ```
     """
 
     dataset_name: str = Field(description="The dataset name.")
@@ -136,6 +161,20 @@ class JsonlDatasetGitlabIdentifer(BaseModel):
 
 
 class DownloadJsonlDatasetGitlabConfig(JsonlDatasetGitlabIdentifer, BaseNeMoGymCLIConfig):
+    """
+    Download a JSONL dataset from GitLab Model Registry.
+
+    Examples:
+
+    ```bash
+    ng_download_dataset_from_gitlab \
+        +dataset_name=example_multi_step \
+        +version=0.0.1 \
+        +artifact_fpath=train.jsonl \
+        +output_fpath=data/train.jsonl
+    ```
+    """
+
     dataset_name: str = Field(description="The dataset name.")
     version: str = Field(description="The version of this dataset. Must be in the format `x.x.x`.")
     artifact_fpath: str = Field(description="The filepath to the artifact to download.")
@@ -143,21 +182,94 @@ class DownloadJsonlDatasetGitlabConfig(JsonlDatasetGitlabIdentifer, BaseNeMoGymC
 
 
 class DeleteJsonlDatasetGitlabConfig(BaseNeMoGymCLIConfig):
-    dataset_name: str
+    """
+    Delete a dataset from GitLab Model Registry (prompts for confirmation).
+
+    Examples:
+
+    ```bash
+    ng_delete_dataset_from_gitlab +dataset_name=old_dataset
+    ```
+    """
+
+    dataset_name: str = Field(description="Name of the dataset to delete from GitLab.")
+
+
+class JsonlDatasetHuggingFaceIdentifer(BaseModel):
+    repo_id: str = Field(description="The repo id.")
+    artifact_fpath: Optional[str] = Field(
+        default=None,
+        description="Path to specific file in HuggingFace repo (e.g., 'train.jsonl'). If omitted, load_dataset will be used with split.",
+    )
 
 
 class BaseUploadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
-    hf_token: str
-    hf_organization: str
-    hf_collection_name: str
-    hf_collection_slug: str
-    dataset_name: str
-    input_jsonl_fpath: str
-    resource_config_path: str
-    hf_dataset_prefix: str = "NeMo-Gym"
+    """
+    Upload a JSONL dataset to HuggingFace Hub with automatic naming based on domain and resource server.
+
+    Examples:
+
+    ```bash
+    resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
+    ng_upload_dataset_to_hf \
+        +dataset_name=my_dataset \
+        +input_jsonl_fpath=data/train.jsonl \
+        +resource_config_path=${resource_config_path}
+    ```
+    """
+
+    hf_token: str = Field(description="HuggingFace API token for authentication.")
+    hf_organization: str = Field(description="HuggingFace organization name where dataset will be uploaded.")
+    hf_collection_name: str = Field(description="HuggingFace collection name for organizing datasets.")
+    hf_collection_slug: str = Field(description="Alphanumeric collection slug found at the end of collection URI.")
+    dataset_name: Optional[str] = Field(
+        default=None, description="Name of the dataset (will be combined with domain and resource server name)."
+    )
+    input_jsonl_fpath: str = Field(description="Path to the local jsonl file to upload.")
+    resource_config_path: str = Field(
+        description="Path to resource server config file (used to extract domain for naming convention)."
+    )
+    hf_dataset_prefix: str = Field(
+        default="Nemotron-RL", description="Prefix prepended to dataset name (default: 'NeMo-Gym')."
+    )
+    split: Literal["train", "validation", "test"] = Field(
+        default="train",
+        description="Dataset split type (e.g., 'train', 'validation', 'test'). Format validation only applies to 'train' splits.",
+    )
+    create_pr: bool = Field(
+        default=False,
+        description="Create a pull request instead of pushing directly. Required for repos where you do not have write access.",
+    )
+    revision: Optional[str] = Field(
+        default=None,
+        description="Git revision (branch name) to upload to. Use the same revision for multiple files to upload to the same PR. If not provided with create_pr=True, a new branch/PR will be created automatically.",
+    )
+    commit_message: Optional[str] = Field(
+        default=None, description="Custom commit message. If not provided, HuggingFace auto-generates one."
+    )
+    commit_description: Optional[str] = Field(
+        default=None, description="Optional commit description with additional context."
+    )
 
 
 class UploadJsonlDatasetHuggingFaceConfig(BaseUploadJsonlDatasetHuggingFaceConfig):
+    """
+    Upload a JSONL dataset to HuggingFace Hub and automatically delete from GitLab after successful upload.
+
+    This command always deletes the dataset from GitLab after uploading to HuggingFace.
+    Use `ng_upload_dataset_to_hf` if you want optional deletion control.
+
+    Examples:
+
+    ```bash
+    resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
+    ng_gitlab_to_hf_dataset \
+        +dataset_name=my_dataset \
+        +input_jsonl_fpath=data/train.jsonl \
+        +resource_config_path=${resource_config_path}
+    ```
+    """
+
     forbidden_fields: ClassVar[Set[str]] = {"delete_from_gitlab"}
 
     @model_validator(mode="before")
@@ -170,14 +282,69 @@ class UploadJsonlDatasetHuggingFaceConfig(BaseUploadJsonlDatasetHuggingFaceConfi
 
 
 class UploadJsonlDatasetHuggingFaceMaybeDeleteConfig(BaseUploadJsonlDatasetHuggingFaceConfig):
-    delete_from_gitlab: Optional[bool] = False
+    """
+    Upload a JSONL dataset to HuggingFace Hub with optional GitLab deletion after successful upload.
+
+    Examples:
+
+    ```bash
+    resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
+    ng_upload_dataset_to_hf \
+        +dataset_name=my_dataset \
+        +input_jsonl_fpath=data/train.jsonl \
+        +resource_config_path=${resource_config_path} \
+        +delete_from_gitlab=true
+    ```
+    """
+
+    delete_from_gitlab: Optional[bool] = Field(
+        default=False, description="Delete the dataset from GitLab after successful upload to HuggingFace."
+    )
 
 
-class DownloadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
-    output_fpath: str
-    hf_token: str
-    artifact_fpath: str
-    repo_id: str
+class DownloadJsonlDatasetHuggingFaceConfig(JsonlDatasetHuggingFaceIdentifer, BaseNeMoGymCLIConfig):
+    """
+    Download a JSONL dataset from HuggingFace Hub to local filesystem.
+
+    Examples:
+
+    ```bash
+    ng_download_dataset_from_hf \
+        +repo_id=NVIDIA/NeMo-Gym-Math-example_multi_step-v1 \
+        +artifact_fpath=train.jsonl \
+        +output_fpath=data/train.jsonl
+    ```
+    """
+
+    output_dirpath: Optional[str] = Field(
+        default=None,
+        description="Directory to save the downloaded dataset. Files will be named {split}.jsonl. If split is omitted, all available splits are downloaded.",
+    )
+    output_fpath: Optional[str] = Field(
+        default=None,
+        description="Exact local file path where the downloaded dataset will be saved. Requires `artifact_fpath` or `split`. Overrides output_dirpath.",
+    )
+    hf_token: Optional[str] = Field(default=None, description="HuggingFace API token for authentication.")
+    split: Optional[Literal["train", "validation", "test"]] = Field(
+        default=None, description="Dataset split to download. Omit to download all available splits."
+    )
+
+    @model_validator(mode="after")
+    def check_output_path(self) -> "DownloadJsonlDatasetHuggingFaceConfig":
+        if not self.output_dirpath and not self.output_fpath:
+            raise ValueError("Either output_dirpath or output_fpath must be provided")
+        if self.output_dirpath and self.output_fpath:
+            raise ValueError("Cannot specify both output_dirpath and output_fpath")
+        if self.artifact_fpath and self.split:
+            raise ValueError(
+                "Cannot specify both artifact_fpath and split. Use artifact_fpath for targeting a raw file, or split for structured datasets."
+            )
+        # Prevent output_fpath without split when not using artifact_fpath
+        if self.output_fpath and not self.split and not self.artifact_fpath:
+            raise ValueError(
+                "When using output_fpath without artifact_fpath, split must be specified. Use output_dirpath to download all splits."
+            )
+        return self
 
 
 DatasetType = Union[Literal["train"], Literal["validation"], Literal["example"]]
@@ -190,21 +357,21 @@ class DatasetConfig(BaseModel):
 
     num_repeats: int = Field(default=1, ge=1)
     gitlab_identifier: Optional[JsonlDatasetGitlabIdentifer] = None
+    huggingface_identifier: Optional[JsonlDatasetHuggingFaceIdentifer] = None
     license: Optional[
         Union[
             Literal["Apache 2.0"],
             Literal["MIT"],
             Literal["Creative Commons Attribution 4.0 International"],
             Literal["Creative Commons Attribution-ShareAlike 4.0 International"],
+            Literal["NVIDIA Internal Use Only, Do Not Distribute"],
             Literal["TBD"],
-            Literal["MIT"],
         ]
     ] = None
 
     @model_validator(mode="after")
     def check_train_validation_sets(self) -> "DatasetConfig":
         if self.type in ["train", "validation"]:
-            assert self.gitlab_identifier is not None, f"A Gitlab path is required for {self.name}"
             assert self.license is not None, f"A license is required for {self.name}"
 
         return self
@@ -224,6 +391,7 @@ class Domain(str, Enum):
     LONG_CONTEXT = "long_context"
     SAFETY = "safety"
     GAMES = "games"
+    TRANSLATION = "translation"
     E2E = "e2e"
     OTHER = "other"
 

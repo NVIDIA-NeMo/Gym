@@ -22,9 +22,8 @@ code_gen_simple_agent:
       - name: opencodereasoning_filtered_train
         type: train
         jsonl_fpath: resources_servers/code_gen/data/opencodereasoning_filtered_25k_train.jsonl
-        gitlab_identifier:
-          dataset_name: opencodereasoning_filtered
-          version: 0.0.1
+        huggingface_identifier:
+          repo_id: nvidia/nemotron-RL-coding-competitive_coding
           artifact_fpath: opencodereasoning_filtered_25k_train.jsonl
         license: Apache 2.0
         num_repeats: 1

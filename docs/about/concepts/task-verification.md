@@ -1,14 +1,14 @@
 (task-verification)=
 
-# Task verification
+# Task Verification
 
 **Goal**: Understand what task verification is and how rewards drive model training.
 
 ## What is Verification?
 
-Every resource server in NeMo Gym has a `verify()` function that **measure task performance**. The purpose of this function is to define how to measure how well that task was accomplished.
+Every resource server in NeMo Gym implements a `verify()` function that returns a reward value for task performance.
 
-**The Problem**: When you ran the weather example in the quickstart, it successfully called the tool and gave a response. But was that response *good*? Should the model be rewarded or penalized for that behavior? Without verification, there's no way to measure improvement.
+**The Problem**: When you ran the weather example in the quickstart, the agent successfully called the tool and provided a response. But was that response *good*? Should the model be rewarded or penalized? Without verification, you cannot measure performance or guide improvement.
 
 **The Solution**: Each resource server must define exactly what "good performance" means for its domain.
 
@@ -16,7 +16,7 @@ Every resource server in NeMo Gym has a `verify()` function that **measure task 
 
 **Tool Execution ≠ Good Performance**
 
-- The right tool call was issued i.e. `get_weather("San Francisco")`
+- The right tool call was issued, e.g., `get_weather("San Francisco")`
 - But was helpful advice given? Was the response accurate? Was it efficient?
 - Verification answers these questions with numerical scores
 
@@ -177,7 +177,7 @@ reward = await expensive_api_call(predicted, expected)
 ## What You've Learned
 
 This verification system is what makes NeMo Gym powerful for model training:
-- **Resource servers** provide both tools AND scoring systems
-- **Verification patterns** vary by domain but follow common principles  
+- **Resource servers** provide verification logic
+- **Verification patterns** vary by domain but follow common principles
 - **Reward signals** from verification drive model improvement through RL
 - **Good verification** is reliable, meaningful, and scalable

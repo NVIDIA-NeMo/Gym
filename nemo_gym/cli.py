@@ -28,7 +28,7 @@ from signal import SIGINT
 from subprocess import Popen
 from threading import Thread
 from time import sleep
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import psutil
 import rich
@@ -59,30 +59,73 @@ from nemo_gym.server_utils import (
 
 
 def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  # pragma: no cover
-    install_cmd = "uv pip install -r requirements.txt"
     head_server_deps = global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]
-    install_cmd += " " + " ".join(head_server_deps)
 
-    return f"""cd {dir_path} \\
-    && uv venv --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} \\
+    uv_venv_cmd = f"uv venv --seed --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} .venv"
+
+    has_pyproject_toml = exists(f"{dir_path / 'pyproject.toml'}")
+    has_requirements_txt = exists(f"{dir_path / 'requirements.txt'}")
+
+    if has_pyproject_toml and has_requirements_txt:
+        raise RuntimeError(
+            f"Found both pyproject.toml and requirements.txt for uv venv setup in server dir: {dir_path}. Please only use one or the other!"
+        )
+    elif has_pyproject_toml:
+        install_cmd = f"""uv pip install '-e .' {" ".join(head_server_deps)}"""
+    elif has_requirements_txt:
+        install_cmd = f"""uv pip install -r requirements.txt {" ".join(head_server_deps)}"""
+    else:
+        raise RuntimeError(f"Missing pyproject.toml or requirements.txt for uv venv setup in server dir: {dir_path}")
+
+    cmd = f"""cd {dir_path} \\
+    && {uv_venv_cmd} \\
     && source .venv/bin/activate \\
     && {install_cmd} \\
-   """
+    """
+
+    return cmd
 
 
-def _run_command(command: str, working_directory: Path) -> Popen:  # pragma: no cover
+def _run_command(command: str, working_dir_path: Path) -> Popen:  # pragma: no cover
+    work_dir = f"{working_dir_path.absolute()}"
     custom_env = environ.copy()
-    custom_env["PYTHONPATH"] = f"{working_directory.absolute()}:{custom_env.get('PYTHONPATH', '')}"
+    py_path = custom_env.get("PYTHONPATH", None)
+    if py_path is not None:
+        custom_env["PYTHONPATH"] = f"{work_dir}:{py_path}"
+    else:
+        custom_env["PYTHONPATH"] = work_dir
     return Popen(command, executable="/bin/bash", shell=True, env=custom_env)
 
 
 class RunConfig(BaseNeMoGymCLIConfig):
+    """
+    Start NeMo Gym servers for agents, models, and resources.
+
+    Examples:
+
+    ```bash
+    config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\\
+    responses_api_models/openai_model/configs/openai_model.yaml"
+    ng_run "+config_paths=[${config_paths}]"
+    ```
+    """
+
     entrypoint: str = Field(
         description="Entrypoint for this command. This must be a relative path with 2 parts. Should look something like `responses_api_agents/simple_agent`."
     )
 
 
 class TestConfig(RunConfig):
+    """
+    Test a specific server module by running its pytest suite and optionally validating example data.
+
+    Examples:
+
+    ```bash
+    ng_test +entrypoint=resources_servers/example_single_tool_call
+    ```
+    """
+
     should_validate_data: bool = Field(
         default=False,
         description="Whether or not to validate the example data (examples, metrics, rollouts, etc) for this server.",
@@ -233,7 +276,22 @@ class RunHelper:  # pragma: no cover
 
         for process_name, process in self._processes.items():
             if process.poll() is not None:
-                raise RuntimeError(f"Process `{process_name}` finished unexpectedly!")
+                proc_out, proc_err = process.communicate()
+                print_str = f"Process `{process_name}` finished unexpectedly!"
+
+                if isinstance(proc_out, bytes):
+                    proc_out = proc_out.decode("utf-8")
+                    print_str = f"""{print_str}
+Process `{process_name}` stdout:
+{proc_out}
+"""
+                if isinstance(proc_err, bytes):
+                    proc_err = proc_err.decode("utf-8")
+                    print_str = f"""{print_str}
+Process `{process_name}` stderr:
+{proc_err}"""
+
+                raise RuntimeError(print_str)
 
     def wait_for_spinup(self) -> None:
         sleep_interval = 3
@@ -243,11 +301,18 @@ class RunHelper:  # pragma: no cover
             self.poll()
             statuses = self.check_http_server_statuses()
 
-            num_spun_up = statuses.count("success")
+            num_spun_up = 0
+            waiting = []
+            for name, status in statuses:
+                if status == "success":
+                    num_spun_up += 1
+                else:
+                    waiting.append(name)
             if len(statuses) != num_spun_up:
                 print(
                     f"""{num_spun_up} / {len(statuses)} servers ready ({statuses.count("timeout")} timed out, {statuses.count("connection_error")} connection errored, {statuses.count("unknown_error")} had unknown errors).
-Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
+Waiting for servers to spin up: {waiting}
+Sleeping {sleep_interval}s..."""
                 )
             else:
                 print(f"All {num_spun_up} / {len(statuses)} servers ready! Polling every 60s")
@@ -289,7 +354,7 @@ Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
         finally:
             self.shutdown()
 
-    def check_http_server_statuses(self) -> List[ServerStatus]:
+    def check_http_server_statuses(self) -> List[Tuple[str, ServerStatus]]:
         print(
             "Checking for HTTP server statuses (you should see some HTTP requests to `/` that may 404. This is expected.)"
         )
@@ -297,7 +362,7 @@ Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
         for server_instance_display_config in self._server_instance_display_configs:
             name = server_instance_display_config.config_path
             status = self._server_client.poll_for_status(name)
-            statuses.append(status)
+            statuses.append((name, status))
 
         return statuses
 
@@ -305,6 +370,24 @@ Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
 def run(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
 ):  # pragma: no cover
+    """
+    Start NeMo Gym servers for agents, models, and resources.
+
+    This command reads configuration from YAML files specified via `+config_paths` and starts all configured servers.
+    The configuration files should define server instances with their entrypoints and settings.
+
+    Configuration Parameter:
+        config_paths (List[str]): Paths to YAML configuration files. Specify via Hydra: `+config_paths="[file1.yaml,file2.yaml]"`
+
+    Examples:
+
+    ```bash
+    # Start servers with specific configs
+    config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\\
+    responses_api_models/openai_model/configs/openai_model.yaml"
+    ng_run "+config_paths=[${config_paths}]"
+    ```
+    """
     global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
     # Just here for help
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
@@ -422,9 +505,19 @@ def _format_pct(count: int, total: int) -> str:  # pragma: no cover
 
 
 class TestAllConfig(BaseNeMoGymCLIConfig):
+    """
+    Run tests for all server modules in the project.
+
+    Examples:
+
+    ```bash
+    ng_test_all
+    ```
+    """
+
     fail_on_total_and_test_mismatch: bool = Field(
         default=False,
-        description="There may be situations where there are an un-equal number of servers that exist vs have tests. This flag will fail the test job if this mismatch exists.",
+        description="Fail if the number of server modules doesn't match the number with tests (default: False).",
     )
 
 
@@ -512,6 +605,15 @@ Extra candidate paths:{_display_list_of_paths(extra_candidates)}"""
 
 
 def dev_test():  # pragma: no cover
+    """
+    Run core NeMo Gym tests with coverage reporting (runs pytest with --cov flag).
+
+    Examples:
+
+    ```bash
+    ng_dev_test
+    ```
+    """
     global_config_dict = get_global_config_dict()
     # Just here for help
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
@@ -521,6 +623,15 @@ def dev_test():  # pragma: no cover
 
 
 def init_resources_server():  # pragma: no cover
+    """
+    Initialize a new resources server with template files and directory structure.
+
+    Examples:
+
+    ```bash
+    ng_init_resources_server +entrypoint=resources_servers/my_server
+    ```
+    """
     config_dict = get_global_config_dict()
     run_config = RunConfig.model_validate(config_dict)
 
@@ -546,6 +657,7 @@ def init_resources_server():  # pragma: no cover
   {server_type}:
     {server_type_name}:
       entrypoint: app.py
+      domain: other
 {server_type_name}_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -633,6 +745,15 @@ Dependencies
 
 
 def dump_config():  # pragma: no cover
+    """
+    Display the resolved Hydra configuration for debugging purposes.
+
+    Examples:
+
+    ```bash
+    ng_dump_config "+config_paths=[<config1>,<config2>]"
+    ```
+    """
     global_config_dict = get_global_config_dict()
     # Just here for help
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
@@ -641,6 +762,15 @@ def dump_config():  # pragma: no cover
 
 
 def display_help():  # pragma: no cover
+    """
+    Display a list of available NeMo Gym CLI commands.
+
+    Examples:
+
+    ```bash
+    ng_help
+    ```
+    """
     global_config_dict = get_global_config_dict()
     # Just here for help
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
@@ -706,6 +836,20 @@ def pip_list():  # pragma: no cover
 
 
 class VersionConfig(BaseNeMoGymCLIConfig):
+    """
+    Display gym version and system information.
+
+    Examples:
+
+    ```bash
+    # Display version information
+    ng_version
+
+    # Output as JSON
+    ng_version +json=true
+    ```
+    """
+
     json_format: bool = Field(default=False, alias="json", description="Output in JSON format for programmatic use.")
 
 

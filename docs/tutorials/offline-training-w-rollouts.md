@@ -1,14 +1,16 @@
-#  Offline Training with Rollouts (SFT/DPO) - Experimental
+(offline-training-w-rollouts)=
+
+# Offline Training with Rollouts (SFT/DPO) - Experimental
 
 :::{warning}
 This tutorial is **experimental** and may contain bugs. Proceed with caution.
 :::
 
-**Goal**: Transform your generated rollouts into high-quality training data for supervised fine-tuning (SFT) and direct preference optimization (DPO).
+**Goal**: Transform your generated rollouts into high-quality training data for {term}`supervised fine-tuning (SFT) <SFT (Supervised Fine-Tuning)>` and {term}`direct preference optimization (DPO) <DPO (Direct Preference Optimization)>`.
 
 ## Why Offline Training?
 
-**Offline training** uses pre-collected rollouts to improve AI models without real-time exploration. This approach is ideal when:
+**{term}`Offline training <Online vs Offline Training>`** uses pre-collected rollouts to improve AI models without real-time exploration. This approach is ideal when:
 
 - You have a working agent that demonstrates good behaviors
 - You want reproducible results - same data, consistent training outcomes
@@ -59,11 +61,11 @@ This tutorial is **experimental** and may contain bugs. Proceed with caution.
 
 The offline training pipeline follows this logical flow:
 
-1. Collect rollouts using strategies from [Tutorial 5]
-- **SFT data**: Use consistent generation (low temperature, single rollout per task)
-- **DPO data**: Use diverse generation (higher temperature, 2 rollouts per task for comparison)
-1. Filter for quality - Remove poor rollouts before processing
-2. Format for training - Convert to SFT or DPO format based on your goals
+1. Collect rollouts
+   - **SFT data**: Use consistent generation (low temperature, single rollout per task)
+   - **DPO data**: Use diverse generation (higher temperature, 2 rollouts per task for comparison)
+2. Filter for quality - Remove poor rollouts before processing
+3. Format for training - Convert to SFT or DPO format based on your goals
 
 
 
