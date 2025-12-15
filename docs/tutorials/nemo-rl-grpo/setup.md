@@ -61,7 +61,7 @@ CONTAINER_IMAGE_PATH=./$CONTAINER_IMAGE_PATH
 ```bash
 # Use the official NeMo RL container from NGC
 # See: https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo-rl
-CONTAINER_IMAGE_PATH=nvcr.io/nvidia/nemo-rl:v0.4.0.nemotron_nano_v3
+CONTAINER_IMAGE_PATH=nvcr.io/nvidia/nemo-rl:v0.4.0.nemotron_3_nano
 
 NUM_ACTOR_NODES=1
 ACCOUNT=<ACCOUNT_NAME>
