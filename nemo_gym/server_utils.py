@@ -572,3 +572,14 @@ class HeadServer(BaseServer):
 
     async def global_config_dict_yaml(self) -> str:
         return OmegaConf.to_yaml(get_global_config_dict())
+
+
+class ServerInstanceBase(BaseModel):
+    process_name: str
+    server_type: str
+    name: str
+    entrypoint: Optional[str] = None
+    host: Optional[str] = None
+    port: Optional[int] = None
+    pid: Optional[int] = None
+    url: Optional[str] = None

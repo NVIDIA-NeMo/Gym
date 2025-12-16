@@ -18,29 +18,21 @@ from typing import List, Optional
 import psutil
 import requests
 from omegaconf import OmegaConf
-from pydantic import BaseModel
 
 from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     get_first_server_config_dict,
 )
-from nemo_gym.server_utils import ServerStatus
+from nemo_gym.server_utils import ServerInstanceBase, ServerStatus
 
 
-class ServerProcessInfo(BaseModel):
+class ServerProcessInfo(ServerInstanceBase):
     """Information about a running server process"""
 
     pid: int
-    server_type: str  # "resources_server", "responses_api_model", "responses_api_agent"
-    name: str  # e.g. "simple_weather", "policy_model", etc.
-    process_name: str  # config path from env var
-    host: Optional[str]
-    port: Optional[int]
-    url: Optional[str]
+    status: ServerStatus
     uptime_seconds: float
-    status: ServerStatus  # "success", "connection_error", etc.
-    entrypoint: Optional[str]
 
 
 def parse_server_info(proc, cmdline: List[str], env: dict) -> Optional[ServerProcessInfo]:

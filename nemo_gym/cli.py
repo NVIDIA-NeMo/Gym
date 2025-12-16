@@ -35,7 +35,7 @@ import rich
 import uvicorn
 from devtools import pprint
 from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel, Field
+from pydantic import Field
 from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR, __version__
@@ -54,6 +54,7 @@ from nemo_gym.server_utils import (
     HEAD_SERVER_KEY_NAME,
     HeadServer,
     ServerClient,
+    ServerInstanceBase,
     ServerStatus,
     initialize_ray,
 )
@@ -147,17 +148,10 @@ class TestConfig(RunConfig):
         return self._dir_path
 
 
-class ServerInstanceDisplayConfig(BaseModel):
-    process_name: str
-    server_type: str
-    name: str
+class ServerInstanceDisplayConfig(ServerInstanceBase):
     dir_path: Path
     entrypoint: str
-    host: Optional[str] = None
-    port: Optional[int] = None
-    pid: Optional[int] = None
     config_path: str
-    url: Optional[str] = None
 
 
 class RunHelper:  # pragma: no cover
