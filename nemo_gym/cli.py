@@ -66,14 +66,17 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
     has_pyproject_toml = exists(f"{dir_path / 'pyproject.toml'}")
     has_requirements_txt = exists(f"{dir_path / 'requirements.txt'}")
 
+    # falls back to /usr in google colab notebook without this
+    uv_pip_python_flag = "--python .venv/bin/python"
+
     if has_pyproject_toml and has_requirements_txt:
         raise RuntimeError(
             f"Found both pyproject.toml and requirements.txt for uv venv setup in server dir: {dir_path}. Please only use one or the other!"
         )
     elif has_pyproject_toml:
-        install_cmd = f"""uv pip install '-e .' {" ".join(head_server_deps)}"""
+        install_cmd = f"""uv pip install {uv_pip_python_flag} '-e .' {" ".join(head_server_deps)}"""
     elif has_requirements_txt:
-        install_cmd = f"""uv pip install -r requirements.txt {" ".join(head_server_deps)}"""
+        install_cmd = f"""uv pip install {uv_pip_python_flag} -r requirements.txt {" ".join(head_server_deps)}"""
     else:
         raise RuntimeError(f"Missing pyproject.toml or requirements.txt for uv venv setup in server dir: {dir_path}")
 
