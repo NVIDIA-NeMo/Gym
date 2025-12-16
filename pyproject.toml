@@ -289,6 +289,10 @@ ng_help = "nemo_gym.cli:display_help"
 nemo_gym_status = "nemo_gym.cli:status"
 ng_status = "nemo_gym.cli:status"
 
+# Environment-specific uv pip list
+nemo_gym_pip_list = "nemo_gym.cli:pip_list"
+ng_pip_list = "nemo_gym.cli:pip_list"
+
 # Display version
 nemo_gym_version = "nemo_gym.cli:version"
 ng_version = "nemo_gym.cli:version"
