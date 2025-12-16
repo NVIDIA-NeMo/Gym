@@ -791,6 +791,50 @@ def display_help():  # pragma: no cover
         print(script)
 
 
+class PipListConfig(RunConfig):
+    format: Optional[str] = Field(
+        default=None,
+        description="Output format for pip list. Options: 'columns' (default), 'freeze', 'json'",
+    )
+    outdated: bool = Field(
+        default=False,
+        description="List outdated packages",
+    )
+
+
+def pip_list():  # pragma: no cover
+    """List packages installed in a server's virtual environment."""
+    global_config_dict = get_global_config_dict()
+    config = PipListConfig.model_validate(global_config_dict)
+
+    dir_path = Path(config.entrypoint)
+    venv_path = dir_path / ".venv"
+
+    if not venv_path.exists():
+        print(f"  Virtual environment not found at: {venv_path}")
+        print("  Run tests or setup the server first using:")
+        print(f"  ng_test +entrypoint={config.entrypoint}")
+        exit(1)
+
+    pip_list_cmd = "uv pip list"
+    if config.format:
+        pip_list_cmd += f" --format={config.format}"
+    if config.outdated:
+        pip_list_cmd += " --outdated"
+
+    command = f"""cd {dir_path} \\
+    && source .venv/bin/activate \\
+    && {pip_list_cmd}"""
+
+    print(f"  Package list for: {config.entrypoint}")
+    print(f"Virtual environment: {venv_path.absolute()}")
+    print("-" * 72)
+
+    proc = _run_command(command, dir_path)
+    return_code = proc.wait()
+    exit(return_code)
+
+
 class VersionConfig(BaseNeMoGymCLIConfig):
     """
     Display gym version and system information.

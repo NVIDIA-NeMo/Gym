@@ -547,6 +547,44 @@ ng_version +json=true
 
 ---
 
+### `ng_pip_list` / `nemo_gym_pip_list`
+
+Each server has its own isolated virtual environment. To inspect the packages:
+
+**Parameters**
+
+```{list-table}
+:header-rows: 1
+:widths: 20 10 70
+
+* - Parameter
+  - Type
+  - Description
+* - `entrypoint`
+  - str
+  - The relative entrypoint path to the server directory
+* - `format`
+  - Optional[str]
+  - Output format for pip list. Options: 'columns' (default), 'freeze', 'json'. Default: `None`.
+* - `outdated`
+  - bool
+  - List outdated packages. Default: `False`.
+```
+
+**Examples**
+
+```bash
+# List all packages
+ng_pip_list +entrypoint=resources_servers/example_single_tool_call
+
+# Output as JSON
+ng_pip_list +entrypoint=resources_servers/example_single_tool_call +format=json
+
+# Check for outdated packages
+ng_pip_list +entrypoint=resources_servers/example_single_tool_call +outdated=true
+```
+
+
 ## Getting Help
 
 For detailed help on any command, run it with `+help=true` or `+h=true`:
