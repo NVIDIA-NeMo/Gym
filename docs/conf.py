@@ -25,10 +25,10 @@ import sys
 # -- Project information -----------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
-project = "NeMo-Gym"
+project = "NeMo Gym"
 copyright = "2025, NVIDIA Corporation"
 author = "NVIDIA Corporation"
-release = "0.1.0"
+release = "0.1.1"
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
@@ -41,6 +41,7 @@ extensions = [
     "sphinx.ext.napoleon",  # For google style docstrings
     "sphinx_copybutton",  # For copy button in code blocks
     "sphinx_design",  # For grid layouts and card components
+    "sphinx_reredirects",  # For URL redirects when pages move
 ]
 
 templates_path = ["_templates"]
@@ -107,3 +108,36 @@ html_theme_options = {
     },
 }
 html_extra_path = ["project.json", "versions1.json"]
+
+# -- Options for sphinx-reredirects ------------------------------------------
+# https://documatt.com/sphinx-reredirects/
+#
+# Use this to create redirects when pages are moved or renamed.
+# Format: "old/path.html": "new/path.html"
+#
+# Examples:
+#   - Simple redirect: "old-page.html": "new-page.html"
+#   - Directory redirect: "old-dir/page.html": "new-dir/page.html"
+#   - External redirect: "old-page.html": "https://example.com/new-page"
+#
+# Note: Paths are relative to the HTML output directory.
+# The .html extension is required for source paths.
+
+redirects = {
+    # Get Started section renames
+    "get-started/setup-installation.html": "get-started/detailed-setup.html",
+    # RL Framework Integration moved from training/ to contribute/
+    "training/rl-framework-integration/index.html": "contribute/rl-framework-integration/index.html",
+    "training/rl-framework-integration/gym-integration-footprint-and-form-factor.html": "contribute/rl-framework-integration/gym-integration-footprint-and-form-factor.html",
+    "training/rl-framework-integration/gym-rl-framework-integration-success-criteria.html": "contribute/rl-framework-integration/gym-rl-framework-integration-success-criteria.html",
+    "training/rl-framework-integration/generation-backend-and-openai-compatible-http-server.html": "contribute/rl-framework-integration/generation-backend-and-openai-compatible-http-server.html",
+    "training/rl-framework-integration/openai-compatible-http-server-on-policy-correction.html": "contribute/rl-framework-integration/openai-compatible-http-server-on-policy-correction.html",
+    # Alternate naming conventions for the same pages
+    "training/rl-framework-integration/integration-footprint.html": "contribute/rl-framework-integration/gym-integration-footprint-and-form-factor.html",
+    "training/rl-framework-integration/on-policy-corrections.html": "contribute/rl-framework-integration/openai-compatible-http-server-on-policy-correction.html",
+    # About/Concepts section renames
+    "about/concepts/core-abstractions.html": "about/concepts/core-components.html",
+    "about/concepts/configuration-system.html": "about/concepts/configuration.html",
+    # Top-level page moves
+    "how-to-faq.html": "reference/faq.html",
+}
