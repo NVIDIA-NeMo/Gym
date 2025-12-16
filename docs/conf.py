@@ -113,31 +113,31 @@ html_extra_path = ["project.json", "versions1.json"]
 # https://documatt.com/sphinx-reredirects/
 #
 # Use this to create redirects when pages are moved or renamed.
-# Format: "old/path.html": "new/path.html"
+# Format: "old/path.html": "target-relative-to-source.html"
 #
-# Examples:
-#   - Simple redirect: "old-page.html": "new-page.html"
-#   - Directory redirect: "old-dir/page.html": "new-dir/page.html"
+# IMPORTANT: Target paths are RELATIVE to the source file's directory!
+#   - Same directory: "dir/old.html": "new.html"
+#   - Cross directory: "old-dir/page.html": "../new-dir/page.html"
 #   - External redirect: "old-page.html": "https://example.com/new-page"
 #
-# Note: Paths are relative to the HTML output directory.
 # The .html extension is required for source paths.
 
 redirects = {
-    # Get Started section renames
-    "get-started/setup-installation.html": "get-started/detailed-setup.html",
+    # Get Started section renames (same directory)
+    "get-started/setup-installation.html": "detailed-setup.html",
     # RL Framework Integration moved from training/ to contribute/
-    "training/rl-framework-integration/index.html": "contribute/rl-framework-integration/index.html",
-    "training/rl-framework-integration/gym-integration-footprint-and-form-factor.html": "contribute/rl-framework-integration/gym-integration-footprint-and-form-factor.html",
-    "training/rl-framework-integration/gym-rl-framework-integration-success-criteria.html": "contribute/rl-framework-integration/gym-rl-framework-integration-success-criteria.html",
-    "training/rl-framework-integration/generation-backend-and-openai-compatible-http-server.html": "contribute/rl-framework-integration/generation-backend-and-openai-compatible-http-server.html",
-    "training/rl-framework-integration/openai-compatible-http-server-on-policy-correction.html": "contribute/rl-framework-integration/openai-compatible-http-server-on-policy-correction.html",
+    # Source is in training/rl-framework-integration/, target is in contribute/rl-framework-integration/
+    "training/rl-framework-integration/index.html": "../../contribute/rl-framework-integration/index.html",
+    "training/rl-framework-integration/gym-integration-footprint-and-form-factor.html": "../../contribute/rl-framework-integration/gym-integration-footprint-and-form-factor.html",
+    "training/rl-framework-integration/gym-rl-framework-integration-success-criteria.html": "../../contribute/rl-framework-integration/gym-rl-framework-integration-success-criteria.html",
+    "training/rl-framework-integration/generation-backend-and-openai-compatible-http-server.html": "../../contribute/rl-framework-integration/generation-backend-and-openai-compatible-http-server.html",
+    "training/rl-framework-integration/openai-compatible-http-server-on-policy-correction.html": "../../contribute/rl-framework-integration/openai-compatible-http-server-on-policy-correction.html",
     # Alternate naming conventions for the same pages
-    "training/rl-framework-integration/integration-footprint.html": "contribute/rl-framework-integration/gym-integration-footprint-and-form-factor.html",
-    "training/rl-framework-integration/on-policy-corrections.html": "contribute/rl-framework-integration/openai-compatible-http-server-on-policy-correction.html",
-    # About/Concepts section renames
-    "about/concepts/core-abstractions.html": "about/concepts/core-components.html",
-    "about/concepts/configuration-system.html": "about/concepts/configuration.html",
-    # Top-level page moves
+    "training/rl-framework-integration/integration-footprint.html": "../../contribute/rl-framework-integration/gym-integration-footprint-and-form-factor.html",
+    "training/rl-framework-integration/on-policy-corrections.html": "../../contribute/rl-framework-integration/openai-compatible-http-server-on-policy-correction.html",
+    # About/Concepts section renames (same directory)
+    "about/concepts/core-abstractions.html": "core-components.html",
+    "about/concepts/configuration-system.html": "configuration.html",
+    # Top-level page moves (from root to reference/)
     "how-to-faq.html": "reference/faq.html",
 }
