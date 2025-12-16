@@ -15,12 +15,11 @@
 from io import StringIO
 from unittest.mock import MagicMock
 
-import psutil
 import requests
 from pytest import MonkeyPatch
 
-from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME
-from nemo_gym.server_status import ServerProcessInfo, StatusCommand, parse_server_info
+from nemo_gym.server_status import ServerProcessInfo, StatusCommand
+from nemo_gym.server_utils import ServerClient
 
 
 class TestServerStatus:
@@ -37,62 +36,6 @@ class TestServerStatus:
             status="success",
             entrypoint="test_server",
         )
-
-    def test_parse_server_info_invalid_config(self, capsys) -> None:
-        mock_proc = MagicMock()
-        mock_proc.info = {"pid": 123, "create_time": 1000.0}
-
-        env = {}
-        result = parse_server_info(mock_proc, ["python", "test_server.py"], env)
-        assert result is None
-
-        env = {
-            NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME: "test_server",
-            NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: "",
-        }
-        result = parse_server_info(mock_proc, ["python", "test_server.py"], env)
-        assert result is None
-
-        env = {
-            NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME: "test_server",
-            NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: """
-test_server:
-  resources_servers: {}
-""",
-        }
-        result = parse_server_info(mock_proc, ["python", "test_server.py"], env)
-        assert result is None
-
-        captured = capsys.readouterr()
-        assert "Error parsing PID 123" in captured.out
-        assert "IndexError" in captured.out
-
-    def test_parse_server_info_valid(self) -> None:
-        config_yaml = """
-test_resources_server:
-  resources_servers:
-    test_resource:
-      host: 127.0.0.1
-      port: 8000
-      entrypoint: app.py
-"""
-
-        mock_proc = MagicMock()
-        mock_proc.info = {"pid": 123, "create_time": 1000.0}
-
-        env = {
-            NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME: "test_resources_server",
-            NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: config_yaml,
-        }
-
-        result = parse_server_info(mock_proc, ["python", "app.py"], env)
-
-        assert result is not None
-        assert result.pid == 123
-        assert result.name == "test_resource"
-        assert result.server_type == "resources_servers"
-        assert result.host == "127.0.0.1"
-        assert result.port == 8000
 
     def test_display_status_no_servers(self, monkeypatch: MonkeyPatch) -> None:
         text_trap = StringIO()
@@ -194,66 +137,47 @@ test_resources_server:
         assert result == "unknown_error"
 
     def test_discover_servers(self, monkeypatch: MonkeyPatch) -> None:
-        mock_proc1 = MagicMock()
-
-        # resource server (healthy)
-        mock_proc1.info = {
-            "pid": 12345,
-            "name": "python",
-            "cmdline": ["python", "app.py"],
-            "create_time": 1000.0,
-            "environ": {
-                NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME: "test_resources_server",
-                NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: """
-test_resources_server:
-  resources_servers:
-    test_resource:
-      host: 127.0.0.1
-      port: 8000
-      entrypoint: app.py
-""",
+        mock_instances = [
+            {
+                "process_name": "test_resources_server",
+                "server_type": "resources_servers",
+                "name": "test_resource",
+                "host": "127.0.0.1",
+                "port": 8000,
+                "url": "http://127.0.0.1:8000",
+                "entrypoint": "app.py",
+                "pid": 12345,
+                "start_time": 1000.0,
             },
-        }
-
-        # model server (unhealthy)
-        mock_proc2 = MagicMock()
-        mock_proc2.info = {
-            "pid": 12346,
-            "name": "python",
-            "cmdline": ["python", "model.py"],
-            "create_time": 2000.0,
-            "environ": {
-                NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME: "test_model_server",
-                NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: """
-test_model_server:
-  responses_api_models:
-    test_model:
-      host: 127.0.0.1
-      port: 8001
-      entrypoint: model.py
-""",
+            {
+                "process_name": "test_model_server",
+                "server_type": "responses_api_models",
+                "name": "test_model",
+                "host": "127.0.0.1",
+                "port": 8001,
+                "url": "http://127.0.0.1:8001",
+                "entrypoint": "model.py",
+                "pid": 12346,
+                "start_time": 2000.0,
             },
-        }
+        ]
 
-        mock_proc3 = MagicMock()
-        mock_proc3.info = {
-            "pid": 99999,
-            "name": "python",
-            "cmdline": ["python", "other.py"],
-            "create_time": 3000.0,
-            "environ": {},
-        }
+        mock_head_config = MagicMock()
+        mock_head_config.host = "127.0.0.1"
+        mock_head_config.port = 11000
 
-        mock_proc4 = MagicMock()
-        mock_proc4.info.get.side_effect = psutil.NoSuchProcess(99998)
+        monkeypatch.setattr(ServerClient, "load_head_server_config", lambda: mock_head_config)
 
-        mock_proc5 = MagicMock()
-        mock_proc5.info.get.side_effect = psutil.AccessDenied(99997)
+        mock_response = MagicMock()
+        mock_response.json.return_value = mock_instances
 
-        mock_process_iter = MagicMock(return_value=iter([mock_proc1, mock_proc2, mock_proc3, mock_proc4, mock_proc5]))
-        monkeypatch.setattr("psutil.process_iter", mock_process_iter)
-
-        mock_get = MagicMock(side_effect=[MagicMock(status_code=200), requests.exceptions.ConnectionError()])
+        mock_get = MagicMock(
+            side_effect=[
+                mock_response,
+                MagicMock(status_code=200),
+                requests.exceptions.ConnectionError(),
+            ]
+        )
         monkeypatch.setattr(requests, "get", mock_get)
 
         mock_time = MagicMock(return_value=10000.0)
@@ -280,4 +204,26 @@ test_model_server:
         assert servers[1].status == "connection_error"
         assert servers[1].uptime_seconds == 8000.0
 
-        mock_process_iter.assert_called_once_with(["pid", "name", "cmdline", "create_time", "environ"])
+        assert mock_get.call_count == 3
+        first_call = mock_get.call_args_list[0]
+        assert first_call[0][0] == "http://127.0.0.1:11000/server_instances"
+
+    def test_discover_servers_head_server_down(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        mock_head_config = MagicMock()
+        mock_head_config.host = "127.0.0.1"
+        mock_head_config.port = 11000
+
+        from nemo_gym.server_utils import ServerClient
+
+        monkeypatch.setattr(ServerClient, "load_head_server_config", lambda: mock_head_config)
+
+        mock_get = MagicMock(side_effect=requests.exceptions.ConnectionError("Connection refused"))
+        monkeypatch.setattr(requests, "get", mock_get)
+
+        cmd = StatusCommand()
+        servers = cmd.discover_servers()
+
+        assert len(servers) == 0
+        captured = capsys.readouterr()
+        assert "Could not connect to head server" in captured.out
+        assert "ng_run" in captured.out

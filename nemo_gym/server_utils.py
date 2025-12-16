@@ -25,7 +25,7 @@ from os import getenv
 from pathlib import Path
 from threading import Thread
 from traceback import print_exc
-from typing import Literal, Optional, Tuple, Type, Union, Unpack
+from typing import List, Literal, Optional, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
 import ray
@@ -45,7 +45,7 @@ from aiohttp.client import _RequestOptions
 from fastapi import FastAPI, Request, Response
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import BaseModel, ConfigDict
 from requests.exceptions import ConnectionError
@@ -543,16 +543,24 @@ Full body: {json.dumps(exc.body, indent=4)}
 
 class HeadServer(BaseServer):
     config: BaseServerConfig
+    _server_instances: List[dict] = []
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
-        app.get("/global_config_dict_yaml")(self.global_config_dict_yaml)
+        app.get("/global_config_dict_yaml", response_class=PlainTextResponse)(self.global_config_dict_yaml)
+        app.get("/server_instances")(self.get_server_instances)
 
         return app
 
+    def get_server_instances(self) -> List[dict]:
+        return self._server_instances
+
+    def set_server_instances(self, instances: List) -> None:
+        self._server_instances = instances
+
     @classmethod
-    def run_webserver(cls) -> Tuple[uvicorn.Server, Thread]:  # pragma: no cover
+    def run_webserver(cls) -> Tuple[uvicorn.Server, Thread, "HeadServer"]:  # pragma: no cover
         config = ServerClient.load_head_server_config()
         server = cls(config=config)
 
@@ -563,12 +571,12 @@ class HeadServer(BaseServer):
             host=server.config.host,
             port=server.config.port,
         )
-        server = uvicorn.Server(config=config)
+        uvicorn_server = uvicorn.Server(config=config)
 
-        thread = Thread(target=server.run, daemon=True)
+        thread = Thread(target=uvicorn_server.run, daemon=True)
         thread.start()
 
-        return server, thread
+        return uvicorn_server, thread, server
 
     async def global_config_dict_yaml(self) -> str:
         return OmegaConf.to_yaml(get_global_config_dict())
