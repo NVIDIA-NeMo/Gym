@@ -19,7 +19,7 @@ from asyncio import Future, Semaphore
 from collections import Counter, defaultdict
 from contextlib import nullcontext
 from itertools import chain, repeat
-from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Set
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Set, Tuple
 
 from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
@@ -49,7 +49,7 @@ class RolloutCollectionConfig(BaseNeMoGymCLIConfig):
 
     ```bash
     ng_collect_rollouts \
-        +agent_name=simple_weather_simple_agent \
+        +agent_name=example_single_tool_call_simple_agent \
         +input_jsonl_fpath=weather_query.jsonl \
         +output_jsonl_fpath=weather_rollouts.jsonl \
         +limit=100 \
@@ -151,10 +151,10 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
     def _run_standard(self, examples: List[Dict], server_client: ServerClient) -> Iterator[Future]:
         """Standard rollout collection - each sample through its agent."""
 
-        async def _post_subroutine(row: Dict) -> Dict:
-            res = await server_client.post(server_name=row.pop("agent_ref")["name"], url_path="/run", json=row)
+        async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
+            res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
             await raise_for_status(res)
-            return await res.json()
+            return row, await res.json()
 
         return tqdm.as_completed(
             map(_post_subroutine, examples), desc="Collecting rollouts", miniters=10, total=len(examples)

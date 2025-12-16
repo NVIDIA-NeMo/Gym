@@ -13,7 +13,7 @@ Learn how to create a custom resource server to implement tools, verifiers, and 
 
 :::{grid-item-card} {octicon}`bookmark;1em;` **Prerequisites**
 
-- Completed {doc}`../get-started/setup-installation`
+- Completed {doc}`../get-started/detailed-setup`
 - Basic Python and FastAPI knowledge
 
 :::

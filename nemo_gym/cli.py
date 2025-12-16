@@ -66,22 +66,16 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
 
     uv_venv_cmd = f"uv venv --seed --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} .venv"
 
-    pyproject_toml = False
-    requirements_txt = False
-    try:
-        with open(f"{dir_path / 'pyproject.toml'}", "r") as _f:
-            pyproject_toml = True
-    except OSError:
-        pass
-    try:
-        with open(f"{dir_path / 'requirements.txt'}", "r") as _f:
-            requirements_txt = True
-    except OSError:
-        pass
+    has_pyproject_toml = exists(f"{dir_path / 'pyproject.toml'}")
+    has_requirements_txt = exists(f"{dir_path / 'requirements.txt'}")
 
-    if pyproject_toml:
+    if has_pyproject_toml and has_requirements_txt:
+        raise RuntimeError(
+            f"Found both pyproject.toml and requirements.txt for uv venv setup in server dir: {dir_path}. Please only use one or the other!"
+        )
+    elif has_pyproject_toml:
         install_cmd = f"""uv pip install '-e .' {" ".join(head_server_deps)}"""
-    elif requirements_txt:
+    elif has_requirements_txt:
         install_cmd = f"""uv pip install -r requirements.txt {" ".join(head_server_deps)}"""
     else:
         raise RuntimeError(f"Missing pyproject.toml or requirements.txt for uv venv setup in server dir: {dir_path}")
@@ -113,7 +107,7 @@ class RunConfig(BaseNeMoGymCLIConfig):
     Examples:
 
     ```bash
-    config_paths="resources_servers/example_simple_weather/configs/simple_weather.yaml,\\
+    config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\\
     responses_api_models/openai_model/configs/openai_model.yaml"
     ng_run "+config_paths=[${config_paths}]"
     ```
@@ -131,7 +125,7 @@ class TestConfig(RunConfig):
     Examples:
 
     ```bash
-    ng_test +entrypoint=resources_servers/example_simple_weather
+    ng_test +entrypoint=resources_servers/example_single_tool_call
     ```
     """
 
@@ -289,18 +283,21 @@ class RunHelper:  # pragma: no cover
         for process_name, process in self._processes.items():
             if process.poll() is not None:
                 proc_out, proc_err = process.communicate()
-                print(f"Process `{process_name}` finished unexpectedly!")
-                print(f"Process `{process_name}` stdout:", flush=True)
+                print_str = f"Process `{process_name}` finished unexpectedly!"
+
                 if isinstance(proc_out, bytes):
-                    print(proc_out.decode("utf-8"), flush=True)
-                else:
-                    print(proc_out, flush=True)
-                print(f"Process `{process_name}` stderr:", flush=True)
+                    proc_out = proc_out.decode("utf-8")
+                    print_str = f"""{print_str}
+Process `{process_name}` stdout:
+{proc_out}
+"""
                 if isinstance(proc_err, bytes):
-                    print(proc_err.decode("utf-8"), flush=True)
-                else:
-                    print(proc_err, flush=True)
-                raise RuntimeError(f"Process `{process_name}` finished unexpectedly!")
+                    proc_err = proc_err.decode("utf-8")
+                    print_str = f"""{print_str}
+Process `{process_name}` stderr:
+{proc_err}"""
+
+                raise RuntimeError(print_str)
 
     def wait_for_spinup(self) -> None:
         sleep_interval = 3
@@ -392,7 +389,7 @@ def run(
 
     ```bash
     # Start servers with specific configs
-    config_paths="resources_servers/example_simple_weather/configs/simple_weather.yaml,\\
+    config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\\
     responses_api_models/openai_model/configs/openai_model.yaml"
     ng_run "+config_paths=[${config_paths}]"
     ```
