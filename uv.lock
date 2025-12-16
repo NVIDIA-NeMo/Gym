@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.13'",
@@ -1936,6 +1936,7 @@ docs = [
     { name = "sphinx-autodoc2" },
     { name = "sphinx-copybutton" },
     { name = "sphinx-design" },
+    { name = "sphinx-reredirects" },
     { name = "sphinxcontrib-mermaid" },
     { name = "swagger-plugin-for-sphinx" },
 ]
@@ -1981,6 +1982,7 @@ docs = [
     { name = "sphinx-autodoc2", specifier = ">=0.5.0" },
     { name = "sphinx-copybutton", specifier = ">=0.5.2" },
     { name = "sphinx-design", specifier = ">=0.6.1" },
+    { name = "sphinx-reredirects", specifier = ">=0.1.6" },
     { name = "sphinxcontrib-mermaid", specifier = ">=1.0.0" },
     { name = "swagger-plugin-for-sphinx", specifier = ">=6.0.0" },
 ]
@@ -3294,6 +3296,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/2b/69/b34e0cb5336f09c6866d53b4a19d76c227cdec1bbc7ac4de63ca7d58c9c7/sphinx_design-0.6.1.tar.gz", hash = "sha256:b44eea3719386d04d765c1a8257caca2b3e6f8421d7b3a5e742c0fd45f84e632", size = 2193689, upload-time = "2024-08-02T13:48:44.277Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c6/43/65c0acbd8cc6f50195a3a1fc195c404988b15c67090e73c7a41a9f57d6bd/sphinx_design-0.6.1-py3-none-any.whl", hash = "sha256:b11f37db1a802a183d61b159d9a202314d4d2fe29c163437001324fe2f19549c", size = 2215338, upload-time = "2024-08-02T13:48:42.106Z" },
+]
+
+[[package]]
+name = "sphinx-reredirects"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "sphinx" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/72/61/d3039bc2b688c73e81f515afe771b7cc9631dfef63b3e3ac3aab3d73c685/sphinx_reredirects-1.0.0.tar.gz", hash = "sha256:7c9bada9f1330489fcf4c7297a2d6da2a49ca4877d3f42d1388ae1de1019bf5c", size = 711970, upload-time = "2025-05-31T14:45:55.428Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2a/7f/adb886a3db417a2ccea6a13dcb4b88d08f82104aed17e347346f79480a5f/sphinx_reredirects-1.0.0-py3-none-any.whl", hash = "sha256:1d0102710a8f633c6c885f940f440f7195ada675c1739976f0135790747dea06", size = 6173, upload-time = "2025-05-31T14:45:53.014Z" },
 ]
 
 [[package]]
