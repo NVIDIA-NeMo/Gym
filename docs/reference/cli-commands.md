@@ -584,6 +584,34 @@ ng_pip_list +entrypoint=resources_servers/example_single_tool_call +format=json
 ng_pip_list +entrypoint=resources_servers/example_single_tool_call +outdated=true
 ```
 
+---
+
+### `ng_status` / `nemo_gym_status`
+
+View all currently running NeMo Gym servers and their health status.
+
+**Example**
+
+```bash
+ng_status
+
+NeMo Gym Server Status:
+
+✓ example_single_tool_call (resources_servers) Port: 59338 PID: 31444 Uptime: 0d 0h 52m 39.9s
+✓ simple_agent (responses_api_agents) Port: 59339 PID: 31445 Uptime: 0d 0h 52m 39.6s
+✓ openai_model (responses_api_models) Port: 59340 PID: 31446 Uptime: 0d 0h 52m 39.6s
+
+3 servers found (3 healthy, 0 unhealthy)
+```
+
+Each server line shows information extracted from your config and the running process:
+- **Server name** (e.g., `example_single_tool_call`) - corresponds to the third-level key in your config YAML (e.g., `resources_servers` → `example_single_tool_call`)
+- **Server type** (e.g., `resources_servers`) - the second-level key indicating whether it's a resources server, model server, or agent server
+- **Port** - from the `port` field in the server config, or auto-assigned by NeMo Gym if not specified
+- **PID** (Process ID) - the operating system's unique identifier for this process
+- **Uptime** - calculated from when the process started, showing days, hours, minutes, and seconds
+
+---
 
 ## Getting Help
 
