@@ -283,25 +283,6 @@ ng_prepare_data "+config_paths=[$config_paths]" \
 ```
 
 
-# How To: ng_pip_list - Debug Package Versions
-Each server has its own isolated virtual environment. To inspect the packages:
-
-**List all packages**
-```bash
-ng_pip_list +entrypoint=resources_servers/example_simple_weather
-```
-
-**Output as JSON**
-```bash
-ng_pip_list +entrypoint=resources_servers/example_simple_weather +format=json
-```
-
-**Check for outdated packages**
-```bash
-ng_pip_list +entrypoint=resources_servers/example_simple_weather +outdated
-```
-
-
 # How To: ng_dump_config - Dump a YAML config as exactly as NeMo Gym sees it
 ```bash
 # Example ng_run command
