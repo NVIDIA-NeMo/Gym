@@ -39,7 +39,11 @@ from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    empty_response,
 )
+
+import asyncio
+from contextlib import nullcontext
 
 
 class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
@@ -59,7 +63,7 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
 
     judge_system_message: Optional[str] = None
-    judge_prompt_template: str
+    judge_prompt_template_fpath: str = "prompt_templates/equivalence_llm_judge.txt"
     judge_equal_label: str = "[[A=B]]"
     judge_not_equal_label: str = "[[A!=B]]"
     # Optional regex to extract the question from the last user message.
@@ -248,7 +252,21 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
     """Judge-only verifier using an LLM to compare answers."""
 
     config: LLMJudgeResourcesServerConfig
+    
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
+        if self.config.judge_endpoint_max_concurrency is not None:
+            self._judge_endpoint_max_concurrency = asyncio.Semaphore(
+                value=self.config.judge_endpoint_max_concurrency
+            )
+        else:
+            self._judge_endpoint_max_concurrency = nullcontext()
+
+        with open(self.config.judge_prompt_template_fpath, "r") as f:
+            self._judge_prompt_template = f.read().strip()
+            
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         return app
@@ -419,7 +437,7 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         not_equal_label = cfg.judge_not_equal_label
 
         responses_create_params = cfg.judge_responses_create_params.model_copy(deep=True)
-        prompt_template = cfg.judge_prompt_template
+        prompt_template = self._judge_prompt_template
         system_message = cfg.judge_system_message
 
         user_prompt = prompt_template.format(
@@ -432,12 +450,21 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         msgs.append(NeMoGymEasyInputMessage(role="user", content=user_prompt))
         responses_create_params.input = msgs
 
-        response = await self.server_client.post(
-            server_name=cfg.judge_model_server.name,
-            url_path="/v1/responses",
-            json=responses_create_params,
-        )
-        judge_response = NeMoGymResponse.model_validate(await response.json())
+        async with self._judge_endpoint_max_concurrency:
+            try:
+                response = await self.server_client.post(
+                    server_name=cfg.judge_model_server.name,
+                    url_path="/v1/responses",
+                    json=responses_create_params,
+                )
+                judge_response = NeMoGymResponse.model_validate(await response.json())
+            except Exception as e:
+                print(
+                    f"DEBUG: LLMJudgeResourcesServer: server client HTTP POST exception: {type(e).__name__} {e}",
+                    flush=True,
+                )
+                judge_response = empty_response()
+                
         eval_record = JudgeEvaluation(
             responses_create_params=responses_create_params,
             response=judge_response,
