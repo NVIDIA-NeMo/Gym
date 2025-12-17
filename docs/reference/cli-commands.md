@@ -597,19 +597,34 @@ ng_status
 
 NeMo Gym Server Status:
 
-✓ example_single_tool_call (resources_servers) Port: 59338 PID: 31444 Uptime: 0d 0h 52m 39.9s
-✓ simple_agent (responses_api_agents) Port: 59339 PID: 31445 Uptime: 0d 0h 52m 39.6s
-✓ openai_model (responses_api_models) Port: 59340 PID: 31446 Uptime: 0d 0h 52m 39.6s
+[1] ✓ example_single_tool_call (resources_servers/example_single_tool_call)
+{
+    'server_type': 'resources_servers',
+    'name': 'example_single_tool_call',
+    'port': 58117,
+    'pid': 89904,
+    'uptime_seconds': '0d 0h 0m 41.5s',
+}
+[2] ✓ example_single_tool_call_simple_agent (responses_api_agents/simple_agent)
+{
+    'server_type': 'responses_api_agents',
+    'name': 'simple_agent',
+    'port': 58118,
+    'pid': 89905,
+    'uptime_seconds': '0d 0h 0m 41.5s',
+}
+[3] ✓ policy_model (responses_api_models/openai_model)
+{
+    'server_type': 'responses_api_models',
+    'name': 'openai_model',
+    'port': 58119,
+    'pid': 89907,
+    'uptime_seconds': '0d 0h 0m 41.5s',
+}
 
 3 servers found (3 healthy, 0 unhealthy)
-```
 
-Each server line shows information extracted from your config and the running process:
-- **Server name** (e.g., `example_single_tool_call`) - corresponds to the third-level key in your config YAML (e.g., `resources_servers` → `example_single_tool_call`)
-- **Server type** (e.g., `resources_servers`) - the second-level key indicating whether it's a resources server, model server, or agent server
-- **Port** - from the `port` field in the server config, or auto-assigned by NeMo Gym if not specified
-- **PID** (Process ID) - the operating system's unique identifier for this process
-- **Uptime** - calculated from when the process started, showing days, hours, minutes, and seconds
+```
 
 ---
 

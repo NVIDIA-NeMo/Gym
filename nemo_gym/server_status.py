@@ -93,7 +93,7 @@ Is the head server running? Start it with: `ng_run`
             print("No NeMo Gym servers found running.")
             return
 
-        print("NeMo Gym Server Status:")
+        print("\nNeMo Gym Server Status:\n")
 
         for i, server in enumerate(servers, 1):
             status_icon = "✓" if server.status == "success" else "✗"
