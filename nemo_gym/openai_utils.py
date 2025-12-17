@@ -13,9 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-import uuid
 from asyncio import sleep
-from datetime import datetime
 from typing import (
     Any,
     Dict,
@@ -506,24 +504,3 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
         await self._raise_for_status(response, request_kwargs)
         return await response.json()
-
-
-def empty_response(create_params=None) -> NeMoGymResponse:
-    uid = str(uuid.uuid4().hex)
-    return NeMoGymResponse.model_validate(
-        {
-            "id": f"resp_{uid}",
-            "object": "response",
-            "created_at": datetime.utcnow().timestamp(),
-            "model": "dummy/model",
-            "parallel_tool_calls": True,
-            "tool_choice": "auto",
-            "tools": [],
-            "output": [
-                {
-                    "role": "assistant",
-                    "content": "",
-                }
-            ],
-        }
-    )
