@@ -296,61 +296,6 @@ ng_dump_config "+config_paths=[$config_paths]"
 ```
 
 
-# How To: ng_version - Check NeMo Gym version and system information
-Check your NeMo Gym installation version and environment details for troubleshooting or support.
-
-**Standard format:**
-```bash
-ng_version
-```
-
-**Example output:**
-```bash
-NeMo Gym v0.2.0rc0
-Python 3.13.5 (/Users/user/nemo-gym/.venv/bin/python3)
-Installation: /Users/user/nemo-gym
-
-Key Dependencies:
-  openai: 2.6.1
-  ray: 2.50.1
-
-System:
-  OS: Darwin 25.1.0
-  Platform: macOS-26.1-arm64-arm-64bit-Mach-O
-  Architecture: arm64
-  Processor: arm
-  CPUs: 14
-  Memory: 48.0 GB
-```
-
-**Machine-readable JSON format:**
-```bash
-ng_version +json=true
-```
-
-**Example output:**
-```bash
-{
-  "nemo_gym": "0.2.0rc0",
-  "python": "3.13.5",
-  "python_path": "/Users/user/nemo-gym/.venv/bin/python3",
-  "installation_path": "/Users/user/nemo-gym",
-  "dependencies": {
-    "openai": "2.6.1",
-    "ray": "2.50.1"
-  },
-  "system": {
-    "os": "Darwin 25.1.0",
-    "platform": "macOS-26.1-arm64-arm-64bit-Mach-O",
-    "architecture": "arm64",
-    "processor": "arm",
-    "cpus": 14,
-    "memory_gb": 48.0
-  }
-}
-```
-
-
 # How To: Use NeMo Gym with a non-Responses compatible API endpoint like vLLM
 As of Sep 05, 2025, not many models have been trained with middlewares or chat templates that are easily parseable to OpenAI Responses API schema, with the notable exception of OpenAI's own open source model GPT-OSS. Since Gym is first-party Responses API, this makes Gym very difficult to use with basically any model.
 
