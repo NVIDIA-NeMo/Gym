@@ -54,7 +54,7 @@ from nemo_gym.server_utils import (
     HEAD_SERVER_KEY_NAME,
     HeadServer,
     ServerClient,
-    ServerInstanceBase,
+    ServerInstanceDisplayConfig,
     ServerStatus,
     initialize_ray,
 )
@@ -146,13 +146,6 @@ class TestConfig(RunConfig):
     @property
     def dir_path(self) -> Path:
         return self._dir_path
-
-
-class ServerInstanceDisplayConfig(ServerInstanceBase):
-    dir_path: Path
-    entrypoint: str
-    config_path: str
-    start_time: float
 
 
 class RunHelper:  # pragma: no cover
@@ -271,7 +264,7 @@ class RunHelper:  # pragma: no cover
 
         for i, inst in enumerate(self._server_instance_display_configs, 1):
             print(f"[{i}] {inst.process_name} ({inst.server_type}/{inst.name})")
-            pprint(inst.model_dump(mode="json", exclude={"start_time"}))
+            pprint(inst.model_dump(mode="json", exclude={"start_time", "status", "uptime_seconds"}))
         print(f"{'#' * 100}\n")
 
     def poll(self) -> None:

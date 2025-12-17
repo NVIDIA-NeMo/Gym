@@ -582,12 +582,17 @@ class HeadServer(BaseServer):
         return OmegaConf.to_yaml(get_global_config_dict())
 
 
-class ServerInstanceBase(BaseModel):
-    process_name: str
-    server_type: str
-    name: str
+class ServerInstanceDisplayConfig(BaseModel):
+    config_path: Optional[str] = None
+    dir_path: Optional[Path] = None
     entrypoint: Optional[str] = None
     host: Optional[str] = None
-    port: Optional[int] = None
+    name: Optional[str] = None
     pid: Optional[int] = None
+    port: Optional[int] = None
+    process_name: Optional[str] = None
+    server_type: Optional[str] = None
+    start_time: Optional[float] = None
+    status: Optional[ServerStatus] = None
+    uptime_seconds: Optional[float] = None
     url: Optional[str] = None

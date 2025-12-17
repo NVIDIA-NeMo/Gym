@@ -18,13 +18,14 @@ from unittest.mock import MagicMock
 import requests
 from pytest import MonkeyPatch
 
-from nemo_gym.server_status import ServerProcessInfo, StatusCommand
+from nemo_gym.cli import ServerInstanceDisplayConfig
+from nemo_gym.server_status import StatusCommand
 from nemo_gym.server_utils import ServerClient
 
 
 class TestServerStatus:
     def test_server_process_info_creation_sanity(self) -> None:
-        ServerProcessInfo(
+        ServerInstanceDisplayConfig(
             pid=12345,
             server_type="resources_server",
             name="test_server",
@@ -52,7 +53,7 @@ class TestServerStatus:
         monkeypatch.setattr("sys.stdout", text_trap)
 
         servers = [
-            ServerProcessInfo(
+            ServerInstanceDisplayConfig(
                 pid=123,
                 server_type="resources_servers",
                 name="test_resource",
@@ -64,7 +65,7 @@ class TestServerStatus:
                 status="success",
                 entrypoint="test_server",
             ),
-            ServerProcessInfo(
+            ServerInstanceDisplayConfig(
                 pid=456,
                 server_type="responses_api_models",
                 name="test_model",
@@ -90,7 +91,7 @@ class TestServerStatus:
 
     def test_check_health(self, monkeypatch: MonkeyPatch) -> None:
         cmd = StatusCommand()
-        server_info = ServerProcessInfo(
+        server_info = ServerInstanceDisplayConfig(
             pid=123,
             server_type="resources_servers",
             name="test_server",

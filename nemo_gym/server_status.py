@@ -18,20 +18,13 @@ from typing import List
 import requests
 from devtools import pprint
 
-from nemo_gym.server_utils import ServerClient, ServerInstanceBase, ServerStatus
-
-
-class ServerProcessInfo(ServerInstanceBase):
-    """Information about a running server process"""
-
-    status: ServerStatus
-    uptime_seconds: float
+from nemo_gym.server_utils import ServerClient, ServerInstanceDisplayConfig, ServerStatus
 
 
 class StatusCommand:
     """Main class to check server status"""
 
-    def check_health(self, server_info: ServerProcessInfo) -> ServerStatus:
+    def check_health(self, server_info: ServerInstanceDisplayConfig) -> ServerStatus:
         """Check if server is responding"""
         if not server_info.url:
             return "unknown_error"
@@ -46,7 +39,7 @@ class StatusCommand:
         except Exception:
             return "unknown_error"
 
-    def discover_servers(self) -> List[ServerProcessInfo]:
+    def discover_servers(self) -> List[ServerInstanceDisplayConfig]:
         """Find all running NeMo Gym server processes"""
 
         try:
@@ -62,7 +55,7 @@ class StatusCommand:
 
             for inst in instances:
                 uptime = current_time - inst.get("start_time", current_time)
-                server_info = ServerProcessInfo(
+                server_info = ServerInstanceDisplayConfig(
                     process_name=inst["process_name"],
                     server_type=inst["server_type"],
                     name=inst["name"],
@@ -86,7 +79,7 @@ Is the head server running? Start it with: `ng_run`
             """)
             return []
 
-    def display_status(self, servers: List[ServerProcessInfo]) -> None:
+    def display_status(self, servers: List[ServerInstanceDisplayConfig]) -> None:
         """Show server info in a table"""
 
         def format_uptime(uptime_seconds: float) -> str:
