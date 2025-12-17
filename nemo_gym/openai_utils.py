@@ -79,6 +79,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import TypedDict
 
 from nemo_gym.server_utils import MAX_NUM_TRIES, ClientResponse, raise_for_status, request
+import uuid
+from datetime import datetime
 
 
 ########################################
@@ -504,3 +506,23 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
         await self._raise_for_status(response, request_kwargs)
         return await response.json()
+
+def empty_response(create_params=None) -> NeMoGymResponse:
+    uid = str(uuid.uuid4().hex)
+    return NeMoGymResponse.model_validate(
+        {
+            "id": f"resp_{uid}",
+            "object": "response",
+            "created_at": datetime.utcnow().timestamp(),
+            "model": "dummy/model",
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+            "output": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                }
+            ],
+        }
+    )
