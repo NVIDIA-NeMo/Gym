@@ -9,7 +9,7 @@ swe_agents:
       agent_config: /lustre/fsw/portfolios/llmservice/users/sdevare/repos/nemo-rl-sl/3rdparty/Penguin-workspace/Penguin/responses_api_agents/swe_agents/configs/oh_config.toml
       agent_max_turns: 100
       agent_framework_repo: https://github.com/sdevare-nv/nv-OpenHands.git
-      agent_framework_commit: 220c02e5e4b2bb6e8447101658b8dc6aa3bbfe98
+      agent_framework_commit: 65759f71eaba35ad4590a3253cb4d7651786771a
       
       # Container configuration
       container_formatter: "/lustre/fsw/portfolios/llmservice/users/igitman/images/swe-bench/swebench_sweb.eval.x86_64.{instance_id}.sif"
