@@ -41,7 +41,6 @@ from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    empty_response,
 )
 
 
@@ -456,10 +455,10 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
                 judge_response = NeMoGymResponse.model_validate(await response.json())
             except Exception as e:
                 print(
-                    f"DEBUG: LLMJudgeResourcesServer: server client HTTP POST exception: {type(e).__name__} {e}",
+                    f"DEBUG: LLMJudgeResourcesServer: judge model server HTTP POST error: {type(e).__name__} {e}",
                     flush=True,
                 )
-                judge_response = empty_response()
+                raise e
 
         eval_record = JudgeEvaluation(
             responses_create_params=responses_create_params,
