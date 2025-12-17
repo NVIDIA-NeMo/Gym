@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import uuid
 from asyncio import sleep
+from datetime import datetime
 from typing import (
     Any,
     Dict,
@@ -79,8 +81,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import TypedDict
 
 from nemo_gym.server_utils import MAX_NUM_TRIES, ClientResponse, raise_for_status, request
-import uuid
-from datetime import datetime
 
 
 ########################################
@@ -506,6 +506,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
         await self._raise_for_status(response, request_kwargs)
         return await response.json()
+
 
 def empty_response(create_params=None) -> NeMoGymResponse:
     uid = str(uuid.uuid4().hex)
