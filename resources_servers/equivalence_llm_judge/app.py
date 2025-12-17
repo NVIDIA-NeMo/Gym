@@ -21,7 +21,9 @@ The judge prompt is fully configurable via server config.
 # limitations under the License.
 from __future__ import annotations
 
+import asyncio
 import re
+from contextlib import nullcontext
 from typing import Any, Optional
 
 from fastapi import FastAPI
@@ -41,9 +43,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     empty_response,
 )
-
-import asyncio
-from contextlib import nullcontext
 
 
 class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
@@ -252,21 +251,18 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
     """Judge-only verifier using an LLM to compare answers."""
 
     config: LLMJudgeResourcesServerConfig
-    
-    
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
         if self.config.judge_endpoint_max_concurrency is not None:
-            self._judge_endpoint_max_concurrency = asyncio.Semaphore(
-                value=self.config.judge_endpoint_max_concurrency
-            )
+            self._judge_endpoint_max_concurrency = asyncio.Semaphore(value=self.config.judge_endpoint_max_concurrency)
         else:
             self._judge_endpoint_max_concurrency = nullcontext()
 
         with open(self.config.judge_prompt_template_fpath, "r") as f:
             self._judge_prompt_template = f.read().strip()
-            
+
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         return app
@@ -464,7 +460,7 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
                     flush=True,
                 )
                 judge_response = empty_response()
-                
+
         eval_record = JudgeEvaluation(
             responses_create_params=responses_create_params,
             response=judge_response,
