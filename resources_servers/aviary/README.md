@@ -6,6 +6,8 @@ This resource server adapts [**Aviary** environments](https://github.com/Future-
 
 - **GSM8K**: `gsm8k_app.py`
   - Meant primarily as an example, this implements [GSM8k](https://arxiv.org/abs/2110.14168) as a set of environments equipped with a calculator too.
+- **HotPotQA**: `hotpotqa_app.py`
+  - The HotPotQA environment asks agents to perform multi-hop question answering on the [HotPotQA dataset](https://aclanthology.org/D18-1259/)
 - **BixBench**: `notebook_app.py`
   - Implements the [BixBench dataset](https://arxiv.org/abs/2503.00096) as a set of environments that allow execution of a Jupyter notebook.
   - Also serves as an example for how to implement notebook-backed environments for other computational scientific tasks.
