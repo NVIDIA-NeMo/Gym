@@ -59,6 +59,7 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     name: str = "equivalence_llm_judge"
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+    judge_endpoint_max_concurrency: Optional[int] = None
 
     judge_system_message: Optional[str] = None
     judge_prompt_template_fpath: str = "prompt_templates/equivalence_llm_judge.txt"
