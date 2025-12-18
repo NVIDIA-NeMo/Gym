@@ -1,0 +1,42 @@
+ext-taubench-env_user_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ???
+      api_key: ???
+      model: ???
+      return_token_id_information: false
+      uses_reasoning_parser: true
+ext-taubench-env-agent:
+  responses_api_agents:
+    ext-taubench-env-agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      user_model_server:
+        type: responses_api_models
+        name: ext-taubench-env_user_model
+      log_level: ERROR
+      max_steps: 75  # GPT 4.1 gets around 47% and the appropriate cutoff is around 60 steps. We give the model 25% more steps than GPT 4.1 needs to achieve the goals.
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: responses_api_agents/ext-taubench-env-agent/data/example.jsonl      
+      - name: train
+        type: train
+        jsonl_fpath: responses_api_agents/ext-taubench-env-agent/data/train.jsonl
+        gitlab_identifier:
+          dataset_name: ext-taubench-env
+          version: 0.0.4
+          artifact_fpath: train.jsonl
+        license: Apache 2.0  # License here is WRONG
+      - name: validation
+        type: validation
+        jsonl_fpath: responses_api_agents/ext-taubench-env-agent/data/validation.jsonl
+        gitlab_identifier:
+          dataset_name: ext-taubench-env
+          version: 0.0.4
+          artifact_fpath: validation.jsonl
+        license: Apache 2.0  # License here is WRONG
+        num_repeats: 16
