@@ -27,7 +27,7 @@ from pathlib import Path
 from signal import SIGINT
 from subprocess import Popen
 from threading import Thread
-from time import sleep
+from time import sleep, time
 from typing import Dict, List, Optional, Tuple
 
 import psutil
@@ -35,7 +35,7 @@ import rich
 import uvicorn
 from devtools import pprint
 from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel, Field
+from pydantic import Field
 from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR, __version__
@@ -49,10 +49,12 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
+from nemo_gym.server_status import StatusCommand
 from nemo_gym.server_utils import (
     HEAD_SERVER_KEY_NAME,
     HeadServer,
     ServerClient,
+    ServerInstanceDisplayConfig,
     ServerStatus,
     initialize_ray,
 )
@@ -146,22 +148,10 @@ class TestConfig(RunConfig):
         return self._dir_path
 
 
-class ServerInstanceDisplayConfig(BaseModel):
-    process_name: str
-    server_type: str
-    name: str
-    dir_path: Path
-    entrypoint: str
-    host: Optional[str] = None
-    port: Optional[int] = None
-    pid: Optional[int] = None
-    config_path: str
-    url: Optional[str] = None
-
-
 class RunHelper:  # pragma: no cover
     _head_server: uvicorn.Server
     _head_server_thread: Thread
+    _head_server_instance: HeadServer
 
     _processes: Dict[str, Popen]
     _server_instance_display_configs: List[ServerInstanceDisplayConfig]
@@ -178,12 +168,14 @@ class RunHelper:  # pragma: no cover
         escaped_config_dict_yaml_str = shlex.quote(OmegaConf.to_yaml(global_config_dict))
 
         # We always run the head server in this `run` command.
-        self._head_server, self._head_server_thread = HeadServer.run_webserver()
+        self._head_server, self._head_server_thread, self._head_server_instance = HeadServer.run_webserver()
 
         top_level_paths = [k for k in global_config_dict.keys() if k not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS]
 
         self._processes: Dict[str, Popen] = dict()
         self._server_instance_display_configs: List[ServerInstanceDisplayConfig] = []
+
+        start_time = time()
 
         # TODO there is a better way to resolve this that uses nemo_gym/global_config.py::ServerInstanceConfig
         for top_level_path in top_level_paths:
@@ -232,8 +224,13 @@ class RunHelper:  # pragma: no cover
                     url=f"http://{host}:{port}" if host and port else None,
                     pid=process.pid,
                     config_path=top_level_path,
+                    start_time=start_time,
                 )
             )
+
+        self._head_server_instance.set_server_instances(
+            [inst.model_dump(mode="json") for inst in self._server_instance_display_configs]
+        )
 
         self._server_client = ServerClient(
             head_server_config=ServerClient.load_head_server_config(),
@@ -267,7 +264,7 @@ class RunHelper:  # pragma: no cover
 
         for i, inst in enumerate(self._server_instance_display_configs, 1):
             print(f"[{i}] {inst.process_name} ({inst.server_type}/{inst.name})")
-            pprint(inst.model_dump(mode="json"))
+            pprint(inst.model_dump(mode="json", exclude={"start_time", "status", "uptime_seconds"}))
         print(f"{'#' * 100}\n")
 
     def poll(self) -> None:
@@ -789,6 +786,15 @@ def display_help():  # pragma: no cover
             continue
 
         print(script)
+
+
+def status():  # pragma: no cover
+    global_config_dict = get_global_config_dict()
+    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+
+    status_cmd = StatusCommand()
+    servers = status_cmd.discover_servers()
+    status_cmd.display_status(servers)
 
 
 class PipListConfig(RunConfig):
