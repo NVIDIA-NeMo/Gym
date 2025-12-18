@@ -129,97 +129,95 @@ class AviaryAgent(SimpleResponsesAPIAgent):
         agent_state_history: list[NeMoGymResponseInput] = []
         model_server_cookies = None
 
-        total_len: int | None = None
-
         step = 0
-        while True:
-            if self.config.max_steps is not None and step >= self.config.max_steps:
-                break
-            step += 1
-            successful_transition = True
+        try:
+            while True:
+                if self.config.max_steps is not None and step >= self.config.max_steps:
+                    break
+                step += 1
+                successful_transition = True
 
-            # Sample action from model
-            try:
-                raw_model_response = await self.server_client.post(
-                    server_name=self.config.model_server.name,
-                    url_path="/v1/responses",
-                    json=agent_state,
-                    cookies=model_server_cookies,
-                )
-                model_server_cookies = raw_model_response.cookies
-                model_response_json = await raw_model_response.json()
-            except json.JSONDecodeError as e:
-                # JSONDecodeError will be thrown if there's an underlying openai error.
-                # for now, we break. Default reward of 0 will be returned when /verify is called.
-                logger.warning(
-                    f"Error calling /v1/responses: {e!r}. Response: {raw_model_response.text!r}. Calculated length: {total_len}."
-                )
-                break
-
-            try:
-                model_response = NeMoGymResponse.model_validate(model_response_json)
-            except ValidationError as e:
-                # Maybe this should be handled as above? i.e. if we got an incomplete message back due to
-                # max token limits
-                raise RuntimeError(
-                    f"Received an invalid response from model server: {json.dumps(model_response_json)}"
-                ) from e
-
-            # Parse model response
-            model_output = model_response.output
-            all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [
-                o for o in model_output if o.type == "function_call"
-            ]
-            all_output_messages: List[NeMoGymResponseOutputMessage] = [
-                o for o in model_output if o.type == "message" and o.role == "assistant"
-            ]
-            done = False
-
-            if not all_fn_calls and all_output_messages:
-                if self.config.done_if_no_tool_calls:
-                    done = True
-                    obs = []
-                else:
-                    # Got non-tool-call outputs, so ask the model to try again.
-                    obs: Sequence[NeMoGymEasyInputMessage | NeMoGymFunctionCallOutput] = [
-                        NeMoGymEasyInputMessage(
-                            role="user",
-                            content="You did not respond with a valid tool call. "
-                            "This may mean you did not call tools, or you tried to "
-                            "and got the formatting, tool name, or arguments "
-                            "wrong. To proceed, please call at least one tool.",
-                        )
-                    ]
-                    successful_transition = False
-            else:
-                # Apply action to environment
-                raw_env_response = await self.server_client.post(
-                    server_name=self.config.resources_server.name,
-                    url_path="/step",
-                    json={"action": [c.model_dump(mode="json") for c in all_fn_calls], "env_id": env_id},
-                )
-                env_response = AviaryStepResponse.model_validate(await raw_env_response.json())
-                obs = env_response.obs
-                done = env_response.done
-
-            agent_state = self.update_agent_state(agent_state, model_output, obs, successful_transition)
-            agent_state_history.append(cast(NeMoGymResponseInput, agent_state.input))
-
-            if self.config.max_total_sequence_length is not None:
-                # NOTE: this assumes vLLM backend.
-                tokenize_response = await self.server_client.post(
-                    server_name=self.config.model_server.name, url_path="/tokenize", json=agent_state
-                )
-                tokenize_response_json = await tokenize_response.json()
-                if tokenize_response_json["count"] >= self.config.max_total_sequence_length:
+                # Sample action from model
+                try:
+                    raw_model_response = await self.server_client.post(
+                        server_name=self.config.model_server.name,
+                        url_path="/v1/responses",
+                        json=agent_state,
+                        cookies=model_server_cookies,
+                    )
+                    model_server_cookies = raw_model_response.cookies
+                    model_response_json = await raw_model_response.json()
+                except json.JSONDecodeError as e:
+                    # JSONDecodeError will be thrown if there's an underlying openai error.
+                    # for now, we break. Default reward of 0 will be returned when /verify is called.
+                    logger.warning(f"Error calling /v1/responses: {e!r}. Response: {raw_model_response.text!r}.")
                     break
 
-            if done:
-                break
+                try:
+                    model_response = NeMoGymResponse.model_validate(model_response_json)
+                except ValidationError as e:
+                    # Maybe this should be handled as above? i.e. if we got an incomplete message back due to
+                    # max token limits
+                    raise RuntimeError(
+                        f"Received an invalid response from model server: {json.dumps(model_response_json)}"
+                    ) from e
 
-        await self.server_client.post(
-            server_name=self.config.resources_server.name, url_path="/close", json={"env_id": env_id}
-        )
+                # Parse model response
+                model_output = model_response.output
+                all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [
+                    o for o in model_output if o.type == "function_call"
+                ]
+                all_output_messages: List[NeMoGymResponseOutputMessage] = [
+                    o for o in model_output if o.type == "message" and o.role == "assistant"
+                ]
+                done = False
+
+                if not all_fn_calls and all_output_messages:
+                    if self.config.done_if_no_tool_calls:
+                        done = True
+                        obs = []
+                    else:
+                        # Got non-tool-call outputs, so ask the model to try again.
+                        obs: Sequence[NeMoGymEasyInputMessage | NeMoGymFunctionCallOutput] = [
+                            NeMoGymEasyInputMessage(
+                                role="user",
+                                content="You did not respond with a valid tool call. "
+                                "This may mean you did not call tools, or you tried to "
+                                "and got the formatting, tool name, or arguments "
+                                "wrong. To proceed, please call at least one tool.",
+                            )
+                        ]
+                        successful_transition = False
+                else:
+                    # Apply action to environment
+                    raw_env_response = await self.server_client.post(
+                        server_name=self.config.resources_server.name,
+                        url_path="/step",
+                        json={"action": [c.model_dump(mode="json") for c in all_fn_calls], "env_id": env_id},
+                    )
+                    env_response = AviaryStepResponse.model_validate(await raw_env_response.json())
+                    obs = env_response.obs
+                    done = env_response.done
+
+                agent_state = self.update_agent_state(agent_state, model_output, obs, successful_transition)
+                agent_state_history.append(cast(NeMoGymResponseInput, agent_state.input))
+
+                if self.config.max_total_sequence_length is not None:
+                    # NOTE: this assumes vLLM backend.
+                    tokenize_response = await self.server_client.post(
+                        server_name=self.config.model_server.name, url_path="/tokenize", json=agent_state
+                    )
+                    tokenize_response_json = await tokenize_response.json()
+                    if tokenize_response_json["count"] >= self.config.max_total_sequence_length:
+                        break
+
+                if done:
+                    break
+
+        finally:
+            await self.server_client.post(
+                server_name=self.config.resources_server.name, url_path="/close", json={"env_id": env_id}
+            )
 
         assert model_response is not None
 
