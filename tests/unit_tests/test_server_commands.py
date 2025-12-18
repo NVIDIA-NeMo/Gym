@@ -18,8 +18,7 @@ from unittest.mock import MagicMock
 from pytest import MonkeyPatch
 
 from nemo_gym.cli import ServerInstanceDisplayConfig
-from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME
-from nemo_gym.server_commands import StatusCommand, StopCommand, parse_server_info, stop_server
+from nemo_gym.server_commands import StatusCommand, StopCommand, stop_server
 
 
 class TestServerCommands:
@@ -36,40 +35,6 @@ class TestServerCommands:
             status="success",
             entrypoint="test_server",
         )
-
-    def test_parse_server_info_missing_env_vars(self) -> None:
-        mock_proc = MagicMock()
-        mock_proc.info = {"pid": 123, "create_time": 1000.0}
-
-        result = parse_server_info(mock_proc, ["python", "test_server.py"], {})
-        assert result is None
-
-    def test_parse_server_info_valid(self) -> None:
-        config_yaml = """
-test_resources_server:
-  resources_servers:
-    test_resource:
-      host: 127.0.0.1
-      port: 8000
-      entrypoint: app.py
-"""
-
-        mock_proc = MagicMock()
-        mock_proc.info = {"pid": 123, "create_time": 1000.0}
-
-        env = {
-            NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME: "test_resources_server",
-            NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: config_yaml,
-        }
-
-        result = parse_server_info(mock_proc, ["python", "app.py"], env)
-
-        assert result is not None
-        assert result.pid == 123
-        assert result.name == "test_resource"
-        assert result.server_type == "resources_servers"
-        assert result.host == "127.0.0.1"
-        assert result.port == 8000
 
     def test_display_status_no_servers(self, monkeypatch: MonkeyPatch) -> None:
         text_trap = StringIO()
