@@ -48,19 +48,37 @@ class AviaryAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
 
-    max_steps: int | None = None
+    max_steps: int | None = Field(
+        default=None,
+        description="The maximum number of steps to take in the environment. "
+        "If not set, the agent will run indefinitely.",
+    )
 
     # Doesn't cause an issue if not set, but if it is, then
     # we can avoid sending requests that are guaranteed to
     # exceed the limit. If not set, vLLM will reject the request
     # for us (but also clutter logs with exceptions).
     # TODO: see if we can retrieve this from /models endpoint
-    max_total_sequence_length: int | None = None
+    max_total_sequence_length: int | None = Field(
+        default=None,
+        description="If set, the rollout will stop when the agent state exceeds this length. "
+        "If not set, will rely on a vLLM exception to tell us when we've exceeded the model's "
+        "token limit. Setting this simply avoids that exception.",
+    )
 
-    done_if_no_tool_calls: bool = True
+    done_if_no_tool_calls: bool = Field(
+        default=True, description="If True, end the rollout if the model does not call any tools."
+    )
 
-    collapse_old_env_states: bool = False
-    old_env_state_message: str = "[Previous environment state - hidden]"
+    collapse_old_env_states: bool = Field(
+        default=False,
+        description="If True, collapse previous Aviary EnvStateMessages into a hidden message "
+        "in the agent state. Can be used to compress the context, if supported by the environment.",
+    )
+    old_env_state_message: str = Field(
+        default="[Previous environment state - hidden]",
+        description="The message to use when collapsing previous Aviary EnvStateMessages into a hidden message.",
+    )
 
 
 class AviaryAgentRunRequest(BaseRunRequest):
