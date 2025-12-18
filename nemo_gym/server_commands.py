@@ -24,96 +24,6 @@ from devtools import pprint
 from nemo_gym.server_utils import ServerClient, ServerInstanceDisplayConfig, ServerStatus
 
 
-def stop_server(server_info: ServerInstanceDisplayConfig, force: bool = False) -> dict:
-    """Stop a single server process."""
-
-    try:
-        proc = psutil.Process(server_info.pid)
-        children = proc.children(recursive=True)
-
-        if force:
-            for child in children:
-                try:
-                    child.kill()
-                except psutil.NoSuchProcess:
-                    pass
-
-            proc.kill()
-            proc.wait(timeout=2)
-
-            return {
-                "server": server_info,
-                "success": True,
-                "method": "force",
-                "message": f"Force stopped {server_info.name}",
-            }
-        else:
-            # Graceful shutdown, then wait
-            for child in children:
-                try:
-                    child.send_signal(SIGINT)
-                except psutil.NoSuchProcess:
-                    pass
-
-            proc.send_signal(SIGINT)
-
-            try:
-                proc.wait(timeout=10)
-
-                return {
-                    "server": server_info,
-                    "success": True,
-                    "method": "graceful",
-                    "message": f"Gracefully stopped {server_info.name}",
-                }
-            except psutil.TimeoutExpired:
-                # Graceful didn't work, so terminate and wait
-                try:
-                    child.terminate()
-                except psutil.NoSuchProcess:
-                    pass
-
-                proc.terminate()
-
-                try:
-                    proc.wait(timeout=5)
-
-                    return {
-                        "server": server_info,
-                        "success": True,
-                        "method": "terminate",
-                        "message": f"Terminated {server_info.name} (graceful shutdown timed out)",
-                    }
-                except psutil.TimeoutExpired:
-                    return {
-                        "server": server_info,
-                        "success": False,
-                        "method": "failed",
-                        "message": f"Failed to stop {server_info.name} - use --force",
-                    }
-    except psutil.NoSuchProcess:
-        return {
-            "server": server_info,
-            "success": False,
-            "method": "no_process",
-            "message": f"{server_info.name} not found",
-        }
-    except psutil.AccessDenied:
-        return {
-            "server": server_info,
-            "success": False,
-            "method": "access_denied",
-            "message": f"Access denied to stop {server_info.name} (PID: {server_info.pid})",
-        }
-    except Exception as e:
-        return {
-            "server": server_info,
-            "success": False,
-            "method": "error",
-            "message": f"Error stopping {server_info.name}: {e}",
-        }
-
-
 class StatusCommand:
     """Main class to check server status"""
 
@@ -212,6 +122,96 @@ class StopCommand:
 
     status_cmd: StatusCommand = field(default_factory=StatusCommand)
 
+    def stop_server(self, server_info: ServerInstanceDisplayConfig, force: bool = False) -> dict:
+        """Stop a single server process."""
+
+        try:
+            proc = psutil.Process(server_info.pid)
+            children = proc.children(recursive=True)
+
+            if force:
+                for child in children:
+                    try:
+                        child.kill()
+                    except psutil.NoSuchProcess:
+                        pass
+
+                proc.kill()
+                proc.wait(timeout=2)
+
+                return {
+                    "server": server_info,
+                    "success": True,
+                    "method": "force",
+                    "message": f"Force stopped {server_info.name}",
+                }
+            else:
+                # Graceful shutdown, then wait
+                for child in children:
+                    try:
+                        child.send_signal(SIGINT)
+                    except psutil.NoSuchProcess:
+                        pass
+
+                proc.send_signal(SIGINT)
+
+                try:
+                    proc.wait(timeout=10)
+
+                    return {
+                        "server": server_info,
+                        "success": True,
+                        "method": "graceful",
+                        "message": f"Gracefully stopped {server_info.name}",
+                    }
+                except psutil.TimeoutExpired:
+                    # Graceful didn't work, so terminate and wait
+                    for child in children:
+                        try:
+                            child.terminate()
+                        except psutil.NoSuchProcess:
+                            pass
+
+                    proc.terminate()
+
+                    try:
+                        proc.wait(timeout=5)
+
+                        return {
+                            "server": server_info,
+                            "success": True,
+                            "method": "terminate",
+                            "message": f"Terminated {server_info.name} (graceful shutdown timed out)",
+                        }
+                    except psutil.TimeoutExpired:
+                        return {
+                            "server": server_info,
+                            "success": False,
+                            "method": "failed",
+                            "message": f"Failed to stop {server_info.name} - use --force",
+                        }
+        except psutil.NoSuchProcess:
+            return {
+                "server": server_info,
+                "success": False,
+                "method": "no_process",
+                "message": f"{server_info.name} not found",
+            }
+        except psutil.AccessDenied:
+            return {
+                "server": server_info,
+                "success": False,
+                "method": "access_denied",
+                "message": f"Access denied to stop {server_info.name} (PID: {server_info.pid})",
+            }
+        except Exception as e:
+            return {
+                "server": server_info,
+                "success": False,
+                "method": "error",
+                "message": f"Error stopping {server_info.name}: {e}",
+            }
+
     def stop_all(self, force: bool = False) -> List[dict]:
         """Stop all running servers"""
         servers = self.status_cmd.discover_servers()
@@ -219,7 +219,7 @@ class StopCommand:
         if not servers:
             return [{"success": False, "message": "No servers found"}]
 
-        return [stop_server(server, force) for server in servers]
+        return [self.stop_server(server, force) for server in servers]
 
     def stop_by_name(self, name: str, force: bool = False) -> List[dict]:
         """Stop a server by name"""
@@ -230,7 +230,7 @@ class StopCommand:
         if not matching:
             return [{"success": False, "message": f"No server found with name: {name}"}]
 
-        return [stop_server(matching, force)]
+        return [self.stop_server(matching, force)]
 
     def stop_by_port(self, port: int, force: bool = False) -> List[dict]:
         """Stop a server on a specific port"""
@@ -240,7 +240,7 @@ class StopCommand:
         if not matching:
             return [{"success": False, "message": f"No server found with port: {port}"}]
 
-        return [stop_server(matching, force)]
+        return [self.stop_server(matching, force)]
 
     def display_results(self, results: List[dict]) -> None:
         """Display stop results"""

@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 from pytest import MonkeyPatch
 
 from nemo_gym.cli import ServerInstanceDisplayConfig
-from nemo_gym.server_commands import StatusCommand, StopCommand, stop_server
+from nemo_gym.server_commands import StatusCommand, StopCommand
 
 
 class TestServerCommands:
@@ -105,7 +105,8 @@ class TestServerCommands:
         mock_process_cls = MagicMock(return_value=mock_proc)
         monkeypatch.setattr("psutil.Process", mock_process_cls)
 
-        result = stop_server(server_info, force=True)
+        cmd = StopCommand()
+        result = cmd.stop_server(server_info, force=True)
 
         assert result["success"] is True
         assert result["method"] == "force"
@@ -146,7 +147,7 @@ class TestServerCommands:
         }
 
         monkeypatch.setattr(cmd.status_cmd, "discover_servers", lambda: servers)
-        monkeypatch.setattr("nemo_gym.server_commands.stop_server", lambda s, f: mock_stop_result)
+        monkeypatch.setattr(cmd, "stop_server", lambda s, f: mock_stop_result)
 
         results = cmd.stop_all(force=False)
 
@@ -180,7 +181,7 @@ class TestServerCommands:
         }
 
         monkeypatch.setattr(cmd.status_cmd, "discover_servers", lambda: servers)
-        monkeypatch.setattr("nemo_gym.server_commands.stop_server", lambda s, f: mock_stop_result)
+        monkeypatch.setattr(cmd, "stop_server", lambda s, f: mock_stop_result)
 
         results = cmd.stop_by_name("test_server", force=False)
 
@@ -222,7 +223,7 @@ class TestServerCommands:
         }
 
         monkeypatch.setattr(cmd.status_cmd, "discover_servers", lambda: servers)
-        monkeypatch.setattr("nemo_gym.server_commands.stop_server", lambda s, f: mock_stop_result)
+        monkeypatch.setattr(cmd, "stop_server", lambda s, f: mock_stop_result)
 
         results = cmd.stop_by_port(8000, force=False)
 
