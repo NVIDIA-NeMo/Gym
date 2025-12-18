@@ -285,6 +285,10 @@ ng_dump_config = "nemo_gym.cli:dump_config"
 nemo_gym_help = "nemo_gym.cli:display_help"
 ng_help = "nemo_gym.cli:display_help"
 
+# Server status
+nemo_gym_status = "nemo_gym.cli:status"
+ng_status = "nemo_gym.cli:status"
+
 # Environment-specific uv pip list
 nemo_gym_pip_list = "nemo_gym.cli:pip_list"
 ng_pip_list = "nemo_gym.cli:pip_list"

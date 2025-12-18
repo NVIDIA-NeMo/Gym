@@ -584,6 +584,49 @@ ng_pip_list +entrypoint=resources_servers/example_single_tool_call +format=json
 ng_pip_list +entrypoint=resources_servers/example_single_tool_call +outdated=true
 ```
 
+---
+
+### `ng_status` / `nemo_gym_status`
+
+View all currently running NeMo Gym servers and their health status.
+
+**Example**
+
+```bash
+ng_status
+
+NeMo Gym Server Status:
+
+[1] ✓ example_single_tool_call (resources_servers/example_single_tool_call)
+{
+    'server_type': 'resources_servers',
+    'name': 'example_single_tool_call',
+    'port': 58117,
+    'pid': 89904,
+    'uptime_seconds': '0d 0h 0m 41.5s',
+}
+[2] ✓ example_single_tool_call_simple_agent (responses_api_agents/simple_agent)
+{
+    'server_type': 'responses_api_agents',
+    'name': 'simple_agent',
+    'port': 58118,
+    'pid': 89905,
+    'uptime_seconds': '0d 0h 0m 41.5s',
+}
+[3] ✓ policy_model (responses_api_models/openai_model)
+{
+    'server_type': 'responses_api_models',
+    'name': 'openai_model',
+    'port': 58119,
+    'pid': 89907,
+    'uptime_seconds': '0d 0h 0m 41.5s',
+}
+
+3 servers found (3 healthy, 0 unhealthy)
+
+```
+
+---
 
 ## Getting Help
 
