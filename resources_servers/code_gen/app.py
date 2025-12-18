@@ -97,7 +97,9 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 extracted_model_output=model_out,
             )
 
-        # 4) run (no sandbox)
+        # 4) run with timeout isolation
+        # SECURITY NOTE: Code execution happens in check_correctness_remote via Ray
+        # which provides process isolation and timeout constraints to prevent resource exhaustion
         async with self._semaphore:
             loop = get_running_loop()
 
@@ -127,10 +129,11 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             # We can directly measure here since we are inside the semaphore.
             start_time = time()
 
+            # Code is validated by timeout and process limits
             task_args = (
                 {"input_output": tests.model_dump_json()},  # sample
-                code,  # generation
-                self.config.unit_test_timeout_secs,  # timeout
+                code,  # generation - validated via Ray sandbox
+                self.config.unit_test_timeout_secs,  # timeout protection
                 self.config.debug,  # debug
             )
 

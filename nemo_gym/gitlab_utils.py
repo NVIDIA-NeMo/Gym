@@ -120,5 +120,22 @@ def is_model_in_gitlab(model_name: str) -> bool:  # pragma: no cover
 
 
 def delete_model_from_gitlab(model_name: str) -> None:  # pragma: no cover
+    """Delete a dataset/model from GitLab with user confirmation.
+    
+    SECURITY: Requires explicit user confirmation before deletion to prevent
+    accidental or unauthorized deletion of resources.
+    """
     client = create_mlflow_client()
-    client.delete_registered_model(model_name)
+    
+    # SECURITY: Prompt for user confirmation before deletion
+    confirmation = input(f"Are you sure you want to delete '{model_name}' from GitLab? Type 'yes' to confirm: ")
+    if confirmation.lower() != 'yes':
+        print(f"Deletion of '{model_name}' cancelled.")
+        return
+    
+    try:
+        client.delete_registered_model(model_name)
+        print(f"Successfully deleted '{model_name}' from GitLab.")
+    except Exception as e:
+        print(f"Error deleting '{model_name}' from GitLab: {e}")
+        raise

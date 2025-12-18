@@ -29,8 +29,21 @@ class StatusCommand:
         if not server_info.url:
             return "unknown_error"
 
+        # SECURITY: Validate URL format to prevent SSRF attacks
         try:
-            requests.get(server_info.url, timeout=2)
+            from urllib.parse import urlparse
+            parsed = urlparse(server_info.url)
+            # Only allow http and https schemes
+            if parsed.scheme not in ('http', 'https'):
+                return "unknown_error"
+            # Reject if no netloc (host) is specified
+            if not parsed.netloc:
+                return "unknown_error"
+        except Exception:
+            return "unknown_error"
+
+        try:
+            requests.get(server_info.url, timeout=2, allow_redirects=False)
             return "success"
         except requests.exceptions.ConnectionError:
             return "connection_error"

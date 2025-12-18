@@ -33,10 +33,14 @@ class Model:
             api_key = os.getenv("NIMS_API_KEY")
             base_url = "https://integrate.api.nvidia.com/v1"
         elif endpoint == "vllm":
-            api_key = "EMPTY"  # pragma: allowlist secret
+            # SECURITY: For vllm, use environment variable instead of hardcoded placeholder
+            api_key = os.getenv("VLLM_API_KEY", "")
             base_url = "http://localhost:8000/v1"
+        else:
+            raise ValueError(f"Unknown endpoint: {endpoint}")
+        
         if not api_key:
-            raise ValueError("API_KEY is not set in the .env file.")
+            raise ValueError(f"API_KEY is not set in the environment for endpoint: {endpoint}")
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.model = model
         self.response_json = response_json
