@@ -1,0 +1,2 @@
+-e nemo-gym[dev] @ ../../
+reasoning-gym>=0.1.19

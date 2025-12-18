@@ -2,13 +2,13 @@
 
 # Training Framework Integration
 
-These guides cover how to integrate NeMo Gym into a new RL training framework. Use them if you're:
+These guides cover how to integrate NeMo Gym into a new RL training framework. Use them if you are:
 
 - A training framework maintainer adding NeMo Gym support
-- Contributing NeMo Gym integration for a training framework that doesn't have one yet
+- Contributing NeMo Gym integration for a training framework that does not have one yet
 
 :::{tip}
-Just want to train models? Use {ref}`NeMo RL <rl-training-with-nemo-rl>` instead.
+Just want to train models? Use {ref}`NeMo RL <training-nemo-rl-grpo-index>` instead.
 :::
 
 ## Prerequisites
@@ -77,7 +77,7 @@ The typical integration workflow follows this sequence:
   - Description
 * - 1
   - Generation backend
-  - Expose your generation engine (vLLM, SGLang) as an OpenAI-compatible HTTP server
+  - Expose your generation engine, such as vLLM or SGLang, as an OpenAI-compatible HTTP server
 * - 2
   - On-policy corrections
   - Implement token ID fixes to prevent re-tokenization and re-templating issues

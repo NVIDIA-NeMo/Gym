@@ -1,7 +1,7 @@
 # FAQ
 
-:::{warning}
-This document is a collection of How-Tos and FAQs that have not made their way into an official tutorial yet. The following guides are **experimental** and may contain bugs. Proceed with caution.
+:::{note}
+This page provides quick answers to commonly asked questions. Over time, these topics will be integrated into the structured product documentation (tutorials, guides, and reference sections) as we expand coverage. We've documented them here to provide immediate help while more comprehensive documentation is in progress.
 :::
 
 # How To: Run tests for simple agent
@@ -14,7 +14,7 @@ Tests are strongly encouraged and you must have at least one test for every serv
 
 
 # How To: Upload and download a dataset from HuggingFace
-The huggingface client requires that your credentials are in `env.yaml`, along with some other pertinent details needed to upload to the designated place. 
+The huggingface client requires that your credentials are in `env.yaml`, along with some other pertinent details needed to upload to the designated place.
 ```yaml
 hf_token: {your huggingface token}
 hf_organization: {your huggingface org}
@@ -22,19 +22,19 @@ hf_collection_name: {your collection}
 hf_collection_slug: {your collection slug}  # alphanumeric string found at the end of a collection URI
 
 # optional:
-hf_dataset_prefix: str  # field to override the default value "NeMo-Gym" prepended to the dataset name
+hf_dataset_prefix: str  # field to override the default value "Nemotron-RL" prepended to the dataset name
 ```
 
 Naming convention for Huggingface datasets is as follows.
 
-`{hf_organization}/{hf_dataset_prefix}-{domain}–{resource_server_name}-{your dataset name}`
+`{hf_organization}/{hf_dataset_prefix}-{domain}–{resource_server OR dataset_name}`
 
 E.g.:
 
-`NVIDIA/Nemo-Gym-Math-math_with_judge-dapo17k`
+`nvidia/Nemotron-RL-math-OpenMathReasoning`
 
 
-You will only need to manually input the `{your dataset name}` portion of the above when inputting the `dataset_name` flag in the upload command (refer to the command below). Everything preceding it will be automatically populated using your config prior to upload.
+You will only need to manually input the `{dataset_name}` portion of the above when inputting the `dataset_name` flag in the upload command (refer to the command below). Everything preceding it will be automatically populated using your config prior to upload. Note that it is optional, and overrides `resource_server` if used.
 
 To upload to Huggingface, use the below command:
 ```bash
@@ -47,6 +47,45 @@ ng_upload_dataset_to_hf \
 
 Because of the required dataset nomenclature, the resource server config path is required when uploading. Specifically, `domain` is used in the naming of a dataset in Huggingface.
 
+By default, the `split` parameter for uploading is set to `train`, which will run a check on the required fields `{"responses_create_params", "reward_profiles", "expected_answer"}`. Specifying `validation` or `test` bypasses this check:
+
+```bash
+resource_config_path="resources_servers/multineedle/configs/multineedle.yaml"
+ng_gitlab_to_hf_dataset \
+    +dataset_name={your dataset name} \
+    +input_jsonl_fpath=data/multineedle_benchmark_validation.jsonl \
+    +resource_config_path=${resource_config_path} \
+    +split=validation
+```
+
+## Uploading with Pull Request workflow
+When uploading to an organization repository where you don't have direct write access (e.g., nvidia/), use the `+create_pr=true` flag to create a Pull Request instead of pushing directly. You can also customize the commit message and description.
+
+If you want to specify the revision (branch name), you can add the `+revision={your branch name}` flag. Excluding `create_pr` (or setting it to `false`) assumes you are committing to an existing branch. Including it assumes it will be a brand new branch.
+
+```bash
+ng_upload_dataset_to_hf \
+    +dataset_name=OpenMathReasoning \
+    +input_jsonl_fpath=data/validation.jsonl \
+    +resource_config_path=${resource_config_path} \
+    +split=validation \
+    +create_pr=true \
+    +revision=my-branch-name \
+    +commit_message="Add validation set" \
+    +commit_description="Includes 545 examples"
+```
+
+The command will output a link to the created Pull Request:
+```bash
+[Nemo-Gym] - Pull Request created: https://huggingface.co/datasets/nvidia/Nemotron-RL-math-OpenMathReasoning/discussions/1
+```
+
+:::{note}
+The commit_message and commit_description parameters work for both direct pushes and Pull Requests. If not provided, HuggingFace auto-generates a commit message based on the filename.
+:::
+
+
+## Deleting Datasets from Gitlab
 You can optionally pass a `+delete_from_gitlab=true` flag to the above command, which will delete the model and all of its artifacts from Gitlab. By default, this is set to `False`.
 ```bash
 resource_config_path="resources_servers/multineedle/configs/multineedle.yaml"
@@ -59,7 +98,7 @@ ng_upload_dataset_to_hf \
 
 There will be a confirmation dialog to confirm the deletion:
 ```bash
-[Nemo-Gym] - Dataset uploaded successful
+[Nemo-Gym] - Dataset upload successful
 [Nemo-Gym] - Found model 'fs-test' in the registry. Are you sure you want to delete it from Gitlab? [y/N]:
 ```
 
@@ -83,13 +122,28 @@ ng_delete_dataset_from_gitlab \
 Gitlab model names are case sensitive. There can be models named 'My_Model' and 'my_model' living simultaneously in the registry. When uploading to Huggingface with the intention of deleting Gitlab artifacts, be sure the casing of your Huggingface dataset name matches that of Gitlab's.
 :::
 
+
+## Downloading Datasets from Huggingface
 Downloading a dataset from Huggingface is straightforward:
+
+**For structured datasets (with train/validation/test splits):**
 ```bash
 ng_download_dataset_from_hf \
-    +repo_id=NVIDIA/NeMo-Gym-Instruction_Following-multineedle-{your dataset name} \
-    +artifact_fpath=multineedle_benchmark.jsonl \
-    +output_fpath=data/multineedle_benchmark_hf.jsonl
+    +repo_id=nvidia/Nemotron-RL-knowledge-mcqa \
+    +output_dirpath=data/mcqa \
+    +split=train
 ```
+The `split` parameter is optional. If omitted, all available splits will be downloaded as separate JSONL files.
+
+
+**For raw file repositories (with specific JSONL files):**
+```bash
+ng_download_dataset_from_hf \
+    +repo_id=nvidia/Nemotron-RL-instruction_following \
+    +output_dirpath=data/instruction_following \
+    +artifact_fpath=instruction_following.jsonl
+```
+Use `artifact_fpath` when the HuggingFace repo contains raw/arbitrary JSONL files rather than structured dataset splits. You cannot specify both `split` and `artifact_fpath`.
 
 
 # How To: Prepare and validate data for PR submission or RL training
@@ -120,6 +174,9 @@ example_multi_step_simple_agent:
           dataset_name: example_multi_step
           version: 0.0.1
           artifact_fpath: example_multi_step/train.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-instruction_following
+          artifact_fpath: instruction_following.jsonl
         license: Apache 2.0
       - name: validation
         type: validation
@@ -130,6 +187,9 @@ example_multi_step_simple_agent:
           dataset_name: example_multi_step
           version: 0.0.1
           artifact_fpath: example_multi_step/validation.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-instruction_following
+          artifact_fpath: if_validation.jsonl
         license: Apache 2.0
       - name: example
         type: example
@@ -142,7 +202,8 @@ A dataset object consists of:
 - Type: train, validation, or example. Train and validation are as used in NeMo RL or other train frameworks. More information about the example type is in the next section.
 - Jsonl fpath: the local file path to your jsonl file for this dataset.
 - Num repeats: optionally repeat each row when preparing or collating data. Defaults to 1 if unspecified.
-- Gitlab identifier: The remote path to the dataset as held in the Gitlab dataset registry. This field is required for train and validation datasets. (Not required for example datasets since those are required to be committed to Git).
+- Gitlab identifier: (NVIDIA internal) The remote path to the dataset as held in the Gitlab dataset registry. This field is required for train and validation datasets. (Not required for example datasets since those are required to be committed to Git).
+- HuggingFace identifier: (Public) The remote path to the dataset on HuggingFace. Contains `repo_id` (required) and optionally `artifact_fpath` for raw file repos. If `artifact_fpath` is omitted, the datasets library will infer the `split` from the dataset `type`.
 - License: The license of that dataset. Required for train and validation datasets and not required for example datasets, similar in principle to the Gitlab identifier.
 - Start idx, end idx: used for slicing your dataset.
 ```yaml
@@ -153,6 +214,9 @@ A dataset object consists of:
     dataset_name: example_multi_step
     version: 0.0.1
     artifact_fpath: example_multi_step/validation.jsonl
+  huggingface_identifier:
+    repo_id: nvidia/example_multi_step
+    artifact_fpath: example_validation.jsonl
   license: Apache 2.0
 ```
 
@@ -165,10 +229,31 @@ responses_api_models/openai_model/configs/openai_model.yaml"
 ng_prepare_data "+config_paths=[$config_paths]" \
     +output_dirpath=data/example_multi_step \
     +mode=example_validation
+```
 
-# Run NeMo Gym servers the exact same way with the same configs!
+To download missing datasets automatically, add +should_download=true. By default, datasets are downloaded from HuggingFace:
+```bash
+ng_prepare_data "+config_paths=[$config_paths]" \
+    +output_dirpath=data/example_multi_step \
+    +mode=train_preparation \
+    +should_download=true
+```
+
+For NVIDIA internal users, you can download from GitLab instead:
+
+```bash
+ng_prepare_data "+config_paths=[$config_paths]" \
+    +output_dirpath=data/example_multi_step \
+    +mode=train_preparation \
+    +should_download=true \
+    +data_source=gitlab
+```
+
+Run NeMo Gym servers the exact same way with the same configs!
+```bash
 ng_run "+config_paths=[$config_paths]"
 ```
+
 
 The `ng_prepare_data` command will:
 1. Attempt to load all the datasets you specified from disk. Missing datasets will be reported before any processing is done.
@@ -208,61 +293,6 @@ ng_run "+config_paths=[$config_paths]"
 
 # Dump the exact yaml config that NeMo gym sees, just by swapping ng_run -> ng_dump_config
 ng_dump_config "+config_paths=[$config_paths]"
-```
-
-
-# How To: ng_version - Check NeMo Gym version and system information
-Check your NeMo Gym installation version and environment details for troubleshooting or support.
-
-**Standard format:**
-```bash
-ng_version
-```
-
-**Example output:**
-```bash
-NeMo Gym v0.2.0rc0
-Python 3.13.5 (/Users/user/nemo-gym/.venv/bin/python3)
-Installation: /Users/user/nemo-gym
-
-Key Dependencies:
-  openai: 2.6.1
-  ray: 2.50.1
-
-System:
-  OS: Darwin 25.1.0
-  Platform: macOS-26.1-arm64-arm-64bit-Mach-O
-  Architecture: arm64
-  Processor: arm
-  CPUs: 14
-  Memory: 48.0 GB
-```
-
-**Machine-readable JSON format:**
-```bash
-ng_version +json=true
-```
-
-**Example output:**
-```bash
-{
-  "nemo_gym": "0.2.0rc0",
-  "python": "3.13.5",
-  "python_path": "/Users/user/nemo-gym/.venv/bin/python3",
-  "installation_path": "/Users/user/nemo-gym",
-  "dependencies": {
-    "openai": "2.6.1",
-    "ray": "2.50.1"
-  },
-  "system": {
-    "os": "Darwin 25.1.0",
-    "platform": "macOS-26.1-arm64-arm-64bit-Mach-O",
-    "architecture": "arm64",
-    "processor": "arm",
-    "cpus": 14,
-    "memory_gb": 48.0
-  }
-}
 ```
 
 
@@ -411,58 +441,6 @@ And you have to ensure that when you make a request with your custom client that
 It's an analogous story for Responses-compatible APIs.
 
 
-# How To: Detailed anatony of a Gym config
-Let's break down the anatomy of a Gym config further and help clarify some things.
-
-TODO: bxyu-nvidia
-
-```yaml
-# `math_with_judge` here at the top most level is the unique name of your resources server. This must be unique across your config.
-# When you or other servers call this server, they will do so using the ServerClient and its name.
-math_with_judge:
-  # `resources_servers` here at the second level is the server type. There are 3 server types in gym: agent, model, or resources.
-  resources_servers:
-    # This is the resources server type. This is not unique at runtime, and you can spin up multiple instances of this with different configs if you wish!
-    math_with_judge:
-      entrypoint: app.py
-      judge_model_server:
-        type: responses_api_models
-        name: ???
-      judge_responses_create_params: {
-        input: []
-      }
-      should_use_judge: false
-math_with_judge_simple_agent:
-  responses_api_agents:
-    simple_agent:
-      entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: math_with_judge
-      model_server:
-        type: responses_api_models
-        name: policy_model
-      datasets:
-      - name: train
-        type: train
-        jsonl_fpath: resources_servers/math_with_judge/data/dapo17k_bytedtsinghua_train.jsonl
-        gitlab_identifier:
-          dataset_name: bytedtsinghua_dapo17k
-          version: 0.0.1
-          artifact_fpath: dapo17k_bytedtsinghua_train.jsonl
-        license: Apache 2.0
-      - name: validation
-        type: validation
-        jsonl_fpath: resources_servers/math_with_judge/data/aime24_bytedtsinghua_validation.jsonl
-        gitlab_identifier:
-          dataset_name: bytedtsinghua_dapo17k
-          version: 0.0.1
-          artifact_fpath: aime24_bytedtsinghua_validation.jsonl
-        license: Apache 2.0
-```
-
-
-
 # How To: Use Ray for parallelizing CPU-intensive tasks
 
 NeMo Gym automatically sets up Ray for distributed computing for CPU-intensive tasks.
@@ -580,34 +558,6 @@ Response(
 Reasoning traces (`Reasoning` items) are parsed before the verifier processes the output. The parsing is **model-specific**, and the verifier does not need to worry about the extracting or interpreting reasoning traces. The verifier receives these items already separated and clearly typed.
 
 
-# FAQ: DCO and commit signing VSCode and Git setup
-Here are some suggestions for easier development using the VSCode code editor.
-
-VSCode workspace settings at `.vscode/settings.json`
-```
-{
-    "git.enableCommitSigning": true,
-    "git.alwaysSignOff": true
-}
-```
-
-Set up your Github signing keys! https://docs.github.com/en/authentication/managing-commit-signature-verification/about-commit-signature-verification#ssh-commit-signature-verification
-
-Specifically, if you visit https://github.com/settings/keys while logged into your account, you should see the following items:
-1. Under the "SSH keys" major section, there are 2 subsections
-   1. Authentication keys
-   2. Signing key
-
-More often than not, the SHA256 displayed by Github (SHA256:xxxx) should be the same for the two keys above since you probably want to just use the same SSH key for both purposes. If you do not see the following, follow the signing keys link above.
-
-
-For developers that sign commits using SSH keys, this is configuration so that VSCode source control is able to sign commits properly.
-```bash
-git config gpg.format ssh
-git config user.signingkey ~/.ssh/id_ed25519.pub
-```
-
-
 # FAQ: SFT and RL
 Reading time: 5 mins
 Date: Fri Aug 15, 2025
@@ -625,33 +575,6 @@ One way I like to think about these things is:
 
 Tying back to NeMo Gym, NeMo gym can be used to create synthetic data for SFT training by running strong teacher models on the different environments. Critically, it will also be used as the source of data during RL training.
 
-
-# FAQ: Error: Found files with missing copyright
-If you get an error like this on your PR:
-```
-Error: Found files with missing copyright:
-path= ./resources_servers/code_gen/scripts/validate_dataset.py
-path= ./resources_servers/code_gen/scripts/build_examples.py
-path= ./resources_servers/code_gen/app.py
-```
-
-Add the following copyright snippet to the top of the files listed:
-```python
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-```
 
 
 # FAQ: PermissionError when starting NeMo Gym in sandboxed environments
@@ -728,22 +651,6 @@ So, the OpenAI compatible model server in a training framework needs to be able 
 
 TODO @bxyu-nvidia: expand on this later.
 
-
-# FAQ: NeMo Gym what CI/CD do I need to pass?
-
-NeMo Gym has an E2E suite of CI/CD in the form of Github actions workflows. Some of these are critical to PR merge and some of them are not.
-
-For the majority of PRs, there are 5 checks that need to pass:
-1. DCO
-2. Code linting / Lint check (pull_request)
-3. Copyright check / copyright-check / main (pull_request)
-4. Secrets detector / secrets-detector / secrets-detector (pull_request)
-5. Unit tests / Test (pull_request)
-
-Examples of PR checks that most PRs do not need to wait for to pass:
-1. CICD NeMo / cicd-container-build / build / main (push)
-2. CICD NeMo / Nemo_CICD_Test (push)
-...
 
 # FAQ: Why use aiohttp backend instead of httpx/httpcore for async http?
 

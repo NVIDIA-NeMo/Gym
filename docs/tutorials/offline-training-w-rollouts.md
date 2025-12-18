@@ -1,4 +1,6 @@
-#  Offline Training with Rollouts (SFT/DPO) - Experimental
+(offline-training-w-rollouts)=
+
+# Offline Training with Rollouts (SFT/DPO) - Experimental
 
 :::{warning}
 This tutorial is **experimental** and may contain bugs. Proceed with caution.

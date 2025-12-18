@@ -153,6 +153,11 @@ dependencies = [
     # Updated: Fri Nov 07, 2025 with psutil==6.1.1
     # License: BSD 3-Clause https://github.com/giampaolo/psutil/blob/master/LICENSE
     "psutil",
+
+    # HuggingFace datasets: for loading and converting parquet datasets
+    # Updated Thu Dec 04, 2025 with datasets==4.4.1
+    # License: Apache 2.0 https://github.com/huggingface/datasets/blob/main/LICENSE
+    "datasets",
 ]
 
 [dependency-groups]
@@ -166,6 +171,7 @@ docs = [
     "sphinxcontrib-mermaid>=1.0.0",   # For mermaid diagrams
     "sphinx-design>=0.6.1",           # For our design elements
     "swagger-plugin-for-sphinx>=6.0.0", # For Swagger API documentation
+    "sphinx-reredirects>=0.1.6",      # For URL redirects when pages move
 ]
 
 [project.optional-dependencies]
@@ -279,10 +285,13 @@ ng_dump_config = "nemo_gym.cli:dump_config"
 nemo_gym_help = "nemo_gym.cli:display_help"
 ng_help = "nemo_gym.cli:display_help"
 
+# Environment-specific uv pip list
+nemo_gym_pip_list = "nemo_gym.cli:pip_list"
+ng_pip_list = "nemo_gym.cli:pip_list"
+
 # Display version
 nemo_gym_version = "nemo_gym.cli:version"
 ng_version = "nemo_gym.cli:version"
-
 
 [tool.setuptools.packages.find]
 where = ["."]

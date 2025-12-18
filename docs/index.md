@@ -22,7 +22,7 @@ content_type: index
 
 [NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) is a library for building reinforcement learning (RL) training environments for large language models (LLMs). NeMo Gym provides infrastructure to develop environments, scale rollout collection, and integrate seamlessly with your preferred training framework.
 
-A training environment consists of three server components: **Agents** orchestrate the rollout lifecycle—calling models, executing tool calls via resources, and coordinating verification. **Models** provide stateless text generation using LLM inference endpoints. **Resources** define tasks, tool implementations, and verification logic.
+A training environment consists of three server components: **Agents** orchestrate the rollout lifecycle—calling models, executing tool calls through resources, and coordinating verification. **Models** provide stateless text generation using LLM inference endpoints. **Resources** define tasks, tool implementations, and verification logic.
 
 ````{div} sd-d-flex-row
 ```{button-ref} gs-quickstart
@@ -108,6 +108,7 @@ Collect and view rollouts
 
 ::::
 
+<!-- This section needs to match the content in docs/tutorials/index.md -->
 ## Tutorials
 
 Hands-on tutorials to build and customize your training environments.
@@ -120,23 +121,23 @@ Hands-on tutorials to build and customize your training environments.
 :link-type: doc
 Implement or integrate existing tools and define task verification logic.
 +++
-{bdg-secondary}`custom-environments` {bdg-secondary}`tools`
+{bdg-primary}`beginner` {bdg-secondary}`30 min` {bdg-secondary}`custom-environments` {bdg-secondary}`tools`
 :::
 
-:::{grid-item-card} {octicon}`database;1.5em;sd-mr-1` Offline Training (SFT, DPO)
-:link: tutorials/offline-training-w-rollouts
-:link-type: doc
-Train with SFT or DPO using collected rollouts.
+:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` Offline Training with Rollouts
+:link: offline-training-w-rollouts
+:link-type: ref
+Transform rollouts into training data for {term}`supervised fine-tuning (SFT) <SFT (Supervised Fine-Tuning)>` and {term}`direct preference optimization (DPO) <DPO (Direct Preference Optimization)>`.
 +++
 {bdg-secondary}`sft` {bdg-secondary}`dpo`
 :::
 
-:::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` RL Training with NeMo RL
-:link: tutorials/rl-training-with-nemo-rl
-:link-type: doc
-Train with GRPO using NeMo RL and NeMo Gym.
+:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` GRPO with NeMo RL
+:link: training-nemo-rl-grpo-index
+:link-type: ref
+Learn how to set up NeMo Gym and NeMo RL training environments, run tests, prepare data, and launch single-node and multi-node training runs.
 +++
-{bdg-secondary}`grpo` {bdg-secondary}`nemo-rl`
+{bdg-primary}`training` {bdg-secondary}`rl` {bdg-secondary}`grpo`
 :::
 
 ::::
@@ -148,12 +149,20 @@ Contribute to NeMo Gym development.
 ::::{grid} 1 2 2 2
 :gutter: 1 1 1 2
 
-:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` Integrate Gym into RL Frameworks
+:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` Contribute Environments
+:link: contribute/environments/index
+:link-type: doc
+Contribute new environments or integrate existing benchmarks.
++++
+{bdg-primary}`environments`
+:::
+
+:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` Integrate RL Frameworks
 :link: contribute/rl-framework-integration/index
 :link-type: doc
 Implement NeMo Gym integration into a new training framework.
 +++
-{bdg-primary}`advanced`
+{bdg-primary}`training-integration`
 :::
 
 ::::
@@ -192,17 +201,8 @@ Rollout Collection <get-started/rollout-collection.md>
 
 tutorials/index.md
 tutorials/creating-resource-server
+tutorials/nemo-rl-grpo/index.md
 tutorials/offline-training-w-rollouts
-tutorials/rl-training-with-nemo-rl
-```
-
-```{toctree}
-:caption: Contribute
-:hidden:
-:maxdepth: 1
-
-Overview <contribute/index>
-Integrate RL Frameworks <contribute/rl-framework-integration/index>
 ```
 
 ```{toctree}
@@ -210,10 +210,10 @@ Integrate RL Frameworks <contribute/rl-framework-integration/index>
 :hidden:
 :maxdepth: 1
 
-FAQ <how-to-faq.md>
 Configuration <reference/configuration>
 reference/cli-commands.md
 apidocs/index.rst
+FAQ <reference/faq>
 ```
 
 ```{toctree}
@@ -222,4 +222,15 @@ apidocs/index.rst
 :maxdepth: 1
 
 troubleshooting/configuration.md
+```
+
+```{toctree}
+:caption: Contribute
+:hidden:
+:maxdepth: 1
+
+Overview <contribute/index>
+Development Setup <contribute/development-setup>
+Environments <contribute/environments/index>
+Integrate RL Frameworks <contribute/rl-framework-integration/index>
 ```

@@ -77,6 +77,9 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     uses_reasoning_parser: bool
     replace_developer_role_with_system: bool = False
 
+    # Corresponds to the extra_body of OpenAI Client.
+    extra_body: Optional[Dict[str, Any]] = None
+
     spinup_server: bool = False
     server_args: Optional[Dict[str, Any]] = None
 
@@ -370,6 +373,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                     pass
                 else:
                     raise NotImplementedError
+
+        if self.config.extra_body:
+            create_params = self.config.extra_body | create_params
 
         try:
             chat_completion_dict = await client.create_chat_completion(**create_params)
