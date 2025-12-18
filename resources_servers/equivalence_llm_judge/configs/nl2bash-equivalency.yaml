@@ -1,0 +1,138 @@
+equivalence_llm_judge:
+  resources_servers:
+    equivalence_llm_judge:
+      entrypoint: app.py
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_responses_create_params:
+        input: []
+      judge_prompt_template: |-
+        ===== System role =====
+        You are a meticulous Bash command grader.
+
+        Task: Determine if the candidate's generated bash command is functionally equivalent to the GOLD command for the given natural language query.
+
+        Consider:
+        1. Does it achieve the same outcome?
+        2. Are there only minor syntactic differences that don't affect functionality?
+        3. Are both commands correct interpretations of the natural language query?
+
+        Rules:
+        - Treat GOLD as authoritative for what counts as correct.
+        - Multi-part: all essential parts must match for “equivalent”; otherwise they are not equivalent.
+        - Be concise. Do NOT reveal or rewrite the GOLD.
+
+        Show your reason why they are equivalent or not equivalent first and then provide the output.
+
+        Output (at the end after double newlines):
+        - If equivalent: [[A=B]] they are equivalent
+        - If not equivalent: [[A!=B]] they are not equivalent
+
+        ===== Example 1 (equivalent) =====
+        QUESTION:
+        Add "execute" to the permissions of all directories in the home directory tree
+
+        GOLD:
+        find ~ -type d -exec chmod +x {{}} \\;
+
+        CANDIDATE:
+        find "$HOME" -type d -exec chmod +x {{}} \\;
+
+        Both commands achieve the same outcome by recursively finding all directories in the home directory and adding execute permissions, with only minor syntactic differences in how the home directory is referenced (~ vs $HOME) and quoting style.
+
+        [[A=B]] they are equivalent
+
+        ===== Example 2 (not equivalent) =====
+        QUESTION:
+        Add read and execute permission to command "node"
+
+        GOLD:
+        sudo chmod +rx $(which node)
+
+        CANDIDATE:
+        chmod +rx node
+
+        Candidate's command operates on a 'node' file in the current directory without sudo, whereas the GOLD modifies the actual node executable found via which and uses sudo.
+
+        [[A!=B]] they are not equivalent
+
+        ===== Inputs =====
+        QUESTION:
+        {question}
+
+        GOLD:
+        {expected_answer}
+
+        CANDIDATE:
+        {generated_answer}
+      judge_system_message: null
+      judge_equal_label: "[[A=B]]"
+      judge_not_equal_label: "[[A!=B]]"
+
+      # Optional regex to extract question from the last user message. The LAST
+      # match is used. If capture groups exist, the first non-empty group is
+      # returned; otherwise, the entire last match is used.
+      # Example: "^Question:\\s*(.*)$"
+      question_extract_regex: null
+
+      # Optional regex to extract the generated response from the last assistant message.
+      # The LAST match is used. If capture groups exist, the first non-empty
+      # group is returned; otherwise, the entire last match is used.
+      # Example: "^Answer:\\s*(.*)$"
+      response_extract_regex: Answer:\s*```(?:\w+)?\s*([\s\S]*?)\s*```(?=[\s\S]*$)
+
+      # Swap check: Run second judge pass with swapped expected/generated to detect positional bias
+      check_twice_swap: true
+      # Reward when the second (swap) pass fails; default 0.0, can be -1.0
+      reward_if_swap_fails: 0.0
+
+      # ========================================================================
+      # Per-Record Regex Features (OpenQA support)
+      # ========================================================================
+      # These features enable mixed datasets with different answer formats.
+      # They only activate when template_metadata.output_regex is present.
+      # Safe to enable by default - falls back to response_extract_regex when
+      # no per-record regex is present.
+
+      # [NEW] Enable per-record regex override from template_metadata.output_regex
+      use_per_record_regex: false
+
+      # --- The following features ONLY work when use_per_record_regex=true ---
+
+      # [NEW] Skip regex extraction when expected_answer length exceeds this threshold.
+      # When skipped, the full generation is shown to judge instead of extracting.
+      # Only applies when per-record regex is present. Set to null to disable.
+      extraction_length_threshold: 120
+
+      # [NEW] If true, when first pass fails, retry with full generation (no regex) for partial credit.
+      # Helps recover from regex extraction failures. Only activates when per-record regex exists.
+      check_full_generation_on_fail: true
+
+      # [NEW] Reward when full generation check succeeds after first pass fails.
+      # Default 0.5 (partial credit). Set to 1.0 for full credit or 0.0 to ignore.
+      reward_if_full_generation_succeeds: 0.5
+      domain: agent
+      verified: false
+      description: Short bash command generation questions with LLM-as-a-judge
+      value: Improve foundational bash and IF capabilities
+equivalence_llm_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: equivalence_llm_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        license: "TBD"
+        jsonl_fpath: /lustre/fsw/portfolios/llmservice/users/kbhardwaj/dev/Gym/data/nl2bash/example.jsonl
+      - name: train
+        type: train
+        license: "TBD"
+        jsonl_fpath: /lustre/fsw/portfolios/llmservice/users/kbhardwaj/dev/Gym/data/nl2bash/example.jsonl
+
