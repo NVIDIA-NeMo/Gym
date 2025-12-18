@@ -967,6 +967,8 @@ System:
   Memory: {sys_info["memory_gb"]} GB"""
 
         print(output)
+
+
 def stop():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     config = StopConfig.model_validate(global_config_dict)
@@ -980,7 +982,7 @@ def stop():  # pragma: no cover
         print("Error: Must specify one of: '+all=<bool>', '+name=<name>', or '+port=<port>'")
         print("\nUsage:")
         print("  ng_stop +all=true              # Stop all servers")
-        print("  ng_stop +name=simple_weather   # Stop specific server")
+        print("  ng_stop +name=example_single_tool_call   # Stop specific server")
         print("  ng_stop +port=8001             # Stop server on port 8001")
         print("  ng_stop +all=true +force=true  # Force stop all servers")
         exit(1)

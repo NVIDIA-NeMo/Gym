@@ -17,13 +17,14 @@ from unittest.mock import MagicMock
 
 from pytest import MonkeyPatch
 
+from nemo_gym.cli import ServerInstanceDisplayConfig
 from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME
-from nemo_gym.server_commands import ServerProcessInfo, StatusCommand, StopCommand, parse_server_info, stop_server
+from nemo_gym.server_commands import StatusCommand, StopCommand, parse_server_info, stop_server
 
 
 class TestServerCommands:
     def test_server_process_info_creation_sanity(self) -> None:
-        ServerProcessInfo(
+        ServerInstanceDisplayConfig(
             pid=12345,
             server_type="resources_server",
             name="test_server",
@@ -85,7 +86,7 @@ test_resources_server:
         monkeypatch.setattr("sys.stdout", text_trap)
 
         servers = [
-            ServerProcessInfo(
+            ServerInstanceDisplayConfig(
                 pid=123,
                 server_type="resources_servers",
                 name="test_resource",
@@ -97,7 +98,7 @@ test_resources_server:
                 status="success",
                 entrypoint="test_server",
             ),
-            ServerProcessInfo(
+            ServerInstanceDisplayConfig(
                 pid=456,
                 server_type="responses_api_models",
                 name="test_model",
@@ -122,7 +123,7 @@ test_resources_server:
         assert "test_model" in output
 
     def test_stop_server_force(self, monkeypatch: MonkeyPatch) -> None:
-        server_info = ServerProcessInfo(
+        server_info = ServerInstanceDisplayConfig(
             pid=99999,
             server_type="resources_servers",
             name="test_server",
@@ -158,7 +159,7 @@ test_resources_server:
 
         # With running servers
         servers = [
-            ServerProcessInfo(
+            ServerInstanceDisplayConfig(
                 pid=123,
                 server_type="resources_servers",
                 name="server1",
@@ -191,7 +192,7 @@ test_resources_server:
         cmd = StopCommand()
 
         servers = [
-            ServerProcessInfo(
+            ServerInstanceDisplayConfig(
                 pid=123,
                 server_type="resources_servers",
                 name="test_server",
@@ -233,7 +234,7 @@ test_resources_server:
         cmd = StopCommand()
 
         servers = [
-            ServerProcessInfo(
+            ServerInstanceDisplayConfig(
                 pid=123,
                 server_type="resources_servers",
                 name="test_server",

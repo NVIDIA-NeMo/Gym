@@ -17,19 +17,27 @@ from signal import SIGINT
 from time import time
 from typing import List
 
+import psutil
 import requests
 from devtools import pprint
 
 from nemo_gym.server_utils import ServerClient, ServerInstanceDisplayConfig, ServerStatus
 
 
-def stop_server(server_info: ServerProcessInfo, force: bool = False) -> dict:
+def stop_server(server_info: ServerInstanceDisplayConfig, force: bool = False) -> dict:
     """Stop a single server process."""
 
     try:
         proc = psutil.Process(server_info.pid)
+        children = proc.children(recursive=True)
 
         if force:
+            for child in children:
+                try:
+                    child.kill()
+                except psutil.NoSuchProcess:
+                    pass
+
             proc.kill()
             proc.wait(timeout=2)
 
@@ -41,6 +49,12 @@ def stop_server(server_info: ServerProcessInfo, force: bool = False) -> dict:
             }
         else:
             # Graceful shutdown, then wait
+            for child in children:
+                try:
+                    child.send_signal(SIGINT)
+                except psutil.NoSuchProcess:
+                    pass
+
             proc.send_signal(SIGINT)
 
             try:
@@ -54,6 +68,11 @@ def stop_server(server_info: ServerProcessInfo, force: bool = False) -> dict:
                 }
             except psutil.TimeoutExpired:
                 # Graceful didn't work, so terminate and wait
+                try:
+                    child.terminate()
+                except psutil.NoSuchProcess:
+                    pass
+
                 proc.terminate()
 
                 try:
