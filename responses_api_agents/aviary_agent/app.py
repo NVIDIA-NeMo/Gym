@@ -156,11 +156,8 @@ class AviaryAgent(SimpleResponsesAPIAgent):
                 try:
                     model_response = NeMoGymResponse.model_validate(model_response_json)
                 except ValidationError as e:
-                    # Maybe this should be handled as above? i.e. if we got an incomplete message back due to
-                    # max token limits
-                    raise RuntimeError(
-                        f"Received an invalid response from model server: {json.dumps(model_response_json)}"
-                    ) from e
+                    logger.warning(f"Error validating model response: {e!r}. Response: {model_response_json!r}.")
+                    break
 
                 # Parse model response
                 model_output = model_response.output
