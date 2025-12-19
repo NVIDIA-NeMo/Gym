@@ -137,7 +137,15 @@ Transform rollouts into training data for {term}`supervised fine-tuning (SFT) <S
 :link-type: ref
 Learn how to set up NeMo Gym and NeMo RL training environments, run tests, prepare data, and launch single-node and multi-node training runs.
 +++
-{bdg-primary}`training` {bdg-secondary}`rl` {bdg-secondary}`grpo`
+{bdg-primary}`training` {bdg-secondary}`rl` {bdg-secondary}`grpo` {bdg-secondary}`multi-step`
+:::
+
+:::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Unsloth and TRL
+:link: training-unsloth-trl
+:link-type: ref
+Fast, memory-efficient fine-tuning for single-step tasks: math, structured outputs, instruction following, reasoning gym and more.
++++
+{bdg-primary}`training` {bdg-secondary}`unsloth` {bdg-secondary}`trl` {bdg-secondary}`single-step`
 :::
 
 ::::
@@ -201,8 +209,9 @@ Rollout Collection <get-started/rollout-collection.md>
 
 tutorials/index.md
 tutorials/creating-resource-server
-tutorials/nemo-rl-grpo/index.md
 tutorials/offline-training-w-rollouts
+tutorials/nemo-rl-grpo/index.md
+tutorials/unsloth-trl-training
 ```
 
 ```{toctree}
