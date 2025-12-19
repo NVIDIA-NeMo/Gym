@@ -46,6 +46,7 @@ from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
     PYTHON_VERSION_KEY_NAME,
+    UV_PIP_SET_PYTHON_KEY_NAME,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
@@ -67,7 +68,8 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
     has_requirements_txt = exists(f"{dir_path / 'requirements.txt'}")
 
     # falls back to /usr in google colab notebook without this
-    uv_pip_python_flag = "--python .venv/bin/python"
+    uv_pip_set_python = global_config_dict.get(UV_PIP_SET_PYTHON_KEY_NAME, False)
+    uv_pip_python_flag = "--python .venv/bin/python" if uv_pip_set_python else ""
 
     if has_pyproject_toml and has_requirements_txt:
         raise RuntimeError(
