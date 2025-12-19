@@ -15,6 +15,7 @@
 import asyncio
 import atexit
 import json
+import yaml
 import resource
 from abc import abstractmethod
 from contextlib import asynccontextmanager
@@ -218,8 +219,11 @@ class ServerClient(BaseModel):
             ) from e
 
         response.raise_for_status()
-        global_config_dict_yaml = response.content.decode()
-        global_config_dict = OmegaConf.create(json.loads(global_config_dict_yaml))
+        try:
+            global_config_dict_yaml = response.content.decode()
+            global_config_dict = OmegaConf.create(yaml.safe_load(global_config_dict_yaml))
+        except Exception as e:
+            raise ValueError(f"Failed to parse global config dict yaml: {response.content}") from e
 
         return cls(head_server_config=head_server_config, global_config_dict=global_config_dict)
 

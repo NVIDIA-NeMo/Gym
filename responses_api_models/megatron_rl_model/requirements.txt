@@ -1,0 +1,4 @@
+-e nemo-gym[dev] @ ../../
+-e megatron-core @ ../../../mrl_internal/megatron-rl
+-e megatron-rl @ ../../../mrl_internal/
+omegaconf == 2.3.0
