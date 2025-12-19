@@ -67,7 +67,7 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
     has_pyproject_toml = exists(f"{dir_path / 'pyproject.toml'}")
     has_requirements_txt = exists(f"{dir_path / 'requirements.txt'}")
 
-    # explicitly set python path if specified. In Google colab, ng_run fails due to uv pip install falls back to system python (/usr) without this and errors. 
+    # explicitly set python path if specified. In Google colab, ng_run fails due to uv pip install falls back to system python (/usr) without this and errors.
     # not needed for most clusters. should be safe in all scenarios, but only minimally tested outside of colab.
     # see discussion and examples here: https://github.com/NVIDIA-NeMo/Gym/pull/526#issuecomment-3676230383
     uv_pip_set_python = global_config_dict.get(UV_PIP_SET_PYTHON_KEY_NAME, False)
