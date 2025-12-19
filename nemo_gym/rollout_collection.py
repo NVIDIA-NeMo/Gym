@@ -1,10 +1,11 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,7 +18,7 @@ from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
 from itertools import chain, repeat
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
@@ -36,6 +37,18 @@ from nemo_gym.server_utils import (
 class RolloutCollectionConfig(BaseNeMoGymCLIConfig):
     """
     Perform a batch of rollout collection.
+
+    Examples:
+
+    ```bash
+    ng_collect_rollouts \
+        +agent_name=example_single_tool_call_simple_agent \
+        +input_jsonl_fpath=weather_query.jsonl \
+        +output_jsonl_fpath=weather_rollouts.jsonl \
+        +limit=100 \
+        +num_repeats=4 \
+        +num_samples_in_parallel=10
+    ```
     """
 
     agent_name: str = Field(description="The agent to collect rollouts from.")
@@ -116,10 +129,10 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
         """
         server_client = self.setup_server_client(head_server_config)
 
-        async def _post_subroutine(row: Dict) -> Dict:
-            res = await server_client.post(server_name=row.pop("agent_ref")["name"], url_path="/run", json=row)
+        async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
+            res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
             await raise_for_status(res)
-            return await res.json()
+            return row, await res.json()
 
         return tqdm.as_completed(
             map(_post_subroutine, examples), desc="Collecting rollouts", miniters=10, total=len(examples)

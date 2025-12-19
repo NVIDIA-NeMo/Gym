@@ -1,0 +1,4 @@
+config_paths:
+- responses_api_agents/simple_agent/configs/simple_agent.yaml
+- responses_api_models/openai_model/configs/openai_model.yaml
+- resources_servers/example_multi_step/configs/example_multi_step.yaml
