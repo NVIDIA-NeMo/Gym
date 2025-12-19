@@ -2,6 +2,8 @@ arc_agi_2:
   resources_servers:
     arc_agi:
       entrypoint: app.py
+      domain: knowledge
+      verified: false
 arc_agi_2_simple_agent:
   responses_api_agents:
     simple_agent:
