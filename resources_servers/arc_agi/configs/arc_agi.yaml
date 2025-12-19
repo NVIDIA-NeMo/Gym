@@ -32,40 +32,4 @@ arc_agi_simple_agent:
           version: 0.0.1
           artifact_fpath: arc_agi_1_evaluation.jsonl
         license: Apache 2.0
-arc_agi_berman_agent:
-  responses_api_agents:
-    berman_agent:
-      entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: arc_agi_resources_server
-      model_server:
-        type: responses_api_models
-        name: policy_model
 
-      # Phase configuration
-      num_initial_candidates: 5
-      num_top_for_revision: 5
-      num_pooled_candidates: 2
-      initial_temperature: 0.9
-
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/arc_agi/data/example.jsonl
-      - name: training_1
-        type: validation
-        jsonl_fpath: resources_servers/arc_agi/data/arc_agi_1_training.jsonl
-        gitlab_identifier:
-          dataset_name: arc_agi
-          version: 0.0.1
-          artifact_fpath: arc_agi_1_training.jsonl
-        license: Apache 2.0
-      - name: evaluation_1
-        type: validation
-        jsonl_fpath: resources_servers/arc_agi/data/arc_agi_1_evaluation.jsonl
-        gitlab_identifier:
-          dataset_name: arc_agi
-          version: 0.0.1
-          artifact_fpath: arc_agi_1_evaluation.jsonl
-        license: Apache 2.0
