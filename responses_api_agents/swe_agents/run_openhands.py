@@ -173,7 +173,7 @@ class RunOpenHandsAgent:
         Runs OpenHands on one instance.
         Returns the absolute (not mounted) path to a .jsonl file in the SWE-bench evaluation format.
         """
-        agent_config = self.cfg.agent_config or "eval/swe-bench/openhands/default"
+        agent_config = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs/oh_config.toml")
 
         # Add parameters to config.toml
         # TODO(sugam): is there a better way to do this?
