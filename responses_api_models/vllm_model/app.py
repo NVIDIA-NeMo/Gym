@@ -120,6 +120,11 @@ def _start_vllm_server(config: VLLMModelConfig, server_host: str, server_port: i
             else:
                 arg_key = f"--{k2}"
             argv.append(arg_key)
+        elif isinstance(v, dict):
+            # Dict values must be passed as JSON strings to vLLM CLI
+            arg_key = f"--{k2}"
+            argv.append(arg_key)
+            argv.append(json.dumps(v))
         else:
             arg_key = f"--{k2}"
             argv.append(arg_key)
