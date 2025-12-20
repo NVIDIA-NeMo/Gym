@@ -1003,20 +1003,20 @@ echo "Python installations:"
 uv python list
 
 echo "Creating virtual environment with uv..."
-rm -rf .venv
-uv venv --python 3.12 .venv
+rm -rf venv
+uv venv --python 3.12 venv
 
 echo "Installing R2E-Gym in editable mode..."
-uv pip install -p {r2e_gym_dir}/.venv/bin/python -e . --no-cache
+uv pip install -p {r2e_gym_dir}/venv/bin/python -e . --no-cache
 
 echo "Verifying installation..."
-{r2e_gym_dir}/.venv/bin/python -c "import r2egym; print('✓ r2egym installed successfully')"
+{r2e_gym_dir}/venv/bin/python -c "import r2egym; print('✓ r2egym installed successfully')"
 
-if [ -d .venv ] && [ -f .venv/bin/python ]; then
-    echo "✓ .venv created at $(pwd)/.venv"
-    echo "✓ Python version: $(.venv/bin/python --version)"
+if [ -d venv ] && [ -f venv/bin/python ]; then
+    echo "✓ venv created at $(pwd)/venv"
+    echo "✓ Python version: $(venv/bin/python --version)"
 else
-    echo "✗ ERROR: .venv was not created properly!"
+    echo "✗ ERROR: venv was not created properly!"
     exit 1
 fi
 

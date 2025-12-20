@@ -607,7 +607,7 @@ class RunOpenHandsAgent:
             f'export PATH="{self.r2e_gym_setup_dir}/uv/bin:$PATH" && '
             # Run with clean environment to avoid venv contamination
             # Use the pre-built venv directly with its absolute path
-            f"env -u VIRTUAL_ENV {self.r2e_gym_setup_dir}/R2E-Gym/.venv/bin/python src/r2egym/agenthub/run/run_local_evaluation.py "
+            f"env -u VIRTUAL_ENV {self.r2e_gym_setup_dir}/R2E-Gym/venv/bin/python src/r2egym/agenthub/run/run_local_evaluation.py "
             f"    --predictions_path {pred_mounted_path} "
             f"    --instance_id {data_point['instance_id']} "
             f"    --timeout {self.cfg.swebench_tests_timeout} "
