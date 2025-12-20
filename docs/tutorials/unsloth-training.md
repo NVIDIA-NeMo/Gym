@@ -34,7 +34,9 @@ Follow this interactive notebook to train your first model with Unsloth and NeMo
 Unsloth GRPO notebook
 :::
 
-> **Note:** This notebook supports **single-step tasks** including math, structured outputs, instruction following, reasoning gym, and more. For multi-step tool calling scenarios, see the {doc}`GRPO with NeMo RL <nemo-rl-grpo/index>` tutorial. A complete multi-step and multi-turn integration with Unsloth is under construction! 
+Check out [Unsloth's documentation](https://docs.unsloth.ai/models/nemotron-3#reinforcement-learning--nemo-gym) for more details.
+
+> **Note:** This notebook supports **single-step tasks** including math, structured outputs, instruction following, reasoning gym, and more. For multi-step tool calling scenarios, see the {doc}`GRPO with NeMo RL <nemo-rl-grpo/index>` tutorial. A multi-step integration with Unsloth is under construction! 
 
 ---
 
