@@ -78,6 +78,9 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     # Reward to assign if the second (swap) pass fails. Defaults to 0.0; can be set to -1.0.
     reward_if_swap_fails: float = 0.0
 
+    # Concurrency limit for judge endpoint requests. Set to None to disable limiting.
+    judge_endpoint_max_concurrency: Optional[int] = 64
+
     # ========================================================================
     # Per-Record Regex Features (OpenQA support)
     # ========================================================================
