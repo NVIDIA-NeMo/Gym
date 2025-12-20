@@ -1,19 +1,16 @@
-(training-unsloth-trl)=
+(training-unsloth)=
 
-# RL Training with Unsloth and TRL
+# RL Training with Unsloth
 
-This tutorial demonstrates how to use [Unsloth](https://github.com/unslothai/unsloth) and [TRL (Transformer Reinforcement Learning)](https://github.com/huggingface/trl) to fine-tune models for single-step tasks with NeMo Gym verifiers and datasets.
+This tutorial demonstrates how to use [Unsloth](https://github.com/unslothai/unsloth) to fine-tune models for single-step tasks with NeMo Gym verifiers and datasets.
 
 **Unsloth** is a fast, memory-efficient library for fine-tuning large language models. It provides optimized implementations that significantly reduce memory usage and training time, making it possible to fine-tune larger models on consumer hardware.
 
-**TRL** is a library from HuggingFace for post-training models using techniques like SFT, GRPO, and DPO. It is built on top of [Transformers](https://github.com/huggingface/transformers) and supports a variety of model architectures and modalities. 
-
-
-Both Unsloth and TRL can be used with NeMo Gym single-step verifiers including math tasks, structured outputs, instruction following, reasoning gym, and more. 
+Unsloth can be used with NeMo Gym single-step verifiers including math tasks, structured outputs, instruction following, reasoning gym, and more. 
 
 :::{card}
 
-**Goal**: Fine-tune a model for single-step tasks using Unsloth and TRL with NeMo Gym verifiers.
+**Goal**: Fine-tune a model for single-step tasks using Unsloth with NeMo Gym verifiers.
 
 ^^^
 
@@ -28,7 +25,7 @@ Both Unsloth and TRL can be used with NeMo Gym single-step verifiers including m
 
 ## Getting Started
 
-Follow this interactive notebook to train your first model with Unsloth or TRL and NeMo Gym:
+Follow this interactive notebook to train your first model with Unsloth and NeMo Gym:
 
 :::{button-link} https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/nemo_gym_sudoku.ipynb
 :color: primary
@@ -37,7 +34,7 @@ Follow this interactive notebook to train your first model with Unsloth or TRL a
 Unsloth GRPO notebook
 :::
 
-> **Note:** This notebook supports **single-step tasks** including math, structured outputs, instruction following, reasoning gym, and more. For multi-step tool calling scenarios, see the {doc}`GRPO with NeMo RL <nemo-rl-grpo/index>` tutorial. A complete multi-step and multi-turn integration with Unsloth and TRL is under construction! 
+> **Note:** This notebook supports **single-step tasks** including math, structured outputs, instruction following, reasoning gym, and more. For multi-step tool calling scenarios, see the {doc}`GRPO with NeMo RL <nemo-rl-grpo/index>` tutorial. A complete multi-step and multi-turn integration with Unsloth is under construction! 
 
 ---
 
