@@ -1006,9 +1006,6 @@ echo "Creating virtual environment with uv..."
 rm -rf .venv
 uv venv --python 3.12 .venv
 
-echo "Syncing dependencies (this may take a few minutes)..."
-uv sync --no-cache
-
 echo "Installing R2E-Gym in editable mode..."
 uv pip install -p {r2e_gym_dir}/.venv/bin/python -e . --no-cache
 
