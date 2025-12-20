@@ -60,12 +60,12 @@ Learn how to set up NeMo Gym and NeMo RL training environments, run tests, prepa
 {bdg-primary}`training` {bdg-secondary}`rl` {bdg-secondary}`grpo` {bdg-secondary}`multi-step`
 :::
 
-:::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Unsloth and TRL
-:link: training-unsloth-trl
+:::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Unsloth
+:link: training-unsloth
 :link-type: ref
 Fast, memory-efficient fine-tuning for single-step tasks: math, structured outputs, instruction following, reasoning gym and more.
 +++
-{bdg-primary}`training` {bdg-secondary}`unsloth` {bdg-secondary}`trl` {bdg-secondary}`single-step`
+{bdg-primary}`training` {bdg-secondary}`unsloth` {bdg-secondary}`single-step`
 :::
 
 ::::
