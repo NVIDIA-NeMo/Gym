@@ -260,9 +260,9 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
 
         main_future = asyncio.ensure_future(_run_all())
 
-        async def _get_at(idx: int) -> Dict:
+        async def _get_at(idx: int) -> Tuple[Dict, Dict]:
             results = await main_future
-            return results[idx]
+            return examples[idx], results[idx]
 
         futures = [asyncio.ensure_future(_get_at(i)) for i in range(len(examples))]
         return tqdm.as_completed(futures, desc="Collecting rollouts", miniters=10, total=len(examples))
