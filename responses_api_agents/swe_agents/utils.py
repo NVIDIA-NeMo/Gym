@@ -937,7 +937,7 @@ def setup_r2e_gym_environment(
         python_dir = setup_dir / "python"
 
         # Check if setup is complete by verifying venv and installed module
-        venv_dir = r2e_gym_dir / ".venv"
+        venv_dir = r2e_gym_dir / "venv"
         if r2e_gym_dir.exists() and venv_dir.exists():
             # Verify r2egym module is actually installed
             python_bin = venv_dir / "bin" / "python"
