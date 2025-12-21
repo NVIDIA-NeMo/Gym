@@ -3,7 +3,8 @@ grl_sokoban_resources_server:
     grl_sokoban:
       entrypoint: app.py
       domain: games
-grl_sokoban_simple_agent:
+      verified: true
+grl_sokoban_game_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py
