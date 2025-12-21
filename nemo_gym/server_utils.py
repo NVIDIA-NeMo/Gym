@@ -218,7 +218,13 @@ class ServerClient(BaseModel):
             ) from e
 
         global_config_dict_yaml = response.content.decode()
-        global_config_dict = OmegaConf.create(global_config_dict_yaml)
+        # TODO: json.loads below can fail.
+        try:
+            global_config_dict = OmegaConf.create(json.loads(global_config_dict_yaml))
+        except Exception as e:
+            print(f"Failed to load global config dict yaml: {type(e).__name__} {e}")
+            print("Retrying without json.loads...", flush=True)
+            global_config_dict = OmegaConf.create(global_config_dict_yaml)
 
         return cls(head_server_config=head_server_config, global_config_dict=global_config_dict)
 
