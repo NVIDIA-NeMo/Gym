@@ -47,7 +47,27 @@ class CalendarResourcesServer(SimpleResourcesServer):
         return app
 
     async def verify(self, body: CalendarVerifyRequest) -> BaseVerifyResponse:
-        assistant_response = body.response.output[-1].content[0].text
+        # Extract the assistant's text response from the last output item.
+        #
+        # For reasoning models (e.g., with deepseek_r1 reasoning_parser), the output
+        # structure is: [ReasoningItem, MessageItem] where:
+        #   - ReasoningItem: has .reasoning attribute (thinking/CoT tokens)
+        #   - MessageItem: has .content attribute (actual response text)
+        #
+        # The last item should be a MessageItem with .content, but if the model
+        # hit the token limit while still thinking, the last item will be a
+        # ReasoningItem without .content. In that case, we return reward=0.
+        assistant_response = ""
+        if body.response.output:
+            last_output = body.response.output[-1]
+            if hasattr(last_output, "content") and last_output.content:
+                assistant_response = last_output.content[0].text
+
+        # If no valid response (e.g., model only produced thinking tokens),
+        # return zero reward
+        if not assistant_response:
+            return BaseVerifyResponse(**body.model_dump(), reward=0)
+
         exp_cal_state = body.exp_cal_state
         try:
             reward, reason = grade_assistant_response(assistant_response, exp_cal_state)

@@ -28,7 +28,7 @@ from signal import SIGINT
 from subprocess import Popen
 from threading import Thread
 from time import sleep, time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import psutil
 import rich
@@ -49,6 +49,9 @@ from nemo_gym.global_config import (
     UV_PIP_SET_PYTHON_KEY_NAME,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
+)
+from nemo_gym.ray_utils import (
+    _start_global_ray_gpu_scheduling_helper,
 )
 from nemo_gym.server_status import StatusCommand
 from nemo_gym.server_utils import (
@@ -159,6 +162,7 @@ class RunHelper:  # pragma: no cover
     _head_server: uvicorn.Server
     _head_server_thread: Thread
     _head_server_instance: HeadServer
+    _head_ray_gpu_helper: Any
 
     _processes: Dict[str, Popen]
     _server_instance_display_configs: List[ServerInstanceDisplayConfig]
@@ -170,6 +174,8 @@ class RunHelper:  # pragma: no cover
         # Initialize Ray cluster in the main process
         # Note: This function will modify the global config dict - update `ray_head_node_address`
         initialize_ray()
+
+        self._head_ray_gpu_helper = _start_global_ray_gpu_scheduling_helper()
 
         # Assume Nemo Gym Run is for a single agent.
         escaped_config_dict_yaml_str = shlex.quote(OmegaConf.to_yaml(global_config_dict))

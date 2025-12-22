@@ -12,12 +12,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
+import os
 import re
+import urllib
 from copy import deepcopy
-from time import time
+from multiprocessing import Process
+from time import sleep, time
 from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
+import ray
 from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request
 from pydantic import BaseModel, Field
@@ -27,6 +32,7 @@ from nemo_gym.base_responses_api_model import (
     Body,
     SimpleResponsesAPIModel,
 )
+from nemo_gym.global_config import find_open_port
 from nemo_gym.openai_utils import (
     RESPONSES_TO_TRAIN,
     NeMoGymAsyncOpenAI,
@@ -34,6 +40,7 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionAssistantMessageForTrainingParam,
     NeMoGymChatCompletionAssistantMessageParam,
     NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymChatCompletionCustomRoleMessageParam,
     NeMoGymChatCompletionDeveloperMessageParam,
     NeMoGymChatCompletionMessage,
     NeMoGymChatCompletionMessageParam,
@@ -55,6 +62,10 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
     TokenIDLogProbMixin,
 )
+from nemo_gym.ray_utils import (
+    lookup_current_ray_node_ip,
+    spinup_single_ray_gpu_node_worker,
+)
 from nemo_gym.server_utils import SESSION_ID_KEY
 
 
@@ -72,23 +83,189 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # Corresponds to the extra_body of OpenAI Client.
     extra_body: Optional[Dict[str, Any]] = None
 
+    spinup_server: bool = False
+    server_args: Optional[Dict[str, Any]] = None
+
+    router_dp_size: int = 1
+
     def model_post_init(self, context):
         if isinstance(self.base_url, str):
             self.base_url = [self.base_url]
         return super().model_post_init(context)
 
 
+def _start_vllm_server(config: VLLMModelConfig, server_host: str, server_port: int, router_dp_rank: int) -> None:
+    import uvloop
+    import vllm.engine.arg_utils
+    import vllm.entrypoints.openai.api_server
+    import vllm.entrypoints.openai.cli_args
+    import vllm.utils.argparse_utils
+
+    argv = []
+    argv.append("--model")
+    argv.append(config.model)
+    argv.append("--host")
+    argv.append(server_host)
+    argv.append("--port")
+    argv.append(f"{server_port}")
+    argv.append("--distributed-executor-backend")
+    argv.append("mp")
+    for k, v in (config.server_args or {}).items():
+        k2 = k.replace("_", "-")
+        if v is None:
+            pass
+        elif isinstance(v, bool):
+            if not v:
+                arg_key = f"--no-{k2}"
+            else:
+                arg_key = f"--{k2}"
+            argv.append(arg_key)
+        elif isinstance(v, dict):
+            # Dict values must be passed as JSON strings to vLLM CLI
+            arg_key = f"--{k2}"
+            argv.append(arg_key)
+            argv.append(json.dumps(v))
+        else:
+            arg_key = f"--{k2}"
+            argv.append(arg_key)
+            argv.append(f"{v}")
+
+    server_args = vllm.utils.argparse_utils.FlexibleArgumentParser()
+    server_args = vllm.entrypoints.openai.cli_args.make_arg_parser(server_args)
+    server_args = server_args.parse_args(argv)
+    vllm.entrypoints.openai.cli_args.validate_parsed_serve_args(server_args)
+
+    uvloop.run(vllm.entrypoints.openai.api_server.run_server(server_args))
+
+
+@ray.remote
+class VLLMServerSpinupWorker:
+    def __init__(self, config: VLLMModelConfig, working_dir: Optional[str], router_dp_rank: int):
+        self.config = config
+        self.working_dir = working_dir
+        self.router_dp_rank = router_dp_rank
+        self._server_host = lookup_current_ray_node_ip()
+        self._server_port = find_open_port()
+
+        if self.working_dir is not None:
+            os.chdir(self.working_dir)
+
+        server_proc = Process(
+            target=_start_vllm_server,
+            args=(
+                self.config,
+                self._server_host,
+                self._server_port,
+                self.router_dp_rank,
+            ),
+            daemon=False,
+        )
+        server_proc.start()
+        self._server_proc = server_proc
+
+    def _get_ip(self) -> int:
+        return self._server_host
+
+    def _get_port(self) -> int:
+        return self._server_port
+
+
+# Use this to query the VLLM servers during spinup without having to start an
+# asyncio event loop for the async client.
+def _vllm_server_heartbeat(base_url: str):
+    req_headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    req_body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": "hi",
+            }
+        ],
+        "max_tokens": 8,
+        "temperature": 1.0,
+    }
+    req_data = json.dumps(req_body).encode("utf-8")
+    req_url = f"{base_url}/chat/completions"
+    req = urllib.request.Request(
+        req_url,
+        headers=req_headers,
+        data=req_data,
+    )
+    with urllib.request.urlopen(req, timeout=5) as out:
+        out_status = out.status
+        out_data = out.read()
+    output = out_data.decode("utf-8")
+    return {
+        "_status": out_status,
+        "output": output,
+        "except": None,
+    }
+
+
 class VLLMModel(SimpleResponsesAPIModel):
     config: VLLMModelConfig
 
     def model_post_init(self, context):
-        self._clients = [
-            NeMoGymAsyncOpenAI(
-                base_url=base_url,
-                api_key=self.config.api_key,
-            )
-            for base_url in self.config.base_url
-        ]
+        working_dir = os.getcwd()
+
+        if self.config.spinup_server:
+            self._server_urls = []
+            self._server_workers = []
+            self._clients = []
+
+            # TODO: support for other parallel sizes.
+            server_tp_size = (self.config.server_args or {}).get("tensor_parallel_size", 1)
+            server_dp_size = (self.config.server_args or {}).get("data_parallel_size", 1)
+
+            assert server_dp_size == 1
+
+            router_dp_size = max(1, self.config.router_dp_size)
+
+            for router_dp_rank in range(router_dp_size):
+                server_worker = spinup_single_ray_gpu_node_worker(
+                    VLLMServerSpinupWorker,
+                    server_tp_size,
+                    config=self.config,
+                    working_dir=working_dir,
+                    router_dp_rank=router_dp_rank,
+                )
+
+                server_ip = ray.get(server_worker._get_ip.remote())
+                server_port = ray.get(server_worker._get_port.remote())
+                server_url = f"http://{server_ip}:{server_port}/v1"
+
+                self._server_urls.append(server_url)
+                self._server_workers.append(server_worker)
+
+                self._clients.append(
+                    NeMoGymAsyncOpenAI(
+                        base_url=server_url,
+                        api_key=self.config.api_key,
+                    )
+                )
+
+            for server_url in self._server_urls:
+                while True:
+                    try:
+                        _vllm_server_heartbeat(server_url)
+                        break
+                    except Exception:
+                        sleep(3)
+                        continue
+
+        else:
+            self._server_urls = None
+            self._server_workers = None
+            self._clients = [
+                NeMoGymAsyncOpenAI(
+                    base_url=base_url,
+                    api_key=self.config.api_key,
+                )
+                for base_url in self.config.base_url
+            ]
 
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
 
@@ -523,6 +700,10 @@ class VLLMConverter(BaseModel):
                         role="developer",
                     )
                 ]
+            # Custom roles (e.g., GenRM response_1/response_2 for pairwise comparison)
+            case "response_1" | "response_2" | "principle":
+                state.flush_assistant()
+                converted = [NeMoGymChatCompletionCustomRoleMessageParam(role=m["role"], content=content)]
             case _:  # pragma: no cover
                 raise NotImplementedError(f"Unrecognized role for message: `{m['role']}`")
 
