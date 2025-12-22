@@ -59,7 +59,9 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     name: str = "equivalence_llm_judge"
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
-    judge_endpoint_max_concurrency: Optional[int] = None
+
+    # Concurrency limit for judge endpoint requests. Set to None to disable limiting.
+    judge_endpoint_max_concurrency: Optional[int] = 64
 
     judge_system_message: Optional[str] = None
     judge_prompt_template_fpath: str = "prompt_templates/equivalence_llm_judge.txt"
@@ -78,9 +80,6 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     check_twice_swap: bool = False
     # Reward to assign if the second (swap) pass fails. Defaults to 0.0; can be set to -1.0.
     reward_if_swap_fails: float = 0.0
-
-    # Concurrency limit for judge endpoint requests. Set to None to disable limiting.
-    judge_endpoint_max_concurrency: Optional[int] = 64
 
     # ========================================================================
     # Per-Record Regex Features (OpenQA support)
