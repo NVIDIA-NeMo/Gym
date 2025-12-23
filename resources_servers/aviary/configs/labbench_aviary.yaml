@@ -1,0 +1,37 @@
+labbench_aviary_resources_server:
+  resources_servers:
+    aviary:
+      entrypoint: labbench_app.py
+      domain: knowledge
+      verified: false
+labbench_aviary_agent:
+  responses_api_agents:
+    aviary_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: labbench_aviary_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 20
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/aviary/data/labbench_train.jsonl
+        gitlab_identifier:
+          dataset_name: PLACEHOLDER
+          version: 0.0.1
+          artifact_fpath: train.jsonl
+        license: Apache 2.0
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/aviary/data/labbench_validation.jsonl
+        gitlab_identifier:
+          dataset_name: PLACEHOLDER
+          version: 0.0.1
+          artifact_fpath: validation.jsonl
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/aviary/data/labbench_example.jsonl

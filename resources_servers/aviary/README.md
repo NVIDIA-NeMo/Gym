@@ -13,7 +13,15 @@ This resource server adapts [**Aviary** environments](https://github.com/Future-
   - Also serves as an example for how to implement notebook-backed environments for other computational scientific tasks.
 - **Client/proxy to a remote Aviary dataset server**: `client_app.py`
   - A generic interface to an Aviary `TaskDatasetServer`. Can be used to interact with any Aviary environments being served remotely.
+- **LAB-Bench**: `labbench_app.py`
+  - [LAB-Bench](https://arxiv.org/abs/2407.10362) benchmark with LitQA2, FigQA, and TableQA currently implemented (624 tasks now).
 
+# LAB-Bench
+
+```bash
+ng_run "+config_paths=[resources_servers/aviary/configs/labbench_aviary.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+ng_collect_rollouts +agent_name=labbench_aviary_agent +input_jsonl_fpath=resources_servers/aviary/data/labbench_train.jsonl +output_jsonl_fpath=labbench_rollouts.jsonl
+```
 
 # Example usage
 
