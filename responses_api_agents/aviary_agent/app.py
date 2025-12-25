@@ -16,6 +16,7 @@ import logging
 from collections.abc import Sequence
 from typing import List, cast
 
+import aiohttp
 from pydantic import ConfigDict, Field, ValidationError
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter
 
@@ -163,11 +164,12 @@ class AviaryAgent(SimpleResponsesAPIAgent):
                         json=agent_state,
                         cookies=model_server_cookies,
                     )
+                    raw_model_response.raise_for_status()
                     model_server_cookies = raw_model_response.cookies
                     model_response_json = await raw_model_response.json()
-                except json.JSONDecodeError as e:
+                except (json.JSONDecodeError, aiohttp.ClientResponseError) as e:
                     # JSONDecodeError will be thrown if there's an underlying openai error.
-                    # for now, we break. Default reward of 0 will be returned when /verify is called.
+                    # For now, we break. Default reward of 0 will be returned when /verify is called.
                     logger.warning(f"Error calling /v1/responses: {e!r}. Response: {raw_model_response.text!r}.")
                     break
 
@@ -225,7 +227,9 @@ class AviaryAgent(SimpleResponsesAPIAgent):
                 server_name=self.config.resources_server.name, url_path="/close", json={"env_id": env_id}
             )
 
-        assert model_response is not None
+        assert model_response is not None, (
+            "Rollout crashed or terminated before first transition completed, cannot proceed."
+        )
 
         output = AviaryNeMoGymResponse.model_validate(
             model_response.model_dump()
