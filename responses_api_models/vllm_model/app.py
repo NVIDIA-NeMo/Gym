@@ -19,7 +19,7 @@ from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
 from aiohttp.client_exceptions import ClientResponseError
-from fastapi import FastAPI, Request
+from fastapi import Request
 from pydantic import BaseModel, Field
 
 from nemo_gym.base_responses_api_model import (
@@ -56,10 +56,6 @@ from nemo_gym.openai_utils import (
     TokenIDLogProbMixin,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
-
-
-class VLLMTokenizeResponse(BaseModel):
-    tokens: List[int]
 
 
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
@@ -101,11 +97,6 @@ class VLLMModel(SimpleResponsesAPIModel):
         )
 
         return super().model_post_init(context)
-
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-        app.post("/tokenize")(self.tokenize)
-        return app
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
@@ -149,28 +140,6 @@ class VLLMModel(SimpleResponsesAPIModel):
             user=body.user,
             incomplete_details={"reason": "max_output_tokens"} if choice.finish_reason == "length" else None,
         )
-
-    async def tokenize(
-        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
-    ) -> VLLMTokenizeResponse:
-        # TODO: simplify this. No need to Responses -> ChatCompletion -> Tokenize.
-        body_dict = self._converter.responses_to_chat_completion_create_params(body).model_dump(exclude_unset=True)
-        body_dict.setdefault("model", self.config.model)
-        tokenize_body_dict = dict()
-        for key in ("model", "messages", "tools"):
-            if key in body_dict:
-                tokenize_body_dict[key] = body_dict[key]
-
-        session_id = request.session[SESSION_ID_KEY]
-        if session_id not in self._session_id_to_client:
-            # There is probably a better way to select the endpoint for this request. But this will do for now.
-            client_idx = len(self._session_id_to_client) % len(self._clients)
-            client = self._clients[client_idx]
-            self._session_id_to_client[session_id] = client
-        client = self._session_id_to_client[session_id]
-
-        tokenize_response = await client.create_tokenize(**tokenize_body_dict)
-        return tokenize_response
 
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()

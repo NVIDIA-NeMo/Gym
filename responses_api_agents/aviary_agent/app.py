@@ -217,15 +217,6 @@ class AviaryAgent(SimpleResponsesAPIAgent):
                 agent_state = self.update_agent_state(agent_state, model_output, obs, successful_transition)
                 agent_state_history.append(cast(NeMoGymResponseInput, agent_state.input))
 
-                if self.config.max_total_sequence_length is not None:
-                    # NOTE: this assumes vLLM backend.
-                    tokenize_response = await self.server_client.post(
-                        server_name=self.config.model_server.name, url_path="/tokenize", json=agent_state
-                    )
-                    tokenize_response_json = await tokenize_response.json()
-                    if tokenize_response_json["count"] >= self.config.max_total_sequence_length:
-                        break
-
                 if done:
                     break
 
