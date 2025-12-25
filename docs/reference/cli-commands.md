@@ -547,6 +547,87 @@ ng_version +json=true
 
 ---
 
+### `ng_pip_list` / `nemo_gym_pip_list`
+
+Each server has its own isolated virtual environment. To inspect the packages:
+
+**Parameters**
+
+```{list-table}
+:header-rows: 1
+:widths: 20 10 70
+
+* - Parameter
+  - Type
+  - Description
+* - `entrypoint`
+  - str
+  - The relative entrypoint path to the server directory
+* - `format`
+  - Optional[str]
+  - Output format for pip list. Options: 'columns' (default), 'freeze', 'json'. Default: `None`.
+* - `outdated`
+  - bool
+  - List outdated packages. Default: `False`.
+```
+
+**Examples**
+
+```bash
+# List all packages
+ng_pip_list +entrypoint=resources_servers/example_single_tool_call
+
+# Output as JSON
+ng_pip_list +entrypoint=resources_servers/example_single_tool_call +format=json
+
+# Check for outdated packages
+ng_pip_list +entrypoint=resources_servers/example_single_tool_call +outdated=true
+```
+
+---
+
+### `ng_status` / `nemo_gym_status`
+
+View all currently running NeMo Gym servers and their health status.
+
+**Example**
+
+```bash
+ng_status
+
+NeMo Gym Server Status:
+
+[1] ✓ example_single_tool_call (resources_servers/example_single_tool_call)
+{
+    'server_type': 'resources_servers',
+    'name': 'example_single_tool_call',
+    'port': 58117,
+    'pid': 89904,
+    'uptime_seconds': '0d 0h 0m 41.5s',
+}
+[2] ✓ example_single_tool_call_simple_agent (responses_api_agents/simple_agent)
+{
+    'server_type': 'responses_api_agents',
+    'name': 'simple_agent',
+    'port': 58118,
+    'pid': 89905,
+    'uptime_seconds': '0d 0h 0m 41.5s',
+}
+[3] ✓ policy_model (responses_api_models/openai_model)
+{
+    'server_type': 'responses_api_models',
+    'name': 'openai_model',
+    'port': 58119,
+    'pid': 89907,
+    'uptime_seconds': '0d 0h 0m 41.5s',
+}
+
+3 servers found (3 healthy, 0 unhealthy)
+
+```
+
+---
+
 ## Getting Help
 
 For detailed help on any command, run it with `+help=true` or `+h=true`:

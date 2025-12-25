@@ -37,16 +37,6 @@ Make sure you have:
 - ✅ Access to a running container session with GPUs
 - ✅ (Optional) Weights & Biases API key for experiment tracking
 
-:::{tip}
-Coming back from a break on a pre-existing filesystem setup? Run these commands once you enter the container:
-
-```bash
-source /opt/nemo_rl_venv/bin/activate
-uv sync --group={build,docs,dev,test} --extra nemo_gym
-uv run nemo_rl/utils/prefetch_venvs.py
-```
-:::
-
 ---
 
 ## 1. Download the Model
@@ -81,23 +71,7 @@ sed -i 's/{%- if messages\[-1\]\['\''role'\''\] == '\''assistant'\'' -%}{%- set 
 
 ---
 
-## 3. Clean Up Existing Processes
-
-**Estimated time**: ~1 minute
-
-Clean up any existing or leftover Ray/vLLM processes:
-
-```bash
-pkill -f VllmAsyncGenerationWorker
-ray stop --force
-python -c "import ray; ray.shutdown()"
-```
-
-**✅ Success Check**: Commands complete without errors. It is okay if some processes are not found.
-
----
-
-## 4. Run Training
+## 3. Run Training
 
 **Estimated time**: ~15-30 minutes
 
@@ -117,7 +91,6 @@ CONFIG_PATH=examples/nemo_gym/grpo_workplace_assistant_nemotron_nano_v2_9b.yaml
 #   logger.wandb.project: Fill in your username
 TORCH_CUDA_ARCH_LIST="9.0 10.0" \
 HF_HOME=$PWD/.cache/ \
-HF_HUB_OFFLINE=1 \
 WANDB_API_KEY={your W&B API key} \
 uv run python examples/nemo_gym/run_grpo_nemo_gym.py \
     --config=$CONFIG_PATH \
@@ -144,12 +117,3 @@ The end of the command above does the following:
 :::
 
 **✅ Success Check**: Training completes 3 steps on single node without any issues. Check the logs for errors and verify that training steps are progressing.
-
----
-
-:::{button-ref} training-nemo-rl-grpo-multi-node-training
-:color: primary
-:ref-type: ref
-
-Next: Multi-Node Training →
-:::

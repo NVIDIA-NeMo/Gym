@@ -61,7 +61,7 @@ CONTAINER_IMAGE_PATH=./$CONTAINER_IMAGE_PATH
 ```bash
 # Use the official NeMo RL container from NGC
 # See: https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo-rl
-CONTAINER_IMAGE_PATH=nvcr.io/nvidia/nemo-rl:v0.4.0.nemotron_nano_v3
+CONTAINER_IMAGE_PATH=nvcr.io/nvidia/nemo-rl:v0.4.0.nemotron_3_nano
 
 NUM_ACTOR_NODES=1
 ACCOUNT=<ACCOUNT_NAME>
@@ -99,25 +99,8 @@ For the first setup on your local filesystem:
 git clone https://github.com/NVIDIA-NeMo/RL
 cd RL
 
-# Clone NeMo Gym as a submodule
-git clone https://github.com/NVIDIA-NeMo/Gym.git 3rdparty/Gym-workspace/Gym
-```
-
-Every time you enter a new container:
-
-```bash
-# CD into your NeMo RL folder
-cd /path/to/nemo/rl
-
-# Initialize all submodules (Megatron, AutoModel, etc.)
+# Initialize all submodules (Gym, Megatron, AutoModel, etc.)
 git submodule update --init --recursive
-
-# Activate the NeMo RL virtual environment
-source /opt/nemo_rl_venv/bin/activate
-
-# Install dependencies. This may take 5-10 minutes!
-uv sync --group={build,docs,dev,test} --extra nemo_gym
-uv run nemo_rl/utils/prefetch_venvs.py
 ```
 
 **✅ Success Check**: No errors during installation and `uv sync` completes successfully.
@@ -146,12 +129,11 @@ HF_HOME=$PWD/.cache/ \
 **✅ Success Check**: All tests pass without errors.
 
 :::{tip}
-If you've run these tests before and encounter HuggingFace rate limit errors, try using the following command:
-
+You can clean up any existing or leftover Ray/vLLM processes using the following commands:
 ```bash
-HF_HUB_OFFLINE=1 \
-HF_HOME=$PWD/.cache/ \
-    ./examples/nemo_gym/run_nemo_gym_single_node_sanity_tests.sh
+pkill -f VLLM
+ray stop --force
+uv run python -c "import ray; ray.shutdown()"
 ```
 :::
 
@@ -192,10 +174,10 @@ ng_prepare_data "+config_paths=[${config_paths}]" \
     +data_source=huggingface
 ```
 
-Return to the NeMo RL directory and Python environment:
+Return to the NeMo RL directory:
 
 ```bash
-cd ../../.. && source /opt/nemo_rl_venv/bin/activate
+cd ../../..
 ```
 
 **✅ Success Check**: Dataset files are created in `3rdparty/Gym-workspace/Gym/data/workplace_assistant/`.

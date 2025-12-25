@@ -66,11 +66,12 @@ WANDB_API_KEY={your W&B API key} \
 EXP_NAME=nemo_gym_grpo/nemotron_nano_v2_9b/2nodes/workplace_assistant_001 \
 NUM_ACTOR_NODES=2 \
 REPO_LOCATION=$PWD \
-CONTAINER_IMAGE_PATH=nvcr.io/nvidia/nemo-rl:v0.4.0.nemotron_nano_v3 \
+CONTAINER_IMAGE_PATH=nvcr.io/nvidia/nemo-rl:v0.4.0.nemotron_3_nano \
 SLURM_ACCOUNT={your Slurm account} \
 SLURM_PARTITION={your Slurm partition} \
     examples/nemo_gym/launch_nemo_gym_multinode_training.sh \
     --config=examples/nemo_gym/grpo_workplace_assistant_nemotron_nano_v2_9b.yaml \
+    ++policy.generation.vllm_cfg.tool_parser_plugin=$(find $PWD/.cache -name nemotron_toolcall_parser_no_streaming.py) \
     logger.wandb.project="$USER-nemo-gym-rl-integration"
 ```
 
@@ -78,7 +79,7 @@ SLURM_PARTITION={your Slurm partition} \
 If you are using enroot following the steps in the {doc}`Setup <setup>` doc and downloaded the container locally, use the local container filepath instead:
 
 ```bash
-CONTAINER_IMAGE_PATH=$PWD/../nvcr.io/nvidia/nemo-rl:v0.4.0.nemotron_nano_v3 \
+CONTAINER_IMAGE_PATH=$PWD/../nvcr.io/nvidia/nemo-rl:v0.4.0.nemotron_3_nano \
 ```
 :::
 
