@@ -218,7 +218,13 @@ class ServerClient(BaseModel):
             ) from e
 
         global_config_dict_yaml = response.content.decode()
-        global_config_dict = OmegaConf.create(json.loads(global_config_dict_yaml))
+        # TODO: json.loads below can fail.
+        try:
+            global_config_dict = OmegaConf.create(json.loads(global_config_dict_yaml))
+        except Exception as e:
+            print(f"Failed to load global config dict yaml: {type(e).__name__} {e}")
+            print("Retrying without json.loads...", flush=True)
+            global_config_dict = OmegaConf.create(global_config_dict_yaml)
 
         return cls(head_server_config=head_server_config, global_config_dict=global_config_dict)
 
@@ -350,6 +356,7 @@ def initialize_ray() -> None:
 
     global_config_dict = get_global_config_dict()
     ray_head_node_address = global_config_dict.get("ray_head_node_address")
+    ray_namespace = global_config_dict.get("ray_namespace", None)
     ray_init_kwargs = dict(ignore_reinit_error=True)
 
     if ray_head_node_address:
@@ -357,6 +364,11 @@ def initialize_ray() -> None:
         ray_init_kwargs["address"] = ray_head_node_address
     else:
         print("Starting Ray cluster...")
+
+    if ray_namespace is None:
+        ray_namespace = "nemo_gym"
+    print(f"Ray namespace: {ray_namespace}")
+    ray_init_kwargs["namespace"] = ray_namespace
 
     ray.init(**ray_init_kwargs)
 

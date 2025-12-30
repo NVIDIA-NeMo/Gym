@@ -45,6 +45,10 @@ HEAD_SERVER_KEY_NAME = "head_server"
 DISALLOWED_PORTS_KEY_NAME = "disallowed_ports"
 HEAD_SERVER_DEPS_KEY_NAME = "head_server_deps"
 PYTHON_VERSION_KEY_NAME = "python_version"
+RAY_HEAD_NODE_ADDRESS_KEY_NAME = "ray_head_node_address"
+RAY_NAMESPACE_KEY_NAME = "ray_namespace"
+RAY_GPU_NODES_KEY_NAME = "ray_gpu_nodes"
+RAY_NUM_GPUS_PER_NODE_KEY_NAME = "ray_num_gpus_per_node"
 USE_ABSOLUTE_IP = "use_absolute_ip"
 UV_PIP_SET_PYTHON_KEY_NAME = "uv_pip_set_python"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
@@ -55,6 +59,10 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     DISALLOWED_PORTS_KEY_NAME,
     HEAD_SERVER_DEPS_KEY_NAME,
     PYTHON_VERSION_KEY_NAME,
+    RAY_HEAD_NODE_ADDRESS_KEY_NAME,
+    RAY_NAMESPACE_KEY_NAME,
+    RAY_GPU_NODES_KEY_NAME,
+    RAY_NUM_GPUS_PER_NODE_KEY_NAME,
     USE_ABSOLUTE_IP,
     UV_PIP_SET_PYTHON_KEY_NAME,
 ]
@@ -373,10 +381,18 @@ def get_first_server_config_dict(global_config_dict: DictConfig, top_level_path:
 
 def find_open_port(
     disallowed_ports: Optional[List[int]] = None,
-    max_retries: int = 50,
+    max_retries: int = 100,
 ) -> int:  # pragma: no cover
     if disallowed_ports is None:
         disallowed_ports = []
+
+    default_disallowed_ports = set(
+        list(range(53000, 53010+1)) +
+        list(range(54000, 60000+1)) +
+        [10001, 8265, 52365, 52365+1]
+    )
+
+    disallowed_ports = default_disallowed_ports | set(disallowed_ports)
 
     # Find an open port that doesn't conflict with disallowed ports.
     for _ in range(max_retries):
