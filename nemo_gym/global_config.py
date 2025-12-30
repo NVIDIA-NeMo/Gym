@@ -379,10 +379,18 @@ def get_first_server_config_dict(global_config_dict: DictConfig, top_level_path:
 
 def find_open_port(
     disallowed_ports: Optional[List[int]] = None,
-    max_retries: int = 50,
+    max_retries: int = 100,
 ) -> int:  # pragma: no cover
     if disallowed_ports is None:
         disallowed_ports = []
+
+    default_disallowed_ports = set(
+        list(range(53000, 53010+1)) +
+        list(range(54000, 60000+1)) +
+        [10001, 8265, 52365, 52365+1]
+    )
+
+    disallowed_ports = default_disallowed_ports | set(disallowed_ports)
 
     # Find an open port that doesn't conflict with disallowed ports.
     for _ in range(max_retries):
