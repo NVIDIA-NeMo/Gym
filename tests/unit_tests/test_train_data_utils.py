@@ -257,6 +257,66 @@ class TestLoadDatasets:
                 ],
             )
 
+    def test_load_datasets_missing_credentials(self, monkeypatch: MonkeyPatch) -> None:
+        exit_called = []
+
+        def mock_exit(code):
+            exit_called.append(code)
+
+        monkeypatch.setattr(nemo_gym.train_data_utils, "get_global_config_dict", lambda: DictConfig({}))
+
+        config = TrainDataProcessorConfig(
+            output_dirpath="",
+            mode="train_preparation",
+            should_download=True,
+        )
+        processor = TrainDataProcessor()
+
+        server_type_config_dict = {
+            "responses_api_agents": {
+                "simple_agent": {
+                    "host": "127.0.0.1",
+                    "port": 12345,
+                    "entrypoint": "app.py",
+                    "datasets": [
+                        {
+                            "name": "train",
+                            "type": "train",
+                            "jsonl_fpath": "some/nonexistent/path.jsonl",
+                            "num_repeats": 1,
+                            "gitlab_identifier": {
+                                "dataset_name": "example_multi_step",
+                                "version": "0.0.1",
+                                "artifact_fpath": "train.jsonl",
+                            },
+                            "license": "Apache 2.0",
+                        }
+                    ],
+                    "resources_server": {
+                        "type": "resources_servers",
+                        "name": "example_multi_step_resources_server",
+                    },
+                    "model_server": {
+                        "type": "responses_api_models",
+                        "name": "policy_model",
+                    },
+                }
+            }
+        }
+
+        processor.load_datasets(
+            config=config,
+            server_instance_configs=[
+                ResponsesAPIAgentServerInstanceConfig(
+                    name="example_multi_step_simple_agent",
+                    server_type_config_dict=DictConfig(server_type_config_dict),
+                    responses_api_agents=server_type_config_dict["responses_api_agents"],
+                ),
+            ],
+        )
+
+        assert exit_called == [1]
+
 
 class TestValidateSamplesAndAggregateMetrics:
     def test_validate_samples_and_aggregate_metrics_sanity(self, monkeypatch: MonkeyPatch) -> None:
