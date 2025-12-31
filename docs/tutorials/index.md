@@ -49,7 +49,7 @@ Transform rollouts into training data for {term}`supervised fine-tuning (SFT) <S
 
 ## RL Training
 
-::::{grid} 1 1 1 1
+::::{grid} 1 1 2 2
 :gutter: 1 1 1 2
 
 :::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` GRPO with NeMo RL
@@ -57,7 +57,15 @@ Transform rollouts into training data for {term}`supervised fine-tuning (SFT) <S
 :link-type: ref
 Learn how to set up NeMo Gym and NeMo RL training environments, run tests, prepare data, and launch single-node and multi-node training runs.
 +++
-{bdg-primary}`training` {bdg-secondary}`rl` {bdg-secondary}`grpo`
+{bdg-primary}`training` {bdg-secondary}`rl` {bdg-secondary}`grpo` {bdg-secondary}`multi-step`
+:::
+
+:::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Unsloth
+:link: training-unsloth
+:link-type: ref
+Fast, memory-efficient fine-tuning for single-step tasks: math, structured outputs, instruction following, reasoning gym and more.
++++
+{bdg-primary}`training` {bdg-secondary}`unsloth` {bdg-secondary}`single-step`
 :::
 
 ::::
