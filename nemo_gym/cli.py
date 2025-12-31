@@ -46,6 +46,7 @@ from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
     PYTHON_VERSION_KEY_NAME,
+    UV_PIP_SET_PYTHON_KEY_NAME,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
@@ -68,14 +69,20 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
     has_pyproject_toml = exists(f"{dir_path / 'pyproject.toml'}")
     has_requirements_txt = exists(f"{dir_path / 'requirements.txt'}")
 
+    # explicitly set python path if specified. In Google colab, ng_run fails due to uv pip install falls back to system python (/usr) without this and errors.
+    # not needed for most clusters. should be safe in all scenarios, but only minimally tested outside of colab.
+    # see discussion and examples here: https://github.com/NVIDIA-NeMo/Gym/pull/526#issuecomment-3676230383
+    uv_pip_set_python = global_config_dict.get(UV_PIP_SET_PYTHON_KEY_NAME, False)
+    uv_pip_python_flag = "--python .venv/bin/python" if uv_pip_set_python else ""
+
     if has_pyproject_toml and has_requirements_txt:
         raise RuntimeError(
             f"Found both pyproject.toml and requirements.txt for uv venv setup in server dir: {dir_path}. Please only use one or the other!"
         )
     elif has_pyproject_toml:
-        install_cmd = f"""uv pip install '-e .' {" ".join(head_server_deps)}"""
+        install_cmd = f"""uv pip install {uv_pip_python_flag} '-e .' {" ".join(head_server_deps)}"""
     elif has_requirements_txt:
-        install_cmd = f"""uv pip install -r requirements.txt {" ".join(head_server_deps)}"""
+        install_cmd = f"""uv pip install {uv_pip_python_flag} -r requirements.txt {" ".join(head_server_deps)}"""
     else:
         raise RuntimeError(f"Missing pyproject.toml or requirements.txt for uv venv setup in server dir: {dir_path}")
 
