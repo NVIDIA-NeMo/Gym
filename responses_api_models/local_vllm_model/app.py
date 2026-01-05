@@ -12,22 +12,23 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
-[project]
-name = "vllm-model"
-version = "0.2.0rc0"
-requires-python = ">=3.12"
-dependencies = [
-    "nemo-gym[dev]",
-]
 
-[build-system]
-build-backend = "setuptools.build_meta"
-requires = ["setuptools>=61", "setuptools-scm"]
+class LocalVLLMModelConfig(VLLMModelConfig):
+    def model_post_init(self, context):
+        # base_url and api_key are set later in the model spinup
+        self.base_url = ""
+        self.api_key = ""
+        return super().model_post_init(context)
 
-[tool.setuptools.packages.find]
-where = [".."]
-include = ["vllm_model"]
 
-[tool.uv.sources]
-nemo-gym = { path = "../..", editable = true }
+class LocalVLLMModel(VLLMModel):
+    config: LocalVLLMModelConfig
+
+    def model_post_init(self, context):
+        return super().model_post_init(context)
+
+
+if __name__ == "__main__":
+    VLLMModel.run_webserver()

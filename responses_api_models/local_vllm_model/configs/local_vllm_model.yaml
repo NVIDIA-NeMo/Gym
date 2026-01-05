@@ -1,0 +1,7 @@
+policy_model:
+  responses_api_models:
+    local_vllm_model:
+      entrypoint: app.py
+      model: ${policy_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: true

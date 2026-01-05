@@ -13,21 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-[project]
-name = "vllm-model"
-version = "0.2.0rc0"
-requires-python = ">=3.12"
-dependencies = [
-    "nemo-gym[dev]",
-]
 
-[build-system]
-build-backend = "setuptools.build_meta"
-requires = ["setuptools>=61", "setuptools-scm"]
-
-[tool.setuptools.packages.find]
-where = [".."]
-include = ["vllm_model"]
-
-[tool.uv.sources]
-nemo-gym = { path = "../..", editable = true }
+class TestApp:
+    def test_sanity(self) -> None:
+        raise NotImplementedError
