@@ -402,6 +402,9 @@ class SimpleServer(BaseServer):
         async def exception_handling_middleware(request: Request, call_next):
             try:
                 return await call_next(request)
+            except ClientResponseError as e:
+                response_content = f"Hit an exception in {self.get_session_middleware_key()} calling an inner server: {e.response_content}"
+                return JSONResponse(content=response_content, status_code=500)
             except Exception as e:
                 print_exc()
                 print(
