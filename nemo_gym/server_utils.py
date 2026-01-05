@@ -218,7 +218,10 @@ class ServerClient(BaseModel):
             ) from e
 
         global_config_dict_yaml = response.content.decode()
-        global_config_dict = OmegaConf.create(json.loads(global_config_dict_yaml))
+        try:
+            global_config_dict = OmegaConf.create(json.loads(global_config_dict_yaml))
+        except (json.JSONDecodeError, ValueError):
+            global_config_dict = OmegaConf.create(global_config_dict_yaml)
 
         return cls(head_server_config=head_server_config, global_config_dict=global_config_dict)
 
