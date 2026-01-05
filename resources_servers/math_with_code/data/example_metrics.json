@@ -1,0 +1,56 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/math_with_code/data/example.jsonl",
+    "gitlab_identifier": null,
+    "license": null,
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 214.0,
+        "Min": 190.0,
+        "Max": 265.0,
+        "Median": 208.0,
+        "Standard deviation": 30.41
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "id": {
+        "Total # non-null values": 5,
+        "Average": 2.0,
+        "Min": 0.0,
+        "Max": 4.0,
+        "Median": 2.0,
+        "Standard deviation": 1.58
+    },
+    "expected_result": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "expected_code_contains": {
+        "unique_count": 1,
+        "total_count": 5
+    }
+}

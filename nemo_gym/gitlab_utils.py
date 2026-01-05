@@ -1,10 +1,11 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -103,3 +104,21 @@ def download_jsonl_dataset_cli() -> None:  # pragma: no cover
     global_config = get_global_config_dict()
     config = DownloadJsonlDatasetGitlabConfig.model_validate(global_config)
     download_jsonl_dataset(config)
+
+
+def is_model_in_gitlab(model_name: str) -> bool:  # pragma: no cover
+    client = create_mlflow_client()
+
+    # model_name in gitlab is case sensitive
+    try:
+        client.get_registered_model(model_name)
+    except RestException as e:
+        print(f"[Nemo-Gym] - Model '{model_name}' not found in Gitlab: {e}")
+        return False
+
+    return True
+
+
+def delete_model_from_gitlab(model_name: str) -> None:  # pragma: no cover
+    client = create_mlflow_client()
+    client.delete_registered_model(model_name)

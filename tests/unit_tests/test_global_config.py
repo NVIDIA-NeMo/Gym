@@ -1,10 +1,11 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -12,9 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from contextlib import nullcontext as does_not_raise
+from socket import gethostbyname, gethostname
 from typing import Dict
 from unittest.mock import MagicMock
-from socket import gethostbyname, gethostname
+
 from pytest import MonkeyPatch, raises
 
 import nemo_gym.global_config
@@ -40,7 +42,7 @@ class TestServerUtils:
         monkeypatch.setattr(nemo_gym.global_config, "python_version", python_version_mock)
 
         return {
-            "head_server_deps": ["ray==test ray version", "openai==test openai version"],
+            "head_server_deps": ["ray[default]==test ray version", "openai==test openai version"],
             "python_version": "test python version",
         }
 
@@ -610,7 +612,7 @@ class TestServerUtils:
         assert "license" in printed_messages
         assert "domain" in printed_messages
 
-def test_use_absolute_ip(self, monkeypatch: MonkeyPatch) -> None:
+    def test_use_absolute_ip(self, monkeypatch: MonkeyPatch) -> None:
         """Test that use_absolute_ip=True uses machine's hostname ip for default_host."""
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
         monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)

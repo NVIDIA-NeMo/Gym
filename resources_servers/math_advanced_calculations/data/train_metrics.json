@@ -1,0 +1,36 @@
+{
+    "name": "train",
+    "type": "train",
+    "jsonl_fpath": "resources_servers/math_advanced_calculations/data/train.jsonl",
+    "gitlab_identifier": {
+        "dataset_name": "math_advanced_calculations",
+        "version": "0.0.1",
+        "artifact_fpath": "train.jsonl"
+    },
+    "license": "Apache 2.0",
+    "Number of examples": 100,
+    "Number of tools": {
+        "Total # non-null values": 100,
+        "Average": 11.0,
+        "Min": 11.0,
+        "Max": 11.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 100,
+        "Average": 411.18,
+        "Min": 398.0,
+        "Max": 465.0
+    },
+    "Number of turns": {
+        "Total # non-null values": 100,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0
+    },
+    "Temperature": {
+        "Total # non-null values": 100,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0
+    }
+}

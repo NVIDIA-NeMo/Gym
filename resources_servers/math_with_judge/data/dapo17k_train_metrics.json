@@ -1,0 +1,53 @@
+{
+    "name": "train",
+    "type": "train",
+    "jsonl_fpath": "resources_servers/math_with_judge/data/dapo17k_train.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": {
+        "dataset_name": "dapo17k",
+        "version": "0.0.1",
+        "artifact_fpath": "dapo17k_train.jsonl"
+    },
+    "license": "Apache 2.0",
+    "Number of examples": 17398,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 17398,
+        "Average": 85.63,
+        "Min": 45.0,
+        "Max": 322.0,
+        "Median": 80.41,
+        "Standard deviation": 26.94
+    },
+    "Number of turns": {
+        "Total # non-null values": 17398,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "question": {
+        "unique_count": 17398,
+        "total_count": 17398
+    },
+    "expected_answer": {
+        "unique_count": 2251,
+        "total_count": 17398
+    }
+}

@@ -42,11 +42,11 @@ Average Turns: 88
 
 ### Agent Configuration 
 
-Path - `resources_servers/mini_swe_resource/configs/mini_swe_resource.yaml
+Path - `resources_servers/mini_swe_agent/configs/mini_swe_agent.yaml
 ```yaml
-mini_swe_resource_resources_server:
+mini_swe_agent_resources_server:
   resources_servers:
-    mini_swe_resource:
+    mini_swe_agent:
       entrypoint: app.py
       domain: coding
 mini_swe_simple_agent:
@@ -55,14 +55,14 @@ mini_swe_simple_agent:
       entrypoint: app.py
       resources_server:
         type: resources_servers
-        name: mini_swe_resource_resources_server
+        name: mini_swe_agent_resources_server
       model_server:
         type: responses_api_models
         name: openai_model
       datasets:
       - name: train
         type: train
-        jsonl_fpath: resources_servers/mini_swe_resource/data/train.jsonl
+        jsonl_fpath: resources_servers/mini_swe_agent/data/train.jsonl
         gitlab_identifier:
           dataset_name: mini_swe_agent
           version: 0.0.1
@@ -70,7 +70,7 @@ mini_swe_simple_agent:
         license: MIT
       - name: validation
         type: validation
-        jsonl_fpath: resources_servers/mini_swe_resource/data/validation.jsonl
+        jsonl_fpath: resources_servers/mini_swe_agent/data/validation.jsonl
         gitlab_identifier:
           dataset_name: mini_swe_agent
           version: 0.0.1
@@ -78,7 +78,7 @@ mini_swe_simple_agent:
         license: MIT
       - name: example
         type: example
-        jsonl_fpath: resources_servers/mini_swe_resource/data/example.jsonl
+        jsonl_fpath: resources_servers/mini_swe_agent/data/example.jsonl
       concurrency: 16 # number of instances to run concurrently
       env: singularity 
       cache_dir_template: ??? # The cache dir path where singularity images are stored
@@ -107,7 +107,7 @@ ng_download_dataset_from_gitlab \
             +output_fpath=data/train.jsonl
 
 # Start server
-CONFIG_PATHS="resources_servers/mini_swe_resource/configs/mini_swe_resource.yaml,responses_api_models/openai_model/configs/openai_model.yaml"
+CONFIG_PATHS="resources_servers/mini_swe_agent/configs/mini_swe_agent.yaml,responses_api_models/openai_model/configs/openai_model.yaml"
 ng_run +config_paths=[$CONFIG_PATHS] \
         '+mini_swe_simple_agent.responses_api_agents.mini_swe_agent.cache_dir_template=/path/to/images/xingyaoww_sweb.eval.x86_64.\{instance_id\}.sif' \
         +mini_swe_simple_agent.responses_api_agents.mini_swe_agent.run_golden=False \
