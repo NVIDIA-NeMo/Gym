@@ -149,7 +149,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 if message["role"] == "developer":
                     message["role"] = "system"
 
-        body_dict = body.model_dump(exclude_unset=True, mode="json")
+        body_dict = body.model_dump(exclude_unset=True)
         body_dict["model"] = self.config.model
 
         if self.config.chat_template_kwargs:
@@ -377,7 +377,7 @@ class VLLMConverter(BaseModel):
         self,
         responses_create_params: NeMoGymResponseCreateParamsNonStreaming,
     ) -> NeMoGymChatCompletionCreateParamsNonStreaming:
-        responses_create_params = responses_create_params.model_dump(exclude_unset=True, mode="json")
+        responses_create_params = responses_create_params.model_dump(exclude_unset=True)
 
         # Tracks messages including reasoning for each respective message type helper function
         state = VLLMConverterResponsesToChatCompletionsState(
