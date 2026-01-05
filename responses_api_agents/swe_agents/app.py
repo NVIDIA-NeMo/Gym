@@ -52,7 +52,6 @@ from responses_api_agents.swe_agents.utils import (
     setup_swebench_environment,
 )
 
-
 @ray.remote(
     scheduling_strategy="SPREAD",
     runtime_env={

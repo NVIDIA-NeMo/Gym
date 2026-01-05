@@ -431,7 +431,7 @@ class RunOpenHandsAgent:
         command: str,
         expected_file_pattern: str,
         mode: str,
-        max_retries: int = 5,
+        max_retries: int = 3,
         timeout: int = 100000,
         dataset_mount_path: Optional[str] = None,
     ):
