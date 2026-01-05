@@ -1,5 +1,6 @@
 -e nemo-gym[dev] @ ../../
 fhaviary[gsm8k,labbench,hotpotqa,notebook,llm]>=0.28.0
+sentence-transformers
 tqdm
 datasets
 huggingface-hub

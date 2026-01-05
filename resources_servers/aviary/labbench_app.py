@@ -11,10 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """
-  - 0-198: LitQA2 (199 items) - text + paper search
-  - 199-379: FigQA (181 items) - figure images
-  - 380-623: TableQA (244 items) - table images
+  - 0-198: LitQA2 (199) - text + paper search
+  - 199-379: FigQA (181) - figure images
+  - 380-623: TableQA (244) - table images
 """
 import asyncio
 import logging
@@ -151,6 +152,8 @@ class LABBenchResourcesServer(AviaryResourcesServer[GradablePaperQAEnvironment, 
             llm_config=make_llm_config(model_name),
             summary_llm=model_name,
             summary_llm_config=make_llm_config(model_name),
+            # embedding="sparse",
+            embedding="st-multi-qa-MiniLM-L6-cos-v1",
             agent=AgentSettings(
                 agent_llm=model_name,
                 agent_llm_config=make_llm_config(model_name),
@@ -160,15 +163,18 @@ class LABBenchResourcesServer(AviaryResourcesServer[GradablePaperQAEnvironment, 
             ),
             parsing=ParsingSettings(
                 defer_embedding=True,
-                enrichment_llm=model_name,
-                enrichment_llm_config=make_llm_config(model_name),
+                multimodal=False,  # Disable images.. Qwen3 VL tool call parsing was giving issues
+                # enrichment_llm=model_name,
+                # enrichment_llm_config=make_llm_config(model_name),
             ),
         )
 
-        logger.info(f"Building paper index from directory: {paper_directory}")
+        # seems to error with false
+        rebuild_index = global_config.get("rebuild_paper_index", True)
+        logger.info(f"Loading paper index (rebuild={rebuild_index}) from: {paper_directory}")
 
         def build_index():
-            return asyncio.run(get_directory_index(settings=settings, build=True))
+            return asyncio.run(get_directory_index(settings=settings, build=rebuild_index))
 
         try:
             asyncio.get_running_loop()
@@ -179,7 +185,7 @@ class LABBenchResourcesServer(AviaryResourcesServer[GradablePaperQAEnvironment, 
         except RuntimeError:
             index = build_index()
 
-        logger.info(f"Paper index built successfully: {index.index_name}")
+        logger.info(f"Paper index loaded: {index.index_name}")
 
         logger.info("Creating LitQA2 dataset...")
         litqa_dataset = TextQATaskDataset(
