@@ -404,6 +404,10 @@ class SimpleServer(BaseServer):
             try:
                 return await call_next(request)
             except ClientResponseError as e:
+                assert hasattr(e, "response_content"), (
+                    "Please use `nemo_gym.server_utils.raise_for_status` for HTTP exceptions!"
+                )
+
                 response_content = f"Hit an exception in {self.get_session_middleware_key()} calling an inner server: {e.response_content}"
                 return JSONResponse(content=response_content, status_code=500)
             except Exception as e:
