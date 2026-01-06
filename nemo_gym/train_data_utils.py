@@ -24,7 +24,6 @@ from typing import Any, Dict, List, Literal, Optional, Self, Tuple, Union
 from devtools import pprint
 from omegaconf import DictConfig
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from tdigest import TDigest
 from tqdm.auto import tqdm
 
 from nemo_gym.base_resources_server import BaseRunRequest
@@ -115,15 +114,10 @@ class AvgMinMax(Accumulator):
     average: float = Field(serialization_alias="Average", default=0)
     min: float = Field(serialization_alias="Min", default=float("inf"))
     max: float = Field(serialization_alias="Max", default=float("-inf"))
-    median: float = Field(serialization_alias="Median", default=0)
     stddev: float = Field(serialization_alias="Standard deviation", default=0)
     # Internal state
     mean: float = Field(default=0, exclude=True)  # running value (before final average)
     M2: float = Field(default=0, exclude=True)  # sum of squared differences (for variance)
-    tdigest: TDigest = Field(default_factory=TDigest, exclude=True)
-    """
-    T-Digest is used to estimate the Median without storing and sorting all values. The Median is essentially an approximation using the 50th percentile, which is very close to the true Median.
-    """
 
     def observe(self, x: float) -> None:
         if x < self.min:
@@ -137,9 +131,6 @@ class AvgMinMax(Accumulator):
         self.mean += delta / self.total
         self.M2 += delta * (x - self.mean)
 
-        # Update quantile estimator (for median)
-        self.tdigest.update(x)
-
     def _add(self: Self, other: Self) -> None:
         # Merge accumulators
         if other.total == 0:
@@ -150,8 +141,6 @@ class AvgMinMax(Accumulator):
             self.M2 = other.M2
             self.min = other.min
             self.max = other.max
-            self.tdigest = TDigest()
-            self.tdigest = self.tdigest + other.tdigest
             return
 
         # Merge mean and variance
@@ -167,9 +156,6 @@ class AvgMinMax(Accumulator):
         if other.max > self.max:
             self.max = other.max
 
-        # Merge t-digests for quantiles/median
-        self.tdigest = self.tdigest + other.tdigest
-
     def _aggregate(self: Self) -> Self:
         def round_metric(x: float) -> float:
             if x >= 1 or x <= -1:
@@ -179,14 +165,12 @@ class AvgMinMax(Accumulator):
         n = self.total
         mean = self.mean if n > 0 else 0.0
         stddev = sqrt(self.M2 / (n - 1)) if n > 1 else 0.0
-        med = float(self.tdigest.percentile(50)) if n > 0 and self.tdigest.n > 0 else 0.0
 
         params = {
             "total": self.total,
             "average": mean,
             "min": self.min if n > 0 else 0.0,
             "max": self.max if n > 0 else 0.0,
-            "median": med,
             "stddev": stddev,
         }
 
