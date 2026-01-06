@@ -20,7 +20,7 @@ from huggingface_hub import snapshot_download
 from vllm.entrypoints.openai.api_server import run_server
 from vllm.entrypoints.openai.cli_args import validate_parsed_serve_args
 
-from nemo_gym.global_config import HF_TOKEN_KEY_NAME, get_global_config_dict
+from nemo_gym.global_config import DISALLOWED_PORTS_KEY_NAME, HF_TOKEN_KEY_NAME, find_open_port, get_global_config_dict
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 
@@ -63,16 +63,16 @@ class LocalVLLMModel(VLLMModel):
 
     def start_vllm_server(self) -> None:
         server_args = self.config.vllm_serve_kwargs
-        server_args.update(
-            {
-                "model": self.config.model,
-                "host": None,
-                "port": None,
-                "distributed_executor_backend": "ray",
-                "data-parallel-backend": "ray",
-                "dtype": "auto",
-            }
-        )
+
+        port = find_open_port(disallowed_ports=get_global_config_dict()[DISALLOWED_PORTS_KEY_NAME])
+        server_args = server_args | {
+            "model": self.config.model,
+            "host": "127.0.0.1",
+            "port": port,
+            "distributed_executor_backend": "ray",
+            "data-parallel-backend": "ray",
+            "dtype": "auto",
+        }
 
         validate_parsed_serve_args(server_args)
 
