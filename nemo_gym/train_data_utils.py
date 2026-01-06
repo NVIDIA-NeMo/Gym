@@ -721,7 +721,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
             aggregate_metrics_dict = aggregate_metrics.model_dump(mode="json", by_alias=True)
 
             parent = Path(config.output_dirpath)
-            parent.mkdir(exist_ok=True)
+            parent.mkdir(exist_ok=True, parents=True)
             metrics_fpath = parent / f"{type}_metrics.json"
             maybe_conflicting_metrics_fpath = self._validate_aggregate_metrics(
                 aggregate_metrics_dict=aggregate_metrics_dict,
