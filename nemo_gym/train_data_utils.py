@@ -39,6 +39,7 @@ from nemo_gym.config_types import (
 )
 from nemo_gym.gitlab_utils import download_jsonl_dataset
 from nemo_gym.global_config import (
+    HF_TOKEN_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
@@ -486,7 +487,7 @@ class TrainDataProcessor(BaseModel):
                                 "output_fpath": d.jsonl_fpath,
                                 # Only pass split if artifact_fpath is not set
                                 **({"split": d.type} if not hf_identifier.artifact_fpath else {}),
-                                "hf_token": global_config.get("hf_token"),
+                                HF_TOKEN_KEY_NAME: global_config.get(HF_TOKEN_KEY_NAME),
                             }
                         )
                         print(f"Downloading '{d.type}' split from {hf_identifier.repo_id} to {d.jsonl_fpath}...")
@@ -780,13 +781,13 @@ def validate_backend_credentials(backend: str) -> tuple[bool, str]:
             )
 
     elif backend == "huggingface":
-        required = ["hf_token"]
+        required = [HF_TOKEN_KEY_NAME]
         missing = [k for k in required if k not in global_config or not global_config[k]]
         if missing:
             return False, (
                 f"HuggingFace backend selected but missing credentials: {missing}\n"
                 f"Add to env.yaml:\n"
-                f"  hf_token: <your_hf_token>\n"
+                f"  {HF_TOKEN_KEY_NAME}: <your_hf_token>\n"
             )
 
     return True, ""
