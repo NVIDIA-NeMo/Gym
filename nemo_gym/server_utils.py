@@ -24,7 +24,7 @@ from logging import LogRecord, getLogger
 from os import getenv
 from pathlib import Path
 from threading import Thread
-from traceback import print_exc
+from traceback import format_exc, print_exc
 from typing import List, Literal, Optional, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
@@ -169,9 +169,10 @@ Sleeping 0.5s and retrying...
 
 
 async def raise_for_status(response: ClientResponse) -> None:  # pragma: no cover
-    if not response.ok and _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
+    if not response.ok:
         content = await response.content.read()
-        print(f"""Request info: {response.request_info}
+        if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
+            print(f"""Request info: {response.request_info}
 Response content: {content}""")
 
         try:
@@ -406,15 +407,16 @@ class SimpleServer(BaseServer):
                 response_content = f"Hit an exception in {self.get_session_middleware_key()} calling an inner server: {e.response_content}"
                 return JSONResponse(content=response_content, status_code=500)
             except Exception as e:
-                print_exc()
                 print(
-                    f"🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"
+                    f"""🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception
+Formatted exception: {format_exc()}
+repr(e): {repr(e)}"""
                 )
                 return JSONResponse(content=repr(e), status_code=500)
             except:
                 print_exc()
                 print(
-                    f"🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"
+                    f"""🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"""
                 )
                 return JSONResponse(content="An unknown error occurred", status_code=500)
 
