@@ -77,6 +77,10 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
         )
     elif has_pyproject_toml:
         install_cmd = f"""uv pip install '-e .' {" ".join(head_server_deps)}"""
+        if dir_path.name == "vllm_model":
+            # NB: --no-deps is a workaround for installing vllm (current version: 0.11.2) on a cpu target,
+            # b/c `uv pip install` resolves dependencies differently vs `pip install`.
+            install_cmd = f"""uv pip install --no-deps 'vllm==0.11.2' && {install_cmd}"""
     elif has_requirements_txt:
         install_cmd = f"""uv pip install -r requirements.txt {" ".join(head_server_deps)}"""
     else:
