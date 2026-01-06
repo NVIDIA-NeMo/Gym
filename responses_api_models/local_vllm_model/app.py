@@ -31,4 +31,4 @@ class LocalVLLMModel(VLLMModel):
 
 
 if __name__ == "__main__":
-    VLLMModel.run_webserver()
+    LocalVLLMModel.run_webserver()
