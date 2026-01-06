@@ -12,10 +12,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from typing import Any, Dict, Optional
+
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 
 class LocalVLLMModelConfig(VLLMModelConfig):
+    vllm_spinup_command: str
+    vllm_spinup_command_template_kwargs: Optional[Dict[str, Any]] = None
+
     def model_post_init(self, context):
         # base_url and api_key are set later in the model spinup
         self.base_url = ""
