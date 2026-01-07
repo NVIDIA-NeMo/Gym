@@ -14,8 +14,11 @@
 # limitations under the License.
 from argparse import Namespace
 from pathlib import Path
+from threading import Thread
+from time import sleep
 from typing import Any, Dict, List, Optional, Union
 
+import requests
 import uvloop
 from huggingface_hub import snapshot_download
 from vllm.entrypoints.openai.api_server import (
@@ -100,7 +103,19 @@ class LocalVLLMModel(VLLMModel):
         server_args = Namespace(**(vars(args) | server_args))
 
         # The main vllm server will be run on the name node as this Gym model server, but the engines can be scheduled as seen fit by Ray.
-        uvloop.run(run_server(server_args))
+        server_task = run_server(server_args)
+        thread = Thread(target=uvloop.run, args=(server_task,), daemon=True)
+        thread.start()
+
+        while True:
+            response = requests.get(f"http://{server_args.host}:{server_args.port}/v1/models")
+            if response.ok:
+                break
+
+            print(
+                f"Polling for {self.config.name} LocalVLLMModel server to spinup. Received {response.status_code}. Sleeping for 3s..."
+            )
+            sleep(3)
 
 
 if __name__ == "__main__":
