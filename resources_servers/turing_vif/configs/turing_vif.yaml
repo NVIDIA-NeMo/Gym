@@ -1,0 +1,31 @@
+# Turing VIF Resource Server Configuration
+# This server validates LLM responses against instruction-following criteria
+# using both fast rule-based validators and async LLM-as-a-judge validators.
+
+turing_vif:
+  resources_servers:
+    turing_vif:
+      entrypoint: app.py
+      domain: instruction_following
+      verified: false
+      description: Turing VIF instruction following validators with rule-based and LLM judge support
+      value: Improve instruction following capabilities with comprehensive validation
+      # LLM Judge configuration - uses policy model credentials by default
+      judge_base_url: ${policy_base_url}
+      judge_api_key: ${policy_api_key}
+      judge_model: ${policy_model_name}
+
+turing_vif_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: turing_vif
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/turing_vif/data/example.jsonl

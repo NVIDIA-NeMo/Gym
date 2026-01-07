@@ -1,0 +1,4 @@
+mode,definition
+non-relational,Judge compliance using instruction and subinstruction-specific descriptions
+relational_with_subinstruction,"Here a specific type of word called the subinstruction (e.g. metaphor, formal, visual) along with it's description, a relation and a relativity value is provided. Count the number of words that satisfy the subinstruction (given it's description) Using the relation, compare the counted word to the relativity value to make the determination."
+relational_without_subinstruction,"Here only a relation and a relativity value is provided. Count the number of words that satisfy the context specific based on the **instruction description** (e.g emotionally expressive adjectives). Using the relation, compare the counted word to the relativity value to make the determination."
