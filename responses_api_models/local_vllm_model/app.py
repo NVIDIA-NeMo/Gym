@@ -21,6 +21,7 @@ from threading import Thread
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import ray
+from aiohttp.client_exceptions import ClientConnectorError
 from huggingface_hub import snapshot_download
 from vllm.entrypoints.openai.api_server import (
     FlexibleArgumentParser,
@@ -141,15 +142,10 @@ class LocalVLLMModel(VLLMModel):
                 client = NeMoGymAsyncOpenAI(base_url=self.config.base_url, api_key="dummy_key")
                 while True:
                     try:
-                        response = await client.create_models()
-                        print("RESPONSE", response)
-                    except Exception as e:
-                        from traceback import format_exc
-
-                        print(type(e), format_exc())
-
+                        await client.create_models()
+                    except ClientConnectorError:
                         print(
-                            f"Polling for {self.config.name} LocalVLLMModel server to spinup. Received a ConnectionError since the server isn't up yet. Sleeping for 3s..."
+                            f"Polling for {self.config.name} LocalVLLMModel server to spinup. Received a ClientConnectorError since the server isn't up yet. Sleeping for 3s..."
                         )
                         asyncio.sleep(3)
 
