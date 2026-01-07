@@ -12,8 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import sys
+import signal
 from argparse import Namespace
+from os import environ
 from pathlib import Path
 from threading import Thread
 from time import sleep
@@ -26,6 +27,7 @@ from vllm.entrypoints.openai.api_server import (
     FlexibleArgumentParser,
     cli_env_setup,
     make_arg_parser,
+    run_server,
     validate_parsed_serve_args,
 )
 
@@ -51,27 +53,6 @@ class LocalVLLMModelConfig(VLLMModelConfig):
             self.hf_home = str(current_directory / ".cache" / "huggingface")
 
         return super().model_post_init(context)
-
-
-@ray.remote
-class LocalVLLMActor:
-    def __init__(self, server_args: Namespace, env_vars: Dict[str, str]) -> None:
-        import signal
-        from os import environ
-
-        import uvloop
-        from vllm.entrypoints.openai.api_server import (
-            run_server,
-        )
-
-        for k, v in env_vars.items():
-            environ[k] = v
-
-        # Pass through signal setting not allowed in threads.
-        signal.signal = lambda *args, **kwargs: None
-
-        self._server_thread = Thread(target=uvloop.run, args=(run_server(server_args),), daemon=True)
-        self._server_thread.start()
 
 
 class LocalVLLMModel(VLLMModel):
@@ -140,13 +121,25 @@ class LocalVLLMModel(VLLMModel):
         return final_args, env_vars
 
     def start_vllm_server(self) -> None:
-        final_args, env_vars = self._configure_vllm_serve()
+        server_args, env_vars = self._configure_vllm_serve()
 
-        self._server_thread = LocalVLLMActor.options(
-            runtime_env={
-                "py_executable": sys.executable,
-            },
-        ).remote(final_args, env_vars)
+        for k, v in env_vars.items():
+            environ[k] = v
+
+        # Pass through signal setting not allowed in threads.
+        signal.signal = lambda *args, **kwargs: None
+
+        vllm_server_task = run_server(server_args)
+
+        from uvicorn.server import asyncio
+
+        original_asyncio_run = asyncio.run
+
+        def new_asyncio_run(coroutine):
+            asyncio.gather()
+            return original_asyncio_run(asyncio.gather(vllm_server_task, coroutine))
+
+        asyncio.run = new_asyncio_run
 
         while True:
             # assert self._server_thread.is_alive(), "Server thread died, please see the exception traceback above!"
