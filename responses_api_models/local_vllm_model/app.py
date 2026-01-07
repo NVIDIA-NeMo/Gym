@@ -142,9 +142,6 @@ class LocalVLLMModel(VLLMModel):
             kwargs = kwargs or dict()
             kwargs["py_executable"] = sys.executable
 
-            # TODO remove
-            print("RUNTIME ENV", args, kwargs)
-
             return original_RuntimeEnv(*args, **kwargs)
 
         runtime_env.RuntimeEnv = new_RuntimeEnv
@@ -198,10 +195,6 @@ class LocalVLLMModel(VLLMModel):
             return original_asyncio_run(wrapper_fn(), *args, **kwargs)
 
         uvicorn_server.asyncio_run = new_asyncio_run
-
-        # TODO remove
-        print("AVAILABLE RESOURCES", ray.available_resources())
-        print("CLUSTER RESOURCES", ray.cluster_resources())
 
 
 if __name__ == "__main__":
