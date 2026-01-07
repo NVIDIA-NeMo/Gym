@@ -32,7 +32,7 @@ from vllm.entrypoints.openai.api_server import (
 )
 
 from nemo_gym.global_config import DISALLOWED_PORTS_KEY_NAME, HF_TOKEN_KEY_NAME, find_open_port, get_global_config_dict
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
+from nemo_gym.server_utils import get_global_aiohttp_client
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 
@@ -139,14 +139,18 @@ class LocalVLLMModel(VLLMModel):
 
         def new_asyncio_run(coroutine, *args, **kwargs):
             async def wait_for_vllm_server() -> None:
-                client = NeMoGymAsyncOpenAI(base_url=self.config.base_url, api_key="dummy_key")
+                poll_count = 0
+                client = get_global_aiohttp_client()
                 while True:
                     try:
-                        await client.create_models()
+                        await client.request(method="GET", url=f"{self.config.base_url}/models")
                     except ClientConnectorError:
-                        print(
-                            f"Polling for {self.config.name} LocalVLLMModel server to spinup. Received a ClientConnectorError since the server isn't up yet. Sleeping for 3s..."
-                        )
+                        if poll_count % 10 == 0:
+                            print(
+                                f"Polling every 3s for {self.config.name} LocalVLLMModel server to spinup. Received a ClientConnectorError since the server isn't up yet..."
+                            )
+
+                        poll_count += 1
                         asyncio.sleep(3)
 
             async def wrapper_fn() -> None:
@@ -156,6 +160,7 @@ class LocalVLLMModel(VLLMModel):
                     (vllm_server_task, asyncio.create_task(wait_for_vllm_server())),
                     return_when="FIRST_COMPLETED",
                 )
+                print(f"{self.config.name} finished vLLM server spinup!")
 
                 _, pending = await asyncio.wait(
                     (vllm_server_task, coroutine),
