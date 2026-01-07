@@ -19,7 +19,7 @@ from argparse import Namespace
 from os import environ
 from pathlib import Path
 from threading import Thread
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Coroutine, Dict, List, Optional, Tuple, Union
 
 
 environ["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] = "1"
@@ -126,33 +126,8 @@ class LocalVLLMModel(VLLMModel):
 
         return final_args, env_vars
 
-    def start_vllm_server(self) -> None:
-        server_args, env_vars = self._configure_vllm_serve()
-
-        for k, v in env_vars.items():
-            environ[k] = v
-
-        # Pass through signal setting not allowed in threads.
-        signal.signal = lambda *args, **kwargs: None
-
-        # This patch may be sensitive to vLLM version! See https://github.com/vllm-project/vllm/blob/275de34170654274616082721348b7edd9741d32/vllm/v1/engine/utils.py#L651
-        original_RuntimeEnv = runtime_env.RuntimeEnv
-
-        def new_RuntimeEnv(*args, **kwargs):
-            kwargs = kwargs or dict()
-            kwargs["py_executable"] = sys.executable
-
-            # Necessary for downstream vLLM ray actor spinup
-            env_vars = kwargs.get("env_vars") or dict()
-            env_vars.pop("CUDA_VISIBLE_DEVICES", None)
-            env_vars["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] = "1"
-
-            return original_RuntimeEnv(*args, **kwargs)
-
-        runtime_env.RuntimeEnv = new_RuntimeEnv
-
-        vllm_server_coroutine = run_server(server_args)
-
+    def _patch_uvicorn_server(self, vllm_server_coroutine: Coroutine) -> None:
+        # We need to run two servers in the same process, so we override the normal Gym server spinup to also perform vLLM server spinup logic.
         # This patch may be sensitive to uvicorn version!
         from uvicorn import server as uvicorn_server
 
@@ -200,6 +175,38 @@ class LocalVLLMModel(VLLMModel):
             return original_asyncio_run(wrapper_fn(), *args, **kwargs)
 
         uvicorn_server.asyncio_run = new_asyncio_run
+
+    def _patch_vllm_ray_runtime_env(self) -> None:
+        # This patch may be sensitive to vLLM version! See https://github.com/vllm-project/vllm/blob/275de34170654274616082721348b7edd9741d32/vllm/v1/engine/utils.py#L651
+        original_RuntimeEnv = runtime_env.RuntimeEnv
+
+        def new_RuntimeEnv(*args, **kwargs):
+            kwargs = kwargs or dict()
+            kwargs["py_executable"] = sys.executable
+
+            # Necessary for downstream vLLM ray actor spinup otherwise we get CUDA device ordinal out of range errors.
+            env_vars = kwargs.get("env_vars") or dict()
+            env_vars.pop("CUDA_VISIBLE_DEVICES", None)
+            env_vars["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] = "1"
+
+            return original_RuntimeEnv(*args, **kwargs)
+
+        runtime_env.RuntimeEnv = new_RuntimeEnv
+
+    def start_vllm_server(self) -> None:
+        server_args, env_vars = self._configure_vllm_serve()
+
+        for k, v in env_vars.items():
+            environ[k] = v
+
+        # Pass through signal setting not allowed in threads.
+        signal.signal = lambda *args, **kwargs: None
+
+        self._patch_vllm_ray_runtime_env()
+
+        vllm_server_coroutine = run_server(server_args)
+
+        self._patch_uvicorn_server(vllm_server_coroutine)
 
 
 if __name__ == "__main__":
