@@ -93,6 +93,9 @@ class LocalVLLMModel(VLLMModel):
             "data_parallel_backend": "ray",
             "download_dir": cache_dir,
         }
+        maybe_hf_token = self.get_hf_token()
+        if maybe_hf_token:
+            server_args["hf_token"] = maybe_hf_token
 
         cli_env_setup()
         parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible RESTful API server.")
