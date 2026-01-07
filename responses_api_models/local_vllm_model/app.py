@@ -31,6 +31,7 @@ from vllm.entrypoints.openai.api_server import (
 )
 
 from nemo_gym.global_config import DISALLOWED_PORTS_KEY_NAME, HF_TOKEN_KEY_NAME, find_open_port, get_global_config_dict
+from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 
@@ -93,6 +94,7 @@ class LocalVLLMModel(VLLMModel):
             "model": self.config.model,
             "host": "0.0.0.0",  # Must be 0.0.0.0 for cross-node communication.
             "port": port,
+            # @bxyu-nvidia: Somehow these variables break spinup with some vllm import issue.
             # "distributed_executor_backend": "ray",
             # "data_parallel_backend": "ray",
             "download_dir": cache_dir,
@@ -135,25 +137,33 @@ class LocalVLLMModel(VLLMModel):
         original_asyncio_run = uvicorn_server.asyncio_run
 
         def new_asyncio_run(coroutine, *args, **kwargs):
+            async def wait_for_vllm_server():
+                client = NeMoGymAsyncOpenAI(base_url=self.config.base_url, api_key="dummy_key")
+                while True:
+                    try:
+                        response = client.create_models()
+                        print("RESPONSE", response)
+                    except Exception as e:
+                        from traceback import format_exc
+
+                        print(type(e), format_exc())
+
+                        print(
+                            f"Polling for {self.config.name} LocalVLLMModel server to spinup. Received a ConnectionError since the server isn't up yet. Sleeping for 3s..."
+                        )
+                        asyncio.sleep(3)
+
             async def wrapper_fn():
+                await asyncio.wait(
+                    (vllm_server_task, wait_for_vllm_server()),
+                    return_when="FIRST_COMPLETED",
+                )
+
                 await asyncio.gather(vllm_server_task, coroutine)
 
             return original_asyncio_run(wrapper_fn(), *args, **kwargs)
 
         uvicorn_server.asyncio_run = new_asyncio_run
-
-        # while True:
-        #     # assert self._server_thread.is_alive(), "Server thread died, please see the exception traceback above!"
-
-        #     try:
-        #         response = requests.get(f"{self.config.base_url}/models")
-        #         assert response.ok, (response.status_code, response.content)
-        #         break
-        #     except requests.exceptions.ConnectionError:
-        #         print(
-        #             f"Polling for {self.config.name} LocalVLLMModel server to spinup. Received a ConnectionError since the server isn't up yet. Sleeping for 3s..."
-        #         )
-        #         sleep(3)
 
 
 if __name__ == "__main__":
