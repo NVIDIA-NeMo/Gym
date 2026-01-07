@@ -54,6 +54,10 @@ class LocalVLLMModelConfig(VLLMModelConfig):
         return super().model_post_init(context)
 
 
+def vllm_server_proc_target(server_args):
+    uvloop.run(run_server(server_args))
+
+
 class LocalVLLMModel(VLLMModel):
     config: LocalVLLMModelConfig
 
@@ -109,8 +113,7 @@ class LocalVLLMModel(VLLMModel):
             environ["HF_TOKEN"] = maybe_hf_token
 
         # The main vllm server will be run on the name node as this Gym model server, but the engines can be scheduled as seen fit by Ray.
-        server_task = run_server(server_args)
-        proc = Process(target=uvloop.run, args=(server_task,), daemon=True)
+        proc = Process(target=vllm_server_proc_target, args=(server_args,), daemon=True)
         proc.start()
 
         while True:
