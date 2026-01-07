@@ -109,6 +109,10 @@ class LocalVLLMModel(VLLMModel):
 
         # TODO remove
         print(final_args)
+        from vllm.entrypoints.openai.api_server import AsyncEngineArgs
+
+        engine_args = AsyncEngineArgs.from_cli_args(final_args)
+        print("ENGINE ARGS", engine_args)
 
         # vLLM accepts a `hf_token` parameter but it's not used everywhere. We need to set HF_TOKEN environment variable here.
         maybe_hf_token = self.get_hf_token()
