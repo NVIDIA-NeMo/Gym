@@ -12,19 +12,23 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import signal
 from argparse import Namespace
 from os import environ
 from pathlib import Path
+from threading import Thread
 from time import sleep
 from typing import Any, Dict, List, Optional, Union
 
 import ray
 import requests
+import uvloop
 from huggingface_hub import snapshot_download
 from vllm.entrypoints.openai.api_server import (
     FlexibleArgumentParser,
     cli_env_setup,
     make_arg_parser,
+    run_server,
     validate_parsed_serve_args,
 )
 
@@ -52,33 +56,8 @@ class LocalVLLMModelConfig(VLLMModelConfig):
         return super().model_post_init(context)
 
 
-@ray.remote
-class LocalVLLMActor:
-    def __init__(self, server_args: Namespace) -> None:
-        import signal
-        from threading import Thread
-
-        import ray
-        import uvloop
-        from vllm.entrypoints.openai.api_server import run_server
-
-        # Pass through signal setting not allowed in threads.
-        signal.signal = lambda *args, **kwargs: None
-
-        self.server_thread = Thread(target=uvloop.run, args=(run_server(server_args),), daemon=True)
-        self.server_thread.start()
-
-        node_ip = ray._private.services.get_node_ip_address()
-        self.base_url = f"http://{node_ip}:{server_args.port}/v1"
-
-    def base_url(self) -> str:
-        return self.base_url
-
-
 class LocalVLLMModel(VLLMModel):
     config: LocalVLLMModelConfig
-
-    _local_vllm_actor: LocalVLLMActor  # Set later in start_vllm_server
 
     def model_post_init(self, context):
         print(
@@ -126,16 +105,19 @@ class LocalVLLMModel(VLLMModel):
 
         server_args = Namespace(**(vars(args) | server_args))
 
-        # TODO Remove
-        print([type(v) for v in vars(server_args).values()])
-
         # vLLM accepts a `hf_token` parameter but it's not used everywhere. We need to set HF_TOKEN environment variable here.
         maybe_hf_token = self.get_hf_token()
         if maybe_hf_token:
             environ["HF_TOKEN"] = maybe_hf_token
 
-        self._local_vllm_actor = LocalVLLMActor.remote(server_args)
-        base_url = ray.get(self._local_vllm_actor.base_url.remote())
+        # Pass through signal setting not allowed in threads.
+        signal.signal = lambda *args, **kwargs: None
+
+        self.server_thread = Thread(target=uvloop.run, args=(run_server(server_args),), daemon=True)
+        self.server_thread.start()
+
+        node_ip = ray._private.services.get_node_ip_address()
+        base_url = f"http://{node_ip}:{server_args.port}/v1"
 
         while True:
             try:
