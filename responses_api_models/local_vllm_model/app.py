@@ -134,6 +134,8 @@ class LocalVLLMModel(VLLMModel):
         original_asyncio_run = asyncio.run
 
         def new_asyncio_run(coroutine):
+            # TODO remove
+            print("Hit inside new asyncio run")
             return original_asyncio_run(asyncio.gather(vllm_server_task, coroutine))
 
         asyncio.run = new_asyncio_run
