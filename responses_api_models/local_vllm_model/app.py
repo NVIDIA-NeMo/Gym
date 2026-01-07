@@ -131,11 +131,12 @@ class LocalVLLMModel(VLLMModel):
 
         # Necessary for downstream vLLM ray actor spinup
         environ.pop("CUDA_VISIBLE_DEVICES", None)
+        environ["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] = "1"
 
         # Pass through signal setting not allowed in threads.
         signal.signal = lambda *args, **kwargs: None
 
-        # This patch may be sensitive to vLLM version!
+        # This patch may be sensitive to vLLM version! See https://github.com/vllm-project/vllm/blob/275de34170654274616082721348b7edd9741d32/vllm/v1/engine/utils.py#L651
         original_RuntimeEnv = runtime_env.RuntimeEnv
 
         def new_RuntimeEnv(*args, **kwargs):
