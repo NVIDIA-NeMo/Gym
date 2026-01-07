@@ -56,6 +56,13 @@ class LocalVLLMModelConfig(VLLMModelConfig):
         return super().model_post_init(context)
 
 
+# TODO remove
+import vllm
+
+
+vllm
+
+
 class LocalVLLMModel(VLLMModel):
     config: LocalVLLMModelConfig
 
