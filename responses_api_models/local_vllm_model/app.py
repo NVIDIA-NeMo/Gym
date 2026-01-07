@@ -93,8 +93,8 @@ class LocalVLLMModel(VLLMModel):
             "model": self.config.model,
             "host": "0.0.0.0",  # Must be 0.0.0.0 for cross-node communication.
             "port": port,
-            "distributed_executor_backend": "ray",
-            "data_parallel_backend": "ray",
+            # "distributed_executor_backend": "ray",
+            # "data_parallel_backend": "ray",
             "download_dir": cache_dir,
         }
 
