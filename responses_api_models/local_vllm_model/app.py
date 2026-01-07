@@ -19,7 +19,9 @@ from typing import Any, Dict, List, Optional, Union
 import uvloop
 from huggingface_hub import snapshot_download
 from vllm.entrypoints.openai.api_server import run_server
-from vllm.entrypoints.openai.cli_args import validate_parsed_serve_args
+from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
+from vllm.entrypoints.utils import cli_env_setup
+from vllm.utils import FlexibleArgumentParser
 
 from nemo_gym.global_config import DISALLOWED_PORTS_KEY_NAME, HF_TOKEN_KEY_NAME, find_open_port, get_global_config_dict
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
@@ -80,7 +82,11 @@ class LocalVLLMModel(VLLMModel):
             "dtype": "auto",
         }
 
-        server_args = Namespace(**server_args)
+        cli_env_setup()
+        parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible RESTful API server.")
+        parser = make_arg_parser(parser)
+        args = parser.parse_args([])
+        server_args = Namespace(**(vars(args) | server_args))
 
         validate_parsed_serve_args(server_args)
 
