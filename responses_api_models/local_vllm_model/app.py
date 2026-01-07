@@ -55,13 +55,17 @@ class LocalVLLMModelConfig(VLLMModelConfig):
 
 @ray.remote
 class LocalVLLMActor:
-    def __init__(self, server_args: Namespace) -> None:
+    def __init__(self, server_args: Namespace, env_vars: Dict[str, str]) -> None:
         import signal
+        from os import environ
 
         import uvloop
         from vllm.entrypoints.openai.api_server import (
             run_server,
         )
+
+        for k, v in env_vars.items():
+            environ[k] = v
 
         # Pass through signal setting not allowed in threads.
         signal.signal = lambda *args, **kwargs: None
@@ -141,9 +145,8 @@ class LocalVLLMModel(VLLMModel):
         self._server_thread = LocalVLLMActor.options(
             runtime_env={
                 "py_executable": sys.executable,
-                "env_vars": env_vars,
             },
-        ).remote(final_args)
+        ).remote(final_args, env_vars)
 
         while True:
             # assert self._server_thread.is_alive(), "Server thread died, please see the exception traceback above!"
