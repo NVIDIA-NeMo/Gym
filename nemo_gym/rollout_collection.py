@@ -18,6 +18,7 @@ from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
 from itertools import chain, repeat
+from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
@@ -104,6 +105,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
             print(f"Overriding responses_create_params fields with {config.responses_create_params}")
 
         metrics = Counter()
+        Path(config.output_jsonl_fpath).parent.mkdir(exist_ok=True, parents=True)
         with open(config.output_jsonl_fpath, "a") as f:
 
             async def _post_coroutine(row: dict) -> None:
