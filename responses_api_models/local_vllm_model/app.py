@@ -134,7 +134,6 @@ class LocalVLLMModel(VLLMModel):
         original_asyncio_run = asyncio.run
 
         def new_asyncio_run(coroutine):
-            asyncio.gather()
             return original_asyncio_run(asyncio.gather(vllm_server_task, coroutine))
 
         asyncio.run = new_asyncio_run
