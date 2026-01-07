@@ -2,14 +2,15 @@
     "name": "validation",
     "type": "validation",
     "jsonl_fpath": "resources_servers/math_with_judge/data/aime24_validation.jsonl",
-    "num_repeats": 1,
+    "num_repeats": 32,
     "gitlab_identifier": {
         "dataset_name": "aime24",
         "version": "0.0.1",
         "artifact_fpath": "aime24.jsonl"
     },
+    "huggingface_identifier": null,
     "license": "Apache 2.0",
-    "Number of examples": 30,
+    "Number of examples": 960,
     "Number of tools": {
         "Total # non-null values": 0,
         "Average": 0.0,
@@ -18,14 +19,14 @@
         "Standard deviation": 0.0
     },
     "Json-dumped number of words (proxy for token count)": {
-        "Total # non-null values": 30,
+        "Total # non-null values": 960,
         "Average": 80.47,
         "Min": 42.0,
         "Max": 149.0,
-        "Standard deviation": 25.11
+        "Standard deviation": 24.7
     },
     "Number of turns": {
-        "Total # non-null values": 30,
+        "Total # non-null values": 960,
         "Average": 1.0,
         "Min": 1.0,
         "Max": 1.0,
@@ -40,10 +41,10 @@
     },
     "question": {
         "unique_count": 30,
-        "total_count": 30
+        "total_count": 960
     },
     "expected_answer": {
         "unique_count": 29,
-        "total_count": 30
+        "total_count": 960
     }
 }
