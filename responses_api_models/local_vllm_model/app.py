@@ -151,8 +151,6 @@ class LocalVLLMModel(VLLMModel):
         original_asyncio_run = uvicorn_server.asyncio_run
 
         def new_asyncio_run(uvicorn_server_coroutine, *args, **kwargs):
-            uvicorn_server_task = asyncio.create_task(uvicorn_server_coroutine)
-
             async def wait_for_vllm_server() -> None:
                 poll_count = 0
                 client = get_global_aiohttp_client()
@@ -169,6 +167,7 @@ class LocalVLLMModel(VLLMModel):
 
             async def wrapper_fn() -> None:
                 vllm_server_task = asyncio.create_task(vllm_server_coroutine)
+                uvicorn_server_task = asyncio.create_task(uvicorn_server_coroutine)
 
                 done, pending = await asyncio.wait(
                     (vllm_server_task, asyncio.create_task(wait_for_vllm_server())),
