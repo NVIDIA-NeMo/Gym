@@ -250,12 +250,16 @@ class RunHelper:  # pragma: no cover
         )
 
         print("Waiting for head server to spin up")
+        poll_count = 0
         while True:
             status = self._server_client.poll_for_status(HEAD_SERVER_KEY_NAME)
             if status == "success":
                 break
 
-            print(f"Head server is not up yet (status `{status}`). Sleeping 3s")
+            if poll_count % 10 == 0:  # Print every 30s
+                print(f"Head server is not up yet (status `{status}`). Sleeping...")
+
+            poll_count += 1
             sleep(3)
 
         print("Waiting for servers to spin up")
@@ -304,6 +308,7 @@ Process `{process_name}` stderr:
 
     def wait_for_spinup(self) -> None:
         sleep_interval = 3
+        poll_count = 0
 
         # Until we spin up or error out.
         while True:
@@ -317,12 +322,14 @@ Process `{process_name}` stderr:
                     num_spun_up += 1
                 else:
                     waiting.append(name)
+
             if len(statuses) != num_spun_up:
-                print(
-                    f"""{num_spun_up} / {len(statuses)} servers ready ({statuses.count("timeout")} timed out, {statuses.count("connection_error")} connection errored, {statuses.count("unknown_error")} had unknown errors).
+                if poll_count % 10 == 0:  # Print every sleep_interval * poll_count = 3 * 10 = 30s
+                    print(
+                        f"""{num_spun_up} / {len(statuses)} servers ready ({statuses.count("timeout")} timed out, {statuses.count("connection_error")} connection errored, {statuses.count("unknown_error")} had unknown errors).
 Waiting for servers to spin up: {waiting}
-Sleeping {sleep_interval}s..."""
-                )
+Sleeping..."""
+                    )
             else:
                 print(f"All {num_spun_up} / {len(statuses)} servers ready! Polling every 60s")
                 self.display_server_instance_info()

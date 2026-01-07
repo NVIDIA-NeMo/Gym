@@ -147,7 +147,7 @@ class LocalVLLMModel(VLLMModel):
                     except ClientConnectorError:
                         if poll_count % 10 == 0:
                             print(
-                                f"Polling every 3s for {self.config.name} LocalVLLMModel server to spinup. Received a ClientConnectorError since the server isn't up yet..."
+                                f"Polling for {self.config.name} LocalVLLMModel server to spinup. Received a ClientConnectorError since the server isn't up yet..."
                             )
 
                         poll_count += 1
