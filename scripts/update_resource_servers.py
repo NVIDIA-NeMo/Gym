@@ -178,7 +178,7 @@ def visit_resource_server(data: dict, level: int = 1) -> ResourceServerMetadata:
         resource.verified_url = data.get("verified_url")
         resource.value = data.get("value")
         return resource
-    else:
+    elif isinstance(data, dict):
         for k, v in data.items():
             if level == 2 and k != "resources_servers":
                 continue
