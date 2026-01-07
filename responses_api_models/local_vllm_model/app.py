@@ -146,9 +146,7 @@ class LocalVLLMModel(VLLMModel):
                         await client.request(method="GET", url=f"{self.config.base_url}/models")
                     except ClientConnectorError:
                         if poll_count % 10 == 0:
-                            print(
-                                f"Polling for {self.config.name} LocalVLLMModel server to spinup. Received a ClientConnectorError since the server isn't up yet..."
-                            )
+                            print(f"Waiting for {self.config.name} LocalVLLMModel server to spinup...")
 
                         poll_count += 1
                         await asyncio.sleep(3)

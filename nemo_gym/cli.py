@@ -327,8 +327,7 @@ Process `{process_name}` stderr:
                 if poll_count % 10 == 0:  # Print every sleep_interval * poll_count = 3 * 10 = 30s
                     print(
                         f"""{num_spun_up} / {len(statuses)} servers ready ({statuses.count("timeout")} timed out, {statuses.count("connection_error")} connection errored, {statuses.count("unknown_error")} had unknown errors).
-Waiting for servers to spin up: {waiting}
-Sleeping..."""
+Waiting for servers to spin up: {waiting}"""
                     )
             else:
                 print(f"All {num_spun_up} / {len(statuses)} servers ready! Polling every 60s")
