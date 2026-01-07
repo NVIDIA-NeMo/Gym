@@ -16,4 +16,6 @@
 
 class TestApp:
     def test_sanity(self) -> None:
-        pass
+        import vllm
+
+        assert vllm.__version__
