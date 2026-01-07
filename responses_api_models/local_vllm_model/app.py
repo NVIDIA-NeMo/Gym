@@ -59,6 +59,8 @@ class LocalVLLMModelConfig(VLLMModelConfig):
 class LocalVLLMModel(VLLMModel):
     config: LocalVLLMModelConfig
 
+    _server_thread: Thread  # Set later on
+
     def model_post_init(self, context):
         print(
             f"Downloading {self.config.model}. If the model has been downloaded previously, the cached version will be used."
@@ -113,8 +115,8 @@ class LocalVLLMModel(VLLMModel):
         # Pass through signal setting not allowed in threads.
         signal.signal = lambda *args, **kwargs: None
 
-        self.server_thread = Thread(target=uvloop.run, args=(run_server(server_args),), daemon=True)
-        self.server_thread.start()
+        self._server_thread = Thread(target=uvloop.run, args=(run_server(server_args),), daemon=True)
+        self._server_thread.start()
 
         node_ip = ray._private.services.get_node_ip_address()
         base_url = f"http://{node_ip}:{server_args.port}/v1"
