@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import ray
 from aiohttp.client_exceptions import ClientConnectorError
 from huggingface_hub import snapshot_download
+from ray import runtime_env
 from vllm.entrypoints.openai.api_server import (
     FlexibleArgumentParser,
     cli_env_setup,
@@ -31,7 +32,6 @@ from vllm.entrypoints.openai.api_server import (
     run_server,
     validate_parsed_serve_args,
 )
-from vllm.v1.engine import utils as vllm_v1_engine_utils
 
 from nemo_gym.global_config import DISALLOWED_PORTS_KEY_NAME, HF_TOKEN_KEY_NAME, find_open_port, get_global_config_dict
 from nemo_gym.server_utils import get_global_aiohttp_client
@@ -133,12 +133,12 @@ class LocalVLLMModel(VLLMModel):
         signal.signal = lambda *args, **kwargs: None
 
         # This patch may be sensitive to vLLM version!
-        original_RuntimeEnv = vllm_v1_engine_utils.RuntimeEnv
+        original_RuntimeEnv = runtime_env.RuntimeEnv
 
         def new_RuntimeEnv(*args, **kwargs):
             return original_RuntimeEnv(*args, **kwargs, py_executable=sys.executable)
 
-        vllm_v1_engine_utils.RuntimeEnv = new_RuntimeEnv
+        runtime_env.RuntimeEnv = new_RuntimeEnv
 
         vllm_server_coroutine = run_server(server_args)
 
