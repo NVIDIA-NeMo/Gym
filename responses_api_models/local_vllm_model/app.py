@@ -136,6 +136,8 @@ class LocalVLLMModel(VLLMModel):
         original_RuntimeEnv = runtime_env.RuntimeEnv
 
         def new_RuntimeEnv(*args, **kwargs):
+            print("Current py_executable", kwargs["py_executable"])
+            print("New py_executable", sys.executable)
             return original_RuntimeEnv(*args, **kwargs, py_executable=sys.executable)
 
         runtime_env.RuntimeEnv = new_RuntimeEnv
