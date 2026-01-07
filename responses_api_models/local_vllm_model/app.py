@@ -146,7 +146,7 @@ class LocalVLLMModel(VLLMModel):
                         await client.request(method="GET", url=f"{self.config.base_url}/models")
                         return
                     except ClientConnectorError:
-                        if poll_count % 10 == 0:
+                        if poll_count % 10 == 0:  # Print every 30s
                             print(f"Waiting for {self.config.name} LocalVLLMModel server to spinup...")
 
                         poll_count += 1
