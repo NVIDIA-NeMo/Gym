@@ -13,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from argparse import Namespace
+from multiprocessing import Process
 from pathlib import Path
-from threading import Thread
 from time import sleep
 from typing import Any, Dict, List, Optional, Union
 
@@ -104,8 +104,8 @@ class LocalVLLMModel(VLLMModel):
 
         # The main vllm server will be run on the name node as this Gym model server, but the engines can be scheduled as seen fit by Ray.
         server_task = run_server(server_args)
-        thread = Thread(target=uvloop.run, args=(server_task,), daemon=True)
-        thread.start()
+        proc = Process(target=uvloop.run, args=(server_task,), daemon=True)
+        proc.start()
 
         while True:
             try:
