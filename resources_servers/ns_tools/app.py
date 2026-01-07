@@ -28,6 +28,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, Request
+from fastapi.responses import PlainTextResponse
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
@@ -40,6 +41,8 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.config_types import ResourcesServerRef
 from nemo_gym.server_utils import SESSION_ID_KEY
 
+from nemo_skills.mcp.tool_manager import ToolManager
+
 logger = logging.getLogger(__name__)
 
 
@@ -51,8 +54,12 @@ logger = logging.getLogger(__name__)
 class NSToolsConfig(BaseResourcesServerConfig):
     """Config for the NeMo Skills tools resources server."""
 
-    # Verifier server reference (math_with_judge)
-    verifier: ResourcesServerRef
+    # Default verifier (typically math_with_judge)
+    default_verifier: str = "math_with_judge"
+
+    # Map of verifier names to server references
+    # At minimum, should include math_with_judge
+    verifiers: Dict[str, ResourcesServerRef] = Field(default_factory=dict)
 
     # NeMo Skills tool modules to load (e.g., "nemo_skills.mcp.servers.python_tool.PythonTool")
     nemo_skills_tools: List[str] = Field(default_factory=list)
@@ -74,6 +81,9 @@ class NSToolsRunRequest(BaseRunRequest):
     """Run request that allows extra fields from the sample."""
 
     model_config = ConfigDict(extra="allow")
+
+    # Per-sample verifier selection (optional, falls back to default_verifier)
+    verifier_type: Optional[str] = None
 
     # Fields for math_with_judge verifier
     question: Optional[str] = None
@@ -115,7 +125,6 @@ class NSToolsResourcesServer(SimpleResourcesServer):
 
     def _initialize_nemo_skills_tools(self):
         """Initialize the nemo_skills ToolManager with configured tools."""
-        from nemo_skills.mcp.tool_manager import ToolManager
 
         logger.info(f"Initializing NeMo Skills ToolManager with tools: {self.config.nemo_skills_tools}")
 
@@ -144,20 +153,20 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         asyncio.get_event_loop().run_until_complete(_load_tools())
         logger.info("NeMo Skills ToolManager initialized successfully")
 
-    async def execute_tool(self, tool_name: str, request: Request) -> str:
+    async def execute_tool(self, tool_name: str, request: Request) -> PlainTextResponse:
         """
         Execute a nemo_skills tool by name.
 
         Uses the nemo-gym session ID as the request_id for stateful tools.
-        Returns the result as a string for simple_agent compatibility.
+        Returns the result as plain text for simple_agent compatibility.
         """
         if not self.tool_manager:
-            return json.dumps({"error": "No tools configured"})
+            return PlainTextResponse(json.dumps({"error": "No tools configured"}))
 
         # Check if tool is in our known tools
         if tool_name not in self._tool_name_map:
             logger.error(f"Unknown tool requested: {tool_name}")
-            return json.dumps({"error": f"Unknown tool: {tool_name}"})
+            return PlainTextResponse(json.dumps({"error": f"Unknown tool: {tool_name}"}))
 
         try:
             body = await request.json()
@@ -175,14 +184,14 @@ class NSToolsResourcesServer(SimpleResourcesServer):
                 extra_args={"request_id": session_id},
             )
 
-            # Return result directly as string for simple_agent compatibility
+            # Return result as plain text to avoid double JSON serialization
             if isinstance(result, str):
-                return result
-            return json.dumps(result)
+                return PlainTextResponse(result)
+            return PlainTextResponse(json.dumps(result))
 
         except Exception as e:
             logger.exception(f"Error executing tool {tool_name}: {e}")
-            return json.dumps({"error": str(e)})
+            return PlainTextResponse(json.dumps({"error": str(e)}))
 
     # --------------------------------------------------------
     # Verification
@@ -191,10 +200,25 @@ class NSToolsResourcesServer(SimpleResourcesServer):
     async def verify(self, body: NSToolsVerifyRequest) -> NSToolsVerifyResponse:
         """
         Verify the model's response by delegating to the configured verifier.
+
+        The verifier is selected by:
+        1. Per-sample `verifier_type` field (if present)
+        2. Config `default_verifier` (fallback)
         """
+        # Select verifier
+        verifier_type = body.verifier_type or self.config.default_verifier
+
+        if verifier_type not in self.config.verifiers:
+            raise ValueError(
+                f"Unknown verifier: {verifier_type}. "
+                f"Configure it in 'verifiers' or check 'default_verifier'."
+            )
+
+        verifier_ref = self.config.verifiers[verifier_type]
+
         # Delegate to the verifier
         response = await self.server_client.post(
-            server_name=self.config.verifier.name,
+            server_name=verifier_ref.name,
             url_path="/verify",
             json=body.model_dump(),
         )
