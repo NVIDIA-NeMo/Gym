@@ -478,9 +478,8 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         await raise_for_status(response)
 
     async def create_models(self):
-        base_url = self.base_url.removesuffix("/v1")
         request_kwargs = dict(
-            url=f"{base_url}/models",
+            url=f"{self.base_url}/models",
             headers={"Authorization": f"Bearer {self.api_key}"},
         )
         response = await self._request(method="GET", **request_kwargs)
