@@ -14,6 +14,7 @@
 # limitations under the License.
 from argparse import Namespace
 from multiprocessing import Process
+from os import environ
 from pathlib import Path
 from time import sleep
 from typing import Any, Dict, List, Optional, Union
@@ -93,9 +94,6 @@ class LocalVLLMModel(VLLMModel):
             "data_parallel_backend": "ray",
             "download_dir": cache_dir,
         }
-        maybe_hf_token = self.get_hf_token()
-        if maybe_hf_token:
-            server_args["hf_token"] = maybe_hf_token
 
         cli_env_setup()
         parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible RESTful API server.")
@@ -104,6 +102,11 @@ class LocalVLLMModel(VLLMModel):
         validate_parsed_serve_args(args)
 
         server_args = Namespace(**(vars(args) | server_args))
+
+        # vLLM accepts a `hf_token` parameter but it's not used everywhere. We need to set HF_TOKEN environment variable here.
+        maybe_hf_token = self.get_hf_token()
+        if maybe_hf_token:
+            environ["HF_TOKEN"] = maybe_hf_token
 
         # The main vllm server will be run on the name node as this Gym model server, but the engines can be scheduled as seen fit by Ray.
         server_task = run_server(server_args)
