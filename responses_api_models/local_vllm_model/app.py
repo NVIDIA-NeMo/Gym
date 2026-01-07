@@ -132,10 +132,6 @@ class LocalVLLMModel(VLLMModel):
         for k, v in env_vars.items():
             environ[k] = v
 
-        # Necessary for downstream vLLM ray actor spinup
-        environ.pop("CUDA_VISIBLE_DEVICES", None)
-        environ["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] = "1"
-
         # Pass through signal setting not allowed in threads.
         signal.signal = lambda *args, **kwargs: None
 
@@ -143,11 +139,10 @@ class LocalVLLMModel(VLLMModel):
         original_RuntimeEnv = runtime_env.RuntimeEnv
 
         def new_RuntimeEnv(*args, **kwargs):
-            print("RUNTIME ENV KWARGS", kwargs)
-
             kwargs = kwargs or dict()
             kwargs["py_executable"] = sys.executable
 
+            # Necessary for downstream vLLM ray actor spinup
             env_vars = kwargs.get("env_vars") or dict()
             env_vars.pop("CUDA_VISIBLE_DEVICES", None)
             env_vars["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] = "1"
