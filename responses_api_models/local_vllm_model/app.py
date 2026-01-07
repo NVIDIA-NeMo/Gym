@@ -137,11 +137,11 @@ class LocalVLLMModel(VLLMModel):
         original_asyncio_run = uvicorn_server.asyncio_run
 
         def new_asyncio_run(coroutine, *args, **kwargs):
-            async def wait_for_vllm_server():
+            async def wait_for_vllm_server() -> None:
                 client = NeMoGymAsyncOpenAI(base_url=self.config.base_url, api_key="dummy_key")
                 while True:
                     try:
-                        response = client.create_models()
+                        response = await client.create_models()
                         print("RESPONSE", response)
                     except Exception as e:
                         from traceback import format_exc
@@ -153,9 +153,9 @@ class LocalVLLMModel(VLLMModel):
                         )
                         asyncio.sleep(3)
 
-            async def wrapper_fn():
+            async def wrapper_fn() -> None:
                 await asyncio.wait(
-                    (vllm_server_task, wait_for_vllm_server()),
+                    (vllm_server_task, asyncio.create_task(wait_for_vllm_server())),
                     return_when="FIRST_COMPLETED",
                 )
 
