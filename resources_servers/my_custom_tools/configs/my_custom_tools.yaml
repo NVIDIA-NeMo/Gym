@@ -27,6 +27,9 @@ my_custom_tools:
         mcqa:
           type: resources_servers
           name: mcqa
+        math_with_judge:
+          type: resources_servers
+          name: math_with_judge_no_judge
       default_verifier: xlam_fc
       domain: agent
       verified: false

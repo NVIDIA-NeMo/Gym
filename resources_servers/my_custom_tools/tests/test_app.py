@@ -311,3 +311,4 @@ class TestServerSetup:
         assert "mcqa" in server.config.available_verifiers
         assert "custom" in server.config.available_verifiers
 
+
