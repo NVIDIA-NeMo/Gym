@@ -49,14 +49,16 @@ echo "      Done."
 
 # --- Step 2: Start servers ---
 echo "[2/5] Starting servers..."
-CONFIG_PATHS="resources_servers/my_custom_tools/configs/my_custom_tools.yaml"
-CONFIG_PATHS="$CONFIG_PATHS,resources_servers/my_custom_tools/configs/math_with_judge_no_judge.yaml"
+CONFIG_PATHS="resources_servers/ns_tools/configs/ns_tools.yaml"
+CONFIG_PATHS="$CONFIG_PATHS,resources_servers/math_with_judge/configs/math_with_judge.yaml"
 CONFIG_PATHS="$CONFIG_PATHS,responses_api_models/vllm_model/configs/vllm_model.yaml"
 
 ng_run "+config_paths=[$CONFIG_PATHS]" \
   +policy_base_url="$POLICY_BASE_URL" \
   +policy_api_key="$POLICY_API_KEY" \
-  +policy_model_name="$POLICY_MODEL_NAME" &
+  +policy_model_name="$POLICY_MODEL_NAME" \
+  ++math_with_judge.resources_servers.math_with_judge.should_use_judge=false \
+  ++math_with_judge.resources_servers.math_with_judge.judge_model_server.name=policy_model &
 
 SERVER_PID=$!
 echo "      Server PID: $SERVER_PID"
