@@ -117,6 +117,9 @@ class LocalVLLMModel(VLLMModel):
         # Pass through signal setting not allowed in threads.
         signal.signal = lambda *args, **kwargs: None
 
+        import vllm
+
+        vllm
         self._server_thread = Thread(target=uvloop.run, args=(run_server(final_args),), daemon=True)
         self._server_thread.start()
 
