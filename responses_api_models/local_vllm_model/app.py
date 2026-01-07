@@ -132,6 +132,7 @@ class LocalVLLMModel(VLLMModel):
         # Pass through signal setting not allowed in threads.
         signal.signal = lambda *args, **kwargs: None
 
+        # This patch may be sensitive to vLLM version!
         original_RuntimeEnv = vllm_v1_engine_utils.RuntimeEnv
 
         def new_RuntimeEnv(*args, **kwargs):
@@ -141,6 +142,7 @@ class LocalVLLMModel(VLLMModel):
 
         vllm_server_coroutine = run_server(server_args)
 
+        # This patch may be sensitive to uvicorn version!
         from uvicorn import server as uvicorn_server
 
         original_asyncio_run = uvicorn_server.asyncio_run
