@@ -114,13 +114,6 @@ class LocalVLLMModel(VLLMModel):
         final_args = parser.parse_args(namespace=Namespace(**server_args))
         validate_parsed_serve_args(final_args)
 
-        # TODO remove
-        print(final_args)
-        from vllm.entrypoints.openai.api_server import AsyncEngineArgs
-
-        engine_args = AsyncEngineArgs.from_cli_args(final_args)
-        print("ENGINE ARGS", engine_args)
-
         # Pass through signal setting not allowed in threads.
         signal.signal = lambda *args, **kwargs: None
 
