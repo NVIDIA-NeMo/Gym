@@ -126,6 +126,9 @@ class LocalVLLMModel(VLLMModel):
 
         server_args = Namespace(**(vars(args) | server_args))
 
+        # TODO Remove
+        print([type(v) for v in vars(server_args).values()])
+
         # vLLM accepts a `hf_token` parameter but it's not used everywhere. We need to set HF_TOKEN environment variable here.
         maybe_hf_token = self.get_hf_token()
         if maybe_hf_token:
