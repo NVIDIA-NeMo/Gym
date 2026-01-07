@@ -28,6 +28,11 @@ dependencies = [
     # Updated Mon Jan 05, 2026 with vllm==0.1.9
     # License: Apache 2.0 https://github.com/huggingface/hf_transfer/blob/51499cc4ff0fe218082e13f27881a06811913751/LICENSE
     "hf_transfer==0.1.9",
+
+    # uvicorn is used by Gym for server spinup. We have server override logic that depends on this specific version.
+    # Updated Wed Jan 07, 2026 with uvicorn==0.40.0
+    # License: BSD 3-Clause https://github.com/Kludex/uvicorn/blob/9ff60042a53cd1bbfd5580ab0a91ea2d1d8f2f8c/LICENSE.md
+    "uvicorn==0.40.0"
 ]
 
 # We use an older version of vllm on Macs since that is the latest version pip-installable. We may need to version tests later on.

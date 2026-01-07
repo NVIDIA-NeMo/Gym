@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import signal
 from argparse import Namespace
 from os import environ
@@ -129,16 +130,22 @@ class LocalVLLMModel(VLLMModel):
 
         vllm_server_task = run_server(server_args)
 
-        from uvicorn.server import asyncio
+        from uvicorn.server import asyncio_run
 
-        original_asyncio_run = asyncio.run
+        original_asyncio_run = asyncio_run
 
-        def new_asyncio_run(coroutine):
+        def new_asyncio_run(coroutine, *args, **kwargs):
             # TODO remove
             print("Hit inside new asyncio run")
-            return original_asyncio_run(asyncio.gather(vllm_server_task, coroutine))
 
-        asyncio.run = new_asyncio_run
+            wait_coroutine = asyncio.wait(
+                [vllm_server_task, coroutine],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            return original_asyncio_run(wait_coroutine, *args, **kwargs)
+
+        asyncio_run = new_asyncio_run
 
         # while True:
         #     # assert self._server_thread.is_alive(), "Server thread died, please see the exception traceback above!"
