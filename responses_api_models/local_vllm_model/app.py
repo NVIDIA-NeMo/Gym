@@ -118,6 +118,10 @@ class LocalVLLMModel(VLLMModel):
         # vLLM doesn't expose a config for this yet, so we need to pass via environment variable.
         environ["VLLM_DP_MASTER_IP"] = node_ip  # This is the master node.
 
+        import sys
+
+        environ["py_executable"] = sys.executable
+
         cli_env_setup()
         parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible RESTful API server.")
         parser = make_arg_parser(parser)
