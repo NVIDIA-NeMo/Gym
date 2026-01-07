@@ -128,12 +128,27 @@ class LocalVLLMModel(VLLMModel):
         final_args = parser.parse_args(namespace=Namespace(**server_args))
         validate_parsed_serve_args(final_args)
 
+        import os
         import sys
+
+        def _prepare_ray_worker_env_vars() -> Dict[str, str]:  # pragma: no cover
+            worker_env_vars = {
+                **os.environ,
+            }
+            pop_env_vars = [
+                "CUDA_VISIBLE_DEVICES",
+                "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
+                "RAY_JOB_ID",
+                "RAY_RAYLET_PID",
+            ]
+            for k in pop_env_vars:
+                worker_env_vars.pop(k, None)
+            return worker_env_vars
 
         self._server_thread = LocalVLLMActor.options(
             runtime_env={
                 "py_executable": sys.executable,
-                "env_vars": env_vars,
+                "env_vars": _prepare_ray_worker_env_vars() | env_vars,
             },
         ).remote(final_args)
 
