@@ -98,8 +98,15 @@ class LocalVLLMModel(VLLMModel):
             "distributed_executor_backend": "ray",
             "data_parallel_backend": "ray",
             "download_dir": cache_dir,
-            "data_parallel_master_ip": node_ip,  # This is the master node.
         }
+
+        # vLLM accepts a `hf_token` parameter but it's not used everywhere. We need to set HF_TOKEN environment variable here.
+        maybe_hf_token = self.get_hf_token()
+        if maybe_hf_token:
+            environ["HF_TOKEN"] = maybe_hf_token
+
+        # vLLM doesn't expose a config for this yet, so we need to pass via environment variable.
+        environ["VLLM_DP_MASTER_IP"] = node_ip  # This is the master node.
 
         cli_env_setup()
         parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible RESTful API server.")
@@ -113,11 +120,6 @@ class LocalVLLMModel(VLLMModel):
 
         engine_args = AsyncEngineArgs.from_cli_args(final_args)
         print("ENGINE ARGS", engine_args)
-
-        # vLLM accepts a `hf_token` parameter but it's not used everywhere. We need to set HF_TOKEN environment variable here.
-        maybe_hf_token = self.get_hf_token()
-        if maybe_hf_token:
-            environ["HF_TOKEN"] = maybe_hf_token
 
         # Pass through signal setting not allowed in threads.
         signal.signal = lambda *args, **kwargs: None
