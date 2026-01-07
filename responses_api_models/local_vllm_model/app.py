@@ -193,6 +193,10 @@ class LocalVLLMModel(VLLMModel):
 
         uvicorn_server.asyncio_run = new_asyncio_run
 
+        # TODO remove
+        print("AVAILABLE RESOURCES", ray.available_resources())
+        print("CLUSTER RESOURCES", ray.cluster_resources())
+
 
 if __name__ == "__main__":
     LocalVLLMModel.run_webserver()
