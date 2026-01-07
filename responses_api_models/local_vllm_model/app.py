@@ -90,6 +90,7 @@ class LocalVLLMModel(VLLMModel):
 
         port = find_open_port(disallowed_ports=get_global_config_dict()[DISALLOWED_PORTS_KEY_NAME])
         cache_dir = self.get_cache_dir()
+        node_ip = ray._private.services.get_node_ip_address()
         server_args = server_args | {
             "model": self.config.model,
             "host": "0.0.0.0",  # Must be 0.0.0.0 for cross-node communication.
@@ -97,6 +98,7 @@ class LocalVLLMModel(VLLMModel):
             "distributed_executor_backend": "ray",
             "data_parallel_backend": "ray",
             "download_dir": cache_dir,
+            "data_parallel_master_ip": node_ip,  # This is the master node.
         }
 
         cli_env_setup()
@@ -118,13 +120,7 @@ class LocalVLLMModel(VLLMModel):
         self._server_thread = Thread(target=uvloop.run, args=(run_server(server_args),), daemon=True)
         self._server_thread.start()
 
-        node_ip = ray._private.services.get_node_ip_address()
         base_url = f"http://{node_ip}:{server_args.port}/v1"
-
-        from ray._private.state import available_resources_per_node
-
-        available_resources = available_resources_per_node()
-        print("Available resources", available_resources.values())
 
         while True:
             assert self._server_thread.is_alive(), "Server thread died, please see the exception traceback above!"
