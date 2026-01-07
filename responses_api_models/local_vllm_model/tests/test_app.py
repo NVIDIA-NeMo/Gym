@@ -13,9 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from responses_api_models.local_vllm_model.app import LocalVLLMModelConfig
+
 
 class TestApp:
-    def test_sanity(self) -> None:
+    def test_sanity_vllm_import(self) -> None:
         import vllm
 
         assert vllm.__version__
+
+    def test_sanity_config_init(self) -> None:
+        LocalVLLMModelConfig(
+            host="",
+            port=0,
+            entrypoint="",
+            name="test name",
+            model="test model",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            vllm_serve_kwargs=dict(),
+        )

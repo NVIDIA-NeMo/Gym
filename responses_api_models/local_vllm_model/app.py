@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import uvloop
 from huggingface_hub import snapshot_download
@@ -25,6 +25,10 @@ from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 
 class LocalVLLMModelConfig(VLLMModelConfig):
+    # We inherit these configs from VLLMModelConfig, but they are set to optional since they will be set later on after we spin up a model endpoint.
+    base_url: Optional[Union[str, List[str]]] = None
+    api_key: Optional[str] = None
+
     hf_home: Optional[str] = None
     vllm_serve_kwargs: Dict[str, Any]
 
@@ -32,10 +36,6 @@ class LocalVLLMModelConfig(VLLMModelConfig):
     # vllm_serve_env_vars: Dict[str, str]
 
     def model_post_init(self, context):
-        # base_url and api_key are set later in the model spinup
-        self.base_url = ""
-        self.api_key = ""
-
         # Default to the .cache/huggingface in this directory.
         if not self.hf_home:
             current_directory = Path.cwd()
