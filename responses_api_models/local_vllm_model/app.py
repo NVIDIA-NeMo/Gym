@@ -120,6 +120,8 @@ class LocalVLLMModel(VLLMModel):
         base_url = f"http://{node_ip}:{server_args.port}/v1"
 
         while True:
+            assert self.server_thread.is_alive(), "Server thread died, please see the exception traceback above!"
+
             try:
                 response = requests.get(f"{base_url}/models")
                 assert response.ok, (response.status_code, response.content)
