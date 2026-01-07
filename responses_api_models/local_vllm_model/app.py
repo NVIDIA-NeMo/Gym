@@ -22,13 +22,11 @@ from typing import Any, Dict, List, Optional, Union
 
 import ray
 import requests
-import uvloop
 from huggingface_hub import snapshot_download
 from vllm.entrypoints.openai.api_server import (
     FlexibleArgumentParser,
     cli_env_setup,
     make_arg_parser,
-    run_server,
     validate_parsed_serve_args,
 )
 
@@ -56,11 +54,16 @@ class LocalVLLMModelConfig(VLLMModelConfig):
         return super().model_post_init(context)
 
 
-# TODO remove
-import vllm
+def vllm_server_target(final_args: Namespace):
+    import uvloop
+    import vllm
 
+    vllm
+    from vllm.entrypoints.openai.api_server import (
+        run_server,
+    )
 
-vllm
+    uvloop.run(run_server(final_args))
 
 
 class LocalVLLMModel(VLLMModel):
@@ -124,7 +127,7 @@ class LocalVLLMModel(VLLMModel):
         # Pass through signal setting not allowed in threads.
         signal.signal = lambda *args, **kwargs: None
 
-        self._server_thread = Thread(target=uvloop.run, args=(run_server(final_args),), daemon=True)
+        self._server_thread = Thread(target=vllm_server_target, args=(final_args,), daemon=True)
         self._server_thread.start()
 
         base_url = f"http://{node_ip}:{final_args.port}/v1"
