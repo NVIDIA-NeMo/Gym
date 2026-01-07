@@ -21,9 +21,6 @@ from pathlib import Path
 from threading import Thread
 from typing import Any, Coroutine, Dict, List, Optional, Tuple, Union
 
-
-environ["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] = "1"
-
 import ray
 from aiohttp.client_exceptions import ClientConnectorError
 from huggingface_hub import snapshot_download
