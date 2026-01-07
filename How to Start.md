@@ -62,7 +62,7 @@ Create a test file (e.g., `my_test.jsonl`):
 ### Step 3: Start Servers
 
 ```bash
-cd /home/dhrutisundar03/turing/tooling/Gym
+cd ./Gym-turing
 source .venv/bin/activate
 ray stop --force  # Clean up any existing processes
 
@@ -75,7 +75,7 @@ Wait for: **"All 3 / 3 servers ready!"**
 
 In a **new terminal**:
 ```bash
-cd /home/dhrutisundar03/turing/tooling/Gym
+cd ./Gym-turing
 source .venv/bin/activate
 
 ng_collect_rollouts \
