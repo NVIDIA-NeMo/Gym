@@ -130,7 +130,7 @@ class LocalVLLMModel(VLLMModel):
         # Pass through signal setting not allowed in threads.
         signal.signal = lambda *args, **kwargs: None
 
-        vllm_server_task = run_server(server_args)
+        vllm_server_coroutine = run_server(server_args)
 
         from uvicorn import server as uvicorn_server
 
@@ -154,6 +154,8 @@ class LocalVLLMModel(VLLMModel):
                         asyncio.sleep(3)
 
             async def wrapper_fn() -> None:
+                vllm_server_task = asyncio.create_task(vllm_server_coroutine)
+
                 await asyncio.wait(
                     (vllm_server_task, asyncio.create_task(wait_for_vllm_server())),
                     return_when="FIRST_COMPLETED",
