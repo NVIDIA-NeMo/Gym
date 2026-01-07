@@ -6,9 +6,9 @@
     "gitlab_identifier": null,
     "huggingface_identifier": null,
     "license": "Apache 2.0",
-    "Number of examples": 5,
+    "Number of examples": 6,
     "Number of tools": {
-        "Total # non-null values": 3,
+        "Total # non-null values": 6,
         "Average": 1.0,
         "Min": 1.0,
         "Max": 1.0,
@@ -16,15 +16,15 @@
         "Standard deviation": 0.0
     },
     "Json-dumped number of words (proxy for token count)": {
-        "Total # non-null values": 5,
-        "Average": 55.6,
-        "Min": 23.0,
-        "Max": 78.0,
-        "Median": 73.0,
-        "Standard deviation": 27.16
+        "Total # non-null values": 6,
+        "Average": 81.67,
+        "Min": 78.0,
+        "Max": 85.0,
+        "Median": 81.5,
+        "Standard deviation": 2.58
     },
     "Number of turns": {
-        "Total # non-null values": 5,
+        "Total # non-null values": 6,
         "Average": 1.0,
         "Min": 1.0,
         "Max": 1.0,
@@ -40,19 +40,15 @@
         "Standard deviation": 0.0
     },
     "id": {
-        "Total # non-null values": 5,
-        "Average": 2.0,
+        "Total # non-null values": 6,
+        "Average": 2.5,
         "Min": 0.0,
-        "Max": 4.0,
-        "Median": 2.0,
-        "Standard deviation": 1.58
+        "Max": 5.0,
+        "Median": 2.5,
+        "Standard deviation": 1.87
     },
     "verifier_type": {
-        "unique_count": 2,
-        "total_count": 5
-    },
-    "expected_answer": {
-        "unique_count": 2,
-        "total_count": 2
+        "unique_count": 1,
+        "total_count": 6
     }
 }

@@ -3,6 +3,8 @@
 # This resources server provides custom tools (search_database, execute_calculation, fetch_data)
 # while delegating verification to existing verifiers based on per-sample configuration.
 #
+# NEW: Integration with nemo_skills ToolManager for additional tools like PythonTool
+#
 # USAGE:
 # When running, include both this config AND the verifier configs:
 #
@@ -29,6 +31,18 @@ my_custom_tools:
       domain: agent
       verified: false
       description: Custom tools with dynamic verifier selection based on sample data
+
+      # ============================================================
+      # NeMo Skills Tool Integration
+      # ============================================================
+      # Enable nemo_skills tools like PythonTool for stateful code execution
+      nemo_skills_tools:
+        - nemo_skills.mcp.servers.python_tool.PythonTool
+
+      # Per-tool configuration overrides
+      nemo_skills_tool_overrides:
+        PythonTool:
+          exec_timeout_s: 30  # Timeout for code execution
 
 # Agent configuration (uses existing simple_agent)
 my_custom_tools_simple_agent:
