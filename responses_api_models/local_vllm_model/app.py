@@ -13,12 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from argparse import Namespace
-from multiprocessing import Process
 from os import environ
 from pathlib import Path
 from time import sleep
 from typing import Any, Dict, List, Optional, Union
 
+import ray
 import requests
 import uvloop
 from huggingface_hub import snapshot_download
@@ -54,12 +54,25 @@ class LocalVLLMModelConfig(VLLMModelConfig):
         return super().model_post_init(context)
 
 
-def vllm_server_proc_target(server_args, ray_init_kwargs):
-    import ray
+@ray.remote
+class LocalVLLMActor:
+    def __init__(self, server_args: Namespace):
+        import signal
+        from threading import Thread
 
-    ray.init(**ray_init_kwargs)
+        import ray
 
-    uvloop.run(run_server(server_args))
+        # Pass through signal setting not allowed in threads.
+        signal.signal = lambda *args, **kwargs: None
+
+        self.server_thread = Thread(target=uvloop.run, args=(run_server(server_args),), daemon=True)
+        self.server_thread.start()
+
+        node_ip = ray._private.services.get_node_ip_address()
+        self.base_url = f"http://{node_ip}:{server_args.port}/v1"
+
+    def base_url(self) -> str:
+        return self.base_url
 
 
 class LocalVLLMModel(VLLMModel):
@@ -96,7 +109,7 @@ class LocalVLLMModel(VLLMModel):
         cache_dir = self.get_cache_dir()
         server_args = server_args | {
             "model": self.config.model,
-            "host": "127.0.0.1",
+            "host": "0.0.0.0",  # Must be 0.0.0.0 for cross-node communication.
             "port": port,
             "distributed_executor_backend": "ray",
             "data_parallel_backend": "ray",
@@ -116,19 +129,12 @@ class LocalVLLMModel(VLLMModel):
         if maybe_hf_token:
             environ["HF_TOKEN"] = maybe_hf_token
 
-        global_config_dict = get_global_config_dict()
-        ray_head_node_address = global_config_dict.get("ray_head_node_address")
-        ray_init_kwargs = {"ignore_reinit_error": True, "address": ray_head_node_address}
-
-        # The main vllm server will be run on the name node as this Gym model server, but the engines can be scheduled as seen fit by Ray.
-        proc = Process(target=vllm_server_proc_target, args=(server_args, ray_init_kwargs), daemon=True)
-        proc.start()
+        self.local_vllm_actor = LocalVLLMActor.remote(server_args)
+        base_url = ray.get(self.local_vllm_actor.base_url.remote())
 
         while True:
-            assert proc.is_alive(), "Server process died! See the error trace above."
-
             try:
-                response = requests.get(f"http://{server_args.host}:{server_args.port}/v1/models")
+                response = requests.get(f"{base_url}/models")
                 assert response.ok, (response.status_code, response.content)
                 break
             except requests.exceptions.ConnectionError:
@@ -136,6 +142,9 @@ class LocalVLLMModel(VLLMModel):
                     f"Polling for {self.config.name} LocalVLLMModel server to spinup. Received a ConnectionError since the server isn't up yet. Sleeping for 3s..."
                 )
                 sleep(3)
+
+        self.config.base_url = base_url
+        self.config.api_key = "dummy_key"  # dummy key
 
 
 if __name__ == "__main__":
