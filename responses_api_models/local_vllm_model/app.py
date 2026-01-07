@@ -117,6 +117,7 @@ class LocalVLLMModel(VLLMModel):
         # Pass through signal setting not allowed in threads.
         signal.signal = lambda *args, **kwargs: None
 
+        # TODO remove
         import vllm
 
         vllm
