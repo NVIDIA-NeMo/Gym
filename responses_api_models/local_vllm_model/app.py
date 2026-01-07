@@ -18,10 +18,13 @@ from typing import Any, Dict, List, Optional, Union
 
 import uvloop
 from huggingface_hub import snapshot_download
-from vllm.entrypoints.openai.api_server import run_server
-from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
-from vllm.entrypoints.utils import cli_env_setup
-from vllm.utils import FlexibleArgumentParser
+from vllm.entrypoints.openai.api_server import (
+    FlexibleArgumentParser,
+    cli_env_setup,
+    make_arg_parser,
+    run_server,
+    validate_parsed_serve_args,
+)
 
 from nemo_gym.global_config import DISALLOWED_PORTS_KEY_NAME, HF_TOKEN_KEY_NAME, find_open_port, get_global_config_dict
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
@@ -85,10 +88,10 @@ class LocalVLLMModel(VLLMModel):
         cli_env_setup()
         parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible RESTful API server.")
         parser = make_arg_parser(parser)
-        args = parser.parse_args([])
-        server_args = Namespace(**(vars(args) | server_args))
+        args = parser.parse_args()
+        validate_parsed_serve_args(args)
 
-        validate_parsed_serve_args(server_args)
+        server_args = Namespace(**(vars(args) | server_args))
 
         # The main vllm server will be run on the name node as this Gym model server, but the engines can be scheduled as seen fit by Ray.
         uvloop.run(run_server(server_args))
