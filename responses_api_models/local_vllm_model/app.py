@@ -150,7 +150,9 @@ class LocalVLLMModel(VLLMModel):
 
         original_asyncio_run = uvicorn_server.asyncio_run
 
-        def new_asyncio_run(coroutine, *args, **kwargs):
+        def new_asyncio_run(uvicorn_server_coroutine, *args, **kwargs):
+            uvicorn_server_task = asyncio.create_task(uvicorn_server_coroutine)
+
             async def wait_for_vllm_server() -> None:
                 poll_count = 0
                 client = get_global_aiohttp_client()
@@ -176,12 +178,13 @@ class LocalVLLMModel(VLLMModel):
                 # If the vllm task finishes first
                 if list(done)[0] == vllm_server_task:
                     list(pending)[0].cancel()  # Cancel the waiting task.
+                    uvicorn_server_task.cancel()
                     raise vllm_server_task.exception()
 
                 print(f"{self.config.name} finished vLLM server spinup!")
 
                 _, pending = await asyncio.wait(
-                    (vllm_server_task, asyncio.create_task(coroutine)),
+                    (vllm_server_task, uvicorn_server_task),
                     return_when="FIRST_COMPLETED",
                 )
                 for task in pending:
