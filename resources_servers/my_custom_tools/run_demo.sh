@@ -1,9 +1,9 @@
 #!/bin/bash
-# Demo script for my_custom_tools with NeMo Skills Python Tool integration
+# Demo script for NeMo Skills Tools with Python execution and math verification
 # 
 # Prerequisites:
 #   - vLLM server running on localhost:8000 with tool calling enabled:
-#     vllm serve Qwen/Qwen3-8B --enable-auto-tool-choice --tool-call-parser hermes
+#     vllm serve MODEL --enable-auto-tool-choice --tool-call-parser hermes
 #   - nemo_skills sandbox server running on localhost:6000
 
 set -e
@@ -15,11 +15,11 @@ GYM_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 POLICY_BASE_URL="${POLICY_BASE_URL:-http://localhost:8000/v1}"
 POLICY_API_KEY="${POLICY_API_KEY:-EMPTY}"
 POLICY_MODEL_NAME="${POLICY_MODEL_NAME:-nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16}"
-NUM_SAMPLES="${NUM_SAMPLES:-10}"
-OUTPUT_FILE="${OUTPUT_FILE:-$GYM_DIR/data/my_custom_tools_python_rollouts.jsonl}"
+NUM_SAMPLES="${NUM_SAMPLES:-6}"
+OUTPUT_FILE="${OUTPUT_FILE:-$GYM_DIR/data/ns_tools_rollouts.jsonl}"
 
 echo "=============================================="
-echo "  My Custom Tools Demo with Python Execution"
+echo "  NeMo Skills Tools Demo"
 echo "=============================================="
 echo "GYM_DIR:         $GYM_DIR"
 echo "POLICY_BASE_URL: $POLICY_BASE_URL"
@@ -44,17 +44,12 @@ pkill -f "ng_run" 2>/dev/null || true
 lsof -ti:11000 2>/dev/null | xargs kill -9 2>/dev/null || true
 ray stop --force 2>/dev/null || true
 
-# Remove old venv to force reinstall (comment out if you want to keep it)
-# rm -rf "$SCRIPT_DIR/.venv"
-
 sleep 2
 echo "      Done."
 
 # --- Step 2: Start servers ---
 echo "[2/5] Starting servers..."
 CONFIG_PATHS="resources_servers/my_custom_tools/configs/my_custom_tools.yaml"
-CONFIG_PATHS="$CONFIG_PATHS,resources_servers/xlam_fc/configs/xlam_fc.yaml"
-CONFIG_PATHS="$CONFIG_PATHS,resources_servers/mcqa/configs/mcqa.yaml"
 CONFIG_PATHS="$CONFIG_PATHS,resources_servers/my_custom_tools/configs/math_with_judge_no_judge.yaml"
 CONFIG_PATHS="$CONFIG_PATHS,responses_api_models/vllm_model/configs/vllm_model.yaml"
 
@@ -73,7 +68,7 @@ echo "      Done waiting."
 
 # --- Step 4: Prepare data ---
 echo "[4/5] Preparing data..."
-PREPARED_DATA="$GYM_DIR/data/my_custom_tools_example.jsonl"
+PREPARED_DATA="$GYM_DIR/data/ns_tools_example.jsonl"
 
 python3 << EOF
 import json
@@ -87,7 +82,7 @@ with open(input_file, 'r') as f, open(output_file, 'w') as out:
             sample = json.loads(line)
             sample['agent_ref'] = {
                 'type': 'responses_api_agents',
-                'name': 'my_custom_tools_simple_agent'
+                'name': 'ns_tools_simple_agent'
             }
             out.write(json.dumps(sample) + '\n')
 
@@ -99,7 +94,7 @@ echo "[5/5] Running rollouts..."
 rm -f "$OUTPUT_FILE"
 
 ng_collect_rollouts \
-  +agent_name=my_custom_tools_simple_agent \
+  +agent_name=ns_tools_simple_agent \
   +input_jsonl_fpath="$PREPARED_DATA" \
   +output_jsonl_fpath="$OUTPUT_FILE" \
   +num_samples_in_parallel=3 \
@@ -126,20 +121,12 @@ with open("$OUTPUT_FILE", 'r') as f:
         total_reward += reward
         count += 1
         
-        # Get prompt
-        prompt = data['responses_create_params']['input'][-1]['content'][:60]
-        
-        # Get tool output if available
-        tool_output = ""
-        for o in data.get('response', {}).get('output', []):
-            if o.get('type') == 'function_call_output':
-                tool_output = o.get('output', '')[:40]
-                break
+        # Get question
+        question = data.get('question', 'N/A')[:50]
+        expected = data.get('expected_answer', 'N/A')
         
         status = "✓" if reward == 1.0 else "✗"
-        print(f"  {status} Sample {i}: reward={reward:.1f} | {prompt}...")
-        if tool_output:
-            print(f"      Output: {tool_output}")
+        print(f"  {status} Sample {i}: reward={reward:.1f} | {question}... (expected: {expected})")
 
     avg = total_reward / count if count > 0 else 0
     print(f"\n  Average Reward: {avg:.2f} ({int(total_reward)}/{count})")
@@ -154,4 +141,3 @@ echo "Servers are still running (PID: $SERVER_PID)"
 echo "To stop: kill $SERVER_PID"
 echo "Or run:  pkill -f ng_run"
 echo ""
-
