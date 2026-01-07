@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from sys import platform
-from subprocess import run
 
 import setuptools
 
@@ -31,22 +30,9 @@ dependencies = [
     "hf_transfer==0.1.9",
 ]
 
-# Follow the instructions at https://docs.vllm.ai/en/stable/getting_started/installation/cpu/#python-only-build
+# We use an older version of vllm on Macs since that is the latest version pip-installable. We may need to version tests later on.
 if platform == "darwin":
-    result = run("source .venv/bin/activate && uv pip show vllm", shell=True, check=False)
-    has_vllm = result.returncode == 0
-
-    if not has_vllm:
-        run(
-            """source .venv/bin/activate
-git clone https://github.com/vllm-project/vllm.git temp_vllm
-cd temp_vllm
-git checkout v0.11.2
-uv pip install -r requirements/cpu.txt --index-strategy unsafe-best-match
-uv pip install -e .""",
-            shell=True,
-            check=True,
-        )
+    dependencies.append("vllm==0.11.0")
 else:
     dependencies.append("vllm==0.11.2")
 
