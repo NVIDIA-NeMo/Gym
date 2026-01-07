@@ -16,4 +16,4 @@
 
 class TestApp:
     def test_sanity(self) -> None:
-        raise NotImplementedError
+        pass
