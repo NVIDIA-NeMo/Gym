@@ -20,13 +20,11 @@ from typing import Any, Dict, List, Optional, Union
 
 import ray
 import requests
-import uvloop
 from huggingface_hub import snapshot_download
 from vllm.entrypoints.openai.api_server import (
     FlexibleArgumentParser,
     cli_env_setup,
     make_arg_parser,
-    run_server,
     validate_parsed_serve_args,
 )
 
@@ -56,11 +54,13 @@ class LocalVLLMModelConfig(VLLMModelConfig):
 
 @ray.remote
 class LocalVLLMActor:
-    def __init__(self, server_args: Namespace):
+    def __init__(self, server_args: Namespace) -> None:
         import signal
         from threading import Thread
 
         import ray
+        import uvloop
+        from vllm.entrypoints.openai.api_server import run_server
 
         # Pass through signal setting not allowed in threads.
         signal.signal = lambda *args, **kwargs: None
