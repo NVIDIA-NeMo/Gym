@@ -78,6 +78,8 @@ class LocalVLLMActor:
 class LocalVLLMModel(VLLMModel):
     config: LocalVLLMModelConfig
 
+    _local_vllm_actor: LocalVLLMActor  # Set later in start_vllm_server
+
     def model_post_init(self, context):
         print(
             f"Downloading {self.config.model}. If the model has been downloaded previously, the cached version will be used."
@@ -129,8 +131,8 @@ class LocalVLLMModel(VLLMModel):
         if maybe_hf_token:
             environ["HF_TOKEN"] = maybe_hf_token
 
-        self.local_vllm_actor = LocalVLLMActor.remote(server_args)
-        base_url = ray.get(self.local_vllm_actor.base_url.remote())
+        self._local_vllm_actor = LocalVLLMActor.remote(server_args)
+        base_url = ray.get(self._local_vllm_actor.base_url.remote())
 
         while True:
             try:
