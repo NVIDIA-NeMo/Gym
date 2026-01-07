@@ -121,6 +121,11 @@ class LocalVLLMModel(VLLMModel):
         node_ip = ray._private.services.get_node_ip_address()
         base_url = f"http://{node_ip}:{server_args.port}/v1"
 
+        from ray._private.state import available_resources_per_node
+
+        available_resources = available_resources_per_node()
+        print("Available resources", available_resources.values())
+
         while True:
             assert self._server_thread.is_alive(), "Server thread died, please see the exception traceback above!"
 
