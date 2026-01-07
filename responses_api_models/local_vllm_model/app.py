@@ -108,14 +108,15 @@ class LocalVLLMModel(VLLMModel):
         thread.start()
 
         while True:
-            response = requests.get(f"http://{server_args.host}:{server_args.port}/v1/models")
-            if response.ok:
+            try:
+                response = requests.get(f"http://{server_args.host}:{server_args.port}/v1/models")
+                assert response.ok, (response.status_code, response.content)
                 break
-
-            print(
-                f"Polling for {self.config.name} LocalVLLMModel server to spinup. Received {response.status_code}. Sleeping for 3s..."
-            )
-            sleep(3)
+            except requests.exceptions.ConnectionError:
+                print(
+                    f"Polling for {self.config.name} LocalVLLMModel server to spinup. Received a ConnectionError since the server isn't up yet. Sleeping for 3s..."
+                )
+                sleep(3)
 
 
 if __name__ == "__main__":
