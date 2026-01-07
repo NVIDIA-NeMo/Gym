@@ -129,6 +129,9 @@ class LocalVLLMModel(VLLMModel):
         for k, v in env_vars.items():
             environ[k] = v
 
+        # Necessary for downstream vLLM ray actor spinup
+        environ.pop("CUDA_VISIBLE_DEVICES", None)
+
         # Pass through signal setting not allowed in threads.
         signal.signal = lambda *args, **kwargs: None
 
