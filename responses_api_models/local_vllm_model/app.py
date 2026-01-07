@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from argparse import Namespace
-from os import environ
 from pathlib import Path
 from threading import Thread
 from time import sleep
@@ -114,13 +113,14 @@ class LocalVLLMModel(VLLMModel):
             "download_dir": cache_dir,
         }
 
+        env_vars = dict()
         # vLLM accepts a `hf_token` parameter but it's not used everywhere. We need to set HF_TOKEN environment variable here.
         maybe_hf_token = self.get_hf_token()
         if maybe_hf_token:
-            environ["HF_TOKEN"] = maybe_hf_token
+            env_vars["HF_TOKEN"] = maybe_hf_token
 
         # vLLM doesn't expose a config for this yet, so we need to pass via environment variable.
-        environ["VLLM_DP_MASTER_IP"] = node_ip  # This is the master node.
+        env_vars["VLLM_DP_MASTER_IP"] = node_ip  # This is the master node.
 
         cli_env_setup()
         parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible RESTful API server.")
@@ -133,6 +133,7 @@ class LocalVLLMModel(VLLMModel):
         self._server_thread = LocalVLLMActor.options(
             runtime_env={
                 "py_executable": sys.executable,
+                "env_vars": env_vars,
             },
         ).remote(final_args)
 
