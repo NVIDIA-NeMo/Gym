@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import signal
+import sys
 from argparse import Namespace
 from os import environ
 from pathlib import Path
@@ -30,6 +31,7 @@ from vllm.entrypoints.openai.api_server import (
     run_server,
     validate_parsed_serve_args,
 )
+from vllm.v1.engine import utils as vllm_v1_engine_utils
 
 from nemo_gym.global_config import DISALLOWED_PORTS_KEY_NAME, HF_TOKEN_KEY_NAME, find_open_port, get_global_config_dict
 from nemo_gym.server_utils import get_global_aiohttp_client
@@ -96,7 +98,7 @@ class LocalVLLMModel(VLLMModel):
             "host": "0.0.0.0",  # Must be 0.0.0.0 for cross-node communication.
             "port": port,
             "distributed_executor_backend": "ray",
-            # "data_parallel_backend": "ray",
+            "data_parallel_backend": "ray",
             "download_dir": cache_dir,
         }
 
@@ -129,6 +131,13 @@ class LocalVLLMModel(VLLMModel):
 
         # Pass through signal setting not allowed in threads.
         signal.signal = lambda *args, **kwargs: None
+
+        original_RuntimeEnv = vllm_v1_engine_utils.RuntimeEnv
+
+        def new_RuntimeEnv(*args, **kwargs):
+            return original_RuntimeEnv(*args, **kwargs, py_executable=sys.executable)
+
+        vllm_v1_engine_utils.RuntimeEnv = new_RuntimeEnv
 
         vllm_server_coroutine = run_server(server_args)
 
