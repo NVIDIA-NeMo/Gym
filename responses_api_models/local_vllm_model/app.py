@@ -12,11 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import sys
 from argparse import Namespace
 from pathlib import Path
 from threading import Thread
 from time import sleep
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import ray
 import requests
@@ -98,7 +99,7 @@ class LocalVLLMModel(VLLMModel):
 
         snapshot_download(repo_id=self.config.model, token=maybe_hf_token, cache_dir=cache_dir)
 
-    def start_vllm_server(self) -> None:
+    def _configure_vllm_serve(self) -> Tuple[Namespace, Dict[str, str]]:
         server_args = self.config.vllm_serve_kwargs
 
         port = find_open_port(disallowed_ports=get_global_config_dict()[DISALLOWED_PORTS_KEY_NAME])
@@ -128,7 +129,14 @@ class LocalVLLMModel(VLLMModel):
         final_args = parser.parse_args(namespace=Namespace(**server_args))
         validate_parsed_serve_args(final_args)
 
-        import sys
+        base_url = f"http://{node_ip}:{final_args.port}/v1"
+        self.config.base_url = base_url
+        self.config.api_key = "dummy_key"  # dummy key
+
+        return final_args, env_vars
+
+    def start_vllm_server(self) -> None:
+        final_args, env_vars = self._configure_vllm_serve()
 
         self._server_thread = LocalVLLMActor.options(
             runtime_env={
@@ -137,13 +145,11 @@ class LocalVLLMModel(VLLMModel):
             },
         ).remote(final_args)
 
-        base_url = f"http://{node_ip}:{final_args.port}/v1"
-
         while True:
             # assert self._server_thread.is_alive(), "Server thread died, please see the exception traceback above!"
 
             try:
-                response = requests.get(f"{base_url}/models")
+                response = requests.get(f"{self.config.base_url}/models")
                 assert response.ok, (response.status_code, response.content)
                 break
             except requests.exceptions.ConnectionError:
@@ -151,9 +157,6 @@ class LocalVLLMModel(VLLMModel):
                     f"Polling for {self.config.name} LocalVLLMModel server to spinup. Received a ConnectionError since the server isn't up yet. Sleeping for 3s..."
                 )
                 sleep(3)
-
-        self.config.base_url = base_url
-        self.config.api_key = "dummy_key"  # dummy key
 
 
 if __name__ == "__main__":
