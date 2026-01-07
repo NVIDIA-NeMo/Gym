@@ -151,7 +151,7 @@ class LocalVLLMModel(VLLMModel):
                             )
 
                         poll_count += 1
-                        asyncio.sleep(3)
+                        await asyncio.sleep(3)
 
             async def wrapper_fn() -> None:
                 vllm_server_task = asyncio.create_task(vllm_server_coroutine)
