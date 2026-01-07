@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from argparse import Namespace
-from os import environ
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -68,11 +67,13 @@ class LocalVLLMModel(VLLMModel):
     def get_hf_token(self) -> Optional[str]:
         return get_global_config_dict().get(HF_TOKEN_KEY_NAME)
 
+    def get_cache_dir(self) -> str:
+        # We need to reconstruct the cache dir as HF does it given HF_HOME. See https://github.com/huggingface/huggingface_hub/blob/b2723cad81f530e197d6e826f194c110bf92248e/src/huggingface_hub/constants.py#L146
+        return Path(self.config.hf_home) / "hub"
+
     def download_model(self) -> None:
         maybe_hf_token = self.get_hf_token()
-
-        # We need to reconstruct the cache dir as HF does it given HF_HOME. See https://github.com/huggingface/huggingface_hub/blob/b2723cad81f530e197d6e826f194c110bf92248e/src/huggingface_hub/constants.py#L146
-        cache_dir = Path(self.config.hf_home) / "hub"
+        cache_dir = self.get_cache_dir()
 
         snapshot_download(repo_id=self.config.model, token=maybe_hf_token, cache_dir=cache_dir)
 
@@ -80,13 +81,14 @@ class LocalVLLMModel(VLLMModel):
         server_args = self.config.vllm_serve_kwargs
 
         port = find_open_port(disallowed_ports=get_global_config_dict()[DISALLOWED_PORTS_KEY_NAME])
+        cache_dir = self.get_cache_dir()
         server_args = server_args | {
             "model": self.config.model,
             "host": "127.0.0.1",
             "port": port,
             "distributed_executor_backend": "ray",
-            "data-parallel-backend": "ray",
-            "dtype": "auto",
+            "data_parallel_backend": "ray",
+            "download_dir": cache_dir,
         }
 
         cli_env_setup()
@@ -97,9 +99,6 @@ class LocalVLLMModel(VLLMModel):
 
         server_args = Namespace(**(vars(args) | server_args))
 
-        maybe_hf_token = self.get_hf_token()
-        if maybe_hf_token:
-            environ["HF_TOKEN"] = maybe_hf_token
         # The main vllm server will be run on the name node as this Gym model server, but the engines can be scheduled as seen fit by Ray.
         uvloop.run(run_server(server_args))
 
