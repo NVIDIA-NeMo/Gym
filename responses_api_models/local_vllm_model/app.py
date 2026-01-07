@@ -163,7 +163,7 @@ class LocalVLLMModel(VLLMModel):
 
                 _, pending = await asyncio.wait(
                     (vllm_server_task, asyncio.create_task(coroutine)),
-                    return_when="FIRST_EXCEPTION",
+                    return_when="FIRST_COMPLETED",
                 )
                 for task in pending:
                     task.cancel()
