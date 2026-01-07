@@ -48,7 +48,12 @@ class LocalVLLMModel(VLLMModel):
     config: LocalVLLMModelConfig
 
     def model_post_init(self, context):
+        print(
+            f"Downloading {self.config.model}. If the model has been downloaded previously, the cached version will be used."
+        )
         self.download_model()
+
+        print("Starting vLLM server. This will take a couple of minutes...")
         self.start_vllm_server()
 
         return super().model_post_init(context)
