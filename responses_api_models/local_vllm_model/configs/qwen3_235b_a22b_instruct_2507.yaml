@@ -9,7 +9,7 @@ qwen3_235b_a22b_instruct_2507_model_server:
 
       # If a hf_token is present in the env.yaml, it will be prepended to the hf download.
       vllm_serve_kwargs:
-        # data_parallel_size: 1
+        data_parallel_size: 1
         tensor_parallel_size: 8
         pipeline_parallel_size: 1
         gpu_memory_utilization: 0.9
