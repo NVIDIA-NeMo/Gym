@@ -329,6 +329,7 @@ Process `{process_name}` stderr:
                         f"""{num_spun_up} / {len(statuses)} servers ready ({statuses.count("timeout")} timed out, {statuses.count("connection_error")} connection errored, {statuses.count("unknown_error")} had unknown errors).
 Waiting for servers to spin up: {waiting}"""
                     )
+                poll_count += 1
             else:
                 print(f"All {num_spun_up} / {len(statuses)} servers ready! Polling every 60s")
                 self.display_server_instance_info()
