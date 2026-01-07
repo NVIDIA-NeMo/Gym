@@ -139,6 +139,9 @@ class LocalVLLMModel(VLLMModel):
             kwargs = kwargs or dict()
             kwargs["py_executable"] = sys.executable
 
+            # TODO remove
+            print("RUNTIME ENV", args, kwargs)
+
             return original_RuntimeEnv(*args, **kwargs)
 
         runtime_env.RuntimeEnv = new_RuntimeEnv
