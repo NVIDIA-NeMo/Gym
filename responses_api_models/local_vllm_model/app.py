@@ -17,11 +17,9 @@ from argparse import Namespace
 from os import environ
 from pathlib import Path
 from threading import Thread
-from time import sleep
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import ray
-import requests
 from huggingface_hub import snapshot_download
 from vllm.entrypoints.openai.api_server import (
     FlexibleArgumentParser,
@@ -141,18 +139,18 @@ class LocalVLLMModel(VLLMModel):
 
         asyncio.run = new_asyncio_run
 
-        while True:
-            # assert self._server_thread.is_alive(), "Server thread died, please see the exception traceback above!"
+        # while True:
+        #     # assert self._server_thread.is_alive(), "Server thread died, please see the exception traceback above!"
 
-            try:
-                response = requests.get(f"{self.config.base_url}/models")
-                assert response.ok, (response.status_code, response.content)
-                break
-            except requests.exceptions.ConnectionError:
-                print(
-                    f"Polling for {self.config.name} LocalVLLMModel server to spinup. Received a ConnectionError since the server isn't up yet. Sleeping for 3s..."
-                )
-                sleep(3)
+        #     try:
+        #         response = requests.get(f"{self.config.base_url}/models")
+        #         assert response.ok, (response.status_code, response.content)
+        #         break
+        #     except requests.exceptions.ConnectionError:
+        #         print(
+        #             f"Polling for {self.config.name} LocalVLLMModel server to spinup. Received a ConnectionError since the server isn't up yet. Sleeping for 3s..."
+        #         )
+        #         sleep(3)
 
 
 if __name__ == "__main__":
