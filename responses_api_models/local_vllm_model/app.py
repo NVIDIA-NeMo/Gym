@@ -54,7 +54,11 @@ class LocalVLLMModelConfig(VLLMModelConfig):
         return super().model_post_init(context)
 
 
-def vllm_server_proc_target(server_args):
+def vllm_server_proc_target(server_args, ray_init_kwargs):
+    import ray
+
+    ray.init(**ray_init_kwargs)
+
     uvloop.run(run_server(server_args))
 
 
@@ -112,8 +116,12 @@ class LocalVLLMModel(VLLMModel):
         if maybe_hf_token:
             environ["HF_TOKEN"] = maybe_hf_token
 
+        global_config_dict = get_global_config_dict()
+        ray_head_node_address = global_config_dict.get("ray_head_node_address")
+        ray_init_kwargs = {"ignore_reinit_error": True, "address": ray_head_node_address}
+
         # The main vllm server will be run on the name node as this Gym model server, but the engines can be scheduled as seen fit by Ray.
-        proc = Process(target=vllm_server_proc_target, args=(server_args,), daemon=True)
+        proc = Process(target=vllm_server_proc_target, args=(server_args, ray_init_kwargs), daemon=True)
         proc.start()
 
         while True:
