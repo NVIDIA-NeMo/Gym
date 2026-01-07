@@ -162,7 +162,7 @@ class LocalVLLMModel(VLLMModel):
                 print(f"{self.config.name} finished vLLM server spinup!")
 
                 _, pending = await asyncio.wait(
-                    (vllm_server_task, coroutine),
+                    (vllm_server_task, asyncio.create_task(coroutine)),
                     return_when="FIRST_EXCEPTION",
                 )
                 for task in pending:
