@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import signal
 from argparse import Namespace
 from os import environ
 from pathlib import Path
@@ -54,16 +53,21 @@ class LocalVLLMModelConfig(VLLMModelConfig):
         return super().model_post_init(context)
 
 
-def vllm_server_target(final_args: Namespace):
-    import uvloop
-    import vllm
+@ray.remote
+class LocalVLLMActor:
+    def __init__(self, server_args: Namespace) -> None:
+        import signal
 
-    vllm
-    from vllm.entrypoints.openai.api_server import (
-        run_server,
-    )
+        import uvloop
+        from vllm.entrypoints.openai.api_server import (
+            run_server,
+        )
 
-    uvloop.run(run_server(final_args))
+        # Pass through signal setting not allowed in threads.
+        signal.signal = lambda *args, **kwargs: None
+
+        self._server_thread = Thread(target=uvloop.run, args=(run_server(server_args),), daemon=True)
+        self._server_thread.start()
 
 
 class LocalVLLMModel(VLLMModel):
@@ -118,26 +122,24 @@ class LocalVLLMModel(VLLMModel):
         # vLLM doesn't expose a config for this yet, so we need to pass via environment variable.
         environ["VLLM_DP_MASTER_IP"] = node_ip  # This is the master node.
 
-        import sys
-
-        environ["py_executable"] = sys.executable
-
         cli_env_setup()
         parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible RESTful API server.")
         parser = make_arg_parser(parser)
         final_args = parser.parse_args(namespace=Namespace(**server_args))
         validate_parsed_serve_args(final_args)
 
-        # Pass through signal setting not allowed in threads.
-        signal.signal = lambda *args, **kwargs: None
+        import sys
 
-        self._server_thread = Thread(target=vllm_server_target, args=(final_args,), daemon=True)
-        self._server_thread.start()
+        self._server_thread = LocalVLLMActor.options(
+            runtime_env={
+                "py_executable": sys.executable,
+            },
+        ).remote(final_args)
 
         base_url = f"http://{node_ip}:{final_args.port}/v1"
 
         while True:
-            assert self._server_thread.is_alive(), "Server thread died, please see the exception traceback above!"
+            # assert self._server_thread.is_alive(), "Server thread died, please see the exception traceback above!"
 
             try:
                 response = requests.get(f"{base_url}/models")
