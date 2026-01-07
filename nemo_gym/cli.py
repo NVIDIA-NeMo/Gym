@@ -326,7 +326,8 @@ Process `{process_name}` stderr:
             if len(statuses) != num_spun_up:
                 if poll_count % 10 == 0:  # Print every sleep_interval * poll_count = 3 * 10 = 30s
                     print(
-                        f"""{num_spun_up} / {len(statuses)} servers ready ({statuses.count("timeout")} timed out, {statuses.count("connection_error")} connection errored, {statuses.count("unknown_error")} had unknown errors).
+                        f"""Checking for HTTP server statuses (you should see some HTTP requests to `/` that may 404. This is expected.
+{num_spun_up} / {len(statuses)} servers ready ({statuses.count("timeout")} timed out, {statuses.count("connection_error")} connection errored, {statuses.count("unknown_error")} had unknown errors).
 Waiting for servers to spin up: {waiting}"""
                     )
                 poll_count += 1
@@ -371,9 +372,6 @@ Waiting for servers to spin up: {waiting}"""
             self.shutdown()
 
     def check_http_server_statuses(self) -> List[Tuple[str, ServerStatus]]:
-        print(
-            "Checking for HTTP server statuses (you should see some HTTP requests to `/` that may 404. This is expected.)"
-        )
         statuses = []
         for server_instance_display_config in self._server_instance_display_configs:
             name = server_instance_display_config.config_path
