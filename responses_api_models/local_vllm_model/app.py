@@ -130,22 +130,17 @@ class LocalVLLMModel(VLLMModel):
 
         vllm_server_task = run_server(server_args)
 
-        from uvicorn.server import asyncio_run
+        from uvicorn import server as uvicorn_server
 
-        original_asyncio_run = asyncio_run
+        original_asyncio_run = uvicorn_server.asyncio_run
 
         def new_asyncio_run(coroutine, *args, **kwargs):
-            # TODO remove
-            print("Hit inside new asyncio run")
+            async def wrapper_fn():
+                await asyncio.gather(vllm_server_task, coroutine)
 
-            wait_coroutine = asyncio.wait(
-                [vllm_server_task, coroutine],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+            return original_asyncio_run(wrapper_fn(), *args, **kwargs)
 
-            return original_asyncio_run(wait_coroutine, *args, **kwargs)
-
-        asyncio_run = new_asyncio_run
+        uvicorn_server.asyncio_run = new_asyncio_run
 
         # while True:
         #     # assert self._server_thread.is_alive(), "Server thread died, please see the exception traceback above!"
