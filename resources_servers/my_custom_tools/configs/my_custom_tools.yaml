@@ -1,0 +1,48 @@
+# Configuration for Custom Tools Resources Server with Dynamic Verifier Delegation
+#
+# This resources server provides custom tools (search_database, execute_calculation, fetch_data)
+# while delegating verification to existing verifiers based on per-sample configuration.
+#
+# USAGE:
+# When running, include both this config AND the verifier configs:
+#
+#   ng_run "+config_paths=[resources_servers/my_custom_tools/configs/my_custom_tools.yaml,\
+#   resources_servers/xlam_fc/configs/xlam_fc.yaml,\
+#   resources_servers/mcqa/configs/mcqa.yaml,\
+#   responses_api_models/openai_model/configs/openai_model.yaml]"
+
+# Main custom tools resources server
+my_custom_tools:
+  resources_servers:
+    my_custom_tools:
+      entrypoint: app.py
+      # Map of verifier names to server references
+      # These servers must be included via config_paths when running
+      available_verifiers:
+        xlam_fc:
+          type: resources_servers
+          name: xlam_fc
+        mcqa:
+          type: resources_servers
+          name: mcqa
+      default_verifier: xlam_fc
+      domain: agent
+      verified: false
+      description: Custom tools with dynamic verifier selection based on sample data
+
+# Agent configuration (uses existing simple_agent)
+my_custom_tools_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: my_custom_tools
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: example
+          type: example
+          license: Apache 2.0
+          jsonl_fpath: resources_servers/my_custom_tools/data/example.jsonl
