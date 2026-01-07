@@ -72,7 +72,7 @@ class LocalVLLMModel(VLLMModel):
 
     def get_cache_dir(self) -> str:
         # We need to reconstruct the cache dir as HF does it given HF_HOME. See https://github.com/huggingface/huggingface_hub/blob/b2723cad81f530e197d6e826f194c110bf92248e/src/huggingface_hub/constants.py#L146
-        return Path(self.config.hf_home) / "hub"
+        return str(Path(self.config.hf_home) / "hub")
 
     def download_model(self) -> None:
         maybe_hf_token = self.get_hf_token()
