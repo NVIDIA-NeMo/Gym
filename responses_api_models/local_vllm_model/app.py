@@ -159,7 +159,12 @@ class LocalVLLMModel(VLLMModel):
                     return_when="FIRST_COMPLETED",
                 )
 
-                await asyncio.gather(vllm_server_task, coroutine)
+                _, pending = await asyncio.wait(
+                    (vllm_server_task, coroutine),
+                    return_when="FIRST_EXCEPTION",
+                )
+                for task in pending:
+                    task.cancel()
 
             return original_asyncio_run(wrapper_fn(), *args, **kwargs)
 
