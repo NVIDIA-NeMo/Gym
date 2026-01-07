@@ -104,10 +104,11 @@ class LocalVLLMModel(VLLMModel):
         cli_env_setup()
         parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible RESTful API server.")
         parser = make_arg_parser(parser)
-        args = parser.parse_args()
-        validate_parsed_serve_args(args)
+        final_args = parser.parse_args(namespace=Namespace(**server_args))
+        validate_parsed_serve_args(final_args)
 
-        server_args = Namespace(**(vars(args) | server_args))
+        # TODO remove
+        print(final_args)
 
         # vLLM accepts a `hf_token` parameter but it's not used everywhere. We need to set HF_TOKEN environment variable here.
         maybe_hf_token = self.get_hf_token()
@@ -117,10 +118,10 @@ class LocalVLLMModel(VLLMModel):
         # Pass through signal setting not allowed in threads.
         signal.signal = lambda *args, **kwargs: None
 
-        self._server_thread = Thread(target=uvloop.run, args=(run_server(server_args),), daemon=True)
+        self._server_thread = Thread(target=uvloop.run, args=(run_server(final_args),), daemon=True)
         self._server_thread.start()
 
-        base_url = f"http://{node_ip}:{server_args.port}/v1"
+        base_url = f"http://{node_ip}:{final_args.port}/v1"
 
         while True:
             assert self._server_thread.is_alive(), "Server thread died, please see the exception traceback above!"
