@@ -143,8 +143,14 @@ class LocalVLLMModel(VLLMModel):
         original_RuntimeEnv = runtime_env.RuntimeEnv
 
         def new_RuntimeEnv(*args, **kwargs):
+            print("RUNTIME ENV KWARGS", kwargs)
+
             kwargs = kwargs or dict()
             kwargs["py_executable"] = sys.executable
+
+            env_vars = kwargs.get("env_vars") or dict()
+            env_vars.pop("CUDA_VISIBLE_DEVICES", None)
+            env_vars["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] = "1"
 
             return original_RuntimeEnv(*args, **kwargs)
 
