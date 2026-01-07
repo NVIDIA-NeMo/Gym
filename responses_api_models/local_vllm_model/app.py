@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from argparse import Namespace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -78,6 +79,8 @@ class LocalVLLMModel(VLLMModel):
             "data-parallel-backend": "ray",
             "dtype": "auto",
         }
+
+        server_args = Namespace(**server_args)
 
         validate_parsed_serve_args(server_args)
 
