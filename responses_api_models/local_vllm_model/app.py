@@ -108,6 +108,8 @@ class LocalVLLMModel(VLLMModel):
         proc.start()
 
         while True:
+            assert proc.is_alive(), "Server process died! See the error trace above."
+
             try:
                 response = requests.get(f"http://{server_args.host}:{server_args.port}/v1/models")
                 assert response.ok, (response.status_code, response.content)
