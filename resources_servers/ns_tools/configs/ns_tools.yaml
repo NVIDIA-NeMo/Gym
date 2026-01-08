@@ -25,7 +25,7 @@ ns_tools:
       
       # NeMo Skills tools to load
       nemo_skills_tools:
-        - nemo_skills.mcp.servers.python_tool.PythonTool
+        - vendored.nemo_skills.mcp.servers.python_tool.PythonTool
       
       # Per-tool configuration overrides
       nemo_skills_tool_overrides:
