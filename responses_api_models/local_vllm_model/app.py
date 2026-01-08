@@ -24,7 +24,7 @@ from typing import Any, Coroutine, Dict, List, Optional, Tuple, Union
 import ray
 from aiohttp.client_exceptions import ClientConnectorError
 from huggingface_hub import snapshot_download
-from ray import runtime_env
+from ray import available_resources, cluster_resources, runtime_env
 from vllm.entrypoints.openai.api_server import (
     FlexibleArgumentParser,
     cli_env_setup,
@@ -191,6 +191,9 @@ class LocalVLLMModel(VLLMModel):
         runtime_env.RuntimeEnv = new_RuntimeEnv
 
     def start_vllm_server(self) -> None:
+        # TODO remove
+        print(f"{available_resources()=} {cluster_resources()=}")
+
         server_args, env_vars = self._configure_vllm_serve()
 
         for k, v in env_vars.items():
