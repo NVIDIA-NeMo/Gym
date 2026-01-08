@@ -39,7 +39,7 @@ else
 fi
 
 # --- Step 1: Cleanup any existing servers ---
-echo "[1/5] Cleaning up existing servers..."
+echo "[1/4] Cleaning up existing servers..."
 pkill -f "ng_run" 2>/dev/null || true
 lsof -ti:11000 2>/dev/null | xargs kill -9 2>/dev/null || true
 ray stop --force 2>/dev/null || true
@@ -48,7 +48,7 @@ sleep 2
 echo "      Done."
 
 # --- Step 2: Start servers ---
-echo "[2/5] Starting servers..."
+echo "[2/4] Starting servers..."
 CONFIG_PATHS="resources_servers/ns_tools/configs/ns_tools.yaml"
 CONFIG_PATHS="$CONFIG_PATHS,resources_servers/math_with_judge/configs/math_with_judge.yaml"
 CONFIG_PATHS="$CONFIG_PATHS,responses_api_models/vllm_model/configs/vllm_model.yaml"
@@ -64,40 +64,19 @@ SERVER_PID=$!
 echo "      Server PID: $SERVER_PID"
 
 # --- Step 3: Wait for servers to be ready ---
-echo "[3/5] Waiting for servers to be ready..."
+echo "[3/4] Waiting for servers to be ready..."
 sleep 15
 echo "      Done waiting."
 
-# --- Step 4: Prepare data ---
-echo "[4/5] Preparing data..."
-PREPARED_DATA="$GYM_DIR/data/ns_tools_example.jsonl"
-
-python3 << EOF
-import json
-
-input_file = "$SCRIPT_DIR/data/example.jsonl"
-output_file = "$PREPARED_DATA"
-
-with open(input_file, 'r') as f, open(output_file, 'w') as out:
-    for line in f:
-        if line.strip():
-            sample = json.loads(line)
-            sample['agent_ref'] = {
-                'type': 'responses_api_agents',
-                'name': 'ns_tools_simple_agent'
-            }
-            out.write(json.dumps(sample) + '\n')
-
-print(f"      Prepared data: {output_file}")
-EOF
-
-# --- Step 5: Run rollouts ---
-echo "[5/5] Running rollouts..."
+# --- Step 4: Run rollouts ---
+echo "[4/4] Running rollouts..."
+# Allow INPUT_DATA to be set via environment variable or fallback to default
+INPUT_DATA="${INPUT_DATA:=$SCRIPT_DIR/data/example.jsonl}"
 rm -f "$OUTPUT_FILE"
 
 ng_collect_rollouts \
   +agent_name=ns_tools_simple_agent \
-  +input_jsonl_fpath="$PREPARED_DATA" \
+  +input_jsonl_fpath="$INPUT_DATA" \
   +output_jsonl_fpath="$OUTPUT_FILE" \
   +num_samples_in_parallel=3 \
   +limit="$NUM_SAMPLES"
