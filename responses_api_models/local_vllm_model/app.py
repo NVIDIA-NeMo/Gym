@@ -121,7 +121,8 @@ class LocalVLLMModel(VLLMModel):
             # Strict is the default. See https://docs.vllm.ai/en/stable/configuration/env_vars/
             env_vars["VLLM_RAY_DP_PACK_STRATEGY"] = "strict"
             assert num_gpus_per_node % total_gpus_per_dp_instance == 0, "tp * pp must divide 8 GPUs/node evenly!"
-            server_args["data_parallel_size_local"] = num_gpus_per_node // total_gpus_per_dp_instance
+            if not server_args.get("data_parallel_size_local"):
+                server_args["data_parallel_size_local"] = num_gpus_per_node // total_gpus_per_dp_instance
 
         cli_env_setup()
         parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible RESTful API server.")
