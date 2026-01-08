@@ -19,8 +19,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict
 
-from .utils import clean_formal_generation
-from .dataset.utils import get_lean4_header
+# from .utils import clean_formal_generation
+# from .dataset.utils import get_lean4_header
 from ..utils import get_logger_name
 
 LOG = logging.getLogger(get_logger_name(__file__))
