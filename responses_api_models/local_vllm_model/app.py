@@ -97,7 +97,6 @@ class LocalVLLMModel(VLLMModel):
             "host": "0.0.0.0",  # Must be 0.0.0.0 for cross-node communication.
             "port": port,
             "distributed_executor_backend": "ray",
-            "data_parallel_backend": "ray",
             "download_dir": cache_dir,
         }
 
@@ -123,6 +122,10 @@ class LocalVLLMModel(VLLMModel):
             assert num_gpus_per_node % total_gpus_per_dp_instance == 0, "tp * pp must divide 8 GPUs/node evenly!"
             if not server_args.get("data_parallel_size_local"):
                 server_args["data_parallel_size_local"] = num_gpus_per_node // total_gpus_per_dp_instance
+
+        # Ray backend only works if dp_size > 1
+        if server_args.get("data_parallel_size", 1) > 1:
+            server_args["data_parallel_backend"] = "ray"
 
         cli_env_setup()
         parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible RESTful API server.")
