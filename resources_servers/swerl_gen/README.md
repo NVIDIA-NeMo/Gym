@@ -68,9 +68,9 @@ ng_run "+config_paths=[$config_paths]"
 
 ng_collect_rollouts \
     +agent_name=swerl_gen_simple_agent \
-    +input_jsonl_fpath=resources_servers/swerl_gen/data/swerl_example.jsonl \
-    +output_jsonl_fpath=resources_servers/swerl_gen/data/swerl_example_rollouts.jsonl \
-    +num_repeats=8 \
+    +input_jsonl_fpath=resources_servers/swerl_gen/data/example.jsonl \
+    +output_jsonl_fpath=resources_servers/swerl_gen/data/example_rollouts.jsonl \
+    +num_repeats=2 \
     +num_samples_in_parallel=4 \
     +responses_create_params.max_output_tokens=4096
 ```

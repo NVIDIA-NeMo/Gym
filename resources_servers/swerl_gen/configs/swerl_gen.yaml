@@ -7,10 +7,10 @@ swerl_gen_resources_server:
       description: Running sandboxed evaluation for SWE-style tasks (either patch generation or reproduction test generation)
       value: Improve SWE capabilities useful for benchmarks like SWE-bench
       env: singularity
-      num_processes: 256
+      num_processes: 2048
       sandbox_timeout: 900
-      debug: true
-      relaxed_formatting: true
+      debug: false
+      relaxed_formatting: false
 swerl_gen_simple_agent:
   responses_api_agents:
     simple_agent:

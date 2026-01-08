@@ -51,8 +51,6 @@ Notes:
 ```
 
 
-**Note:** Example files in `data/swerl_llm_judge_example.jsonl` use simulated `reward_profiles` for demonstration purposes.
-
 ### Example of rollouts and usage
 
 **Standard format (with `grading_mode`):**
@@ -69,7 +67,7 @@ ng_collect_rollouts \
     +input_jsonl_fpath=resources_servers/swerl_llm_judge/data/example.jsonl \
     +output_jsonl_fpath=resources_servers/swerl_llm_judge/data/example_rollouts.jsonl \
     +num_repeats=1 \
-    +num_samples_in_parallel=3 \
+    +num_samples_in_parallel=5 \
     +responses_create_params.max_output_tokens=4096
 
 ```
