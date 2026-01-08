@@ -1,4 +1,4 @@
-# CLI Command Reference
+# CLI Commands
 
 This page documents all available NeMo Gym CLI commands.
 
@@ -47,7 +47,7 @@ This command reads configuration from YAML files specified via `+config_paths` a
 
 ```bash
 # Start servers with specific configs
-config_paths="resources_servers/example_simple_weather/configs/simple_weather.yaml,\
+config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml"
 ng_run "+config_paths=[${config_paths}]"
 ```
@@ -78,7 +78,7 @@ Test a specific server module by running its pytest suite and optionally validat
 **Example**
 
 ```bash
-ng_test +entrypoint=resources_servers/example_simple_weather
+ng_test +entrypoint=resources_servers/example_single_tool_call
 ```
 
 ---
@@ -177,7 +177,7 @@ Perform a batch of rollout collection.
 
 ```bash
 ng_collect_rollouts \
-    +agent_name=simple_weather_simple_agent \
+    +agent_name=example_single_tool_call_simple_agent \
     +input_jsonl_fpath=weather_query.jsonl \
     +output_jsonl_fpath=weather_rollouts.jsonl \
     +limit=100 \
@@ -243,12 +243,25 @@ Launch a Gradio interface to view and explore dataset rollouts interactively.
 * - `jsonl_fpath`
   - str
   - Filepath to a local JSONL file to view.
+* - `server_host`
+  - str
+  - Network address where the viewer accepts requests. Defaults to `"127.0.0.1"` (localhost only). Set to `"0.0.0.0"` to accept requests from anywhere.
+* - `server_port`
+  - int
+  - Port where the viewer accepts requests. Defaults to `7860`. If the specified port is unavailable, Gradio will search for the next available port.
 ```
 
-**Example**
+**Examples**
 
 ```bash
+# Launch viewer with default settings (accessible from localhost only)
 ng_viewer +jsonl_fpath=weather_rollouts.jsonl
+
+# Accept requests from anywhere (e.g., for remote access)
+ng_viewer +jsonl_fpath=weather_rollouts.jsonl +server_host=0.0.0.0
+
+# Use a custom port
+ng_viewer +jsonl_fpath=weather_rollouts.jsonl +server_port=8080
 ```
 
 ---
@@ -530,6 +543,87 @@ ng_version
 
 # Output as JSON
 ng_version +json=true
+```
+
+---
+
+### `ng_pip_list` / `nemo_gym_pip_list`
+
+Each server has its own isolated virtual environment. To inspect the packages:
+
+**Parameters**
+
+```{list-table}
+:header-rows: 1
+:widths: 20 10 70
+
+* - Parameter
+  - Type
+  - Description
+* - `entrypoint`
+  - str
+  - The relative entrypoint path to the server directory
+* - `format`
+  - Optional[str]
+  - Output format for pip list. Options: 'columns' (default), 'freeze', 'json'. Default: `None`.
+* - `outdated`
+  - bool
+  - List outdated packages. Default: `False`.
+```
+
+**Examples**
+
+```bash
+# List all packages
+ng_pip_list +entrypoint=resources_servers/example_single_tool_call
+
+# Output as JSON
+ng_pip_list +entrypoint=resources_servers/example_single_tool_call +format=json
+
+# Check for outdated packages
+ng_pip_list +entrypoint=resources_servers/example_single_tool_call +outdated=true
+```
+
+---
+
+### `ng_status` / `nemo_gym_status`
+
+View all currently running NeMo Gym servers and their health status.
+
+**Example**
+
+```bash
+ng_status
+
+NeMo Gym Server Status:
+
+[1] ✓ example_single_tool_call (resources_servers/example_single_tool_call)
+{
+    'server_type': 'resources_servers',
+    'name': 'example_single_tool_call',
+    'port': 58117,
+    'pid': 89904,
+    'uptime_seconds': '0d 0h 0m 41.5s',
+}
+[2] ✓ example_single_tool_call_simple_agent (responses_api_agents/simple_agent)
+{
+    'server_type': 'responses_api_agents',
+    'name': 'simple_agent',
+    'port': 58118,
+    'pid': 89905,
+    'uptime_seconds': '0d 0h 0m 41.5s',
+}
+[3] ✓ policy_model (responses_api_models/openai_model)
+{
+    'server_type': 'responses_api_models',
+    'name': 'openai_model',
+    'port': 58119,
+    'pid': 89907,
+    'uptime_seconds': '0d 0h 0m 41.5s',
+}
+
+3 servers found (3 healthy, 0 unhealthy)
+
 ```
 
 ---

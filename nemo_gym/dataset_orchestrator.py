@@ -1,10 +1,11 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,7 +21,7 @@ from nemo_gym.config_types import (
     UploadJsonlDatasetHuggingFaceMaybeDeleteConfig,
 )
 from nemo_gym.gitlab_utils import delete_model_from_gitlab, is_model_in_gitlab
-from nemo_gym.hf_utils import download_jsonl_dataset as download_jsonl_dataset_from_hf
+from nemo_gym.hf_utils import download_hf_dataset_as_jsonl
 from nemo_gym.hf_utils import upload_jsonl_dataset as upload_jsonl_dataset_to_hf
 from nemo_gym.server_utils import get_global_config_dict
 
@@ -73,7 +74,13 @@ def upload_jsonl_dataset_to_hf_and_delete_gitlab_cli() -> None:  # pragma: no co
 def download_jsonl_dataset_from_hf_cli() -> None:  # pragma: no cover
     global_config = get_global_config_dict()
     config = DownloadJsonlDatasetHuggingFaceConfig.model_validate(global_config)
-    download_jsonl_dataset_from_hf(config)
+
+    if config.artifact_fpath:
+        print(f"Downloading file '{config.artifact_fpath}' from '{config.repo_id}'...")
+    else:
+        print(f"Downloading '{config.split or 'all'}' split(s) from '{config.repo_id}'...")
+
+    download_hf_dataset_as_jsonl(config)
 
 
 def delete_jsonl_dataset_from_gitlab_cli() -> None:  # pragma: no cover

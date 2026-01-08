@@ -2,7 +2,7 @@
 
 # Creating a Resource Server
 
-Learn how to create a custom resource server to implement tools, verifiers, and business logic for your AI agents.
+Learn how to create a custom resource server to implement tools, verifiers, and business logic for your training environment.
 
 ::::{grid} 2
 :gutter: 3
@@ -13,7 +13,7 @@ Learn how to create a custom resource server to implement tools, verifiers, and 
 
 :::{grid-item-card} {octicon}`bookmark;1em;` **Prerequisites**
 
-- Completed {doc}`../get-started/setup-installation`
+- Completed {doc}`../get-started/detailed-setup`
 - Basic Python and FastAPI knowledge
 
 :::
@@ -24,19 +24,19 @@ Learn how to create a custom resource server to implement tools, verifiers, and 
 
 ## What is a Resource Server?
 
-Resource servers are the backbone of tool-based agent interactions in NeMo Gym. They provide:
+Resource servers are the backbone of tool-based interactions in NeMo Gym. They provide:
 
-- **Tool implementations**: APIs that agents can call to perform actions or retrieve information
-- **Verification logic**: Functions to evaluate agent performance and compute rewards
-- **Business logic abstraction**: Clean separation between agent logic and domain-specific functionality
+- **Tool implementations**: APIs that models can call to perform actions or retrieve information
+- **Verification logic**: Functions to evaluate model performance and compute rewards
+- **Business logic abstraction**: Clean separation between model logic and domain-specific functionality
 
-Each resource server must implement a `verify` function that evaluates the agent's interactions and returns a reward signal for reinforcement learning.
+Each resource server must implement a `verify` function that evaluates the model's interactions and returns a reward signal for reinforcement learning.
 
 ---
 
 ## 1. Initialize the Resource Server
 
-Resource servers live in the `resources_servers/` directory. Create a weather server that provides weather information to agents.
+Resource servers live in the `resources_servers/` directory. Create a weather server that provides weather information to models.
 
 Run the initialization command from the repository root:
 
@@ -153,9 +153,9 @@ class MyWeatherResourcesServer(SimpleResourcesServer):
 
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
         """
-        Verification function: Evaluate agent performance.
+        Verification function: Evaluate rollout performance.
         
-        This function is called after an agent completes an interaction.
+        This function is called after a rollout completes.
         Return a reward between 0.0 and 1.0.
         
         For this simple example, we always return 1.0 (success).
@@ -175,7 +175,7 @@ if __name__ == "__main__":
 3. **Server Class**: Extends `SimpleResourcesServer` and implements tools and verification
 4. **`setup_webserver()`**: Registers FastAPI routes for your tools
 5. **Tool Methods**: Async functions that implement the actual tool logic
-6. **`verify()`**: **Required** method that evaluates agent performance and returns a reward
+6. **`verify()`**: **Required** method that evaluates task performance and returns a reward
 
 ---
 
@@ -293,15 +293,15 @@ policy_base_url: https://api.openai.com/v1
 policy_model_name: gpt-4o-mini
 ```
 
-### Test the Agent
+### Test the resources server
 
-After the servers start, test your agent in a new terminal:
+After the servers start, test your resources server in a new terminal:
 
 ```bash
 python responses_api_agents/simple_agent/client.py
 ```
 
-The agent should be able to use your `get_weather` tool to answer questions about weather!
+The model should be able to use your `get_weather` tool to answer questions about weather!
 
 ---
 
@@ -319,7 +319,7 @@ Your resource server needs example data for testing and validation. Create `reso
 
 ### Generate Example Rollouts
 
-Collect rollouts by running the agent against your example inputs. This generates interaction traces showing how agents use your tools:
+Collect rollouts by running against your example inputs. This generates interaction traces showing how models use your tools:
 
 ```bash
 ng_collect_rollouts +agent_name=my_weather_tool_simple_agent \
@@ -331,7 +331,7 @@ ng_collect_rollouts +agent_name=my_weather_tool_simple_agent \
 ```
 
 :::{note}
-Ensure your servers are running (from step 6) before collecting rollouts. The command processes each input example, runs it through the agent, and saves the complete interaction including tool calls and verification rewards to `example_rollouts.jsonl`.
+Ensure your servers are running (from step 6) before collecting rollouts. The command processes each input example, runs it through the servers, and saves the complete interaction including tool calls and verification rewards to `example_rollouts.jsonl`.
 :::
 
 ---
@@ -386,14 +386,14 @@ Before submitting a PR, ensure you have:
 
 ## Advanced: Custom Verification
 
-For more sophisticated verification, you can implement custom logic in the `verify` function. Here's an example that checks if the agent used the correct tool:
+For more sophisticated verification, you can implement custom logic in the `verify` function. Here's an example that checks if the model used the correct tool:
 
 ```python
 async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
     """
-    Advanced verification: Check if agent called the get_weather tool.
+    Advanced verification: Check if model called the get_weather tool.
     """
-    # Check if the agent made a function call
+    # Check if the model made a function call
     used_tool = False
     for output in body.response.output:
         if output.type == "function_call" and output.name == "get_weather":
@@ -420,7 +420,7 @@ Now that you have a working resource server:
 1. **Add training data**: Collect rollouts and prepare datasets for RL training
 2. **Add complex verification**: Add reward shaping and detailed performance metrics
 3. **Scale up**: Add more tools and more sophisticated business logic
-4. **Integrate with RL**: Use {doc}`rl-training-with-nemo-rl` to train agents on your tasks
+4. **Integrate with RL**: Use {ref}`RL Training with NeMo RL using GRPO <training-nemo-rl-grpo-index>` to train models on your tasks
 
 ::::{grid} 2
 :gutter: 3
@@ -432,9 +432,9 @@ Learn how to collect and process rollouts for training data.
 :::
 
 :::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` Train with NeMo RL
-:link: rl-training-with-nemo-rl
-:link-type: doc
-Train agents using your resource server with NeMo RL.
+:link: training-nemo-rl-grpo-index
+:link-type: ref
+Train models using your resource server with NeMo RL.
 :::
 
 ::::
@@ -480,8 +480,8 @@ You've learned how to:
 ✅ Configure the required `domain` field  
 ✅ Add tools and verification logic  
 ✅ Write and run tests  
-✅ Run your server with an agent  
+✅ Run your server with an model
 ✅ Create required data artifacts  
 
-Resource servers are the foundation for building custom RL environments in NeMo Gym. Experiment with different tool implementations and verification strategies to create engaging tasks for your agents!
+Resource servers are the foundation for building custom RL environments in NeMo Gym. Experiment with different tool implementations and verification strategies to create engaging tasks for your models!
 

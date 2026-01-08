@@ -101,6 +101,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             output = model_response.output
             new_outputs.extend(output)
 
+            if model_response.incomplete_details and model_response.incomplete_details.reason == "max_output_tokens":
+                break
+
             all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
             all_output_messages: List[NeMoGymResponseOutputMessage] = [
                 o for o in output if o.type == "message" and o.role == "assistant"

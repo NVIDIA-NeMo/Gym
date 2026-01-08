@@ -46,6 +46,7 @@ DISALLOWED_PORTS_KEY_NAME = "disallowed_ports"
 HEAD_SERVER_DEPS_KEY_NAME = "head_server_deps"
 PYTHON_VERSION_KEY_NAME = "python_version"
 USE_ABSOLUTE_IP = "use_absolute_ip"
+UV_PIP_SET_PYTHON_KEY_NAME = "uv_pip_set_python"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -55,6 +56,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     HEAD_SERVER_DEPS_KEY_NAME,
     PYTHON_VERSION_KEY_NAME,
     USE_ABSOLUTE_IP,
+    UV_PIP_SET_PYTHON_KEY_NAME,
 ]
 
 POLICY_BASE_URL_KEY_NAME = "policy_base_url"
@@ -261,7 +263,8 @@ class GlobalConfigDictParser(BaseModel):
             # Constrain sensitive package versions
             global_config_dict[HEAD_SERVER_DEPS_KEY_NAME] = [
                 # The ray version is very sensitive. The children ray versions must exactly match those of the parent ray.
-                f"ray=={ray_version}",
+                # The ray extra [default] should also exactly match the extra in the top-level Gym pyproject.toml.
+                f"ray[default]=={ray_version}",
                 # OpenAI version is also sensitive since it changes so often and may introduce subtle incompatibilities.
                 f"openai=={openai_version}",
             ]
