@@ -24,10 +24,10 @@ import stat
 from pathlib import Path
 
 from datasets import load_dataset
+from swebench.harness.constants import SWEbenchInstance
 from swebench.harness.test_spec.test_spec import (
     make_test_spec,
 )
-from swebench.harness.constants import SWEbenchInstance
 from tqdm import tqdm
 
 
@@ -100,10 +100,10 @@ def process_dataset(dataset_name: str, dataset_split: str, output_dir: Path, ima
 
     dataset = load_dataset(dataset_name, split=dataset_split)
     for instance in tqdm(dataset, desc="Generating eval scripts"):
-        if not instance['image_name']:
+        if not instance["image_name"]:
             continue
-        image_path = instance['image_name'] if 'image_name' in instance else instance['instance_id']
-        if not os.path.exists(f'{image_dir}/{image_path}.sif'):
+        image_path = instance["image_name"] if "image_name" in instance else instance["instance_id"]
+        if not os.path.exists(f"{image_dir}/{image_path}.sif"):
             continue
         instance_id = instance["instance_id"]
         test_spec = make_test_spec(SWEbenchInstance(**instance))
@@ -159,7 +159,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
-

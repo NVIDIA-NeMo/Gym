@@ -135,9 +135,7 @@ class TestApp:
         )
 
         verify_request_bracketed = verify_request.model_copy(
-            update={"response": response_bracketed, 
-                    "grading_mode": "strict"
-            }
+            update={"response": response_bracketed, "grading_mode": "strict"}
         )
         result3 = await server.verify(verify_request_bracketed)
         assert result3.reward == 1.0
@@ -175,7 +173,7 @@ class TestApp:
         )
         result4 = await server.verify(verify_request_lowercase)
         assert result4.reward == 1.0
-        
+
         # Strict: extra text is not allowed
         response_extra_text = NeMoGymResponse(
             id="resp_test5",
@@ -243,6 +241,3 @@ class TestApp:
         )
         result6 = await server.verify(verify_request_extra_text_lenient)
         assert result6.reward == 1.0
-
-
-

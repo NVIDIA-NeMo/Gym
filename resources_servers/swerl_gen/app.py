@@ -12,13 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any, Optional
-from asyncio import Semaphore, get_running_loop
 import base64
 import json
 import time
-from fastapi import FastAPI
+from asyncio import Semaphore, get_running_loop
+from typing import Any, Optional
+
 import ray
+from fastapi import FastAPI
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -27,15 +28,15 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-
-from resources_servers.swerl_gen.eval.singularity_utils import (
-    compute_score,
-)
 from resources_servers.swerl_gen.eval.process_patch import (
     extract_pred_patch,
     extract_pred_patch_relaxed_formatting,
     extract_repro_test,
 )
+from resources_servers.swerl_gen.eval.singularity_utils import (
+    compute_score,
+)
+
 
 class SWEGenResourcesServerConfig(BaseResourcesServerConfig):
     num_processes: int = 1
@@ -43,17 +44,21 @@ class SWEGenResourcesServerConfig(BaseResourcesServerConfig):
     debug: bool = False
     relaxed_formatting: bool = False
 
+
 class SWEGenRunRequest(BaseRunRequest):
-    instance: dict[str, Any] ## dictionary keys: instance_id, repo, setup_script, test_script, regression_script, PASS_TO_PASS, FAIL_TO_PASS, patch
+    instance: dict[
+        str, Any
+    ]  ## dictionary keys: instance_id, repo, setup_script, test_script, regression_script, PASS_TO_PASS, FAIL_TO_PASS, patch
     dataset_name: Optional[str] = None
     dataset_split: Optional[str] = None
-    metadata: dict[str, Any] = {} ## keys: relevant_file_contents, remove_repo_name, image
+    metadata: dict[str, Any] = {}  ## keys: relevant_file_contents, remove_repo_name, image
     partial_similarity: Optional[bool] = None
-    mode: str = "eval" ## eval or repro-gen
+    mode: str = "eval"  ## eval or repro-gen
 
 
 class SWEGenVerifyRequest(SWEGenRunRequest, BaseVerifyRequest):
     pass
+
 
 class SWEGenVerifyResponse(BaseVerifyResponse):
     verification_result: Optional[dict[str, Any]] = None
@@ -61,7 +66,6 @@ class SWEGenVerifyResponse(BaseVerifyResponse):
     model_patch: Optional[str] = None
     repro_test_info_base64: Optional[str] = None
     model_output: Optional[str] = None
-    
 
 
 def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
@@ -86,7 +90,7 @@ class SWEGenResourcesServer(SimpleResourcesServer):
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         return app
-    
+
     def model_post_init(self, context):
         self._semaphore: Semaphore = Semaphore(value=self.config.num_processes)
 
@@ -103,7 +107,7 @@ class SWEGenResourcesServer(SimpleResourcesServer):
         if body.mode == "repro-gen":
             try:
                 extracted_data = extract_repro_test(predict_str, body.instance["instance_id"])
-            except Exception as e:
+            except Exception:
                 extracted_data = None
             if extracted_data is None:
                 return SWEGenVerifyResponse(
@@ -123,11 +127,11 @@ class SWEGenResourcesServer(SimpleResourcesServer):
                     )
                 else:
                     extracted_data = extract_pred_patch(
-                    json.loads(body.metadata["relevant_file_contents"]),
-                    predict_str,
-                    body.metadata["remove_repo_name"],
-                )
-            except Exception as e:
+                        json.loads(body.metadata["relevant_file_contents"]),
+                        predict_str,
+                        body.metadata["remove_repo_name"],
+                    )
+            except Exception:
                 extracted_data = None
             if extracted_data is None:
                 return SWEGenVerifyResponse(
@@ -141,15 +145,22 @@ class SWEGenResourcesServer(SimpleResourcesServer):
             raise ValueError(f"Invalid mode: {body.mode}")
 
         extra_info = {
-            'instance_info': body.instance,
-            'image': body.metadata['image'],
+            "instance_info": body.instance,
+            "image": body.metadata["image"],
         }
         extra_info_base64 = base64.b64encode(json.dumps(extra_info).encode()).decode()
 
         async with self._semaphore:
             loop = get_running_loop()
             start_time = time.time()
-            task_args = (extra_info_base64, patch_str, repro_test_info_base64, body.mode, self.config.sandbox_timeout, self.config.debug)
+            task_args = (
+                extra_info_base64,
+                patch_str,
+                repro_test_info_base64,
+                body.mode,
+                self.config.sandbox_timeout,
+                self.config.debug,
+            )
             future = compute_score.remote(*task_args)
             reward, verification_result = await loop.run_in_executor(None, ray.get, future)
             verification_time = time.time() - start_time

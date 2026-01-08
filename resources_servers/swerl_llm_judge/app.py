@@ -49,9 +49,7 @@ class SWEJudgeVerifyResponse(BaseVerifyResponse):
     extracted_answer: Optional[str]
 
 
-LENIENT_SOLUTION_PATTERN = re.compile(
-    r"<solution>\s*(.*?)\s*</solution>", flags=re.DOTALL | re.IGNORECASE
-)
+LENIENT_SOLUTION_PATTERN = re.compile(r"<solution>\s*(.*?)\s*</solution>", flags=re.DOTALL | re.IGNORECASE)
 
 
 def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
@@ -71,10 +69,12 @@ def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
                 texts.append(content)
     return "\n".join(texts).strip()
 
+
 def _extract_options_and_expected(
     body: SWEJudgeRunRequest,
 ) -> tuple[Optional[list[dict[str, str]]], Optional[str]]:
-    return body.options, body.expected_answer  
+    return body.options, body.expected_answer
+
 
 def _get_allowed_letters_from_options(
     options: Optional[list[dict[str, str]]],
@@ -108,30 +108,27 @@ def _extract_llm_choice_from_solution_block_lenient(llm_output: str, allowed_let
         if ch.isalpha():
             left = solution_content[idx - 1] if idx > 0 else None
             right = solution_content[idx + 1] if idx < len(solution_content) - 1 else None
-            if (
-                (left is None or not left.isalpha())
-                and (right is None or not right.isalpha())
-            ):
+            if (left is None or not left.isalpha()) and (right is None or not right.isalpha()):
                 if ch.upper() not in allowed_letters:
                     return None
                 return ch.upper()
 
     return None
 
+
 def _extract_llm_choice_from_solution_block_strict(llm_output: str, allowed_letters: set[str]) -> Optional[str]:
-    """Only accept a (bracketed) single letter in the solution block.
-    """
+    """Only accept a (bracketed) single letter in the solution block."""
     patterns = [
-        (r"<solution>\s*\[?([A-Za-z])\]?\s*</solution>", re.MULTILINE),       
+        (r"<solution>\s*\[?([A-Za-z])\]?\s*</solution>", re.MULTILINE),
     ]
-    
+
     for pattern, flags in patterns:
         match = re.search(re.compile(pattern, flags), llm_output)
         if match:
             if match.group(1).upper() not in allowed_letters:
                 return None
             return match.group(1).upper()
-        
+
     return None
 
 
@@ -150,9 +147,9 @@ class SWEJudgeResourcesServer(SimpleResourcesServer):
         # Derive allowed letters from option keys
         allowed_letters = _get_allowed_letters_from_options(options)
         # Parse the model's choice from the <solution>...</solution> block.
-        if body.grading_mode == "lenient": ## get the first letter from the solution block
+        if body.grading_mode == "lenient":  ## get the first letter from the solution block
             pred_choice = _extract_llm_choice_from_solution_block_lenient(text, allowed_letters)
-        elif body.grading_mode == "strict": ## only one letter is allowed in the solution block
+        elif body.grading_mode == "strict":  ## only one letter is allowed in the solution block
             pred_choice = _extract_llm_choice_from_solution_block_strict(text, allowed_letters)
         else:
             raise ValueError(f"Invalid grading mode: {body.grading_mode}")
@@ -173,8 +170,6 @@ class SWEJudgeResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     SWEJudgeResourcesServer.run_webserver()
-    
-    
+
+
 ### data needs allowed letters field and grading mode field
-
-

@@ -18,6 +18,7 @@ from typing import Dict
 
 log = logging.getLogger(__name__)
 
+
 def _calculate_patch_gen_reward(verification_result: Dict, scale_factor: float) -> float:
     """Map patch-generation sandbox resolution to a scalar reward."""
     if not verification_result:
@@ -61,7 +62,6 @@ def _calculate_test_gen_reward(verification_result: Dict, scale_factor: float) -
     status = verification_result.get("status")
 
     if status == "done":
-        resolution = verification_result.get("resolution", "ERROR")
         return_codes_before_patch = verification_result.get("return_codes_before_patch", [])
         return_codes_after_patch = verification_result.get("return_codes_after_patch", [])
         if not return_codes_before_patch or not return_codes_after_patch:

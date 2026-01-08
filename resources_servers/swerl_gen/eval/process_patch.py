@@ -18,9 +18,8 @@ import json
 import re
 from typing import Dict, List, Optional, Tuple, TypedDict
 
-SEARCH_REPLACE_REGEX = (
-    r"```.*?\n### (.*)\s*<<<<<<< SEARCH\n([\s\S]*?)\n=======\n([\s\S]*?)\n>>>>>>> REPLACE\n*```"
-)
+
+SEARCH_REPLACE_REGEX = r"```.*?\n### (.*)\s*<<<<<<< SEARCH\n([\s\S]*?)\n=======\n([\s\S]*?)\n>>>>>>> REPLACE\n*```"
 # Regular expression pattern to match ```python\n{text}\n```
 PYTHON_BLOCK_PATTERN = r"```python\n(.*?)\n```"
 THINK_START = "<think>"
@@ -28,13 +27,15 @@ THINK_END = "</think>"
 ANSWER_START = "<solution>"
 ANSWER_END = "</solution>"
 
+
 class FormatError(Exception):
     """Raised when the search/replace format is invalid."""
 
 
 class FormatSolutionError(Exception):
     """Raised when the <solution>...</solution> block is missing or malformed."""
-    
+
+
 class ChangeSimilarity(TypedDict):
     path: str
     pred_change: str
@@ -59,7 +60,6 @@ index 0000000..e69de29
         patch_body.append(f"+{line}")
 
     return patch_header + "\n".join(patch_body) + "\n"
-
 
 
 def extract_python_blocks(text: str) -> list[str]:
@@ -100,6 +100,7 @@ def parse_search_replace(text: str) -> dict[str, list[tuple[str, str]]]:
             path_list.append(search_replace_pair)
     return path_search_replace_dict
 
+
 def parse_git_patch(patch_text: str) -> Dict[str, List[Tuple[str, str]]]:
     """
     Parse an oracle patch in diff format and convert it to search/replace format.
@@ -114,21 +115,21 @@ def parse_git_patch(patch_text: str) -> Dict[str, List[Tuple[str, str]]]:
     result = {}
 
     # Split the patch into file sections
-    file_sections = re.split(r'^diff --git', patch_text, flags=re.MULTILINE)
+    file_sections = re.split(r"^diff --git", patch_text, flags=re.MULTILINE)
 
     for section in file_sections:
         if not section.strip():
             continue
 
         # Extract file path from the +++ line
-        file_path_match = re.search(r'^\+\+\+ (?:b/)?(.+)$', section, re.MULTILINE)
+        file_path_match = re.search(r"^\+\+\+ (?:b/)?(.+)$", section, re.MULTILINE)
         if not file_path_match:
             continue
 
         file_path = file_path_match.group(1)
 
         # Find all hunks in this file - FIXED: Use a more robust pattern
-        hunk_pattern = r'^(@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@[^\n]*\n)((?:(?!^@@|^diff --git).*\n?)*)'
+        hunk_pattern = r"^(@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@[^\n]*\n)((?:(?!^@@|^diff --git).*\n?)*)"
         hunk_matches = re.findall(hunk_pattern, section, re.MULTILINE)
 
         hunks = []
@@ -142,14 +143,14 @@ def parse_git_patch(patch_text: str) -> Dict[str, List[Tuple[str, str]]]:
             old_start, old_count, new_start, new_count, hunk_content = hunk
 
             # Parse the hunk content into lines with their prefixes
-            lines = hunk_content.rstrip('\n').split('\n') if hunk_content.strip() else []
+            lines = hunk_content.rstrip("\n").split("\n") if hunk_content.strip() else []
 
             # Group consecutive changes together
             change_groups = []
             current_group = []
 
             for line in lines:
-                if line.startswith(('-', '+')):
+                if line.startswith(("-", "+")):
                     current_group.append(line)
                 else:
                     if current_group:
@@ -168,28 +169,28 @@ def parse_git_patch(patch_text: str) -> Dict[str, List[Tuple[str, str]]]:
 
             # Process each change group
             for group in change_groups:
-                if not any(line.startswith(('-', '+')) for line in group):
+                if not any(line.startswith(("-", "+")) for line in group):
                     continue  # Skip groups with only context
 
                 # Find the context before changes
                 context_before = []
                 change_start_idx = 0
                 for i, line in enumerate(group):
-                    if line.startswith(('-', '+')):
+                    if line.startswith(("-", "+")):
                         change_start_idx = i
                         break
                     # Remove prefix only if it's a space (context line prefix)
-                    context_before.append(line[1:] if line.startswith(' ') else line)
+                    context_before.append(line[1:] if line.startswith(" ") else line)
 
                 # Find the context after changes
                 context_after = []
                 change_end_idx = len(group)
                 for i in range(len(group) - 1, -1, -1):
-                    if group[i].startswith(('-', '+')):
+                    if group[i].startswith(("-", "+")):
                         change_end_idx = i + 1
                         break
                     # Remove prefix only if it's a space (context line prefix)
-                    context_after.insert(0, group[i][1:] if group[i].startswith(' ') else group[i])
+                    context_after.insert(0, group[i][1:] if group[i].startswith(" ") else group[i])
 
                 # Process the actual changes
                 deleted_lines = []
@@ -197,14 +198,14 @@ def parse_git_patch(patch_text: str) -> Dict[str, List[Tuple[str, str]]]:
 
                 for i in range(change_start_idx, change_end_idx):
                     line = group[i]
-                    if line.startswith('-'):
+                    if line.startswith("-"):
                         deleted_lines.append(line[1:])
-                    elif line.startswith('+'):
+                    elif line.startswith("+"):
                         added_lines.append(line[1:])
                     else:
                         # Context line in the middle of changes
                         # Remove prefix only if it's a space
-                        content = line[1:] if line.startswith(' ') else line
+                        content = line[1:] if line.startswith(" ") else line
                         deleted_lines.append(content)
                         added_lines.append(content)
 
@@ -214,8 +215,8 @@ def parse_git_patch(patch_text: str) -> Dict[str, List[Tuple[str, str]]]:
 
                 # Only create a search/replace pair if there are actual changes
                 if deleted_lines != added_lines:
-                    search_text = '\n'.join(search_content)
-                    replace_text = '\n'.join(replace_content)
+                    search_text = "\n".join(search_content)
+                    replace_text = "\n".join(replace_content)
                     search_replace_pairs.append((search_text, replace_text))
 
         if search_replace_pairs:
@@ -223,16 +224,18 @@ def parse_git_patch(patch_text: str) -> Dict[str, List[Tuple[str, str]]]:
 
     return result
 
+
 def get_search_replace_pairs(patch):
     search_replace_pairs = parse_git_patch(patch)
     search_replace_diff_list = []
     for file_path, pairs in search_replace_pairs.items():
         for search, replace in pairs:
-            search_replace_diff_list.append(f'```python\n### {file_path}\n')
-            search_replace_diff_list.append(f'<<<<<<< SEARCH\n{search}\n=======\n{replace}\n>>>>>>> REPLACE\n')
-            search_replace_diff_list.append(f'```\n')
-    search_replace_diff_str = '\n'.join(search_replace_diff_list)
+            search_replace_diff_list.append(f"```python\n### {file_path}\n")
+            search_replace_diff_list.append(f"<<<<<<< SEARCH\n{search}\n=======\n{replace}\n>>>>>>> REPLACE\n")
+            search_replace_diff_list.append("```\n")
+    search_replace_diff_str = "\n".join(search_replace_diff_list)
     return search_replace_pairs, search_replace_diff_str
+
 
 def apply_code_change(
     code_context: dict[str, str],
@@ -279,6 +282,7 @@ def apply_code_change(
         new_content_dict[path] = original_content[1:]
 
     return new_content_dict
+
 
 def generate_git_diff(
     code_context: dict[str, str],
@@ -389,7 +393,6 @@ def extract_pred_patch(
         text_output = text_output.split(THINK_END)[-1].strip()
     text_output = text_output.split(ANSWER_START)[1].split(ANSWER_END)[0].strip()
 
-    
     pred_search_replaces = parse_search_replace(text_output)
     pred_new_content = apply_code_change(code_context, pred_search_replaces)
     pred_patch, pred_patch_dict = generate_git_diff(code_context, pred_new_content, remove_repo_name=remove_repo_name)
@@ -421,8 +424,7 @@ def extract_pred_patch_relaxed_formatting(
     return {"model_patch": pred_patch, "model_patch_dict": pred_patch_dict}
 
 
-def extract_repro_test(text_output: str,
-                       instance_id: str) -> tuple[str, dict] | None:
+def extract_repro_test(text_output: str, instance_id: str) -> tuple[str, dict] | None:
     test_script_blocks = extract_python_blocks(text_output)
     if not test_script_blocks:
         return None
@@ -430,6 +432,6 @@ def extract_repro_test(text_output: str,
     reproduction_tests_dict = {"instance_id": instance_id, "test_patch": [processed_test_script[0]]}
     repro_test_info_base64 = base64.b64encode(json.dumps(reproduction_tests_dict).encode()).decode()
     return {
-            "repro_test_info_base64": repro_test_info_base64,
-            "reproduction_tests_dict": reproduction_tests_dict,
-        }
+        "repro_test_info_base64": repro_test_info_base64,
+        "reproduction_tests_dict": reproduction_tests_dict,
+    }

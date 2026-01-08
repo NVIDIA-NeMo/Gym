@@ -12,16 +12,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import os
 import json
+import os
 from typing import Any, Iterable, Optional
 
+from resources_servers.swerl_llm_judge.prompts import *
 from resources_servers.swerl_llm_judge.utils import (
-    extract_filenames,
     create_instance_obj,
+    extract_filenames,
 )
 
-from resources_servers.swerl_llm_judge.prompts import *
 
 def write_jsonl(rows: Iterable[dict], out_path: str) -> None:
     with open(out_path, "w", encoding="utf-8") as f:
@@ -63,21 +63,24 @@ def build_row(
             relevant_files = set()
             for patch in choices.values():
                 relevant_files.update(extract_filenames(patch))
-                
-            instance_obj = create_instance_obj(instance_id, dataset_name, dataset_split, repo_playground='./repo_playground')
-            code_context = {file: '\n'.join(instance_obj.python_files[file]['text']) for file in relevant_files}
-        prompt_list = [META_JUDGE_SOLUTION_PREMISE,
-                    "<issue>",
-                    problem_statement,
-                    "</issue>",
-                    "<relevant_files>",
-                    "\n".join(f"[start of {file}]\n{code}\n[end of {file}]" for file, code in code_context.items()),
-                    "</relevant_files>",
-                    "<choices>",
-                    "\n".join(f"{letter}: {patch}" for letter, patch in choices.items()),
-                    "</choices>",
-                    ]
-        prompt = '\n'.join(prompt_list)
+
+            instance_obj = create_instance_obj(
+                instance_id, dataset_name, dataset_split, repo_playground="./repo_playground"
+            )
+            code_context = {file: "\n".join(instance_obj.python_files[file]["text"]) for file in relevant_files}
+        prompt_list = [
+            META_JUDGE_SOLUTION_PREMISE,
+            "<issue>",
+            problem_statement,
+            "</issue>",
+            "<relevant_files>",
+            "\n".join(f"[start of {file}]\n{code}\n[end of {file}]" for file, code in code_context.items()),
+            "</relevant_files>",
+            "<choices>",
+            "\n".join(f"{letter}: {patch}" for letter, patch in choices.items()),
+            "</choices>",
+        ]
+        prompt = "\n".join(prompt_list)
 
     row: dict = {
         # Required by BaseRunRequest
@@ -107,15 +110,16 @@ if __name__ == "__main__":  # pragma: no cover
     # Minimal example demonstrating how to build and write a tiny dataset.
     cur_dir = os.path.dirname(os.path.abspath(__file__))
     os.makedirs(os.path.join(cur_dir, "data"), exist_ok=True)
-    
-    instance_id = 'astropy__astropy-12907'
-    dataset_name = 'princeton-nlp/SWE-bench_Verified'
-    dataset_split = 'test'
+
+    instance_id = "astropy__astropy-12907"
+    dataset_name = "princeton-nlp/SWE-bench_Verified"
+    dataset_split = "test"
     from datasets import load_dataset
+
     dataset = load_dataset(dataset_name, split=dataset_split)
-    example = dataset.filter(lambda x: x['instance_id'] == instance_id)[0]
-    problem_statement = example['problem_statement']
-    choices = {'A': example['patch'], 'B': example['test_patch']}
+    example = dataset.filter(lambda x: x["instance_id"] == instance_id)[0]
+    problem_statement = example["problem_statement"]
+    choices = {"A": example["patch"], "B": example["test_patch"]}
     rows = [
         build_row(
             problem_statement=problem_statement,
@@ -126,5 +130,5 @@ if __name__ == "__main__":  # pragma: no cover
             dataset_split=dataset_split,
         )
     ]
-    
+
     write_jsonl(rows, os.path.join(cur_dir, "data/swerl_llm_judge_example.jsonl"))

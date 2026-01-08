@@ -12,17 +12,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import ast
 import base64
 import json
 import logging
+import os
 import subprocess
+import sys
+import tempfile
 from typing import Dict, Optional, Tuple
 
 import ray
-import os
-import sys
-import ast
-import tempfile
+
+
 sys.set_int_max_str_digits(50000)
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -67,22 +69,16 @@ def _run_instance(
     repro_test_info_file = None
 
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".b64", dir=eval_dir, delete=False
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".b64", dir=eval_dir, delete=False) as f:
             f.write(instance_info_base64 or "")
             instance_info_file = f.name
 
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".b64", dir=eval_dir, delete=False
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".b64", dir=eval_dir, delete=False) as f:
             f.write(inference_results_base64 or "")
             inference_results_file = f.name
 
         if repro_test_info_base64 is not None:
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".b64", dir=eval_dir, delete=False
-            ) as f:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".b64", dir=eval_dir, delete=False) as f:
                 f.write(repro_test_info_base64 or "")
                 repro_test_info_file = f.name
 
@@ -144,7 +140,7 @@ def _run_instance(
             if errs:
                 combined_output += errs
             if outs:
-                combined_output += ("\n" + outs if combined_output else outs)
+                combined_output += "\n" + outs if combined_output else outs
             output_lines = combined_output.splitlines() if combined_output else []
             if debug:
                 print("output_lines", output_lines)
@@ -167,18 +163,14 @@ def _run_instance(
                     for line in reversed(output_lines):
                         line = line.strip()
                         if "[Return codes before patch]:" in line:
-                            match = (
-                                line.split("[Return codes before patch]:")[1].strip()
-                            )
+                            match = line.split("[Return codes before patch]:")[1].strip()
                             if match.endswith("]"):
                                 try:
                                     return_codes_before_patch = ast.literal_eval(match)
                                 except Exception:
                                     pass
                         elif "[Return codes after patch]:" in line:
-                            match = (
-                                line.split("[Return codes after patch]:")[1].strip()
-                            )
+                            match = line.split("[Return codes after patch]:")[1].strip()
                             if match.endswith("]"):
                                 try:
                                     return_codes_after_patch = ast.literal_eval(match)
@@ -204,8 +196,6 @@ def _run_instance(
         "return_codes_before_patch": return_codes_before_patch,
     }
     return verification_result
-            
-
 
 
 # Using SPREAD scheduling so that Ray assigns tasks to as many distinct nodes as possible.
@@ -228,6 +218,7 @@ def compute_score(
         debug=debug,
     )
 
+
 def calculate_execution_feedback_reward(
     extra_info_base64: str,
     patch_str: str,
@@ -248,7 +239,7 @@ def calculate_execution_feedback_reward(
     if missing_fields:
         log.warning("Missing required fields in extra_info: %s", missing_fields)
         return 0.0, None
-    
+
     instance_info = extra_info.get("instance_info")
     image = extra_info.get("image")
     instance_id = instance_info.get("instance_id")
@@ -256,13 +247,13 @@ def calculate_execution_feedback_reward(
         instance_info_base64 = base64.b64encode(json.dumps(instance_info).encode()).decode()
     else:
         instance_info_base64 = instance_info
-    
+
     inference_data = {
         "instance_id": instance_id,
         "model_patch": patch_str,
     }
     inference_results_base64 = base64.b64encode(json.dumps(inference_data).encode()).decode()
-    
+
     verification_result = _run_instance(
         instance_info_base64=instance_info_base64,
         inference_results_base64=inference_results_base64,
@@ -280,13 +271,5 @@ def calculate_execution_feedback_reward(
         reward = _calculate_patch_gen_reward(verification_result, scale_factor)
 
     if debug:
-        print(
-                "Verification completed for instance %s. Reward: %s",
-                instance_id,
-                reward
-            )
+        print("Verification completed for instance %s. Reward: %s", instance_id, reward)
     return reward, verification_result
-
-
-
-
