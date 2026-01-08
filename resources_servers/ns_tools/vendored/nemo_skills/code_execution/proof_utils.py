@@ -19,11 +19,21 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict
 
-# from .utils import clean_formal_generation
-# from .dataset.utils import get_lean4_header
+from .utils import clean_formal_generation
+# from .dataset.utils import get_lean4_header  # Not needed for ns_tools (lean4-specific)
 from ..utils import get_logger_name
 
 LOG = logging.getLogger(get_logger_name(__file__))
+
+
+# Fallback for get_lean4_header (not vendored from dataset.utils)
+def get_lean4_header() -> str:
+    """Minimal Lean4 header for proof compilation.
+    
+    Note: This is a simplified version. For full functionality,
+    vendor the complete get_lean4_header from nemo_skills.dataset.utils
+    """
+    return "import Mathlib\nimport Aesop\n\nset_option maxHeartbeats 0\n\nopen BigOperators Real Nat Topology Rat\n\n"
 
 
 @dataclass
