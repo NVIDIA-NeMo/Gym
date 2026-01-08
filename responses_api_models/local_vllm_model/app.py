@@ -134,7 +134,11 @@ class LocalVLLMModel(VLLMModel):
         self.config.api_key = "dummy_key"  # dummy key
 
         if self.config.debug:
-            print(f"Final vLLM serve arguments: {final_args}")
+            env_vars_to_print = env_vars.copy()
+            if "HF_TOKEN" in env_vars_to_print:
+                env_vars_to_print["HF_TOKEN"] = "****"
+            print(f"""Final vLLM serve arguments: {final_args}
+Environment variables: {env_vars_to_print}""")
 
         return final_args, env_vars
 
