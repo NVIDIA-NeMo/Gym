@@ -18,7 +18,6 @@ import sys
 from argparse import Namespace
 from os import environ
 from pathlib import Path
-from threading import Thread
 from typing import Any, Coroutine, Dict, List, Optional, Tuple, Union
 
 import ray
@@ -60,8 +59,6 @@ class LocalVLLMModelConfig(VLLMModelConfig):
 
 class LocalVLLMModel(VLLMModel):
     config: LocalVLLMModelConfig
-
-    _server_thread: Thread  # Set later on
 
     def model_post_init(self, context):
         print(
