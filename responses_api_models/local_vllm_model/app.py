@@ -201,8 +201,8 @@ class LocalVLLMModel(VLLMModel):
         runtime_env.RuntimeEnv = new_RuntimeEnv
 
     def start_vllm_server(self) -> None:
-        # TODO remove
-        print(f"{available_resources()=} {cluster_resources()=}")
+        print(f"""Currently available Ray cluster resources: {available_resources()}
+Total Ray cluster resources: {cluster_resources()}""")
 
         server_args, env_vars = self._configure_vllm_serve()
 
