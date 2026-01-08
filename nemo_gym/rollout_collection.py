@@ -14,14 +14,15 @@
 # limitations under the License.
 import asyncio
 import json
-from asyncio import Future, Semaphore
+from asyncio import Future, Lock, Semaphore
 from collections import Counter
 from contextlib import nullcontext
-from itertools import chain, repeat
+from itertools import count, product
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
-from tqdm.asyncio import tqdm
+from tqdm import tqdm
+from tqdm.asyncio import tqdm as tqdm_asyncio
 
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig
 from nemo_gym.server_utils import (
@@ -70,23 +71,35 @@ class RolloutCollectionConfig(BaseNeMoGymCLIConfig):
         default_factory=dict,
         description="Overrides for the responses_create_params e.g. temperature, max_output_tokens, etc.",
     )
+    enable_cache: Optional[bool] = Field(
+        default=None,
+        description="Enable caching for robust rollout collection.",
+    )
 
 
 class RolloutCollectionHelper(BaseModel):  # pragma: no cover
     async def run_from_config(self, config: RolloutCollectionConfig):
-        range_iterator = repeat(0)
+        range_iterator = count()
         if config.limit:
             range_iterator = range(config.limit)
             print(f"Limiting the number of rows to {config.limit}!")
 
         with open(config.input_jsonl_fpath) as input_dataset:
-            rows = [row for _, row in zip(range_iterator, map(json.loads, input_dataset))]
-        print(f"Found {len(rows)} rows!")
-
+            if config.num_repeats:
+                rows = [
+                    (row_idx, rep_idx, row)
+                    for (row_idx, row), rep_idx in product(
+                        zip(range_iterator, map(json.loads, input_dataset)), range(config.num_repeats)
+                    )
+                ]
+            else:
+                rows = [(row_idx, 0, row) for row_idx, row in zip(range_iterator, map(json.loads, input_dataset))]
         if config.num_repeats:
-            previous_length = len(rows)
-            rows = list(chain.from_iterable(repeat(row, config.num_repeats) for row in rows))
-            print(f"Repeating rows (in a pattern of abc to aabbcc) from {previous_length} to {len(rows)}!")
+            print(f"Found {len(rows) // config.num_repeats} rows!")
+            print(f"Including {config.num_repeats} repeats per original row, found {len(rows)} total repeated rows!")
+            print("(Repeating rows in an interleaved pattern from abc to aabbcc)")
+        else:
+            print(f"Found {len(rows)} rows!")
 
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
@@ -95,31 +108,87 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
 
         server_client = self.setup_server_client()
 
-        tqdm_miniters = 10
-        print(
-            f"The tqdm progress bar will only update every {tqdm_miniters} samples that finish to ensure that you are not being spammed."
-        )
+        if len(rows) > 10:
+            tqdm_miniters = 10
+            print(
+                f"The tqdm progress bar will only update every {tqdm_miniters} samples that finish to ensure that you are not being spammed."
+            )
+        else:
+            tqdm_miniters = 1
 
         if config.responses_create_params:
             print(f"Overriding responses_create_params fields with {config.responses_create_params}")
 
         metrics = Counter()
-        with open(config.output_jsonl_fpath, "a") as f:
+        cache_key_set = set()
 
-            async def _post_coroutine(row: dict) -> None:
-                row["responses_create_params"] = row["responses_create_params"] | config.responses_create_params
-                async with semaphore:
-                    response = await server_client.post(server_name=config.agent_name, url_path="/run", json=row)
+        if config.enable_cache:
+            print("Reading cached rollouts...", flush=True)
+            try:
+                with open(config.output_jsonl_fpath, "r") as f:
+                    for line in tqdm(f, total=len(rows)):
+                        result = json.loads(line)
+                        assert "_rollout_cache_key" in result
+                        metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
+                        result_cache_key = result["_rollout_cache_key"]
+                        row_idx = result_cache_key["row_idx"]
+                        rep_idx = result_cache_key["rep_idx"]
+                        cache_key_set.add((row_idx, rep_idx))
+            except OSError:
+                pass
+            print(f"Found {len(cache_key_set)} cached rollouts.", flush=True)
+
+        print("Starting rollout collection...", flush=True)
+
+        write_lock = Lock()
+        write_file = open(config.output_jsonl_fpath, "a")
+
+        def _filter_row(row: tuple) -> bool:
+            row_idx, rep_idx, row = row
+            if config.enable_cache:
+                if (row_idx, rep_idx) in cache_key_set:
+                    return False
+            return True
+
+        async def _post_coroutine(row: tuple) -> None:
+            row_idx, rep_idx, row = row
+            row["responses_create_params"] = row["responses_create_params"] | config.responses_create_params
+            async with semaphore:
+                response = await server_client.post(server_name=config.agent_name, url_path="/run", json=row)
+                if config.enable_cache:
+                    try:
+                        await raise_for_status(response)
+                    except Exception as e:
+                        print(f"HTTP error during rollout (row={row_idx} rep={rep_idx}): {e}", flush=True)
+                        return
+                else:
                     await raise_for_status(response)
-                    result = await response.json()
-                    f.write(json.dumps(result) + "\n")
-                    metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
+                result = await response.json()
+                result = row | result
+                if config.enable_cache:
+                    assert "_rollout_cache_key" not in result
+                    result["_rollout_cache_key"] = {
+                        "row_idx": row_idx,
+                        "rep_idx": rep_idx,
+                    }
+                async with write_lock:
+                    print(json.dumps(result), file=write_file, flush=True)
+                metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
 
-            await tqdm.gather(*map(_post_coroutine, rows), desc="Collecting rollouts", miniters=tqdm_miniters)
+        await tqdm_asyncio.gather(
+            *map(_post_coroutine, filter(_filter_row, rows)), desc="Collecting rollouts", miniters=tqdm_miniters
+        )
+
+        write_file.flush()
+        write_file.close()
+
+        print("Done rollout collection.", flush=True)
 
         avg_metrics = {k: v / len(rows) for k, v in metrics.items()}
         avg_metrics.setdefault("reward", 0.0)
-        print(json.dumps(avg_metrics, indent=4))
+
+        if avg_metrics:
+            print(f"Metrics (sample mean): {json.dumps(avg_metrics, indent=4)}", flush=True)
 
     def run_examples(
         self, examples: List[Dict], head_server_config: Optional[BaseServerConfig] = None
