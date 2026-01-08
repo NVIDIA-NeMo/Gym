@@ -41,7 +41,7 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.config_types import ResourcesServerRef
 from nemo_gym.server_utils import SESSION_ID_KEY
 
-from nemo_skills.mcp.tool_manager import ToolManager
+from .vendored.nemo_skills.mcp.tool_manager import ToolManager
 
 logger = logging.getLogger(__name__)
 

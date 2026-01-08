@@ -1,2 +1,6 @@
 -e nemo-gym[dev] @ ../../
-nemo-skills @ git+https://github.com/NVIDIA-NeMo/Skills.git
+# Vendored nemo_skills dependencies (no need to install nemo-skills)
+mcp
+fire
+latex2sympy2-extended
+math-verify[antlr4_9_3]==0.8.0
