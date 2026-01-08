@@ -108,8 +108,18 @@ class LocalVLLMModel(VLLMModel):
         # vLLM doesn't expose a config for this yet, so we need to pass via environment variable.
         env_vars["VLLM_DP_MASTER_IP"] = node_ip  # This is the master node.
 
-        # A single DP group may require multiple nodes
-        env_vars["VLLM_RAY_DP_PACK_STRATEGY"] = "span"
+        # If a single DP group requires multiple nodes, we need to set this `span` strategy
+        num_gpus_per_node = 8  # This may need to be exposed later on
+        total_gpus_per_dp_instance = server_args.get("tensor_parallel_size", 1) * server_args.get(
+            "pipeline_parallel_size", 1
+        )
+        if total_gpus_per_dp_instance > num_gpus_per_node:
+            env_vars["VLLM_RAY_DP_PACK_STRATEGY"] = "span"
+        else:
+            # Strict is the default. See https://docs.vllm.ai/en/stable/configuration/env_vars/
+            env_vars["VLLM_RAY_DP_PACK_STRATEGY"] = "strict"
+            assert num_gpus_per_node % total_gpus_per_dp_instance == 0, "tp * pp must divide 8 GPUs/node evenly!"
+            server_args["data_parallel_size_local"] = num_gpus_per_node // total_gpus_per_dp_instance
 
         cli_env_setup()
         parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible RESTful API server.")
