@@ -164,6 +164,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
                 else:
                     await raise_for_status(response)
                 result = await response.json()
+                result = row | result
                 if config.enable_cache:
                     assert "_rollout_cache_key" not in result
                     result["_rollout_cache_key"] = {
