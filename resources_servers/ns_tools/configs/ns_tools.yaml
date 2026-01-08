@@ -33,8 +33,9 @@ ns_tools:
           exec_timeout_s: 30
       
       # Sandbox configuration
-      sandbox_host: "127.0.0.1"
-      sandbox_port: "6000"
+      # Respects NEMO_SKILLS_SANDBOX_HOST/PORT env vars if set, else defaults
+      sandbox_host: ${oc.env:NEMO_SKILLS_SANDBOX_HOST,127.0.0.1}
+      sandbox_port: ${oc.env:NEMO_SKILLS_SANDBOX_PORT,6000}
       
       domain: agent
       verified: false
