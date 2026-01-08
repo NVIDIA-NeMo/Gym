@@ -45,6 +45,8 @@ class LocalVLLMModelConfig(VLLMModelConfig):
     hf_home: Optional[str] = None
     vllm_serve_kwargs: Dict[str, Any]
 
+    debug: bool = False
+
     # TODO eventually we may need to support these env vars
     # vllm_serve_env_vars: Dict[str, str]
 
@@ -131,6 +133,9 @@ class LocalVLLMModel(VLLMModel):
         self.config.base_url = [base_url]
         self.config.api_key = "dummy_key"  # dummy key
 
+        if self.config.debug:
+            print(f"Final vLLM serve arguments: {final_args}")
+
         return final_args, env_vars
 
     def _patch_uvicorn_server(self, vllm_server_coroutine: Coroutine) -> None:
@@ -201,7 +206,8 @@ class LocalVLLMModel(VLLMModel):
         runtime_env.RuntimeEnv = new_RuntimeEnv
 
     def start_vllm_server(self) -> None:
-        print(f"""Currently available Ray cluster resources: {available_resources()}
+        if self.config.debug:
+            print(f"""Currently available Ray cluster resources: {available_resources()}
 Total Ray cluster resources: {cluster_resources()}""")
 
         server_args, env_vars = self._configure_vllm_serve()
