@@ -1,0 +1,46 @@
+swerl_gen_resources_server:
+  resources_servers:
+    swerl_gen:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: Running sandboxed evaluation for SWE-style tasks (either patch generation or reproduction test generation)
+      value: Improve SWE capabilities useful for benchmarks like SWE-bench
+      env: singularity
+      num_processes: 256
+      sandbox_timeout: 900
+      debug: true
+      relaxed_formatting: true
+swerl_gen_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: swerl_gen_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/swerl_gen/data/train_swebenchverified_n32768.jsonl
+        num_repeats: 1
+        gitlab_identifier:
+          dataset_name: swerl_gen
+          version: 0.0.1
+          artifact_fpath: train_swebenchverified_n32768.jsonl
+        license: Apache 2.0
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/swerl_gen/data/validation_gym690_curriculum2.jsonl
+        num_repeats: 1
+        gitlab_identifier:
+          dataset_name: swerl_gen
+          version: 0.0.1
+          artifact_fpath: validation_gym690_curriculum2.jsonl
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/swerl_gen/data/example.jsonl
+        num_repeats: 1
