@@ -128,7 +128,7 @@ class LocalVLLMModel(VLLMModel):
         validate_parsed_serve_args(final_args)
 
         base_url = f"http://{node_ip}:{final_args.port}/v1"
-        self.config.base_url = base_url
+        self.config.base_url = [base_url]
         self.config.api_key = "dummy_key"  # dummy key
 
         return final_args, env_vars
