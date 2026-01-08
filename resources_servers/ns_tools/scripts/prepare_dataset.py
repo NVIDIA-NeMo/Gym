@@ -83,6 +83,11 @@ def parse_args():
         help="Verifier type to use (e.g., math_with_judge). If not set, uses default from config.",
     )
     parser.add_argument(
+        "--agent_ref",
+        default="ns_tools_simple_agent",
+        help="Agent reference name for routing (default: ns_tools_simple_agent)",
+    )
+    parser.add_argument(
         "--problem_field",
         default="problem",
         help="Field name in source data containing the problem text",
@@ -214,6 +219,7 @@ def process_sample(
     answer_field: str,
     id_field: str,
     verifier_type: str | None,
+    agent_ref: str | None,
 ) -> dict[str, Any]:
     """
     Process a single sample into the nemo-gym format.
@@ -240,6 +246,7 @@ def process_sample(
         "id": sample_id,
         "question": problem,
         "expected_answer": expected_answer,
+        "agent_ref": {"type": "responses_api_agents", "name": agent_ref},
         "responses_create_params": {
             "input": input_messages,
         },
@@ -327,6 +334,7 @@ async def main():
                 answer_field=args.answer_field,
                 id_field=args.id_field,
                 verifier_type=args.verifier_type,
+                agent_ref=args.agent_ref,
             )
             
             fout.write(json.dumps(output) + "\n")
