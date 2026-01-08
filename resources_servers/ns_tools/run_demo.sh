@@ -65,8 +65,30 @@ echo "      Server PID: $SERVER_PID"
 
 # --- Step 3: Wait for servers to be ready ---
 echo "[3/4] Waiting for servers to be ready..."
-sleep 15
-echo "      Done waiting."
+MAX_WAIT=120
+WAIT_INTERVAL=3
+ELAPSED=0
+
+while [ $ELAPSED -lt $MAX_WAIT ]; do
+    # Check if all servers are healthy using ng_status
+    STATUS_OUTPUT=$(ng_status 2>&1)
+    
+    if echo "$STATUS_OUTPUT" | grep -q "healthy, 0 unhealthy"; then
+        echo "      All servers ready!"
+        break
+    fi
+    
+    HEALTHY=$(echo "$STATUS_OUTPUT" | grep -oP '\d+(?= healthy)' || echo "0")
+    TOTAL=$(echo "$STATUS_OUTPUT" | grep -oP '\d+(?= servers found)' || echo "?")
+    echo "      $HEALTHY/$TOTAL servers ready, waiting..."
+    
+    sleep $WAIT_INTERVAL
+    ELAPSED=$((ELAPSED + WAIT_INTERVAL))
+done
+
+if [ $ELAPSED -ge $MAX_WAIT ]; then
+    echo "      WARNING: Timeout waiting for servers (${MAX_WAIT}s). Proceeding anyway..."
+fi
 
 # --- Step 4: Run rollouts ---
 echo "[4/4] Running rollouts..."
