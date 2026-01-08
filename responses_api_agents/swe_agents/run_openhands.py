@@ -371,8 +371,6 @@ class RunOpenHandsAgent:
             for container_formatter in container_formatters:
                 container_name = container_formatter.format(instance_id=instance_id_modified)
                 if os.path.exists(container_name):
-                    print(f"container found: {container_name}", flush=True)
-                    print(f"container formatter: {container_formatter}", flush=True)
                     return container_name
 
         replacements = ["_1776_", "_s_"]
@@ -447,9 +445,6 @@ class RunOpenHandsAgent:
         logs_dir = self.output_dir / "apptainer_logs"
         logs_dir.mkdir(exist_ok=True)
         log_file_path = logs_dir / f"{data_point['instance_id']}_{mode}.log"
-        print(
-            f"Starting execution of an apptainer command. Logs are available at {log_file_path}",
-        )
 
         # Fix localhost URLs not working sometimes
         container_commands = []
@@ -464,10 +459,6 @@ class RunOpenHandsAgent:
         if mode == "agent" and self.cfg.agent_framework == SupportedAgentFrameworks.openhands:
             # Mount the entire setup directory at both /openhands_setup and its original absolute path
             # This is needed because poetry and other tools have hardcoded absolute paths
-            print(
-                f"Mounting pre-built OpenHands from: {self.openhands_setup_dir}",
-                flush=True,
-            )
             mount_args.append(f"--mount type=bind,src={self.openhands_setup_dir},dst=/openhands_setup")
             mount_args.append(f"--mount type=bind,src={self.openhands_setup_dir},dst={self.openhands_setup_dir}")
             # Mount only the venv and miniforge as read-only to prevent mutation while keeping the rest writable
@@ -484,10 +475,6 @@ class RunOpenHandsAgent:
         if mode == "eval" and data_point["dataset_name"] != "nv-internal-1":
             # Mount the entire setup directory at both /swebench_setup and its original absolute path
             # This is needed because uv venv has hardcoded absolute paths
-            print(
-                f"Mounting pre-built SWE-bench from: {self.swebench_setup_dir}",
-                flush=True,
-            )
             mount_args.append(f"--mount type=bind,src={self.swebench_setup_dir},dst=/swebench_setup")
             mount_args.append(f"--mount type=bind,src={self.swebench_setup_dir},dst={self.swebench_setup_dir}")
             mount_args.append(f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl")
@@ -504,7 +491,6 @@ class RunOpenHandsAgent:
         if mode == "eval" and "R2E-Gym" in data_point["dataset_name"]:
             # Mount the entire setup directory at both /r2egym_setup and its original absolute path
             # This is needed because uv venv has hardcoded absolute paths in its wrappers
-            print(f"Mounting R2E-Gym setup directory from: {self.r2e_gym_setup_dir}", flush=True)
             mount_args.append(f"--mount type=bind,src={self.r2e_gym_setup_dir},dst=/r2egym_setup")
             mount_args.append(f"--mount type=bind,src={self.r2e_gym_setup_dir},dst={self.r2e_gym_setup_dir}")
             mount_args.append(f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl")
@@ -527,7 +513,7 @@ class RunOpenHandsAgent:
 
         # Launch Apptainer container and execute the command
         apptainer_cmd = (
-            f"apptainer exec --writable-tmpfs --no-mount home,tmp,bind-paths "
+            f"apptainer exec --writable-tmpfs --cleanenv --no-mount home,tmp,bind-paths "
             f"{mount_str} "
             f" {container_name} bash -c {shlex.quote(combined_command)}"
         )

@@ -52,6 +52,7 @@ from responses_api_agents.swe_agents.utils import (
     setup_swebench_environment,
 )
 
+
 @ray.remote(
     scheduling_strategy="SPREAD",
     runtime_env={
@@ -184,6 +185,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         model_endpoint = get_model_endpoint(self.config.model_server.name)
 
         # Run SWE-bench evaluation
+        instance_dir = (
+            f"{problem_info.get('instance_id', 'unknown')}_{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
+        )
         try:
             params = {
                 "problem_info": problem_info,
@@ -201,7 +205,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "swebench_setup_dir": self.config.swebench_setup_dir,
                 "r2e_gym_setup_dir": self.config.r2e_gym_setup_dir,
                 "dataset_path": self.config.dataset_path,
+                "instance_dir": instance_dir,
             }
+
             future = runner_ray_remote.remote(run_swebench_evaluation, params)
             result = await future
 

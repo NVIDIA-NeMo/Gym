@@ -336,13 +336,6 @@ def get_trajectory_and_tools(
 
     if agent_framework == "openhands":
         trajectory_data, tools = get_openhands_trajectory_from_completions(trajectories_dir, instance_id)
-        if trajectory_data:
-            print(
-                f"Loaded OpenHands trajectory from llm_completions ({len(trajectory_data)} messages)",
-                flush=True,
-            )
-        else:
-            print(f"No trajectory files found in {trajectories_dir}", flush=True)
 
     elif agent_framework == "swe_agent":
         # For SWE-agent, look for .traj files
@@ -562,11 +555,6 @@ def get_openhands_trajectory_from_completions(
 
         tools = data.get("kwargs", {}).get("tools", [])
 
-        print(
-            f"Loaded {len(messages)} messages from last completion file: {last_file}",
-            flush=True,
-        )
-
     except Exception as e:
         print(f"Failed to read completion file {last_file}: {e}", flush=True)
         return [], []
@@ -644,11 +632,11 @@ async def run_swebench_evaluation(
     swebench_setup_dir: Optional[Path] = None,
     r2e_gym_setup_dir: Optional[Path] = None,
     dataset_path: Optional[str] = None,
+    instance_dir: Optional[str] = None,
 ) -> Dict:
     # Create persistent directory for I/O and logs in local workspace
     workspace_root = Path(os.path.dirname(os.path.abspath(__file__)))
     instance_id = problem_info.get("instance_id", "unknown")
-    instance_dir = f"{instance_id}_{int(time.time() * 1000)}_{uuid.uuid4()}"
     persistent_dir = workspace_root / f"swebench_results_{run_session_id}" / instance_dir
     persistent_dir.mkdir(parents=True, exist_ok=True)
     output_file = persistent_dir / "output.jsonl"
@@ -712,11 +700,9 @@ async def run_swebench_evaluation(
         agent_tools_file if agent_framework == "swe_agent" else None,
     )
 
-    # Add trajectory and tools to result if found
-    if trajectory_data:
-        result["trajectory"] = trajectory_data
-    if tools:
-        result["tools"] = tools
+
+    result["tools"] = tools
+    result["trajectory"] = trajectory_data
 
     return result
 
