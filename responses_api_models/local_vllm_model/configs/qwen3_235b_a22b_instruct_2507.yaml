@@ -3,6 +3,9 @@ qwen3_235b_a22b_instruct_2507_model_server:
     local_vllm_model:
       entrypoint: app.py
       model: Qwen/Qwen3-235B-A22B-Instruct-2507
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      debug: false
 
       # For example, if your model is downloaded at ~/.cache/huggingface/hub/models--Qwen--Qwen3-235B-A22B-Instruct-2507, your hf_home here would be `~/.cache/huggingface`
       hf_home: null
@@ -15,6 +18,3 @@ qwen3_235b_a22b_instruct_2507_model_server:
         gpu_memory_utilization: 0.9
         enable_auto_tool_choice: true
         tool_call_parser: hermes
-
-      return_token_id_information: false
-      uses_reasoning_parser: true
