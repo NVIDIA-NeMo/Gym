@@ -99,10 +99,10 @@ class PythonTool(MCPClientTool):
         # Defaults for stdio Python MCP using explicit client class
         self.apply_config_updates(
             {
-                "client": "nemo_skills.mcp.clients.MCPStdioClient",
+                "client": "vendored.nemo_skills.mcp.clients.MCPStdioClient",
                 "client_params": {
                     "command": "python",
-                    "args": ["-m", "nemo_skills.mcp.servers.python_tool"],
+                    "args": ["-m", "vendored.nemo_skills.mcp.servers.python_tool"],
                 },
                 # hide args from schemas and sanitize at runtime
                 "hide_args": {"stateful_python_code_exec": ["session_id", "timeout"]},
