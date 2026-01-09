@@ -134,9 +134,6 @@ class LocalVLLMModel(VLLMModel):
             "Ray backend only works with data parallel size > 1!"
         )
 
-        # Ray address needs to be set here in case vLLM decides to start its own cluster down the line for whatever reason.
-        # env_vars["RAY_ADDRESS"] = get_global_config_dict()[RAY_HEAD_NODE_ADDRESS_KEY_NAME]
-
         cli_env_setup()
         parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible RESTful API server.")
         parser = make_arg_parser(parser)
