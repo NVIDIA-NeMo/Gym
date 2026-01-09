@@ -124,8 +124,9 @@ class LocalVLLMModel(VLLMModel):
                 server_args["data_parallel_size_local"] = num_gpus_per_node // total_gpus_per_dp_instance
 
         # Ray backend only works if dp_size > 1
-        if server_args.get("data_parallel_size", 1) > 1:
-            server_args["data_parallel_backend"] = "ray"
+        assert server_args.get("data_parallel_size") is None or server_args.get("data_parallel_size") > 1, (
+            "Ray backend only works with data parallel size > 1!"
+        )
 
         # Ray address needs to be set here in case vLLM decides to start its own cluster down the line for whatever reason.
         ray_context = ray.get_runtime_context()
