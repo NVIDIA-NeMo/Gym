@@ -74,6 +74,8 @@ class GlobalConfigDictParserConfig(BaseModel):
     skip_load_from_cli: bool = False
     skip_load_from_dotenv: bool = False
 
+    hide_secrets: bool = False
+
     NO_MODEL_GLOBAL_CONFIG_DICT: ClassVar[DictConfig] = DictConfig(
         {
             POLICY_BASE_URL_KEY_NAME: "",
@@ -193,6 +195,12 @@ class GlobalConfigDictParser(BaseModel):
         dotenv_extra_config = DictConfig({})
         if dotenv_path.exists() and not parse_config.skip_load_from_dotenv:
             dotenv_extra_config = OmegaConf.load(dotenv_path)
+
+            if parse_config.hide_secrets:
+                with open_dict(dotenv_extra_config):
+                    for k in list(dotenv_extra_config.keys()):
+                        if "token" in k or "key" in k:
+                            dotenv_extra_config[k] = "****"
 
         merged_config_for_config_paths = OmegaConf.merge(dotenv_extra_config, global_config_dict)
         ta = TypeAdapter(List[str])
