@@ -59,6 +59,7 @@ from nemo_gym.config_types import (
 from nemo_gym.global_config import (
     HEAD_SERVER_KEY_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
+    RAY_HEAD_NODE_ADDRESS_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
@@ -350,14 +351,14 @@ def initialize_ray() -> None:
         return
 
     global_config_dict = get_global_config_dict()
-    ray_head_node_address = global_config_dict.get("ray_head_node_address")
+    ray_head_node_address = global_config_dict.get(RAY_HEAD_NODE_ADDRESS_KEY_NAME)
     ray_init_kwargs = dict(ignore_reinit_error=True)
 
     if ray_head_node_address:
         print(f"Connecting to Ray cluster at specified address: {ray_head_node_address}")
         ray_init_kwargs["address"] = ray_head_node_address
     else:
-        print("Starting Ray cluster...")
+        print("NeMo Gym is starting a new Ray cluster...")
 
     ray.init(**ray_init_kwargs)
 
