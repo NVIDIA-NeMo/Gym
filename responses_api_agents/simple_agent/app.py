@@ -44,6 +44,7 @@ class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
     max_steps: int = None
     count_tool_calls: bool = False  # count tool calls instead of model calls toward steps
+    use_done_flag: bool = False  # stop when resource server returns {"done": true}
 
 
 class SimpleAgentRunRequest(BaseRunRequest):
@@ -103,6 +104,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             output = model_response.output
             new_outputs.extend(output)
 
+            if model_response.incomplete_details and model_response.incomplete_details.reason == "max_output_tokens":
+                break
+
             all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
             all_output_messages: List[NeMoGymResponseOutputMessage] = [
                 o for o in output if o.type == "message" and o.role == "assistant"
@@ -120,12 +124,13 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 resources_server_cookies = api_response.cookies
 
                 raw_output = (await api_response.content.read()).decode()
-                try:
-                    parsed_output = json.loads(raw_output)
-                    if isinstance(parsed_output, dict):
-                        done_flag = done_flag or bool(parsed_output.get("done"))
-                except json.JSONDecodeError:
-                    pass
+                if self.config.use_done_flag:
+                    try:
+                        parsed_output = json.loads(raw_output)
+                        if isinstance(parsed_output, dict):
+                            done_flag = done_flag or bool(parsed_output.get("done"))
+                    except json.JSONDecodeError:
+                        pass
 
                 tool_response = NeMoGymFunctionCallOutput(
                     type="function_call_output",
@@ -134,15 +139,15 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 )
                 new_outputs.append(tool_response)
 
+            if not all_fn_calls and all_output_messages:
+                break
+
             # Check if max steps is not None and if we have exhausted it.
             step_count = tool_call_count if self.config.count_tool_calls else step
             if self.config.max_steps and step_count >= self.config.max_steps:
                 break
 
-            if done_flag:
-                break
-
-            if not all_fn_calls and all_output_messages:
+            if self.config.use_done_flag and done_flag:
                 break
 
         # Propogate any extra cookies necessary for downstream verification
