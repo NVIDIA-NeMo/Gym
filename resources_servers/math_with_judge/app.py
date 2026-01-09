@@ -156,6 +156,8 @@ Example output: "My final verdict is different [[A!=B]]"."""
         if not self.config.should_use_judge or library_reward > 0.5:
             return library_reward, extracted_answer, library_reward, None
 
+        # TODO remove
+        print(f"HIT JUDGE EVALUATION WITH CONFIG: {self.config}")
         judge_reward, judge_evaluations = await self._verify_answer_with_judge(
             question, expected_answer, generated_answer
         )
