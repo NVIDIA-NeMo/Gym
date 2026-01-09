@@ -1,0 +1,5 @@
+{"nl":"display all the regular files in the current folder that are exactly 10KB","bash":"find . -type f -size 10k"}
+{"nl":"find all files  that names are 'apt'","bash":"find  \/ -name \"apt\""}
+{"nl":"Replaces any occurences of '*favicon.ico*' in any subfolder with file '\/root\/favicon.ico'.","bash":"find . | grep favicon\\.ico | xargs -n 1 cp -f \/root\/favicon.ico"}
+{"nl":"Print the grand total disk usage of all files listed in \"files.txt\"","bash":"cat files.txt | xargs du -c | tail -1"}
+{"nl":"Split \"t.txt\" into files with at most 30000000 lines each and use a prefix \"t\" and numeric suffixes of length 2","bash":"split --lines=30000000 --numeric-suffixes --suffix-length=2 t.txt t"}
