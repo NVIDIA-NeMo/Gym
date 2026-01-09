@@ -58,7 +58,7 @@ class _VLLMChatCompletions(AsyncCompletions):
                 resp.raise_for_status()
                 response_dict = await resp.json()
 
-        # Extract token IDs from vllm_model format 
+        # Extract token IDs from vllm_model
         choice_dict = response_dict["choices"][0]
         message_dict = choice_dict.get("message", {})
         prompt_token_ids = message_dict.pop("prompt_token_ids", [])
@@ -126,6 +126,16 @@ class VerifiersAgentRunRequest(BaseRunRequest):
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming = Field(
         default_factory=lambda: NeMoGymResponseCreateParamsNonStreaming(input=[])
     )
+    answer: str = Field(default="", description="Expected answer")
+    task: str = Field(default="default", description="Task type")
+    example_id: int | str = Field(default=0, description="Example ID")
+    info: dict = Field(default_factory=dict, description="Extra info for scoring (e.g., ifeval constraints)")
+
+
+_ENVS_CACHE: dict[str, vf.Environment] = {}
+_ENV_IDS_CACHE: dict[str, str] = {}
+_DATASET_ROWS_CACHE: dict[str, list[dict]] = {}
+_OPENAI_CLIENT_CACHE: dict[str, "VLLMOpenAIClient"] = {}
 
 
 class VerifiersAgent(SimpleResponsesAPIAgent):
@@ -133,30 +143,13 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     config: VerifiersAgentConfig
 
-    _envs: dict[str, vf.Environment] = {}
-    _env_ids: dict[str, str] = {}
-    _dataset_rows_cache: dict[str, list[dict]] = {}
-    _openai_client: VLLMOpenAIClient | None = None
-
     async def _ensure_env_loaded(self, vf_env_id: str) -> tuple[vf.Environment, str, list[dict]]:
-        if vf_env_id in self._envs:
-            return self._envs[vf_env_id], self._env_ids[vf_env_id], self._dataset_rows_cache[vf_env_id]
+        if vf_env_id in _ENVS_CACHE:
+            return _ENVS_CACHE[vf_env_id], _ENV_IDS_CACHE[vf_env_id], _DATASET_ROWS_CACHE[vf_env_id]
 
-        response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/seed_session",
-            json={
-                "vf_env_id": vf_env_id,
-                "vf_env_args": self.config.vf_env_args,
-                "dataset_n": self.config.dataset_n,
-                "dataset_seed": self.config.dataset_seed,
-            },
-        )
-        response.raise_for_status()
-        seed_response = VerifiersSeedSessionResponse.model_validate(await response.json())
-
-        env_id = seed_response.env_id
-        logger.info(f"Seeded verifiers environment: {seed_response.vf_env_id} with {seed_response.dataset_length} examples")
+        import uuid
+        env_id = f"{vf_env_id}-{uuid.uuid4().hex[:8]}"
+        logger.info(f"Loading verifiers environment: {vf_env_id}")
 
         vf_env = vf.load_environment(vf_env_id, **self.config.vf_env_args)
 
@@ -189,14 +182,15 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             for i in range(len(dataset))
         ]
 
-        self._envs[vf_env_id] = vf_env
-        self._env_ids[vf_env_id] = env_id
-        self._dataset_rows_cache[vf_env_id] = dataset_rows
+        _ENVS_CACHE[vf_env_id] = vf_env
+        _ENV_IDS_CACHE[vf_env_id] = env_id
+        _DATASET_ROWS_CACHE[vf_env_id] = dataset_rows
 
         return vf_env, env_id, dataset_rows
 
     def _get_openai_client(self) -> VLLMOpenAIClient:
-        if self._openai_client is None:
+        cache_key = self.config.model_server.name
+        if cache_key not in _OPENAI_CLIENT_CACHE:
             from nemo_gym.global_config import get_first_server_config_dict
 
             server_config_dict = get_first_server_config_dict(
@@ -208,10 +202,10 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             if not model_server_url.endswith("/v1"):
                 model_server_url = model_server_url.rstrip("/") + "/v1"
 
-            self._openai_client = VLLMOpenAIClient(base_url=model_server_url)
+            _OPENAI_CLIENT_CACHE[cache_key] = VLLMOpenAIClient(base_url=model_server_url)
             logger.info(f"Created VLLMOpenAIClient pointing to: {model_server_url}")
 
-        return self._openai_client
+        return _OPENAI_CLIENT_CACHE[cache_key]
 
     def _convert_trajectory_to_output(self, state: dict) -> list:
         from nemo_gym.openai_utils import (
@@ -257,19 +251,24 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         return output
 
     async def responses(self, req: VerifiersAgentRunRequest) -> VerifiersNeMoGymResponse:
-        # Use env_id from request if provided, else fall back to config
         vf_env_id = req.vf_env_id or self.config.vf_env_id
-        vf_env, env_id, dataset_rows = await self._ensure_env_loaded(vf_env_id)
+        vf_env, env_id, _ = await self._ensure_env_loaded(vf_env_id)
 
         task_idx = req.task_idx
-        row = dataset_rows[task_idx]
+
+        prompt_messages = []
+        for item in req.responses_create_params.input or []:
+            if hasattr(item, 'role') and hasattr(item, 'content'):
+                prompt_messages.append({"role": item.role, "content": item.content})
+            elif isinstance(item, dict):
+                prompt_messages.append({"role": item.get("role", "user"), "content": item.get("content", "")})
 
         rollout_input = vf.RolloutInput(
-            prompt=row["prompt"],
-            answer=row.get("answer", ""),
-            task=row["task"],
-            info=row.get("info", {}),
-            example_id=row["example_id"],
+            prompt=prompt_messages,
+            answer=req.answer,
+            task=req.task,
+            info=req.info,
+            example_id=req.example_id,
         )
 
         client = self._get_openai_client()
