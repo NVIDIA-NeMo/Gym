@@ -1,0 +1,25 @@
+reasoning_gym:
+  resources_servers:
+    reasoning_gym:
+      entrypoint: app.py
+      domain: knowledge
+      verified: true
+reasoning_gym_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: reasoning_gym
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/reasoning_gym/data/train_knights_knaves.jsonl
+        gitlab_identifier:
+          dataset_name: knights_knaves_reasoning_gym
+          version: 1.0.0
+          artifact_fpath: train_knights_knaves.jsonl
+        license: Apache 2.0

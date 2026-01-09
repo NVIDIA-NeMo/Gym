@@ -1,10 +1,11 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,7 +16,7 @@ from collections import defaultdict
 from os import getenv
 from pathlib import Path
 from platform import python_version
-from socket import socket
+from socket import gethostbyname, gethostname, socket
 from typing import ClassVar, List, Optional, Tuple, Type
 
 import hydra
@@ -44,6 +45,8 @@ HEAD_SERVER_KEY_NAME = "head_server"
 DISALLOWED_PORTS_KEY_NAME = "disallowed_ports"
 HEAD_SERVER_DEPS_KEY_NAME = "head_server_deps"
 PYTHON_VERSION_KEY_NAME = "python_version"
+USE_ABSOLUTE_IP = "use_absolute_ip"
+UV_PIP_SET_PYTHON_KEY_NAME = "uv_pip_set_python"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -52,6 +55,8 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     DISALLOWED_PORTS_KEY_NAME,
     HEAD_SERVER_DEPS_KEY_NAME,
     PYTHON_VERSION_KEY_NAME,
+    USE_ABSOLUTE_IP,
+    UV_PIP_SET_PYTHON_KEY_NAME,
 ]
 
 POLICY_BASE_URL_KEY_NAME = "policy_base_url"
@@ -229,8 +234,12 @@ class GlobalConfigDictParser(BaseModel):
 
         server_instance_configs = self.filter_for_server_instance_configs(global_config_dict)
 
-        # Do one pass through all the configs validate and populate various configs for our servers.
-        default_host = global_config_dict.get(DEFAULT_HOST_KEY_NAME) or "127.0.0.1"
+        use_absolute_ip = global_config_dict.get(USE_ABSOLUTE_IP, False)
+        if use_absolute_ip:
+            default_host = gethostbyname(gethostname())
+        else:
+            # Do one pass through all the configs validate and populate various configs for our servers.
+            default_host = global_config_dict.get(DEFAULT_HOST_KEY_NAME) or "127.0.0.1"
 
         head_server_config = global_config_dict.get(HEAD_SERVER_KEY_NAME, {})
         head_server_port = head_server_config.get("port", DEFAULT_HEAD_SERVER_PORT)
@@ -254,7 +263,8 @@ class GlobalConfigDictParser(BaseModel):
             # Constrain sensitive package versions
             global_config_dict[HEAD_SERVER_DEPS_KEY_NAME] = [
                 # The ray version is very sensitive. The children ray versions must exactly match those of the parent ray.
-                f"ray=={ray_version}",
+                # The ray extra [default] should also exactly match the extra in the top-level Gym pyproject.toml.
+                f"ray[default]=={ray_version}",
                 # OpenAI version is also sensitive since it changes so often and may introduce subtle incompatibilities.
                 f"openai=={openai_version}",
             ]

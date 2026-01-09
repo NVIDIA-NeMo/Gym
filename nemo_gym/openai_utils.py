@@ -1,10 +1,11 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -77,7 +78,13 @@ from openai.types.shared_params import FunctionDefinition
 from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import TypedDict
 
-from nemo_gym.server_utils import MAX_NUM_TRIES, ClientResponse, raise_for_status, request
+from nemo_gym.server_utils import (
+    _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG,
+    MAX_NUM_TRIES,
+    ClientResponse,
+    raise_for_status,
+    request,
+)
 
 
 ########################################
@@ -465,7 +472,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         response.raise_for_status()
 
     async def _raise_for_status(self, response: ClientResponse, request_kwargs: Dict[str, Any]) -> None:
-        if not response.ok:
+        if not response.ok and _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
             print(f"Request kwargs: {json.dumps(request_kwargs)}")
 
         await raise_for_status(response)
