@@ -207,6 +207,8 @@ Environment variables: {env_vars_to_print}""")
         def new_RuntimeEnv(*args, **kwargs):
             kwargs = kwargs or dict()
             kwargs["py_executable"] = sys.executable
+            if self.config.debug:
+                print(f"Patched RuntimeEnv py_executable with {sys.executable}")
 
             # Necessary for downstream vLLM ray actor spinup otherwise we get CUDA device ordinal out of range errors.
             env_vars = kwargs.get("env_vars") or dict()
