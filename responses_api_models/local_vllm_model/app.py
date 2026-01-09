@@ -47,7 +47,7 @@ class LocalVLLMModelConfig(VLLMModelConfig):
 
     debug: bool = False
 
-    # TODO eventually we may need to support these env vars
+    # Eventually we may need to support these env vars
     # vllm_serve_env_vars: Dict[str, str]
 
     def model_post_init(self, context):
@@ -235,11 +235,6 @@ Total Ray cluster resources: {cluster_resources()}""")
         signal.signal = lambda *args, **kwargs: None
 
         self._patch_vllm_ray_runtime_env()
-
-        # TODO remove
-        import subprocess
-
-        subprocess.run("nvidia-smi", shell=True, check=False)
 
         vllm_server_coroutine = run_server(server_args)
 
