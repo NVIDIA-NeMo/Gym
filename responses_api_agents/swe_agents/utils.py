@@ -336,6 +336,13 @@ def get_trajectory_and_tools(
 
     if agent_framework == "openhands":
         trajectory_data, tools = get_openhands_trajectory_from_completions(trajectories_dir, instance_id)
+        # if trajectory_data:
+        #     print(
+        #         f"Loaded OpenHands trajectory from llm_completions ({len(trajectory_data)} messages)",
+        #         flush=True,
+        #     )
+        # else:
+        #     print(f"No trajectory files found in {trajectories_dir}", flush=True)
 
     elif agent_framework == "swe_agent":
         # For SWE-agent, look for .traj files
@@ -555,6 +562,11 @@ def get_openhands_trajectory_from_completions(
 
         tools = data.get("kwargs", {}).get("tools", [])
 
+        # print(
+        #     f"Loaded {len(messages)} messages from last completion file: {last_file}",
+        #     flush=True,
+        # )
+
     except Exception as e:
         print(f"Failed to read completion file {last_file}: {e}", flush=True)
         return [], []
@@ -700,6 +712,7 @@ async def run_swebench_evaluation(
         agent_tools_file if agent_framework == "swe_agent" else None,
     )
 
+    # tools = convert_tools_to_function_format(tools) if tools else []
 
     result["tools"] = tools
     result["trajectory"] = trajectory_data

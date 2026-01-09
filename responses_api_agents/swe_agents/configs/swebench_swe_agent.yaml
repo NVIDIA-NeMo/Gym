@@ -57,4 +57,3 @@ swe_agents:
         - name: example
           type: example
           jsonl_fpath: responses_api_agents/swe_agents/data/example.jsonl
-  
