@@ -32,16 +32,6 @@ python resources_servers/verifiers/scripts/create_dataset.py \
     --output resources_servers/verifiers/data/reverse_text_train.jsonl
 ```
 
-**With custom environment args:**
-```bash
-python resources_servers/verifiers/scripts/create_dataset.py \
-    --env-id math-python \
-    --env-args '{"difficulty": "easy"}' \
-    --size 500 \
-    --seed 42 \
-    --output resources_servers/verifiers/data/math_train.jsonl
-```
-
 ## Rollout Collection
 
 ```bash
