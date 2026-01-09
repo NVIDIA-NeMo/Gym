@@ -178,6 +178,22 @@ class GlobalConfigDictParser(BaseModel):
 
         return disallowed_ports
 
+    def _recursively_hide_secrets(self, dict_config: DictConfig) -> None:
+        with open_dict(dict_config):
+            self._recursively_hide_secrets_helper(dict_config)
+
+    def _recursively_hide_secrets_helper(self, dict_config: DictConfig) -> None:
+        for k, v in list(dict_config.items()):
+            if isinstance(v, (DictConfig, dict)):
+                self._recursively_hide_secrets_helper(v)
+            elif isinstance(v, list):
+                for inner_v in v:
+                    if isinstance(v, (DictConfig, dict)):
+                        self._recursively_hide_secrets_helper(inner_v)
+            else:
+                if "token" in k or "key" in k:
+                    dict_config[k] = "****"
+
     def parse(self, parse_config: Optional[GlobalConfigDictParserConfig] = None) -> DictConfig:
         if parse_config is None:
             parse_config = GlobalConfigDictParserConfig()
@@ -195,12 +211,6 @@ class GlobalConfigDictParser(BaseModel):
         dotenv_extra_config = DictConfig({})
         if dotenv_path.exists() and not parse_config.skip_load_from_dotenv:
             dotenv_extra_config = OmegaConf.load(dotenv_path)
-
-            if parse_config.hide_secrets:
-                with open_dict(dotenv_extra_config):
-                    for k in list(dotenv_extra_config.keys()):
-                        if "token" in k or "key" in k:
-                            dotenv_extra_config[k] = "****"
 
         merged_config_for_config_paths = OmegaConf.merge(dotenv_extra_config, global_config_dict)
         ta = TypeAdapter(List[str])
@@ -279,6 +289,9 @@ class GlobalConfigDictParser(BaseModel):
 
             # Constrain python version since ray is sensitive to this.
             global_config_dict[PYTHON_VERSION_KEY_NAME] = python_version()
+
+        if parse_config.hide_secrets:
+            self._recursively_hide_secrets(global_config_dict)
 
         return global_config_dict
 
