@@ -49,7 +49,26 @@ class VerifiersResourcesServer(SimpleResourcesServer):
     async def seed_session(self, request: Request, body: VerifiersSeedSessionRequest) -> VerifiersSeedSessionResponse:
         env_id = str(uuid.uuid4())
         vf_env = vf.load_environment(body.vf_env_id, **body.vf_env_args)
-        dataset = vf_env.get_dataset(n=body.dataset_n, seed=body.dataset_seed)
+
+        # Try get_dataset first, fall back to eval_dataset/train_dataset for some envs
+        # TODO: is there more standard way in verifiers.. check prime rl
+        try:
+            dataset = vf_env.get_dataset(n=body.dataset_n, seed=body.dataset_seed)
+        except ValueError:
+            dataset = None
+            for attr in ['dataset', 'train_dataset', 'eval_dataset']:
+                ds = getattr(vf_env, attr, None)
+                if ds is not None:
+                    dataset = ds
+                    logger.info(f"Found dataset in vf_env.{attr}")
+                    break
+            if dataset is None:
+                raise ValueError(f"Environment {body.vf_env_id} does not have a dataset")
+            if body.dataset_seed is not None:
+                dataset = dataset.shuffle(seed=body.dataset_seed)
+            if body.dataset_n > 0:
+                dataset = dataset.select(range(min(body.dataset_n, len(dataset))))
+
         rows = [
             {
                 "prompt": dataset["prompt"][i],

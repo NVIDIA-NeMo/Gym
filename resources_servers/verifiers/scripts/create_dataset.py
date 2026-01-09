@@ -46,7 +46,26 @@ def main():
     env = vf.load_environment(args.env_id, **env_args)
 
     print(f"Getting dataset (size={args.size}, seed={args.seed})")
-    dataset = env.get_dataset(n=args.size, seed=args.seed)
+    try:
+        dataset = env.get_dataset(n=args.size, seed=args.seed)
+    except ValueError:
+        # Some environments (aime2025, ifeval, etc.) load dataset via different attributes
+        # TODO: is there more standard way in verifiers.. check prime rl
+        dataset = None
+        for attr in ['dataset', 'train_dataset', 'eval_dataset']:
+            ds = getattr(env, attr, None)
+            if ds is not None:
+                dataset = ds
+                print(f"Found dataset in env.{attr}")
+                break
+
+        if dataset is None:
+            raise ValueError(f"Environment {args.env_id} does not have a dataset")
+
+        if args.seed is not None:
+            dataset = dataset.shuffle(seed=args.seed)
+        if args.size > 0:
+            dataset = dataset.select(range(min(args.size, len(dataset))))
 
     print(f"Dataset has {len(dataset)} examples")
 
@@ -57,6 +76,7 @@ def main():
         for i in range(len(dataset)):
             row = {
                 "task_idx": i,
+                "vf_env_id": args.env_id,
                 "responses_create_params": {
                     "input": dataset["prompt"][i],
                 },

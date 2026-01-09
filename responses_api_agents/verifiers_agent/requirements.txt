@@ -2,3 +2,7 @@
 verifiers>=0.1.9
 --extra-index-url https://hub.primeintellect.ai/primeintellect/simple/
 reverse-text
+math-python
+wordle
+aime2025
+ifeval

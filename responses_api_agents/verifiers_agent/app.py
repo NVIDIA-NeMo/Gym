@@ -122,6 +122,7 @@ class VerifiersAgentRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
     task_idx: int
+    vf_env_id: str | None = Field(default=None, description="Override env ID from config")
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming = Field(
         default_factory=lambda: NeMoGymResponseCreateParamsNonStreaming(input=[])
     )
@@ -132,20 +133,20 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     config: VerifiersAgentConfig
 
-    _vf_env: vf.Environment | None = None
-    _env_id: str | None = None
-    _dataset_rows: list[dict] | None = None
+    _envs: dict[str, vf.Environment] = {}
+    _env_ids: dict[str, str] = {}
+    _dataset_rows_cache: dict[str, list[dict]] = {}
     _openai_client: VLLMOpenAIClient | None = None
 
-    async def _ensure_env_loaded(self) -> None:
-        if self._vf_env is not None:
-            return
+    async def _ensure_env_loaded(self, vf_env_id: str) -> tuple[vf.Environment, str, list[dict]]:
+        if vf_env_id in self._envs:
+            return self._envs[vf_env_id], self._env_ids[vf_env_id], self._dataset_rows_cache[vf_env_id]
 
         response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/seed_session",
             json={
-                "vf_env_id": self.config.vf_env_id,
+                "vf_env_id": vf_env_id,
                 "vf_env_args": self.config.vf_env_args,
                 "dataset_n": self.config.dataset_n,
                 "dataset_seed": self.config.dataset_seed,
@@ -154,13 +155,31 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         response.raise_for_status()
         seed_response = VerifiersSeedSessionResponse.model_validate(await response.json())
 
-        self._env_id = seed_response.env_id
+        env_id = seed_response.env_id
         logger.info(f"Seeded verifiers environment: {seed_response.vf_env_id} with {seed_response.dataset_length} examples")
 
-        self._vf_env = vf.load_environment(self.config.vf_env_id, **self.config.vf_env_args)
-        dataset = self._vf_env.get_dataset(n=self.config.dataset_n, seed=self.config.dataset_seed)
+        vf_env = vf.load_environment(vf_env_id, **self.config.vf_env_args)
 
-        self._dataset_rows = [
+        # Try get_dataset first, fall back to eval_dataset/train_dataset for some envs
+        # TODO: is there more standard way in verifiers.. check prime rl
+        try:
+            dataset = vf_env.get_dataset(n=self.config.dataset_n, seed=self.config.dataset_seed)
+        except ValueError:
+            dataset = None
+            for attr in ['dataset', 'train_dataset', 'eval_dataset']:
+                ds = getattr(vf_env, attr, None)
+                if ds is not None:
+                    dataset = ds
+                    logger.info(f"Found dataset in vf_env.{attr}")
+                    break
+            if dataset is None:
+                raise ValueError(f"Environment {vf_env_id} does not have a dataset")
+            if self.config.dataset_seed is not None:
+                dataset = dataset.shuffle(seed=self.config.dataset_seed)
+            if self.config.dataset_n > 0:
+                dataset = dataset.select(range(min(self.config.dataset_n, len(dataset))))
+
+        dataset_rows = [
             {
                 "prompt": dataset["prompt"][i],
                 "example_id": dataset["example_id"][i],
@@ -170,6 +189,12 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             }
             for i in range(len(dataset))
         ]
+
+        self._envs[vf_env_id] = vf_env
+        self._env_ids[vf_env_id] = env_id
+        self._dataset_rows_cache[vf_env_id] = dataset_rows
+
+        return vf_env, env_id, dataset_rows
 
     def _get_openai_client(self) -> VLLMOpenAIClient:
         if self._openai_client is None:
@@ -233,10 +258,12 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         return output
 
     async def responses(self, req: VerifiersAgentRunRequest) -> VerifiersNeMoGymResponse:
-        await self._ensure_env_loaded()
+        # Use env_id from request if provided, else fall back to config
+        vf_env_id = req.vf_env_id or self.config.vf_env_id
+        vf_env, env_id, dataset_rows = await self._ensure_env_loaded(vf_env_id)
 
         task_idx = req.task_idx
-        row = self._dataset_rows[task_idx]
+        row = dataset_rows[task_idx]
 
         rollout_input = vf.RolloutInput(
             prompt=row["prompt"],
@@ -256,7 +283,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             "temperature": self.config.temperature,
         }
 
-        states = await self._vf_env.run_group(
+        states = await vf_env.run_group(
             group_inputs=[rollout_input],
             client=client,
             model=self.config.model_name,
@@ -272,12 +299,12 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         output = self._convert_trajectory_to_output(state)
 
         return VerifiersNeMoGymResponse(
-            id=f"verifiers-{self._env_id}-{task_idx}",
+            id=f"verifiers-{env_id}-{task_idx}",
             created_at=0,
             model=self.config.model_name,
             object="response",
             output=output,
-            env_id=self._env_id,
+            env_id=env_id,
             group_id=str(task_idx),
             reward=reward,
             metrics=metrics,
