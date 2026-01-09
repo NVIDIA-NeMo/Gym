@@ -3,11 +3,12 @@ grl_sokoban_resources_server:
     grl_sokoban:
       entrypoint: app.py
       domain: games
-grl_sokoban_game_agent:
+grl_sokoban_simple_agent:
   responses_api_agents:
-    game_agent:
+    simple_agent:
       entrypoint: app.py
       max_steps: 10
+      count_tool_calls: true
       resources_server:
         type: resources_servers
         name: grl_sokoban_resources_server
