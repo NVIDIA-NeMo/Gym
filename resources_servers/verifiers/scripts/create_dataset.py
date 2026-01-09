@@ -11,19 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-python scripts/create_dataset.py \
-    --env-id reverse-text \
-    --size 1000 \
-    --output data/reverse_text_train.jsonl
-
-python scripts/create_dataset.py \
-    --env-id math-python \
-    --env-args '{"difficulty": "easy"}' \
-    --size 1000 \
-    --seed 42 \
-    --output data/math_train.jsonl
-"""
 import argparse
 import json
 from pathlib import Path
@@ -49,7 +36,6 @@ def main():
     try:
         dataset = env.get_dataset(n=args.size, seed=args.seed)
     except ValueError:
-        # Some environments (aime2025, ifeval, etc.) load dataset via different attributes
         # TODO: is there more standard way in verifiers.. check prime rl
         dataset = None
         for attr in ['dataset', 'train_dataset', 'eval_dataset']:

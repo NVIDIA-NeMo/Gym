@@ -50,7 +50,6 @@ class VerifiersResourcesServer(SimpleResourcesServer):
         env_id = str(uuid.uuid4())
         vf_env = vf.load_environment(body.vf_env_id, **body.vf_env_args)
 
-        # Try get_dataset first, fall back to eval_dataset/train_dataset for some envs
         # TODO: is there more standard way in verifiers.. check prime rl
         try:
             dataset = vf_env.get_dataset(n=body.dataset_n, seed=body.dataset_seed)
