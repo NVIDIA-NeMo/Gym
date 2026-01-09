@@ -74,20 +74,19 @@ def parse_formal_statement(formal_statement: str) -> tuple[str, str, str]:
         informal_prefix: The docstring (problem statement)
         theorem: The theorem declaration
     """
-    lines = formal_statement.split('\n')
+    lines = formal_statement.split("\n")
     header_lines = []
     informal_lines = []
     theorem_lines = []
 
     in_docstring = False
-    docstring_started = False
     theorem_started = False
 
     for line in lines:
         stripped = line.strip()
 
         # Check for theorem/lemma/example start
-        if not theorem_started and re.match(r'^(theorem|lemma|example)\s+', stripped):
+        if not theorem_started and re.match(r"^(theorem|lemma|example)\s+", stripped):
             theorem_started = True
 
         if theorem_started:
@@ -95,32 +94,31 @@ def parse_formal_statement(formal_statement: str) -> tuple[str, str, str]:
         elif in_docstring:
             informal_lines.append(line)
             # Check for docstring end
-            if '-/' in line or '--/' in line:
+            if "-/" in line or "--/" in line:
                 in_docstring = False
-        elif '/-' in stripped or '/--' in stripped:
+        elif "/-" in stripped or "/--" in stripped:
             # Docstring start
             in_docstring = True
-            docstring_started = True
             informal_lines.append(line)
             # Check if docstring ends on same line
-            if '-/' in stripped.split('/-', 1)[-1] or '--/' in stripped.split('/--', 1)[-1]:
+            if "-/" in stripped.split("/-", 1)[-1] or "--/" in stripped.split("/--", 1)[-1]:
                 in_docstring = False
         else:
             # Header (imports, opens, etc.)
             if stripped:  # Only add non-empty lines to header
                 header_lines.append(line)
 
-    header = '\n'.join(header_lines)
-    if header and not header.endswith('\n'):
-        header += '\n'
+    header = "\n".join(header_lines)
+    if header and not header.endswith("\n"):
+        header += "\n"
     if header:
-        header += '\n'  # Extra newline before docstring/theorem
+        header += "\n"  # Extra newline before docstring/theorem
 
-    informal_prefix = '\n'.join(informal_lines)
-    if informal_prefix and not informal_prefix.endswith('\n'):
-        informal_prefix += '\n'
+    informal_prefix = "\n".join(informal_lines)
+    if informal_prefix and not informal_prefix.endswith("\n"):
+        informal_prefix += "\n"
 
-    theorem = '\n'.join(theorem_lines)
+    theorem = "\n".join(theorem_lines)
     theorem = clean_lean_snippet(theorem) or ""
 
     return header, informal_prefix, theorem
@@ -163,8 +161,8 @@ def process_entry(entry: dict) -> dict:
 def load_and_filter_dataset() -> list[dict]:
     """Load NuminaMath-LEAN from HuggingFace and apply filters."""
     try:
-        from datasets import load_dataset
         import pandas as pd
+        from datasets import load_dataset
     except ImportError:
         raise ImportError("Please install datasets and pandas: pip install datasets pandas")
 
@@ -173,24 +171,25 @@ def load_and_filter_dataset() -> list[dict]:
     df = pd.DataFrame(ds)
 
     # Extract win_rate from nested rl_data dict
-    df['win_rate'] = df['rl_data'].apply(lambda x: x.get('win_rate', 0) if isinstance(x, dict) else 0)
+    df["win_rate"] = df["rl_data"].apply(lambda x: x.get("win_rate", 0) if isinstance(x, dict) else 0)
 
     # Apply filters
     candidates = df[
-        (df['author'] == 'human') &
-        (df['ground_truth_type'].isin(['complete', 'statement'])) &
-        (df['win_rate'] > 0.01) &
-        (df['win_rate'] < 0.95)
+        (df["author"] == "human")
+        & (df["ground_truth_type"].isin(["complete", "statement"]))
+        & (df["win_rate"] > 0.01)
+        & (df["win_rate"] < 0.95)
     ]
 
     print(f"Filtered to {len(candidates)} problems (from {len(df)} total)")
 
-    return candidates.to_dict('records')
+    return candidates.to_dict("records")
 
 
 def save_data(data: list, output_file: str) -> None:
     """Save processed data to JSONL file."""
     import os
+
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     with open(output_file, "w", encoding="utf-8") as fout:
         for entry in data:
