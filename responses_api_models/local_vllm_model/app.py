@@ -32,7 +32,13 @@ from vllm.entrypoints.openai.api_server import (
     validate_parsed_serve_args,
 )
 
-from nemo_gym.global_config import DISALLOWED_PORTS_KEY_NAME, HF_TOKEN_KEY_NAME, find_open_port, get_global_config_dict
+from nemo_gym.global_config import (
+    DISALLOWED_PORTS_KEY_NAME,
+    HF_TOKEN_KEY_NAME,
+    RAY_HEAD_NODE_ADDRESS_KEY_NAME,
+    find_open_port,
+    get_global_config_dict,
+)
 from nemo_gym.server_utils import get_global_aiohttp_client
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
@@ -128,10 +134,8 @@ class LocalVLLMModel(VLLMModel):
             "Ray backend only works with data parallel size > 1!"
         )
 
-        # TODO remove: Should not need anymore
         # Ray address needs to be set here in case vLLM decides to start its own cluster down the line for whatever reason.
-        ray_context = ray.get_runtime_context()
-        env_vars["RAY_ADDRESS"] = ray_context.gcs_address
+        env_vars["RAY_ADDRESS"] = get_global_config_dict()[RAY_HEAD_NODE_ADDRESS_KEY_NAME]
 
         cli_env_setup()
         parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible RESTful API server.")
