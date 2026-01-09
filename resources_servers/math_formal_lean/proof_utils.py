@@ -15,27 +15,13 @@
 
 """Utilities for Lean4 proof processing and evaluation.
 
-Ported from NeMo-Skills nemo_skills/code_execution/proof_utils.py and utils.py
+Ported from NeMo-Skills:
+https://github.com/NVIDIA-NeMo/NeMo-Skills/blob/main/nemo_skills/code_execution/proof_utils.py
 """
 
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
-
-
-# Standard Lean4 header with common imports
-LEAN4_HEADER = (
-    "import Mathlib\n\n"
-    "import Aesop\n\n"
-    "set_option maxHeartbeats 0\n\n"
-    "open Topology Filter Real Complex TopologicalSpace Finset Function Metric Nat Rat\n"
-    "open scoped BigOperators Matrix\n\n"
-)
-
-
-def get_lean4_header() -> str:
-    """Returns the standard Lean4 import header."""
-    return LEAN4_HEADER
 
 
 @dataclass
@@ -88,13 +74,13 @@ def clean_formal_generation(
     if final_answer_key and final_answer_key in generation:
         generation = generation.split(final_answer_key, 1)[1].strip()
 
-    languages = ["lean4", "lean3", "lean", ""]
+    languages = ["lean4", "lean", ""]
     extracted_code = extract_code_block(generation, languages, extract_code_mode=extract_code_mode)
     if extracted_code:
         return extracted_code
 
     # If no explicit code block, remove any surrounding triple backticks
-    return re.sub(r"^\s*```(?:lean4|lean3|lean)?\s*|\s*```[\s]*$", "", generation).strip()
+    return re.sub(r"^\s*```(?:lean4|lean)?\s*|\s*```[\s]*$", "", generation).strip()
 
 
 def extract_proof_only(lean_code: str) -> str:
@@ -155,47 +141,32 @@ def extract_proof_only(lean_code: str) -> str:
     return "\n".join(proof_lines).rstrip()
 
 
-def build_lean4_proof(
-    generation: str, data_point: Dict[str, Any], config: ProofBuildConfig, answer_format: str = "lean4-proof"
-) -> str:
+def build_lean4_proof(generation: str, data_point: Dict[str, Any], config: ProofBuildConfig) -> str:
     """Build a complete Lean4 proof from generation and data point.
 
     Args:
         generation: The raw generation from the model
         data_point: Dictionary containing header, formal_statement, etc.
         config: Configuration for proof building
-        answer_format: Either "lean4-proof" or "lean4-statement"
 
     Returns:
         Complete Lean4 proof ready for execution
     """
-    if answer_format == "lean4-proof":
-        # Clean the generation and extract the formal proof
-        cleaned_generation = clean_formal_generation(
-            generation, final_answer_key=config.final_answer_key, extract_code_mode=config.extract_code_mode
-        )
+    # Clean the generation and extract the formal proof
+    cleaned_generation = clean_formal_generation(
+        generation, final_answer_key=config.final_answer_key, extract_code_mode=config.extract_code_mode
+    )
 
-        # Combine header + formal_statement + proof
-        header = data_point.get("header", "")
-        formal_statement = data_point.get("formal_statement", "") if config.restate_formal_statement else ""
+    # Combine header + formal_statement + proof
+    header = data_point.get("header", "")
+    formal_statement = data_point.get("formal_statement", "") if config.restate_formal_statement else ""
 
-        if config.strip_theorem_from_proof:
-            proof_part = extract_proof_only(cleaned_generation)
-        else:
-            proof_part = cleaned_generation
-
-        predicted_proof = header + formal_statement + proof_part
-
-    elif answer_format == "lean4-statement":
-        # For statements, add header and append sorry
-        cleaned_generation = clean_formal_generation(generation, extract_code_mode=config.extract_code_mode)
-        header = get_lean4_header()
-        predicted_proof = header + cleaned_generation + "\n sorry"
-
+    if config.strip_theorem_from_proof:
+        proof_part = extract_proof_only(cleaned_generation)
     else:
-        raise ValueError(f"Unknown answer_format: {answer_format}")
+        proof_part = cleaned_generation
 
-    return predicted_proof
+    return header + formal_statement + proof_part
 
 
 def determine_proof_status(compiler_output: Dict[str, Any]) -> str:

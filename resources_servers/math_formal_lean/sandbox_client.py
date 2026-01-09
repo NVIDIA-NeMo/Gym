@@ -13,7 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""HTTP client for communicating with Lean4 sandbox container."""
+"""HTTP client for communicating with Lean4 sandbox container.
+
+Reference sandbox implementation:
+- Server: https://github.com/NVIDIA-NeMo/NeMo-Skills/tree/main/nemo_skills/code_execution/local_sandbox
+- Dockerfile: https://github.com/NVIDIA-NeMo/NeMo-Skills/blob/main/dockerfiles/Dockerfile.sandbox
+"""
 
 import json
 import logging
