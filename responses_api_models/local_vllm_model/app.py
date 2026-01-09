@@ -127,6 +127,10 @@ class LocalVLLMModel(VLLMModel):
         if server_args.get("data_parallel_size", 1) > 1:
             server_args["data_parallel_backend"] = "ray"
 
+        # Ray address needs to be set here in case vLLM decides to start its own cluster down the line for whatever reason.
+        ray_context = ray.get_runtime_context()
+        env_vars["RAY_ADDRESS"] = ray_context.gcs_address
+
         cli_env_setup()
         parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible RESTful API server.")
         parser = make_arg_parser(parser)
