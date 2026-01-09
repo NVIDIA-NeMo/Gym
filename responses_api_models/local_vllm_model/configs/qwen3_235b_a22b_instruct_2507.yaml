@@ -1,0 +1,23 @@
+qwen3_235b_a22b_instruct_2507_model_server:
+  responses_api_models:
+    local_vllm_model:
+      entrypoint: app.py
+      model: Qwen/Qwen3-235B-A22B-Instruct-2507
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      debug: false
+
+      # For example, if your model is downloaded at ~/.cache/huggingface/hub/models--Qwen--Qwen3-235B-A22B-Instruct-2507, your hf_home here would be `~/.cache/huggingface`
+      hf_home: null
+
+      # If a hf_token is present in the env.yaml, it will be prepended to the hf download.
+      vllm_serve_kwargs:
+        data_parallel_size: 2
+        tensor_parallel_size: 8
+        pipeline_parallel_size: 1
+        gpu_memory_utilization: 0.9
+        enable_auto_tool_choice: true
+        tool_call_parser: hermes
+        model_loader_extra_config:
+          enable_multithread_load: true
+          num_threads: 16

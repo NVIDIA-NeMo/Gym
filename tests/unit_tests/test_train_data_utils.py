@@ -413,7 +413,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     average=0,
                     min=2.0,
                     max=2.0,
-                    median=0,
                     stddev=0,
                 ),
                 json_dumped_number_of_words=AvgMinMax(
@@ -422,7 +421,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     average=0,
                     min=1499.0,
                     max=1509.0,
-                    median=0,
                     stddev=0,
                 ),
                 number_of_turns=AvgMinMax(
@@ -431,7 +429,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     average=0,
                     min=1.0,
                     max=1.0,
-                    median=0,
                     stddev=0,
                 ),
                 temperature=AvgMinMax(
@@ -440,7 +437,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     average=0,
                     min=float("inf"),
                     max=float("-inf"),
-                    median=0,
                     stddev=0,
                 ),
                 id=AvgMinMax(
@@ -449,7 +445,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     average=2.0,
                     min=0.0,
                     max=4.0,
-                    median=2.0,
                     stddev=1.58,
                 ),
                 expected_synonym_values=AvgMinMax(
@@ -458,7 +453,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     average=559.0,
                     min=407.0,
                     max=711.0,
-                    median=559.0,
                     stddev=160.22,
                 ),
                 minefield_label_value=AvgMinMax(
@@ -467,7 +461,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     average=299.0,
                     min=299.0,
                     max=299.0,
-                    median=299.0,
                     stddev=0.0,
                 ),
                 expected_synonyms=StringMetrics(unique_count=2, total_count=10),
@@ -586,7 +579,6 @@ class TestValidateSamplesAndAggregateMetrics:
                 average=0,
                 min=float("inf"),
                 max=float("-inf"),
-                median=0,
                 stddev=0,
             ),
             json_dumped_number_of_words=AvgMinMax(
@@ -595,7 +587,6 @@ class TestValidateSamplesAndAggregateMetrics:
                 average=0,
                 min=2.0,
                 max=2.0,
-                median=0,
                 stddev=0,
             ),
             number_of_turns=AvgMinMax(
@@ -604,7 +595,6 @@ class TestValidateSamplesAndAggregateMetrics:
                 average=0,
                 min=float("inf"),
                 max=float("-inf"),
-                median=0,
                 stddev=0,
             ),
             temperature=AvgMinMax(
@@ -613,7 +603,6 @@ class TestValidateSamplesAndAggregateMetrics:
                 average=0,
                 min=float("inf"),
                 max=float("-inf"),
-                median=0,
                 stddev=0,
             ),
         )

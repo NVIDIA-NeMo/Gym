@@ -477,6 +477,16 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
         await raise_for_status(response)
 
+    async def create_models(self):
+        request_kwargs = dict(
+            url=f"{self.base_url}/models",
+            headers={"Authorization": f"Bearer {self.api_key}"},
+        )
+        response = await self._request(method="GET", **request_kwargs)
+
+        await self._raise_for_status(response, request_kwargs)
+        return await response.json()
+
     async def create_chat_completion(self, **kwargs):
         request_kwargs = dict(
             url=f"{self.base_url}/chat/completions",

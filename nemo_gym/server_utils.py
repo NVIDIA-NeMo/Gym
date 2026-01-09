@@ -24,7 +24,7 @@ from logging import LogRecord, getLogger
 from os import getenv
 from pathlib import Path
 from threading import Thread
-from traceback import print_exc
+from traceback import format_exc, print_exc
 from typing import List, Literal, Optional, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
@@ -59,6 +59,7 @@ from nemo_gym.config_types import (
 from nemo_gym.global_config import (
     HEAD_SERVER_KEY_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
+    RAY_HEAD_NODE_ADDRESS_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
@@ -350,14 +351,14 @@ def initialize_ray() -> None:
         return
 
     global_config_dict = get_global_config_dict()
-    ray_head_node_address = global_config_dict.get("ray_head_node_address")
+    ray_head_node_address = global_config_dict.get(RAY_HEAD_NODE_ADDRESS_KEY_NAME)
     ray_init_kwargs = dict(ignore_reinit_error=True)
 
     if ray_head_node_address:
         print(f"Connecting to Ray cluster at specified address: {ray_head_node_address}")
         ray_init_kwargs["address"] = ray_head_node_address
     else:
-        print("Starting Ray cluster...")
+        print("NeMo Gym is starting a new Ray cluster...")
 
     ray.init(**ray_init_kwargs)
 
@@ -403,16 +404,24 @@ class SimpleServer(BaseServer):
         async def exception_handling_middleware(request: Request, call_next):
             try:
                 return await call_next(request)
+            except ClientResponseError as e:
+                assert hasattr(e, "response_content"), (
+                    "Please use `nemo_gym.server_utils.raise_for_status` for HTTP exceptions!"
+                )
+
+                response_content = f"Hit an exception in {self.get_session_middleware_key()} calling an inner server: {e.response_content}"
+                return JSONResponse(content=response_content, status_code=500)
             except Exception as e:
-                print_exc()
                 print(
-                    f"🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"
+                    f"""🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception
+Formatted exception: {format_exc()}
+repr(e): {repr(e)}"""
                 )
                 return JSONResponse(content=repr(e), status_code=500)
             except:
                 print_exc()
                 print(
-                    f"🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"
+                    f"""🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"""
                 )
                 return JSONResponse(content="An unknown error occurred", status_code=500)
 
