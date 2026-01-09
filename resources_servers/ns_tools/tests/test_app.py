@@ -12,19 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-import json
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from app import (
-    ExecuteCalculationRequest,
-    FetchDataRequest,
-    MyCustomToolsConfig,
-    MyCustomToolsResourcesServer,
-    MyCustomToolsVerifyRequest,
-    SearchDatabaseRequest,
+    NSToolsConfig,
+    NSToolsResourcesServer,
+    NSToolsVerifyRequest,
 )
 
 from nemo_gym.config_types import ResourcesServerRef
@@ -32,115 +25,57 @@ from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 
 
-def create_server(available_verifiers=None, default_verifier="xlam_fc"):
-    """Helper to create a server instance with mocked dependencies."""
-    if available_verifiers is None:
-        available_verifiers = {
-            "xlam_fc": ResourcesServerRef(type="resources_servers", name="xlam_fc_verifier"),
-            "mcqa": ResourcesServerRef(type="resources_servers", name="mcqa_verifier"),
+class TestApp:
+    def test_sanity(self) -> None:
+        """Test that the server can be instantiated with minimal config."""
+        config = NSToolsConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="ns_tools",
+        )
+        NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    def test_config_with_verifiers(self) -> None:
+        """Test configuration with verifiers."""
+        verifiers = {
+            "math_with_judge": ResourcesServerRef(type="resources_servers", name="math_with_judge"),
         }
+        config = NSToolsConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="ns_tools",
+            verifiers=verifiers,
+            default_verifier="math_with_judge",
+        )
+        server = NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
-    config = MyCustomToolsConfig(
-        host="0.0.0.0",
-        port=8080,
-        entrypoint="app.py",
-        name="my_custom_tools",
-        available_verifiers=available_verifiers,
-        default_verifier=default_verifier,
-    )
-    return MyCustomToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        assert len(server.config.verifiers) == 1
+        assert "math_with_judge" in server.config.verifiers
+        assert server.config.default_verifier == "math_with_judge"
 
+    async def test_verify_delegates_to_math_with_judge(self) -> None:
+        """Test that verification is delegated to math_with_judge verifier."""
+        verifiers = {
+            "math_with_judge": ResourcesServerRef(type="resources_servers", name="math_with_judge"),
+        }
+        config = NSToolsConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="ns_tools",
+            verifiers=verifiers,
+            default_verifier="math_with_judge",
+        )
+        server = NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
-class TestToolEndpoints:
-    """Tests for the custom tool endpoints."""
-
-    async def test_search_database(self):
-        """Test the search_database tool."""
-        server = create_server()
-        request = SearchDatabaseRequest(query="test query", database="test_db")
-        result = await server.search_database(request)
-
-        assert result.total_count == 1
-        assert len(result.results) == 1
-        assert result.results[0]["database"] == "test_db"
-        assert "test query" in result.results[0]["name"]
-
-    async def test_search_database_default_db(self):
-        """Test search_database with default database."""
-        server = create_server()
-        request = SearchDatabaseRequest(query="another query")
-        result = await server.search_database(request)
-
-        assert result.results[0]["database"] == "default"
-
-    async def test_execute_calculation_simple(self):
-        """Test execute_calculation with simple expression."""
-        server = create_server()
-        request = ExecuteCalculationRequest(expression="2 + 2", precision=2)
-        result = await server.execute_calculation(request)
-
-        assert result.result == 4.0
-        assert result.formatted == "4.00"
-
-    async def test_execute_calculation_with_precision(self):
-        """Test execute_calculation with custom precision."""
-        server = create_server()
-        request = ExecuteCalculationRequest(expression="100 * 1.15", precision=2)
-        result = await server.execute_calculation(request)
-
-        assert result.result == 115.0
-        assert result.formatted == "115.00"
-
-    async def test_execute_calculation_complex(self):
-        """Test execute_calculation with more complex expression."""
-        server = create_server()
-        request = ExecuteCalculationRequest(expression="(10 + 5) * 2 / 3", precision=4)
-        result = await server.execute_calculation(request)
-
-        assert result.result == pytest.approx(10.0, rel=1e-4)
-
-    async def test_execute_calculation_invalid(self):
-        """Test execute_calculation with invalid expression returns 0."""
-        server = create_server()
-        request = ExecuteCalculationRequest(expression="invalid_expression", precision=2)
-        result = await server.execute_calculation(request)
-
-        assert result.result == 0.0
-
-    async def test_fetch_data(self):
-        """Test the fetch_data tool."""
-        server = create_server()
-        request = FetchDataRequest(source_id="customers", fields=["name", "email"])
-        result = await server.fetch_data(request)
-
-        assert result.source == "customers"
-        assert result.data["source_id"] == "customers"
-        assert result.data["fields"] == ["name", "email"]
-        assert result.data["fetched"] is True
-
-    async def test_fetch_data_no_fields(self):
-        """Test fetch_data with no fields specified."""
-        server = create_server()
-        request = FetchDataRequest(source_id="products")
-        result = await server.fetch_data(request)
-
-        assert result.source == "products"
-        assert result.data["fields"] == []
-
-
-class TestDynamicVerification:
-    """Tests for the dynamic verification delegation."""
-
-    def _create_mock_response(self, reward: float, extra_fields: dict = None):
-        """Create a mock HTTP response for the server_client."""
-        response_data = {"reward": reward, **(extra_fields or {})}
-
+        # Mock the server_client.post to return a successful verification
         mock_response = AsyncMock()
-        mock_response.json = AsyncMock(return_value=response_data)
-        return mock_response
+        mock_response.json = AsyncMock(return_value={"reward": 1.0, "extracted_answer": "4"})
+        server.server_client.post = AsyncMock(return_value=mock_response)
 
-    def _create_verify_request(self, verifier_type: str = None, **kwargs):
-        """Create a verify request with a mock model response."""
+        # Build a NeMoGymResponse with a valid output
         response = NeMoGymResponse(
             id="resp_test",
             created_at=0.0,
@@ -148,10 +83,17 @@ class TestDynamicVerification:
             object="response",
             output=[
                 {
-                    "call_id": "call_1",
-                    "name": "search_database",
-                    "arguments": json.dumps({"query": "test", "database": "default"}),
-                    "type": "function_call",
+                    "id": "msg_test",
+                    "content": [
+                        {
+                            "annotations": [],
+                            "text": "The answer is \\boxed{4}.",
+                            "type": "output_text",
+                        }
+                    ],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
                 }
             ],
             parallel_tool_calls=True,
@@ -159,156 +101,144 @@ class TestDynamicVerification:
             tools=[],
         )
 
-        return MyCustomToolsVerifyRequest(
+        verify_request = NSToolsVerifyRequest(
             responses_create_params={
-                "input": [{"role": "user", "content": "Test query"}],
+                "input": [
+                    {"role": "system", "content": "You are a helpful math assistant."},
+                    {"role": "user", "content": "What is 2 + 2?"},
+                ],
             },
             response=response,
-            verifier_type=verifier_type,
-            **kwargs,
+            question="What is 2 + 2?",
+            expected_answer="4",
         )
 
-    async def test_verify_delegates_to_xlam_fc(self):
-        """Test that verification is delegated to xlam_fc verifier."""
-        server = create_server()
-
-        # Mock the server_client.post to return a successful verification
-        mock_response = self._create_mock_response(
-            reward=1.0, extra_fields={"num_correct": 1, "num_expected": 1}
-        )
-        server.server_client.post = AsyncMock(return_value=mock_response)
-
-        request = self._create_verify_request(
-            verifier_type="xlam_fc",
-            expected_answers=[{"name": "search_database", "arguments": {"query": "test"}}],
-        )
-
-        result = await server.verify(request)
+        result = await server.verify(verify_request)
 
         assert result.reward == 1.0
-        assert result.verifier_used == "xlam_fc"
         assert result.delegated_response is not None
         assert result.delegated_response["reward"] == 1.0
 
         # Verify the server_client.post was called with correct args
         server.server_client.post.assert_called_once()
         call_args = server.server_client.post.call_args
-        assert call_args.kwargs["server_name"] == "xlam_fc_verifier"
+        assert call_args.kwargs["server_name"] == "math_with_judge"
         assert call_args.kwargs["url_path"] == "/verify"
 
-    async def test_verify_delegates_to_mcqa(self):
-        """Test that verification is delegated to mcqa verifier."""
-        server = create_server()
-
-        mock_response = self._create_mock_response(
-            reward=1.0, extra_fields={"expected_answer": "B", "extracted_answer": "B"}
-        )
-        server.server_client.post = AsyncMock(return_value=mock_response)
-
-        request = self._create_verify_request(
-            verifier_type="mcqa",
-            expected_answer="B",
-            options=[{"A": "option1"}, {"B": "option2"}],
-        )
-
-        result = await server.verify(request)
-
-        assert result.reward == 1.0
-        assert result.verifier_used == "mcqa"
-
-        call_args = server.server_client.post.call_args
-        assert call_args.kwargs["server_name"] == "mcqa_verifier"
-
-    async def test_verify_uses_default_verifier(self):
+    async def test_verify_uses_default_verifier(self) -> None:
         """Test that default verifier is used when verifier_type not specified."""
-        server = create_server(default_verifier="xlam_fc")
+        verifiers = {
+            "math_with_judge": ResourcesServerRef(type="resources_servers", name="math_with_judge"),
+        }
+        config = NSToolsConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="ns_tools",
+            verifiers=verifiers,
+            default_verifier="math_with_judge",
+        )
+        server = NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
-        mock_response = self._create_mock_response(reward=0.5)
+        mock_response = AsyncMock()
+        mock_response.json = AsyncMock(return_value={"reward": 0.0})
         server.server_client.post = AsyncMock(return_value=mock_response)
 
-        # No verifier_type specified
-        request = self._create_verify_request(verifier_type=None)
+        response = NeMoGymResponse(
+            id="resp_test",
+            created_at=0.0,
+            model="dummy",
+            object="response",
+            output=[
+                {
+                    "id": "msg_test",
+                    "content": [
+                        {
+                            "annotations": [],
+                            "text": "The answer is \\boxed{5}.",
+                            "type": "output_text",
+                        }
+                    ],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+        )
 
-        result = await server.verify(request)
+        # No verifier_type specified - should use default
+        verify_request = NSToolsVerifyRequest(
+            responses_create_params={
+                "input": [{"role": "user", "content": "What is 2 + 2?"}],
+            },
+            response=response,
+            question="What is 2 + 2?",
+            expected_answer="4",
+        )
 
-        assert result.verifier_used == "xlam_fc"
-        call_args = server.server_client.post.call_args
-        assert call_args.kwargs["server_name"] == "xlam_fc_verifier"
-
-    async def test_verify_unknown_verifier(self):
-        """Test handling of unknown verifier type."""
-        server = create_server()
-
-        request = self._create_verify_request(verifier_type="unknown_verifier")
-
-        result = await server.verify(request)
+        result = await server.verify(verify_request)
 
         assert result.reward == 0.0
-        assert "unknown:unknown_verifier" in result.verifier_used
-        assert "error" in result.delegated_response
+        call_args = server.server_client.post.call_args
+        assert call_args.kwargs["server_name"] == "math_with_judge"
 
-    async def test_verify_passes_through_all_fields(self):
+    async def test_verify_passes_through_fields(self) -> None:
         """Test that all sample fields are passed through to the delegated verifier."""
-        server = create_server()
+        verifiers = {
+            "math_with_judge": ResourcesServerRef(type="resources_servers", name="math_with_judge"),
+        }
+        config = NSToolsConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="ns_tools",
+            verifiers=verifiers,
+            default_verifier="math_with_judge",
+        )
+        server = NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
-        mock_response = self._create_mock_response(reward=1.0)
+        mock_response = AsyncMock()
+        mock_response.json = AsyncMock(return_value={"reward": 1.0})
         server.server_client.post = AsyncMock(return_value=mock_response)
 
-        # Include various fields that should pass through
-        request = self._create_verify_request(
-            verifier_type="xlam_fc",
-            expected_answers=[{"name": "search_database", "arguments": {"query": "test"}}],
-            expected_answer="also_included",  # Extra field
-            options=[{"A": "opt1"}],  # Extra field
+        response = NeMoGymResponse(
+            id="resp_test",
+            created_at=0.0,
+            model="dummy",
+            object="response",
+            output=[
+                {
+                    "id": "msg_test",
+                    "content": [{"annotations": [], "text": "\\boxed{4}", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
         )
 
-        await server.verify(request)
+        verify_request = NSToolsVerifyRequest(
+            responses_create_params={
+                "input": [{"role": "user", "content": "What is 2 + 2?"}],
+            },
+            response=response,
+            question="What is 2 + 2?",
+            expected_answer="4",
+        )
+
+        await server.verify(verify_request)
 
         call_args = server.server_client.post.call_args
         json_data = call_args.kwargs["json"]
 
         # Verify fields are passed through
-        assert "expected_answers" in json_data
+        assert "question" in json_data
         assert "expected_answer" in json_data
-        assert "options" in json_data
         assert "responses_create_params" in json_data
         assert "response" in json_data
-
-
-class TestServerSetup:
-    """Tests for server setup and configuration."""
-
-    def test_sanity(self):
-        """Test that the server can be instantiated."""
-        server = create_server()
-        assert server is not None
-        assert server.config.name == "my_custom_tools"
-
-    def test_setup_webserver_registers_endpoints(self):
-        """Test that setup_webserver registers the tool endpoints."""
-        server = create_server()
-        app = server.setup_webserver()
-
-        # Check that routes are registered
-        routes = [route.path for route in app.routes]
-        assert "/search_database" in routes
-        assert "/execute_calculation" in routes
-        assert "/fetch_data" in routes
-        assert "/verify" in routes
-        assert "/seed_session" in routes
-
-    def test_config_with_multiple_verifiers(self):
-        """Test configuration with multiple available verifiers."""
-        verifiers = {
-            "xlam_fc": ResourcesServerRef(type="resources_servers", name="verifier1"),
-            "mcqa": ResourcesServerRef(type="resources_servers", name="verifier2"),
-            "custom": ResourcesServerRef(type="resources_servers", name="verifier3"),
-        }
-        server = create_server(available_verifiers=verifiers)
-
-        assert len(server.config.available_verifiers) == 3
-        assert "xlam_fc" in server.config.available_verifiers
-        assert "mcqa" in server.config.available_verifiers
-        assert "custom" in server.config.available_verifiers
-
-

@@ -1,11 +1,11 @@
-#!/usr/bin/env python3
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -43,8 +43,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from nemo_skills.prompt.utils import load_config
 from nemo_skills.mcp.tool_manager import ToolManager
+from nemo_skills.prompt.utils import load_config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -57,12 +57,14 @@ def parse_args():
         epilog=__doc__,
     )
     parser.add_argument(
-        "--input", "-i",
+        "--input",
+        "-i",
         required=True,
         help="Path to input JSONL file (e.g., comp-math-24-25/test.txt)",
     )
     parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         required=True,
         help="Path to output JSONL file",
     )
@@ -131,14 +133,16 @@ def format_tools_for_responses_api(raw_tools: list[dict[str, Any]]) -> list[dict
         input_schema.pop("title", None)
         for prop in input_schema.get("properties", {}).values():
             prop.pop("title", None)
-        
-        formatted.append({
-            "type": "function",
-            "name": t["name"],
-            "description": t.get("description", ""),
-            "parameters": input_schema,
-            "strict": True,
-        })
+
+        formatted.append(
+            {
+                "type": "function",
+                "name": t["name"],
+                "description": t.get("description", ""),
+                "parameters": input_schema,
+                "strict": True,
+            }
+        )
     return formatted
 
 
@@ -157,22 +161,22 @@ async def get_tool_schemas(
             "port": sandbox_port,
         }
     }
-    
+
     tool_manager = ToolManager(
         module_specs=tool_specs,
         overrides={},
         context=context,
     )
-    
+
     # Get raw tool list
     raw_tools = await tool_manager.list_all_tools(use_cache=False)
-    
+
     # Format for responses API endpoint
     formatted_tools = format_tools_for_responses_api(raw_tools)
-    
+
     # Shutdown tool manager
     await tool_manager.shutdown()
-    
+
     return formatted_tools
 
 
@@ -183,13 +187,13 @@ def format_user_message(problem: str, prompt_config: str) -> str:
     try:
         config = load_config(prompt_config)
         user_template = config.get("user", "{problem}")
-        
+
         # Handle few-shot examples if present
         examples = ""
         if "few_shot_examples" in config:
             # For now, we don't include few-shot examples by default
             pass
-        
+
         # Format the user message
         user_message = user_template.format(problem=problem, examples=examples)
         return user_message
@@ -228,19 +232,19 @@ def process_sample(
     sample_id = sample.get(id_field, idx)
     problem = sample.get(problem_field, "")
     expected_answer = sample.get(answer_field, "")
-    
+
     if not problem:
         logger.warning(f"Sample {sample_id} has no problem text")
-    
+
     # Format user message using prompt config
     user_message = format_user_message(problem, prompt_config)
-    
+
     # Build the input messages
     input_messages = []
     if system_prompt:
         input_messages.append({"role": "system", "content": system_prompt})
     input_messages.append({"role": "user", "content": user_message})
-    
+
     # Build the output entry
     output = {
         "id": sample_id,
@@ -251,44 +255,44 @@ def process_sample(
             "input": input_messages,
         },
     }
-    
+
     # Add tools if available
     if tool_schemas:
         output["responses_create_params"]["tools"] = tool_schemas
-    
+
     # Add verifier type if specified
     if verifier_type:
         output["verifier_type"] = verifier_type
-    
+
     # Preserve additional fields from source
     preserved_fields = ["subset_for_metrics", "reference_solution", "level", "label"]
     for field in preserved_fields:
         if field in sample:
             output[field] = sample[field]
-    
+
     return output
 
 
 async def main():
     args = parse_args()
-    
+
     # Validate input file
     input_path = Path(args.input).expanduser()
     if not input_path.exists():
         logger.error(f"Input file not found: {input_path}")
         sys.exit(1)
-    
+
     # Create output directory if needed
     output_path = Path(args.output).expanduser()
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    
+
     logger.info(f"Input: {input_path}")
     logger.info(f"Output: {output_path}")
     logger.info(f"Prompt config: {args.prompt_config}")
     logger.info(f"Tools: {args.tools}")
     if args.verifier_type:
         logger.info(f"Verifier type: {args.verifier_type}")
-    
+
     # Get tool schemas
     logger.info("Loading tool schemas...")
     tool_schemas = await get_tool_schemas(
@@ -297,33 +301,33 @@ async def main():
         sandbox_port=args.sandbox_port,
     )
     logger.info(f"Loaded {len(tool_schemas)} tools: {[t.get('name') for t in tool_schemas]}")
-    
+
     # Get system prompt from config
     system_prompt = get_system_prompt(args.prompt_config)
     if system_prompt:
         logger.info(f"System prompt: {system_prompt[:100]}...")
     else:
         logger.info("No system prompt in config")
-    
+
     # Process input file
     logger.info("Processing samples...")
     samples_processed = 0
-    
+
     with open(input_path, "r") as fin, open(output_path, "w") as fout:
         for idx, line in enumerate(fin):
             if args.limit and idx >= args.limit:
                 break
-            
+
             line = line.strip()
             if not line:
                 continue
-            
+
             try:
                 sample = json.loads(line)
             except json.JSONDecodeError as e:
                 logger.warning(f"Skipping line {idx}: invalid JSON: {e}")
                 continue
-            
+
             output = process_sample(
                 sample=sample,
                 idx=idx,
@@ -336,10 +340,10 @@ async def main():
                 verifier_type=args.verifier_type,
                 agent_ref=args.agent_ref,
             )
-            
+
             fout.write(json.dumps(output) + "\n")
             samples_processed += 1
-    
+
     logger.info(f"Processed {samples_processed} samples -> {output_path}")
 
 
