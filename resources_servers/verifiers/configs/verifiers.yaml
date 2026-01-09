@@ -23,5 +23,5 @@ verifiers_agent:
       group_size: 1
       max_concurrent_generation: -1
       max_concurrent_scoring: -1
-      max_tokens: 512
+      max_tokens: 4192
       temperature: 1.0
