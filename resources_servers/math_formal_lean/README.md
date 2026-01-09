@@ -27,7 +27,7 @@ Failure modes detected:
 - Number theory
 - Geometry (formalized)
 
-The dataset uses the NeMo-Skills prompt format aligned with deepseek-prover-v2.
+The dataset uses the [NeMo-Skills](https://github.com/NVIDIA-NeMo/Skills) prompt format aligned with deepseek-prover-v2.
 
 ## Requirements
 
