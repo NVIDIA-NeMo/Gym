@@ -77,6 +77,10 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
         )
     elif has_pyproject_toml:
         install_cmd = f"""uv pip install '-e .' {" ".join(head_server_deps)}"""
+        if dir_path.name == "vllm_model":
+            # NB: --no-deps is a workaround for installing vllm (current version: 0.11.2) on a cpu target,
+            # b/c `uv pip install` resolves dependencies differently vs `pip install`.
+            install_cmd = f"""uv pip install --no-deps 'vllm==0.11.2' && {install_cmd}"""
     elif has_requirements_txt:
         install_cmd = f"""uv pip install -r requirements.txt {" ".join(head_server_deps)}"""
     else:
@@ -91,7 +95,7 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
     return cmd
 
 
-def _run_command(command: str, working_dir_path: Path) -> Popen:  # pragma: no cover
+def _run_command(command: str, working_dir_path: Path, top_level_name: Optional[str] = None) -> Popen:  # pragma: no cover
     work_dir = f"{working_dir_path.absolute()}"
     custom_env = environ.copy()
     py_path = custom_env.get("PYTHONPATH", None)
@@ -99,7 +103,19 @@ def _run_command(command: str, working_dir_path: Path) -> Popen:  # pragma: no c
         custom_env["PYTHONPATH"] = f"{work_dir}:{py_path}"
     else:
         custom_env["PYTHONPATH"] = work_dir
-    return Popen(command, executable="/bin/bash", shell=True, env=custom_env)
+    redirect_stdout = None
+    redirect_stderr = None
+    if top_level_name is not None:
+        redirect_stdout = open(f"{work_dir}/run-{top_level_name}.out.log", "a")
+        redirect_stderr = open(f"{work_dir}/run-{top_level_name}.err.log", "a")
+    return Popen(
+        command,
+        executable="/bin/bash",
+        shell=True,
+        env=custom_env,
+        stdout=redirect_stdout,
+        stderr=redirect_stderr,
+    )
 
 
 class RunConfig(BaseNeMoGymCLIConfig):
@@ -212,7 +228,7 @@ class RunHelper:  # pragma: no cover
     {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(top_level_path)} \\
     python {str(entrypoint_fpath)}"""
 
-            process = _run_command(command, dir_path)
+            process = _run_command(command, dir_path, top_level_path)
             self._processes[top_level_path] = process
 
             host = server_config_dict.get("host")
