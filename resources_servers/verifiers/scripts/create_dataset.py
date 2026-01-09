@@ -70,6 +70,7 @@ def main():
                 "answer": dataset["answer"][i] if "answer" in dataset.column_names else "",
                 "task": dataset["task"][i],
                 "example_id": dataset["example_id"][i],
+                "info": dataset["info"][i] if "info" in dataset.column_names else {},
             }
             f.write(json.dumps(row) + "\n")
 
