@@ -51,7 +51,10 @@ class RolloutCollectionConfig(BaseNeMoGymCLIConfig):
     ```
     """
 
-    agent_name: str = Field(description="The agent to collect rollouts from.")
+    agent_name: Optional[str] = Field(
+        default=None,
+        description="The agent to collect rollouts from. If not specified, uses agent_ref from each data row.",
+    )
     input_jsonl_fpath: str = Field(
         description="The input data source to use to collect rollouts, in the form of a file path to a jsonl file."
     )
@@ -108,8 +111,14 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
 
             async def _post_coroutine(row: dict) -> None:
                 row["responses_create_params"] = row["responses_create_params"] | config.responses_create_params
+                # Use config.agent_name if specified, otherwise use agent_ref from the row
+                agent_name = config.agent_name or row.get("agent_ref", {}).get("name")
+                if not agent_name:
+                    raise ValueError(
+                        f"No agent specified for row. Either provide +agent_name config or include agent_ref in data. Row: {row.get('id', 'unknown')}"
+                    )
                 async with semaphore:
-                    response = await server_client.post(server_name=config.agent_name, url_path="/run", json=row)
+                    response = await server_client.post(server_name=agent_name, url_path="/run", json=row)
                     await raise_for_status(response)
                     result = await response.json()
                     f.write(json.dumps(result) + "\n")
