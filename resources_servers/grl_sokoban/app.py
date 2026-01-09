@@ -119,6 +119,12 @@ class GrlSokobanResourcesServer(SimpleResourcesServer):
         return GrlSokobanSeedSessionResponse(observation=observation)
 
     async def step(self, request: Request, body: GrlSokobanStepRequest) -> GrlSokobanStepResponse:
+        """Execute Sokoban actions.
+
+        Note: FastAPI will return 422 errors if the request body is not properly formatted.
+        The body must be a JSON object with an 'actions' field: {"actions": ["Up", "Down", ...]}
+        Sending just an array ["Right"] will result in a 422 validation error.
+        """
         session_id = request.session.get(SESSION_ID_KEY)
         if session_id is None or session_id not in self.session_id_to_state:
             raise HTTPException(status_code=400, detail="Session not initialized. Call /seed_session first.")
