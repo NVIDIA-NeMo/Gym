@@ -157,7 +157,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
             return library_reward, extracted_answer, library_reward, None
 
         # TODO remove
-        print(f"HIT JUDGE EVALUATION WITH CONFIG: {self.config}")
+        print(f"HIT JUDGE EVALUATION WITH CONFIG: {self.config}", flush=True)
         judge_reward, judge_evaluations = await self._verify_answer_with_judge(
             question, expected_answer, generated_answer
         )
