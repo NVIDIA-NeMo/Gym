@@ -14,7 +14,7 @@
 # limitations under the License.
 import json
 from typing import Any, Dict
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
@@ -24,6 +24,19 @@ from resources_servers.swerl_gen.app import (
     SWEGenVerifyRequest,
     SWEGenVerifyResponse,
 )
+
+
+class AwaitableResult:
+    """Small helper to mock an awaitable Ray ObjectRef-like return value."""
+
+    def __init__(self, value):
+        self._value = value
+
+    def __await__(self):
+        async def _coro():
+            return self._value
+
+        return _coro().__await__()
 
 
 def create_test_config() -> SWEGenResourcesServerConfig:
@@ -114,12 +127,10 @@ class TestApp:
         SWEGenResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
     @patch("resources_servers.swerl_gen.app.compute_score")
-    @patch("resources_servers.swerl_gen.app.get_running_loop")
     @patch("resources_servers.swerl_gen.app.extract_pred_patch")
     async def test_verify_patch_gen_successful_execution(
         self,
         mock_extract_pred_patch,
-        mock_get_running_loop,
         mock_compute_score,
     ) -> None:
         """Test successful verification flow when a patch is extracted and compute_score succeeds."""
@@ -133,12 +144,8 @@ class TestApp:
         mock_extract_pred_patch.return_value = {"model_patch": model_patch}
 
         # Mock compute_score.remote to avoid initializing Ray
-        mock_compute_score.remote.return_value = MagicMock()
-
-        # Mock event loop's run_in_executor to return a successful score
-        mock_loop = MagicMock()
-        mock_loop.run_in_executor = AsyncMock(
-            return_value=(
+        mock_compute_score.remote.return_value = AwaitableResult(
+            (
                 1.0,
                 {
                     "status": "done",
@@ -148,7 +155,6 @@ class TestApp:
                 },
             )
         )
-        mock_get_running_loop.return_value = mock_loop
 
         verify_request = create_verify_request(
             text="I've successfully fixed the bug in the code.",
@@ -168,12 +174,10 @@ class TestApp:
         assert result.model_patch == model_patch
 
     @patch("resources_servers.swerl_gen.app.compute_score")
-    @patch("resources_servers.swerl_gen.app.get_running_loop")
     @patch("resources_servers.swerl_gen.app.extract_repro_test")
     async def test_verify_test_gen_successful_execution(
         self,
         mock_extract_repro_test,
-        mock_get_running_loop,
         mock_compute_score,
     ) -> None:
         """Test successful verification flow when a patch is extracted and compute_score succeeds."""
@@ -187,12 +191,8 @@ class TestApp:
         mock_extract_repro_test.return_value = {"repro_test_info_base64": repro_test_info_base64}
 
         # Mock compute_score.remote to avoid initializing Ray
-        mock_compute_score.remote.return_value = MagicMock()
-
-        # Mock event loop's run_in_executor to return a successful score
-        mock_loop = MagicMock()
-        mock_loop.run_in_executor = AsyncMock(
-            return_value=(
+        mock_compute_score.remote.return_value = AwaitableResult(
+            (
                 1.0,
                 {
                     "status": "done",
@@ -202,7 +202,6 @@ class TestApp:
                 },
             )
         )
-        mock_get_running_loop.return_value = mock_loop
 
         verify_request = create_verify_request(
             text="I've successfully fixed the bug in the code.",
