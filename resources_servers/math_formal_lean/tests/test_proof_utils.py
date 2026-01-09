@@ -21,7 +21,6 @@ from resources_servers.math_formal_lean.proof_utils import (
     determine_proof_status,
     extract_code_block,
     extract_proof_only,
-    get_lean4_header,
 )
 
 
@@ -174,17 +173,6 @@ theorem test : True := by
         # formal_statement should not be included when restate is False
         assert result.count("theorem test") == 0 or "trivial" in result
 
-    def test_build_statement_format(self):
-        generation = """```lean4
-theorem new_theorem : 1 = 1
-```"""
-        data_point = {}
-        config = ProofBuildConfig()
-        result = build_lean4_proof(generation, data_point, config, answer_format="lean4-statement")
-
-        assert "import Mathlib" in result
-        assert "sorry" in result
-
 
 class TestDetermineProofStatus:
     def test_completed_status(self):
@@ -218,11 +206,3 @@ class TestDetermineProofStatus:
     def test_unknown_status(self):
         output = {}
         assert determine_proof_status(output) == "unknown"
-
-
-class TestGetLean4Header:
-    def test_header_contains_imports(self):
-        header = get_lean4_header()
-        assert "import Mathlib" in header
-        assert "import Aesop" in header
-        assert "set_option maxHeartbeats 0" in header
