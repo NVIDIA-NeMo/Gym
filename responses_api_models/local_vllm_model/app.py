@@ -232,6 +232,11 @@ Total Ray cluster resources: {cluster_resources()}""")
 
         self._patch_vllm_ray_runtime_env()
 
+        # TODO remove
+        import subprocess
+
+        subprocess.run("nvidia-smi", shell=True, check=False)
+
         vllm_server_coroutine = run_server(server_args)
 
         self._patch_uvicorn_server(vllm_server_coroutine)
