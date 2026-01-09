@@ -30,6 +30,7 @@ from nemo_gym.train_data_utils import (
     StringMetrics,
     TrainDataProcessor,
     TrainDataProcessorConfig,
+    validate_backend_credentials,
 )
 
 
@@ -256,6 +257,95 @@ class TestLoadDatasets:
                     ),
                 ],
             )
+
+    def test_load_datasets_missing_credentials(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.train_data_utils, "get_global_config_dict", lambda: DictConfig({}))
+
+        config = TrainDataProcessorConfig(
+            output_dirpath="",
+            mode="train_preparation",
+            should_download=True,
+        )
+        processor = TrainDataProcessor()
+
+        server_type_config_dict = {
+            "responses_api_agents": {
+                "simple_agent": {
+                    "host": "127.0.0.1",
+                    "port": 12345,
+                    "entrypoint": "app.py",
+                    "datasets": [
+                        {
+                            "name": "train",
+                            "type": "train",
+                            "jsonl_fpath": "some/nonexistent/path.jsonl",
+                            "num_repeats": 1,
+                            "gitlab_identifier": {
+                                "dataset_name": "example_multi_step",
+                                "version": "0.0.1",
+                                "artifact_fpath": "train.jsonl",
+                            },
+                            "license": "Apache 2.0",
+                        }
+                    ],
+                    "resources_server": {
+                        "type": "resources_servers",
+                        "name": "example_multi_step_resources_server",
+                    },
+                    "model_server": {
+                        "type": "responses_api_models",
+                        "name": "policy_model",
+                    },
+                }
+            }
+        }
+
+        with raises(SystemExit) as exc_info:
+            processor.load_datasets(
+                config=config,
+                server_instance_configs=[
+                    ResponsesAPIAgentServerInstanceConfig(
+                        name="example_multi_step_simple_agent",
+                        server_type_config_dict=DictConfig(server_type_config_dict),
+                        responses_api_agents=server_type_config_dict["responses_api_agents"],
+                    ),
+                ],
+            )
+        assert exc_info.value.code == 1
+
+    def test_validate_backend_credentials_missing(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            nemo_gym.train_data_utils,
+            "get_global_config_dict",
+            lambda: DictConfig({}),
+        )
+
+        is_valid, error_msg = validate_backend_credentials("gitlab")
+        assert not is_valid
+        assert "GitLab backend selected but missing credentials" in error_msg
+        assert "mlflow_tracking_uri" in error_msg
+        assert "mlflow_tracking_token" in error_msg
+
+        is_valid, error_msg = validate_backend_credentials("huggingface")
+        assert not is_valid
+        assert "HuggingFace backend selected but missing credentials" in error_msg
+        assert "hf_token" in error_msg
+
+    def test_validate_backend_credentials_valid(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            nemo_gym.train_data_utils,
+            "get_global_config_dict",
+            lambda: DictConfig(
+                {
+                    "mlflow_tracking_uri": "https://example.com",
+                    "mlflow_tracking_token": "token123",
+                }
+            ),
+        )
+
+        is_valid, error_msg = validate_backend_credentials("gitlab")
+        assert is_valid is True
+        assert error_msg == ""
 
 
 class TestValidateSamplesAndAggregateMetrics:
@@ -656,6 +746,11 @@ class TestValidateSamplesAndAggregateMetrics:
                 {"items": [1, 1, 2]},
                 {"items": [1, 2, 2]},  # different duplicates
                 False,
+            ),
+            (
+                {"items": [{"a": 1}, {"b": 2}]},
+                {"items": [{"b": 2}, {"a": 1}]},  # lists containing dicts
+                True,
             ),
         ]
 
