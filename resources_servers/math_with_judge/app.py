@@ -114,9 +114,6 @@ Example output: "My final verdict is different [[A!=B]]"."""
         # Additional server routes go here! e.g.:
         # app.post("/get_weather")(self.get_weather)
 
-        # TODO remove
-        print(f"Library judge match config: {self.config}", flush=True)
-
         return app
 
     async def verify(self, body: LibraryJudgeMathVerifyRequest) -> LibraryJudgeMathVerifyResponse:
