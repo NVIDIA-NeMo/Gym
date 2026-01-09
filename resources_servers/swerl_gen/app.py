@@ -151,7 +151,6 @@ class SWEGenResourcesServer(SimpleResourcesServer):
         extra_info_base64 = base64.b64encode(json.dumps(extra_info).encode()).decode()
 
         async with self._semaphore:
-            loop = get_running_loop()
             start_time = time.time()
             task_args = (
                 extra_info_base64,
@@ -162,7 +161,7 @@ class SWEGenResourcesServer(SimpleResourcesServer):
                 self.config.debug,
             )
             future = compute_score.remote(*task_args)
-            reward, verification_result = await loop.run_in_executor(None, ray.get, future)
+            reward, verification_result = await future
             verification_time = time.time() - start_time
 
         return SWEGenVerifyResponse(
