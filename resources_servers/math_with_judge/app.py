@@ -114,6 +114,9 @@ Example output: "My final verdict is different [[A!=B]]"."""
         # Additional server routes go here! e.g.:
         # app.post("/get_weather")(self.get_weather)
 
+        # TODO remove
+        print(f"Library judge match config: {self.config}", flush=True)
+
         return app
 
     async def verify(self, body: LibraryJudgeMathVerifyRequest) -> LibraryJudgeMathVerifyResponse:
@@ -156,8 +159,6 @@ Example output: "My final verdict is different [[A!=B]]"."""
         if not self.config.should_use_judge or library_reward > 0.5:
             return library_reward, extracted_answer, library_reward, None
 
-        # TODO remove
-        print(f"HIT JUDGE EVALUATION WITH CONFIG: {self.config}", flush=True)
         judge_reward, judge_evaluations = await self._verify_answer_with_judge(
             question, expected_answer, generated_answer
         )
