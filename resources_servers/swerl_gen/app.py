@@ -15,10 +15,9 @@
 import base64
 import json
 import time
-from asyncio import Semaphore, get_running_loop
+from asyncio import Semaphore
 from typing import Any, Optional
 
-import ray
 from fastapi import FastAPI
 
 from nemo_gym.base_resources_server import (
