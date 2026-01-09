@@ -12,9 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+from typing import Any
 
+import aiohttp
 import verifiers as vf
 from openai import AsyncOpenAI
+from openai.resources.chat import AsyncChat
+from openai.resources.chat.completions import AsyncCompletions
+from openai.types.chat.chat_completion import ChatCompletion
 from pydantic import ConfigDict, Field
 from verifiers.utils.async_utils import maybe_semaphore
 
@@ -32,6 +37,67 @@ from resources_servers.verifiers.schemas import (
 
 
 logger = logging.getLogger(__name__)
+
+
+class _VLLMChatCompletions(AsyncCompletions):
+    """Wraps vllm_model and injects token IDs as attributes for verifiers."""
+    def __init__(self, base_url: str) -> None:
+        self._base_url = base_url.rstrip("/")
+
+    async def create(self, *args: Any, **kwargs: Any) -> ChatCompletion:
+        request_body: dict[str, Any] = {
+            "model": kwargs.get("model", ""),
+            "messages": kwargs.get("messages", []),
+        }
+        for key in ("temperature", "max_tokens", "max_completion_tokens", "top_p", "stop", "n", "tools", "tool_choice"):
+            if key in kwargs and kwargs[key] is not None:
+                request_body[key] = kwargs[key]
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{self._base_url}/chat/completions", json=request_body) as resp:
+                resp.raise_for_status()
+                response_dict = await resp.json()
+
+        # Extract token IDs from vllm_model format 
+        choice_dict = response_dict["choices"][0]
+        message_dict = choice_dict.get("message", {})
+        prompt_token_ids = message_dict.pop("prompt_token_ids", [])
+        generation_token_ids = message_dict.pop("generation_token_ids", [])
+        generation_log_probs = message_dict.pop("generation_log_probs", [])
+
+        # Reconstruct logprobs.content for verifiers
+        if generation_token_ids and generation_log_probs:
+            choice_dict["logprobs"] = {
+                "content": [
+                    {"token": f"token_id:{tid}", "logprob": lp, "top_logprobs": []}
+                    for tid, lp in zip(generation_token_ids, generation_log_probs)
+                ]
+            }
+
+        response = ChatCompletion.model_validate(response_dict)
+        setattr(response, "prompt_token_ids", prompt_token_ids)
+        setattr(response.choices[0], "token_ids", generation_token_ids)
+        return response
+
+
+class _VLLMChat(AsyncChat):
+    def __init__(self, base_url: str) -> None:
+        self._completions = _VLLMChatCompletions(base_url)
+
+    @property
+    def completions(self) -> AsyncCompletions:
+        return self._completions
+
+
+class VLLMOpenAIClient(AsyncOpenAI):
+    """OpenAI-compatible client wrapping vllm_model."""
+    def __init__(self, base_url: str) -> None:
+        super().__init__(api_key="dummy", base_url=base_url)
+        self._chat = _VLLMChat(base_url)
+
+    @property
+    def chat(self) -> AsyncChat:
+        return self._chat
 
 
 class VerifiersAgentConfig(BaseResponsesAPIAgentConfig):
@@ -69,7 +135,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
     _vf_env: vf.Environment | None = None
     _env_id: str | None = None
     _dataset_rows: list[dict] | None = None
-    _openai_client: AsyncOpenAI | None = None
+    _openai_client: VLLMOpenAIClient | None = None
 
     async def _ensure_env_loaded(self) -> None:
         if self._vf_env is not None:
@@ -105,7 +171,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             for i in range(len(dataset))
         ]
 
-    def _get_openai_client(self) -> AsyncOpenAI:
+    def _get_openai_client(self) -> VLLMOpenAIClient:
         if self._openai_client is None:
             from nemo_gym.global_config import get_first_server_config_dict
 
@@ -118,13 +184,53 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             if not model_server_url.endswith("/v1"):
                 model_server_url = model_server_url.rstrip("/") + "/v1"
 
-            self._openai_client = AsyncOpenAI(
-                base_url=model_server_url,
-                api_key="dummy",  # assuming vLLM for now, probably breaks with openai model
-            )
-            logger.info(f"Created OpenAI client pointing to: {model_server_url}")
+            self._openai_client = VLLMOpenAIClient(base_url=model_server_url)
+            logger.info(f"Created VLLMOpenAIClient pointing to: {model_server_url}")
 
         return self._openai_client
+
+    def _convert_trajectory_to_output(self, state: dict) -> list:
+        from nemo_gym.openai_utils import (
+            NeMoGymEasyInputMessage,
+            NeMoGymResponseOutputMessage,
+            NeMoGymResponseOutputText,
+            NeMoGymEasyInputMessageForTraining,
+            NeMoGymResponseOutputMessageForTraining,
+        )
+
+        output = []
+        trajectory = state.get("trajectory", [])
+
+        for step in trajectory:
+            step_output = []
+
+            for msg in step.get("prompt", []):
+                if isinstance(msg, dict):
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+                    step_output.append(NeMoGymEasyInputMessage(role=role, content=content))
+
+            tokens = step.get("tokens")
+            for msg in step.get("completion", []):
+                if isinstance(msg, dict):
+                    content = msg.get("content", "")
+                    if tokens:
+                        step_output.append(NeMoGymResponseOutputMessageForTraining(
+                            id=f"msg_{id(msg)}",
+                            content=[NeMoGymResponseOutputText(text=content, annotations=[])],
+                            prompt_token_ids=tokens.get("prompt_ids", []),
+                            generation_token_ids=tokens.get("completion_ids", []),
+                            generation_log_probs=tokens.get("completion_logprobs", []),
+                        ))
+                    else:
+                        step_output.append(NeMoGymResponseOutputMessage(
+                            id=f"msg_{id(msg)}",
+                            content=[NeMoGymResponseOutputText(text=content, annotations=[])],
+                        ))
+
+            output.append(step_output)
+
+        return output
 
     async def responses(self, req: VerifiersAgentRunRequest) -> VerifiersNeMoGymResponse:
         await self._ensure_env_loaded()
@@ -163,12 +269,14 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         reward = state.get("reward", 0.0) or 0.0
         metrics = state.get("metrics", {}) or {}
 
+        output = self._convert_trajectory_to_output(state)
+
         return VerifiersNeMoGymResponse(
             id=f"verifiers-{self._env_id}-{task_idx}",
             created_at=0,
             model=self.config.model_name,
             object="response",
-            output=[],  # Could put trajectory if needed for something
+            output=output,
             env_id=self._env_id,
             group_id=str(task_idx),
             reward=reward,

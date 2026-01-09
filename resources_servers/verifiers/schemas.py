@@ -22,7 +22,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     BaseVerifyResponse,
 )
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseOutputItem
 
 
 class VerifiersResourcesServerConfig(BaseResourcesServerConfig):
@@ -91,6 +91,7 @@ class VerifiersNeMoGymResponse(NeMoGymResponse):
     env_id: str
     group_id: str
     contains_transitions: Literal[True] = True
+    output: list[list[NeMoGymResponseOutputItem]]
     reward: float
     metrics: dict[str, Any] = Field(default_factory=dict)
     parallel_tool_calls: bool = False

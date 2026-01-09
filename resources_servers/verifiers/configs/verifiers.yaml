@@ -15,7 +15,7 @@ verifiers_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      model_name: "Qwen/Qwen3-4B"
+      model_name: ${policy_model_name}
       vf_env_id: "reverse-text"
       vf_env_args: {}
       dataset_n: -1
