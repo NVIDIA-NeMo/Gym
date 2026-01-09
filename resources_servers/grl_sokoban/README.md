@@ -1,6 +1,6 @@
 # GRL Sokoban Resource Server
 
-Single-box Sokoban puzzle environment. The environment is implemented under `resources_servers/grl_sokoban/env`, mirroring the sokoban implementation in GRL repo (https://github.com/lmgame-org/GRL). The implementation uses gym-sokoban package (https://github.com/mpSchrader/gym-sokoban) which implements DeepMind's paper Imagination Augmented Agents for Deep Reinforcement Learning following the standard of https://gymnasium.farama.org.
+Single-box Sokoban puzzle environment. The environment is implemented under `resources_servers/grl_sokoban/env`, mirroring the sokoban implementation in GRL repo (https://github.com/lmgame-org/GRL) and based on code from https://github.com/lmgame-org/lmenv, developed in collaboration with NVIDIA. The implementation uses gym-sokoban package (https://github.com/mpSchrader/gym-sokoban) which implements DeepMind's paper Imagination Augmented Agents for Deep Reinforcement Learning following the standard of https://gymnasium.farama.org.
 
 ## Why it exists
 - **Domain**: Deterministic Sokoban puzzles.

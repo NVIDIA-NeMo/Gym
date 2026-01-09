@@ -16,6 +16,9 @@
 This module is adapted from the ``gym_sokoban`` project and GRL's fork of the
 same utilities. It produces solvable single-box Sokoban rooms suitable for
 text-based rendering.
+
+This implementation is based on code from https://github.com/lmgame-org/lmenv,
+developed in collaboration with NVIDIA.
 """
 
 from __future__ import annotations
