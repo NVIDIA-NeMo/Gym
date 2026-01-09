@@ -1,0 +1,27 @@
+verifiers_resources_server:
+  resources_servers:
+    verifiers:
+      entrypoint: app.py
+      domain: other
+      verified: false
+
+verifiers_agent:
+  responses_api_agents:
+    verifiers_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: verifiers_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model_name: "Qwen/Qwen3-4B"
+      vf_env_id: "reverse-text"
+      vf_env_args: {}
+      dataset_n: -1
+      dataset_seed: null
+      group_size: 1
+      max_concurrent_generation: -1
+      max_concurrent_scoring: -1
+      max_tokens: 512
+      temperature: 1.0
