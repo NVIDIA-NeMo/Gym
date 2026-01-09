@@ -23,7 +23,7 @@ Then, rollouts can be collected using a command such as the following:
 ```bash
 ng_collect_rollouts \
     +agent_name=ns_tools_simple_agent \
-    +input_jsonl_fpath=data/ns_tools_example.jsonl \
+    +input_jsonl_fpath=resources_servers/ns_tools/data/example.jsonl \
     +output_jsonl_fpath=data/ns_tools_rollouts.jsonl \
     +limit=5
 ```
@@ -56,6 +56,32 @@ Example with Python tool:
     }]
   }
 }
+```
+
+## Preparing datasets
+
+The `prepare_dataset.py` script transforms source datasets into the JSONL format required by nemo-gym.
+
+### Regenerating compmath_prepared.jsonl
+
+The `data/compmath_prepared.jsonl` file is generated from the nemo-skills comp-math-24-25 dataset. To regenerate it:
+
+```bash
+python prepare_dataset.py \
+    --input /path/to/nemo_skills/dataset/comp-math-24-25/test.txt \
+    --output data/compmath_prepared.jsonl \
+    --prompt_config generic/math \
+    --tools nemo_skills.mcp.servers.python_tool.PythonTool \
+    --verifier_type math_with_judge
+```
+
+### Validating example data
+
+To validate the example data and regenerate metrics:
+```bash
+ng_prepare_data "+config_paths=[resources_servers/ns_tools/configs/ns_tools.yaml,responses_api_models/openai_model/configs/openai_model.yaml]" \
+    +output_dirpath=data/ns_tools \
+    +mode=example_validation
 ```
 
 # Licensing information
