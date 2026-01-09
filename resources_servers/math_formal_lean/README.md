@@ -38,8 +38,8 @@ The dataset uses the [NeMo-Skills](https://github.com/NVIDIA-NeMo/Skills) prompt
 
 Set sandbox location via environment variables or YAML config:
 ```yaml
-sandbox_host: ${oc.env:LEAN_SANDBOX_HOST,127.0.0.1}
-sandbox_port: ${oc.env:LEAN_SANDBOX_PORT,6000}
+sandbox_host: ${oc.env:NEMO_SKILLS_SANDBOX_HOST,127.0.0.1}
+sandbox_port: ${oc.env:NEMO_SKILLS_SANDBOX_PORT,6000}
 ```
 
 ## License
