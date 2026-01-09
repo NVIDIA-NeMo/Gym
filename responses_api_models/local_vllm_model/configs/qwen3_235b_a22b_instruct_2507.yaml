@@ -18,3 +18,4 @@ qwen3_235b_a22b_instruct_2507_model_server:
         gpu_memory_utilization: 0.9
         enable_auto_tool_choice: true
         tool_call_parser: hermes
+        model_loader_extra_config: "{\"enable_multithread_load\": true, \"num_threads\": 16}"
