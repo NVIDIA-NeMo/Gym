@@ -1,0 +1,66 @@
+translation_llm_judge:
+  resources_servers:
+    translation_llm_judge:
+      entrypoint: app.py
+      domain: translation
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_responses_create_params:
+        input: []
+      judge_system_message: "You are a professional translation evaluator."
+      # This uses the VIP process from Cheng et al. 2024 (https://arxiv.org/abs/2407.21646)
+      # as implemented by Ouyang et al. 2025 (NVIDIA internal, not yet published)
+      judge_prompt_template: |-
+        Your task is to assess whether a translation segment successfully conveys the semantic content of the original speech according to the following criteria:
+
+        1. Key Information Recognition: Identify whether the key information in the source (e.g., proper nouns, keywords, terminologies, or sentence structures) is present in the translation.
+        2. Correctness Assessment: Determine whether the translation accurately conveys the speaker’s intention, without misinterpretation or contextual errors.
+        3. Expressiveness Assessment: Evaluate whether the translation is fluent, clear, and intuitive to human readers. It should avoid unnecessary verbosity, ambiguous phrases, or awkward grammar.
+
+        Given a source text and its translation, answer "1" if the translation meets all three criteria and answer "0" otherwise. Only output the answer, no other text.
+
+        <begin_of_source>
+        {src_txt}
+        <end_of_source>
+
+        <begin_of_translation>
+        {generated_text}
+        <end_of_translation>
+      judge_score_extract_regex: "(1|0)"
+      judge_max_score: 1
+translation_llm_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: translation_llm_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/translation_llm_judge/data/riva_mt_v3_nothinkInSys_train.jsonl
+        num_repeats: 1
+        gitlab_identifier:
+          dataset_name: riva_mt_v3_nothinkInSys_train
+          version: 0.0.1
+          artifact_fpath: riva_mt_v3_nothinkInSys_train.jsonl
+        license: NVIDIA Internal Use Only, Do Not Distribute
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/translation_llm_judge/data/riva_mt_v3_nothinkInSys_validation.jsonl
+        num_repeats: 1
+        gitlab_identifier:
+          dataset_name: riva_mt_v3_nothinkInSys_validation
+          version: 0.0.1
+          artifact_fpath: riva_mt_v3_nothinkInSys_validation.jsonl
+        license: NVIDIA Internal Use Only, Do Not Distribute
+      - name: example
+        type: example
+        license: NVIDIA Internal Use Only, Do Not Distribute
+        jsonl_fpath: resources_servers/translation_llm_judge/data/example.jsonl
+
+
