@@ -533,13 +533,39 @@ Full body: {json.dumps(exc.body, indent=4)}
                 "Adding a uvicorn logging filter so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
             )
 
-        uvicorn.run(
-            app,
+        uvicorn_kwargs = dict(
             host=server.config.host,
             port=server.config.port,
             # We add a very small graceful shutdown timeout so when we shutdown we cancel all inflight requests and there are no lingering requests (requests are cancelled)
             timeout_graceful_shutdown=0.5,
         )
+
+        is_main_proc = getenv("NEMO_GYM_FASTAPI_WORKER_CLS")
+
+        if server.config.num_workers:
+            from os import environ
+
+            environ["NEMO_GYM_FASTAPI_WORKER_CLS"] = f"{cls.__module__}:{cls.__name__}"
+            print(environ["NEMO_GYM_FASTAPI_WORKER_CLS"])
+
+            # TODO may need to make generic
+            # uvicorn_kwargs["app"] = "nemo_gym.server_utils:_global_app_for_multiple_fastapi_workers"
+            # uvicorn_kwargs["workers"] = server.config.num_workers
+        else:
+            uvicorn_kwargs["app"] = app
+
+        if is_main_proc:
+            uvicorn.run(**uvicorn_kwargs)
+
+
+if getenv("NEMO_GYM_FASTAPI_WORKER_CLS"):
+    from importlib import import_module
+
+    module_path, class_path = getenv("NEMO_GYM_FASTAPI_WORKER_CLS").split(":")
+
+    server_cls = getattr(import_module(module_path), class_path)
+    _global_app_for_multiple_fastapi_workers = server_cls.run_webserver()
+    _global_app_for_multiple_fastapi_workers
 
 
 class HeadServer(BaseServer):
