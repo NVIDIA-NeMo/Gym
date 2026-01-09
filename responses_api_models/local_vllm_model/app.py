@@ -226,23 +226,6 @@ Environment variables: {env_vars_to_print}""")
 
         runtime_env.RuntimeEnv = new_RuntimeEnv
 
-    def _patch_vllm_ray_RayDistributedExecutor(self) -> None:
-        # This patch may be sensitive to vLLM version! See https://github.com/vllm-project/vllm/blob/275de34170654274616082721348b7edd9741d32/vllm/v1/executor/ray_executor.py#L134
-        from vllm.v1.executor.ray_executor import RayDistributedExecutor
-
-        original_configure_ray_workers_use_nsight = RayDistributedExecutor._configure_ray_workers_use_nsight
-
-        def new_configure_ray_workers_use_nsight(*args, **kwargs):
-            ray_remote_kwargs = original_configure_ray_workers_use_nsight(*args, **kwargs)
-
-            ray_remote_kwargs["runtime_env"]["py_executable"] = sys.executable
-            if self.config.debug:
-                print(f"Patched RayDistributedExecutor with {sys.executable}")
-
-            return ray_remote_kwargs
-
-        RayDistributedExecutor._configure_ray_workers_use_nsight = new_configure_ray_workers_use_nsight
-
     def start_vllm_server(self) -> None:
         if self.config.debug:
             print(f"""Currently available Ray cluster resources: {available_resources()}
@@ -257,7 +240,6 @@ Total Ray cluster resources: {cluster_resources()}""")
         signal.signal = lambda *args, **kwargs: None
 
         self._patch_vllm_ray_runtime_env()
-        self._patch_vllm_ray_RayDistributedExecutor()
 
         vllm_server_coroutine = run_server(server_args)
 
