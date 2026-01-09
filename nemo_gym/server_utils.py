@@ -555,7 +555,7 @@ Full body: {json.dumps(exc.body, indent=4)}
             timeout_graceful_shutdown=0.5,
         )
 
-        if server.config.num_workers:
+        if server.config.num_workers and server.config.num_workers > 1:
             set_is_nemo_gym_fastapi_worker()
 
             module = getmodule(cls)
