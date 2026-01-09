@@ -131,9 +131,9 @@ equivalence_llm_judge_simple_agent:
       - name: example
         type: example
         license: "TBD"
-        jsonl_fpath: /lustre/fsw/portfolios/llmservice/users/kbhardwaj/dev/Gym/data/nl2bash/example.jsonl
+        jsonl_fpath: resources_servers/equivalence_llm_judge/data/example_nl2bash.jsonl
       - name: train
         type: train
         license: "TBD"
-        jsonl_fpath: /lustre/fsw/portfolios/llmservice/users/kbhardwaj/dev/Gym/data/nl2bash/example.jsonl
+        jsonl_fpath: resources_servers/equivalence_llm_judge/data/train_nl2bash.jsonl
 
