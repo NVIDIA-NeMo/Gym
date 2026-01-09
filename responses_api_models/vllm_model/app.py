@@ -446,6 +446,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.return_token_id_information:
             log_probs = choice_dict["logprobs"]["content"]
             generation_log_probs = [log_prob["logprob"] for log_prob in log_probs]
+            prompt_routed_experts = chat_completion_dict.get("prompt_routed_experts")
+            generation_routed_experts = choice_dict.get("routed_experts")
 
             """
             START TODO remove this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
@@ -467,22 +469,27 @@ class VLLMModel(SimpleResponsesAPIModel):
             """
 
             message_dict = choice_dict["message"]
-            message_dict.update(
-                dict(
-                    # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-                    # prompt_token_ids=chat_completion_dict["prompt_token_ids"],
-                    prompt_token_ids=tokenize_response["tokens"],
-                    # generation_token_ids=choice_dict["token_ids"],
-                    generation_token_ids=generation_token_ids,
-                    generation_log_probs=generation_log_probs,
-                )
+            message_payload = dict(
+                # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
+                # prompt_token_ids=chat_completion_dict["prompt_token_ids"],
+                prompt_token_ids=tokenize_response["tokens"],
+                # generation_token_ids=choice_dict["token_ids"],
+                generation_token_ids=generation_token_ids,
+                generation_log_probs=generation_log_probs,
             )
+            if prompt_routed_experts is not None:
+                message_payload["prompt_routed_experts"] = prompt_routed_experts
+            if generation_routed_experts is not None:
+                message_payload["generation_routed_experts"] = generation_routed_experts
+            message_dict.update(message_payload)
 
             # Clean the duplicated information
             choice_dict.pop("logprobs")
+            choice_dict.pop("routed_experts", None)
             # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
             # chat_completion_dict.pop("prompt_token_ids")
             # choice_dict.pop("token_ids")
+            chat_completion_dict.pop("prompt_routed_experts", None)
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 
@@ -514,7 +521,7 @@ class VLLMConverterResponsesToChatCompletionsState(BaseModel):
         if self.return_token_id_information and self.token_information:
             message = NeMoGymChatCompletionAssistantMessageForTrainingParam(
                 **shared_params,
-                **self.token_information.model_dump(),
+                **self.token_information.model_dump(exclude_none=True),
             )
         else:
             message = NeMoGymChatCompletionAssistantMessageParam(**shared_params)
@@ -599,6 +606,8 @@ class VLLMConverter(BaseModel):
                     prompt_token_ids=m["prompt_token_ids"],
                     generation_token_ids=m["generation_token_ids"],
                     generation_log_probs=m["generation_log_probs"],
+                    prompt_routed_experts=m.get("prompt_routed_experts"),
+                    generation_routed_experts=m.get("generation_routed_experts"),
                 )
 
         state.flush_assistant()
@@ -802,11 +811,17 @@ class VLLMConverter(BaseModel):
         if self.return_token_id_information and "prompt_token_ids" in raw_message:
             last_response_output_item = response_output[-1]
             train_cls = RESPONSES_TO_TRAIN[last_response_output_item.__class__]
+            routed_experts_payload = {}
+            if raw_message.get("prompt_routed_experts") is not None:
+                routed_experts_payload["prompt_routed_experts"] = raw_message["prompt_routed_experts"]
+            if raw_message.get("generation_routed_experts") is not None:
+                routed_experts_payload["generation_routed_experts"] = raw_message["generation_routed_experts"]
             response_output[-1] = train_cls(
                 **last_response_output_item.model_dump(),
                 prompt_token_ids=raw_message["prompt_token_ids"],
                 generation_token_ids=raw_message["generation_token_ids"],
                 generation_log_probs=raw_message["generation_log_probs"],
+                **routed_experts_payload,
             )
 
         return response_output
