@@ -7,3 +7,5 @@ wordle
 aime2025
 ifeval
 alphabet-sort
+i3-math
+acereason-math
