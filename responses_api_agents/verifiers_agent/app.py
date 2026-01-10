@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+import sys
+import traceback
 from typing import Any
 
 import aiohttp
@@ -40,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 
 class _VLLMChatCompletions(AsyncCompletions):
-    """Wraps vllm_model and injects token IDs as attributes for verifiers."""
+    """adapt vllm_model format to verifiers expected format"""
     def __init__(self, base_url: str) -> None:
         self._base_url = base_url.rstrip("/")
 
@@ -53,19 +55,33 @@ class _VLLMChatCompletions(AsyncCompletions):
             if key in kwargs and kwargs[key] is not None:
                 request_body[key] = kwargs[key]
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(f"{self._base_url}/chat/completions", json=request_body) as resp:
-                resp.raise_for_status()
-                response_dict = await resp.json()
+        url = f"{self._base_url}/chat/completions"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=request_body) as resp:
+                    if resp.status != 200:
+                        error_text = await resp.text()
+                        logger.error(f"[verifiers_agent] Request to {url} failed with status {resp.status}: {error_text[:500]}")
+                        resp.raise_for_status()
+                    response_dict = await resp.json()
+        except Exception as e:
+            logger.error(f"[verifiers_agent] Exception calling {url}: {type(e).__name__}: {e}")
+            raise
 
-        # Extract token IDs from vllm_model
         choice_dict = response_dict["choices"][0]
         message_dict = choice_dict.get("message", {})
+
+
         prompt_token_ids = message_dict.pop("prompt_token_ids", [])
         generation_token_ids = message_dict.pop("generation_token_ids", [])
         generation_log_probs = message_dict.pop("generation_log_probs", [])
 
-        # Reconstruct logprobs.content for verifiers
+        if not generation_token_ids:
+            logger.warning(f"[verifiers_agent] No generation_token_ids in response! Full message keys were: {list(choice_dict.get('message', {}).keys())}")
+
+        if generation_token_ids and isinstance(generation_token_ids[0], str):
+            generation_token_ids = [int(tid) for tid in generation_token_ids]
+
         if generation_token_ids and generation_log_probs:
             choice_dict["logprobs"] = {
                 "content": [
@@ -116,6 +132,7 @@ class VerifiersAgentConfig(BaseResponsesAPIAgentConfig):
 
     max_tokens: int = Field(default=512, description="Max tokens for generation")
     temperature: float = Field(default=1.0, description="Sampling temperature")
+    top_p: float = Field(default=1.0, description="Top-p sampling")
 
 
 class VerifiersAgentRunRequest(BaseRunRequest):
@@ -129,7 +146,7 @@ class VerifiersAgentRunRequest(BaseRunRequest):
     answer: str = Field(default="", description="Expected answer")
     task: str = Field(default="default", description="Task type")
     example_id: int | str = Field(default=0, description="Example ID")
-    info: dict = Field(default_factory=dict, description="Extra info for scoring (e.g., ifeval constraints)")
+    info: dict = Field(default_factory=dict, description="Extra info for scoring")
 
 
 _ENVS_CACHE: dict[str, vf.Environment] = {}
@@ -162,7 +179,6 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 ds = getattr(vf_env, attr, None)
                 if ds is not None:
                     dataset = ds
-                    logger.info(f"Found dataset in vf_env.{attr}")
                     break
             if dataset is None:
                 raise ValueError(f"Environment {vf_env_id} does not have a dataset")
@@ -203,7 +219,6 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 model_server_url = model_server_url.rstrip("/") + "/v1"
 
             _OPENAI_CLIENT_CACHE[cache_key] = VLLMOpenAIClient(base_url=model_server_url)
-            logger.info(f"Created VLLMOpenAIClient pointing to: {model_server_url}")
 
         return _OPENAI_CLIENT_CACHE[cache_key]
 
@@ -220,97 +235,97 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         trajectory = state.get("trajectory", [])
 
         for step in trajectory:
-            step_output = []
-
             for msg in step.get("prompt", []):
                 if isinstance(msg, dict):
                     role = msg.get("role", "user")
                     content = msg.get("content", "")
-                    step_output.append(NeMoGymEasyInputMessage(role=role, content=content))
+                    output.append(NeMoGymEasyInputMessage(role=role, content=content).model_dump())
 
             tokens = step.get("tokens")
             for msg in step.get("completion", []):
                 if isinstance(msg, dict):
                     content = msg.get("content", "")
                     if tokens:
-                        step_output.append(NeMoGymResponseOutputMessageForTraining(
+                        output.append(NeMoGymResponseOutputMessageForTraining(
                             id=f"msg_{id(msg)}",
                             content=[NeMoGymResponseOutputText(text=content, annotations=[])],
                             prompt_token_ids=tokens.get("prompt_ids", []),
                             generation_token_ids=tokens.get("completion_ids", []),
                             generation_log_probs=tokens.get("completion_logprobs", []),
-                        ))
+                        ).model_dump())
                     else:
-                        step_output.append(NeMoGymResponseOutputMessage(
+                        output.append(NeMoGymResponseOutputMessage(
                             id=f"msg_{id(msg)}",
                             content=[NeMoGymResponseOutputText(text=content, annotations=[])],
-                        ))
-
-            output.append(step_output)
+                        ).model_dump())
 
         return output
 
     async def responses(self, req: VerifiersAgentRunRequest) -> VerifiersNeMoGymResponse:
-        vf_env_id = req.vf_env_id or self.config.vf_env_id
-        vf_env, env_id, _ = await self._ensure_env_loaded(vf_env_id)
+        try:
+            vf_env_id = req.vf_env_id or self.config.vf_env_id
+            vf_env, env_id, _ = await self._ensure_env_loaded(vf_env_id)
 
-        task_idx = req.task_idx
+            task_idx = req.task_idx
 
-        prompt_messages = []
-        for item in req.responses_create_params.input or []:
-            if hasattr(item, 'role') and hasattr(item, 'content'):
-                prompt_messages.append({"role": item.role, "content": item.content})
-            elif isinstance(item, dict):
-                prompt_messages.append({"role": item.get("role", "user"), "content": item.get("content", "")})
+            prompt_messages = []
+            for item in req.responses_create_params.input or []:
+                if hasattr(item, 'role') and hasattr(item, 'content'):
+                    prompt_messages.append({"role": item.role, "content": item.content})
+                elif isinstance(item, dict):
+                    prompt_messages.append({"role": item.get("role", "user"), "content": item.get("content", "")})
 
-        rollout_input = vf.RolloutInput(
-            prompt=prompt_messages,
-            answer=req.answer,
-            task=req.task,
-            info=req.info,
-            example_id=req.example_id,
-        )
+            rollout_input = vf.RolloutInput(
+                prompt=prompt_messages,
+                answer=req.answer,
+                task=req.task,
+                info=req.info,
+                example_id=req.example_id,
+            )
 
-        client = self._get_openai_client()
+            client = self._get_openai_client()
 
-        gen_sem = await maybe_semaphore(self.config.max_concurrent_generation)
-        score_sem = await maybe_semaphore(self.config.max_concurrent_scoring)
+            gen_sem = await maybe_semaphore(self.config.max_concurrent_generation)
+            score_sem = await maybe_semaphore(self.config.max_concurrent_scoring)
 
-        sampling_args = {
-            "max_tokens": self.config.max_tokens,
-            "temperature": self.config.temperature,
-        }
+            sampling_args = {
+                "max_tokens": self.config.max_tokens,
+                "temperature": self.config.temperature,
+                "top_p": self.config.top_p,
+            }
+            states = await vf_env.run_group(
+                group_inputs=[rollout_input],
+                client=client,
+                model=self.config.model_name,
+                gen_sampling_args=sampling_args,
+                gen_sem=gen_sem,
+                score_sem=score_sem,
+            )
 
-        states = await vf_env.run_group(
-            group_inputs=[rollout_input],
-            client=client,
-            model=self.config.model_name,
-            gen_sampling_args=sampling_args,
-            gen_sem=gen_sem,
-            score_sem=score_sem,
-        )
+            state = states[0]
+            reward = state.get("reward", 0.0) or 0.0
+            metrics = state.get("metrics", {}) or {}
 
-        state = states[0]
-        reward = state.get("reward", 0.0) or 0.0
-        metrics = state.get("metrics", {}) or {}
+            output = self._convert_trajectory_to_output(state)
 
-        output = self._convert_trajectory_to_output(state)
-
-        return VerifiersNeMoGymResponse(
-            id=f"verifiers-{env_id}-{task_idx}",
-            created_at=0,
-            model=self.config.model_name,
-            object="response",
-            output=output,
-            env_id=env_id,
-            group_id=str(task_idx),
-            reward=reward,
-            metrics=metrics,
-        )
+            return VerifiersNeMoGymResponse(
+                id=f"verifiers-{env_id}-{task_idx}",
+                created_at=0,
+                model=self.config.model_name,
+                object="response",
+                output=output,
+                env_id=env_id,
+                group_id=str(task_idx),
+                reward=reward,
+                metrics=metrics,
+            )
+        except Exception as e:
+            logger.error(f"[verifiers_agent] EXCEPTION in responses(): {type(e).__name__}: {e}")
+            logger.error(f"[verifiers_agent] Traceback:\n{traceback.format_exc()}")
+            raise
 
     async def run(self, body: VerifiersAgentRunRequest) -> VerifiersAgentVerifyResponse:
         response = await self.responses(body)
-
         return VerifiersAgentVerifyResponse(
             responses_create_params=body.responses_create_params,
             response=response,

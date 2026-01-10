@@ -91,7 +91,7 @@ class VerifiersNeMoGymResponse(NeMoGymResponse):
     env_id: str
     group_id: str
     contains_transitions: Literal[True] = True
-    output: list[list[NeMoGymResponseOutputItem]]
+    output: list[dict[str, Any]]
     reward: float
     metrics: dict[str, Any] = Field(default_factory=dict)
     parallel_tool_calls: bool = False
