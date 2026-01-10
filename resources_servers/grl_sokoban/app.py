@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Union
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Body, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from nemo_gym.base_resources_server import (
@@ -118,16 +118,31 @@ class GrlSokobanResourcesServer(SimpleResourcesServer):
 
         return GrlSokobanSeedSessionResponse(observation=observation)
 
-    async def step(self, request: Request, body: GrlSokobanStepRequest) -> GrlSokobanStepResponse:
-        """Execute Sokoban actions.
-
-        Note: FastAPI will return 422 errors if the request body is not properly formatted.
-        The body must be a JSON object with an 'actions' field: {"actions": ["Up", "Down", ...]}
-        Sending just an array ["Right"] will result in a 422 validation error.
-        """
+    async def step(self, request: Request, body: Any = Body()) -> GrlSokobanStepResponse:
         session_id = request.session.get(SESSION_ID_KEY)
         if session_id is None or session_id not in self.session_id_to_state:
             raise HTTPException(status_code=400, detail="Session not initialized. Call /seed_session first.")
+
+        # Handle both formats: {"actions": [...]} and [...]
+        # This makes the endpoint more robust to handle cases where the model
+        # might send just the array instead of the expected object format
+        if isinstance(body, list):
+            # If body is directly a list, wrap it in the expected format
+            parsed_body = GrlSokobanStepRequest(actions=body)
+        elif isinstance(body, dict):
+            # If body is a dict, try to parse it normally
+            try:
+                parsed_body = GrlSokobanStepRequest.model_validate(body)
+            except Exception as e:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Invalid request format. Expected {{'actions': [...]}} or [...], got: {body}. Error: {str(e)}",
+                )
+        else:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid request format. Expected {{'actions': [...]}} or [...], got: {type(body).__name__}",
+            )
 
         session_state = self.session_id_to_state[session_id]
         env = session_state.env
@@ -146,7 +161,7 @@ class GrlSokobanResourcesServer(SimpleResourcesServer):
                 history=list(session_state.history),
             )
 
-        for action in body.actions:
+        for action in parsed_body.actions:
             action_id = self._parse_action(action, reverse_lookup)
             if action_id not in env.ACTION_LOOKUP:
                 raise HTTPException(status_code=400, detail=f"Invalid action identifier: {action}")
