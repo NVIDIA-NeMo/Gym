@@ -22,7 +22,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     BaseVerifyResponse,
 )
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseOutputItem
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 
 
 class VerifiersResourcesServerConfig(BaseResourcesServerConfig):
@@ -64,27 +64,6 @@ class VerifiersCloseRequest(BaseModel):
 class VerifiersCloseResponse(BaseModel):
     message: str
     success: bool
-
-
-class VerifiersAgentConfig(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    vf_env_id: str = Field(description="Default verifiers environment ID")
-    vf_env_args: dict = Field(default_factory=dict, description="Default environment arguments")
-    dataset_n: int = Field(default=-1, description="Number of examples to load")
-    dataset_seed: int | None = Field(default=None, description="Seed for dataset shuffling")
-    group_size: int = Field(default=1, description="Number of rollouts per example")
-    max_concurrent_generation: int = Field(default=-1, description="Max concurrent generation")
-    max_concurrent_scoring: int = Field(default=-1, description="Max concurrent scoring")
-
-
-class VerifiersAgentRunRequest(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    task_idx: int = Field(description="Index of the example to run")
-    responses_create_params: NeMoGymResponseCreateParamsNonStreaming = Field(
-        default_factory=lambda: NeMoGymResponseCreateParamsNonStreaming(input=[])
-    )
 
 
 class VerifiersNeMoGymResponse(NeMoGymResponse):

@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
-import sys
 import traceback
+import uuid
 from typing import Any
 
 import aiohttp
@@ -34,7 +34,6 @@ from resources_servers.verifiers.schemas import (
     VerifiersAgentVerifyRequest,
     VerifiersAgentVerifyResponse,
     VerifiersNeMoGymResponse,
-    VerifiersSeedSessionResponse,
 )
 
 
@@ -70,7 +69,6 @@ class _VLLMChatCompletions(AsyncCompletions):
 
         choice_dict = response_dict["choices"][0]
         message_dict = choice_dict.get("message", {})
-
 
         prompt_token_ids = message_dict.pop("prompt_token_ids", [])
         generation_token_ids = message_dict.pop("generation_token_ids", [])
@@ -164,7 +162,6 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         if vf_env_id in _ENVS_CACHE:
             return _ENVS_CACHE[vf_env_id], _ENV_IDS_CACHE[vf_env_id], _DATASET_ROWS_CACHE[vf_env_id]
 
-        import uuid
         env_id = f"{vf_env_id}-{uuid.uuid4().hex[:8]}"
         logger.info(f"Loading verifiers environment: {vf_env_id}")
 
@@ -226,9 +223,8 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         from nemo_gym.openai_utils import (
             NeMoGymEasyInputMessage,
             NeMoGymResponseOutputMessage,
-            NeMoGymResponseOutputText,
-            NeMoGymEasyInputMessageForTraining,
             NeMoGymResponseOutputMessageForTraining,
+            NeMoGymResponseOutputText,
         )
 
         output = []
