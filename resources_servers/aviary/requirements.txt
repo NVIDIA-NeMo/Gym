@@ -1,5 +1,9 @@
 -e nemo-gym[dev] @ ../../
-fhaviary[gsm8k,hotpotqa,notebook,llm]>=0.28.0
+-e fhaviary[llm] @ ../../../aviary
+-e aviary.gsm8k @ ../../../aviary/packages/gsm8k
+-e aviary.hotpotqa @ ../../../aviary/packages/hotpotqa
+-e aviary.notebook @ ../../../aviary/packages/notebook
+-e aviary.repl @ ../../../aviary/packages/repl
 tqdm
 datasets
 huggingface-hub
