@@ -13,7 +13,6 @@ resources_servers/math_with_judge/configs/math_with_judge.yaml, \
 responses_api_models/vllm_model/configs/vllm_model.yaml"
 ng_run "+config_paths=[$config_paths]" \
     +policy_base_url="http://localhost:8000/v1" \
-    +policy_api_key="EMPTY" \
     +policy_model_name="Qwen/Qwen3-8B" \
     ++math_with_judge.resources_servers.math_with_judge.should_use_judge=false \
     ++math_with_judge.resources_servers.math_with_judge.judge_model_server.name=policy_model
