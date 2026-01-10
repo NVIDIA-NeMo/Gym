@@ -82,6 +82,8 @@ class GlobalConfigDictParserConfig(BaseModel):
     skip_load_from_cli: bool = False
     skip_load_from_dotenv: bool = False
 
+    hide_secrets: bool = False
+
     NO_MODEL_GLOBAL_CONFIG_DICT: ClassVar[DictConfig] = DictConfig(
         {
             POLICY_BASE_URL_KEY_NAME: "",
@@ -184,6 +186,22 @@ class GlobalConfigDictParser(BaseModel):
 
         return disallowed_ports
 
+    def _recursively_hide_secrets(self, dict_config: DictConfig) -> None:
+        with open_dict(dict_config):
+            self._recursively_hide_secrets_helper(dict_config)
+
+    def _recursively_hide_secrets_helper(self, dict_config: DictConfig) -> None:
+        for k, v in list(dict_config.items()):
+            if isinstance(v, (DictConfig, dict)):
+                self._recursively_hide_secrets_helper(v)
+            elif isinstance(v, list):
+                for inner_v in v:
+                    if isinstance(v, (DictConfig, dict)):
+                        self._recursively_hide_secrets_helper(inner_v)
+            else:
+                if "token" in k or "key" in k:
+                    dict_config[k] = "****"
+
     def parse(self, parse_config: Optional[GlobalConfigDictParserConfig] = None) -> DictConfig:
         if parse_config is None:
             parse_config = GlobalConfigDictParserConfig()
@@ -279,6 +297,9 @@ class GlobalConfigDictParser(BaseModel):
 
             # Constrain python version since ray is sensitive to this.
             global_config_dict[PYTHON_VERSION_KEY_NAME] = python_version()
+
+        if parse_config.hide_secrets:
+            self._recursively_hide_secrets(global_config_dict)
 
         return global_config_dict
 
