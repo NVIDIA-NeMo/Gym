@@ -114,7 +114,7 @@ equivalence_llm_judge:
       # Default 0.5 (partial credit). Set to 1.0 for full credit or 0.0 to ignore.
       reward_if_full_generation_succeeds: 0.5
       domain: agent
-      verified: false
+      verified: true
       description: Short bash command generation questions with LLM-as-a-judge
       value: Improve foundational bash and IF capabilities
 equivalence_llm_judge_simple_agent:
@@ -130,10 +130,23 @@ equivalence_llm_judge_simple_agent:
       datasets:
       - name: example
         type: example
-        license: "TBD"
+        license: GNU General Public License v3.0
         jsonl_fpath: resources_servers/equivalence_llm_judge/data/example_nl2bash.jsonl
       - name: train
         type: train
-        license: "TBD"
+        license: GNU General Public License v3.0
         jsonl_fpath: resources_servers/equivalence_llm_judge/data/train_nl2bash.jsonl
+        gitlab_identifier:
+          dataset_name: nl2bash-equivalency-judge
+          version: 0.0.1
+          artifact_fpath: nl2bash-super-train-0901.jsonl
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/equivalence_llm_judge/data/validation_nl2bash.jsonl
+        gitlab_identifier:
+          dataset_name: nl2bash-equivalency-judge
+          version: 0.0.1
+          artifact_fpath: nl2bash-super-validation-0901.jsonl
+        license: GNU General Public License v3.0
+
 
