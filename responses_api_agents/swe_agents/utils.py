@@ -1190,6 +1190,10 @@ poetry install --no-interaction --no-root
 echo "Installing datasets package..."
 poetry run python -m pip install datasets
 
+mkdir -p evaluation/oh
+mkdir -p logs
+mkdir -p .eval_sessions
+
 echo "Verifying .venv was created..."
 if [ -d .venv ]; then
     echo "✓ .venv created at $(pwd)/.venv"

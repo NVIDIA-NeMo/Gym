@@ -203,7 +203,7 @@ class RunOpenHandsAgent:
 
         eval_dir_in_openhands = f"evaluation/oh/{agent_run_id}"
         local_dataset_path = "/root/dataset/data.jsonl"
-        config_file_path = f"config_{agent_run_id}.toml"
+        config_file_path = f"/tmp/config_{agent_run_id}.toml"
 
         assert self.openhands_setup_dir is not None, "OpenHands setup directory is not set"
 
@@ -215,6 +215,7 @@ class RunOpenHandsAgent:
             "    exit 1; "
             "fi && "
             # Add miniforge bin to PATH (for tmux, node, poetry, etc.)
+            "mkdir -p /tmp/ && "
             "export PATH=/openhands_setup/miniforge3/bin:$PATH && "
             # Setup tmux socket (OpenHands requirement)
             "uid=$(id -ru 2>/dev/null || id -u) && "
@@ -405,11 +406,6 @@ class RunOpenHandsAgent:
                     matches = glob.glob(pattern)
                     if matches:
                         return matches[0]
-
-                print(
-                    f"No container found with replacements {replacements} in {container_dir}",
-                    flush=True,
-                )
             else:
                 print(f"Container directory {container_dir} does not exist", flush=True)
 
@@ -468,12 +464,26 @@ class RunOpenHandsAgent:
             #     f"Mounting pre-built OpenHands from: {self.openhands_setup_dir}",
             #     flush=True,
             # )
-            mount_args.append(f"--mount type=bind,src={self.openhands_setup_dir},dst=/openhands_setup")
-            mount_args.append(f"--mount type=bind,src={self.openhands_setup_dir},dst={self.openhands_setup_dir}")
+            mount_args.append(f"--mount type=bind,src={self.openhands_setup_dir},dst=/openhands_setup,ro")
+            mount_args.append(f"--mount type=bind,src={self.openhands_setup_dir},dst={self.openhands_setup_dir},ro")
             # Mount only the venv and miniforge as read-only to prevent mutation while keeping the rest writable
             venv_path = Path(self.openhands_setup_dir) / "OpenHands/.venv"
             mount_args.append(f"--mount type=bind,src={venv_path},dst=/openhands_setup/OpenHands/.venv,ro")
             mount_args.append(f"--mount type=bind,src={venv_path},dst={venv_path},ro")
+
+            # make everything in OpenHands read-only
+            mount_args.append(
+                f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands,dst=/openhands_setup/OpenHands,ro"
+            )
+            mount_args.append(
+                f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/.eval_sessions,dst=/openhands_setup/OpenHands/.eval_sessions"
+            )
+            mount_args.append(
+                f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/logs,dst=/openhands_setup/OpenHands/logs"
+            )
+            mount_args.append(
+                f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/evaluation/oh,dst=/openhands_setup/OpenHands/evaluation/oh"
+            )
             mount_args.append(f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl")
 
             miniforge3_path = Path(self.openhands_setup_dir) / "miniforge3"
