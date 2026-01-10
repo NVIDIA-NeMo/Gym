@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
+from nemo_skills.mcp.tool_manager import ToolManager
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
@@ -41,7 +42,6 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.config_types import ResourcesServerRef
 from nemo_gym.server_utils import SESSION_ID_KEY
 
-from nemo_skills.mcp.tool_manager import ToolManager
 
 logger = logging.getLogger(__name__)
 
@@ -210,8 +210,7 @@ class NSToolsResourcesServer(SimpleResourcesServer):
 
         if verifier_type not in self.config.verifiers:
             raise ValueError(
-                f"Unknown verifier: {verifier_type}. "
-                f"Configure it in 'verifiers' or check 'default_verifier'."
+                f"Unknown verifier: {verifier_type}. Configure it in 'verifiers' or check 'default_verifier'."
             )
 
         verifier_ref = self.config.verifiers[verifier_type]
