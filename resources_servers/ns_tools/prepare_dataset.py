@@ -46,6 +46,7 @@ from typing import Any
 from nemo_skills.mcp.tool_manager import ToolManager
 from nemo_skills.prompt.utils import load_config
 
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
