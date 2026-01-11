@@ -1,0 +1,47 @@
+{
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 752.0,
+        "Min": 532.0,
+        "Max": 935.0,
+        "Median": 764.0,
+        "Standard deviation": 149.52
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "dataset_name": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "dataset_split": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "mode": {
+        "unique_count": 2,
+        "total_count": 5
+    }
+}
