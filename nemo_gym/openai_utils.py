@@ -1,17 +1,21 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
+from asyncio import sleep
 from typing import (
+    Any,
     Dict,
     List,
     Literal,
@@ -74,7 +78,13 @@ from openai.types.shared_params import FunctionDefinition
 from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import TypedDict
 
-from nemo_gym.server_utils import request
+from nemo_gym.server_utils import (
+    _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG,
+    MAX_NUM_TRIES,
+    ClientResponse,
+    raise_for_status,
+    request,
+)
 
 
 ########################################
@@ -344,10 +354,10 @@ class NeMoGymChatCompletionMessageToolCallParam(ChatCompletionMessageToolCallPar
     function: NeMoGymChatCompletionMessageToolCallFunctionParam
 
 
-class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageParam):
+class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageParam, total=False):
     # Override the iterable which is annoying to work with.
     content: Union[str, List[ContentArrayOfContentPart], None]
-    tool_calls: List[NeMoGymChatCompletionMessageToolCallParam]
+    tool_calls: Optional[List[NeMoGymChatCompletionMessageToolCallParam]] = None
 
 
 class NeMoGymChatCompletionAssistantMessageForTrainingParam(
@@ -418,37 +428,85 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
 # Clients
 ########################################
 
+# See https://platform.openai.com/docs/guides/error-codes/api-errors
+# 500 is internal server error, which may sporadically occur
+# 502 is Bad gateway (when the endpoint is overloaded)
+# 504 is Gateway timeout (when the endpoint config has too low of a gateway timeout setting for the model to finish generating)
+RATE_LIMIT_ERROR_CODES = [429, 502, 503, 504, 520]
+RETRY_ERROR_CODES = RATE_LIMIT_ERROR_CODES + [500]
 
-class NeMoGymAsyncOpenAI(BaseModel):
+
+class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     """This is just a stub class that wraps around aiohttp"""
 
     base_url: str
     api_key: str
 
+    internal: bool = Field(
+        default=False,
+        description="Set this to true if this particular client is only used to call internal NeMo Gym servers.",
+    )
+
+    async def _request(self, **request_kwargs: Dict) -> ClientResponse:
+        max_num_tries = MAX_NUM_TRIES
+        tries = 0
+        while tries < MAX_NUM_TRIES:
+            tries += 1
+            response = await request(**(request_kwargs | {"_internal": self.internal}))
+
+            if response.status in RETRY_ERROR_CODES:
+                # If we hit a rate limit, we don't want to hit max num tries, so we increment both.
+                if response.status in RATE_LIMIT_ERROR_CODES:
+                    max_num_tries += 1
+
+                content = (await response.content.read()).decode()
+                print(
+                    f"Hit a {response.status} trying to query an OpenAI endpoint (try {tries}). Sleeping 0.5s. Error message: {content}"
+                )
+                await sleep(0.5)
+                continue
+            else:
+                return response
+
+        # We've exited the loop
+        response.raise_for_status()
+
+    async def _raise_for_status(self, response: ClientResponse, request_kwargs: Dict[str, Any]) -> None:
+        if not response.ok and _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
+            print(f"Request kwargs: {json.dumps(request_kwargs)}")
+
+        await raise_for_status(response)
+
     async def create_chat_completion(self, **kwargs):
-        response = await request(
-            method="POST",
+        request_kwargs = dict(
             url=f"{self.base_url}/chat/completions",
             json=kwargs,
             headers={"Authorization": f"Bearer {self.api_key}"},
         )
+        response = await self._request(method="POST", **request_kwargs)
+
+        await self._raise_for_status(response, request_kwargs)
         return await response.json()
 
     async def create_response(self, **kwargs):
-        response = await request(
-            method="POST",
+        request_kwargs = dict(
             url=f"{self.base_url}/responses",
             json=kwargs,
             headers={"Authorization": f"Bearer {self.api_key}"},
         )
+        response = await self._request(method="POST", **request_kwargs)
+
+        await self._raise_for_status(response, request_kwargs)
         return await response.json()
 
     async def create_tokenize(self, **kwargs):
         base_url = self.base_url.removesuffix("/v1")
-        response = await request(
-            method="POST",
+        request_kwargs = dict(
             url=f"{base_url}/tokenize",
             json=kwargs,
             headers={"Authorization": f"Bearer {self.api_key}"},
         )
+        response = await self._request(method="POST", **request_kwargs)
+
+        await self._raise_for_status(response, request_kwargs)
         return await response.json()

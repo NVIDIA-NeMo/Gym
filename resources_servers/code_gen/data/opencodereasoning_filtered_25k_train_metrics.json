@@ -1,0 +1,57 @@
+{
+    "name": "opencodereasoning_filtered_train",
+    "type": "train",
+    "jsonl_fpath": "resources_servers/code_gen/data/opencodereasoning_filtered_25k_train.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": {
+        "dataset_name": "opencodereasoning_filtered",
+        "version": "0.0.1",
+        "artifact_fpath": "opencodereasoning_filtered_25k_train.jsonl"
+    },
+    "license": "Apache 2.0",
+    "Number of examples": 23971,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 23971,
+        "Average": 355.09,
+        "Min": 43.0,
+        "Max": 2201.0,
+        "Median": 336.52,
+        "Standard deviation": 156.88
+    },
+    "Number of turns": {
+        "Total # non-null values": 23971,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "hash_id": {
+        "unique_count": 23971,
+        "total_count": 23971
+    },
+    "dataset": {
+        "unique_count": 4,
+        "total_count": 23971
+    },
+    "source": {
+        "unique_count": 8,
+        "total_count": 23971
+    }
+}

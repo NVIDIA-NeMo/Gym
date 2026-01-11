@@ -11,6 +11,8 @@ Evaluates language model responses against instruction-following criteria using 
 - `kwargs` (required): Details of the instruction.
 - `grading_mode`: Either binary (reward is whether all instructions must be followed) or fraction (reward is fraction of instructions followed).
 
+The dataset can be found at https://huggingface.co/datasets/nvidia/Nemotron-RL-instruction_following 
+
 ### Example dataset row (dataset format)
 ```json
 {

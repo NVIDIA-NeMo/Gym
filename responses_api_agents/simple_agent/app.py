@@ -1,10 +1,11 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -36,6 +37,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
+from nemo_gym.server_utils import raise_for_status
 
 
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
@@ -85,6 +87,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 json=new_body,
                 cookies=model_server_cookies,
             )
+            # We raise for status here since we expect model calls to always work.
+            await raise_for_status(model_response)
             model_response_json = await model_response.json()
             model_server_cookies = model_response.cookies
             try:
@@ -96,6 +100,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
             output = model_response.output
             new_outputs.extend(output)
+
+            if model_response.incomplete_details and model_response.incomplete_details.reason == "max_output_tokens":
+                break
 
             all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
             all_output_messages: List[NeMoGymResponseOutputMessage] = [
@@ -111,6 +118,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     json=json.loads(output_function_call.arguments),
                     cookies=resources_server_cookies,
                 )
+                # We don't raise for status here since it's a valid return for the API to error e.g. if the model outputs an invalid call or something.
                 resources_server_cookies = api_response.cookies
 
                 tool_response = NeMoGymFunctionCallOutput(
@@ -140,6 +148,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             json=body.model_dump(),
             cookies=cookies,
         )
+        await raise_for_status(seed_session_response)
         cookies = seed_session_response.cookies
 
         response = await self.server_client.post(
@@ -148,6 +157,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             json=body.responses_create_params,
             cookies=cookies,
         )
+        await raise_for_status(response)
         cookies = response.cookies
 
         verify_request = SimpleAgentVerifyRequest.model_validate(
@@ -160,6 +170,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             json=verify_request.model_dump(),
             cookies=cookies,
         )
+        await raise_for_status(verify_response)
         return SimpleAgentVerifyResponse.model_validate(await verify_response.json())
 
 

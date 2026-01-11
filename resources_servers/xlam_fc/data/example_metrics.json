@@ -1,0 +1,49 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/xlam_fc/data/example.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": null,
+    "license": null,
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 5,
+        "Average": 1.6,
+        "Min": 1.0,
+        "Max": 2.0,
+        "Median": 1.6,
+        "Standard deviation": 0.548
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 259.0,
+        "Min": 106.0,
+        "Max": 648.0,
+        "Median": 143.0,
+        "Standard deviation": 230.19
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "id": {
+        "Total # non-null values": 5,
+        "Average": 2.0,
+        "Min": 0.0,
+        "Max": 4.0,
+        "Median": 2.0,
+        "Standard deviation": 1.58
+    }
+}
