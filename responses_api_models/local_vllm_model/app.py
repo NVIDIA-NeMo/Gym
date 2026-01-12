@@ -96,7 +96,7 @@ class LocalVLLMModelActor:
         return self._base_url
 
     def is_alive(self) -> bool:
-        return self.server_thread.is_alive
+        return self.server_thread.is_alive()
 
 
 class LocalVLLMModel(VLLMModel):
