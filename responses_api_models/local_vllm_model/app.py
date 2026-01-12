@@ -224,8 +224,9 @@ Environment variables: {env_vars_to_print}""")
         selected_node = None
         partial_node = None
         for node in alive_gpu_nodes:
-            total_gpus = node.resources_total.get("GPU", 0) > 0
-            available_gpus = node_id_to_available_resources[node.node_id]["GPU"]
+            total_gpus = node.resources_total["GPU"]
+            # We use .get("GPU") here since if there are no available GPUs, the property won't be set.
+            available_gpus = node_id_to_available_resources[node.node_id].get("GPU", 0)
 
             if total_gpus == available_gpus:
                 selected_node = node
