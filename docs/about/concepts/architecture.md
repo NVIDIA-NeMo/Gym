@@ -127,7 +127,7 @@ sequenceDiagram
 - **Stateless model servers**: Model servers perform single-call generation without memory; the agent maintains conversation state
 - **Session state in resources**: Resources servers use session cookies to maintain per-rollout state across multiple tool calls
 - **OpenAI API compatibility**: Model servers expose `/v1/responses` endpoints compatible with the OpenAI Responses API
-- **uvicorn + FastAPI**: All servers use uvicorn as the ASGI server with FastAPI for HTTP routing and request handling
+- **uvicorn + FastAPI**: All servers use [uvicorn](https://uvicorn.dev/) as the ASGI server with [FastAPI](https://fastapi.tiangolo.com/) for HTTP routing and request handling
 
 ---
 
