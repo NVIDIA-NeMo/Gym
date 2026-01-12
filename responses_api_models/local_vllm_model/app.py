@@ -199,7 +199,7 @@ Environment variables: {env_vars_to_print}""")
         #     self.avail_gpus_dict[state.node_id] += avail_num_gpus
 
         nodes = list_nodes()
-        print(f"{nodes=}")
+        print(f"{nodes=} {available_resources()=}")
 
         for node in nodes:
             if node.state != "ALIVE":
