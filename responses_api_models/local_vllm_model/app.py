@@ -95,6 +95,9 @@ class LocalVLLMModelActor:
     def base_url(self) -> str:
         return self._base_url
 
+    def is_alive(self) -> bool:
+        return self.server_thread.is_alive
+
 
 class LocalVLLMModel(VLLMModel):
     config: LocalVLLMModelConfig
@@ -193,6 +196,9 @@ Total Ray cluster resources: {cluster_resources()}""")
         poll_count = 0
         client = get_global_aiohttp_client()
         while True:
+            is_alive = await self._local_vllm_model_actor.is_alive.remote()
+            assert is_alive, f"{self.config.name} LocalVLLMModel server spinup failed, see the error logs above!"
+
             try:
                 await client.request(method="GET", url=f"{self.config.base_url[0]}/models")
                 return
