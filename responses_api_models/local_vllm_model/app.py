@@ -22,6 +22,7 @@ from threading import Thread
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import ray
+from aiohttp import ClientConnectorError
 from huggingface_hub import snapshot_download
 from ray import available_resources, cluster_resources, runtime_env
 from vllm.entrypoints.openai.api_server import (
@@ -38,7 +39,7 @@ from nemo_gym.global_config import (
     find_open_port,
     get_global_config_dict,
 )
-from nemo_gym.server_utils import ClientConnectorError, get_global_aiohttp_client
+from nemo_gym.server_utils import get_global_aiohttp_client
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 
