@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
-import signal
 import sys
 from argparse import Namespace
 from pathlib import Path
@@ -69,6 +68,7 @@ def _vllm_asyncio_task(server_args: Namespace):
 @ray.remote
 class LocalVLLMModelActor:
     def __init__(self, server_args: Namespace, env_vars: Dict[str, str], server_name: str) -> None:
+        import signal
         from os import environ
 
         self.server_args = server_args
