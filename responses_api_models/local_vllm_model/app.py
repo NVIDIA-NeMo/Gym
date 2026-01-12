@@ -191,10 +191,17 @@ Environment variables: {env_vars_to_print}""")
         return final_args, env_vars
 
     def _select_vllm_server_head_node(self) -> NodeAffinitySchedulingStrategy:
-        # TODO remove
-        print(f"{ray.global_state.cluster_resources()=} {ray.global_state.client_table()=}")
+        # head = get_global_config_dict()[RAY_HEAD_NODE_ADDRESS_KEY_NAME]
+        # node_states = ray.util.state.list_nodes(head, detail=True)
+        # for state in node_states:
+        #     assert state.node_id is not None
+        #     avail_num_gpus = state.resources_total.get("GPU", 0)
+        #     self.avail_gpus_dict[state.node_id] += avail_num_gpus
 
-        for node in list_nodes():
+        nodes = list_nodes()
+        print(f"{nodes=}")
+
+        for node in nodes:
             if node.state != "ALIVE":
                 continue
 
