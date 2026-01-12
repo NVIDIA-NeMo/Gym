@@ -179,6 +179,7 @@ Total Ray cluster resources: {cluster_resources()}""")
                 py_executable=sys.executable,
                 env_vars={
                     "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+                    **env_vars,
                 },
             ),
         ).remote(server_args, env_vars, self.config.name)
