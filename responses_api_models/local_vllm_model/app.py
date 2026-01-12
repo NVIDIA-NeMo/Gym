@@ -196,6 +196,26 @@ Environment variables: {env_vars_to_print}""")
         return final_args, env_vars
 
     def _select_vllm_server_head_node(self) -> NodeAffinitySchedulingStrategy:
+        """
+        There are a few params vLLM has:
+        - data parallel size
+        - data parallel size local
+        - tensor parallel size
+        - pipeline parallel size
+        - vllm ray dp pack strategy
+
+        As of vLLM 0.11.2, the way vLLM + Ray works is:
+        1. allocate (tensor parallel size * pipeline parallel size)-sized placement groups
+        2. for vllm ray dp pack strategy
+            - span (not relevant for my tp * pp within one node)
+            - fill: basically as many as possible
+                - this will clash if there are > 1 endpoints or the compute necessary is less than what is available (mismatch throws an error in vllm)
+            - strict: data size parallel local * num nodes placement groups
+
+        Now the problem is that for `strict`, if we spin up the head server on the same node, we need to set data parallel size local to 0. So `fill` and `strict` don't work out of the box.
+
+        Here, we fix `strict` by spinning things up on not the head server node. We find a currently available GPU node and star the vLLM server there so the head node address is propagated properly.
+        """
         alive_gpu_nodes = [n for n in list_nodes() if n.state == "ALIVE" and n.resources_total.get("GPU", 0) > 0]
         assert alive_gpu_nodes
 
