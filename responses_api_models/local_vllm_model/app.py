@@ -210,7 +210,7 @@ Environment variables: {env_vars_to_print}""")
             - span (not relevant for my tp * pp within one node)
             - fill: basically as many as possible
                 - this will clash if there are > 1 endpoints or the compute necessary is less than what is available (mismatch throws an error in vllm)
-            - strict: data size parallel local * num nodes placement groups
+            - strict: data parallel size local * num nodes placement groups
 
         Now the problem is that for `strict`, if we spin up the head server on the same node, we need to set data parallel size local to 0. So `fill` and `strict` don't work out of the box.
 
