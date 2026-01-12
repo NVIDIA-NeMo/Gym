@@ -195,7 +195,7 @@ Total Ray cluster resources: {cluster_resources()}""")
                 return
             except ClientConnectorError:
                 if poll_count % 10 == 0:  # Print every 30s
-                    print(f"Waiting for {self.server_name} LocalVLLMModel server to spinup...")
+                    print(f"Waiting for {self.config.name} LocalVLLMModel server to spinup...")
 
                 poll_count += 1
                 await asyncio.sleep(3)
