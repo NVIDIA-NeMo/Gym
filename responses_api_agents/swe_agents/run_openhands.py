@@ -809,7 +809,7 @@ set -e
 cd /app
 git reset --hard {instance_dict.get("base_commit", "")}
 git checkout {instance_dict.get("base_commit", "")}
-git apply --ignore-space-change --ignore-whitespace -v /root/patch.diff
+git apply --ignore-space-change --ignore-whitespace --reject -v /root/patch.diff || true
 
 # Setup repository
 {repo_cmd}
