@@ -38,6 +38,7 @@ from nemo_gym.global_config import (
     find_open_port,
     get_global_config_dict,
 )
+from nemo_gym.server_utils import ClientConnectorError, get_global_aiohttp_client
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 
@@ -67,9 +68,10 @@ def _vllm_asyncio_task(server_args: Namespace):
 
 @ray.remote
 class LocalVLLMModelActor:
-    def __init__(self, server_args: Namespace, env_vars: Dict[str, str]) -> None:
+    def __init__(self, server_args: Namespace, env_vars: Dict[str, str], server_name: str) -> None:
         self.server_args = server_args
         self.env_vars = env_vars
+        self.server_name = server_name
 
         node_ip = ray._private.services.get_node_ip_address()
         self._base_url = f"http://{node_ip}:{self.server_args.port}/v1"
@@ -191,6 +193,22 @@ Total Ray cluster resources: {cluster_resources()}""")
 
         self.config.base_url = [self._local_vllm_model_actor.base_url.remote()]
         self.config.api_key = "dummy_key"  # dummy key
+
+        asyncio.run(self.await_server_ready())
+
+    async def await_server_ready(self) -> None:
+        poll_count = 0
+        client = get_global_aiohttp_client()
+        while True:
+            try:
+                await client.request(method="GET", url=f"{self._base_url}/models")
+                return
+            except ClientConnectorError:
+                if poll_count % 10 == 0:  # Print every 30s
+                    print(f"Waiting for {self.server_name} LocalVLLMModel server to spinup...")
+
+                poll_count += 1
+                await asyncio.sleep(3)
 
 
 if __name__ == "__main__":
