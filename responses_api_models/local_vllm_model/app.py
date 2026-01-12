@@ -198,8 +198,10 @@ Environment variables: {env_vars_to_print}""")
         #     avail_num_gpus = state.resources_total.get("GPU", 0)
         #     self.avail_gpus_dict[state.node_id] += avail_num_gpus
 
+        from ray._private.state import available_resources_per_node
+
         nodes = list_nodes()
-        print(f"{nodes=} {available_resources()=}")
+        print(f"{nodes=} {available_resources()=} {available_resources_per_node()=}")
 
         for node in nodes:
             if node.state != "ALIVE":
