@@ -23,6 +23,8 @@ import ray
 from aiohttp import ClientConnectorError
 from huggingface_hub import snapshot_download
 from ray import available_resources, cluster_resources
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+from ray.util.state import list_nodes
 from vllm.entrypoints.openai.api_server import (
     FlexibleArgumentParser,
     cli_env_setup,
@@ -173,6 +175,23 @@ Environment variables: {env_vars_to_print}""")
 
         return final_args, env_vars
 
+    def _select_vllm_server_head_node(self) -> NodeAffinitySchedulingStrategy:
+        for node in list_nodes():
+            if node.state != "ALIVE":
+                continue
+
+            total_gpus = node.resources_total.get("GPU", 0)
+            available_gpus = node.resources_available.get("GPU", 0)
+
+            # Found an idle GPU node
+            if total_gpus > 0 and total_gpus == available_gpus:
+                return NodeAffinitySchedulingStrategy(
+                    node_id=node.node_id,
+                    soft=False,  # Hard constraint - must run on this node
+                )
+
+            # TODO need to account for hybrid serving on one node.
+
     def start_vllm_server(self) -> None:
         if self.config.debug:
             print(f"""Currently available Ray cluster resources: {available_resources()}
@@ -181,6 +200,7 @@ Total Ray cluster resources: {cluster_resources()}""")
         server_args, env_vars = self._configure_vllm_serve()
 
         self._local_vllm_model_actor = LocalVLLMModelActor.options(
+            scheduling_strategy=self._select_vllm_server_head_node(),
             runtime_env=dict(
                 py_executable=sys.executable,
                 env_vars={
