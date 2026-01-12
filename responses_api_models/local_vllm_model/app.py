@@ -18,10 +18,10 @@ import sys
 from argparse import Namespace
 from os import environ
 from pathlib import Path
-from typing import Any, Coroutine, Dict, List, Optional, Tuple, Union
+from threading import Thread
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import ray
-from aiohttp.client_exceptions import ClientConnectorError
 from huggingface_hub import snapshot_download
 from ray import available_resources, cluster_resources, runtime_env
 from vllm.entrypoints.openai.api_server import (
@@ -38,7 +38,6 @@ from nemo_gym.global_config import (
     find_open_port,
     get_global_config_dict,
 )
-from nemo_gym.server_utils import get_global_aiohttp_client
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 
@@ -49,11 +48,9 @@ class LocalVLLMModelConfig(VLLMModelConfig):
 
     hf_home: Optional[str] = None
     vllm_serve_kwargs: Dict[str, Any]
+    vllm_serve_env_vars: Dict[str, str]
 
     debug: bool = False
-
-    # Eventually we may need to support these env vars
-    # vllm_serve_env_vars: Dict[str, str]
 
     def model_post_init(self, context):
         # Default to the .cache/huggingface in this directory.
@@ -64,8 +61,38 @@ class LocalVLLMModelConfig(VLLMModelConfig):
         return super().model_post_init(context)
 
 
+def _vllm_asyncio_task(server_args: Namespace):
+    asyncio.run(run_server(server_args))
+
+
+@ray.remote
+class LocalVLLMModelActor:
+    def __init__(self, server_args: Namespace, env_vars: Dict[str, str]) -> None:
+        self.server_args = server_args
+        self.env_vars = env_vars
+
+        node_ip = ray._private.services.get_node_ip_address()
+        self._base_url = f"http://{node_ip}:{self.server_args.port}/v1"
+
+        # vLLM doesn't expose a config for this yet, so we need to pass via environment variable.
+        self.env_vars["VLLM_DP_MASTER_IP"] = node_ip  # This is the master node.
+
+        # Pass through signal setting not allowed in threads.
+        signal.signal = lambda *args, **kwargs: None
+
+        for k, v in env_vars.items():
+            environ[k] = v
+
+        self.server_thread = Thread(target=_vllm_asyncio_task, args=(server_args,), daemon=True)
+
+    def base_url(self) -> str:
+        return self._base_url
+
+
 class LocalVLLMModel(VLLMModel):
     config: LocalVLLMModelConfig
+
+    _local_vllm_model_actor: LocalVLLMModelActor
 
     def model_post_init(self, context):
         print(
@@ -96,7 +123,6 @@ class LocalVLLMModel(VLLMModel):
 
         port = find_open_port(disallowed_ports=get_global_config_dict()[DISALLOWED_PORTS_KEY_NAME])
         cache_dir = self.get_cache_dir()
-        node_ip = ray._private.services.get_node_ip_address()
         server_args = server_args | {
             "model": self.config.model,
             "host": "0.0.0.0",  # Must be 0.0.0.0 for cross-node communication.
@@ -112,22 +138,7 @@ class LocalVLLMModel(VLLMModel):
         if maybe_hf_token:
             env_vars["HF_TOKEN"] = maybe_hf_token
 
-        # vLLM doesn't expose a config for this yet, so we need to pass via environment variable.
-        env_vars["VLLM_DP_MASTER_IP"] = node_ip  # This is the master node.
-
-        # If a single DP group requires multiple nodes, we need to set this `span` strategy
-        num_gpus_per_node = 8  # This may need to be exposed later on
-        total_gpus_per_dp_instance = server_args.get("tensor_parallel_size", 1) * server_args.get(
-            "pipeline_parallel_size", 1
-        )
-        if total_gpus_per_dp_instance > num_gpus_per_node:
-            env_vars["VLLM_RAY_DP_PACK_STRATEGY"] = "span"
-        else:
-            # Strict is the default. See https://docs.vllm.ai/en/stable/configuration/env_vars/
-            env_vars["VLLM_RAY_DP_PACK_STRATEGY"] = "strict"
-            assert num_gpus_per_node % total_gpus_per_dp_instance == 0, "tp * pp must divide 8 GPUs/node evenly!"
-            if server_args.get("data_parallel_size_local") is None:
-                server_args["data_parallel_size_local"] = num_gpus_per_node // total_gpus_per_dp_instance
+        env_vars.update(self.config.vllm_serve_env_vars)
 
         # Ray backend only works if dp_size > 1
         assert server_args.get("data_parallel_size") is None or server_args.get("data_parallel_size") > 1, (
@@ -140,10 +151,6 @@ class LocalVLLMModel(VLLMModel):
         final_args = parser.parse_args(namespace=Namespace(**server_args))
         validate_parsed_serve_args(final_args)
 
-        base_url = f"http://{node_ip}:{final_args.port}/v1"
-        self.config.base_url = [base_url]
-        self.config.api_key = "dummy_key"  # dummy key
-
         if self.config.debug:
             env_vars_to_print = env_vars.copy()
             if "HF_TOKEN" in env_vars_to_print:
@@ -153,57 +160,8 @@ Environment variables: {env_vars_to_print}""")
 
         return final_args, env_vars
 
-    def _patch_uvicorn_server(self, vllm_server_coroutine: Coroutine) -> None:
-        # We need to run two servers in the same process, so we override the normal Gym server spinup to also perform vLLM server spinup logic.
-        # This patch may be sensitive to uvicorn version!
-        from uvicorn import server as uvicorn_server
-
-        original_asyncio_run = uvicorn_server.asyncio_run
-
-        def new_asyncio_run(uvicorn_server_coroutine, *args, **kwargs):
-            async def wait_for_vllm_server() -> None:
-                poll_count = 0
-                client = get_global_aiohttp_client()
-                while True:
-                    try:
-                        await client.request(method="GET", url=f"{self.config.base_url}/models")
-                        return
-                    except ClientConnectorError:
-                        if poll_count % 10 == 0:  # Print every 30s
-                            print(f"Waiting for {self.config.name} LocalVLLMModel server to spinup...")
-
-                        poll_count += 1
-                        await asyncio.sleep(3)
-
-            async def wrapper_fn() -> None:
-                vllm_server_task = asyncio.create_task(vllm_server_coroutine)
-                uvicorn_server_task = asyncio.create_task(uvicorn_server_coroutine)
-
-                done, pending = await asyncio.wait(
-                    (vllm_server_task, asyncio.create_task(wait_for_vllm_server())),
-                    return_when="FIRST_COMPLETED",
-                )
-
-                # If the vllm task finishes first
-                if list(done)[0] == vllm_server_task:
-                    list(pending)[0].cancel()  # Cancel the waiting task.
-                    uvicorn_server_task.cancel()
-                    raise vllm_server_task.exception()
-
-                print(f"{self.config.name} finished vLLM server spinup!")
-
-                _, pending = await asyncio.wait(
-                    (vllm_server_task, uvicorn_server_task),
-                    return_when="FIRST_COMPLETED",
-                )
-                for task in pending:
-                    task.cancel()
-
-            return original_asyncio_run(wrapper_fn(), *args, **kwargs)
-
-        uvicorn_server.asyncio_run = new_asyncio_run
-
     def _patch_vllm_ray_runtime_env(self) -> None:
+        # TODO this may not be necessary anymore
         # This patch may be sensitive to vLLM version! See https://github.com/vllm-project/vllm/blob/275de34170654274616082721348b7edd9741d32/vllm/v1/engine/utils.py#L651
         original_RuntimeEnv = runtime_env.RuntimeEnv
 
@@ -229,17 +187,10 @@ Total Ray cluster resources: {cluster_resources()}""")
 
         server_args, env_vars = self._configure_vllm_serve()
 
-        for k, v in env_vars.items():
-            environ[k] = v
+        self._local_vllm_model_actor = LocalVLLMModelActor.remote(server_args, env_vars)
 
-        # Pass through signal setting not allowed in threads.
-        signal.signal = lambda *args, **kwargs: None
-
-        self._patch_vllm_ray_runtime_env()
-
-        vllm_server_coroutine = run_server(server_args)
-
-        self._patch_uvicorn_server(vllm_server_coroutine)
+        self.config.base_url = [self._local_vllm_model_actor.base_url.remote()]
+        self.config.api_key = "dummy_key"  # dummy key
 
 
 if __name__ == "__main__":
