@@ -23,6 +23,7 @@ import ray
 from aiohttp import ClientConnectorError
 from huggingface_hub import snapshot_download
 from ray import available_resources, cluster_resources
+from ray._private.state import available_resources_per_node
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from ray.util.state import list_nodes
 from vllm.entrypoints.openai.api_server import (
@@ -191,33 +192,29 @@ Environment variables: {env_vars_to_print}""")
         return final_args, env_vars
 
     def _select_vllm_server_head_node(self) -> NodeAffinitySchedulingStrategy:
-        # head = get_global_config_dict()[RAY_HEAD_NODE_ADDRESS_KEY_NAME]
-        # node_states = ray.util.state.list_nodes(head, detail=True)
-        # for state in node_states:
-        #     assert state.node_id is not None
-        #     avail_num_gpus = state.resources_total.get("GPU", 0)
-        #     self.avail_gpus_dict[state.node_id] += avail_num_gpus
+        alive_gpu_nodes = [n for n in list_nodes() if n.state == "ALIVE" and n.resources_total.get("GPU", 0) > 0]
+        assert alive_gpu_nodes
 
-        from ray._private.state import available_resources_per_node
+        node_id_to_available_resources = available_resources_per_node()
 
-        nodes = list_nodes()
-        print(f"{nodes=} {available_resources()=} {available_resources_per_node()=}")
+        selected_node = None
+        partial_node = None
+        for node in alive_gpu_nodes:
+            total_gpus = node.resources_total.get("GPU", 0) > 0
+            available_gpus = node_id_to_available_resources[node.node_id]["GPU"]
 
-        for node in nodes:
-            if node.state != "ALIVE":
-                continue
+            if total_gpus == available_gpus:
+                selected_node = node
+                break
 
-            total_gpus = node.resources_total.get("GPU", 0)
-            available_gpus = node.resources_available.get("GPU", 0)
+            if available_gpus != 0:
+                partial_node = node
 
-            # Found an idle GPU node
-            if total_gpus > 0 and total_gpus == available_gpus:
-                return NodeAffinitySchedulingStrategy(
-                    node_id=node.node_id,
-                    soft=False,  # Hard constraint - must run on this node
-                )
-
-            # TODO need to account for hybrid serving on one node.
+        selected_node = selected_node or partial_node
+        return NodeAffinitySchedulingStrategy(
+            node_id=selected_node.node_id,
+            soft=False,  # Hard constraint - must run on this node
+        )
 
     def start_vllm_server(self) -> None:
         if self.config.debug:
