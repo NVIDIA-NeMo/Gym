@@ -29,7 +29,6 @@ from vllm.entrypoints.openai.api_server import (
     FlexibleArgumentParser,
     cli_env_setup,
     make_arg_parser,
-    run_server,
     validate_parsed_serve_args,
 )
 
@@ -64,13 +63,14 @@ class LocalVLLMModelConfig(VLLMModelConfig):
 
 
 def _vllm_asyncio_task(server_args: Namespace):
+    from vllm.entrypoints.openai.api_server import run_server
+
     asyncio.run(run_server(server_args))
 
 
 @ray.remote
 class LocalVLLMModelActor:
     def __init__(self, server_args: Namespace, env_vars: Dict[str, str], server_name: str) -> None:
-        from asyncio import get_running_loop
         from os import environ
 
         self.server_args = server_args
@@ -85,17 +85,32 @@ class LocalVLLMModelActor:
         # vLLM doesn't expose a config for this yet, so we need to pass via environment variable.
         self.env_vars["VLLM_DP_MASTER_IP"] = node_ip  # This is the master node.
 
-        # TODO this may be vLLM version specific
-        # Pass through signal setting not allowed in threads.
-        # See https://github.com/vllm-project/vllm/blob/275de34170654274616082721348b7edd9741d32/vllm/entrypoints/launcher.py#L94
-        loop = get_running_loop()
-        loop.add_signal_handler = lambda *args, **kwargs: None
+        self._patch_signal_handler()
 
         for k, v in self.env_vars.items():
             environ[k] = v
 
         self.server_thread = Thread(target=_vllm_asyncio_task, args=(server_args,), daemon=True)
         self.server_thread.start()
+
+    def _patch_signal_handler(self) -> None:
+        # Pass through signal setting not allowed in threads.
+        # See https://github.com/vllm-project/vllm/blob/275de34170654274616082721348b7edd9741d32/vllm/entrypoints/launcher.py#L94
+        # This may be vLLM version specific!
+
+        from asyncio import get_running_loop
+
+        from vllm.entrypoints import launcher
+
+        original_serve_http = launcher.serve_http
+
+        def new_serve_http(*args, **kwargs):
+            loop = get_running_loop()
+            loop.add_signal_handler = lambda *args, **kwargs: None
+
+            return original_serve_http(*args, **kwargs)
+
+        launcher.serve_http = new_serve_http
 
     def base_url(self) -> str:
         return self._base_url
