@@ -181,7 +181,7 @@ Total Ray cluster resources: {cluster_resources()}""")
             ),
         ).remote(server_args, env_vars, self.config.name)
 
-        self.config.base_url = [self._local_vllm_model_actor.base_url.remote()]
+        self.config.base_url = [ray.get(self._local_vllm_model_actor.base_url.remote())]
         self.config.api_key = "dummy_key"  # dummy key
 
         asyncio.run(self.await_server_ready())
