@@ -191,6 +191,9 @@ Environment variables: {env_vars_to_print}""")
         return final_args, env_vars
 
     def _select_vllm_server_head_node(self) -> NodeAffinitySchedulingStrategy:
+        # TODO remove
+        print(f"{ray.global_state.cluster_resources()=} {ray.global_state.client_table()=}")
+
         for node in list_nodes():
             if node.state != "ALIVE":
                 continue
