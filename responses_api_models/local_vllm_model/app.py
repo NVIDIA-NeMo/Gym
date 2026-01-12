@@ -202,7 +202,7 @@ Total Ray cluster resources: {cluster_resources()}""")
         client = get_global_aiohttp_client()
         while True:
             try:
-                await client.request(method="GET", url=f"{self._base_url}/models")
+                await client.request(method="GET", url=f"{self.config.base_url[0]}/models")
                 return
             except ClientConnectorError:
                 if poll_count % 10 == 0:  # Print every 30s
