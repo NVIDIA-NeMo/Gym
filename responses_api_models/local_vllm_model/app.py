@@ -94,6 +94,7 @@ class LocalVLLMModelActor:
         print("Hit inside LocalVLLMModelActor spinup", server_args)
 
         self.server_thread = Thread(target=_vllm_asyncio_task, args=(server_args,), daemon=True)
+        self.server_thread.start()
 
     def base_url(self) -> str:
         return self._base_url
