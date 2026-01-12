@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import ray
 from aiohttp import ClientConnectorError
 from huggingface_hub import snapshot_download
-from ray import available_resources, cluster_resources, runtime_env
+from ray import available_resources, cluster_resources
 from vllm.entrypoints.openai.api_server import (
     FlexibleArgumentParser,
     cli_env_setup,
@@ -73,6 +73,8 @@ class LocalVLLMModelActor:
         self.server_args = server_args
         self.env_vars = env_vars
         self.server_name = server_name
+
+        self.env_vars.pop("CUDA_VISIBLE_DEVICES", None)
 
         node_ip = ray._private.services.get_node_ip_address()
         self._base_url = f"http://{node_ip}:{self.server_args.port}/v1"
@@ -163,26 +165,6 @@ Environment variables: {env_vars_to_print}""")
 
         return final_args, env_vars
 
-    def _patch_vllm_ray_runtime_env(self) -> None:
-        # TODO this may not be necessary anymore
-        # This patch may be sensitive to vLLM version! See https://github.com/vllm-project/vllm/blob/275de34170654274616082721348b7edd9741d32/vllm/v1/engine/utils.py#L651
-        original_RuntimeEnv = runtime_env.RuntimeEnv
-
-        def new_RuntimeEnv(*args, **kwargs):
-            kwargs = kwargs or dict()
-            kwargs["py_executable"] = sys.executable
-            if self.config.debug:
-                print(f"Patched RuntimeEnv py_executable with {sys.executable}")
-
-            # Necessary for downstream vLLM ray actor spinup otherwise we get CUDA device ordinal out of range errors.
-            env_vars = kwargs.get("env_vars") or dict()
-            env_vars.pop("CUDA_VISIBLE_DEVICES", None)
-            env_vars["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] = "1"
-
-            return original_RuntimeEnv(*args, **kwargs)
-
-        runtime_env.RuntimeEnv = new_RuntimeEnv
-
     def start_vllm_server(self) -> None:
         if self.config.debug:
             print(f"""Currently available Ray cluster resources: {available_resources()}
@@ -190,7 +172,14 @@ Total Ray cluster resources: {cluster_resources()}""")
 
         server_args, env_vars = self._configure_vllm_serve()
 
-        self._local_vllm_model_actor = LocalVLLMModelActor.remote(server_args, env_vars, self.config.name)
+        self._local_vllm_model_actor = LocalVLLMModelActor.options(
+            py_executable=sys.executable,
+            runtime_env={
+                "env_vars": {
+                    "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+                },
+            },
+        ).remote(server_args, env_vars, self.config.name)
 
         self.config.base_url = [self._local_vllm_model_actor.base_url.remote()]
         self.config.api_key = "dummy_key"  # dummy key
