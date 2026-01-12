@@ -68,7 +68,7 @@ def _vllm_asyncio_task(server_args: Namespace):
 @ray.remote
 class LocalVLLMModelActor:
     def __init__(self, server_args: Namespace, env_vars: Dict[str, str], server_name: str) -> None:
-        import signal
+        from asyncio import get_running_loop
         from os import environ
 
         self.server_args = server_args
@@ -83,8 +83,11 @@ class LocalVLLMModelActor:
         # vLLM doesn't expose a config for this yet, so we need to pass via environment variable.
         self.env_vars["VLLM_DP_MASTER_IP"] = node_ip  # This is the master node.
 
+        # TODO this may be vLLM version specific
         # Pass through signal setting not allowed in threads.
-        signal.signal = lambda *args, **kwargs: None
+        # See https://github.com/vllm-project/vllm/blob/275de34170654274616082721348b7edd9741d32/vllm/entrypoints/launcher.py#L94
+        loop = get_running_loop()
+        loop.add_signal_handler = lambda *args, **kwargs: None
 
         for k, v in self.env_vars.items():
             environ[k] = v
