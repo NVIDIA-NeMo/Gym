@@ -190,7 +190,7 @@ Total Ray cluster resources: {cluster_resources()}""")
 
         server_args, env_vars = self._configure_vllm_serve()
 
-        self._local_vllm_model_actor = LocalVLLMModelActor.remote(server_args, env_vars)
+        self._local_vllm_model_actor = LocalVLLMModelActor.remote(server_args, env_vars, self.config.name)
 
         self.config.base_url = [self._local_vllm_model_actor.base_url.remote()]
         self.config.api_key = "dummy_key"  # dummy key
