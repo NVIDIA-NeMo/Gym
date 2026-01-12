@@ -64,6 +64,8 @@ class LocalVLLMModelConfig(VLLMModelConfig):
 
 
 def _vllm_asyncio_task(server_args: Namespace):
+    # TODO remove
+    print("hit inside _vllm_asyncio_task")
     asyncio.run(run_server(server_args))
 
 
