@@ -173,12 +173,12 @@ Total Ray cluster resources: {cluster_resources()}""")
         server_args, env_vars = self._configure_vllm_serve()
 
         self._local_vllm_model_actor = LocalVLLMModelActor.options(
-            py_executable=sys.executable,
-            runtime_env={
-                "env_vars": {
+            runtime_env=dict(
+                py_executable=sys.executable,
+                env_vars={
                     "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
                 },
-            },
+            ),
         ).remote(server_args, env_vars, self.config.name)
 
         self.config.base_url = [self._local_vllm_model_actor.base_url.remote()]
