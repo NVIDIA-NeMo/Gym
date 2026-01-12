@@ -124,8 +124,7 @@ class LocalVLLMModel(VLLMModel):
             env_vars["VLLM_RAY_DP_PACK_STRATEGY"] = "span"
         else:
             # Strict is the default. See https://docs.vllm.ai/en/stable/configuration/env_vars/
-            # We want more flexibility, so we fill here.
-            env_vars["VLLM_RAY_DP_PACK_STRATEGY"] = "fill"
+            env_vars["VLLM_RAY_DP_PACK_STRATEGY"] = "strict"
             assert num_gpus_per_node % total_gpus_per_dp_instance == 0, "tp * pp must divide 8 GPUs/node evenly!"
             if server_args.get("data_parallel_size_local") is None:
                 server_args["data_parallel_size_local"] = num_gpus_per_node // total_gpus_per_dp_instance
