@@ -91,7 +91,7 @@ class LocalVLLMModelActor:
             environ[k] = v
 
         # TODO remove
-        print("Hit inside LocalVLLMModelActor spinup")
+        print("Hit inside LocalVLLMModelActor spinup", server_args)
 
         self.server_thread = Thread(target=_vllm_asyncio_task, args=(server_args,), daemon=True)
 
