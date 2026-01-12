@@ -99,6 +99,7 @@ class LocalVLLMModelActor:
         # See https://github.com/vllm-project/vllm/blob/275de34170654274616082721348b7edd9741d32/vllm/entrypoints/launcher.py#L94
         # This may be vLLM version specific!
 
+        import signal
         from asyncio import get_running_loop
 
         from vllm.entrypoints import launcher
@@ -112,6 +113,9 @@ class LocalVLLMModelActor:
             return original_serve_http(*args, **kwargs)
 
         launcher.serve_http = new_serve_http
+
+        # Patch signal as well.
+        signal.signal = lambda *args, **kwargs: None
 
     def base_url(self) -> str:
         return self._base_url
