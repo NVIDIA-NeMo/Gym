@@ -88,6 +88,9 @@ class LocalVLLMModelActor:
         for k, v in env_vars.items():
             environ[k] = v
 
+        # TODO remove
+        print("Hit inside LocalVLLMModelActor spinup")
+
         self.server_thread = Thread(target=_vllm_asyncio_task, args=(server_args,), daemon=True)
 
     def base_url(self) -> str:
