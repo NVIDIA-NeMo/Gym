@@ -16,7 +16,6 @@ import asyncio
 import signal
 import sys
 from argparse import Namespace
-from os import environ
 from pathlib import Path
 from threading import Thread
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -64,14 +63,14 @@ class LocalVLLMModelConfig(VLLMModelConfig):
 
 
 def _vllm_asyncio_task(server_args: Namespace):
-    # TODO remove
-    print("hit inside _vllm_asyncio_task")
     asyncio.run(run_server(server_args))
 
 
 @ray.remote
 class LocalVLLMModelActor:
     def __init__(self, server_args: Namespace, env_vars: Dict[str, str], server_name: str) -> None:
+        from os import environ
+
         self.server_args = server_args
         self.env_vars = env_vars
         self.server_name = server_name
@@ -87,11 +86,8 @@ class LocalVLLMModelActor:
         # Pass through signal setting not allowed in threads.
         signal.signal = lambda *args, **kwargs: None
 
-        for k, v in env_vars.items():
+        for k, v in self.env_vars.items():
             environ[k] = v
-
-        # TODO remove
-        print("Hit inside LocalVLLMModelActor spinup", server_args)
 
         self.server_thread = Thread(target=_vllm_asyncio_task, args=(server_args,), daemon=True)
         self.server_thread.start()
