@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
+
 import logging
 import traceback
 import uuid
@@ -167,7 +169,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     config: VerifiersAgentConfig
 
-    envs_cache: dict[str, vf.Environment] = Field(default_factory=dict)
+    envs_cache: dict[str, Any] = Field(default_factory=dict)  # vf.Environment
     env_ids_cache: dict[str, str] = Field(default_factory=dict)
     dataset_rows_cache: dict[str, list[dict]] = Field(default_factory=dict)
     openai_client_cache: dict[str, VLLMOpenAIClient] = Field(default_factory=dict)

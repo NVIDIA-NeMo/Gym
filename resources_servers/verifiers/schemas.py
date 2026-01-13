@@ -108,4 +108,5 @@ class VerifiersVerifyRequest(BaseVerifyRequest):
 
 class VerifiersVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
+    response: dict[str, Any]
     reward: float
