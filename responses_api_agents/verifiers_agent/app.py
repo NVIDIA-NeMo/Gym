@@ -15,8 +15,7 @@ from __future__ import annotations
 
 import logging
 import traceback
-import uuid
-from typing import Any
+from typing import Any, Literal
 
 import verifiers as vf
 from fastapi import Body, Request, Response
@@ -27,26 +26,40 @@ from openai.types.chat.chat_completion import ChatCompletion
 from pydantic import ConfigDict, Field
 from verifiers.utils.async_utils import maybe_semaphore
 
-from nemo_gym.base_resources_server import BaseRunRequest
+from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
+    NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
 )
 from nemo_gym.server_utils import get_global_aiohttp_client
-from resources_servers.verifiers.schemas import (
-    VerifiersAgentVerifyResponse,
-    VerifiersNeMoGymResponse,
-)
-from resources_servers.verifiers.utils import load_verifiers_dataset
 
 
 logger = logging.getLogger(__name__)
+
+
+class VerifiersNeMoGymResponse(NeMoGymResponse):
+    env_id: str
+    group_id: str
+    contains_transitions: Literal[True] = True
+    output: list[dict[str, Any]]
+    reward: float
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    parallel_tool_calls: bool = False
+    tool_choice: str = "none"
+    tools: list = Field(default_factory=list)
+
+
+class VerifiersAgentVerifyResponse(BaseVerifyResponse):
+    model_config = ConfigDict(extra="allow")
+    response: VerifiersNeMoGymResponse
+    reward: float
 
 
 class _VLLMChatCompletions(AsyncCompletions):
@@ -133,14 +146,11 @@ class VLLMOpenAIClient(AsyncOpenAI):
 
 
 class VerifiersAgentConfig(BaseResponsesAPIAgentConfig):
-    resources_server: ResourcesServerRef
     model_server: ModelServerRef
     model_name: str = Field(default="", description="Model name for the vLLM server")
 
     vf_env_id: str = Field(default="", description="Default verifiers environment ID")
     vf_env_args: dict = Field(default_factory=dict, description="Environment arguments")
-    dataset_n: int = Field(default=-1, description="Number of examples to load")
-    dataset_seed: int | None = Field(default=None, description="Dataset shuffle seed")
 
     group_size: int = Field(default=1, description="Number of rollouts per example")
     max_concurrent_generation: int = Field(default=-1, description="Max concurrent generation requests")
@@ -155,14 +165,14 @@ class VerifiersAgentRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
     task_idx: int
-    vf_env_id: str | None = Field(default=None, description="Override env ID from config")
+    vf_env_id: str | None = Field(default=None, description="Verifiers environment ID")
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming = Field(
         default_factory=lambda: NeMoGymResponseCreateParamsNonStreaming(input=[])
     )
-    answer: str = Field(default="", description="Expected answer")
-    task: str = Field(default="default", description="Task type")
-    example_id: int | str = Field(default=0, description="Example ID")
-    info: dict = Field(default_factory=dict, description="Extra info for scoring")
+    answer: str = Field(default="", description="Expected answer from dataset")
+    task: str = Field(default="default", description="Task type from dataset")
+    example_id: int | str = Field(default=0, description="Example ID from dataset")
+    info: dict = Field(default_factory=dict, description="Extra info from dataset")
 
 
 class VerifiersAgent(SimpleResponsesAPIAgent):
@@ -170,29 +180,16 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
     config: VerifiersAgentConfig
 
     envs_cache: dict[str, Any] = Field(default_factory=dict)  # vf.Environment
-    env_ids_cache: dict[str, str] = Field(default_factory=dict)
-    dataset_rows_cache: dict[str, list[dict]] = Field(default_factory=dict)
     openai_client_cache: dict[str, VLLMOpenAIClient] = Field(default_factory=dict)
 
-    async def _ensure_env_loaded(self, vf_env_id: str) -> tuple[vf.Environment, str, list[dict]]:
-        if vf_env_id in self.envs_cache:
-            return self.envs_cache[vf_env_id], self.env_ids_cache[vf_env_id], self.dataset_rows_cache[vf_env_id]
-
-        env_id = f"{vf_env_id}-{uuid.uuid4().hex[:8]}"
-        logger.info(f"Loading verifiers environment: {vf_env_id}")
-
-        vf_env = vf.load_environment(vf_env_id, **self.config.vf_env_args)
-        dataset_rows = load_verifiers_dataset(vf_env, n=self.config.dataset_n, seed=self.config.dataset_seed)
-
-        self.envs_cache[vf_env_id] = vf_env
-        self.env_ids_cache[vf_env_id] = env_id
-        self.dataset_rows_cache[vf_env_id] = dataset_rows
-
-        return vf_env, env_id, dataset_rows
+    def _get_env(self, vf_env_id: str) -> vf.Environment:
+        if vf_env_id not in self.envs_cache:
+            logger.info(f"Loading verifiers environment: {vf_env_id}")
+            self.envs_cache[vf_env_id] = vf.load_environment(vf_env_id, **self.config.vf_env_args)
+        return self.envs_cache[vf_env_id]
 
     def _get_openai_client(self) -> VLLMOpenAIClient:
-        cache_key = self.config.model_server.name
-        if cache_key not in self.openai_client_cache:
+        if self.config.model_server.name not in self.openai_client_cache:
             server_config_dict = get_first_server_config_dict(
                 self.server_client.global_config_dict,
                 self.config.model_server.name,
@@ -202,9 +199,9 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             if not model_server_url.endswith("/v1"):
                 model_server_url = model_server_url.rstrip("/") + "/v1"
 
-            self.openai_client_cache[cache_key] = VLLMOpenAIClient(base_url=model_server_url)
+            self.openai_client_cache[self.config.model_server.name] = VLLMOpenAIClient(base_url=model_server_url)
 
-        return self.openai_client_cache[cache_key]
+        return self.openai_client_cache[self.config.model_server.name]
 
     def _convert_trajectory_to_output(self, state: dict) -> list:
         output = []
@@ -249,8 +246,10 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
     ) -> VerifiersNeMoGymResponse:
         try:
             vf_env_id = body.vf_env_id or self.config.vf_env_id
-            vf_env, env_id, _ = await self._ensure_env_loaded(vf_env_id)
+            if not vf_env_id:
+                raise ValueError("vf_env_id must be provided in request or config")
 
+            vf_env = self._get_env(vf_env_id)
             task_idx = body.task_idx
 
             prompt_messages = []
@@ -294,12 +293,12 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             output = self._convert_trajectory_to_output(state)
 
             return VerifiersNeMoGymResponse(
-                id=f"verifiers-{env_id}-{task_idx}",
+                id=f"verifiers-{vf_env_id}-{task_idx}",
                 created_at=0,
                 model=self.config.model_name,
                 object="response",
                 output=output,
-                env_id=env_id,
+                env_id=vf_env_id,
                 group_id=str(task_idx),
                 reward=reward,
                 metrics=metrics,
@@ -316,6 +315,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         body: VerifiersAgentRunRequest = Body(),
     ) -> VerifiersAgentVerifyResponse:
         resp = await self.responses(request, response, body)
+
         return VerifiersAgentVerifyResponse(
             responses_create_params=body.responses_create_params,
             response=resp,

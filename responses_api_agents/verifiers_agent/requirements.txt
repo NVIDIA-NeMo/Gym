@@ -8,3 +8,5 @@ wordle
 alphabet-sort
 --extra-index-url https://hub.primeintellect.ai/primeintellect/simple/
 acereason-math
+i3-math
+ascii-tree

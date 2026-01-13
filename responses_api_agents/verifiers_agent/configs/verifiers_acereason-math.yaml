@@ -1,0 +1,16 @@
+verifiers_agent:
+  responses_api_agents:
+    verifiers_agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model_name: ""
+      vf_env_id: acereason-math
+      vf_env_args: {}
+      group_size: 1
+      max_concurrent_generation: -1
+      max_concurrent_scoring: -1
+      max_tokens: 16384
+      temperature: 1.0
+      top_p: 1.0
