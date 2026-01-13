@@ -14,16 +14,12 @@
 import copy
 import fcntl
 import json
-import logging
 import os
+import shutil
 import subprocess
-import time
-import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-import shutil
-
 
 from openai.types.responses.function_tool import FunctionTool
 

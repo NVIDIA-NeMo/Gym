@@ -306,25 +306,29 @@ class RunOpenHandsAgent:
             dataset_mount_path=dataset_mount_path,
         )
 
-        with open(out_file, "r") as f:
-            out_dict = json.loads(f.read().strip())
+        try:
+            with open(out_file, "r") as f:
+                out_dict = json.loads(f.read().strip())
 
-        patch = out_dict["test_result"]["git_patch"]
-        if not patch:
-            patch = None
+            patch = out_dict["test_result"]["git_patch"]
+            if not patch:
+                patch = None
 
-        # Create file in the SWE-bench evaluation format
-        pred_file = out_file.replace("output.jsonl", "output_for_eval.jsonl")
-        with open(pred_file, "w") as f:
-            f.write(
-                json.dumps(
-                    {
-                        "model_name_or_path": out_dict["metadata"]["llm_config"]["model"],
-                        "instance_id": out_dict["instance_id"],
-                        "model_patch": patch,
-                    }
+            # Create file in the SWE-bench evaluation format
+            pred_file = out_file.replace("output.jsonl", "output_for_eval.jsonl")
+            with open(pred_file, "w") as f:
+                f.write(
+                    json.dumps(
+                        {
+                            "model_name_or_path": out_dict["metadata"]["llm_config"]["model"],
+                            "instance_id": out_dict["instance_id"],
+                            "model_patch": patch,
+                        }
+                    )
                 )
-            )
+        except Exception as e:
+            print(f"oh run_infer.sh output parsing failed: {e}", flush=True)
+            return None
         return pred_file
 
     def _write_instance_dataset(self, data_point: dict[str, Any], agent_run_id: str) -> Path:
@@ -822,6 +826,8 @@ set -e
 cd /app
 git reset --hard {instance_dict.get("base_commit", "")}
 git checkout {instance_dict.get("base_commit", "")}
+
+# Apply patch with rejection to handle conflicts
 git apply --ignore-space-change --ignore-whitespace --reject -v /root/patch.diff || true
 
 # Setup repository
@@ -890,14 +896,7 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
 
             generation_time = asyncio.get_running_loop().time() - start_time
 
-            pred_mounted_path = pred_file.replace(str(self.output_dir), "/trajectories_mount")
-            with open(pred_file, "r") as f:
-                trajectory_dict = json.loads(f.read())
-
-            # Check if the trajectory has an empty patch before running evaluation
-            has_patch = trajectory_dict["model_patch"] is not None
-
-            if not has_patch:
+            if pred_file is None:
                 report_json = {
                     data_point["instance_id"]: {
                         "resolved": False,
@@ -907,52 +906,70 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
                         "evaluation_time": evaluation_time,
                     }
                 }
-
             else:
-                # Run full evaluation with streaming output
-                # TODO: should we fail on errors here? Seems that json isn't always generated
-                try:
-                    start_time = asyncio.get_running_loop().time()
-                    if data_point["dataset_name"] == "nv-internal-1":
-                        report_file = await self._run_nv_internal_eval(
-                            data_point,
-                            trajectory_dict["model_patch"],
-                            instance_dataset_path,
-                        )
-                    elif "R2E-Gym" in data_point["dataset_name"]:
-                        report_file = await self._run_r2e_gym_eval(
-                            pred_mounted_path,
-                            data_point,
-                            agent_run_id,
-                            instance_dataset_path,
-                        )
-                    else:
-                        report_file = await self._run_swebench_eval(
-                            pred_mounted_path,
-                            data_point,
-                            agent_run_id,
-                            instance_dataset_path,
-                        )
-                    evaluation_time = asyncio.get_running_loop().time() - start_time
-                except ValueError:
-                    print(
-                        f"Failed to execute SWE-bench evaluation command for {data_point['instance_id']}",
-                        flush=True,
-                    )
+                pred_mounted_path = pred_file.replace(str(self.output_dir), "/trajectories_mount")
+                with open(pred_file, "r") as f:
+                    trajectory_dict = json.loads(f.read())
+
+                # Check if the trajectory has an empty patch before running evaluation
+                has_patch = trajectory_dict["model_patch"] is not None
+
+                if not has_patch:
                     report_json = {
                         data_point["instance_id"]: {
                             "resolved": False,
-                            "patch_exists": True,
+                            "patch_exists": False,
                             "patch_successfully_applied": False,
                             "generation_time": generation_time,
                             "evaluation_time": evaluation_time,
                         }
                     }
-                    report_file = None
 
-                if report_file is not None:
-                    with open(report_file, "r") as f:
-                        report_json = json.loads(f.read().strip())
+                else:
+                    # Run full evaluation with streaming output
+                    # TODO: should we fail on errors here? Seems that json isn't always generated
+                    try:
+                        start_time = asyncio.get_running_loop().time()
+                        if data_point["dataset_name"] == "nv-internal-1":
+                            report_file = await self._run_nv_internal_eval(
+                                data_point,
+                                trajectory_dict["model_patch"],
+                                instance_dataset_path,
+                            )
+                        elif "R2E-Gym" in data_point["dataset_name"]:
+                            report_file = await self._run_r2e_gym_eval(
+                                pred_mounted_path,
+                                data_point,
+                                agent_run_id,
+                                instance_dataset_path,
+                            )
+                        else:
+                            report_file = await self._run_swebench_eval(
+                                pred_mounted_path,
+                                data_point,
+                                agent_run_id,
+                                instance_dataset_path,
+                            )
+                        evaluation_time = asyncio.get_running_loop().time() - start_time
+                    except ValueError:
+                        print(
+                            f"Failed to execute SWE-bench evaluation command for {data_point['instance_id']}",
+                            flush=True,
+                        )
+                        report_json = {
+                            data_point["instance_id"]: {
+                                "resolved": False,
+                                "patch_exists": True,
+                                "patch_successfully_applied": False,
+                                "generation_time": generation_time,
+                                "evaluation_time": evaluation_time,
+                            }
+                        }
+                        report_file = None
+
+                    if report_file is not None:
+                        with open(report_file, "r") as f:
+                            report_json = json.loads(f.read().strip())
 
             output_dict = {
                 "swe-bench-metrics": report_json[data_point["instance_id"]],
