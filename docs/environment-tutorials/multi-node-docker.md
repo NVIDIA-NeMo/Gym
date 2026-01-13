@@ -1,6 +1,10 @@
 (env-multi-node-docker)=
 # Multi-Node Docker Instances
 
+```{warning}
+This article was generated and has not been reviewed. Content may change.
+```
+
 Deploy NeMo Gym environments across multiple Docker instances for scalable rollout collection.
 
 ::::{grid} 2

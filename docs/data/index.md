@@ -1,6 +1,10 @@
 (data-index)=
 # Data
 
+```{warning}
+This article was generated and has not been reviewed. Content may change.
+```
+
 Data management is critical for RL training with NeMo Gym. This section covers how to prepare, validate, and source datasets for your training environments.
 
 ## Data Format

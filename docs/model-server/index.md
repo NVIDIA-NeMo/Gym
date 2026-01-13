@@ -1,6 +1,10 @@
 (model-server-index)=
 # Model Server
 
+```{warning}
+This article was generated and has not been reviewed. Content may change.
+```
+
 ```{note}
 This section is being developed. See [GitHub Issue #194](https://github.com/NVIDIA-NeMo/Gym/issues/194) for details.
 ```

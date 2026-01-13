@@ -1,6 +1,10 @@
 (env-multi-turn)=
 # Multi-Turn Environments
 
+```{warning}
+This article was generated and has not been reviewed. Content may change.
+```
+
 Build conversational training environments with extended dialogue interactions.
 
 ::::{grid} 2
@@ -200,7 +204,9 @@ def is_conversation_complete(self, conversation: list[dict]) -> bool:
 
 ## Verification Strategies
 
-### Final State Verification
+:::::{tab-set}
+
+::::{tab-item} Final State Verification
 
 Verify only the end result of the conversation:
 
@@ -215,7 +221,9 @@ async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
 
 **Best for**: Task-oriented dialogues with clear success criteria (scheduling, booking).
 
-### Cumulative Turn Scoring
+::::
+
+::::{tab-item} Cumulative Turn Scoring
 
 Weight turns by importance or recency:
 
@@ -239,7 +247,9 @@ async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
 
 **Best for**: Conversations where later turns build on earlier ones.
 
-### Constraint-Based Verification
+::::
+
+::::{tab-item} Constraint-Based Verification
 
 Check multiple criteria for correctness:
 
@@ -258,6 +268,10 @@ async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
 ```
 
 **Best for**: Structured tasks with multiple success criteria.
+
+::::
+
+:::::
 
 ---
 

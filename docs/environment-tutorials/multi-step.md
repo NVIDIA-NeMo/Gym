@@ -1,6 +1,10 @@
 (env-multi-step)=
 # Multi-Step Environments
 
+```{warning}
+This article was generated and has not been reviewed. Content may change.
+```
+
 Build training environments with sequential tool calling and intermediate states.
 
 ::::{grid} 2
@@ -190,7 +194,9 @@ async def submit(self, body: SubmitRequest) -> SubmitResponse:
 
 ## Verification Strategies
 
-### Final State Verification
+:::::{tab-set}
+
+::::{tab-item} Final State Verification
 
 Verify the final tool call contains the correct answer:
 
@@ -212,7 +218,9 @@ async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
     return BaseVerifyResponse(**body.model_dump(), reward=float(correct))
 ```
 
-### Partial Credit Verification
+::::
+
+::::{tab-item} Partial Credit Verification
 
 Award partial credit based on progress:
 
@@ -232,6 +240,10 @@ async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
     
     return BaseVerifyResponse(**body.model_dump(), reward=reward)
 ```
+
+::::
+
+:::::
 
 ---
 

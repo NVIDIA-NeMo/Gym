@@ -40,7 +40,9 @@ Use vLLM when you need:
 
 Before configuring NeMo Gym, you need a running vLLM server. Here are common startup patterns:
 
-### Basic Startup
+:::::{tab-set}
+
+::::{tab-item} Basic Startup
 
 ```bash
 pip install -U "vllm>=0.8.0"
@@ -51,7 +53,9 @@ vllm serve <model-name> \
     --api-key token-abc123
 ```
 
-### With Tool/Function Calling
+::::
+
+::::{tab-item} With Tool/Function Calling
 
 For agentic workflows with tool calling, specify the appropriate tool parser for your model:
 
@@ -67,7 +71,9 @@ vllm serve Qwen/Qwen3-30B-A3B \
     --port 8000
 ```
 
-### Multi-GPU (Tensor Parallelism)
+::::
+
+::::{tab-item} Multi-GPU (Tensor Parallelism)
 
 For large models that don't fit on a single GPU:
 
@@ -79,11 +85,15 @@ vllm serve meta-llama/Llama-3.1-70B-Instruct \
     --port 8000
 ```
 
-### Reasoning Models (Nemotron, QwQ, DeepSeek-R1)
+::::
+
+::::{tab-item} Reasoning Models
 
 :::{important}
 Do **NOT** use vLLM's `--reasoning-parser` flag. NeMo Gym handles reasoning via `<think>` tags internally through the `uses_reasoning_parser` config option. Using both will cause conflicts.
 :::
+
+For Nemotron, QwQ, or DeepSeek-R1:
 
 ```bash
 # Correct: Let NeMo Gym handle reasoning parsing
@@ -100,6 +110,10 @@ Then enable reasoning parsing in NeMo Gym config:
 ```yaml
 uses_reasoning_parser: true
 ```
+
+::::
+
+:::::
 
 ## NeMo Gym Configuration
 
@@ -241,7 +255,8 @@ Both endpoints route to the same underlying vLLM server, with format conversion 
 
 ## Troubleshooting
 
-### Context Length Errors
+::::{dropdown} Context Length Errors
+:icon: alert
 
 **Symptom**: Empty responses or `400 Bad Request` errors
 
@@ -252,7 +267,10 @@ vLLM returns errors when input exceeds the model's context length. NeMo Gym hand
 - Reduce input length in your prompts
 - Use a model with longer context support
 
-### Connection Errors
+::::
+
+::::{dropdown} Connection Errors
+:icon: alert
 
 **Symptom**: `Connection refused` or timeout errors
 
@@ -264,7 +282,10 @@ curl http://localhost:8000/v1/models
 # Common issues: OOM, model loading failures
 ```
 
-### Tool Calling Not Working
+::::
+
+::::{dropdown} Tool Calling Not Working
+:icon: alert
 
 **Symptom**: Model outputs text instead of tool calls
 
@@ -272,7 +293,10 @@ curl http://localhost:8000/v1/models
 2. Verify the correct `--tool-call-parser` for your model
 3. Check that the model supports function calling
 
-### Chat Template Issues
+::::
+
+::::{dropdown} Chat Template Issues
+:icon: alert
 
 **Symptom**: Malformed responses or parsing errors
 
@@ -284,6 +308,8 @@ chat_template_kwargs:
 ```
 
 Or use `replace_developer_role_with_system: true` if the model doesn't support the developer role.
+
+::::
 
 ## See Also
 

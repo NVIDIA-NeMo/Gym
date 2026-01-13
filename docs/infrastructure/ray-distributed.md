@@ -1,6 +1,10 @@
 (infra-ray-distributed)=
 # Distributed Computing with Ray
 
+```{warning}
+This article was generated and has not been reviewed. Content may change.
+```
+
 Scale CPU-intensive tasks in NeMo Gym using [Ray](https://www.ray.io/) for distributed parallel execution.
 
 ---
@@ -19,7 +23,9 @@ Ray is **not** used for rollout collection parallelism. Rollout collection uses 
 
 ## Ray Initialization
 
-### Automatic Setup
+:::::{tab-set}
+
+::::{tab-item} Automatic Setup
 
 Ray initializes automatically when you start NeMo Gym servers:
 
@@ -33,7 +39,9 @@ The initialization flow:
 2. **Server processes** (`server_utils.py`): Each server calls `initialize_ray()` and connects to the same cluster
 3. **Shared state**: The Ray cluster address is stored in the global config for all child processes
 
-### Connecting to an Existing Cluster
+::::
+
+::::{tab-item} Connecting to an Existing Cluster
 
 For production training with NeMo-RL or other frameworks, connect to an existing Ray cluster:
 
@@ -43,6 +51,10 @@ ray_head_node_address: "ray://your-cluster-address:10001"
 ```
 
 When `ray_head_node_address` is specified, NeMo Gym connects to that cluster instead of starting a new one. This enables resources servers to run distributed tasks across all nodes in the training cluster.
+
+::::
+
+:::::
 
 ## Parallelizing CPU-Intensive Tasks
 
@@ -165,7 +177,8 @@ The dashboard provides:
 
 ## Troubleshooting
 
-### Version Mismatch Errors
+::::{dropdown} Version Mismatch Errors
+:icon: alert
 
 If you see errors about Ray version incompatibility:
 
@@ -173,7 +186,10 @@ If you see errors about Ray version incompatibility:
 2. Check that `ray[default]` extra matches the top-level `pyproject.toml`
 3. Verify Python versions match (Ray is sensitive to Python version)
 
-### Sandboxed Environment Errors
+::::
+
+::::{dropdown} Sandboxed Environment Errors
+:icon: alert
 
 If you encounter:
 
@@ -187,13 +203,18 @@ This occurs in sandboxed environments where Ray's `psutil` calls are blocked. So
 2. Grant additional permissions if your environment supports it
 3. See the {ref}`FAQ <reference-faq>` for environment-specific workarounds
 
-### Connection Issues
+::::
+
+::::{dropdown} Connection Issues
+:icon: alert
 
 If servers fail to connect to the Ray cluster:
 
 1. Verify `ray_head_node_address` is correct and reachable
 2. Check firewall rules allow Ray's ports (default: 6379 for GCS, 8265 for dashboard)
 3. Ensure the Ray cluster is running before starting NeMo Gym servers
+
+::::
 
 ## Related Resources
 

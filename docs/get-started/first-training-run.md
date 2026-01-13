@@ -1,6 +1,10 @@
 (gs-first-training-run)=
 # First Training Run
 
+```{warning}
+This article was generated and has not been reviewed. Content may change.
+```
+
 This tutorial walks you through your first complete RL training run with NeMo Gym—from collected rollouts to a measurably improved model.
 
 ::::{grid} 2

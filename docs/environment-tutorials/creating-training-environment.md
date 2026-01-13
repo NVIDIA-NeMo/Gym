@@ -1,6 +1,10 @@
 (env-creating-training-environment)=
 # Creating a Training Environment
 
+```{warning}
+This article was generated and has not been reviewed. Content may change.
+```
+
 Build a complete training environment ready for reinforcement learning with NeMo RL.
 
 ::::{grid} 2
@@ -94,7 +98,9 @@ reward = step_progress + correctness_bonus
 
 ### Reward Patterns
 
-#### Binary Rewards
+:::::{tab-set}
+
+::::{tab-item} Binary Rewards
 
 Use for tasks with clear right/wrong answers:
 
@@ -107,7 +113,9 @@ async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
 
 **Best for**: Math, factual Q&A, code correctness
 
-#### Partial Credit
+::::
+
+::::{tab-item} Partial Credit
 
 Use when intermediate progress is meaningful:
 
@@ -121,7 +129,9 @@ async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
 
 **Best for**: Multi-step reasoning, structured outputs
 
-#### Shaped Rewards
+::::
+
+::::{tab-item} Shaped Rewards
 
 Combine multiple signals for complex tasks:
 
@@ -141,6 +151,10 @@ async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
 ```
 
 **Best for**: Complex workflows, multi-objective tasks
+
+::::
+
+:::::
 
 ### Avoiding Common Pitfalls
 
@@ -172,7 +186,9 @@ Training requires significantly more data than testing.
 
 ### Creating Training Data
 
-#### From Existing Datasets
+:::::{tab-set}
+
+::::{tab-item} From Existing Datasets
 
 ```python
 import json
@@ -193,7 +209,9 @@ with open("data/train.jsonl", "w") as f:
         f.write(json.dumps(item) + "\n")
 ```
 
-#### Synthetic Data Generation
+::::
+
+::::{tab-item} Synthetic Data Generation
 
 For custom tasks, generate examples programmatically:
 
@@ -214,6 +232,10 @@ with open("data/train.jsonl", "w") as f:
     for _ in range(10000):
         f.write(json.dumps(generate_math_example()) + "\n")
 ```
+
+::::
+
+:::::
 
 ### Data Quality Checklist
 

@@ -1,6 +1,10 @@
 (agent-server-integrate-index)=
 # Integrate Existing Agents
 
+```{warning}
+This article was generated and has not been reviewed. Content may change.
+```
+
 ```{note}
 This section is being developed.
 ```

@@ -1,6 +1,10 @@
 (env-rlhf-reward-models)=
 # RLHF with Reward Models
 
+```{warning}
+This article was generated and has not been reviewed. Content may change.
+```
+
 Integrate learned reward models for Reinforcement Learning from Human Feedback (RLHF).
 
 ::::{grid} 2
@@ -126,7 +130,8 @@ ng_collect_rollouts \
 
 Understanding these concepts is essential for effective RLHF training.
 
-### Reward Normalization
+::::{dropdown} Reward Normalization
+:icon: graph
 
 Raw reward model outputs may have arbitrary scale and distribution. Normalize rewards to stabilize training:
 
@@ -144,7 +149,10 @@ def normalize_reward(self, raw_reward: float) -> float:
 - Combining multiple reward signals
 - Reward scale varies across data subsets
 
-### KL Divergence Constraints
+::::
+
+::::{dropdown} KL Divergence Constraints
+:icon: shield
 
 Prevent the policy from diverging too far from the reference model:
 
@@ -159,7 +167,10 @@ reward_with_kl = reward - beta * kl_divergence(policy, reference)
 | Medium (0.1-0.2) | Balanced exploration and stability |
 | High (0.5+) | Conservative updates, slower learning |
 
-### Reward Hacking Mitigation
+::::
+
+::::{dropdown} Reward Hacking Mitigation
+:icon: alert
 
 Models may exploit reward model weaknesses. Common mitigations:
 
@@ -179,9 +190,13 @@ async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
     return BaseVerifyResponse(**body.model_dump(), reward=reward)
 ```
 
+::::
+
 ## Reward Model Types
 
-### Preference-Based
+:::::{tab-set}
+
+::::{tab-item} Preference-Based
 
 Trained on pairwise comparisons (response A vs response B):
 
@@ -196,7 +211,9 @@ reward = reward_model.score(prompt, response)
 - Bradley-Terry models
 - Reward models fine-tuned from LLMs (e.g., removing the LM head, adding a scalar head)
 
-### Scalar Reward
+::::
+
+::::{tab-item} Scalar Reward
 
 Trained to predict absolute quality scores:
 
@@ -210,6 +227,10 @@ reward = reward_model.predict(prompt, response)
 - Direct quality ratings (1-5 stars)
 - Absolute safety scores
 - Multi-attribute scoring
+
+::::
+
+:::::
 
 ## Input Data Format
 
@@ -241,7 +262,9 @@ reward = reward_model.predict(prompt, response)
 
 ## Supported Models
 
-### Hugging Face Reward Models
+:::::{tab-set}
+
+::::{tab-item} Hugging Face Reward Models
 
 Load reward models from Hugging Face Hub:
 
@@ -271,7 +294,9 @@ class HFRewardModelServer(SimpleResourcesServer):
         return outputs.logits[0].item()
 ```
 
-### Custom Reward Models
+::::
+
+::::{tab-item} Custom Reward Models
 
 For custom architectures, implement the scoring interface:
 
@@ -284,6 +309,10 @@ class CustomRewardModel:
         # Your custom scoring logic
         return self.model.forward(prompt, response)
 ```
+
+::::
+
+:::::
 
 ## Example
 

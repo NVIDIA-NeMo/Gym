@@ -1,6 +1,10 @@
 (environment-tutorials-index)=
 # Custom Environment Tutorials
 
+```{warning}
+This article was generated and has not been reviewed. Content may change.
+```
+
 Learn how to build custom training environments with NeMo Gym for various RL scenarios.
 
 ## Environment Patterns

@@ -13,7 +13,9 @@ Understand how to deploy NeMo Gym components for different scales and use cases.
 
 NeMo Gym supports three deployment patterns, each suited to different stages of development and scale.
 
-### Pattern 1: All-in-One (Development)
+:::::{tab-set}
+
+::::{tab-item} All-in-One (Development)
 
 All servers run in a single process—ideal for local development and debugging:
 
@@ -32,7 +34,9 @@ All servers run in a single process—ideal for local development and debugging:
 
 **Best for:** Local development, debugging, quick iteration
 
-### Pattern 2: Separated Services (Testing)
+::::
+
+::::{tab-item} Separated Services (Testing)
 
 Services run as separate processes on a single machine:
 
@@ -53,7 +57,9 @@ Services run as separate processes on a single machine:
 
 **Best for:** Integration testing, validating service communication, Docker Compose setups
 
-### Pattern 3: Distributed (Production)
+::::
+
+::::{tab-item} Distributed (Production)
 
 Services distributed across multiple nodes for horizontal scaling:
 
@@ -78,6 +84,10 @@ Services distributed across multiple nodes for horizontal scaling:
 ```
 
 **Best for:** Production workloads, large-scale rollout collection, multi-GPU training
+
+::::
+
+:::::
 
 ---
 
@@ -109,14 +119,18 @@ Use this decision matrix to select the right deployment pattern:
 
 ## Configuration
 
-### Single-Node
+:::::{tab-set}
+
+::::{tab-item} Single-Node
 
 ```bash
 # All-in-one: everything in one process
 ng_run "+config_paths=[config.yaml]"
 ```
 
-### Multi-Node
+::::
+
+::::{tab-item} Multi-Node
 
 ```bash
 # Start head server on coordinator node
@@ -125,6 +139,10 @@ ng_run --head-only
 # Start workers on GPU nodes (run on each worker machine)
 ng_run --worker --head-url=http://coordinator:11000
 ```
+
+::::
+
+:::::
 
 ### Key Environment Variables
 
@@ -198,20 +216,27 @@ Actual throughput depends on model size, GPU type, and environment complexity.
 
 ## Migration Paths
 
-### Development → Testing
+::::{dropdown} Development → Testing
+:icon: arrow-right
 
 1. Extract configuration into separate YAML files per server
 2. Start servers in separate terminals/processes
 3. Verify inter-service communication via logs
 
-### Testing → Production
+::::
+
+::::{dropdown} Testing → Production
+:icon: arrow-right
 
 1. Containerize each server type (see {doc}`/resources-server/containerize`)
 2. Deploy head server on coordinator node
 3. Deploy workers with GPU resources
 4. Configure networking and service discovery
 
-### Scaling Existing Deployments
+::::
+
+::::{dropdown} Scaling Existing Deployments
+:icon: arrow-right
 
 ```bash
 # Add workers to running cluster
@@ -219,6 +244,8 @@ ng_run --worker --head-url=http://coordinator:11000
 
 # Workers auto-register; head distributes work automatically
 ```
+
+::::
 
 ---
 

@@ -27,7 +27,9 @@ Learn how to prepare and validate your data for use with NeMo Gym training envir
 
 NeMo Gym uses JSONL files where each line is a JSON object containing task data.
 
-### Basic Format
+:::::{tab-set}
+
+::::{tab-item} Basic Format
 
 Each line must contain `responses_create_params` with an `input` field:
 
@@ -35,7 +37,9 @@ Each line must contain `responses_create_params` with an `input` field:
 {"responses_create_params": {"input": [{"role": "user", "content": "Your task here"}]}}
 ```
 
-### Training Format
+::::
+
+::::{tab-item} Training Format
 
 For training, include verification metadata:
 
@@ -51,6 +55,10 @@ For training, include verification metadata:
   "metadata": {"source": "math_dataset", "difficulty": "easy"}
 }
 ```
+
+::::
+
+:::::
 
 ### Required Fields
 
@@ -73,7 +81,9 @@ Valid roles for messages in `input`:
 
 ## Converting Data
 
-### From Custom Datasets
+:::::{tab-set}
+
+::::{tab-item} From Custom Datasets
 
 ```python
 import json
@@ -92,7 +102,9 @@ with open("data.jsonl", "w") as f:
         f.write(json.dumps(item) + "\n")
 ```
 
-### Adding System Prompts
+::::
+
+::::{tab-item} Adding System Prompts
 
 Include a `developer` message before the user message:
 
@@ -107,9 +119,15 @@ Include a `developer` message before the user message:
 }
 ```
 
-### From Hugging Face
+::::
+
+::::{tab-item} From Hugging Face
 
 For datasets on Hugging Face Hub, see {doc}`download-huggingface` for download commands and conversion examples.
+
+::::
+
+:::::
 
 ---
 
@@ -126,7 +144,8 @@ For datasets on Hugging Face Hub, see {doc}`download-huggingface` for download c
 
 ### Debugging Tips
 
-**Validate a single line:**
+::::{dropdown} Validate a single line
+:icon: code
 
 ```python
 import json
@@ -141,7 +160,10 @@ with open("data.jsonl") as f:
             print(f"Line {i}: {e}")
 ```
 
-**Test with a small sample:**
+::::
+
+::::{dropdown} Test with a small sample
+:icon: terminal
 
 ```bash
 head -5 data.jsonl > sample.jsonl
@@ -149,6 +171,8 @@ ng_collect_rollouts +agent_name=my_agent \
     +input_jsonl_fpath=sample.jsonl \
     +output_jsonl_fpath=test_output.jsonl
 ```
+
+::::
 
 ---
 

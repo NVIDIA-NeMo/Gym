@@ -2,6 +2,10 @@
 
 # LLM-as-a-Judge Verification
 
+```{warning}
+This article was generated and has not been reviewed. Content may change.
+```
+
 Use large language models to verify and score agent responses.
 
 ::::{grid} 2
@@ -152,7 +156,8 @@ GOLD: {expected_answer}
 CANDIDATE: {generated_answer}
 ```
 
-### Few-Shot Examples
+::::{dropdown} Few-Shot Examples
+:icon: code
 
 Include examples in your prompt to improve judge consistency:
 
@@ -172,9 +177,12 @@ CANDIDATE: ΔU = Q + W
 [[A!=B]] they are not equivalent
 ```
 
+::::
+
 ## Reliability Features
 
-### Swap Check (Positional Bias)
+::::{dropdown} Swap Check (Positional Bias)
+:icon: sync
 
 LLM judges can exhibit positional bias—preferring the first or second answer. Enable swap checking to detect this:
 
@@ -189,7 +197,10 @@ When enabled:
 2. If equal, second pass: Compare generated vs expected (swapped)
 3. Reward 1.0 only if both passes agree
 
-### Full Generation Rescue
+::::
+
+::::{dropdown} Full Generation Rescue
+:icon: rocket
 
 When regex extraction fails, the server can retry with the full generation:
 
@@ -199,6 +210,8 @@ reward_if_full_generation_succeeds: 0.5
 ```
 
 This helps recover from extraction failures while giving partial credit.
+
+::::
 
 ## Input Data Format
 

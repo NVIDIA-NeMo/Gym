@@ -1,6 +1,10 @@
 (data-download-huggingface)=
 # Download from Hugging Face
 
+```{warning}
+This article was generated and has not been reviewed. Content may change.
+```
+
 Download and use datasets from Hugging Face Hub for NeMo Gym training.
 
 ---
@@ -41,7 +45,9 @@ Use `output_dirpath` without `split` to download all available splits at once.
 
 ## Examples
 
-### Download All Splits
+:::::{tab-set}
+
+::::{tab-item} Download All Splits
 
 ```bash
 ng_download_dataset_from_hf \
@@ -49,7 +55,9 @@ ng_download_dataset_from_hf \
     +output_dirpath=data/
 ```
 
-### Download Specific Split
+::::
+
+::::{tab-item} Download Specific Split
 
 ```bash
 ng_download_dataset_from_hf \
@@ -58,7 +66,9 @@ ng_download_dataset_from_hf \
     +output_fpath=data/train.jsonl
 ```
 
-### Download Raw File
+::::
+
+::::{tab-item} Download Raw File
 
 ```bash
 ng_download_dataset_from_hf \
@@ -66,6 +76,10 @@ ng_download_dataset_from_hf \
     +artifact_fpath=train.jsonl \
     +output_fpath=data/train.jsonl
 ```
+
+::::
+
+:::::
 
 ## Private Datasets
 
