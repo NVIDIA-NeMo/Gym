@@ -55,7 +55,7 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
     TokenIDLogProbMixin,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_worker
 
 
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
@@ -68,6 +68,9 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     replace_developer_role_with_system: bool = False
 
     chat_template_kwargs: Optional[Dict[str, Any]] = None
+
+    # Corresponds to the extra_body of OpenAI Client.
+    extra_body: Optional[Dict[str, Any]] = None
 
     def model_post_init(self, context):
         if isinstance(self.base_url, str):
@@ -135,6 +138,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             metadata=body.metadata,
             instructions=body.instructions,
             user=body.user,
+            incomplete_details={"reason": "max_output_tokens"} if choice.finish_reason == "length" else None,
         )
 
     async def chat_completions(
@@ -147,6 +151,7 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         body_dict = body.model_dump(exclude_unset=True)
         body_dict["model"] = self.config.model
+
         if self.config.chat_template_kwargs:
             body_dict["chat_template_kwargs"] = deepcopy(self.config.chat_template_kwargs)
 
@@ -202,6 +207,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                     pass
                 else:
                     raise NotImplementedError
+
+        if self.config.extra_body:
+            create_params = self.config.extra_body | create_params
 
         try:
             chat_completion_dict = await client.create_chat_completion(**create_params)
@@ -276,7 +284,6 @@ class VLLMModel(SimpleResponsesAPIModel):
                     tokenize_body_dict[key] = body_dict[key]
 
             # The base url has /v1 at the end but vLLM's tokenize endpoint does not have v1, hence the ..
-            # I can't believe the path is resolved correctly LOL
             tokenize_response = await client.create_tokenize(**tokenize_body_dict)
             """
             END
@@ -527,11 +534,11 @@ class VLLMConverter(BaseModel):
         state: VLLMConverterResponsesToChatCompletionsState,
     ) -> None:
         """
-        Collects text from 'reasoning' messages and appends it to a buffer.
+        Collects text from 'reasoning' messages in responses api and appends it to a buffer.
 
         This is done to group together one (or multiple) reasoning message(s) into a single,
         cohesive block, later prepending it to a subsequent assistant message.
-        See: https://gitlab-master.nvidia.com/bxyu/nemo-gym#reasoning-in-the-response-api
+        See: https://github.com/NVIDIA-NeMo/Gym/blob/main/docs/how-to-faq.md#faq-openai-responses-vs-chat-completions-api for an example of reasoning in responses api.
         """
         if "summary" in m and m["summary"]:
             texts = [s["text"] for s in m["summary"]]
@@ -631,3 +638,5 @@ class VLLMConverter(BaseModel):
 
 if __name__ == "__main__":
     VLLMModel.run_webserver()
+elif is_nemo_gym_fastapi_worker():
+    app = VLLMModel.run_webserver()  # noqa: F401

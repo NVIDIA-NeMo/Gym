@@ -18,7 +18,7 @@ from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
 from itertools import chain, repeat
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
@@ -37,9 +37,24 @@ from nemo_gym.server_utils import (
 class RolloutCollectionConfig(BaseNeMoGymCLIConfig):
     """
     Perform a batch of rollout collection.
+
+    Examples:
+
+    ```bash
+    ng_collect_rollouts \
+        +agent_name=example_single_tool_call_simple_agent \
+        +input_jsonl_fpath=weather_query.jsonl \
+        +output_jsonl_fpath=weather_rollouts.jsonl \
+        +limit=100 \
+        +num_repeats=4 \
+        +num_samples_in_parallel=10
+    ```
     """
 
-    agent_name: str = Field(description="The agent to collect rollouts from.")
+    agent_name: Optional[str] = Field(
+        default=None,
+        description="The agent to collect rollouts from. If not specified, uses agent_ref from each data row.",
+    )
     input_jsonl_fpath: str = Field(
         description="The input data source to use to collect rollouts, in the form of a file path to a jsonl file."
     )
@@ -91,13 +106,23 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
         if config.responses_create_params:
             print(f"Overriding responses_create_params fields with {config.responses_create_params}")
 
+        # Validate all rows have an agent specified (either via config or agent_ref in data)
+        if not config.agent_name:
+            missing_agent_indices = [idx for idx, row in enumerate(rows) if not row.get("agent_ref", {}).get("name")]
+            if missing_agent_indices:
+                raise ValueError(
+                    f"No agent specified for rows {missing_agent_indices}. Either provide +agent_name config or include agent_ref in data."
+                )
+
         metrics = Counter()
         with open(config.output_jsonl_fpath, "a") as f:
 
             async def _post_coroutine(row: dict) -> None:
                 row["responses_create_params"] = row["responses_create_params"] | config.responses_create_params
+                # Use config.agent_name if specified, otherwise use agent_ref from the row
+                agent_name = config.agent_name or row.get("agent_ref", {}).get("name")
                 async with semaphore:
-                    response = await server_client.post(server_name=config.agent_name, url_path="/run", json=row)
+                    response = await server_client.post(server_name=agent_name, url_path="/run", json=row)
                     await raise_for_status(response)
                     result = await response.json()
                     f.write(json.dumps(result) + "\n")
@@ -117,10 +142,10 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
         """
         server_client = self.setup_server_client(head_server_config)
 
-        async def _post_subroutine(row: Dict) -> Dict:
-            res = await server_client.post(server_name=row.pop("agent_ref")["name"], url_path="/run", json=row)
+        async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
+            res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
             await raise_for_status(res)
-            return await res.json()
+            return row, await res.json()
 
         return tqdm.as_completed(
             map(_post_subroutine, examples), desc="Collecting rollouts", miniters=10, total=len(examples)

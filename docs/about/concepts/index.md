@@ -13,14 +13,6 @@ Need a refresher on reinforcement learning language? Refer to the {doc}`key-term
 
 ---
 
-## How to Navigate This Section
-
-- Read these explanations when your team needs shared vocabulary for configuring Models, Resources, and Agents together.
-- Pair each concept page with its related tutorials when you are ready to practice tasks such as assembling interaction datasets or scoring agent behavior.
-- Return here whenever you add a new teammate so that they can orient and choose the depth that fits their role.
-
----
-
 ## Concept Highlights
 
 Each explainer below covers one foundational idea and links to deeper material.
@@ -28,28 +20,28 @@ Each explainer below covers one foundational idea and links to deeper material.
 ::::{grid} 1 1 1 2
 :gutter: 1 1 1 2
 
-:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Core Abstractions
-:link: core-abstractions
+:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Core Components
+:link: core-components
 :link-type: ref
-Understand how Models, Resources, and Agents remain decoupled yet coordinated as independent HTTP services, including which endpoints each abstraction exposes.
+Understand the three server components that make up a training environment.
 :::
 
 :::{grid-item-card} {octicon}`gear;1.5em;sd-mr-1` Configuration System
-:link: configuration-management
+:link: configuration-concepts
 :link-type: ref
-Learn how NeMo Gym's three-tier configuration system (YAML → env.yaml → CLI) enables secure secrets management and flexible multi-environment deployments.
+Understand how servers are configured and connected.
 :::
 
 :::{grid-item-card} {octicon}`check-circle;1.5em;sd-mr-1` Task Verification
 :link: task-verification
 :link-type: ref
-Explore how resource servers score agent outputs with `verify()` implementations that transform correctness, quality, and efficiency checks into reward signals.
+Understand the importance of verification and common implementation patterns.
 :::
 
 :::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` Key Terminology
 :link: key-terminology
 :link-type: ref
-Essential vocabulary for agent training, RL workflows, and NeMo Gym. This glossary defines terms you'll encounter throughout the tutorials and documentation.
+Essential vocabulary for agent training, RL workflows, and NeMo Gym.
 :::
 
 ::::
@@ -60,8 +52,8 @@ Essential vocabulary for agent training, RL workflows, and NeMo Gym. This glossa
 :hidden:
 :maxdepth: 1
 
-Core Abstractions <core-abstractions>
-Configuration System <configuration-system>
+Core Components <core-components>
+Configuration System <configuration>
 Task Verification <task-verification>
 Key Terminology <key-terminology>
 ```

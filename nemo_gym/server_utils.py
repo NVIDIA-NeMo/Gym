@@ -18,14 +18,15 @@ import json
 import resource
 from abc import abstractmethod
 from contextlib import asynccontextmanager
+from inspect import getmodule
 from io import StringIO
 from logging import Filter as LoggingFilter
 from logging import LogRecord, getLogger
-from os import getenv
+from os import environ, getenv
 from pathlib import Path
 from threading import Thread
 from traceback import print_exc
-from typing import Literal, Optional, Tuple, Type, Union, Unpack
+from typing import List, Literal, Optional, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
 import ray
@@ -171,7 +172,8 @@ Sleeping 0.5s and retrying...
 async def raise_for_status(response: ClientResponse) -> None:  # pragma: no cover
     if not response.ok:
         content = await response.content.read()
-        print(f"""Request info: {response.request_info}
+        if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
+            print(f"""Request info: {response.request_info}
 Response content: {content}""")
 
         try:
@@ -366,6 +368,17 @@ def initialize_ray() -> None:
         print(f"Started Ray cluster at {global_config_dict['ray_head_node_address']}")
 
 
+IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME = "IS_NEMO_GYM_FASTAPI_WORKER"
+
+
+def is_nemo_gym_fastapi_worker() -> bool:
+    return getenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME) == "1"
+
+
+def set_is_nemo_gym_fastapi_worker() -> None:
+    environ[IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME] = "1"
+
+
 class SimpleServer(BaseServer):
     server_client: ServerClient
 
@@ -488,10 +501,12 @@ class SimpleServer(BaseServer):
                 )
 
     @classmethod
-    def run_webserver(cls) -> None:  # pragma: no cover
+    def run_webserver(cls) -> FastAPI:  # pragma: no cover
         global_config_dict = get_global_config_dict()
 
         initialize_ray()
+
+        is_main_fastapi_proc = not is_nemo_gym_fastapi_worker()
 
         server_config = cls.load_config_from_global_config()
         server_client = ServerClient(
@@ -528,31 +543,56 @@ Full body: {json.dumps(exc.body, indent=4)}
             uvicorn_logger = getLogger("uvicorn.access")
             uvicorn_logger.addFilter(No200Filter())
 
-            print(
-                "Adding a uvicorn logging filter so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
-            )
+            if is_main_fastapi_proc:
+                print(
+                    "Adding a uvicorn logging filter so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
+                )
 
-        uvicorn.run(
-            app,
+        uvicorn_kwargs = dict(
             host=server.config.host,
             port=server.config.port,
             # We add a very small graceful shutdown timeout so when we shutdown we cancel all inflight requests and there are no lingering requests (requests are cancelled)
             timeout_graceful_shutdown=0.5,
         )
 
+        if server.config.num_workers and server.config.num_workers > 1:
+            set_is_nemo_gym_fastapi_worker()
+
+            module = getmodule(cls)
+            relative_fpath = Path(module.__file__).relative_to(PARENT_DIR).with_suffix("")
+            module_import_str = str(relative_fpath).replace("/", ".")
+
+            uvicorn_kwargs["app"] = f"{module_import_str}:app"
+            uvicorn_kwargs["workers"] = server.config.num_workers
+        else:
+            uvicorn_kwargs["app"] = app
+
+        if is_main_fastapi_proc:
+            uvicorn.run(**uvicorn_kwargs)
+
+        return app
+
 
 class HeadServer(BaseServer):
     config: BaseServerConfig
+    _server_instances: List[dict] = []
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
         app.get("/global_config_dict_yaml")(self.global_config_dict_yaml)
+        app.get("/server_instances")(self.get_server_instances)
 
         return app
 
+    def get_server_instances(self) -> List[dict]:
+        return self._server_instances
+
+    def set_server_instances(self, instances: List) -> None:
+        self._server_instances = instances
+
     @classmethod
-    def run_webserver(cls) -> Tuple[uvicorn.Server, Thread]:  # pragma: no cover
+    def run_webserver(cls) -> Tuple[uvicorn.Server, Thread, "HeadServer"]:  # pragma: no cover
         config = ServerClient.load_head_server_config()
         server = cls(config=config)
 
@@ -563,12 +603,28 @@ class HeadServer(BaseServer):
             host=server.config.host,
             port=server.config.port,
         )
-        server = uvicorn.Server(config=config)
+        uvicorn_server = uvicorn.Server(config=config)
 
-        thread = Thread(target=server.run, daemon=True)
+        thread = Thread(target=uvicorn_server.run, daemon=True)
         thread.start()
 
-        return server, thread
+        return uvicorn_server, thread, server
 
     async def global_config_dict_yaml(self) -> str:
         return OmegaConf.to_yaml(get_global_config_dict())
+
+
+class ServerInstanceDisplayConfig(BaseModel):
+    config_path: Optional[str] = None
+    dir_path: Optional[Path] = None
+    entrypoint: Optional[str] = None
+    host: Optional[str] = None
+    name: Optional[str] = None
+    pid: Optional[int] = None
+    port: Optional[int] = None
+    process_name: Optional[str] = None
+    server_type: Optional[str] = None
+    start_time: Optional[float] = None
+    status: Optional[ServerStatus] = None
+    uptime_seconds: Optional[float] = None
+    url: Optional[str] = None

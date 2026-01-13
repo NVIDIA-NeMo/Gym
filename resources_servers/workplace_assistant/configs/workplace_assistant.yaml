@@ -6,7 +6,6 @@ workplace_assistant:
       verified: false
       description: Workplace assistant multi-step tool-using environment
       value: Improve multi-step tool use capability
-      dataset_name: Nemotron-RL-agent-workplace_assistant
 workplace_assistant_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -21,17 +20,15 @@ workplace_assistant_simple_agent:
         - name: train
           type: train
           jsonl_fpath: resources_servers/workplace_assistant/data/train.jsonl
-          gitlab_identifier:
-            dataset_name: workplace_assistant
-            version: 0.0.4
+          huggingface_identifier:
+            repo_id: nvidia/Nemotron-RL-agent-workplace_assistant
             artifact_fpath: train.jsonl
           license: Apache 2.0
         - name: validation
           type: validation
           jsonl_fpath: resources_servers/workplace_assistant/data/validation.jsonl
-          gitlab_identifier:
-            dataset_name: workplace_assistant
-            version: 0.0.4
+          huggingface_identifier:
+            repo_id: nvidia/Nemotron-RL-agent-workplace_assistant
             artifact_fpath: validation.jsonl
           license: Apache 2.0
         - name: example

@@ -13,7 +13,6 @@ math_with_judge:
       verified: false
       description: Math dataset with math-verify and LLM-as-a-judge
       value: Improve math capabilities including AIME 24 / 25
-      dataset_name: Nemotron-RL-math-OpenMathReasoning
 math_with_judge_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -28,18 +27,16 @@ math_with_judge_simple_agent:
       - name: train
         type: train
         jsonl_fpath: resources_servers/math_with_judge/data/train.jsonl
-        gitlab_identifier:
-          dataset_name: math_open_math_reasoning
-          version: 0.0.1
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-math-OpenMathReasoning
           artifact_fpath: open_math_reasoning_problems.jsonl
         license: Creative Commons Attribution 4.0 International
       - name: validation
         type: validation
         jsonl_fpath: resources_servers/math_with_judge/data/aime24_validation.jsonl
-        gitlab_identifier:
-          dataset_name: aime24
-          version: 0.0.1
-          artifact_fpath: aime24.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-math-OpenMathReasoning
+          artifact_fpath: aime24_validation.jsonl
         license: Apache 2.0
       - name: example
         type: example
