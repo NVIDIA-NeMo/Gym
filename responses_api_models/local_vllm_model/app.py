@@ -213,6 +213,8 @@ class LocalVLLMModel(VLLMModel):
             "Ray backend only works with data parallel size > 1!"
         )
 
+        # TODO multi-node model instances still need to be properly supported
+        # We get a vLLM error: Exception: Error setting CUDA_VISIBLE_DEVICES: local range: [0, 16) base value: "0,1,2,3,4,5,6,7"
         if env_vars["VLLM_RAY_DP_PACK_STRATEGY"] == "span":
             # Unset this flag since it's set by default using span
             server_args.pop("data_parallel_size_local", None)
