@@ -72,7 +72,16 @@ class VLLMOpenAIClient:
             "model": kwargs.get("model", ""),
             "messages": kwargs.get("messages", []),
         }
-        for key in ("temperature", "max_tokens", "max_completion_tokens", "top_p", "stop", "n", "tools", "tool_choice"):
+        for key in (
+            "temperature",
+            "max_tokens",
+            "max_completion_tokens",
+            "top_p",
+            "stop",
+            "n",
+            "tools",
+            "tool_choice",
+        ):
             if key in kwargs and kwargs[key] is not None:
                 request_body[key] = kwargs[key]
 
