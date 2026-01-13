@@ -28,6 +28,7 @@ from traceback import format_exc, print_exc
 from typing import List, Literal, Optional, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
+import orjson
 import ray
 import requests
 import uvicorn
@@ -143,6 +144,12 @@ MAX_NUM_TRIES = 3
 async def request(
     method: str, url: str, _internal: bool = False, **kwargs: Unpack[_RequestOptions]
 ) -> ClientResponse:  # pragma: no cover
+    # Faster JSON dumps than the default aiohttp json
+    if kwargs.get("json"):
+        kwargs["data"] = orjson.dumps(kwargs.pop("json"))
+        kwargs.setdefault("headers", dict())
+        kwargs["headers"]["Content-Type"] = "application/json"
+
     client = get_global_aiohttp_client()
     num_tries = 1
     while True:

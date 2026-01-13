@@ -448,11 +448,18 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     )
 
     async def _request(self, **request_kwargs: Dict) -> ClientResponse:
+        request_kwargs = request_kwargs | {
+            "headers": {
+                "Authorization": f"Bearer {self.api_key}",
+            },
+            "_internal": self.internal,
+        }
+
         max_num_tries = MAX_NUM_TRIES
         tries = 0
         while tries < MAX_NUM_TRIES:
             tries += 1
-            response = await request(**(request_kwargs | {"_internal": self.internal}))
+            response = await request(**request_kwargs)
 
             if response.status in RETRY_ERROR_CODES:
                 # If we hit a rate limit, we don't want to hit max num tries, so we increment both.
@@ -478,10 +485,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         await raise_for_status(response)
 
     async def create_models(self):
-        request_kwargs = dict(
-            url=f"{self.base_url}/models",
-            headers={"Authorization": f"Bearer {self.api_key}"},
-        )
+        request_kwargs = dict(url=f"{self.base_url}/models")
         response = await self._request(method="GET", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
@@ -491,7 +495,6 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         request_kwargs = dict(
             url=f"{self.base_url}/chat/completions",
             json=kwargs,
-            headers={"Authorization": f"Bearer {self.api_key}"},
         )
         response = await self._request(method="POST", **request_kwargs)
 
@@ -502,7 +505,6 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         request_kwargs = dict(
             url=f"{self.base_url}/responses",
             json=kwargs,
-            headers={"Authorization": f"Bearer {self.api_key}"},
         )
         response = await self._request(method="POST", **request_kwargs)
 
@@ -514,7 +516,6 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         request_kwargs = dict(
             url=f"{base_url}/tokenize",
             json=kwargs,
-            headers={"Authorization": f"Bearer {self.api_key}"},
         )
         response = await self._request(method="POST", **request_kwargs)
 
