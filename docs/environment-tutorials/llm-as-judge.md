@@ -2,6 +2,10 @@
 
 # LLM-as-a-Judge Verification
 
+```{warning}
+This article has not been reviewed by a developer SME. Content may change.
+```
+
 Use large language models to verify and score agent responses.
 
 ::::{grid} 2
@@ -226,7 +230,7 @@ This helps recover from extraction failures while giving partial credit.
 
 For per-record regex extraction (OpenQA support):
 
-```json
+```text
 {
   "expected_answer": "42",
   "template_metadata": {

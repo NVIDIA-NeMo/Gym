@@ -34,7 +34,7 @@ Multi-node deployment distributes environment execution across multiple Docker c
 - **GPU distribution** — Spread GPU workloads across machines
 - **Fault isolation** — Worker failures don't crash the head node
 
-This guide covers Docker Compose-based deployment. For Kubernetes orchestration, see {doc}`/deployment/kubernetes` (coming soon).
+This guide covers Docker Compose-based deployment. Kubernetes orchestration documentation is coming soon.
 
 ---
 

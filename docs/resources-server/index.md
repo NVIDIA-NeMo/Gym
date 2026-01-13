@@ -1,6 +1,10 @@
 (resources-server-index)=
 # Resources Server
 
+```{warning}
+This article has not been reviewed by a developer SME. Content may change.
+```
+
 Resources servers define the training environment—tasks, tools, and verification logic. They implement `SimpleResourcesServer` and expose two core endpoints:
 
 - **`/seed_session`** — Initialize session state before a rollout

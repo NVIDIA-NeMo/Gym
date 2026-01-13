@@ -1,6 +1,10 @@
 (infra-ray-distributed)=
 # Distributed Computing with Ray
 
+```{warning}
+This article has not been reviewed by a developer SME. Content may change.
+```
+
 Scale CPU-intensive tasks in NeMo Gym using [Ray](https://www.ray.io/) for distributed parallel execution.
 
 ---

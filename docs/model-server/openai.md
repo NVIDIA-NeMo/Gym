@@ -1,6 +1,10 @@
 (model-server-openai)=
 # OpenAI Model Server
 
+```{warning}
+This article has not been reviewed by a developer SME. Content may change.
+```
+
 The OpenAI model server (`responses_api_models/openai_model/`) connects NeMo Gym to OpenAI's API, providing access to GPT models with native function calling support.
 
 ---

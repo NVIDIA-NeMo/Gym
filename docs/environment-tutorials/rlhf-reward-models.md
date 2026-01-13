@@ -1,6 +1,10 @@
 (env-rlhf-reward-models)=
 # RLHF with Reward Models
 
+```{warning}
+This article has not been reviewed by a developer SME. Content may change.
+```
+
 Integrate learned reward models for Reinforcement Learning from Human Feedback (RLHF).
 
 ::::{grid} 2

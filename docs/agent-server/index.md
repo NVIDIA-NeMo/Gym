@@ -1,6 +1,10 @@
 (agent-server-index)=
 # Agent Server
 
+```{warning}
+This article has not been reviewed by a developer SME. Content may change.
+```
+
 Agent servers orchestrate the rollout lifecycle—calling models, executing tool calls through resources servers, and coordinating verification. They implement `SimpleResponsesAPIAgent` and expose two endpoints:
 
 - **`/v1/responses`** — Responses API passthrough for direct model interaction

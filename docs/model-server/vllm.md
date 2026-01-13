@@ -1,6 +1,10 @@
 (model-server-vllm)=
 # vLLM Model Server
 
+```{warning}
+This article has not been reviewed by a developer SME. Content may change.
+```
+
 [vLLM](https://docs.vllm.ai/) provides high-throughput, low-latency LLM inference. The NeMo Gym vLLM model server (`responses_api_models/vllm_model/`) wraps vLLM endpoints to provide Responses API compatibility, enabling self-hosted models to work seamlessly with NeMo Gym's agentic workflows.
 
 ::::{grid} 2

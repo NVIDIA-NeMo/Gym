@@ -17,7 +17,7 @@ NeMo Gym uses JSONL files where each line contains a task:
 
 For training datasets, include metadata and expected answers:
 
-```json
+```text
 {
   "responses_create_params": {"input": [...]},
   "expected_answer": "4",

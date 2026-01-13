@@ -1,6 +1,10 @@
 (resources-server-apis)=
 # Integrate Existing APIs
 
+```{warning}
+This article has not been reviewed by a developer SME. Content may change.
+```
+
 Connect external REST APIs, GraphQL endpoints, or other web services as tools in your resources server.
 
 ---

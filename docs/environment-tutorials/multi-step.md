@@ -1,6 +1,10 @@
 (env-multi-step)=
 # Multi-Step Environments
 
+```{warning}
+This article has not been reviewed by a developer SME. Content may change.
+```
+
 Build training environments with sequential tool calling and intermediate states.
 
 ::::{grid} 2

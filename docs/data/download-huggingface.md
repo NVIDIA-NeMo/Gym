@@ -1,6 +1,10 @@
 (data-download-huggingface)=
 # Download from Hugging Face
 
+```{warning}
+This article has not been reviewed by a developer SME. Content may change.
+```
+
 Download and use datasets from Hugging Face Hub for NeMo Gym training.
 
 ---
