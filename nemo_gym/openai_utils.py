@@ -469,7 +469,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 return response
 
         # We've exited the loop
-        response.raise_for_status()
+        await raise_for_status(response)
 
     async def _raise_for_status(self, response: ClientResponse, request_kwargs: Dict[str, Any]) -> None:
         if not response.ok and _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:

@@ -13,22 +13,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
-import signal
 import sys
 from argparse import Namespace
-from os import environ
 from pathlib import Path
-from typing import Any, Coroutine, Dict, List, Optional, Tuple, Union
+from threading import Thread
+from time import sleep
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import ray
-from aiohttp.client_exceptions import ClientConnectorError
+import requests
 from huggingface_hub import snapshot_download
-from ray import available_resources, cluster_resources, runtime_env
+from ray import available_resources, cluster_resources
+from ray._private.state import available_resources_per_node
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+from ray.util.state import list_nodes
+from requests.exceptions import ConnectionError
 from vllm.entrypoints.openai.api_server import (
     FlexibleArgumentParser,
     cli_env_setup,
     make_arg_parser,
-    run_server,
     validate_parsed_serve_args,
 )
 
@@ -38,7 +41,6 @@ from nemo_gym.global_config import (
     find_open_port,
     get_global_config_dict,
 )
-from nemo_gym.server_utils import get_global_aiohttp_client
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 
@@ -49,11 +51,9 @@ class LocalVLLMModelConfig(VLLMModelConfig):
 
     hf_home: Optional[str] = None
     vllm_serve_kwargs: Dict[str, Any]
+    vllm_serve_env_vars: Dict[str, str]
 
     debug: bool = False
-
-    # Eventually we may need to support these env vars
-    # vllm_serve_env_vars: Dict[str, str]
 
     def model_post_init(self, context):
         # Default to the .cache/huggingface in this directory.
@@ -64,8 +64,88 @@ class LocalVLLMModelConfig(VLLMModelConfig):
         return super().model_post_init(context)
 
 
+def _vllm_asyncio_task(server_args: Namespace):
+    from vllm.entrypoints.openai.api_server import run_server
+
+    asyncio.run(run_server(server_args))
+
+
+@ray.remote
+class LocalVLLMModelActor:
+    def __init__(self, server_args: Namespace, env_vars: Dict[str, str], server_name: str) -> None:
+        from os import environ
+
+        self.server_args = server_args
+        self.env_vars = env_vars
+        self.server_name = server_name
+
+        self.env_vars.pop("CUDA_VISIBLE_DEVICES", None)
+
+        node_ip = ray._private.services.get_node_ip_address()
+        self._base_url = f"http://{node_ip}:{self.server_args.port}/v1"
+
+        # vLLM doesn't expose a config for this yet, so we need to pass via environment variable.
+        self.env_vars["VLLM_DP_MASTER_IP"] = node_ip  # This is the master node.
+
+        self._patch_signal_handler()
+        self._patch_uvicorn_logger()
+
+        for k, v in self.env_vars.items():
+            environ[k] = v
+
+        self.server_thread = Thread(target=_vllm_asyncio_task, args=(server_args,), daemon=True)
+        self.server_thread.start()
+
+    def _patch_signal_handler(self) -> None:
+        # Pass through signal setting not allowed in threads.
+        # See https://github.com/vllm-project/vllm/blob/275de34170654274616082721348b7edd9741d32/vllm/entrypoints/launcher.py#L94
+        # This may be vLLM version specific!
+
+        import signal
+        from asyncio import get_running_loop
+
+        from vllm.entrypoints import launcher
+
+        original_serve_http = launcher.serve_http
+
+        def new_serve_http(*args, **kwargs):
+            loop = get_running_loop()
+            loop.add_signal_handler = lambda *args, **kwargs: None
+
+            return original_serve_http(*args, **kwargs)
+
+        launcher.serve_http = new_serve_http
+
+        # Patch signal as well.
+        signal.signal = lambda *args, **kwargs: None
+
+    def _patch_uvicorn_logger(self) -> None:
+        from logging import Filter as LoggingFilter
+        from logging import LogRecord, getLogger
+
+        print(
+            "Adding a uvicorn logging filter so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
+        )
+
+        class No200Filter(LoggingFilter):
+            def filter(self, record: LogRecord) -> bool:
+                msg = record.getMessage()
+                return not msg.strip().endswith("200")
+
+        uvicorn_logger = getLogger("uvicorn.access")
+        uvicorn_logger.addFilter(No200Filter())
+
+    def base_url(self) -> str:
+        return self._base_url
+
+    def is_alive(self) -> bool:
+        return self.server_thread.is_alive()
+
+
 class LocalVLLMModel(VLLMModel):
     config: LocalVLLMModelConfig
+
+    _local_vllm_model_actor: LocalVLLMModelActor
 
     def model_post_init(self, context):
         print(
@@ -96,7 +176,6 @@ class LocalVLLMModel(VLLMModel):
 
         port = find_open_port(disallowed_ports=get_global_config_dict()[DISALLOWED_PORTS_KEY_NAME])
         cache_dir = self.get_cache_dir()
-        node_ip = ray._private.services.get_node_ip_address()
         server_args = server_args | {
             "model": self.config.model,
             "host": "0.0.0.0",  # Must be 0.0.0.0 for cross-node communication.
@@ -112,22 +191,7 @@ class LocalVLLMModel(VLLMModel):
         if maybe_hf_token:
             env_vars["HF_TOKEN"] = maybe_hf_token
 
-        # vLLM doesn't expose a config for this yet, so we need to pass via environment variable.
-        env_vars["VLLM_DP_MASTER_IP"] = node_ip  # This is the master node.
-
-        # If a single DP group requires multiple nodes, we need to set this `span` strategy
-        num_gpus_per_node = 8  # This may need to be exposed later on
-        total_gpus_per_dp_instance = server_args.get("tensor_parallel_size", 1) * server_args.get(
-            "pipeline_parallel_size", 1
-        )
-        if total_gpus_per_dp_instance > num_gpus_per_node:
-            env_vars["VLLM_RAY_DP_PACK_STRATEGY"] = "span"
-        else:
-            # Strict is the default. See https://docs.vllm.ai/en/stable/configuration/env_vars/
-            env_vars["VLLM_RAY_DP_PACK_STRATEGY"] = "strict"
-            assert num_gpus_per_node % total_gpus_per_dp_instance == 0, "tp * pp must divide 8 GPUs/node evenly!"
-            if server_args.get("data_parallel_size_local") is None:
-                server_args["data_parallel_size_local"] = num_gpus_per_node // total_gpus_per_dp_instance
+        env_vars.update(self.config.vllm_serve_env_vars)
 
         # Ray backend only works if dp_size > 1
         assert server_args.get("data_parallel_size") is None or server_args.get("data_parallel_size") > 1, (
@@ -140,10 +204,6 @@ class LocalVLLMModel(VLLMModel):
         final_args = parser.parse_args(namespace=Namespace(**server_args))
         validate_parsed_serve_args(final_args)
 
-        base_url = f"http://{node_ip}:{final_args.port}/v1"
-        self.config.base_url = [base_url]
-        self.config.api_key = "dummy_key"  # dummy key
-
         if self.config.debug:
             env_vars_to_print = env_vars.copy()
             if "HF_TOKEN" in env_vars_to_print:
@@ -153,74 +213,51 @@ Environment variables: {env_vars_to_print}""")
 
         return final_args, env_vars
 
-    def _patch_uvicorn_server(self, vllm_server_coroutine: Coroutine) -> None:
-        # We need to run two servers in the same process, so we override the normal Gym server spinup to also perform vLLM server spinup logic.
-        # This patch may be sensitive to uvicorn version!
-        from uvicorn import server as uvicorn_server
+    def _select_vllm_server_head_node(self) -> NodeAffinitySchedulingStrategy:
+        """
+        There are a few params vLLM has:
+        - data parallel size
+        - data parallel size local
+        - tensor parallel size
+        - pipeline parallel size
+        - vllm ray dp pack strategy
 
-        original_asyncio_run = uvicorn_server.asyncio_run
+        As of vLLM 0.11.2, the way vLLM + Ray works is:
+        1. allocate (tensor parallel size * pipeline parallel size)-sized placement groups
+        2. for vllm ray dp pack strategy
+            - span (not relevant for my tp * pp within one node)
+            - fill: basically as many as possible
+                - this will clash if there are > 1 endpoints or the compute necessary is less than what is available (mismatch throws an error in vllm)
+            - strict: data parallel size local * num nodes placement groups
 
-        def new_asyncio_run(uvicorn_server_coroutine, *args, **kwargs):
-            async def wait_for_vllm_server() -> None:
-                poll_count = 0
-                client = get_global_aiohttp_client()
-                while True:
-                    try:
-                        await client.request(method="GET", url=f"{self.config.base_url}/models")
-                        return
-                    except ClientConnectorError:
-                        if poll_count % 10 == 0:  # Print every 30s
-                            print(f"Waiting for {self.config.name} LocalVLLMModel server to spinup...")
+        Now the problem is that for `strict`, if we spin up the head server on the same node, we need to set data parallel size local to 0. So `fill` and `strict` don't work out of the box.
 
-                        poll_count += 1
-                        await asyncio.sleep(3)
+        Here, we fix `strict` by spinning things up on not the head server node. We find a currently available GPU node and star the vLLM server there so the head node address is propagated properly.
+        """
+        alive_gpu_nodes = [n for n in list_nodes() if n.state == "ALIVE" and n.resources_total.get("GPU", 0) > 0]
+        assert alive_gpu_nodes
 
-            async def wrapper_fn() -> None:
-                vllm_server_task = asyncio.create_task(vllm_server_coroutine)
-                uvicorn_server_task = asyncio.create_task(uvicorn_server_coroutine)
+        node_id_to_available_resources = available_resources_per_node()
 
-                done, pending = await asyncio.wait(
-                    (vllm_server_task, asyncio.create_task(wait_for_vllm_server())),
-                    return_when="FIRST_COMPLETED",
-                )
+        selected_node = None
+        partial_node = None
+        for node in alive_gpu_nodes:
+            total_gpus = node.resources_total["GPU"]
+            # We use .get("GPU") here since if there are no available GPUs, the property won't be set.
+            available_gpus = node_id_to_available_resources[node.node_id].get("GPU", 0)
 
-                # If the vllm task finishes first
-                if list(done)[0] == vllm_server_task:
-                    list(pending)[0].cancel()  # Cancel the waiting task.
-                    uvicorn_server_task.cancel()
-                    raise vllm_server_task.exception()
+            if total_gpus == available_gpus:
+                selected_node = node
+                break
 
-                print(f"{self.config.name} finished vLLM server spinup!")
+            if available_gpus != 0:
+                partial_node = node
 
-                _, pending = await asyncio.wait(
-                    (vllm_server_task, uvicorn_server_task),
-                    return_when="FIRST_COMPLETED",
-                )
-                for task in pending:
-                    task.cancel()
-
-            return original_asyncio_run(wrapper_fn(), *args, **kwargs)
-
-        uvicorn_server.asyncio_run = new_asyncio_run
-
-    def _patch_vllm_ray_runtime_env(self) -> None:
-        # This patch may be sensitive to vLLM version! See https://github.com/vllm-project/vllm/blob/275de34170654274616082721348b7edd9741d32/vllm/v1/engine/utils.py#L651
-        original_RuntimeEnv = runtime_env.RuntimeEnv
-
-        def new_RuntimeEnv(*args, **kwargs):
-            kwargs = kwargs or dict()
-            kwargs["py_executable"] = sys.executable
-            if self.config.debug:
-                print(f"Patched RuntimeEnv py_executable with {sys.executable}")
-
-            # Necessary for downstream vLLM ray actor spinup otherwise we get CUDA device ordinal out of range errors.
-            env_vars = kwargs.get("env_vars") or dict()
-            env_vars.pop("CUDA_VISIBLE_DEVICES", None)
-            env_vars["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] = "1"
-
-            return original_RuntimeEnv(*args, **kwargs)
-
-        runtime_env.RuntimeEnv = new_RuntimeEnv
+        selected_node = selected_node or partial_node
+        return NodeAffinitySchedulingStrategy(
+            node_id=selected_node.node_id,
+            soft=False,  # Hard constraint - must run on this node
+        )
 
     def start_vllm_server(self) -> None:
         if self.config.debug:
@@ -229,17 +266,37 @@ Total Ray cluster resources: {cluster_resources()}""")
 
         server_args, env_vars = self._configure_vllm_serve()
 
-        for k, v in env_vars.items():
-            environ[k] = v
+        self._local_vllm_model_actor = LocalVLLMModelActor.options(
+            scheduling_strategy=self._select_vllm_server_head_node(),
+            runtime_env=dict(
+                py_executable=sys.executable,
+                env_vars={
+                    "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+                    **env_vars,
+                },
+            ),
+        ).remote(server_args, env_vars, self.config.name)
 
-        # Pass through signal setting not allowed in threads.
-        signal.signal = lambda *args, **kwargs: None
+        self.config.base_url = [ray.get(self._local_vllm_model_actor.base_url.remote())]
+        self.config.api_key = "dummy_key"  # dummy key
 
-        self._patch_vllm_ray_runtime_env()
+        self.await_server_ready()
 
-        vllm_server_coroutine = run_server(server_args)
+    def await_server_ready(self) -> None:
+        poll_count = 0
+        while True:
+            is_alive = ray.get(self._local_vllm_model_actor.is_alive.remote())
+            assert is_alive, f"{self.config.name} LocalVLLMModel server spinup failed, see the error logs above!"
 
-        self._patch_uvicorn_server(vllm_server_coroutine)
+            try:
+                requests.get(url=f"{self.config.base_url[0]}/models")
+                return
+            except ConnectionError:
+                if poll_count % 10 == 0:  # Print every 30s
+                    print(f"Waiting for {self.config.name} LocalVLLMModel server to spinup...")
+
+                poll_count += 1
+                sleep(3)
 
 
 if __name__ == "__main__":
