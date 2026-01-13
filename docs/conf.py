@@ -42,6 +42,7 @@ extensions = [
     "sphinx_copybutton",  # For copy button in code blocks
     "sphinx_design",  # For grid layouts and card components
     "sphinx_reredirects",  # For URL redirects when pages move
+    "sphinxcontrib.mermaid",  # For mermaid diagrams
 ]
 
 templates_path = ["_templates"]
