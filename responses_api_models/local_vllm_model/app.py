@@ -17,10 +17,11 @@ import sys
 from argparse import Namespace
 from pathlib import Path
 from threading import Thread
+from time import sleep
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import ray
-from aiohttp import ClientConnectorError
+import requests
 from huggingface_hub import snapshot_download
 from ray import available_resources, cluster_resources
 from ray._private.state import available_resources_per_node
@@ -39,7 +40,6 @@ from nemo_gym.global_config import (
     find_open_port,
     get_global_config_dict,
 )
-from nemo_gym.server_utils import get_global_aiohttp_client
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 
@@ -262,24 +262,23 @@ Total Ray cluster resources: {cluster_resources()}""")
         self.config.base_url = [ray.get(self._local_vllm_model_actor.base_url.remote())]
         self.config.api_key = "dummy_key"  # dummy key
 
-        asyncio.run(self.await_server_ready())
+        self.await_server_ready()
 
-    async def await_server_ready(self) -> None:
+    def await_server_ready(self) -> None:
         poll_count = 0
-        client = get_global_aiohttp_client()
         while True:
-            is_alive = await self._local_vllm_model_actor.is_alive.remote()
+            is_alive = ray.get(self._local_vllm_model_actor.is_alive.remote())
             assert is_alive, f"{self.config.name} LocalVLLMModel server spinup failed, see the error logs above!"
 
-            try:
-                await client.request(method="GET", url=f"{self.config.base_url[0]}/models")
+            response = requests.get(url=f"{self.config.base_url[0]}/models")
+            if response.ok:
                 return
-            except ClientConnectorError:
-                if poll_count % 10 == 0:  # Print every 30s
-                    print(f"Waiting for {self.config.name} LocalVLLMModel server to spinup...")
 
-                poll_count += 1
-                await asyncio.sleep(3)
+            if poll_count % 10 == 0:  # Print every 30s
+                print(f"Waiting for {self.config.name} LocalVLLMModel server to spinup...")
+
+            poll_count += 1
+            sleep(3)
 
 
 if __name__ == "__main__":
