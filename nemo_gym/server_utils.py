@@ -552,8 +552,10 @@ repr(e): {repr(e)}"""
             file.start_new_line = True
             file.write = write_with_prefix
 
-        _add_prefix(sys.stdout)
-        _add_prefix(sys.stderr)
+        is_main_fastapi_proc = not is_nemo_gym_fastapi_worker()
+        if is_main_fastapi_proc:
+            _add_prefix(sys.stdout)
+            _add_prefix(sys.stderr)
 
     @classmethod
     def run_webserver(cls) -> FastAPI:  # pragma: no cover
