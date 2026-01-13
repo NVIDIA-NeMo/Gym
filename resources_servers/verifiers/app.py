@@ -15,12 +15,8 @@ import logging
 import uuid
 from typing import Any
 
-import verifiers as vf
 from fastapi import FastAPI, Request
 from pydantic import ConfigDict, Field
-
-from nemo_gym.base_resources_server import SimpleResourcesServer
-
 from schemas import (
     VerifiersCloseRequest,
     VerifiersCloseResponse,
@@ -34,7 +30,12 @@ from schemas import (
 )
 from utils import load_verifiers_dataset
 
+import verifiers as vf
+from nemo_gym.base_resources_server import SimpleResourcesServer
+
+
 logger = logging.getLogger(__name__)
+
 
 class VerifiersResourcesServer(SimpleResourcesServer):
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -107,6 +108,7 @@ class VerifiersResourcesServer(SimpleResourcesServer):
         if env_id not in self.env_id_to_dataset:
             raise ValueError(f"Unknown env_id: {env_id}")
         return self.env_id_to_dataset[env_id]
+
 
 if __name__ == "__main__":
     VerifiersResourcesServer.run_webserver()

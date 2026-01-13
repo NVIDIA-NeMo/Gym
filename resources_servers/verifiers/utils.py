@@ -16,19 +16,21 @@ from typing import Any
 
 import verifiers as vf
 
+
 logger = logging.getLogger(__name__)
+
 
 def load_verifiers_dataset(
     vf_env: vf.Environment,
     n: int = -1,
     seed: int | None = None,
 ) -> list[dict[str, Any]]:
-    # TODO: Is there a more standard way in verifiers to get the dataset? check prime? 
+    # TODO: Is there a more standard way in verifiers to get the dataset? check prime?
     try:
         dataset = vf_env.get_dataset(n=n, seed=seed)
     except ValueError:
         dataset = None
-        for attr in ['dataset', 'train_dataset', 'eval_dataset']:
+        for attr in ["dataset", "train_dataset", "eval_dataset"]:
             ds = getattr(vf_env, attr, None)
             if ds is not None:
                 dataset = ds

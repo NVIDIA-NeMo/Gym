@@ -37,14 +37,15 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.server_utils import get_global_aiohttp_client
-
 from resources_servers.verifiers.schemas import (
     VerifiersAgentVerifyResponse,
     VerifiersNeMoGymResponse,
 )
 from resources_servers.verifiers.utils import load_verifiers_dataset
 
+
 logger = logging.getLogger(__name__)
+
 
 class _VLLMChatCompletions(AsyncCompletions):
     def __init__(self, base_url: str) -> None:
@@ -55,7 +56,16 @@ class _VLLMChatCompletions(AsyncCompletions):
             "model": kwargs.get("model", ""),
             "messages": kwargs.get("messages", []),
         }
-        for key in ("temperature", "max_tokens", "max_completion_tokens", "top_p", "stop", "n", "tools", "tool_choice"):
+        for key in (
+            "temperature",
+            "max_tokens",
+            "max_completion_tokens",
+            "top_p",
+            "stop",
+            "n",
+            "tools",
+            "tool_choice",
+        ):
             if key in kwargs and kwargs[key] is not None:
                 request_body[key] = kwargs[key]
 
@@ -80,7 +90,9 @@ class _VLLMChatCompletions(AsyncCompletions):
         generation_log_probs = message_dict.pop("generation_log_probs", [])
 
         if not generation_token_ids:
-            logger.warning(f"No generation_token_ids in response! Full message keys were: {list(choice_dict.get('message', {}).keys())}")
+            logger.warning(
+                f"No generation_token_ids in response! Full message keys were: {list(choice_dict.get('message', {}).keys())}"
+            )
 
         if generation_token_ids and isinstance(generation_token_ids[0], str):
             generation_token_ids = [int(tid) for tid in generation_token_ids]
@@ -208,18 +220,22 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 if isinstance(msg, dict):
                     content = msg.get("content", "")
                     if tokens:
-                        output.append(NeMoGymResponseOutputMessageForTraining(
-                            id=f"msg_{id(msg)}",
-                            content=[NeMoGymResponseOutputText(text=content, annotations=[])],
-                            prompt_token_ids=tokens.get("prompt_ids", []),
-                            generation_token_ids=tokens.get("completion_ids", []),
-                            generation_log_probs=tokens.get("completion_logprobs", []),
-                        ).model_dump())
+                        output.append(
+                            NeMoGymResponseOutputMessageForTraining(
+                                id=f"msg_{id(msg)}",
+                                content=[NeMoGymResponseOutputText(text=content, annotations=[])],
+                                prompt_token_ids=tokens.get("prompt_ids", []),
+                                generation_token_ids=tokens.get("completion_ids", []),
+                                generation_log_probs=tokens.get("completion_logprobs", []),
+                            ).model_dump()
+                        )
                     else:
-                        output.append(NeMoGymResponseOutputMessage(
-                            id=f"msg_{id(msg)}",
-                            content=[NeMoGymResponseOutputText(text=content, annotations=[])],
-                        ).model_dump())
+                        output.append(
+                            NeMoGymResponseOutputMessage(
+                                id=f"msg_{id(msg)}",
+                                content=[NeMoGymResponseOutputText(text=content, annotations=[])],
+                            ).model_dump()
+                        )
 
         return output
 
@@ -237,7 +253,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
 
             prompt_messages = []
             for item in body.responses_create_params.input or []:
-                if hasattr(item, 'role') and hasattr(item, 'content'):
+                if hasattr(item, "role") and hasattr(item, "content"):
                     prompt_messages.append({"role": item.role, "content": item.content})
                 elif isinstance(item, dict):
                     prompt_messages.append({"role": item.get("role", "user"), "content": item.get("content", "")})

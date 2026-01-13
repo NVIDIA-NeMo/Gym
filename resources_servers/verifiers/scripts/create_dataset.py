@@ -18,8 +18,10 @@ from pathlib import Path
 
 import verifiers as vf
 
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils import load_verifiers_dataset
+
 
 def main():
     parser = argparse.ArgumentParser(description="Create dataset from verifiers environment")
