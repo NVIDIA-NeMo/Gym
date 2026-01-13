@@ -72,12 +72,13 @@ def _vllm_asyncio_task(server_args: Namespace):
 
 @ray.remote
 class LocalVLLMModelActor:
-    def __init__(self, server_args: Namespace, env_vars: Dict[str, str], server_name: str) -> None:
+    def __init__(self, server_args: Namespace, env_vars: Dict[str, str], server_name: str, debug: bool) -> None:
         from os import environ
 
         self.server_args = server_args
         self.env_vars = env_vars
         self.server_name = server_name
+        self.debug = debug
 
         self.env_vars.pop("CUDA_VISIBLE_DEVICES", None)
 
@@ -89,6 +90,7 @@ class LocalVLLMModelActor:
 
         self._patch_signal_handler()
         self._patch_uvicorn_logger()
+        self._maybe_patch_engine_stats()
 
         for k, v in self.env_vars.items():
             environ[k] = v
@@ -134,6 +136,19 @@ class LocalVLLMModelActor:
 
         uvicorn_logger = getLogger("uvicorn.access")
         uvicorn_logger.addFilter(No200Filter())
+
+    def _maybe_patch_engine_stats(self) -> None:
+        from logging import ERROR
+
+        from vllm.v1.metrics.loggers import logger as metrics_logger
+
+        if self.debug:
+            print("vLLM metrics logger will display engine stats.")
+        else:
+            print(
+                f"Setting vLLM metrics logger for {self.server_name} to ERROR which will not print engine stats. This helps declutter the logs. Use `debug` for LocalVLLMModel to see them."
+            )
+            metrics_logger.setLevel(ERROR)
 
     def base_url(self) -> str:
         return self._base_url
@@ -275,7 +290,7 @@ Total Ray cluster resources: {cluster_resources()}""")
                     **env_vars,
                 },
             ),
-        ).remote(server_args, env_vars, self.config.name)
+        ).remote(server_args, env_vars, self.config.name, self.config.debug)
 
         self.config.base_url = [ray.get(self._local_vllm_model_actor.base_url.remote())]
         self.config.api_key = "dummy_key"  # dummy key

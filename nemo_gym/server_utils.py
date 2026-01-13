@@ -16,6 +16,7 @@ import asyncio
 import atexit
 import json
 import resource
+import sys
 from abc import abstractmethod
 from contextlib import asynccontextmanager
 from inspect import getmodule
@@ -26,7 +27,7 @@ from os import environ, getenv
 from pathlib import Path
 from threading import Thread
 from traceback import format_exc, print_exc
-from typing import Any, List, Literal, Optional, Tuple, Type, Union, Unpack
+from typing import Any, List, Literal, Optional, TextIO, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
 import orjson
@@ -520,6 +521,42 @@ repr(e): {repr(e)}"""
                     e,
                 )
 
+    def prefix_server_logs(self) -> None:  # pragma: no cover
+        # Adapted from https://github.com/vllm-project/vllm/blob/ab74b2a27a4eb88b90356bfb4b452d29edf05574/vllm/utils/system_utils.py#L205
+
+        def _add_prefix(file: TextIO) -> None:
+            prefix = f"({self.config.name}) "
+            file_write = file.write
+
+            def write_with_prefix(s: str):
+                if not s:
+                    return
+
+                if file.start_new_line:
+                    file_write(prefix)
+
+                idx = 0
+                while (next_idx := s.find("\n", idx)) != -1:
+                    next_idx += 1
+                    file_write(s[idx:next_idx])
+                    if next_idx == len(s):
+                        file.start_new_line = True
+                        return
+
+                    file_write(prefix)
+                    idx = next_idx
+
+                file_write(s[idx:])
+                file.start_new_line = False
+
+            file.start_new_line = True
+            file.write = write_with_prefix
+
+        is_main_fastapi_proc = not is_nemo_gym_fastapi_worker()
+        if is_main_fastapi_proc:
+            _add_prefix(sys.stdout)
+            _add_prefix(sys.stderr)
+
     @classmethod
     def run_webserver(cls) -> FastAPI:  # pragma: no cover
         global_config_dict = get_global_config_dict()
@@ -537,6 +574,7 @@ repr(e): {repr(e)}"""
 
         app = server.setup_webserver()
         server.set_ulimit()
+        server.prefix_server_logs()
         server.setup_exception_middleware(app)
 
         @app.exception_handler(RequestValidationError)
