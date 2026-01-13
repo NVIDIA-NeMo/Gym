@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
+
 import logging
 import uuid
 from typing import Any
@@ -41,7 +43,7 @@ class VerifiersResourcesServer(SimpleResourcesServer):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     config: VerifiersResourcesServerConfig
-    env_id_to_env: dict[str, vf.Environment] = Field(default_factory=dict)
+    env_id_to_env: dict[str, Any] = Field(default_factory=dict)  # vf.Environment
     env_id_to_dataset: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
 
     def setup_webserver(self) -> FastAPI:
