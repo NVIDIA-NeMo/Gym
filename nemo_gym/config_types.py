@@ -400,6 +400,7 @@ class Domain(str, Enum):
 class BaseServerConfig(BaseModel):
     host: str
     port: int
+    num_workers: Optional[int] = None
 
 
 class BaseRunServerConfig(BaseServerConfig):
