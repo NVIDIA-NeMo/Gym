@@ -82,6 +82,7 @@ from nemo_gym.server_utils import (
     _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG,
     MAX_NUM_TRIES,
     ClientResponse,
+    get_response_json,
     raise_for_status,
     request,
 )
@@ -489,7 +490,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         response = await self._request(method="GET", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
-        return await response.json()
+        return await get_response_json(response)
 
     async def create_chat_completion(self, **kwargs):
         request_kwargs = dict(
@@ -499,7 +500,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
-        return await response.json()
+        return await get_response_json(response)
 
     async def create_response(self, **kwargs):
         request_kwargs = dict(
@@ -509,7 +510,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
-        return await response.json()
+        return await get_response_json(response)
 
     async def create_tokenize(self, **kwargs):
         base_url = self.base_url.removesuffix("/v1")
@@ -520,4 +521,4 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
-        return await response.json()
+        return await get_response_json(response)

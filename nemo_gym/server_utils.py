@@ -25,7 +25,7 @@ from os import getenv
 from pathlib import Path
 from threading import Thread
 from traceback import format_exc, print_exc
-from typing import List, Literal, Optional, Tuple, Type, Union, Unpack
+from typing import Any, List, Literal, Optional, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
 import orjson
@@ -189,6 +189,10 @@ Response content: {content}""")
             # Set the response content here so we have access to it down the line.
             e.response_content = content
             raise e
+
+
+async def get_response_json(response: ClientResponse) -> Any:
+    return orjson.loads(await response.read())
 
 
 DEFAULT_HEAD_SERVER_PORT = 11000
