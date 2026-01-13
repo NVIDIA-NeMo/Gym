@@ -79,7 +79,7 @@ Suddenly the inputs and outputs are no longer separable?
 This feels like a bug to me, but I might be missing something?""",
             },
             # Model and inference parameters
-            model="Qwen3-30B-A3B-Instruct-2507", #"gpt-4.1-2025-04-14",
+            model="Qwen3-30B-A3B-Instruct-2507",  # "gpt-4.1-2025-04-14",
             temperature=1.0,
             max_output_tokens=32768,
         ),
