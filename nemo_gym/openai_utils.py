@@ -25,6 +25,7 @@ from typing import (
     Union,
 )
 
+import orjson
 from openai.types.chat import (
     ChatCompletion,
     ChatCompletionAssistantMessageParam,
@@ -480,33 +481,44 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     async def create_chat_completion(self, **kwargs):
         request_kwargs = dict(
             url=f"{self.base_url}/chat/completions",
-            json=kwargs,
-            headers={"Authorization": f"Bearer {self.api_key}"},
+            data=orjson.dumps(kwargs),
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
         )
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
-        return await response.json()
+        response_dict = orjson.loads(await response.read())
+        return response_dict
 
     async def create_response(self, **kwargs):
         request_kwargs = dict(
             url=f"{self.base_url}/responses",
-            json=kwargs,
-            headers={"Authorization": f"Bearer {self.api_key}"},
+            data=orjson.dumps(kwargs),
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
         )
         response = await self._request(method="POST", **request_kwargs)
 
-        await self._raise_for_status(response, request_kwargs)
-        return await response.json()
+        response_dict = orjson.loads(await response.read())
+        return response_dict
 
     async def create_tokenize(self, **kwargs):
         base_url = self.base_url.removesuffix("/v1")
         request_kwargs = dict(
             url=f"{base_url}/tokenize",
-            json=kwargs,
-            headers={"Authorization": f"Bearer {self.api_key}"},
+            data=orjson.dumps(kwargs),
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
         )
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
-        return await response.json()
+        response_dict = orjson.loads(await response.read())
+        return response_dict

@@ -158,6 +158,11 @@ dependencies = [
     # Updated Thu Dec 04, 2025 with datasets==4.4.1
     # License: Apache 2.0 https://github.com/huggingface/datasets/blob/main/LICENSE
     "datasets",
+
+    # orjson: Fast, correct Python JSON library supporting dataclasses, datetimes, and numpy
+    # Updated: Thu Jan 08, 2026 with orjson==3.11.3
+    # License: Apache 2.0 https://github.com/ijl/orjson/blob/master/LICENSE
+    "orjson",
 ]
 
 [dependency-groups]
