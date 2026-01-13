@@ -1,10 +1,6 @@
 (env-multi-step)=
 # Multi-Step Environments
 
-```{warning}
-This article was generated and has not been reviewed. Content may change.
-```
-
 Build training environments with sequential tool calling and intermediate states.
 
 ::::{grid} 2
@@ -290,8 +286,11 @@ From `example_multi_step`:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `max_steps` | int | None | Maximum tool-calling iterations before stopping |
-| `done_if_no_tool_calls` | bool | true | End rollout if model stops calling tools |
+| `max_steps` | int | `null` | Maximum tool-calling iterations (no limit if null) |
+
+:::{note}
+The agent automatically ends the rollout when the model outputs a message without tool calls.
+:::
 
 Example configuration:
 

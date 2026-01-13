@@ -1,21 +1,36 @@
 (model-server-openai)=
 # OpenAI Model Server
 
-```{note}
-This page is a stub. Content is being developed. See [GitHub Issue #194](https://github.com/NVIDIA-NeMo/Gym/issues/194) for details.
-```
-
 The OpenAI model server (`responses_api_models/openai_model/`) connects NeMo Gym to OpenAI's API, providing access to GPT models with native function calling support.
 
 ---
 
-## When to Use OpenAI
+## When to Use OpenAI vs vLLM
 
-Use OpenAI when you need:
+| Factor | OpenAI | vLLM |
+|--------|--------|------|
+| **Setup time** | Minutes (API key only) | Hours (GPU + model download) |
+| **Cost** | Pay per token | GPU infrastructure |
+| **Training integration** | ❌ No token IDs | ✅ Full token tracking |
+| **Data privacy** | Cloud processing | On-premise |
+| **Latest models** | ✅ Immediate access | Depends on open weights |
+| **Rate limits** | Yes (varies by tier) | No (self-hosted) |
+
+**Use OpenAI when:**
+
 - Quick prototyping and development
-- Access to latest GPT models
-- Native Responses API support
-- Reliable function calling
+- Testing environment design before GPU investment
+- Baseline comparisons with frontier models
+- Budget allows pay-per-token pricing
+
+**Use vLLM when:**
+
+- Training with policy gradient methods (GRPO, PPO)
+- Data privacy requirements
+- High-volume rollout collection
+- Custom or fine-tuned models
+
+---
 
 ## Configuration
 
@@ -39,6 +54,16 @@ policy_api_key: sk-your-api-key
 policy_model_name: gpt-4.1-2025-04-14
 ```
 
+### Configuration Options
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `openai_base_url` | `str` | Required | OpenAI API endpoint |
+| `openai_api_key` | `str` | Required | API key for authentication |
+| `openai_model` | `str` | Required | Model identifier |
+
+---
+
 ## Supported Models
 
 Any OpenAI model with function calling support:
@@ -49,6 +74,9 @@ Any OpenAI model with function calling support:
 | `gpt-4o` | ✅ | General purpose |
 | `gpt-4o-mini` | ✅ | Cost-effective testing |
 | `gpt-4-turbo` | ✅ | Complex reasoning |
+| `o1` / `o1-mini` | ✅ | Reasoning tasks |
+
+---
 
 ## API Key Setup
 
@@ -56,17 +84,33 @@ Any OpenAI model with function calling support:
 2. Ensure billing is configured with available credits
 3. Store securely in `env.yaml` (gitignored)
 
-## Rate Limits
+:::{important}
+Never commit API keys to version control. The `env.yaml` file should be in your `.gitignore`.
+:::
 
-<!-- TODO: Document rate limit handling -->
+---
 
-## Cost Optimization
+## Limitations
 
-<!-- TODO: Document cost optimization strategies -->
+OpenAI's API has important limitations for RL training:
+
+| Limitation | Impact | Workaround |
+|------------|--------|------------|
+| **No token IDs** | Cannot compute policy gradients | Use vLLM for training |
+| **No log probabilities** | Cannot compute advantages | Use vLLM for training |
+| **Rate limits** | Throttled at high volume | Implement backoff |
+| **Cost at scale** | Expensive for large rollout collection | Use for prototyping only |
+
+:::{note}
+OpenAI is best suited for **prototyping and evaluation**. For RL training that requires token-level information, use {doc}`vllm`.
+:::
+
+---
 
 ## Troubleshooting
 
-### Authentication Errors
+::::{dropdown} Authentication Errors
+:icon: alert
 
 ```text
 Error code: 401 - Incorrect API key provided
@@ -74,10 +118,33 @@ Error code: 401 - Incorrect API key provided
 
 Verify your API key in `env.yaml` matches your OpenAI account.
 
-### Quota Errors
+::::
+
+::::{dropdown} Quota Errors
+:icon: alert
 
 ```text
 Error code: 429 - You exceeded your current quota
 ```
 
 Add credits at [platform.openai.com/account/billing](https://platform.openai.com/account/billing).
+
+::::
+
+::::{dropdown} Rate Limit Errors
+:icon: alert
+
+```text
+Error code: 429 - Rate limit reached
+```
+
+Reduce `num_samples_in_parallel` in rollout collection or implement exponential backoff.
+
+::::
+
+---
+
+## See Also
+
+- {doc}`vllm` — Self-hosted inference with training support
+- {doc}`azure-openai` — Enterprise Azure deployment

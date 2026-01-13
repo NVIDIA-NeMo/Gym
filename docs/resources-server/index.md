@@ -1,14 +1,12 @@
 (resources-server-index)=
 # Resources Server
 
-```{warning}
-This article was generated and has not been reviewed. Content may change.
-```
-
 Resources servers define the training environment—tasks, tools, and verification logic. They implement `SimpleResourcesServer` and expose two core endpoints:
 
 - **`/seed_session`** — Initialize session state before a rollout
 - **`/verify`** — Evaluate the completed rollout and compute reward
+
+---
 
 ## Core Concepts
 
@@ -33,6 +31,83 @@ async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
     reward = 1.0 if correct else 0.0
     return BaseVerifyResponse(**body.model_dump(), reward=reward)
 ```
+
+### Session Management
+
+Sessions isolate state between rollouts. The `seed_session()` method initializes per-rollout state:
+
+```python
+async def seed_session(self, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
+    # Initialize state for this rollout
+    return BaseSeedSessionResponse()
+```
+
+---
+
+## Base Classes
+
+Resources servers inherit from base classes in `nemo_gym/base_resources_server.py`:
+
+### Request/Response Types
+
+| Type | Description | Key Fields |
+|------|-------------|------------|
+| `BaseRunRequest` | Input for tool execution | `responses_create_params` |
+| `BaseVerifyRequest` | Input for verification | `responses_create_params`, `response` |
+| `BaseVerifyResponse` | Output from verification | `reward` (float) |
+| `BaseSeedSessionRequest` | Input for session initialization | — |
+| `BaseSeedSessionResponse` | Output from session initialization | — |
+
+### Class Hierarchy
+
+```text
+BaseServer
+    └── BaseResourcesServer
+            └── SimpleResourcesServer  ← Use this for most implementations
+```
+
+- **`BaseResourcesServer`**: Abstract base with config management
+- **`SimpleResourcesServer`**: Adds FastAPI setup, session middleware, and default endpoints
+
+---
+
+## Minimal Working Example
+
+```python
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+from nemo_gym.base_resources_server import (
+    BaseResourcesServerConfig,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
+)
+
+
+class MyConfig(BaseResourcesServerConfig):
+    domain: str = "math"
+
+
+class MyResourcesServer(SimpleResourcesServer):
+    config: MyConfig
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        # Register custom tools
+        app.post("/my_tool")(self.my_tool)
+        return app
+
+    async def my_tool(self, body: MyToolRequest) -> MyToolResponse:
+        return MyToolResponse(result="computed")
+
+    async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+        # Your verification logic
+        reward = 1.0 if self.is_correct(body.response) else 0.0
+        return BaseVerifyResponse(**body.model_dump(), reward=reward)
+```
+
+---
 
 ## How-To Guides
 
@@ -73,6 +148,8 @@ Measure and optimize throughput.
 
 ::::
 
+---
+
 ## Configuration
 
 Resources servers require a `domain` field:
@@ -87,7 +164,12 @@ my_resource:
 
 See {doc}`/reference/configuration` for all domain values.
 
+---
+
 ## Creating a New Resources Server
 
 For a complete tutorial on building a resources server from scratch, see {doc}`/tutorials/creating-resource-server`.
 
+## Source Code
+
+The base classes are defined in `nemo_gym/base_resources_server.py` (73 lines).

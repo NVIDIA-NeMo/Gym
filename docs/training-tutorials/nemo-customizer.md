@@ -3,6 +3,8 @@
 
 ```{note}
 This page is a stub. Content is being developed.
+
+**Blocker**: External service dependency. See [GitHub Issue #550](https://github.com/NVIDIA-NeMo/Gym/issues/550) for coordination with NeMo Customizer team.
 ```
 
 Train models with NeMo Gym using [NeMo Customizer](https://docs.nvidia.com/nemo/nemo-microservices/latest/), NVIDIA's managed fine-tuning microservice.

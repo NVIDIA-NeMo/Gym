@@ -1,10 +1,6 @@
 (data-download-huggingface)=
 # Download from Hugging Face
 
-```{warning}
-This article was generated and has not been reviewed. Content may change.
-```
-
 Download and use datasets from Hugging Face Hub for NeMo Gym training.
 
 ---
@@ -22,14 +18,24 @@ ng_download_dataset_from_hf \
 
 ## Command Options
 
-| Option | Description |
-|--------|-------------|
-| `repo_id` | Hugging Face repository ID (e.g., `NVIDIA/NeMo-Gym-Math`) |
-| `artifact_fpath` | Path to specific file in repo (e.g., `train.jsonl`) |
-| `output_dirpath` | Directory to save downloaded files (files named `{split}.jsonl`) |
-| `output_fpath` | Exact file path for single file download |
-| `split` | Dataset split: `train`, `validation`, `test` |
-| `hf_token` | Authentication token for private datasets |
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `repo_id` | `str` | Required | Hugging Face repository ID (e.g., `NVIDIA/NeMo-Gym-Math`) |
+| `artifact_fpath` | `str` | `null` | Path to specific file in repo for raw JSONL download |
+| `output_dirpath` | `str` | `null` | Directory to save downloaded files (files named `{split}.jsonl`) |
+| `output_fpath` | `str` | `null` | Exact file path for single file download |
+| `split` | `str` | `null` | Dataset split: `train`, `validation`, `test` |
+| `hf_token` | `str` | `null` | Authentication token for private datasets |
+
+## Download Methods
+
+NeMo Gym supports three methods for downloading datasets:
+
+| Method | When to Use | Parameters |
+|--------|-------------|------------|
+| **Raw File** | Download a specific JSONL file | `artifact_fpath` + `output_fpath` |
+| **Single Split** | Download one split from structured dataset | `split` + (`output_fpath` or `output_dirpath`) |
+| **All Splits** | Download all available splits | `output_dirpath` only |
 
 ## Constraints
 
@@ -39,9 +45,9 @@ The following constraints apply to command options:
 - **Download method**: Specify either `artifact_fpath` (raw file) or `split` (structured dataset), not both
 - **Single file output**: When using `output_fpath` without `artifact_fpath`, you must specify `split`
 
-```{tip}
+:::{tip}
 Use `output_dirpath` without `split` to download all available splits at once.
-```
+:::
 
 ## Examples
 
@@ -102,7 +108,12 @@ Example datasets:
 
 - `NVIDIA/NeMo-Gym-Math-example_multi_step-v1` — Multi-step math problems
 
+## Source Code
+
+The download functionality is implemented in `nemo_gym/hf_utils.py`. See `DownloadJsonlDatasetHuggingFaceConfig` in `nemo_gym/config_types.py` for the full configuration schema.
+
 ## Related
 
 - {doc}`prepare-validate` — Convert datasets to NeMo Gym format
 - {doc}`/reference/configuration` — Configure datasets in your server
+- [NVIDIA Hugging Face Datasets](https://huggingface.co/NVIDIA) 🔗 — Browse available datasets

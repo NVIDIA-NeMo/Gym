@@ -3,6 +3,8 @@
 
 ```{note}
 This page is a stub. Content is being developed.
+
+**Blocker**: No reference implementation exists. See [GitHub Issue #551](https://github.com/NVIDIA-NeMo/Gym/issues/551) to track progress. The `calendar/` resources server contains user modeling patterns that may be extracted.
 ```
 
 Create training environments that simulate user interactions for dialogue training.

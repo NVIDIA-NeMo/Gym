@@ -3,6 +3,8 @@
 
 ```{note}
 This page is a stub. Content is being developed.
+
+**Status**: Partial integration exists. See [GitHub Issue #549](https://github.com/NVIDIA-NeMo/Gym/issues/549) for documentation progress.
 ```
 
 Train models with NeMo Gym using [VeRL](https://github.com/volcengine/verl), a distributed reinforcement learning framework designed for large-scale LLM training.

@@ -13,6 +13,7 @@ This directory contains internal design discussions, proposals, and analysis doc
 | File | Status | Description |
 |------|--------|-------------|
 | `training-tutorials-restructure.md` | Draft | Analysis of training tutorials section and recommendations |
+| `documentation-priority-by-code-maturity.md` | Draft | Prioritization of new docs based on code maturity analysis |
 
 ## Note
 

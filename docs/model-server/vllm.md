@@ -1,10 +1,6 @@
 (model-server-vllm)=
 # vLLM Model Server
 
-```{note}
-This page is a stub. Content is being developed. See [GitHub Issue #194](https://github.com/NVIDIA-NeMo/Gym/issues/194) for details.
-```
-
 [vLLM](https://docs.vllm.ai/) provides high-throughput, low-latency LLM inference. The NeMo Gym vLLM model server (`responses_api_models/vllm_model/`) wraps vLLM endpoints to provide Responses API compatibility, enabling self-hosted models to work seamlessly with NeMo Gym's agentic workflows.
 
 ::::{grid} 2
@@ -146,8 +142,8 @@ policy_model_name: Qwen/Qwen3-30B-A3B
 | `base_url` | `str` or `list[str]` | Required | vLLM server endpoint(s). Supports multiple for load balancing. |
 | `api_key` | `str` | Required | API key matching vLLM's `--api-key` flag |
 | `model` | `str` | Required | Model name as registered in vLLM |
-| `return_token_id_information` | `bool` | `false` | Enable token IDs and log probs for training |
-| `uses_reasoning_parser` | `bool` | `false` | Parse `<think>` tags for reasoning models |
+| `return_token_id_information` | `bool` | Required | Enable token IDs and log probs for training |
+| `uses_reasoning_parser` | `bool` | Required | Parse `<think>` tags for reasoning models |
 | `replace_developer_role_with_system` | `bool` | `false` | Convert developer role to system for compatibility |
 | `chat_template_kwargs` | `dict` | `null` | Override chat template parameters |
 | `extra_body` | `dict` | `null` | Pass additional vLLM-specific parameters |

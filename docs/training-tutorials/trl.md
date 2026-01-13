@@ -3,6 +3,8 @@
 
 ```{note}
 This page is a stub. Content is being developed.
+
+**Blocker**: TRL integration code not yet implemented. See [GitHub Issue #548](https://github.com/NVIDIA-NeMo/Gym/issues/548) for progress.
 ```
 
 Train models with NeMo Gym using [Hugging Face TRL](https://huggingface.co/docs/trl), the Transformer Reinforcement Learning library.

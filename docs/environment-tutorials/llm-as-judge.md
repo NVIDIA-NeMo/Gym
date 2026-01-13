@@ -2,10 +2,6 @@
 
 # LLM-as-a-Judge Verification
 
-```{warning}
-This article was generated and has not been reviewed. Content may change.
-```
-
 Use large language models to verify and score agent responses.
 
 ::::{grid} 2
