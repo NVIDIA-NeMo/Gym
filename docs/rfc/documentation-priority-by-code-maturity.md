@@ -73,7 +73,7 @@ To ensure documentation resonance, articles are tailored to specific user person
 | **Environment Designer** | Researchers building new tasks/verifiers | Tier 1 (`multi-step.md`), Tier 2 (`llm-as-judge.md`) |
 | **Infrastructure Engineer** | MLOps/SREs deploying servers | Tier 1 (`vllm.md`), Tier 3 (`deployment-topology.md`) |
 | **Data Scientist** | Preparing datasets for training | Tier 1 (`download-huggingface.md`) |
-| **RL Practitioner** | Training models using Gym outputs | Tier 2 (`rlhf-reward-models.md`), Tier 3 (`trl.md`) |
+| **RL Practitioner** | Training models using Gym outputs | Tier 2 (`llm-as-judge.md`), Tier 3 (`trl.md`) |
 
 ---
 
@@ -425,7 +425,7 @@ Working code exists but may need verification or has higher complexity:
 | `docs/resources-server/integrate-apis.md` | `google_search/` (383-line README) | Best reference available |
 | `docs/infrastructure/ray-distributed.md` | `server_utils.py` Ray usage | Needs concrete examples |
 | `docs/model-server/openai.md` | `openai_model/` | Simple but undifferentiated |
-| `docs/environment-tutorials/rlhf-reward-models.md` | Partial in `math_with_judge/` | Needs RLHF-specific examples |
+| `docs/environment-tutorials/rlhf-reward-models.md` | No implementation yet | Stubbed - awaiting implementation |
 
 **Estimated effort**: 4-8 hours each  
 **Risk**: Medium
@@ -714,54 +714,6 @@ Working code exists but may need verification or has higher complexity:
 - [ ] Configuration example
 - [ ] Environment variable setup
 - [ ] Limitations clearly documented
-
----
-
-##### 📄 `docs/environment-tutorials/rlhf-reward-models.md`
-
-**Status**: Stub  
-**Source Code**: `resources_servers/math_with_judge/` (1,125 lines)  
-**README Quality**: 56 lines
-
-**Scope**:
-- Using reward models for verification
-- RLHF integration patterns
-- Combining rule-based and model-based rewards
-
-**Key Content to Include**:
-
-1. **Reward Model Patterns**:
-   - Binary classification (correct/incorrect)
-   - Scalar reward (quality score)
-   - Preference-based (pairwise comparison)
-
-2. **Integration with Verification**:
-   ```python
-   async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
-       # Rule-based check first
-       if rule_based_correct(body.response):
-           reward = 1.0
-       else:
-           # Fall back to reward model
-           reward = await self.reward_model.score(body.response)
-       return BaseVerifyResponse(**body.model_dump(), reward=reward)
-   ```
-
-3. **Math with Judge Pattern** (from `math_with_judge/`):
-   - First: Check for exact match
-   - Second: Use LLM judge for semantic equivalence
-   - Hybrid approach reduces false negatives
-
-4. **RLHF Training Flow**:
-   - Collect rollouts with NeMo Gym
-   - Compute rewards with reward model
-   - Train with NeMo RL / TRL / veRL
-
-**Acceptance Criteria**:
-- [ ] Reward model pattern overview
-- [ ] Hybrid verification example
-- [ ] Link to math_with_judge implementation
-- [ ] Connection to training tutorials
 
 ### 🔴 Tier 3: Needs Code Work (Low Confidence)
 
@@ -1173,13 +1125,6 @@ As NeMo Gym is in active development, documentation must evolve with the code:
 - [ ] Configuration example
 - [ ] Environment variable setup
 - [ ] Limitations clearly documented
-
-#### `docs/environment-tutorials/rlhf-reward-models.md`
-
-- [ ] Reward model pattern overview
-- [ ] Hybrid verification example
-- [ ] Link to `math_with_judge/` implementation
-- [ ] Connection to training tutorials
 
 ### Tier 3 (Target: Stub with tracking issue)
 

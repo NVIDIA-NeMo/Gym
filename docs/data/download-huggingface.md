@@ -28,7 +28,7 @@ ng_download_dataset_from_hf \
 | `artifact_fpath` | `str` | `null` | Path to specific file in repo for raw JSONL download |
 | `output_dirpath` | `str` | `null` | Directory to save downloaded files (files named `{split}.jsonl`) |
 | `output_fpath` | `str` | `null` | Exact file path for single file download |
-| `split` | `str` | `null` | Dataset split: `train`, `validation`, `test` |
+| `split` | `"train"` \| `"validation"` \| `"test"` | `null` | Dataset split to download |
 | `hf_token` | `str` | `null` | Authentication token for private datasets |
 
 ## Download Methods

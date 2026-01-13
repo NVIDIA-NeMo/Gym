@@ -147,8 +147,8 @@ class MyCustomAgent(SimpleResponsesAPIAgent):
 
     async def responses(
         self,
-        request: Request,
-        response: Response,
+        request: Request,  # Optional: access request context
+        response: Response,  # Optional: set response cookies
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
         """Override for custom model interaction logic."""
@@ -157,7 +157,7 @@ class MyCustomAgent(SimpleResponsesAPIAgent):
 
     async def run(
         self,
-        request: Request,
+        request: Request,  # Optional: access request context
         body: BaseRunRequest,
     ) -> BaseVerifyResponse:
         """Override for custom rollout orchestration."""

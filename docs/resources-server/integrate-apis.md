@@ -14,7 +14,7 @@ Connect external REST APIs, GraphQL endpoints, or other web services as tools in
 External API integration allows models to access real-world data and services. The pattern involves:
 
 1. Configure API credentials via `env.yaml`
-2. Create an async HTTP client (use `aiohttp` for async operations)
+2. Create an HTTP client (use `requests` for simplicity)
 3. Define request/response schemas that map to the API
 4. Handle authentication, errors, and rate limiting
 
@@ -69,7 +69,7 @@ tools = [
     {
         "type": "function",
         "name": "browse",
-        "description": "Returns the cleaned content of a webpage. Truncated to 10,000 words.",
+        "description": "Returns the cleaned content of a webpage. If the page is too long, it will be truncated to 10,000 words.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -104,8 +104,10 @@ ng_collect_rollouts +agent_name=simple_agent \
 
 ## Basic REST API Integration
 
+The simplest approach uses the synchronous `requests` library, which works well for most use cases:
+
 ```python
-import aiohttp
+import requests
 from pydantic import BaseModel
 
 from nemo_gym.base_resources_server import (
@@ -130,27 +132,21 @@ class SearchResponse(BaseModel):
 class MyAPIResourcesServer(SimpleResourcesServer):
     config: MyAPIConfig
 
-    def model_post_init(self, context):
-        # Create reusable HTTP session for better performance
-        self._session = None
-
-    async def _get_session(self) -> aiohttp.ClientSession:
-        if self._session is None:
-            self._session = aiohttp.ClientSession(
-                headers={"Authorization": f"Bearer {self.config.api_key}"}
-            )
-        return self._session
-
     async def search(self, body: SearchRequest) -> SearchResponse:
-        session = await self._get_session()
-        async with session.get(
+        response = requests.get(
             f"{self.config.base_url}/search",
-            params={"q": body.query}
-        ) as response:
-            response.raise_for_status()
-            data = await response.json()
-            return SearchResponse(results=data["results"])
+            params={"q": body.query},
+            headers={"Authorization": f"Bearer {self.config.api_key}"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return SearchResponse(results=data["results"])
 ```
+
+:::{tip}
+For high-concurrency scenarios (thousands of concurrent requests), consider using `aiohttp` for true async HTTP. See the FAQ section on async HTTP backends for details on when this matters.
+:::
 
 ---
 
@@ -192,25 +188,25 @@ params = {
 Handle API errors gracefully to prevent rollout failures:
 
 ```python
-import aiohttp
+import requests
 from loguru import logger
 
 
 async def search(self, body: SearchRequest) -> SearchResponse:
     try:
-        session = await self._get_session()
-        async with session.get(
+        response = requests.get(
             f"{self.config.base_url}/search",
             params={"q": body.query},
-            timeout=aiohttp.ClientTimeout(total=30)
-        ) as response:
-            if response.status == 429:
-                logger.warning("Rate limited, returning empty results")
-                return SearchResponse(results=[])
-            response.raise_for_status()
-            data = await response.json()
-            return SearchResponse(results=data["results"])
-    except aiohttp.ClientError as e:
+            headers={"Authorization": f"Bearer {self.config.api_key}"},
+            timeout=30,
+        )
+        if response.status_code == 429:
+            logger.warning("Rate limited, returning empty results")
+            return SearchResponse(results=[])
+        response.raise_for_status()
+        data = response.json()
+        return SearchResponse(results=data["results"])
+    except requests.RequestException as e:
         logger.error(f"API error: {e}")
         return SearchResponse(results=[])
 ```
@@ -237,4 +233,4 @@ class MyCustomServer(GoogleSearchResourcesServer):
 
 ## Source Code
 
-For the complete implementation, see `resources_servers/google_search/` (README: 383 lines).
+For the complete implementation, see `resources_servers/google_search/`.

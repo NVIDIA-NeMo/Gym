@@ -60,7 +60,7 @@ equivalence_llm_judge:
       entrypoint: app.py
       judge_model_server:
         type: responses_api_models
-        name: judge_model
+        name: policy_model
       judge_responses_create_params:
         input: []
       judge_prompt_template: |
@@ -219,10 +219,12 @@ This helps recover from extraction failures while giving partial credit.
 
 ```json
 {
-  "expected_answer": "The correct answer text",
-  "messages": [
-    {"role": "user", "content": "Your question here"}
-  ]
+  "responses_create_params": {
+    "input": [
+      {"role": "user", "content": "Your question here"}
+    ]
+  },
+  "expected_answer": "The correct answer text"
 }
 ```
 
@@ -230,13 +232,17 @@ This helps recover from extraction failures while giving partial credit.
 
 For per-record regex extraction (OpenQA support):
 
-```text
+```json
 {
+  "responses_create_params": {
+    "input": [
+      {"role": "user", "content": "Your question here"}
+    ]
+  },
   "expected_answer": "42",
   "template_metadata": {
     "output_regex": "\\[ANSWER\\]\\s*(.+?)\\s*\\[/ANSWER\\]"
-  },
-  "messages": [...]
+  }
 }
 ```
 

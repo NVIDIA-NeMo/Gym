@@ -55,7 +55,7 @@ Set credentials in `env.yaml`:
 ```yaml
 policy_base_url: https://api.openai.com/v1
 policy_api_key: sk-your-api-key
-policy_model_name: gpt-4.1-2025-04-14
+policy_model_name: gpt-4o-mini
 ```
 
 ### Configuration Options
@@ -74,11 +74,11 @@ Any OpenAI model with function calling support:
 
 | Model | Function Calling | Recommended Use |
 |-------|------------------|-----------------|
-| `gpt-4.1-2025-04-14` | ✅ | Low-latency prototyping |
-| `gpt-4o` | ✅ | General purpose |
-| `gpt-4o-mini` | ✅ | Cost-effective testing |
+| `gpt-4o` | ✅ | General purpose, best balance |
+| `gpt-4o-mini` | ✅ | Cost-effective testing and prototyping |
 | `gpt-4-turbo` | ✅ | Complex reasoning |
-| `o1` / `o1-mini` | ✅ | Reasoning tasks |
+| `o1` / `o1-mini` | ✅ | Advanced reasoning tasks |
+| `o3-mini` | ✅ | Fast reasoning with tool use |
 
 ---
 

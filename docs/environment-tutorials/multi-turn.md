@@ -130,11 +130,31 @@ Each assistant response becomes part of the context for subsequent turns.
 
 ### Conversation State Management
 
-Track state across turns using session data or by parsing the conversation history:
+Track state across turns using session data or by parsing the conversation history. First, define a custom request schema with your expected state field:
 
 ```python
+from typing import Any
+
+from nemo_gym.base_resources_server import (
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
+)
+
+
+class MultiTurnRunRequest(BaseRunRequest):
+    """Custom request with expected state field."""
+    expected_state: dict[str, Any]
+
+
+class MultiTurnVerifyRequest(MultiTurnRunRequest, BaseVerifyRequest):
+    """Verification request combining run request and response."""
+    pass
+
+
 class MultiTurnResourcesServer(SimpleResourcesServer):
-    async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+    async def verify(self, body: MultiTurnVerifyRequest) -> BaseVerifyResponse:
         conversation = body.responses_create_params.input
         
         # Extract state from conversation history
@@ -208,12 +228,12 @@ def is_conversation_complete(self, conversation: list[dict]) -> bool:
 
 ::::{tab-item} Final State Verification
 
-Verify only the end result of the conversation:
+Verify only the end result of the conversation. Use a custom request class with your expected state field (see the implementation example above):
 
 ```python
-async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+async def verify(self, body: MultiTurnVerifyRequest) -> BaseVerifyResponse:
     final_state = self.extract_final_state(body.response)
-    expected_state = body.expected_state
+    expected_state = body.expected_state  # Defined in MultiTurnRunRequest
     
     reward = 1.0 if final_state == expected_state else 0.0
     return BaseVerifyResponse(**body.model_dump(), reward=reward)
@@ -287,7 +307,7 @@ Multi-turn training data includes conversation history and expected outcomes:
       {"role": "user", "content": "Schedule a team meeting at 10am for 1 hour"}
     ]
   },
-  "expected_state": {
+  "exp_cal_state": {
     "1": {
       "event_name": "Team Meeting",
       "start_time": "10:00",
@@ -296,6 +316,10 @@ Multi-turn training data includes conversation history and expected outcomes:
   }
 }
 ```
+
+:::{note}
+The field name for expected state varies by resources server. The calendar example uses `exp_cal_state`. Check your resources server's request schema for the correct field name.
+:::
 
 For multi-turn training, data can include partial conversations where the model must continue appropriately.
 
