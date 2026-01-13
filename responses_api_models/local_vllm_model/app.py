@@ -88,6 +88,7 @@ class LocalVLLMModelActor:
         self.env_vars["VLLM_DP_MASTER_IP"] = node_ip  # This is the master node.
 
         self._patch_signal_handler()
+        self._patch_uvicorn_logger()
 
         for k, v in self.env_vars.items():
             environ[k] = v
@@ -117,6 +118,22 @@ class LocalVLLMModelActor:
 
         # Patch signal as well.
         signal.signal = lambda *args, **kwargs: None
+
+    def _patch_uvicorn_logger(self) -> None:
+        from logging import Filter as LoggingFilter
+        from logging import LogRecord, getLogger
+
+        print(
+            "Adding a uvicorn logging filter so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
+        )
+
+        class No200Filter(LoggingFilter):
+            def filter(self, record: LogRecord) -> bool:
+                msg = record.getMessage()
+                return not msg.strip().endswith("200")
+
+        uvicorn_logger = getLogger("uvicorn.access")
+        uvicorn_logger.addFilter(No200Filter())
 
     def base_url(self) -> str:
         return self._base_url
