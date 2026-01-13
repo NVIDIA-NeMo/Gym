@@ -1,4 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,12 +22,10 @@ from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     BaseVerifyResponse,
 )
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-
+from nemo_gym.openai_utils import NeMoGymResponse
 
 class VerifiersResourcesServerConfig(BaseResourcesServerConfig):
     pass
-
 
 class VerifiersSeedSessionRequest(BaseSeedSessionRequest):
     vf_env_id: str = Field(description="The verifiers environment ID to load")
@@ -35,12 +33,10 @@ class VerifiersSeedSessionRequest(BaseSeedSessionRequest):
     dataset_n: int = Field(default=-1, description="Number of examples to load (-1 for all)")
     dataset_seed: int | None = Field(default=None, description="Seed for dataset shuffling")
 
-
 class VerifiersSeedSessionResponse(BaseSeedSessionResponse):
     env_id: str = Field(description="Unique ID for this environment session")
     dataset_length: int = Field(description="Number of examples in the dataset")
     vf_env_id: str = Field(description="The verifiers environment ID that was loaded")
-
 
 class VerifiersRunRequest(BaseModel):
     env_id: str = Field(description="Environment session ID from seed_session")
@@ -50,21 +46,17 @@ class VerifiersRunRequest(BaseModel):
     max_concurrent_generation: int = Field(default=-1, description="Max concurrent generation requests")
     max_concurrent_scoring: int = Field(default=-1, description="Max concurrent scoring requests")
 
-
 class VerifiersRunResponse(BaseModel):
     states: list[dict[str, Any]] = Field(description="Verifiers State objects (serialized)")
     rewards: list[float] = Field(description="Rewards for each rollout")
     metrics: list[dict[str, Any]] = Field(description="Metrics for each rollout")
 
-
 class VerifiersCloseRequest(BaseModel):
     env_id: str
-
 
 class VerifiersCloseResponse(BaseModel):
     message: str
     success: bool
-
 
 class VerifiersNeMoGymResponse(NeMoGymResponse):
     env_id: str
@@ -77,11 +69,29 @@ class VerifiersNeMoGymResponse(NeMoGymResponse):
     tool_choice: str = "none"
     tools: list = Field(default_factory=list)
 
-
 class VerifiersAgentVerifyRequest(BaseVerifyRequest):
     model_config = ConfigDict(extra="allow")
     response: VerifiersNeMoGymResponse
 
-
 class VerifiersAgentVerifyResponse(VerifiersAgentVerifyRequest, BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
+
+class VerifiersGetExampleRequest(BaseModel):
+    env_id: str
+    task_idx: int
+
+class VerifiersGetExampleResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    prompt: list[dict[str, Any]]
+    example_id: int | str
+    task: str
+    answer: str | None = None
+    info: dict | None = None
+
+class VerifiersVerifyRequest(BaseVerifyRequest):
+    model_config = ConfigDict(extra="allow")
+    response: dict[str, Any]
+
+class VerifiersVerifyResponse(BaseVerifyResponse):
+    model_config = ConfigDict(extra="allow")
+    reward: float

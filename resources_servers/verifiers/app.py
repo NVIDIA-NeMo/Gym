@@ -1,4 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -24,14 +24,17 @@ from nemo_gym.base_resources_server import SimpleResourcesServer
 from schemas import (
     VerifiersCloseRequest,
     VerifiersCloseResponse,
+    VerifiersGetExampleRequest,
+    VerifiersGetExampleResponse,
     VerifiersResourcesServerConfig,
     VerifiersSeedSessionRequest,
     VerifiersSeedSessionResponse,
+    VerifiersVerifyRequest,
+    VerifiersVerifyResponse,
 )
-
+from utils import load_verifiers_dataset
 
 logger = logging.getLogger(__name__)
-
 
 class VerifiersResourcesServer(SimpleResourcesServer):
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -50,34 +53,7 @@ class VerifiersResourcesServer(SimpleResourcesServer):
         env_id = str(uuid.uuid4())
         vf_env = vf.load_environment(body.vf_env_id, **body.vf_env_args)
 
-        # TODO: is there more standard way in verifiers.. check prime rl
-        try:
-            dataset = vf_env.get_dataset(n=body.dataset_n, seed=body.dataset_seed)
-        except ValueError:
-            dataset = None
-            for attr in ['dataset', 'train_dataset', 'eval_dataset']:
-                ds = getattr(vf_env, attr, None)
-                if ds is not None:
-                    dataset = ds
-                    logger.info(f"Found dataset in vf_env.{attr}")
-                    break
-            if dataset is None:
-                raise ValueError(f"Environment {body.vf_env_id} does not have a dataset")
-            if body.dataset_seed is not None:
-                dataset = dataset.shuffle(seed=body.dataset_seed)
-            if body.dataset_n > 0:
-                dataset = dataset.select(range(min(body.dataset_n, len(dataset))))
-
-        rows = [
-            {
-                "prompt": dataset["prompt"][i],
-                "example_id": dataset["example_id"][i],
-                "task": dataset["task"][i],
-                **({"answer": dataset["answer"][i]} if "answer" in dataset.column_names else {}),
-                **({"info": dataset["info"][i]} if "info" in dataset.column_names else {}),
-            }
-            for i in range(len(dataset))
-        ]
+        rows = load_verifiers_dataset(vf_env, n=body.dataset_n, seed=body.dataset_seed)
 
         self.env_id_to_env[env_id] = vf_env
         self.env_id_to_dataset[env_id] = rows
@@ -90,9 +66,9 @@ class VerifiersResourcesServer(SimpleResourcesServer):
             vf_env_id=body.vf_env_id,
         )
 
-    async def get_example(self, request: Request, body: dict) -> dict:
-        env_id = body["env_id"]
-        task_idx = body["task_idx"]
+    async def get_example(self, request: Request, body: VerifiersGetExampleRequest) -> VerifiersGetExampleResponse:
+        env_id = body.env_id
+        task_idx = body.task_idx
 
         if env_id not in self.env_id_to_dataset:
             raise ValueError(f"Unknown env_id: {env_id}")
@@ -101,13 +77,12 @@ class VerifiersResourcesServer(SimpleResourcesServer):
         if task_idx < 0 or task_idx >= len(rows):
             raise ValueError(f"task_idx {task_idx} out of range [0, {len(rows)})")
 
-        return rows[task_idx]
+        return VerifiersGetExampleResponse(**rows[task_idx])
 
-    async def verify(self, request: Request, body: dict) -> dict:
-        response = body.get("response", {})
+    async def verify(self, request: Request, body: VerifiersVerifyRequest) -> VerifiersVerifyResponse:
+        response = body.response
         reward = response.get("reward", 0.0)
-
-        return {**body, "reward": reward}
+        return VerifiersVerifyResponse(**body.model_dump(), reward=reward)
 
     async def close(self, request: Request, body: VerifiersCloseRequest) -> VerifiersCloseResponse:
         env_id = body.env_id

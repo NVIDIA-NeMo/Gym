@@ -1,4 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,10 +13,13 @@
 # limitations under the License.
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import verifiers as vf
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from utils import load_verifiers_dataset
 
 def main():
     parser = argparse.ArgumentParser(description="Create dataset from verifiers environment")
@@ -33,48 +36,30 @@ def main():
     env = vf.load_environment(args.env_id, **env_args)
 
     print(f"Getting dataset (size={args.size}, seed={args.seed})")
-    try:
-        dataset = env.get_dataset(n=args.size, seed=args.seed)
-    except ValueError:
-        # TODO: is there more standard way in verifiers.. check prime rl
-        dataset = None
-        for attr in ['dataset', 'train_dataset', 'eval_dataset']:
-            ds = getattr(env, attr, None)
-            if ds is not None:
-                dataset = ds
-                print(f"Found dataset in env.{attr}")
-                break
+    dataset_rows = load_verifiers_dataset(env, n=args.size, seed=args.seed)
 
-        if dataset is None:
-            raise ValueError(f"Environment {args.env_id} does not have a dataset")
-
-        if args.seed is not None:
-            dataset = dataset.shuffle(seed=args.seed)
-        if args.size > 0:
-            dataset = dataset.select(range(min(args.size, len(dataset))))
-
-    print(f"Dataset has {len(dataset)} examples")
+    print(f"Dataset has {len(dataset_rows)} examples")
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(output_path, "w") as f:
-        for i in range(len(dataset)):
-            row = {
+        for i, row in enumerate(dataset_rows):
+            output_row = {
                 "task_idx": i,
                 "vf_env_id": args.env_id,
                 "responses_create_params": {
-                    "input": dataset["prompt"][i],
+                    "input": row["prompt"],
                 },
-                "question": dataset["prompt"][i][-1]["content"] if dataset["prompt"][i] else "",
-                "answer": dataset["answer"][i] if "answer" in dataset.column_names else "",
-                "task": dataset["task"][i],
-                "example_id": dataset["example_id"][i],
-                "info": dataset["info"][i] if "info" in dataset.column_names else {},
+                "question": row["prompt"][-1]["content"] if row["prompt"] else "",
+                "answer": row.get("answer", ""),
+                "task": row["task"],
+                "example_id": row["example_id"],
+                "info": row.get("info", {}),
             }
-            f.write(json.dumps(row) + "\n")
+            f.write(json.dumps(output_row) + "\n")
 
-    print(f"Wrote {len(dataset)} examples to {output_path}")
+    print(f"Wrote {len(dataset_rows)} examples to {output_path}")
 
 
 if __name__ == "__main__":

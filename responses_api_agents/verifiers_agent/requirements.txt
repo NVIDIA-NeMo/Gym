@@ -1,11 +1,10 @@
 -e nemo-gym[dev] @ ../../
 verifiers>=0.1.9
---extra-index-url https://hub.primeintellect.ai/primeintellect/simple/
-reverse-text
-math-python
+--extra-index-url https://hub.primeintellect.ai/belharethsami/simple/
+ascii-grid-maze
+--extra-index-url https://hub.primeintellect.ai/will/simple/
 wordle
-aime2025
-ifeval
+--extra-index-url https://hub.primeintellect.ai/kalomaze/simple/
 alphabet-sort
-i3-math
+--extra-index-url https://hub.primeintellect.ai/primeintellect/simple/
 acereason-math

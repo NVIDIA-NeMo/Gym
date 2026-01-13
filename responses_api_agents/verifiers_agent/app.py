@@ -1,4 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,8 +16,8 @@ import traceback
 import uuid
 from typing import Any
 
-import aiohttp
 import verifiers as vf
+from fastapi import Body, Request, Response
 from openai import AsyncOpenAI
 from openai.resources.chat import AsyncChat
 from openai.resources.chat.completions import AsyncCompletions
@@ -28,20 +28,25 @@ from verifiers.utils.async_utils import maybe_semaphore
 from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.global_config import get_first_server_config_dict
+from nemo_gym.openai_utils import (
+    NeMoGymEasyInputMessage,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputMessageForTraining,
+    NeMoGymResponseOutputText,
+)
+from nemo_gym.server_utils import get_global_aiohttp_client
 
 from resources_servers.verifiers.schemas import (
-    VerifiersAgentVerifyRequest,
     VerifiersAgentVerifyResponse,
     VerifiersNeMoGymResponse,
 )
-
+from resources_servers.verifiers.utils import load_verifiers_dataset
 
 logger = logging.getLogger(__name__)
 
-
 class _VLLMChatCompletions(AsyncCompletions):
-    """adapt vllm_model format to verifiers expected format"""
     def __init__(self, base_url: str) -> None:
         self._base_url = base_url.rstrip("/")
 
@@ -56,15 +61,15 @@ class _VLLMChatCompletions(AsyncCompletions):
 
         url = f"{self._base_url}/chat/completions"
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=request_body) as resp:
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        logger.error(f"[verifiers_agent] Request to {url} failed with status {resp.status}: {error_text[:500]}")
-                        resp.raise_for_status()
-                    response_dict = await resp.json()
+            session = get_global_aiohttp_client()
+            async with session.post(url, json=request_body) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    logger.error(f"Request to {url} failed with status {resp.status}: {error_text}")
+                    resp.raise_for_status()
+                response_dict = await resp.json()
         except Exception as e:
-            logger.error(f"[verifiers_agent] Exception calling {url}: {type(e).__name__}: {e}")
+            logger.error(f"Exception calling {url}: {type(e).__name__}: {e}")
             raise
 
         choice_dict = response_dict["choices"][0]
@@ -75,7 +80,7 @@ class _VLLMChatCompletions(AsyncCompletions):
         generation_log_probs = message_dict.pop("generation_log_probs", [])
 
         if not generation_token_ids:
-            logger.warning(f"[verifiers_agent] No generation_token_ids in response! Full message keys were: {list(choice_dict.get('message', {}).keys())}")
+            logger.warning(f"No generation_token_ids in response! Full message keys were: {list(choice_dict.get('message', {}).keys())}")
 
         if generation_token_ids and isinstance(generation_token_ids[0], str):
             generation_token_ids = [int(tid) for tid in generation_token_ids]
@@ -104,7 +109,6 @@ class _VLLMChat(AsyncChat):
 
 
 class VLLMOpenAIClient(AsyncOpenAI):
-    """OpenAI-compatible client wrapping vllm_model."""
     def __init__(self, base_url: str) -> None:
         super().__init__(api_key="dummy", base_url=base_url)
         self._chat = _VLLMChat(base_url)
@@ -147,65 +151,34 @@ class VerifiersAgentRunRequest(BaseRunRequest):
     info: dict = Field(default_factory=dict, description="Extra info for scoring")
 
 
-_ENVS_CACHE: dict[str, vf.Environment] = {}
-_ENV_IDS_CACHE: dict[str, str] = {}
-_DATASET_ROWS_CACHE: dict[str, list[dict]] = {}
-_OPENAI_CLIENT_CACHE: dict[str, "VLLMOpenAIClient"] = {}
-
-
 class VerifiersAgent(SimpleResponsesAPIAgent):
-    """Uses vf_env.run_group() with an AsyncOpenAI client pointing to the vLLM model server."""
     model_config = ConfigDict(arbitrary_types_allowed=True)
     config: VerifiersAgentConfig
 
+    envs_cache: dict[str, vf.Environment] = Field(default_factory=dict)
+    env_ids_cache: dict[str, str] = Field(default_factory=dict)
+    dataset_rows_cache: dict[str, list[dict]] = Field(default_factory=dict)
+    openai_client_cache: dict[str, VLLMOpenAIClient] = Field(default_factory=dict)
+
     async def _ensure_env_loaded(self, vf_env_id: str) -> tuple[vf.Environment, str, list[dict]]:
-        if vf_env_id in _ENVS_CACHE:
-            return _ENVS_CACHE[vf_env_id], _ENV_IDS_CACHE[vf_env_id], _DATASET_ROWS_CACHE[vf_env_id]
+        if vf_env_id in self.envs_cache:
+            return self.envs_cache[vf_env_id], self.env_ids_cache[vf_env_id], self.dataset_rows_cache[vf_env_id]
 
         env_id = f"{vf_env_id}-{uuid.uuid4().hex[:8]}"
         logger.info(f"Loading verifiers environment: {vf_env_id}")
 
         vf_env = vf.load_environment(vf_env_id, **self.config.vf_env_args)
+        dataset_rows = load_verifiers_dataset(vf_env, n=self.config.dataset_n, seed=self.config.dataset_seed)
 
-        # TODO: is there more standard way in verifiers.. check prime rl
-        try:
-            dataset = vf_env.get_dataset(n=self.config.dataset_n, seed=self.config.dataset_seed)
-        except ValueError:
-            dataset = None
-            for attr in ['dataset', 'train_dataset', 'eval_dataset']:
-                ds = getattr(vf_env, attr, None)
-                if ds is not None:
-                    dataset = ds
-                    break
-            if dataset is None:
-                raise ValueError(f"Environment {vf_env_id} does not have a dataset")
-            if self.config.dataset_seed is not None:
-                dataset = dataset.shuffle(seed=self.config.dataset_seed)
-            if self.config.dataset_n > 0:
-                dataset = dataset.select(range(min(self.config.dataset_n, len(dataset))))
-
-        dataset_rows = [
-            {
-                "prompt": dataset["prompt"][i],
-                "example_id": dataset["example_id"][i],
-                "task": dataset["task"][i],
-                **({"answer": dataset["answer"][i]} if "answer" in dataset.column_names else {}),
-                **({"info": dataset["info"][i]} if "info" in dataset.column_names else {}),
-            }
-            for i in range(len(dataset))
-        ]
-
-        _ENVS_CACHE[vf_env_id] = vf_env
-        _ENV_IDS_CACHE[vf_env_id] = env_id
-        _DATASET_ROWS_CACHE[vf_env_id] = dataset_rows
+        self.envs_cache[vf_env_id] = vf_env
+        self.env_ids_cache[vf_env_id] = env_id
+        self.dataset_rows_cache[vf_env_id] = dataset_rows
 
         return vf_env, env_id, dataset_rows
 
     def _get_openai_client(self) -> VLLMOpenAIClient:
         cache_key = self.config.model_server.name
-        if cache_key not in _OPENAI_CLIENT_CACHE:
-            from nemo_gym.global_config import get_first_server_config_dict
-
+        if cache_key not in self.openai_client_cache:
             server_config_dict = get_first_server_config_dict(
                 self.server_client.global_config_dict,
                 self.config.model_server.name,
@@ -215,18 +188,11 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             if not model_server_url.endswith("/v1"):
                 model_server_url = model_server_url.rstrip("/") + "/v1"
 
-            _OPENAI_CLIENT_CACHE[cache_key] = VLLMOpenAIClient(base_url=model_server_url)
+            self.openai_client_cache[cache_key] = VLLMOpenAIClient(base_url=model_server_url)
 
-        return _OPENAI_CLIENT_CACHE[cache_key]
+        return self.openai_client_cache[cache_key]
 
     def _convert_trajectory_to_output(self, state: dict) -> list:
-        from nemo_gym.openai_utils import (
-            NeMoGymEasyInputMessage,
-            NeMoGymResponseOutputMessage,
-            NeMoGymResponseOutputMessageForTraining,
-            NeMoGymResponseOutputText,
-        )
-
         output = []
         trajectory = state.get("trajectory", [])
 
@@ -257,15 +223,20 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
 
         return output
 
-    async def responses(self, req: VerifiersAgentRunRequest) -> VerifiersNeMoGymResponse:
+    async def responses(
+        self,
+        request: Request,
+        response: Response,
+        body: VerifiersAgentRunRequest = Body(),
+    ) -> VerifiersNeMoGymResponse:
         try:
-            vf_env_id = req.vf_env_id or self.config.vf_env_id
+            vf_env_id = body.vf_env_id or self.config.vf_env_id
             vf_env, env_id, _ = await self._ensure_env_loaded(vf_env_id)
 
-            task_idx = req.task_idx
+            task_idx = body.task_idx
 
             prompt_messages = []
-            for item in req.responses_create_params.input or []:
+            for item in body.responses_create_params.input or []:
                 if hasattr(item, 'role') and hasattr(item, 'content'):
                     prompt_messages.append({"role": item.role, "content": item.content})
                 elif isinstance(item, dict):
@@ -273,10 +244,10 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
 
             rollout_input = vf.RolloutInput(
                 prompt=prompt_messages,
-                answer=req.answer,
-                task=req.task,
-                info=req.info,
-                example_id=req.example_id,
+                answer=body.answer,
+                task=body.task,
+                info=body.info,
+                example_id=body.example_id,
             )
 
             client = self._get_openai_client()
@@ -316,16 +287,21 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 metrics=metrics,
             )
         except Exception as e:
-            logger.error(f"[verifiers_agent] EXCEPTION in responses(): {type(e).__name__}: {e}")
-            logger.error(f"[verifiers_agent] Traceback:\n{traceback.format_exc()}")
+            logger.error(f"Exception in responses(): {type(e).__name__}: {e}")
+            logger.error(f"Traceback:\n{traceback.format_exc()}")
             raise
 
-    async def run(self, body: VerifiersAgentRunRequest) -> VerifiersAgentVerifyResponse:
-        response = await self.responses(body)
+    async def run(
+        self,
+        request: Request,
+        response: Response,
+        body: VerifiersAgentRunRequest = Body(),
+    ) -> VerifiersAgentVerifyResponse:
+        resp = await self.responses(request, response, body)
         return VerifiersAgentVerifyResponse(
             responses_create_params=body.responses_create_params,
-            response=response,
-            reward=response.reward,
+            response=resp,
+            reward=resp.reward,
         )
 
 

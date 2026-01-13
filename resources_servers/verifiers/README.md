@@ -11,15 +11,14 @@ Install verifiers and an environment from the Environments Hub:
 ```bash
 uv add verifiers
 uv tool install prime 
-prime env install primeintellect/reverse-text
-prime env install primeintellect/math-python
+prime env install primeintellect/acereason-math
 ```
 
 Currently the environment package must also be listed in the `requirements.txt` files for both the resource server and agent, since they run in isolated venvs. For example:
 
 ```
 --extra-index-url https://hub.primeintellect.ai/primeintellect/simple/
-reverse-text
+acereason-math
 ```
 i
 ## Dataset Prep
@@ -27,9 +26,9 @@ i
 **Create dataset from verifiers environment:**
 ```bash
 python resources_servers/verifiers/scripts/create_dataset.py \
-    --env-id reverse-text \
-    --size 100 \
-    --output resources_servers/verifiers/data/reverse_text_train.jsonl
+    --env-id acereason-math \
+    --size 5 \
+    --output resources_servers/verifiers/data/acereason_math_example.jsonl
 ```
 
 ## Rollout Collection
@@ -41,11 +40,10 @@ ng_run "+config_paths=[resources_servers/verifiers/configs/verifiers.yaml,respon
 ```bash
 ng_collect_rollouts \
     +agent_name=verifiers_agent \
-    +input_jsonl_fpath=resources_servers/verifiers/data/example.jsonl \
+    +input_jsonl_fpath=resources_servers/verifiers/data/acereason_math_example.jsonl \
     +output_jsonl_fpath=results/verifiers_rollouts.jsonl \
     +limit=5
 ```
 
-## Available Environments
 
-Any text-based environment from the [Environments Hub](https://app.primeintellect.ai/dashboard/environments):
+See [Environments Hub](https://app.primeintellect.ai/dashboard/environments) for available environments. Only some are tested within NeMo Gym currently.
