@@ -1,6 +1,10 @@
 (env-rlhf-reward-models)=
 # RLHF with Reward Models
 
+```{warning}
+This article has not been reviewed by a developer SME. Content may change.
+```
+
 ```{note}
 This tutorial is planned but not yet implemented. The content below describes the intended scope.
 ```
