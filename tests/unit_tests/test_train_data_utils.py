@@ -77,6 +77,7 @@ class TestLoadAndValidateServerInstanceConfigs:
                         "host": "127.0.0.1",
                         "port": 12345,
                         "entrypoint": "app.py",
+                        "num_workers": None,
                         "datasets": [
                             {
                                 "name": "example",
