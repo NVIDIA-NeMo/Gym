@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 (creating-resource-server)=
 
 # Creating a Resource Server
