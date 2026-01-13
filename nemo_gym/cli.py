@@ -768,7 +768,12 @@ def dump_config():  # pragma: no cover
     ng_dump_config "+config_paths=[<config1>,<config2>]"
     ```
     """
-    global_config_dict = get_global_config_dict()
+    global_config_dict = get_global_config_dict(
+        global_config_dict_parser_config=GlobalConfigDictParserConfig(
+            hide_secrets=True,
+        ),
+    )
+
     # Just here for help
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 

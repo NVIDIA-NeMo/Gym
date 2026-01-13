@@ -368,6 +368,7 @@ class DatasetConfig(BaseModel):
             Literal["Creative Commons Attribution-ShareAlike 4.0 International"],
             Literal["NVIDIA Internal Use Only, Do Not Distribute"],
             Literal["TBD"],
+            Literal["GNU General Public License v3.0"],
         ]
     ] = None
 
@@ -401,6 +402,7 @@ class Domain(str, Enum):
 class BaseServerConfig(BaseModel):
     host: str
     port: int
+    num_workers: Optional[int] = None
 
 
 class BaseRunServerConfig(BaseServerConfig):
