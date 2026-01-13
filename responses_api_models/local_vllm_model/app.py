@@ -27,6 +27,7 @@ from ray import available_resources, cluster_resources
 from ray._private.state import available_resources_per_node
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from ray.util.state import list_nodes
+from requests.exceptions import ConnectionError
 from vllm.entrypoints.openai.api_server import (
     FlexibleArgumentParser,
     cli_env_setup,
@@ -270,15 +271,15 @@ Total Ray cluster resources: {cluster_resources()}""")
             is_alive = ray.get(self._local_vllm_model_actor.is_alive.remote())
             assert is_alive, f"{self.config.name} LocalVLLMModel server spinup failed, see the error logs above!"
 
-            response = requests.get(url=f"{self.config.base_url[0]}/models")
-            if response.ok:
+            try:
+                requests.get(url=f"{self.config.base_url[0]}/models")
                 return
+            except ConnectionError:
+                if poll_count % 10 == 0:  # Print every 30s
+                    print(f"Waiting for {self.config.name} LocalVLLMModel server to spinup...")
 
-            if poll_count % 10 == 0:  # Print every 30s
-                print(f"Waiting for {self.config.name} LocalVLLMModel server to spinup...")
-
-            poll_count += 1
-            sleep(3)
+                poll_count += 1
+                sleep(3)
 
 
 if __name__ == "__main__":
