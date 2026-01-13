@@ -14,10 +14,12 @@
 # limitations under the License.
 from unittest.mock import MagicMock
 
-from app import VerifiersAgent, VerifiersAgentConfig
-
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.server_utils import ServerClient
+from responses_api_agents.verifiers_agent.app import (
+    VerifiersAgent,
+    VerifiersAgentConfig,
+)
 
 
 class TestApp:
