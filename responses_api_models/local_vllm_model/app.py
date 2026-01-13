@@ -213,6 +213,10 @@ class LocalVLLMModel(VLLMModel):
             "Ray backend only works with data parallel size > 1!"
         )
 
+        if env_vars["VLLM_RAY_DP_PACK_STRATEGY"] == "span":
+            # Unset this flag since it's set by default using span
+            server_args.pop("data_parallel_size_local", None)
+
         cli_env_setup()
         parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible RESTful API server.")
         parser = make_arg_parser(parser)
