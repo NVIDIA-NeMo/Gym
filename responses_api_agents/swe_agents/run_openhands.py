@@ -294,6 +294,7 @@ class RunOpenHandsAgent:
             self.output_dir / "trajectories",
             "**",
             data_point["instance_id"],
+            "**",
             "output.jsonl",
         )
 
