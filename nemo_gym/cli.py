@@ -14,26 +14,31 @@
 # limitations under the License.
 import asyncio
 import json
+import os
+import platform
 import shlex
+import sys
 import tomllib
 from glob import glob
+from importlib.metadata import version as md_version
 from os import environ, makedirs
 from os.path import exists
 from pathlib import Path
 from signal import SIGINT
 from subprocess import Popen
 from threading import Thread
-from time import sleep
-from typing import Dict, List, Optional
+from time import sleep, time
+from typing import Dict, List, Optional, Tuple
 
+import psutil
 import rich
 import uvicorn
 from devtools import pprint
 from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel, Field
+from pydantic import Field
 from tqdm.auto import tqdm
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import PARENT_DIR, __version__
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
     HEAD_SERVER_DEPS_KEY_NAME,
@@ -41,43 +46,95 @@ from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
     PYTHON_VERSION_KEY_NAME,
+    UV_PIP_SET_PYTHON_KEY_NAME,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
+from nemo_gym.server_status import StatusCommand
 from nemo_gym.server_utils import (
     HEAD_SERVER_KEY_NAME,
     HeadServer,
     ServerClient,
+    ServerInstanceDisplayConfig,
     ServerStatus,
     initialize_ray,
 )
 
 
 def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  # pragma: no cover
-    install_cmd = "uv pip install -r requirements.txt"
     head_server_deps = global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]
-    install_cmd += " " + " ".join(head_server_deps)
 
-    return f"""cd {dir_path} \\
-    && uv venv --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} \\
+    uv_venv_cmd = f"uv venv --seed --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} .venv"
+
+    has_pyproject_toml = exists(f"{dir_path / 'pyproject.toml'}")
+    has_requirements_txt = exists(f"{dir_path / 'requirements.txt'}")
+
+    # explicitly set python path if specified. In Google colab, ng_run fails due to uv pip install falls back to system python (/usr) without this and errors.
+    # not needed for most clusters. should be safe in all scenarios, but only minimally tested outside of colab.
+    # see discussion and examples here: https://github.com/NVIDIA-NeMo/Gym/pull/526#issuecomment-3676230383
+    uv_pip_set_python = global_config_dict.get(UV_PIP_SET_PYTHON_KEY_NAME, False)
+    uv_pip_python_flag = "--python .venv/bin/python" if uv_pip_set_python else ""
+
+    if has_pyproject_toml and has_requirements_txt:
+        raise RuntimeError(
+            f"Found both pyproject.toml and requirements.txt for uv venv setup in server dir: {dir_path}. Please only use one or the other!"
+        )
+    elif has_pyproject_toml:
+        install_cmd = f"""uv pip install {uv_pip_python_flag} '-e .' {" ".join(head_server_deps)}"""
+    elif has_requirements_txt:
+        install_cmd = f"""uv pip install {uv_pip_python_flag} -r requirements.txt {" ".join(head_server_deps)}"""
+    else:
+        raise RuntimeError(f"Missing pyproject.toml or requirements.txt for uv venv setup in server dir: {dir_path}")
+
+    cmd = f"""cd {dir_path} \\
+    && {uv_venv_cmd} \\
     && source .venv/bin/activate \\
     && {install_cmd} \\
-   """
+    """
+
+    return cmd
 
 
-def _run_command(command: str, working_directory: Path) -> Popen:  # pragma: no cover
+def _run_command(command: str, working_dir_path: Path) -> Popen:  # pragma: no cover
+    work_dir = f"{working_dir_path.absolute()}"
     custom_env = environ.copy()
-    custom_env["PYTHONPATH"] = f"{working_directory.absolute()}:{custom_env.get('PYTHONPATH', '')}"
+    py_path = custom_env.get("PYTHONPATH", None)
+    if py_path is not None:
+        custom_env["PYTHONPATH"] = f"{work_dir}:{py_path}"
+    else:
+        custom_env["PYTHONPATH"] = work_dir
     return Popen(command, executable="/bin/bash", shell=True, env=custom_env)
 
 
 class RunConfig(BaseNeMoGymCLIConfig):
+    """
+    Start NeMo Gym servers for agents, models, and resources.
+
+    Examples:
+
+    ```bash
+    config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\\
+    responses_api_models/openai_model/configs/openai_model.yaml"
+    ng_run "+config_paths=[${config_paths}]"
+    ```
+    """
+
     entrypoint: str = Field(
         description="Entrypoint for this command. This must be a relative path with 2 parts. Should look something like `responses_api_agents/simple_agent`."
     )
 
 
 class TestConfig(RunConfig):
+    """
+    Test a specific server module by running its pytest suite and optionally validating example data.
+
+    Examples:
+
+    ```bash
+    ng_test +entrypoint=resources_servers/example_single_tool_call
+    ```
+    """
+
     should_validate_data: bool = Field(
         default=False,
         description="Whether or not to validate the example data (examples, metrics, rollouts, etc) for this server.",
@@ -98,22 +155,10 @@ class TestConfig(RunConfig):
         return self._dir_path
 
 
-class ServerInstanceDisplayConfig(BaseModel):
-    process_name: str
-    server_type: str
-    name: str
-    dir_path: Path
-    entrypoint: str
-    host: Optional[str] = None
-    port: Optional[int] = None
-    pid: Optional[int] = None
-    config_path: str
-    url: Optional[str] = None
-
-
 class RunHelper:  # pragma: no cover
     _head_server: uvicorn.Server
     _head_server_thread: Thread
+    _head_server_instance: HeadServer
 
     _processes: Dict[str, Popen]
     _server_instance_display_configs: List[ServerInstanceDisplayConfig]
@@ -130,12 +175,14 @@ class RunHelper:  # pragma: no cover
         escaped_config_dict_yaml_str = shlex.quote(OmegaConf.to_yaml(global_config_dict))
 
         # We always run the head server in this `run` command.
-        self._head_server, self._head_server_thread = HeadServer.run_webserver()
+        self._head_server, self._head_server_thread, self._head_server_instance = HeadServer.run_webserver()
 
         top_level_paths = [k for k in global_config_dict.keys() if k not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS]
 
         self._processes: Dict[str, Popen] = dict()
         self._server_instance_display_configs: List[ServerInstanceDisplayConfig] = []
+
+        start_time = time()
 
         # TODO there is a better way to resolve this that uses nemo_gym/global_config.py::ServerInstanceConfig
         for top_level_path in top_level_paths:
@@ -184,8 +231,13 @@ class RunHelper:  # pragma: no cover
                     url=f"http://{host}:{port}" if host and port else None,
                     pid=process.pid,
                     config_path=top_level_path,
+                    start_time=start_time,
                 )
             )
+
+        self._head_server_instance.set_server_instances(
+            [inst.model_dump(mode="json") for inst in self._server_instance_display_configs]
+        )
 
         self._server_client = ServerClient(
             head_server_config=ServerClient.load_head_server_config(),
@@ -219,7 +271,7 @@ class RunHelper:  # pragma: no cover
 
         for i, inst in enumerate(self._server_instance_display_configs, 1):
             print(f"[{i}] {inst.process_name} ({inst.server_type}/{inst.name})")
-            pprint(inst.model_dump(mode="json"))
+            pprint(inst.model_dump(mode="json", exclude={"start_time", "status", "uptime_seconds"}))
         print(f"{'#' * 100}\n")
 
     def poll(self) -> None:
@@ -228,7 +280,22 @@ class RunHelper:  # pragma: no cover
 
         for process_name, process in self._processes.items():
             if process.poll() is not None:
-                raise RuntimeError(f"Process `{process_name}` finished unexpectedly!")
+                proc_out, proc_err = process.communicate()
+                print_str = f"Process `{process_name}` finished unexpectedly!"
+
+                if isinstance(proc_out, bytes):
+                    proc_out = proc_out.decode("utf-8")
+                    print_str = f"""{print_str}
+Process `{process_name}` stdout:
+{proc_out}
+"""
+                if isinstance(proc_err, bytes):
+                    proc_err = proc_err.decode("utf-8")
+                    print_str = f"""{print_str}
+Process `{process_name}` stderr:
+{proc_err}"""
+
+                raise RuntimeError(print_str)
 
     def wait_for_spinup(self) -> None:
         sleep_interval = 3
@@ -238,11 +305,18 @@ class RunHelper:  # pragma: no cover
             self.poll()
             statuses = self.check_http_server_statuses()
 
-            num_spun_up = statuses.count("success")
+            num_spun_up = 0
+            waiting = []
+            for name, status in statuses:
+                if status == "success":
+                    num_spun_up += 1
+                else:
+                    waiting.append(name)
             if len(statuses) != num_spun_up:
                 print(
                     f"""{num_spun_up} / {len(statuses)} servers ready ({statuses.count("timeout")} timed out, {statuses.count("connection_error")} connection errored, {statuses.count("unknown_error")} had unknown errors).
-Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
+Waiting for servers to spin up: {waiting}
+Sleeping {sleep_interval}s..."""
                 )
             else:
                 print(f"All {num_spun_up} / {len(statuses)} servers ready! Polling every 60s")
@@ -284,7 +358,7 @@ Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
         finally:
             self.shutdown()
 
-    def check_http_server_statuses(self) -> List[ServerStatus]:
+    def check_http_server_statuses(self) -> List[Tuple[str, ServerStatus]]:
         print(
             "Checking for HTTP server statuses (you should see some HTTP requests to `/` that may 404. This is expected.)"
         )
@@ -292,7 +366,7 @@ Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
         for server_instance_display_config in self._server_instance_display_configs:
             name = server_instance_display_config.config_path
             status = self._server_client.poll_for_status(name)
-            statuses.append(status)
+            statuses.append((name, status))
 
         return statuses
 
@@ -300,6 +374,24 @@ Waiting for servers to spin up. Sleeping {sleep_interval}s..."""
 def run(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
 ):  # pragma: no cover
+    """
+    Start NeMo Gym servers for agents, models, and resources.
+
+    This command reads configuration from YAML files specified via `+config_paths` and starts all configured servers.
+    The configuration files should define server instances with their entrypoints and settings.
+
+    Configuration Parameter:
+        config_paths (List[str]): Paths to YAML configuration files. Specify via Hydra: `+config_paths="[file1.yaml,file2.yaml]"`
+
+    Examples:
+
+    ```bash
+    # Start servers with specific configs
+    config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\\
+    responses_api_models/openai_model/configs/openai_model.yaml"
+    ng_run "+config_paths=[${config_paths}]"
+    ```
+    """
     global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
     # Just here for help
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
@@ -417,9 +509,19 @@ def _format_pct(count: int, total: int) -> str:  # pragma: no cover
 
 
 class TestAllConfig(BaseNeMoGymCLIConfig):
+    """
+    Run tests for all server modules in the project.
+
+    Examples:
+
+    ```bash
+    ng_test_all
+    ```
+    """
+
     fail_on_total_and_test_mismatch: bool = Field(
         default=False,
-        description="There may be situations where there are an un-equal number of servers that exist vs have tests. This flag will fail the test job if this mismatch exists.",
+        description="Fail if the number of server modules doesn't match the number with tests (default: False).",
     )
 
 
@@ -507,6 +609,15 @@ Extra candidate paths:{_display_list_of_paths(extra_candidates)}"""
 
 
 def dev_test():  # pragma: no cover
+    """
+    Run core NeMo Gym tests with coverage reporting (runs pytest with --cov flag).
+
+    Examples:
+
+    ```bash
+    ng_dev_test
+    ```
+    """
     global_config_dict = get_global_config_dict()
     # Just here for help
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
@@ -516,6 +627,15 @@ def dev_test():  # pragma: no cover
 
 
 def init_resources_server():  # pragma: no cover
+    """
+    Initialize a new resources server with template files and directory structure.
+
+    Examples:
+
+    ```bash
+    ng_init_resources_server +entrypoint=resources_servers/my_server
+    ```
+    """
     config_dict = get_global_config_dict()
     run_config = RunConfig.model_validate(config_dict)
 
@@ -541,6 +661,7 @@ def init_resources_server():  # pragma: no cover
   {server_type}:
     {server_type_name}:
       entrypoint: app.py
+      domain: other
 {server_type_name}_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -628,7 +749,21 @@ Dependencies
 
 
 def dump_config():  # pragma: no cover
-    global_config_dict = get_global_config_dict()
+    """
+    Display the resolved Hydra configuration for debugging purposes.
+
+    Examples:
+
+    ```bash
+    ng_dump_config "+config_paths=[<config1>,<config2>]"
+    ```
+    """
+    global_config_dict = get_global_config_dict(
+        global_config_dict_parser_config=GlobalConfigDictParserConfig(
+            hide_secrets=True,
+        ),
+    )
+
     # Just here for help
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
@@ -636,6 +771,15 @@ def dump_config():  # pragma: no cover
 
 
 def display_help():  # pragma: no cover
+    """
+    Display a list of available NeMo Gym CLI commands.
+
+    Examples:
+
+    ```bash
+    ng_help
+    ```
+    """
     global_config_dict = get_global_config_dict()
     # Just here for help
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
@@ -654,3 +798,138 @@ def display_help():  # pragma: no cover
             continue
 
         print(script)
+
+
+def status():  # pragma: no cover
+    global_config_dict = get_global_config_dict()
+    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+
+    status_cmd = StatusCommand()
+    servers = status_cmd.discover_servers()
+    status_cmd.display_status(servers)
+
+
+class PipListConfig(RunConfig):
+    format: Optional[str] = Field(
+        default=None,
+        description="Output format for pip list. Options: 'columns' (default), 'freeze', 'json'",
+    )
+    outdated: bool = Field(
+        default=False,
+        description="List outdated packages",
+    )
+
+
+def pip_list():  # pragma: no cover
+    """List packages installed in a server's virtual environment."""
+    global_config_dict = get_global_config_dict()
+    config = PipListConfig.model_validate(global_config_dict)
+
+    dir_path = Path(config.entrypoint)
+    venv_path = dir_path / ".venv"
+
+    if not venv_path.exists():
+        print(f"  Virtual environment not found at: {venv_path}")
+        print("  Run tests or setup the server first using:")
+        print(f"  ng_test +entrypoint={config.entrypoint}")
+        exit(1)
+
+    pip_list_cmd = "uv pip list"
+    if config.format:
+        pip_list_cmd += f" --format={config.format}"
+    if config.outdated:
+        pip_list_cmd += " --outdated"
+
+    command = f"""cd {dir_path} \\
+    && source .venv/bin/activate \\
+    && {pip_list_cmd}"""
+
+    print(f"  Package list for: {config.entrypoint}")
+    print(f"Virtual environment: {venv_path.absolute()}")
+    print("-" * 72)
+
+    proc = _run_command(command, dir_path)
+    return_code = proc.wait()
+    exit(return_code)
+
+
+class VersionConfig(BaseNeMoGymCLIConfig):
+    """
+    Display gym version and system information.
+
+    Examples:
+
+    ```bash
+    # Display version information
+    ng_version
+
+    # Output as JSON
+    ng_version +json=true
+    ```
+    """
+
+    json_format: bool = Field(default=False, alias="json", description="Output in JSON format for programmatic use.")
+
+
+def version():  # pragma: no cover
+    """Display gym version and system information."""
+    global_config_dict = get_global_config_dict()
+    config = VersionConfig.model_validate(global_config_dict)
+
+    json_output = config.json_format
+
+    version_info = {
+        "nemo_gym": __version__,
+        "python": platform.python_version(),
+        "python_path": sys.executable,
+        "installation_path": str(PARENT_DIR),
+    }
+
+    key_deps = [
+        "openai",
+        "ray",
+    ]
+
+    dependencies = {dep: md_version(dep) for dep in key_deps}
+
+    version_info["dependencies"] = dependencies
+
+    # System info
+    version_info["system"] = {
+        "os": f"{platform.system()} {platform.release()}",
+        "platform": platform.platform(),
+        "architecture": platform.machine(),
+        "processor": platform.processor() or "unknown",
+        "cpus": os.cpu_count(),
+    }
+
+    # Memory info
+    mem = psutil.virtual_memory()
+    version_info["system"]["memory_gb"] = round(mem.total / (1024**3), 2)
+
+    # Output
+    if json_output:
+        print(json.dumps(version_info))
+    else:
+        output = f"""\
+NeMo Gym v{version_info["nemo_gym"]}
+Python {version_info["python"]} ({version_info["python_path"]})
+Installation: {version_info["installation_path"]}"""
+
+        if "dependencies" in version_info:
+            deps_lines = "\n".join(f"  {dep}: {ver}" for dep, ver in version_info["dependencies"].items())
+            sys_info = version_info["system"]
+            output += f"""
+
+Key Dependencies:
+{deps_lines}
+
+System:
+  OS: {sys_info["os"]}
+  Platform: {sys_info["platform"]}
+  Architecture: {sys_info["architecture"]}
+  Processor: {sys_info["processor"]}
+  CPUs: {sys_info["cpus"]}
+  Memory: {sys_info["memory_gb"]} GB"""
+
+        print(output)

@@ -31,7 +31,6 @@ TARGET_FOLDER = Path("resources_servers")
 class ResourceServerMetadata:
     """Metadata extracted from resource server YAML config."""
 
-    dataset_name: Optional[str] = None
     domain: Optional[str] = None
     description: Optional[str] = None
     verified: bool = False
@@ -41,7 +40,6 @@ class ResourceServerMetadata:
     def to_dict(self) -> dict[str, str | bool | None]:  # pragma: no cover
         """Convert to dict for backward compatibility with hf_utils.py"""
         return {
-            "dataset_name": self.dataset_name,
             "domain": self.domain,
             "description": self.description,
             "verified": self.verified,
@@ -56,10 +54,12 @@ class AgentDatasetsMetadata:
 
     license: str | None = None
     types: list[str] = field(default_factory=list)
+    huggingface_repo_id: Optional[str] = None
 
     def to_dict(self) -> dict[str, str | list[str] | None]:  # pragma: no cover
         """Convert to dict for backward compatibility."""
         return {
+            "huggingface_repo_id": self.huggingface_repo_id,
             "license": self.license,
             "types": self.types,
         }
@@ -69,7 +69,7 @@ class AgentDatasetsMetadata:
 class ConfigMetadata:
     """Combined metadata from YAML configuration file."""
 
-    dataset_name: Optional[str] = None
+    huggingface_repo_id: Optional[str] = None
     domain: Optional[str] = None
     description: Optional[str] = None
     verified: bool = False
@@ -84,12 +84,12 @@ class ConfigMetadata:
     ) -> "ConfigMetadata":  # pragma: no cover
         """Combine resource server and agent datasets metadata."""
         return cls(
-            dataset_name=resource.dataset_name,
             domain=resource.domain,
             description=resource.description,
             verified=resource.verified,
             verified_url=resource.verified_url,
             value=resource.value,
+            huggingface_repo_id=agent.huggingface_repo_id,
             license=agent.license,
             types=agent.types,
         )
@@ -108,8 +108,8 @@ class ServerInfo:
     yaml_file: Path
 
     @property
-    def dataset_name(self) -> str | None:  # pragma: no cover
-        return self.config_metadata.dataset_name
+    def huggingface_repo_id(self) -> str | None:  # pragma: no cover
+        return self.config_metadata.huggingface_repo_id
 
     @property
     def domain(self) -> str | None:  # pragma: no cover
@@ -154,10 +154,15 @@ class ServerInfo:
         return "✓" if "validation" in set(self.config_metadata.types) else "-"
 
     def get_dataset_link(self) -> str:  # pragma: no cover
-        return f"<a href='{self.config_path}'>{self.config_metadata.dataset_name}</a>"
+        if not self.config_metadata.huggingface_repo_id:
+            return "-"
+        repo_id = self.config_metadata.huggingface_repo_id
+        dataset_name = repo_id.split("/")[-1]
+        dataset_url = f"https://huggingface.co/datasets/{repo_id}"
+        return f"<a href='{dataset_url}'>{dataset_name}</a>"
 
-    def get_config_link(self) -> str:  # pragma: no cover
-        return f"<a href='{self.config_path}'>{self.config_filename}</a>"
+    def get_config_link(self, use_filename: bool = True) -> str:  # pragma: no cover
+        return f"<a href='{self.config_path}'>{self.config_filename if use_filename else 'config'}</a>"
 
     def get_readme_link(self) -> str:  # pragma: no cover
         return f"<a href='{self.readme_path}'>README</a>"
@@ -167,7 +172,6 @@ def visit_resource_server(data: dict, level: int = 1) -> ResourceServerMetadata:
     """Extract resource server metadata from YAML data."""
     resource = ResourceServerMetadata()
     if level == 4:
-        resource.dataset_name = data.get("dataset_name")
         resource.domain = data.get("domain")
         resource.description = data.get("description")
         resource.verified = data.get("verified", False)
@@ -198,6 +202,9 @@ def visit_agent_datasets(data: dict) -> AgentDatasetsMetadata:  # pragma: no cov
                                     agent.types.append(entry.get("type"))
                                     if entry.get("type") == "train":
                                         agent.license = entry.get("license")
+                                        hf_id = entry.get("huggingface_identifier")
+                                        if hf_id and isinstance(hf_id, dict):
+                                            agent.huggingface_repo_id = hf_id.get("repo_id")
     return agent
 
 
@@ -211,7 +218,6 @@ def extract_config_metadata(yaml_path: Path) -> ConfigMetadata:  # pragma: no co
                     verified: {true/false}
                     description: {example_description}
                     value: {example_value}
-                    dataset_name: {example_dataset_name}
                     ...
         {something}_simple_agent:
             responses_api_agents:
@@ -220,6 +226,9 @@ def extract_config_metadata(yaml_path: Path) -> ConfigMetadata:  # pragma: no co
                         - name: train
                           type: {example_type_1}
                           license: {example_license_1}
+                          huggingface_identifier:
+                            repo_id: {example_repo_id_1}
+                            artifact_fpath: {example_artifact_fpath_1}
                         - name: validation
                           type: {example_type_2}
                           license: {example_license_2}
@@ -256,7 +265,7 @@ def get_example_and_training_server_info() -> tuple[list[ServerInfo], list[Serve
             server_name = subdir.name
             is_example_only = server_name.startswith("example_")
 
-            if not is_example_only and not yaml_data.dataset_name:
+            if not is_example_only and not yaml_data.huggingface_repo_id:
                 continue
 
             display_name = (
@@ -286,10 +295,11 @@ def get_example_and_training_server_info() -> tuple[list[ServerInfo], list[Serve
 
 def generate_example_only_table(servers: list[ServerInfo]) -> str:  # pragma: no cover
     """Generate table for example-only resource servers."""
-    if not servers:
-        return "| Name | Demonstrates | Config | README |\n| ---- | ------------------- | ----------- | ------ |\n"
-
     col_names = ["Name", "Demonstrates", "Config", "README"]
+
+    if not servers:
+        return handle_empty_table(col_names)
+
     rows = []
 
     for server in servers:
@@ -310,22 +320,22 @@ def generate_example_only_table(servers: list[ServerInfo]) -> str:  # pragma: no
 
 def generate_training_table(servers: list[ServerInfo]) -> str:  # pragma: no cover
     """Generate table for training resource servers."""
-    if not servers:
-        # TODO: Add back in when we can verify resource servers
-        # return "| Dataset | Domain | Resource Server | Description | Value | Train | Validation | Verified | License |\n| ------- | ------ | --------------- | ----------- | ----- | ----- | ---------- | -------- | ------- |\n"
-        return "| Dataset | Domain | Resource Server | Description | Value | Train | Validation | License |\n| ------- | ------ | --------------- | ----------- | ----- | ----- | ---------- | ------- |\n"
-
     col_names = [
-        "Dataset",
-        "Domain",
         "Resource Server",
+        "Domain",
+        "Dataset",
         "Description",
         "Value",
+        "Config",
         "Train",
         "Validation",
+        # TODO: Add back in when we can verify resource servers
         # "Verified",
         "License",
     ]
+    if not servers:
+        return handle_empty_table(col_names)
+
     rows = []
 
     for server in servers:
@@ -334,11 +344,12 @@ def generate_training_table(servers: list[ServerInfo]) -> str:  # pragma: no cov
 
         rows.append(
             [
-                server.get_dataset_link(),
-                server.get_domain_or_empty(),
                 server.display_name,
+                server.get_domain_or_empty(),
+                server.get_dataset_link(),
                 server.get_description_or_dash(),
                 server.get_value_or_dash(),
+                server.get_config_link(use_filename=False),
                 server.get_train_mark(),
                 server.get_validation_mark(),
                 # TODO: Add back in when we can verify resource servers
@@ -350,13 +361,20 @@ def generate_training_table(servers: list[ServerInfo]) -> str:  # pragma: no cov
     rows.sort(
         key=lambda r: (
             normalize_str(r[1]),  # domain
-            0 if "✓" in r[7] else 1,  # verified first (reverse order for checkmarks...hyphens)
+            # TODO: Add back in when we can verify resource servers
+            # 0 if "✓" in r[8] else 1,  # verified first (reverse order for checkmarks...hyphens)
             tuple(normalize_str(cell) for cell in r),
         )
     )
 
     table = [col_names, ["-" for _ in col_names]] + rows
     return format_table(table)
+
+
+def handle_empty_table(col_names: list[str]) -> str:  # pragma: no cover
+    """Generate an empty table when there are no servers."""
+    separator = ["-" * len(col_name) for col_name in col_names]
+    return format_table([col_names, separator])
 
 
 def normalize_str(s: str) -> str:  # pragma: no cover
