@@ -15,13 +15,10 @@ from __future__ import annotations
 
 import logging
 import traceback
-from typing import Any, Literal
+from typing import Any
 
 import verifiers as vf
 from fastapi import Body, Request, Response
-from openai import AsyncOpenAI
-from openai.resources.chat import AsyncChat
-from openai.resources.chat.completions import AsyncCompletions
 from openai.types.chat.chat_completion import ChatCompletion
 from pydantic import ConfigDict, Field
 from verifiers.utils.async_utils import maybe_semaphore
@@ -47,7 +44,6 @@ logger = logging.getLogger(__name__)
 class VerifiersNeMoGymResponse(NeMoGymResponse):
     env_id: str
     group_id: str
-    contains_transitions: Literal[True] = True
     output: list[dict[str, Any]]
     reward: float
     metrics: dict[str, Any] = Field(default_factory=dict)
@@ -62,25 +58,21 @@ class VerifiersAgentVerifyResponse(BaseVerifyResponse):
     reward: float
 
 
-class _VLLMChatCompletions(AsyncCompletions):
+class VLLMOpenAIClient:
     def __init__(self, base_url: str) -> None:
         self._base_url = base_url.rstrip("/")
+        self.chat = self._Chat(self)
+
+    class _Chat:
+        def __init__(self, client: "VLLMOpenAIClient") -> None:
+            self.completions = client
 
     async def create(self, *args: Any, **kwargs: Any) -> ChatCompletion:
         request_body: dict[str, Any] = {
             "model": kwargs.get("model", ""),
             "messages": kwargs.get("messages", []),
         }
-        for key in (
-            "temperature",
-            "max_tokens",
-            "max_completion_tokens",
-            "top_p",
-            "stop",
-            "n",
-            "tools",
-            "tool_choice",
-        ):
+        for key in ("temperature", "max_tokens", "max_completion_tokens", "top_p", "stop", "n", "tools", "tool_choice"):
             if key in kwargs and kwargs[key] is not None:
                 request_body[key] = kwargs[key]
 
@@ -124,25 +116,6 @@ class _VLLMChatCompletions(AsyncCompletions):
         setattr(response, "prompt_token_ids", prompt_token_ids)
         setattr(response.choices[0], "token_ids", generation_token_ids)
         return response
-
-
-class _VLLMChat(AsyncChat):
-    def __init__(self, base_url: str) -> None:
-        self._completions = _VLLMChatCompletions(base_url)
-
-    @property
-    def completions(self) -> AsyncCompletions:
-        return self._completions
-
-
-class VLLMOpenAIClient(AsyncOpenAI):
-    def __init__(self, base_url: str) -> None:
-        super().__init__(api_key="dummy", base_url=base_url)
-        self._chat = _VLLMChat(base_url)
-
-    @property
-    def chat(self) -> AsyncChat:
-        return self._chat
 
 
 class VerifiersAgentConfig(BaseResponsesAPIAgentConfig):
@@ -189,7 +162,8 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         return self.envs_cache[vf_env_id]
 
     def _get_openai_client(self) -> VLLMOpenAIClient:
-        if self.config.model_server.name not in self.openai_client_cache:
+        cache_key = self.config.model_server.name
+        if cache_key not in self.openai_client_cache:
             server_config_dict = get_first_server_config_dict(
                 self.server_client.global_config_dict,
                 self.config.model_server.name,
@@ -199,9 +173,9 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             if not model_server_url.endswith("/v1"):
                 model_server_url = model_server_url.rstrip("/") + "/v1"
 
-            self.openai_client_cache[self.config.model_server.name] = VLLMOpenAIClient(base_url=model_server_url)
+            self.openai_client_cache[cache_key] = VLLMOpenAIClient(base_url=model_server_url)
 
-        return self.openai_client_cache[self.config.model_server.name]
+        return self.openai_client_cache[cache_key]
 
     def _convert_trajectory_to_output(self, state: dict) -> list:
         output = []
