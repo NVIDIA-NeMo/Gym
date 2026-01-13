@@ -617,7 +617,8 @@ Full body: {json.dumps(exc.body, indent=4)}
             set_is_nemo_gym_fastapi_worker()
 
             module = getmodule(cls)
-            relative_fpath = Path(module.__file__).relative_to(PARENT_DIR).with_suffix("")
+            # We use `.absolute()` since PARENT_DIR is an absolute path.
+            relative_fpath = Path(module.__file__).absolute().relative_to(PARENT_DIR).with_suffix("")
             module_import_str = str(relative_fpath).replace("/", ".")
 
             uvicorn_kwargs["app"] = f"{module_import_str}:app"
