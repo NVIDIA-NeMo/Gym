@@ -22,6 +22,7 @@ policy_model:
         tensor_parallel_size: 4
         pipeline_parallel_size: 1
 
+        trust_remote_code: true
         gpu_memory_utilization: 0.9
         enable_auto_tool_choice: true
         tool_call_parser: qwen3_coder
