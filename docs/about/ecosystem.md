@@ -24,23 +24,21 @@ NeMo Gym provides scalable rollout collection infrastructure that decouples envi
   - Status
   - Description
 * - [NeMo RL](https://github.com/NVIDIA-NeMo/RL)
-  - ✅ Fully Supported
-  - NVIDIA's scalable post-training library. Supports GRPO, DPO, SFT, and on-policy distillation with PyTorch (DTensor) and Megatron Core backends. NeMo Gym integrates natively for multi-turn rollout collection and verified reward training.
-* - [veRL](https://github.com/volcengine/verl)
   - ✅ Supported
-  - Volcano Engine's scalable RL library. Shares architectural principles with NeMo RL. NeMo Gym rollout outputs are compatible with veRL's training data format.
+  - NVIDIA's scalable post-training library. Supports GRPO, DPO, SFT, and on-policy distillation with PyTorch (DTensor) and Megatron Core backends. NeMo Gym integrates natively for multi-turn rollout collection and verified reward training.
+* - [Unsloth](https://github.com/unslothai/unsloth)
+  - ✅ Supported
+  - Fast fine-tuning framework with 2-5x speedup and 80% memory reduction. Supports LoRA and QLoRA for efficient model adaptation.
 ```
 
-### Planned Integrations
+### In-Progress Integrations
 
 We're actively working on integrations with additional training frameworks:
 
 | Framework | Description | Status |
 |-----------|-------------|--------|
-| [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF) | High-performance RLHF library with Ray-based distributed training | 🔜 Planned |
-| [TRL](https://github.com/huggingface/trl) | Hugging Face's Transformer Reinforcement Learning library | 🔜 Planned |
-| [SkyRL](https://github.com/NovaSky-AI/SkyRL) | NovaSky's reinforcement learning framework | 🔜 Planned |
-| [ROLL](https://github.com/alibaba/ROLL) | Alibaba's reinforcement learning library | 🔜 Planned |
+| [veRL](https://github.com/volcengine/verl) | Volcano Engine's scalable RL library with similar architectural principles | 🔜 In Progress |
+| [TRL](https://github.com/huggingface/trl) | Hugging Face's Transformer Reinforcement Learning library | 🔜 In Progress |
 
 :::{note}
 **Want to integrate your training framework?** NeMo Gym outputs standardized rollout data (JSONL with OpenAI-compatible message format and verification rewards). See the {doc}`Contributing Guide <../contribute/index>` or [open an issue](https://github.com/NVIDIA-NeMo/Gym/issues) to discuss integration requirements.
@@ -48,20 +46,33 @@ We're actively working on integrations with additional training frameworks:
 
 ---
 
-## Environment Library Compatibility
+## Environment Library Integrations
 
-NeMo Gym is designed for LLM training environments and provides multiple ways to build and integrate environments.
+NeMo Gym integrates with environment libraries to provide diverse training scenarios—from reasoning tasks to web browsing agents.
 
-### Supported Interfaces
+### Supported Libraries
+
+```{list-table}
+:header-rows: 1
+:widths: 25 15 60
+
+* - Library
+  - Status
+  - Description
+* - [reasoning-gym](https://github.com/open-thought/reasoning-gym)
+  - ✅ Supported
+  - Procedurally generated reasoning tasks for training and evaluation. See `resources_servers/reasoning_gym/` for the integration pattern.
+* - [Aviary](https://github.com/Future-House/aviary)
+  - ✅ Supported
+  - Multi-environment framework for tool-using agents. Supports GSM8K, HotPotQA, BixBench, and more. See `resources_servers/aviary/` for examples.
+```
+
+### In-Progress Integrations
 
 | Library | Description | Status |
 |---------|-------------|--------|
-| OpenAI-compatible APIs | Any inference endpoint supporting the OpenAI API spec | ✅ Native |
-| [Gymnasium](https://gymnasium.farama.org/) / [OpenAI Gym](https://github.com/openai/gym) | Standard RL environment APIs | ✅ Wrapper Available |
-
-:::{note}
-For Gymnasium/OpenAI Gym environments, NeMo Gym provides integration through the [reasoning-gym](https://github.com/open-thought/reasoning-gym) resource server pattern. See `resources_servers/reasoning_gym/` for an example of wrapping external environment libraries.
-:::
+| [PRIME Intellect](https://github.com/PrimeIntellect-ai) | Distributed AI training environments | 🔜 In Progress |
+| [BrowserGym](https://github.com/ServiceNow/BrowserGym) | Web browsing and automation environments for agent training | 🔜 In Progress |
 
 ### Native Environment Pattern
 
