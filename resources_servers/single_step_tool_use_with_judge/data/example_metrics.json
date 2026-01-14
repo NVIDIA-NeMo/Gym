@@ -1,0 +1,46 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/single_step_tool_use_with_judge/data/example.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": null,
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 5,
+        "Average": 14.0,
+        "Min": 14.0,
+        "Max": 14.0,
+        "Median": 14.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 3727.6,
+        "Min": 2029.0,
+        "Max": 7754.0,
+        "Median": 3302.0,
+        "Standard deviation": 2342.79
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 2.2,
+        "Min": 1.0,
+        "Max": 3.0,
+        "Median": 2.25,
+        "Standard deviation": 0.837
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "domain_policy": {
+        "unique_count": 1,
+        "total_count": 5
+    }
+}
