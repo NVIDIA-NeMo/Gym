@@ -213,7 +213,7 @@ class GlobalConfigDictParser(BaseModel):
         global_config_dict: DictConfig = OmegaConf.merge(initial_global_config_dict, global_config_dict)
 
         # Load the env.yaml config. We load it early so that people can use it to conveniently store config paths.
-        dotenv_path = parse_config.dotenv_path or Path(PARENT_DIR) / "env.yaml"
+        dotenv_path = parse_config.dotenv_path or PARENT_DIR / "env.yaml"
         dotenv_extra_config = DictConfig({})
         if dotenv_path.exists() and not parse_config.skip_load_from_dotenv:
             dotenv_extra_config = OmegaConf.load(dotenv_path)

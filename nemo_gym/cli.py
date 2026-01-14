@@ -794,7 +794,7 @@ def display_help():  # pragma: no cover
     # Just here for help
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
-    pyproject_path = Path(PARENT_DIR) / "pyproject.toml"
+    pyproject_path = PARENT_DIR / "pyproject.toml"
     with pyproject_path.open("rb") as f:
         pyproject_data = tomllib.load(f)
 

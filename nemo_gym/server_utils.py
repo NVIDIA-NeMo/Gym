@@ -450,7 +450,7 @@ repr(e): {repr(e)}"""
                 return JSONResponse(content="An unknown error occurred", status_code=500)
 
     def setup_profiling(self, app: FastAPI, profiling_config: ProfilingMiddlewareConfig) -> None:  # pragma: no cover
-        base_profile_dir = Path(PARENT_DIR) / profiling_config.profiling_results_dirpath
+        base_profile_dir = PARENT_DIR / profiling_config.profiling_results_dirpath
         server_profile_path = (base_profile_dir / self.get_session_middleware_key()).with_suffix(".log")
 
         base_profile_dir.mkdir(parents=True, exist_ok=True)
