@@ -16,19 +16,20 @@ import asyncio
 import atexit
 import json
 import resource
+import sys
 from abc import abstractmethod
 from contextlib import asynccontextmanager
-from inspect import getmodule
 from io import StringIO
 from logging import Filter as LoggingFilter
 from logging import LogRecord, getLogger
 from os import environ, getenv
 from pathlib import Path
 from threading import Thread
-from traceback import print_exc
-from typing import List, Literal, Optional, Tuple, Type, Union, Unpack
+from traceback import format_exc, print_exc
+from typing import Any, List, Literal, Optional, TextIO, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
+import orjson
 import ray
 import requests
 import uvicorn
@@ -60,6 +61,7 @@ from nemo_gym.config_types import (
 from nemo_gym.global_config import (
     HEAD_SERVER_KEY_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
+    RAY_HEAD_NODE_ADDRESS_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
@@ -143,6 +145,12 @@ MAX_NUM_TRIES = 3
 async def request(
     method: str, url: str, _internal: bool = False, **kwargs: Unpack[_RequestOptions]
 ) -> ClientResponse:  # pragma: no cover
+    # Faster JSON dumps than the default aiohttp json
+    if kwargs.get("json"):
+        kwargs["data"] = orjson.dumps(kwargs.pop("json"))
+        kwargs.setdefault("headers", dict())
+        kwargs["headers"]["Content-Type"] = "application/json"
+
     client = get_global_aiohttp_client()
     num_tries = 1
     while True:
@@ -182,6 +190,10 @@ Response content: {content}""")
             # Set the response content here so we have access to it down the line.
             e.response_content = content
             raise e
+
+
+async def get_response_json(response: ClientResponse) -> Any:
+    return orjson.loads(await response.read())
 
 
 DEFAULT_HEAD_SERVER_PORT = 11000
@@ -351,14 +363,14 @@ def initialize_ray() -> None:
         return
 
     global_config_dict = get_global_config_dict()
-    ray_head_node_address = global_config_dict.get("ray_head_node_address")
+    ray_head_node_address = global_config_dict.get(RAY_HEAD_NODE_ADDRESS_KEY_NAME)
     ray_init_kwargs = dict(ignore_reinit_error=True)
 
     if ray_head_node_address:
         print(f"Connecting to Ray cluster at specified address: {ray_head_node_address}")
         ray_init_kwargs["address"] = ray_head_node_address
     else:
-        print("Starting Ray cluster...")
+        print("NeMo Gym is starting a new Ray cluster...")
 
     ray.init(**ray_init_kwargs)
 
@@ -415,21 +427,29 @@ class SimpleServer(BaseServer):
         async def exception_handling_middleware(request: Request, call_next):
             try:
                 return await call_next(request)
+            except ClientResponseError as e:
+                assert hasattr(e, "response_content"), (
+                    "Please use `nemo_gym.server_utils.raise_for_status` for HTTP exceptions!"
+                )
+
+                response_content = f"Hit an exception in {self.get_session_middleware_key()} calling an inner server: {e.response_content}"
+                return JSONResponse(content=response_content, status_code=500)
             except Exception as e:
-                print_exc()
                 print(
-                    f"🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"
+                    f"""🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception
+Formatted exception: {format_exc()}
+repr(e): {repr(e)}"""
                 )
                 return JSONResponse(content=repr(e), status_code=500)
             except:
                 print_exc()
                 print(
-                    f"🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"
+                    f"""🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"""
                 )
                 return JSONResponse(content="An unknown error occurred", status_code=500)
 
     def setup_profiling(self, app: FastAPI, profiling_config: ProfilingMiddlewareConfig) -> None:  # pragma: no cover
-        base_profile_dir = Path(PARENT_DIR) / profiling_config.profiling_results_dirpath
+        base_profile_dir = PARENT_DIR / profiling_config.profiling_results_dirpath
         server_profile_path = (base_profile_dir / self.get_session_middleware_key()).with_suffix(".log")
 
         base_profile_dir.mkdir(parents=True, exist_ok=True)
@@ -500,6 +520,42 @@ class SimpleServer(BaseServer):
                     e,
                 )
 
+    def prefix_server_logs(self) -> None:  # pragma: no cover
+        # Adapted from https://github.com/vllm-project/vllm/blob/ab74b2a27a4eb88b90356bfb4b452d29edf05574/vllm/utils/system_utils.py#L205
+
+        def _add_prefix(file: TextIO) -> None:
+            prefix = f"({self.config.name}) "
+            file_write = file.write
+
+            def write_with_prefix(s: str):
+                if not s:
+                    return
+
+                if file.start_new_line:
+                    file_write(prefix)
+
+                idx = 0
+                while (next_idx := s.find("\n", idx)) != -1:
+                    next_idx += 1
+                    file_write(s[idx:next_idx])
+                    if next_idx == len(s):
+                        file.start_new_line = True
+                        return
+
+                    file_write(prefix)
+                    idx = next_idx
+
+                file_write(s[idx:])
+                file.start_new_line = False
+
+            file.start_new_line = True
+            file.write = write_with_prefix
+
+        is_main_fastapi_proc = not is_nemo_gym_fastapi_worker()
+        if is_main_fastapi_proc:
+            _add_prefix(sys.stdout)
+            _add_prefix(sys.stderr)
+
     @classmethod
     def run_webserver(cls) -> FastAPI:  # pragma: no cover
         global_config_dict = get_global_config_dict()
@@ -517,6 +573,7 @@ class SimpleServer(BaseServer):
 
         app = server.setup_webserver()
         server.set_ulimit()
+        server.prefix_server_logs()
         server.setup_exception_middleware(app)
 
         @app.exception_handler(RequestValidationError)
@@ -558,9 +615,12 @@ Full body: {json.dumps(exc.body, indent=4)}
         if server.config.num_workers and server.config.num_workers > 1:
             set_is_nemo_gym_fastapi_worker()
 
-            module = getmodule(cls)
-            relative_fpath = Path(module.__file__).relative_to(PARENT_DIR).with_suffix("")
-            module_import_str = str(relative_fpath).replace("/", ".")
+            # TODO this is very dirty. We need a cleaner way to populate this information in the configs data structures.
+            server_instance_config_dict = global_config_dict[server.config.name]
+            first_level_key = list(server_instance_config_dict.keys())[0]
+            second_level_key = list(server_instance_config_dict[first_level_key].keys())[0]
+            relative_fpath = f"{first_level_key}/{second_level_key}/{server.config.entrypoint}"
+            module_import_str = relative_fpath.replace(".py", "").replace("/", ".")
 
             uvicorn_kwargs["app"] = f"{module_import_str}:app"
             uvicorn_kwargs["workers"] = server.config.num_workers
