@@ -79,6 +79,6 @@ class ExternalAgentWrapper(SimpleResponsesAPIAgent):
 :hidden:
 :maxdepth: 1
 
-openai-agents-sdk
-nemo-agent-toolkit
+🟡 OpenAI Agents SDK <openai-agents-sdk>
+🟡 NeMo Agent Toolkit <nemo-agent-toolkit>
 ```

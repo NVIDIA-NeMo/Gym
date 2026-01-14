@@ -335,8 +335,8 @@ Home <self>
 
 Overview <about/index.md>
 Concepts <about/concepts/index>
-Architecture <about/architecture>
-Performance <about/performance>
+🟡 Architecture <about/architecture>
+🟡 Performance <about/performance>
 Ecosystem <about/ecosystem>
 ```
 
@@ -348,7 +348,7 @@ Ecosystem <about/ecosystem>
 Quickstart <get-started/index>
 Detailed Setup Guide <get-started/detailed-setup.md>
 Rollout Collection <get-started/rollout-collection.md>
-First Training Run <get-started/first-training-run.md>
+🟡 First Training Run <get-started/first-training-run.md>
 ```
 
 ```{toctree}
@@ -356,11 +356,11 @@ First Training Run <get-started/first-training-run.md>
 :hidden:
 :maxdepth: 1
 
-Overview <model-server/index>
-model-server/vllm
-model-server/openai
-model-server/azure-openai
-model-server/responses-native
+🟡 Overview <model-server/index>
+🟡 vLLM <model-server/vllm>
+🟡 OpenAI <model-server/openai>
+🟡 Azure OpenAI <model-server/azure-openai>
+🟡 Responses API <model-server/responses-native>
 ```
 
 ```{toctree}
@@ -368,11 +368,11 @@ model-server/responses-native
 :hidden:
 :maxdepth: 1
 
-Overview <resources-server/index>
-resources-server/integrate-python-tools
-resources-server/integrate-apis
-resources-server/containerize
-resources-server/profile
+🟡 Overview <resources-server/index>
+🟡 Integrate Python Tools <resources-server/integrate-python-tools>
+🟡 Integrate APIs <resources-server/integrate-apis>
+🟡 Containerize <resources-server/containerize>
+🟡 Profile <resources-server/profile>
 ```
 
 ```{toctree}
@@ -380,8 +380,8 @@ resources-server/profile
 :hidden:
 :maxdepth: 1
 
-Overview <agent-server/index>
-agent-server/integrate-agents/index
+🟡 Overview <agent-server/index>
+🟡 Integrate Agents <agent-server/integrate-agents/index>
 ```
 
 ```{toctree}
@@ -389,9 +389,9 @@ agent-server/integrate-agents/index
 :hidden:
 :maxdepth: 1
 
-Overview <data/index>
-data/prepare-validate
-data/download-huggingface
+🟡 Overview <data/index>
+🟡 Prepare and Validate <data/prepare-validate>
+🟡 Download from Hugging Face <data/download-huggingface>
 ```
 
 ```{toctree}
@@ -399,14 +399,14 @@ data/download-huggingface
 :hidden:
 :maxdepth: 1
 
-Overview <environment-tutorials/index>
-environment-tutorials/creating-training-environment
-environment-tutorials/multi-step
-environment-tutorials/multi-turn
-environment-tutorials/user-modeling
-environment-tutorials/multi-node-docker
-environment-tutorials/llm-as-judge
-environment-tutorials/rlhf-reward-models
+🟡 Overview <environment-tutorials/index>
+🟡 Creating Training Environment <environment-tutorials/creating-training-environment>
+🟡 Multi-Step <environment-tutorials/multi-step>
+🟡 Multi-Turn <environment-tutorials/multi-turn>
+🟡 User Modeling <environment-tutorials/user-modeling>
+🟡 Multi-Node Docker <environment-tutorials/multi-node-docker>
+🟡 LLM as Judge <environment-tutorials/llm-as-judge>
+🟡 RLHF Reward Models <environment-tutorials/rlhf-reward-models>
 ```
 
 ```{toctree}
@@ -414,15 +414,15 @@ environment-tutorials/rlhf-reward-models
 :hidden:
 :maxdepth: 1
 
-Overview <training-tutorials/index>
-training-tutorials/nemotron-nano
-training-tutorials/nemotron-super
-tutorials/nemo-rl-grpo/index.md
-tutorials/unsloth-training
-training-tutorials/trl
-training-tutorials/verl
-training-tutorials/nemo-customizer
-tutorials/offline-training-w-rollouts
+🟡 Overview <training-tutorials/index>
+🟡 Nemotron Nano <training-tutorials/nemotron-nano>
+🟡 Nemotron Super <training-tutorials/nemotron-super>
+NeMo RL GRPO <tutorials/nemo-rl-grpo/index.md>
+Unsloth Training <tutorials/unsloth-training>
+🟡 TRL <training-tutorials/trl>
+🟡 VERL <training-tutorials/verl>
+🟡 NeMo Customizer <training-tutorials/nemo-customizer>
+Offline Training <tutorials/offline-training-w-rollouts>
 ```
 
 ```{toctree}
@@ -430,9 +430,9 @@ tutorials/offline-training-w-rollouts
 :hidden:
 :maxdepth: 1
 
-Overview <infrastructure/index>
-infrastructure/deployment-topology
-infrastructure/ray-distributed
+🟡 Overview <infrastructure/index>
+🟡 Deployment Topology <infrastructure/deployment-topology>
+🟡 Ray Distributed <infrastructure/ray-distributed>
 ```
 
 ```{toctree}
