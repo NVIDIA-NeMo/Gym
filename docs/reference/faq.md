@@ -311,10 +311,8 @@ ng_run "+config_paths=[$config_paths]"
 
 Here is an e2e example of how to spin up a NeMo Gym compatible vLLM Chat Completions OpenAI server.
 - If you want to use tools, find the appropriate vLLM arguments regarding the tool call parser to use. In this example, we use Qwen3-30B-A3B, which is suggested to use the `hermes` tool call parser.
+- If you are using a reasoning model, find the appropriate vLLM arguments regarding reasoning parser to use. In this example, we use Qwen3-30B-A3B, which is suggested to use the `qwen3` reasoning parser.
 
-:::{important}
-Do NOT use a reasoning parser argument to vLLM here. The Responses to Chat Completions middleware logic needs to parse to and from Responses Reasoning items and Chat Completion Message content. **Do NOT use things like `--reasoning-parser qwen3`**.
-:::
 ```bash
 uv venv --python 3.12 --seed 
 source .venv/bin/activate
@@ -334,6 +332,7 @@ vllm serve \
     --tensor-parallel-size 4 \
     --gpu-memory-utilization 0.9 \
     --enable-auto-tool-choice --tool-call-parser hermes \
+    --reasoning-parser qwen3 \
     --host 0.0.0.0 \
     --port 10240
 ```
