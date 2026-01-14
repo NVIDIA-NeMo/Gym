@@ -15,8 +15,6 @@
 
 from unittest.mock import MagicMock
 
-from pytest import raises
-
 import responses_api_models.local_vllm_model.app
 from nemo_gym.global_config import DISALLOWED_PORTS_KEY_NAME, DictConfig
 from responses_api_models.local_vllm_model.app import LocalVLLMModel, LocalVLLMModelConfig
@@ -38,6 +36,7 @@ class TestApp:
             model="test model",
             return_token_id_information=False,
             uses_reasoning_parser=False,
+            vllm_serve_env_vars=dict(),
             vllm_serve_kwargs=dict(),
         )
 
@@ -59,8 +58,11 @@ class TestApp:
                 model="test model",
                 return_token_id_information=False,
                 uses_reasoning_parser=False,
+                vllm_serve_env_vars=dict(),
                 vllm_serve_kwargs=dict(),
             )
 
-        with raises(OSError, match="Can't load the configuration of"):
-            LocalVLLMModel.start_vllm_server(DummyLocalVLLMModel())
+            get_cache_dir = LocalVLLMModel.get_cache_dir
+            get_hf_token = LocalVLLMModel.get_hf_token
+
+        LocalVLLMModel._configure_vllm_serve(DummyLocalVLLMModel())
