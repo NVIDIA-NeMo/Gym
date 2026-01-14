@@ -18,6 +18,7 @@ from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
 from itertools import chain, repeat
+from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
@@ -28,6 +29,7 @@ from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
     get_global_config_dict,
+    get_response_json,
     is_global_aiohttp_client_setup,
     raise_for_status,
     set_global_aiohttp_client,
@@ -115,6 +117,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
                 )
 
         metrics = Counter()
+        Path(config.output_jsonl_fpath).parent.mkdir(exist_ok=True, parents=True)
         with open(config.output_jsonl_fpath, "a") as f:
 
             async def _post_coroutine(row: dict) -> None:
@@ -124,7 +127,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
                 async with semaphore:
                     response = await server_client.post(server_name=agent_name, url_path="/run", json=row)
                     await raise_for_status(response)
-                    result = await response.json()
+                    result = await get_response_json(response)
                     f.write(json.dumps(result) + "\n")
                     metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
 
@@ -145,7 +148,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
             await raise_for_status(res)
-            return row, await res.json()
+            return row, await get_response_json(res)
 
         return tqdm.as_completed(
             map(_post_subroutine, examples), desc="Collecting rollouts", miniters=10, total=len(examples)

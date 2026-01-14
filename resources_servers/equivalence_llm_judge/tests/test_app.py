@@ -14,7 +14,6 @@
 # limitations under the License.
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 from omegaconf import OmegaConf
@@ -58,7 +57,7 @@ class TestApp:
         cfg.judge_not_equal_label = "[[A!=B]]"
         return cfg
 
-    def _create_response(self, id: str, output_item: NeMoGymResponseOutputItem) -> dict[str, Any]:
+    def _create_response(self, id: str, output_item: NeMoGymResponseOutputItem) -> str:
         return NeMoGymResponse(
             id=id,
             created_at=123.0,
@@ -68,7 +67,7 @@ class TestApp:
             parallel_tool_calls=False,
             tool_choice="none",
             tools=[],
-        ).model_dump()
+        ).model_dump_json()
 
     def _msg(self, text: str) -> NeMoGymResponseOutputMessage:
         return NeMoGymResponseOutputMessage(
@@ -86,11 +85,11 @@ class TestApp:
 
         # First: judge says equal; Second: judge says equal => reward 1
         post_mock = MagicMock()
-        post_mock.json = AsyncMock()
+        post_mock.read = AsyncMock()
         server_mock.post = AsyncMock(return_value=post_mock)
 
         # Only the first call is used when check_twice_swap is False
-        post_mock.json.side_effect = [
+        post_mock.read.side_effect = [
             self._create_response("first", self._msg("some text [[A=B]] trailing")),
         ]
 
@@ -122,9 +121,9 @@ class TestApp:
         rs_twice = LLMJudgeResourcesServer(config=config_twice, server_client=server_mock)
 
         post_mock2 = MagicMock()
-        post_mock2.json = AsyncMock()
+        post_mock2.read = AsyncMock()
         server_mock.post = AsyncMock(return_value=post_mock2)
-        post_mock2.json.side_effect = [
+        post_mock2.read.side_effect = [
             self._create_response("first", self._msg("[[A=B]]")),
             self._create_response("second", self._msg("[[A=B]]")),
         ]
@@ -142,7 +141,7 @@ class TestApp:
         rs = LLMJudgeResourcesServer(config=config, server_client=server_mock)
 
         post_mock = MagicMock()
-        post_mock.json = AsyncMock(return_value=self._create_response("f", self._msg("[[A!=B]]")))
+        post_mock.read = AsyncMock(return_value=self._create_response("f", self._msg("[[A!=B]]")))
         server_mock.post = AsyncMock(return_value=post_mock)
 
         model_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Q: 1+1?"}])
@@ -171,7 +170,7 @@ class TestApp:
         rs = LLMJudgeResourcesServer(config=config, server_client=server_mock)
 
         post_mock = MagicMock()
-        post_mock.json = AsyncMock(return_value=self._create_response("f", self._msg("no label present")))
+        post_mock.read = AsyncMock(return_value=self._create_response("f", self._msg("no label present")))
         server_mock.post = AsyncMock(return_value=post_mock)
 
         req = LLMJudgeVerifyRequest(
@@ -199,10 +198,10 @@ class TestApp:
         rs = LLMJudgeResourcesServer(config=cfg, server_client=server_mock)
 
         post_mock = MagicMock()
-        post_mock.json = AsyncMock()
+        post_mock.read = AsyncMock()
         server_mock.post = AsyncMock(return_value=post_mock)
         # First pass equal, second pass not equal -> use configured -1.0
-        post_mock.json.side_effect = [
+        post_mock.read.side_effect = [
             self._create_response("first", self._msg("[[A=B]]")),
             self._create_response("second", self._msg("[[A!=B]]")),
         ]
@@ -235,7 +234,7 @@ class TestApp:
         rs = LLMJudgeResourcesServer(config=cfg, server_client=server_mock)
 
         post_mock = MagicMock()
-        post_mock.json = AsyncMock(return_value=self._create_response("first", self._msg("[[A=B]]")))
+        post_mock.read = AsyncMock(return_value=self._create_response("first", self._msg("[[A=B]]")))
         server_mock.post = AsyncMock(return_value=post_mock)
 
         model_create_params = NeMoGymResponseCreateParamsNonStreaming(
@@ -277,10 +276,10 @@ class TestApp:
         rs = LLMJudgeResourcesServer(config=cfg, server_client=server_mock)
 
         post_mock = MagicMock()
-        post_mock.json = AsyncMock()
+        post_mock.read = AsyncMock()
         server_mock.post = AsyncMock(return_value=post_mock)
         # First call (extracted answer) fails, second call (full generation) succeeds
-        post_mock.json.side_effect = [
+        post_mock.read.side_effect = [
             self._create_response("first", self._msg("[[A!=B]]")),
             self._create_response("second", self._msg("[[A=B]]")),
         ]
@@ -322,7 +321,7 @@ class TestApp:
         rs = LLMJudgeResourcesServer(config=cfg, server_client=server_mock)
 
         post_mock = MagicMock()
-        post_mock.json = AsyncMock(return_value=self._create_response("first", self._msg("[[A=B]]")))
+        post_mock.read = AsyncMock(return_value=self._create_response("first", self._msg("[[A=B]]")))
         server_mock.post = AsyncMock(return_value=post_mock)
 
         model_create_params = NeMoGymResponseCreateParamsNonStreaming(

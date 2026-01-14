@@ -218,6 +218,7 @@ class BaseUploadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
     ```
     """
 
+    # Must match `nemo_gym.global_config.HF_TOKEN_KEY_NAME`
     hf_token: str = Field(description="HuggingFace API token for authentication.")
     hf_organization: str = Field(description="HuggingFace organization name where dataset will be uploaded.")
     hf_collection_name: str = Field(description="HuggingFace collection name for organizing datasets.")
@@ -324,6 +325,7 @@ class DownloadJsonlDatasetHuggingFaceConfig(JsonlDatasetHuggingFaceIdentifer, Ba
         default=None,
         description="Exact local file path where the downloaded dataset will be saved. Requires `artifact_fpath` or `split`. Overrides output_dirpath.",
     )
+    # Must match `nemo_gym.global_config.HF_TOKEN_KEY_NAME`
     hf_token: Optional[str] = Field(default=None, description="HuggingFace API token for authentication.")
     split: Optional[Literal["train", "validation", "test"]] = Field(
         default=None, description="Dataset split to download. Omit to download all available splits."
