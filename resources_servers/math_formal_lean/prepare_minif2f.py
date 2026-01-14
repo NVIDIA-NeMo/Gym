@@ -28,11 +28,12 @@ PROOF_PROMPT_TEMPLATE = """Complete the following Lean 4 code:
 
 ```lean4
 {header}{informal_prefix}{formal_statement}
-  sorry
+    sorry
 ```
 
-Before producing the Lean 4 code to formally prove the given theorem, provide a detailed proof plan outlining the main proof steps and strategies.
-The plan should highlight key ideas, intermediate lemmas, and proof structures that will guide the construction of the final formal proof."""
+First, think through your solution step-by-step. Provide a detailed proof plan outlining the main proof steps and strategies. The plan should highlight key ideas, intermediate lemmas, and proof structures that will guide the construction of the final formal proof.
+
+Then provide your final answer. Your final answer must be a single, complete Lean 4 markdown code block containing the completed theorem. Do NOT include any text or explanation before or after the code block. Begin with ```lean4 and end with ```."""
 
 
 def download_dataset(output_path: str) -> None:
