@@ -29,14 +29,14 @@ math_with_judge_simple_agent:
         jsonl_fpath: resources_servers/math_with_judge/data/train.jsonl
         huggingface_identifier:
           repo_id: nvidia/Nemotron-RL-math-OpenMathReasoning
-          artifact_fpath: open_math_reasoning_problems.jsonl
+          artifact_fpath: train.jsonl
         license: Creative Commons Attribution 4.0 International
       - name: validation
         type: validation
         jsonl_fpath: resources_servers/math_with_judge/data/aime24_validation.jsonl
         huggingface_identifier:
           repo_id: nvidia/Nemotron-RL-math-OpenMathReasoning
-          artifact_fpath: aime24_validation.jsonl
+          artifact_fpath: validation.jsonl
         license: Apache 2.0
       - name: example
         type: example
