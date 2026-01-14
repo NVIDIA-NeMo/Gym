@@ -15,9 +15,9 @@ View the logs
 tail -f temp.log
 ```
 
-Call the server. If you see a tool call here, then everything is working as intended!
+Call the server. If you see a model response here, then everything is working as intended!
 ```bash
-python resources_servers/example_single_tool_call/client.py
+python responses_api_agents/simple_agent/client.py
 ```
 
 
