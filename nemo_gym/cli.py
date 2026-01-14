@@ -309,30 +309,29 @@ Process `{process_name}` stderr:
     def wait_for_spinup(self) -> None:
         sleep_interval = 3
         poll_count = 0
+        successful_servers = []
+        total_servers = len(self._server_instance_display_configs)
 
         # Until we spin up or error out.
         while True:
             self.poll()
-            statuses = self.check_http_server_statuses()
+            statuses = self.check_http_server_statuses(successful_servers)
+            successful_servers.extend(s for s, status in statuses if status == "success")
 
-            num_spun_up = 0
             waiting = []
             for name, status in statuses:
-                if status == "success":
-                    num_spun_up += 1
-                else:
+                if status != "success":
                     waiting.append(name)
 
-            if len(statuses) != num_spun_up:
+            if len(successful_servers) != total_servers:
                 if poll_count % 10 == 0:  # Print every sleep_interval * poll_count = 3 * 10 = 30s
                     print(
                         f"""Checking for HTTP server statuses (you should see some HTTP requests to `/` that may 404. This is expected.
-{num_spun_up} / {len(statuses)} servers ready ({statuses.count("timeout")} timed out, {statuses.count("connection_error")} connection errored, {statuses.count("unknown_error")} had unknown errors).
-Waiting for servers to spin up: {waiting}"""
+{len(successful_servers)} / {total_servers} servers ready. Waiting for servers to spin up: {waiting}"""
                     )
                 poll_count += 1
             else:
-                print(f"All {num_spun_up} / {len(statuses)} servers ready! Polling every 60s")
+                print(f"All {len(successful_servers)} / {total_servers} servers ready! Polling every 60s")
                 self.display_server_instance_info()
                 return
 
@@ -371,10 +370,15 @@ Waiting for servers to spin up: {waiting}"""
         finally:
             self.shutdown()
 
-    def check_http_server_statuses(self) -> List[Tuple[str, ServerStatus]]:
+    def check_http_server_statuses(self, successful_servers: List[str]) -> List[Tuple[str, ServerStatus]]:
         statuses = []
         for server_instance_display_config in self._server_instance_display_configs:
             name = server_instance_display_config.config_path
+
+            # No need to re-poll successfully spun up servers.
+            if name in successful_servers:
+                continue
+
             status = self._server_client.poll_for_status(name)
             statuses.append((name, status))
 
