@@ -27,19 +27,20 @@ NeMo Gym provides rollout collection infrastructure that integrates with various
 | Framework | Status | Description |
 |-----------|--------|-------------|
 | [NeMo RL](https://github.com/NVIDIA-NeMo/RL) | ✅ Supported | NVIDIA's scalable post-training library with GRPO, DPO, SFT |
-| [veRL](https://github.com/volcengine/verl) | ✅ Supported | Volcano Engine's scalable RL framework |
-| [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF) | 🔜 Planned | High-performance RLHF framework |
-| [TRL](https://github.com/huggingface/trl) | 🔜 Planned | Hugging Face Transformer Reinforcement Learning |
+| [Unsloth](https://github.com/unslothai/unsloth) | ✅ Supported | Fast fine-tuning framework with memory optimization |
+| [veRL](https://github.com/volcengine/verl) | 🔜 In Progress | Volcano Engine's scalable RL framework |
+| [TRL](https://github.com/huggingface/trl) | 🔜 In Progress | Hugging Face Transformer Reinforcement Learning |
 
 ### Environment Libraries
 
-NeMo Gym supports integration with standard RL environment interfaces:
+NeMo Gym integrates with environment libraries for diverse training scenarios:
 
 | Library | Status | Description |
 |---------|--------|-------------|
-| OpenAI-compatible APIs | ✅ Native | Any inference endpoint supporting the OpenAI API spec |
-| [Gymnasium](https://gymnasium.farama.org/) / [OpenAI Gym](https://github.com/openai/gym) | ✅ Wrapper Available | Standard RL environment APIs (see `reasoning_gym` example) |
-| Custom Environments | ✅ Native | Build LLM training environments with NeMo Gym's resource server pattern |
+| [reasoning-gym](https://github.com/open-thought/reasoning-gym) | ✅ Supported | Procedurally generated reasoning tasks (see `reasoning_gym` resource server) |
+| [Aviary](https://github.com/Future-House/aviary) | ✅ Supported | Multi-environment framework for tool-using agents (see `aviary` resource server) |
+| [PRIME Intellect](https://github.com/PrimeIntellect-ai) | 🔜 In Progress | Distributed AI training environments |
+| [BrowserGym](https://github.com/ServiceNow/BrowserGym) | 🔜 In Progress | Web browsing and automation environments |
 
 > 💡 **Want to add an integration?** We welcome contributions! See our [Contributing Guide](https://docs.nvidia.com/nemo/gym/latest/contribute/index.html) or [open an issue](https://github.com/NVIDIA-NeMo/Gym/issues) to discuss.
 
