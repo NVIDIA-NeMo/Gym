@@ -19,7 +19,6 @@ import resource
 import sys
 from abc import abstractmethod
 from contextlib import asynccontextmanager
-from inspect import getmodule
 from io import StringIO
 from logging import Filter as LoggingFilter
 from logging import LogRecord, getLogger
@@ -616,10 +615,12 @@ Full body: {json.dumps(exc.body, indent=4)}
         if server.config.num_workers and server.config.num_workers > 1:
             set_is_nemo_gym_fastapi_worker()
 
-            module = getmodule(cls)
-            # We use `.absolute()` since PARENT_DIR is an absolute path.
-            relative_fpath = Path(module.__file__).absolute().relative_to(PARENT_DIR).with_suffix("")
-            module_import_str = str(relative_fpath).replace("/", ".")
+            # TODO this is very dirty. We need a cleaner way to populate this information in the configs data structures.
+            server_instance_config_dict = global_config_dict[server.config.name]
+            first_level_key = list(server_instance_config_dict.keys())[0]
+            second_level_key = list(server_instance_config_dict[first_level_key].keys())[0]
+            relative_fpath = f"{first_level_key}/{second_level_key}/{server.config.entrypoint}"
+            module_import_str = relative_fpath.replace(".py", "").replace("/", ".")
 
             uvicorn_kwargs["app"] = f"{module_import_str}:app"
             uvicorn_kwargs["workers"] = server.config.num_workers
