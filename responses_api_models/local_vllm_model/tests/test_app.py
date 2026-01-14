@@ -17,7 +17,7 @@ import sys
 from unittest.mock import MagicMock
 
 from vllm import platforms
-from vllm.platforms import cpu_platform_plugin, resolve_obj_by_qualname
+from vllm.platforms import resolve_obj_by_qualname
 
 import responses_api_models.local_vllm_model.app
 from nemo_gym.global_config import DISALLOWED_PORTS_KEY_NAME, DictConfig
@@ -53,7 +53,7 @@ class TestApp:
             get_global_config_dict_mock,
         )
 
-        cpu_platform = resolve_obj_by_qualname(cpu_platform_plugin())()
+        cpu_platform = resolve_obj_by_qualname("vllm.platforms.cpu.CpuPlatform")()
         monkeypatch.setattr(platforms, "_current_platform", cpu_platform)
 
         monkeypatch.setattr(sys, "argv", ["dummy"])
