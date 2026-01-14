@@ -10,6 +10,7 @@ terminal_pivot_simple_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py
+      max_steps: 1
       resources_server:
         type: resources_servers
         name: terminal_pivot
