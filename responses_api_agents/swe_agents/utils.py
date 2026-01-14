@@ -14,12 +14,16 @@
 import copy
 import fcntl
 import json
+import logging
 import os
-import shutil
 import subprocess
+import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+import shutil
+
 
 from openai.types.responses.function_tool import FunctionTool
 
@@ -133,20 +137,20 @@ def convert_trajectory_to_output_items(
         for item in trajectory:
             if isinstance(item, dict):
                 role = item["role"]
+
+                # Extract text content from content data
+                content_data = item.get("content", "")
+                text_content = ""
+                if isinstance(content_data, str):
+                    text_content = content_data
+                elif isinstance(content_data, list):
+                    # Handle list of content items
+                    for c in content_data:
+                        if isinstance(c, dict) and c.get("type") == "text":
+                            text_content = c.get("text", "")
+                            break  # Take first text content
+
                 if role in ["user", "system", "developer"]:
-                    # Create input message
-                    content_data = item.get("content", "")
-                    text_content = ""
-
-                    if isinstance(content_data, str):
-                        text_content = content_data
-                    elif isinstance(content_data, list):
-                        # Handle list of content items
-                        for c in content_data:
-                            if isinstance(c, dict) and c.get("type") == "text":
-                                text_content = c.get("text", "")
-                                break  # Take first text content
-
                     if text_content:
                         output_items.append(
                             NeMoGymMessage(
@@ -160,33 +164,30 @@ def convert_trajectory_to_output_items(
                 elif role == "assistant":
                     # Handle assistant messages with potential tool calls
                     tool_calls = item.get("tool_calls", [])
-                    content_data = item.get("content", "")
 
                     # Add assistant message if there's content (even if there are also tool calls)
                     prompt_token_ids = item.get("prompt_token_ids", [])
                     generation_token_ids = item.get("generation_token_ids", [])
                     generation_log_probs = item.get("generation_log_probs", [])
 
-                    if content_data:
-                        content_data = content_data if isinstance(content_data, str) else str(content_data)
-                        output_items.append(
-                            NeMoGymResponseOutputMessageForTraining(
-                                id=f"msg-{len(output_items)}",
-                                content=[
-                                    NeMoGymResponseOutputText(
-                                        type="output_text",
-                                        text=content_data,
-                                        annotations=[],
-                                    )
-                                ],
-                                role="assistant",
-                                status="completed",
-                                type="message",
-                                prompt_token_ids=prompt_token_ids,
-                                generation_token_ids=generation_token_ids,
-                                generation_log_probs=generation_log_probs,
-                            )
+                    output_items.append(
+                        NeMoGymResponseOutputMessageForTraining(
+                            id=f"msg-{len(output_items)}",
+                            content=[
+                                NeMoGymResponseOutputText(
+                                    type="output_text",
+                                    text=text_content,
+                                    annotations=[],
+                                )
+                            ],
+                            role="assistant",
+                            status="completed",
+                            type="message",
+                            prompt_token_ids=prompt_token_ids,
+                            generation_token_ids=generation_token_ids,
+                            generation_log_probs=generation_log_probs,
                         )
+                    )
 
                     # Also add tool calls if present
                     if tool_calls:
@@ -215,7 +216,7 @@ def convert_trajectory_to_output_items(
                         output_items.append(
                             NeMoGymFunctionCallOutput(
                                 call_id=tool_call_id,
-                                output=content if isinstance(content, str) else json.dumps(content),
+                                output=text_content,
                                 type="function_call_output",
                                 status="completed",
                             )
