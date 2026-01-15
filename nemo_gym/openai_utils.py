@@ -78,7 +78,14 @@ from openai.types.shared_params import FunctionDefinition
 from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import TypedDict
 
-from nemo_gym.server_utils import MAX_NUM_TRIES, ClientResponse, raise_for_status, request
+from nemo_gym.server_utils import (
+    _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG,
+    MAX_NUM_TRIES,
+    ClientResponse,
+    get_response_json,
+    raise_for_status,
+    request,
+)
 
 
 ########################################
@@ -442,11 +449,18 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     )
 
     async def _request(self, **request_kwargs: Dict) -> ClientResponse:
+        request_kwargs = request_kwargs | {
+            "headers": {
+                "Authorization": f"Bearer {self.api_key}",
+            },
+            "_internal": self.internal,
+        }
+
         max_num_tries = MAX_NUM_TRIES
         tries = 0
         while tries < MAX_NUM_TRIES:
             tries += 1
-            response = await request(**(request_kwargs | {"_internal": self.internal}))
+            response = await request(**request_kwargs)
 
             if response.status in RETRY_ERROR_CODES:
                 # If we hit a rate limit, we don't want to hit max num tries, so we increment both.
@@ -463,44 +477,48 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 return response
 
         # We've exited the loop
-        response.raise_for_status()
+        await raise_for_status(response)
 
     async def _raise_for_status(self, response: ClientResponse, request_kwargs: Dict[str, Any]) -> None:
-        if not response.ok:
+        if not response.ok and _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
             print(f"Request kwargs: {json.dumps(request_kwargs)}")
 
         await raise_for_status(response)
+
+    async def create_models(self):
+        request_kwargs = dict(url=f"{self.base_url}/models")
+        response = await self._request(method="GET", **request_kwargs)
+
+        await self._raise_for_status(response, request_kwargs)
+        return await get_response_json(response)
 
     async def create_chat_completion(self, **kwargs):
         request_kwargs = dict(
             url=f"{self.base_url}/chat/completions",
             json=kwargs,
-            headers={"Authorization": f"Bearer {self.api_key}"},
         )
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
-        return await response.json()
+        return await get_response_json(response)
 
     async def create_response(self, **kwargs):
         request_kwargs = dict(
             url=f"{self.base_url}/responses",
             json=kwargs,
-            headers={"Authorization": f"Bearer {self.api_key}"},
         )
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
-        return await response.json()
+        return await get_response_json(response)
 
     async def create_tokenize(self, **kwargs):
         base_url = self.base_url.removesuffix("/v1")
         request_kwargs = dict(
             url=f"{base_url}/tokenize",
             json=kwargs,
-            headers={"Authorization": f"Bearer {self.api_key}"},
         )
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
-        return await response.json()
+        return await get_response_json(response)
