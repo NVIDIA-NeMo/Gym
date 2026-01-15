@@ -1,11 +1,16 @@
 (model-server-vllm)=
 # vLLM Model Server
 
-```{warning}
-This article has not been reviewed by a developer SME. Content may change.
-```
-
 [vLLM](https://docs.vllm.ai/) provides high-throughput, low-latency LLM inference. The NeMo Gym vLLM model server wraps vLLM's Chat Completions endpoint and converts requests/responses to OpenAI's [Responses API](https://platform.openai.com/docs/api-reference/responses) format, enabling self-hosted models to work with NeMo Gym's agentic workflows.
+
+**Goal**: Connect NeMo Gym to a self-hosted vLLM server for inference and training.
+
+**Prerequisites**:
+- CUDA-capable GPU(s)
+- vLLM 0.8.0+ installed
+- Model weights downloaded
+
+**Source**: `responses_api_models/vllm_model/`
 
 :::{tip}
 **Quick Start**: If you have vLLM running at `http://localhost:8000`, you can use it immediately:
@@ -22,23 +27,6 @@ policy_model:
       uses_reasoning_parser: false
 ```
 :::
-
-::::{grid} 2
-:gutter: 3
-
-:::{grid-item-card} {octicon}`clock;1em;` **Setup Time**
-15-30 minutes
-:::
-
-:::{grid-item-card} {octicon}`bookmark;1em;` **Prerequisites**
-
-- CUDA-capable GPU(s)
-- vLLM 0.8.0+ installed
-- Model weights downloaded
-
-:::
-
-::::
 
 ---
 

@@ -1,14 +1,6 @@
 (model-server-index)=
 # Model Server
 
-```{warning}
-This article was generated and has not been reviewed. Content may change.
-```
-
-```{note}
-This section is being developed. See [GitHub Issue #194](https://github.com/NVIDIA-NeMo/Gym/issues/194) for details.
-```
-
 Model servers provide stateless LLM inference via OpenAI-compatible endpoints. They implement `SimpleResponsesAPIModel` and expose two endpoints:
 
 - **`/v1/chat/completions`** — Standard Chat Completions API

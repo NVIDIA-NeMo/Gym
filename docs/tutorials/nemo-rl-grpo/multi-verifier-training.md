@@ -1,11 +1,13 @@
 (training-nemo-rl-grpo-multi-verifier)=
-# Multi-Verifier Training
+# Train with Multiple Verifiers
 
-Train with verifiers in parallel for more robust reward signals. Combining verification strategies balances rule-based and model-based approaches.
+Combine multiple verification strategies for more robust reward signals during GRPO training.
 
-:::{note}
-**New to NeMo Gym?** Start with {doc}`/get-started/quickstart` and {doc}`/about/concepts/task-verification` before this guide.
-:::
+**Goal**: Configure NeMo Gym to use multiple resource servers or reward functions in a single training run.
+
+**Prerequisites**:
+- Completed {doc}`/get-started/detailed-setup`
+- Familiar with {doc}`/resources-server/index`
 
 ---
 

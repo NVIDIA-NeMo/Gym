@@ -3,22 +3,27 @@
 
 Generate multi-turn training data by simulating user behavior with LLM-driven personas.
 
-::::{grid} 2
-:gutter: 3
+:::{card}
 
-:::{grid-item-card} {octicon}`clock;1em;` **Time**
-45-60 minutes
+**Goal**: Generate synthetic multi-turn training data using LLM-driven personas.
+
+^^^
+
+**In this tutorial, you will**:
+
+1. Configure user simulation prompts
+2. Generate synthetic conversations at scale
+3. Process rollouts for training
+
 :::
 
-:::{grid-item-card} {octicon}`bookmark;1em;` **Prerequisites**
+:::{button-ref} rlhf-reward-models
+:color: secondary
+:outline:
+:ref-type: doc
 
-- Completed {doc}`/get-started/detailed-setup`
-- Completed {doc}`/environment-tutorials/multi-turn`
-- Access to **one** of: OpenAI API, local vLLM server, or NVIDIA NIMs
-
+← Previous: RLHF with Reward Models
 :::
-
-::::
 
 ---
 

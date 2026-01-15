@@ -3,6 +3,10 @@
 
 The OpenAI model server connects NeMo Gym to [OpenAI's API](https://platform.openai.com/docs/api-reference), enabling GPT models with native function calling for agentic workflows.
 
+**Goal**: Connect NeMo Gym to OpenAI's API for inference.
+
+**Prerequisites**: OpenAI API key ([platform.openai.com](https://platform.openai.com/api-keys))
+
 **Source**: `responses_api_models/openai_model/`
 
 :::{tip}

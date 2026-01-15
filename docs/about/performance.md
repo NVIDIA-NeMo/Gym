@@ -3,7 +3,12 @@
 
 This page lists the performance controls and profiling hooks in Gym.
 
-**Use this page to**: tune rollout throughput, control server profiling, and adjust runtime limits.
+## TL;DR
+
+- **Concurrency**: Use `+num_samples_in_parallel` to cap concurrent rollout requests.
+- **Profiling**: Enable with `+profiling_enabled=true` to identify bottlenecks.
+- **Connection limits**: Configure `global_aiohttp_connector_limit` for high-throughput workloads.
+- **Workers**: Set `num_workers` for Uvicorn server worker count.
 
 ## Rollout collection concurrency
 

@@ -3,22 +3,27 @@
 
 Scale NeMo Gym environments across multiple machines using container orchestration.
 
-::::{grid} 2
-:gutter: 3
+:::{card}
 
-:::{grid-item-card} {octicon}`clock;1em;` **Time**
-20-40 minutes
+**Goal**: Deploy NeMo Gym across multiple nodes using Docker containers.
+
+^^^
+
+**In this tutorial, you will**:
+
+1. Configure coordinator and worker nodes
+2. Deploy containerized resources servers
+3. Connect to NeMo RL for distributed training
+
 :::
 
-:::{grid-item-card} {octicon}`bookmark;1em;` **Prerequisites**
+:::{button-ref} user-modeling
+:color: secondary
+:outline:
+:ref-type: doc
 
-- Completed {doc}`/get-started/detailed-setup`
-- Docker installed on all nodes
-- Network connectivity between nodes
-
+← Previous: User Modeling
 :::
-
-::::
 
 ---
 

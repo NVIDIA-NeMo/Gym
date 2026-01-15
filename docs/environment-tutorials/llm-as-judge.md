@@ -4,27 +4,26 @@
 
 Use an LLM to compare model-generated answers against expected answers when exact string matching fails.
 
-::::{grid} 2
-:gutter: 3
+:::{card}
 
-:::{grid-item-card} {octicon}`clock;1em;` **Time**
-20-30 minutes
+**Goal**: Use an LLM judge to verify semantic equivalence when exact matching isn't enough.
+
+^^^
+
+**In this tutorial, you will**:
+
+1. Configure the equivalence LLM judge resources server
+2. Set up judge prompts for your domain
+3. Collect rollouts with LLM-based verification
+
 :::
 
-:::{grid-item-card} {octicon}`bookmark;1em;` **Prerequisites**
+:::{button-ref} creating-training-environment
+:color: secondary
+:outline:
+:ref-type: doc
 
-- Completed {doc}`/get-started/detailed-setup`
-- Access to a judge model (OpenAI API, vLLM, or other)
-
-:::
-
-::::
-
-:::{tip}
-**New to NeMo Gym?** See {doc}`/about/concepts/core-components` for:
-- **{term}`Resources server <Verifier>`** — Hosts verification logic
-- **{term}`Rollout <Rollout / Trajectory>`** — Complete task attempt from prompt to reward
-- **{term}`Policy model <Policy Model>`** — The LLM being trained
+← Previous: Creating a Training Environment
 :::
 
 ---

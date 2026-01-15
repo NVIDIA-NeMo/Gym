@@ -8,21 +8,28 @@ orphan: true
 
 Learn how to create a custom resource server to implement tools, verifiers, and business logic for your training environment.
 
-::::{grid} 2
-:gutter: 3
+:::{card}
 
-:::{grid-item-card} {octicon}`clock;1em;` **Time**
-30 minutes
+**Goal**: Build a custom resource server with tools and verification logic.
+
+^^^
+
+**In this tutorial, you will**:
+
+1. Initialize a resource server from template
+2. Implement tool endpoints
+3. Add verification logic for rewards
+4. Test with rollout collection
+
 :::
 
-:::{grid-item-card} {octicon}`bookmark;1em;` **Prerequisites**
+:::{button-ref} ../get-started/rollout-collection
+:color: secondary
+:outline:
+:ref-type: doc
 
-- Completed {doc}`../get-started/detailed-setup`
-- Basic Python and FastAPI knowledge
-
+← Previous: Rollout Collection
 :::
-
-::::
 
 :::{important}
 Run all commands from the **repository root** directory (where `pyproject.toml` is located).

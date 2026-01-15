@@ -4,11 +4,15 @@
 
 Measure and optimize the performance of your resources server for high-throughput rollout collection.
 
-For large-scale RL training, resources servers can receive thousands of concurrent requests. This guide covers NeMo Gym's built-in profiling tools and optimization patterns.
+**Goal**: Identify and fix performance bottlenecks in your resources server.
+
+**Prerequisites**: A working resources server ({doc}`/tutorials/creating-resource-server`)
 
 ---
 
-## Prerequisites
+For large-scale RL training, resources servers can receive thousands of concurrent requests. This guide covers NeMo Gym's built-in profiling tools and optimization patterns.
+
+## Additional Profiling Tools
 
 NeMo Gym includes [yappi](https://github.com/sumerc/yappi) (Yet Another Python Profiler), a CPU profiler that supports multithreaded and async code. For additional profiling tools:
 

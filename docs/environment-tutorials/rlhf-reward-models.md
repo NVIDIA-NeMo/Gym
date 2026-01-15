@@ -4,22 +4,27 @@
 
 Use trained reward models as environments for GRPO training to optimize against learned human preferences.
 
-::::{grid} 2
-:gutter: 3
+:::{card}
 
-:::{grid-item-card} {octicon}`clock;1em;` **Time**
-30-45 minutes
+**Goal**: Train with reward models instead of rule-based verification.
+
+^^^
+
+**In this tutorial, you will**:
+
+1. Train or load a Bradley-Terry reward model
+2. Configure the reward model environment
+3. Run GRPO training with learned preferences
+
 :::
 
-:::{grid-item-card} {octicon}`bookmark;1em;` **Prerequisites**
+:::{button-ref} multi-turn
+:color: secondary
+:outline:
+:ref-type: doc
 
-- Completed {doc}`/get-started/detailed-setup`
-- Access to a trained reward model (Bradley-Terry)
-- NeMo RL installed
-
+← Previous: Multi-Turn Environments
 :::
-
-::::
 
 :::{tip}
 **When to use reward models vs. LLM-as-judge:**

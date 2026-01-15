@@ -5,18 +5,10 @@ Quick-reference recipe for training models using the Nemotron Nano model family 
 
 **Nemotron Nano** is a family of efficient language models from NVIDIA designed for tool calling, reasoning, and general-purpose tasks. These models use hybrid architectures (Transformer + Mamba) or Mixture-of-Experts (MoE) for efficient training and inference.
 
-:::{card}
+**Use this page to**: select a model variant, check hardware requirements, and copy working launch commands.
 
-**Goal**: Select the right Nemotron Nano variant and launch training.
-
-^^^
-
-**In this guide, you will learn**:
-
-1. Available Nemotron Nano model variants
-2. Hardware requirements for each variant
-3. How to launch training with the appropriate configuration
-
+:::{tip}
+**New to NeMo Gym training?** Start with the {doc}`NeMo RL GRPO Tutorial <../tutorials/nemo-rl-grpo/index>` for a complete walkthrough before using this recipe.
 :::
 
 ---

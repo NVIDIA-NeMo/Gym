@@ -3,6 +3,12 @@
 
 Download JSONL datasets from Hugging Face Hub for NeMo Gym training.
 
+**Goal**: Download a dataset from Hugging Face Hub in JSONL format for training.
+
+**Prerequisites**: NeMo Gym installed ({doc}`/get-started/detailed-setup`)
+
+---
+
 ## Quick Start
 
 ```bash

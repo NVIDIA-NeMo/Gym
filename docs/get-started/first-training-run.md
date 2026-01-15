@@ -3,21 +3,19 @@
 
 This tutorial guides you through your first RL training run using NeMo Gym for task verification and Unsloth for efficient fine-tuning. By the end, you'll have a model that demonstrably improves at solving Sudoku puzzles.
 
-::::{grid} 2
-:gutter: 3
+:::{card}
 
-:::{grid-item-card} {octicon}`clock;1em;` **Time**
-30 minutes (Colab) | 60+ minutes (local)
+**Goal**: Train your first RL model using NeMo Gym verification and Unsloth.
+
+^^^
+
+**In this tutorial, you will**:
+
+1. Run a Colab notebook for Sudoku RL training
+2. Understand the training loop and metrics
+3. Evaluate before/after model performance
+
 :::
-
-:::{grid-item-card} {octicon}`bookmark;1em;` **Prerequisites**
-
-- Google account (for Colab path)
-- **OR** NVIDIA GPU with 16GB+ VRAM (for local path)
-
-:::
-
-::::
 
 :::{tip}
 **No prior NeMo Gym setup required.** The Colab notebook is self-contained. For local training, see [Local Training](#local-training-advanced) below.

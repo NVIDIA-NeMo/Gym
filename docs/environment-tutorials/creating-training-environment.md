@@ -3,10 +3,27 @@
 
 Implement verification logic, prepare training data, and connect to NeMo RL.
 
-| | |
-|--|--|
-| **Time** | 45-90 minutes |
-| **Prerequisites** | {doc}`/get-started/detailed-setup`, {doc}`/tutorials/creating-resource-server` |
+:::{card}
+
+**Goal**: Build a complete training environment with verification, data preparation, and NeMo RL integration.
+
+^^^
+
+**In this tutorial, you will**:
+
+1. Implement a `verify()` method to compute rewards
+2. Prepare training data with `ng_prepare_data`
+3. Collect rollouts and connect to NeMo RL
+
+:::
+
+:::{button-ref} /tutorials/creating-resource-server
+:color: secondary
+:outline:
+:ref-type: doc
+
+← Previous: Creating a Resource Server
+:::
 
 ```{mermaid}
 flowchart LR

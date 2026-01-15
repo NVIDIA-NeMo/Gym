@@ -1,10 +1,6 @@
 (infrastructure-index)=
 # Infrastructure
 
-```{warning}
-This article was generated and has not been reviewed. Content may change.
-```
-
 Learn how to deploy and scale NeMo Gym for production workloads.
 
 ## Overview

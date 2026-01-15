@@ -3,7 +3,11 @@
 
 Wrap existing Python functions and libraries as tools in your resources server.
 
-**Prerequisites**: Familiar with [Resources Server concepts](index.md) and basic FastAPI.
+**Goal**: Wrap Python functions as FastAPI tool endpoints in your resources server.
+
+**Prerequisites**: Familiar with {doc}`index` and basic FastAPI.
+
+---
 
 NeMo Gym tools are FastAPI endpoints. To integrate existing Python code:
 1. Define Pydantic schemas for input/output

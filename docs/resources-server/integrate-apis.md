@@ -3,6 +3,8 @@
 
 Connect external REST APIs, GraphQL endpoints, or web services as tools in your resources server.
 
+**Goal**: Add external API calls (REST, GraphQL) as tools in your resources server.
+
 **Prerequisites**: Complete {doc}`/get-started/detailed-setup`
 
 ---

@@ -3,31 +3,28 @@
 
 Build training environments where models make sequential tool calls, using results from previous calls to inform the next action.
 
-::::{grid} 2
-:gutter: 3
+:::{card}
 
-:::{grid-item-card} {octicon}`clock;1em;` **Time**
-30-45 minutes
+**Goal**: Build a multi-step environment where models make sequential tool calls.
+
+^^^
+
+**In this tutorial, you will**:
+
+1. Understand how multi-step tool-calling loops work
+2. Define tools that models can call sequentially
+3. Manage state across tool calls
+4. Verify multi-step rollouts
+
 :::
 
-:::{grid-item-card} {octicon}`bookmark;1em;` **Prerequisites**
+:::{button-ref} llm-as-judge
+:color: secondary
+:outline:
+:ref-type: doc
 
-- Completed {doc}`/get-started/detailed-setup`
-- Completed {doc}`/tutorials/creating-resource-server`
-- `OPENAI_API_KEY` environment variable set
-
+← Previous: LLM-as-a-Judge Verification
 :::
-
-::::
-
----
-
-## What You'll Learn
-
-- How multi-step tool-calling loops work in NeMo Gym
-- How to define tools that models can call sequentially
-- How to manage state across tool calls
-- How to verify multi-step rollouts
 
 ---
 

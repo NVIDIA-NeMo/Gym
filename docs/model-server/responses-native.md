@@ -1,10 +1,15 @@
 (model-server-responses-native)=
 
-# Responses-Native Models
+# Responses-Native vs Conversion
 
-Responses-native models use OpenAI's `/v1/responses` endpoint directly, without converting requests to Chat Completions format. This eliminates the conversion layer used by vLLM and Azure OpenAI backends.
+This page explains the difference between responses-native and conversion-based model server backends.
 
-**When to use**: You want to use OpenAI GPT models with the simplest integration path and lowest latency.
+## TL;DR
+
+- **Responses-native (OpenAI)**: Requests pass directly to `/v1/responses` — lowest latency, simplest path.
+- **Conversion (vLLM/Azure)**: Requests are converted to Chat Completions format — supports self-hosted models and training.
+- **Choose responses-native** for prototyping and evaluation with GPT models.
+- **Choose conversion** for training workflows that require token IDs.
 
 ---
 

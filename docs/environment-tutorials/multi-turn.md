@@ -3,21 +3,28 @@
 
 Train models on extended conversations where context accumulates across user/assistant exchanges.
 
-::::{grid} 2
-:gutter: 3
+:::{card}
 
-:::{grid-item-card} {octicon}`clock;1em;` **Time**
-30-45 minutes
+**Goal**: Build a multi-turn environment for conversational RL training.
+
+^^^
+
+**In this tutorial, you will**:
+
+1. Understand the difference between multi-turn and multi-step
+2. Run the calendar scheduling environment
+3. Implement custom verification for conversations
+4. Generate synthetic training data
+
 :::
 
-:::{grid-item-card} {octicon}`bookmark;1em;` **Prerequisites**
+:::{button-ref} multi-step
+:color: secondary
+:outline:
+:ref-type: doc
 
-- Completed {doc}`/get-started/detailed-setup`
-- Completed {doc}`/tutorials/creating-resource-server`
-
+← Previous: Multi-Step Environments
 :::
-
-::::
 
 ---
 

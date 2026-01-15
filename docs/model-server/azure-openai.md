@@ -1,11 +1,19 @@
 (model-server-azure-openai)=
 # Azure OpenAI Model Server
 
-Connect NeMo Gym to Azure-hosted OpenAI models for enterprise RL training workflows. The server wraps the `AsyncAzureOpenAI` client and exposes OpenAI-compatible endpoints for generating rollouts (model responses collected during training episodes).
+Connect NeMo Gym to Azure-hosted OpenAI models for enterprise RL training workflows. The server wraps the `AsyncAzureOpenAI` client and exposes OpenAI-compatible endpoints for generating rollouts.
 
-**Use Azure OpenAI when you need**: Enterprise compliance, data residency controls, Azure subscription integration, or private network deployment.
+**Goal**: Connect NeMo Gym to Azure OpenAI for enterprise deployments.
 
-**Use standard [OpenAI Model Server](openai.md) when**: You don't need Azure-specific features and want simpler setup.
+**Prerequisites**: Azure subscription with OpenAI Service access, deployed model
+
+**Source**: `responses_api_models/azure_openai_model/`
+
+:::{tip}
+**Use Azure OpenAI when you need**: Enterprise compliance, data residency controls, or private network deployment.
+
+**Use standard {doc}`openai` when**: You don't need Azure-specific features and want simpler setup.
+:::
 
 ---
 

@@ -3,10 +3,11 @@
 
 Format and validate JSONL datasets for NeMo Gym training using `ng_prepare_data`.
 
-## Prerequisites
+**Goal**: Validate data format and prepare datasets for training.
 
-- **NeMo Gym installed** — See {doc}`/get-started/detailed-setup`
-- **Familiarity with resources servers** — See {doc}`/resources-server/index`
+**Prerequisites**:
+- NeMo Gym installed ({doc}`/get-started/detailed-setup`)
+- Familiarity with resources servers ({doc}`/resources-server/index`)
 
 ---
 
