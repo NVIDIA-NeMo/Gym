@@ -1,153 +1,151 @@
 (training-nemo-customizer)=
 # NeMo Customizer
 
-```{note}
-This page is a stub. Content is being developed.
+:::{admonition} 🚧 Integration Not Yet Available
+:class: warning
 
-**Blocker**: External service dependency. See [GitHub Issue #550](https://github.com/NVIDIA-NeMo/Gym/issues/550) for coordination with NeMo Customizer team.
-```
+NeMo Customizer integration is blocked by an external service dependency.
 
-Train models with NeMo Gym using [NeMo Customizer](https://docs.nvidia.com/nemo/nemo-microservices/latest/), NVIDIA's managed fine-tuning microservice.
+**Status**: No integration code exists in NeMo Gym. See [GitHub Issue #550](https://github.com/NVIDIA-NeMo/Gym/issues/550).
 
-:::{card}
-
-**Goal**: Fine-tune models using NeMo Customizer's API with NeMo Gym rollouts.
-
-^^^
-
-**In this tutorial, you will**:
-
-1. Generate training data using NeMo Gym rollout collection
-2. Configure NeMo Customizer for RL fine-tuning
-3. Launch and monitor training via the Customizer API
-4. Export and deploy the fine-tuned model
-
+**What you CAN do now**: Collect {term}`rollouts <Rollout>` and prepare training data for manual upload.
 :::
 
 ---
 
-## Before You Begin
+## What Is NeMo Customizer?
 
-- ✅ **Access**: NeMo Customizer API credentials
-- ✅ **Software**: Python 3.10+, NeMo Gym installed
-- ✅ **Data**: Training dataset prepared (or use NeMo Gym rollout collection)
+[NeMo Customizer](https://docs.nvidia.com/nemo/nemo-microservices/latest/) is NVIDIA's managed fine-tuning microservice. It provides:
+
+- Managed infrastructure—no GPU cluster setup required
+- NVIDIA-optimized training recipes
+- API-driven workflow for automation
+- Built-in checkpointing and model versioning
+
+## Integration Status
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Rollout collection | ✅ Available | Use `ng_collect_rollouts` |
+| Training data preparation | ✅ Available | Use `ng_prepare_data` |
+| NeMo Customizer API client | ❌ Not implemented | Requires external coordination |
+| Data upload to Customizer | ❌ Not implemented | Blocked on API access |
+| Training job management | ❌ Not implemented | Blocked on API access |
+
+## What You Can Do Now
+
+While NeMo Customizer integration is pending, you can collect and prepare training data using existing NeMo Gym tools. The output is compatible with most training frameworks and can be manually uploaded to NeMo Customizer.
+
+### Complete Example: Collect Rollouts for Training
+
+This example uses the `example_single_tool_call` resource server included with NeMo Gym:
 
 ```bash
-pip install nemo-gym requests
+# Step 1: Start servers (in terminal 1)
+config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml"
+ng_run "+config_paths=[${config_paths}]"
 ```
 
-## Why NeMo Customizer + NeMo Gym?
-
-**NeMo Customizer** provides enterprise-grade fine-tuning:
-- Managed infrastructure—no GPU cluster setup required
-- NVIDIA-optimized training recipes for maximum efficiency
-- API-driven workflow for automation and CI/CD integration
-- Built-in checkpointing, monitoring, and model versioning
-
-**NeMo Gym** complements Customizer by providing:
-- Rollout collection for generating high-quality training data
-- Verifiers for computing accurate task-specific rewards
-- Diverse training environments (math, code, tool calling, and more)
-
-## Getting Started
-
-<!-- TODO: Add quick start command or notebook link -->
-
-```python
-import requests
-from nemo_gym import RolloutCollectionHelper
-
-# Step 1: Collect rollouts with NeMo Gym
-# TODO: Add rollout collection code
-
-# Step 2: Submit to NeMo Customizer API
-# TODO: Add API submission code
+```bash
+# Step 2: Collect rollouts (in terminal 2)
+ng_collect_rollouts +agent_name=example_single_tool_call_simple_agent \
+    +input_jsonl_fpath=resources_servers/example_single_tool_call/data/example.jsonl \
+    +output_jsonl_fpath=results/rollouts.jsonl \
+    +limit=10 \
+    +num_repeats=2
 ```
 
-## Integration Pattern
-
-### Rollout Collection → Training Data
-
-Use NeMo Gym to collect and verify rollouts, then format them for Customizer:
-
-<!-- TODO: Document rollout collection to Customizer data format -->
-
-```python
-# Example: Collecting rollouts and formatting for Customizer
-# TODO: Add integration code
-```
-
-### API Configuration
-
-<!-- TODO: Document Customizer API configuration -->
-
-```python
-# NeMo Customizer API configuration
-customizer_config = {
-    "api_endpoint": "https://your-customizer-endpoint",
-    "model": "nemotron-nano",
-    # TODO: Add configuration details
+**Output format** (JSONL, one rollout per line):
+```json
+{
+  "reward": 1.0,
+  "output": [
+    {"role": "user", "content": "What's the weather in Paris?"},
+    {"role": "assistant", "tool_calls": [...]},
+    {"role": "tool", "content": "22°C, sunny"},
+    {"role": "assistant", "content": "The weather in Paris is 22°C and sunny."}
+  ],
+  "responses_create_params": {...}
 }
 ```
 
-## Training Workflow
+### Prepare Data for Training
 
-### 1. Prepare Training Data
+Format rollouts for {term}`SFT (Supervised Fine-Tuning)` or {term}`DPO (Direct Preference Optimization)`:
 
-<!-- TODO: Document data preparation from Gym rollouts -->
+```bash
+ng_prepare_data "+config_paths=[your_config.yaml]" \
+    +output_dirpath=data/prepared \
+    +mode=train_preparation
+```
 
-### 2. Launch Training Job
-
-<!-- TODO: Document API call to launch training -->
-
-### 3. Monitor Progress
-
-<!-- TODO: Document monitoring endpoints -->
-
-### 4. Export Model
-
-<!-- TODO: Document model export process -->
-
-## Supported Features
-
-| Feature | Status | Description |
-|---------|--------|-------------|
-| SFT | TBD | Supervised fine-tuning from rollouts |
-| LoRA | TBD | Parameter-efficient fine-tuning |
-| Full fine-tuning | TBD | Full model weight updates |
-
-## Complete Example
-
-<!-- TODO: Add end-to-end working example -->
-
-## Troubleshooting
-
-<!-- TODO: Add common issues and solutions -->
+**Full documentation**: {ref}`Offline Training Tutorial <offline-training-w-rollouts>`
 
 ---
 
-## What's Next?
+## Unblocking Requirements
 
-After completing this tutorial, explore these options:
+To complete NeMo Customizer integration:
+
+1. **API access**: Coordinate with NeMo Customizer team
+2. **Integration code**: Create client wrapper for Customizer API
+3. **Example workflow**: End-to-end example from rollouts to deployed model
+4. **Authentication docs**: Document credential management
+
+Track progress: [GitHub Issue #550](https://github.com/NVIDIA-NeMo/Gym/issues/550)
+
+---
+
+## Alternative Training Options
+
+Use these available training frameworks instead of NeMo Customizer:
 
 ::::{grid} 1 1 2 2
 :gutter: 3
 
-:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Use Other Training Environments
-:link: https://github.com/NVIDIA-NeMo/Gym#-available-resource-servers
-
-Browse available resource servers on GitHub to find other training environments.
-+++
-{bdg-secondary}`github` {bdg-secondary}`resource-servers`
-:::
-
-:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` NeMo RL with GRPO
+:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` NeMo RL
 :link: ../tutorials/nemo-rl-grpo/index
 :link-type: doc
 
-Multi-step tool calling with GRPO using NeMo RL.
+Multi-node {term}`GRPO (Group Relative Policy Optimization)` training for production workloads.
 +++
-{bdg-secondary}`rl` {bdg-secondary}`grpo`
+{bdg-primary}`recommended` {bdg-secondary}`production`
+:::
+
+:::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Unsloth
+:link: ../tutorials/unsloth-training
+:link-type: doc
+
+Fast single-GPU training for rapid prototyping.
++++
+{bdg-secondary}`fast` {bdg-secondary}`prototyping`
+:::
+
+:::{grid-item-card} {octicon}`file;1.5em;sd-mr-1` Offline Training
+:link: ../tutorials/offline-training-w-rollouts
+:link-type: doc
+
+{term}`SFT <SFT (Supervised Fine-Tuning)>` and {term}`DPO <DPO (Direct Preference Optimization)>` training from collected rollouts.
++++
+{bdg-secondary}`sft` {bdg-secondary}`dpo`
+:::
+
+:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Browse Resource Servers
+:link: https://github.com/NVIDIA-NeMo/Gym#-available-resource-servers
+
+Find training environments on GitHub.
++++
+{bdg-secondary}`github` {bdg-secondary}`environments`
 :::
 
 ::::
+
+---
+
+## Related Resources
+
+- {ref}`Rollout Collection Tutorial <gs-collecting-rollouts>` - Generate training data
+- {ref}`Offline Training Tutorial <offline-training-w-rollouts>` - SFT and DPO from rollouts
+- [NeMo Customizer Documentation](https://docs.nvidia.com/nemo/nemo-microservices/latest/) - Official service docs
+- [GitHub Issue #550](https://github.com/NVIDIA-NeMo/Gym/issues/550) - Integration tracking

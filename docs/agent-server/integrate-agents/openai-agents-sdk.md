@@ -2,76 +2,72 @@
 # OpenAI Agents SDK Integration
 
 ```{note}
-This page is a stub. Content is being developed. See [GitHub Issue #520](https://github.com/NVIDIA-NeMo/Gym/issues/520) for details.
+This page documents the current, code-backed status of OpenAI Agents SDK integration in NeMo Gym.
 ```
-
-Integrate agents built with the [OpenAI Agents SDK](https://github.com/openai/openai-agents-python) into NeMo Gym for RL training.
 
 ---
 
-## Overview
+**Purpose**: Describe the current OpenAI Agents SDK integration status and the agent server interface in NeMo Gym.
 
-The OpenAI Agents SDK provides:
-- Structured agent workflows
-- Built-in tool handling
-- Conversation state management
+**Audience**: Contributors integrating external agents into NeMo Gym.
 
-## Prerequisites
+## Key facts (code-backed)
 
-```bash
-pip install openai-agents
-```
+- The repository has no code references to `openai_agents` or the OpenAI Agents SDK; the references are in documentation files.
+- Agent servers subclass `SimpleResponsesAPIAgent`. That base class registers the `/v1/responses` and `/run` endpoints.
+- Agent servers in `responses_api_agents/` are `simple_agent`, `aviary_agent`, and `mini_swe_agent`.
+- Gym depends on `openai<=2.6.1`. The dependency list does not include the OpenAI Agents SDK package.
 
-## Integration Architecture
+## Integration surface in NeMo Gym
 
-```
-NeMo Gym Agent Server
-    └── OpenAI Agents SDK Agent
-            ├── Model calls → NeMo Gym Model Server
-            └── Tool calls → NeMo Gym Resources Server
-```
-
-## Configuration
-
-<!-- TODO: Add configuration example -->
-
-## Implementation
-
-### Wrapping an OpenAI SDK Agent
+`SimpleResponsesAPIAgent` is the base interface an external adapter must provide. It registers the two agent endpoints. It also requires `responses()` and `run()` implementations.
 
 ```python
-from openai_agents import Agent
-from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
+class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, SimpleServer):
+    config: BaseResponsesAPIAgentConfig
 
-class OpenAIAgentWrapper(SimpleResponsesAPIAgent):
-    def model_post_init(self, context):
-        self.sdk_agent = Agent(
-            name="my_agent",
-            instructions="...",
-            tools=[...]
-        )
+    def setup_webserver(self) -> FastAPI:
+        app = FastAPI()
+        self.setup_session_middleware(app)
+        app.post("/v1/responses")(self.responses)
+        app.post("/run")(self.run)
+        return app
 
-    async def run(self, body: BaseRunRequest) -> BaseVerifyResponse:
-        # Route SDK agent through NeMo Gym infrastructure
+    @abstractmethod
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        pass
+
+    @abstractmethod
+    async def run(self, body: BaseRunRequest = Body()) -> BaseVerifyResponse:
         pass
 ```
 
-### Tool Routing
+## Reference behavior from `simple_agent`
 
-<!-- TODO: Document how to route SDK tool calls to NeMo Gym resources server -->
+The `simple_agent` implementation shows how the agent server orchestrates model calls, tool calls, and termination.
 
-### State Management
+```python
+model_response = await self.server_client.post(
+    server_name=self.config.model_server.name,
+    url_path="/v1/responses",
+    json=new_body,
+    cookies=model_server_cookies,
+)
+...
+api_response = await self.server_client.post(
+    server_name=self.config.resources_server.name,
+    url_path=f"/{output_function_call.name}",
+    json=json.loads(output_function_call.arguments),
+    cookies=resources_server_cookies,
+)
+```
 
-<!-- TODO: Document conversation state handling -->
+Other verified behaviors in `simple_agent`:
 
-## Example
+- Stops when the model produces assistant messages without tool calls.
+- Stops when `max_steps` exists and the step counter reaches that value.
+- Stops when the model response reports `max_output_tokens` in `incomplete_details`.
 
-<!-- TODO: Add complete working example -->
+## What this means for OpenAI Agents SDK users
 
-## Limitations
-
-<!-- TODO: Document any limitations or unsupported features -->
-
-## Troubleshooting
-
-<!-- TODO: Add common issues and solutions -->
+The repository ships the agent servers under `responses_api_agents/`. To integrate an OpenAI Agents SDK agent, add a new agent server that conforms to `SimpleResponsesAPIAgent` and follow the request/response patterns in `responses_api_agents/simple_agent/app.py`.

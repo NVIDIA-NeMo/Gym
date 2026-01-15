@@ -1,11 +1,36 @@
 (model-server-openai)=
 # OpenAI Model Server
 
-```{warning}
-This article has not been reviewed by a developer SME. Content may change.
+The OpenAI model server connects NeMo Gym to [OpenAI's API](https://platform.openai.com/docs/api-reference), enabling GPT models with native function calling for agentic workflows.
+
+**Source**: `responses_api_models/openai_model/`
+
+:::{tip}
+OpenAI is ideal for **prototyping** and **baseline comparisons**. For RL training that requires token-level information, use {doc}`vllm`.
+:::
+
+---
+
+## Quick Start
+
+Verify your OpenAI connection works:
+
+```python
+import openai
+
+client = openai.OpenAI(
+    api_key="sk-your-api-key",
+    base_url="https://api.openai.com/v1"
+)
+
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Hello"}]
+)
+print(response.choices[0].message.content)
 ```
 
-The OpenAI model server (`responses_api_models/openai_model/`) connects NeMo Gym to OpenAI's API, providing access to GPT models with native function calling support.
+If this returns a response, you're ready to configure NeMo Gym.
 
 ---
 
@@ -20,19 +45,23 @@ The OpenAI model server (`responses_api_models/openai_model/`) connects NeMo Gym
 | **Latest models** | ✅ Immediate access | Depends on open weights |
 | **Rate limits** | Yes (varies by tier) | No (self-hosted) |
 
-**Use OpenAI when:**
+:::::{tab-set}
 
-- Quick prototyping and development
-- Testing environment design before GPU investment
-- Baseline comparisons with frontier models
-- Budget allows pay-per-token pricing
+::::{tab-item} Use OpenAI
+- **Prototyping**: Quick experiments without GPU setup
+- **Baseline comparisons**: Test against frontier models
+- **Environment design**: Validate workflows before infrastructure investment
+- **Pay-per-use**: Budget allows per-token pricing
+::::
 
-**Use vLLM when:**
+::::{tab-item} Use vLLM
+- **RL Training**: Policy gradient methods (GRPO, PPO) require token IDs
+- **Data privacy**: On-premise deployment for sensitive data
+- **High volume**: Large-scale rollout collection (many model responses)
+- **Custom models**: Fine-tuned or open-weight models
+::::
 
-- Training with policy gradient methods (GRPO, PPO)
-- Data privacy requirements
-- High-volume rollout collection
-- Custom or fine-tuned models
+:::::
 
 ---
 
@@ -70,7 +99,7 @@ policy_model_name: gpt-4o-mini
 
 ## Supported Models
 
-Any OpenAI model with function calling support:
+Any OpenAI model with [function calling support](https://platform.openai.com/docs/guides/function-calling):
 
 | Model | Function Calling | Recommended Use |
 |-------|------------------|-----------------|
@@ -79,6 +108,10 @@ Any OpenAI model with function calling support:
 | `gpt-4-turbo` | ✅ | Complex reasoning |
 | `o1` / `o1-mini` | ✅ | Advanced reasoning tasks |
 | `o3-mini` | ✅ | Fast reasoning with tool use |
+
+:::{note}
+Model availability and capabilities change. Check [OpenAI's model documentation](https://platform.openai.com/docs/models) for current information.
+:::
 
 ---
 
@@ -107,6 +140,33 @@ OpenAI's API has important limitations for RL training:
 
 :::{note}
 OpenAI is best suited for **prototyping and evaluation**. For RL training that requires token-level information, use {doc}`vllm`.
+:::
+
+---
+
+## Production Considerations
+
+:::{dropdown} Rate Limit Handling
+:icon: clock
+
+OpenAI enforces rate limits that vary by tier. For high-volume workloads:
+
+- Implement exponential backoff in your rollout collection
+- Monitor `429` responses and adjust `num_samples_in_parallel`
+- Consider upgrading your OpenAI usage tier for higher limits
+
+:::
+
+:::{dropdown} API Key Security
+:icon: shield
+
+Best practices for production:
+
+- Store keys in environment variables or secret managers (not in code)
+- Use project-scoped keys when possible (limits blast radius)
+- Rotate keys periodically
+- Monitor usage via OpenAI dashboard for anomalies
+
 :::
 
 ---
@@ -150,5 +210,7 @@ Reduce `num_samples_in_parallel` in rollout collection or implement exponential 
 
 ## See Also
 
-- {doc}`vllm` — Self-hosted inference with training support
-- {doc}`azure-openai` — Enterprise Azure deployment
+- {doc}`vllm` — Self-hosted inference with full training support
+- {doc}`azure-openai` — Enterprise Azure deployment with managed endpoints
+- [OpenAI API Reference](https://platform.openai.com/docs/api-reference) 🔗
+- [OpenAI Function Calling Guide](https://platform.openai.com/docs/guides/function-calling) 🔗

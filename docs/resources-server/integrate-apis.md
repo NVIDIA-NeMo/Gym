@@ -1,51 +1,84 @@
 (resources-server-apis)=
-# Integrate Existing APIs
+# Integrate External APIs
 
-```{warning}
-This article has not been reviewed by a developer SME. Content may change.
-```
+Connect external REST APIs, GraphQL endpoints, or web services as tools in your resources server.
 
-Connect external REST APIs, GraphQL endpoints, or other web services as tools in your resources server.
+**Prerequisites**: Complete {doc}`/get-started/detailed-setup`
 
 ---
 
 ## Overview
 
-External API integration allows models to access real-world data and services. The pattern involves:
+External API integration allows models to call real-world services during rollouts (model inference + tool execution cycles). The pattern:
 
-1. Configure API credentials via `env.yaml`
-2. Create an HTTP client (use `requests` for simplicity)
-3. Define request/response schemas that map to the API
-4. Handle authentication, errors, and rate limiting
+1. Add API credentials to `env.yaml` (in repo root, gitignored)
+2. Create a config class extending `BaseResourcesServerConfig`
+3. Define Pydantic request/response schemas
+4. Register tool endpoints in `setup_webserver()`
+5. Implement async tool methods with error handling
+
+:::{warning}
+Store API credentials in `env.yaml` (gitignored) or environment variables. Never commit secrets to version control.
+:::
 
 ---
 
 ## Example: Google Search Integration
 
-The `google_search` resources server demonstrates a complete API integration pattern. It provides two tools:
+The `google_search` resources server demonstrates a complete API integration. It provides:
 
-| Tool | Description |
-|------|-------------|
-| `search` | Query Google and return structured results |
-| `browse` | Fetch and parse webpage content |
+| Tool | Endpoint | Description |
+|------|----------|-------------|
+| `search` | `/search` | Query Google Programmable Search Engine |
+| `browse` | `/browse` | Fetch and extract webpage content using [trafilatura](https://trafilatura.readthedocs.io/) |
 
 ### Configuration
 
-Set API credentials in `env.yaml`:
+Add credentials to `env.yaml`:
 
 ```yaml
 google_search:
   resources_servers:
     google_search:
       google_api_key: <your_api_key>
-      google_cx: <your_cx_engine>
+      google_cx: <your_search_engine_id>
 ```
 
 Get credentials from [Google Programmable Search Engine](https://developers.google.com/custom-search/v1/using_rest).
 
+### Server Implementation
+
+The server extends `SimpleResourcesServer` and registers tool endpoints:
+
+```python
+from fastapi import FastAPI
+
+from nemo_gym.base_resources_server import (
+    BaseResourcesServerConfig,
+    SimpleResourcesServer,
+)
+
+
+class GoogleSearchResourcesServerConfig(BaseResourcesServerConfig):
+    google_api_key: str
+    google_cx: str
+
+
+class GoogleSearchResourcesServer(SimpleResourcesServer):
+    config: GoogleSearchResourcesServerConfig
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        app.post("/search")(self.search)
+        app.post("/browse")(self.browse)
+        return app
+```
+
+Reference: `resources_servers/google_search/app.py:33-35,90-100`
+
 ### Tool Definitions
 
-These tools can be inherited by other environments:
+Tools are defined in the dataset JSONL file (each row's `responses_create_params.tools` array) or in agent configuration. The tool `name` must match the endpoint path:
 
 ```python
 tools = [
@@ -69,7 +102,7 @@ tools = [
     {
         "type": "function",
         "name": "browse",
-        "description": "Returns the cleaned content of a webpage. If the page is too long, it will be truncated to 10,000 words.",
+        "description": "Returns the cleaned content of a webpage. Long pages are truncated.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -86,6 +119,10 @@ tools = [
 ]
 ```
 
+:::{note}
+Tool `name` must match the FastAPI endpoint path (without leading `/`).
+:::
+
 ### Running the Example
 
 ```bash
@@ -95,7 +132,7 @@ resources_servers/google_search/configs/google_search.yaml"
 ng_run "+config_paths=[$config_paths]"
 
 ng_collect_rollouts +agent_name=simple_agent \
-    +input_jsonl_fpath=data/Nemotron-RL-knowledge-web_search-mcqa.jsonl \
+    +input_jsonl_fpath=resources_servers/google_search/data/example.jsonl \
     +output_jsonl_fpath=results/rollouts.jsonl \
     +limit=1
 ```
@@ -104,14 +141,17 @@ ng_collect_rollouts +agent_name=simple_agent \
 
 ## Basic REST API Integration
 
-The simplest approach uses the synchronous `requests` library, which works well for most use cases:
+Use the synchronous `requests` library for simple integrations:
 
 ```python
 import requests
+from fastapi import FastAPI
 from pydantic import BaseModel
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
     SimpleResourcesServer,
 )
 
@@ -132,6 +172,11 @@ class SearchResponse(BaseModel):
 class MyAPIResourcesServer(SimpleResourcesServer):
     config: MyAPIConfig
 
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        app.post("/search")(self.search)
+        return app
+
     async def search(self, body: SearchRequest) -> SearchResponse:
         response = requests.get(
             f"{self.config.base_url}/search",
@@ -140,12 +185,15 @@ class MyAPIResourcesServer(SimpleResourcesServer):
             timeout=30,
         )
         response.raise_for_status()
-        data = response.json()
-        return SearchResponse(results=data["results"])
+        return SearchResponse(results=response.json()["results"])
+
+    async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+        # Implement verification logic
+        return BaseVerifyResponse(**body.model_dump(), reward=1.0)
 ```
 
-:::{tip}
-For high-concurrency scenarios (thousands of concurrent requests), consider using `aiohttp` for true async HTTP. See the FAQ section on async HTTP backends for details on when this matters.
+:::{note}
+This example uses synchronous `requests` inside an `async def`. This blocks the event loop during the HTTP call, which is acceptable for low-to-moderate concurrency. For high-concurrency scenarios (thousands of concurrent requests), use `aiohttp`—NeMo Gym provides a global aiohttp client at `nemo_gym/server_utils.py:83-98`.
 :::
 
 ---
@@ -154,29 +202,29 @@ For high-concurrency scenarios (thousands of concurrent requests), consider usin
 
 :::::{tab-set}
 
-::::{tab-item} API Key
-
+::::{tab-item} Bearer Token
 ```python
-class MyResourcesServerConfig(BaseResourcesServerConfig):
+class MyConfig(BaseResourcesServerConfig):
     api_key: str
 
 # In your tool method:
 headers = {"Authorization": f"Bearer {self.config.api_key}"}
+response = requests.get(url, headers=headers)
 ```
-
 ::::
 
 ::::{tab-item} Query Parameter
-
 ```python
-# Some APIs use query parameter authentication
+# Google APIs use query parameter authentication
 params = {
-    "key": self.config.api_key,
-    "cx": self.config.search_engine_id,
+    "key": self.config.google_api_key,
+    "cx": self.config.google_cx,
     "q": body.query,
 }
+response = requests.get(url, params=params)
 ```
 
+Reference: `resources_servers/google_search/app.py:103-107`
 ::::
 
 :::::
@@ -204,8 +252,7 @@ async def search(self, body: SearchRequest) -> SearchResponse:
             logger.warning("Rate limited, returning empty results")
             return SearchResponse(results=[])
         response.raise_for_status()
-        data = response.json()
-        return SearchResponse(results=data["results"])
+        return SearchResponse(results=response.json()["results"])
     except requests.RequestException as e:
         logger.error(f"API error: {e}")
         return SearchResponse(results=[])
@@ -215,22 +262,31 @@ async def search(self, body: SearchRequest) -> SearchResponse:
 
 ## Environment Inheritance
 
-APIs integrated into one resources server can be reused by others. The `google_search` tools are available for inheritance:
+Inherit from existing resources servers to reuse their tools:
 
 ```python
-from resources_servers.google_search.app import GoogleSearchResourcesServer
+from resources_servers.google_search.app import (
+    GoogleSearchResourcesServer,
+    GoogleSearchVerifyRequest,
+    GoogleSearchVerifyResponse,
+)
 
 
 class MyCustomServer(GoogleSearchResourcesServer):
     """Inherit search and browse tools, add custom verification."""
 
-    async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
-        # Custom verification using search results
-        ...
+    async def verify(self, body: GoogleSearchVerifyRequest) -> GoogleSearchVerifyResponse:
+        # Use inherited search/browse, add custom logic
+        return GoogleSearchVerifyResponse(**body.model_dump(), reward=1.0, parsed_option="A")
 ```
+
+Reference: `resources_servers/google_search/app.py:59-63`
 
 ---
 
-## Source Code
+## Related
 
-For the complete implementation, see `resources_servers/google_search/`.
+- {doc}`./index` — Resources server overview
+- {doc}`./integrate-python-tools` — Integrate Python libraries as tools
+- {doc}`./containerize` — Package resources servers for deployment
+- `resources_servers/google_search/` — Complete reference implementation

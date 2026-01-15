@@ -1,28 +1,27 @@
 (gs-first-training-run)=
 # First Training Run
 
-```{warning}
-This article was generated and has not been reviewed. Content may change.
-```
-
-This tutorial walks you through your first complete RL training run with NeMo Gym—from collected rollouts to a measurably improved model.
+This tutorial guides you through your first RL training run using NeMo Gym for task verification and Unsloth for efficient fine-tuning. By the end, you'll have a model that demonstrably improves at solving Sudoku puzzles.
 
 ::::{grid} 2
 :gutter: 3
 
 :::{grid-item-card} {octicon}`clock;1em;` **Time**
-30-60 minutes
+30 minutes (Colab) | 60+ minutes (local)
 :::
 
 :::{grid-item-card} {octicon}`bookmark;1em;` **Prerequisites**
 
-- Completed {doc}`rollout-collection`
-- Single GPU with 16GB+ VRAM
-- Google account (for Colab)
+- Google account (for Colab path)
+- **OR** NVIDIA GPU with 16GB+ VRAM (for local path)
 
 :::
 
 ::::
+
+:::{tip}
+**No prior NeMo Gym setup required.** The Colab notebook is self-contained. For local training, see [Local Training](#local-training-advanced) below.
+:::
 
 ---
 
@@ -31,19 +30,20 @@ This tutorial walks you through your first complete RL training run with NeMo Gy
 | Component | Value |
 |-----------|-------|
 | **Model** | Qwen-2.5 3B |
-| **Compute** | Single GPU (T4/L4/A10 or better) |
+| **Task** | Sudoku puzzle solving |
+| **Compute** | Single GPU (Colab T4 or local GPU with 16GB+ VRAM) |
 | **Framework** | [Unsloth](https://github.com/unslothai/unsloth) |
-| **Algorithm** | GRPO |
+| **Algorithm** | GRPO (Group Relative Policy Optimization) |
 
 :::{tip}
-**Why Unsloth?** Unsloth provides 2-5× faster training with 70% less memory, making it ideal for single-GPU experimentation. For production multi-node training, see the {doc}`/tutorials/nemo-rl-grpo/index` tutorial.
+**Why Unsloth?** Unsloth provides optimized memory usage, making it possible to train on free Colab T4 GPUs. For production multi-node training, see {doc}`/tutorials/nemo-rl-grpo/index`.
 :::
 
 ---
 
 ## Interactive Notebook (Recommended)
 
-The fastest path to your first trained model is our interactive Colab notebook. It handles all setup and runs end-to-end in about 30 minutes on a free T4 GPU.
+The Colab notebook is self-contained—it installs dependencies, downloads the model, and runs training in ~30 minutes on a free T4 GPU.
 
 :::{button-link} https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/nemo_gym_sudoku.ipynb
 :color: primary
@@ -52,46 +52,76 @@ The fastest path to your first trained model is our interactive Colab notebook. 
 Open in Google Colab
 :::
 
-The notebook demonstrates:
+**What the notebook does**:
 
-1. **Environment**: Sudoku puzzle solving with NeMo Gym verification
-2. **Training**: GRPO with Unsloth's optimized implementation
-3. **Evaluation**: Before/after comparison showing measurable improvement
+1. Installs Unsloth and NeMo Gym dependencies
+2. Loads Qwen-2.5 3B with LoRA adapters
+3. Trains on Sudoku puzzles using GRPO with automatic verification
+4. Shows before/after accuracy comparison
+
+**Expected outcome**: After training, model accuracy on Sudoku puzzles should noticeably improve. Exact results vary by random seed and runtime conditions.
 
 ---
 
 ## What You'll Learn
 
-By completing this tutorial, you'll understand the core RL training loop with NeMo Gym:
+By completing this tutorial, you'll understand the core RL training loop:
 
 ```{mermaid}
 flowchart LR
-    A[Training Data] --> B[Model Generates Response]
-    B --> C[Gym Verifies Response]
-    C --> D[Compute Reward]
-    D --> E[Update Model via GRPO]
+    A[Sudoku Puzzle] --> B[Model Generates Solution]
+    B --> C[Verifier Checks Solution]
+    C --> D[Reward: 1.0 or 0.0]
+    D --> E[GRPO Updates Model]
     E --> B
 ```
 
-**Key concepts covered**:
+**How verification works**: NeMo Gym's `reasoning_gym` integration automatically verifies solutions:
 
-- **Reward signal**: How NeMo Gym's `verify()` function provides training signal
-- **GRPO algorithm**: Group Relative Policy Optimization for efficient RL
-- **LoRA fine-tuning**: Memory-efficient adaptation of large models
+```python
+# Simplified verification flow (handled by the notebook)
+score_fn = reasoning_gym.get_score_answer_fn("sudoku")
+reward = score_fn(answer=model_answer, entry=puzzle_entry)
+# reward = 1.0 if correct, 0.0 if incorrect
+```
+
+**Key concepts**:
+
+- **Reward signal**: Binary verification (correct/incorrect) drives model improvement
+- **GRPO**: Groups responses and updates based on relative performance within the group
+- **LoRA**: Trains adapter weights instead of full model, significantly reducing memory requirements
 
 ---
 
+(local-training-advanced)=
 ## Local Training (Advanced)
 
-If you prefer to run training locally instead of using Colab, install Unsloth and follow the [NeMo Gym integration guide](https://docs.unsloth.ai/models/nemotron-3#reinforcement-learning--nemo-gym) in the Unsloth documentation.
+Run training locally with an NVIDIA GPU (16GB+ VRAM recommended).
+
+### Setup
 
 ```bash
-# Install Unsloth (requires CUDA)
-pip install unsloth
+# Create environment and install dependencies
+pip install unsloth reasoning_gym
+
+# Verify GPU is available
+python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
 ```
 
-:::{note}
-Local training requires an NVIDIA GPU with CUDA support. The Colab notebook is recommended for first-time users.
+### Run Training
+
+Download and run the notebook locally, or follow the [Unsloth NeMo Gym integration guide](https://docs.unsloth.ai/models/nemotron-3#reinforcement-learning--nemo-gym) for custom configurations.
+
+```bash
+# Download the notebook
+wget https://raw.githubusercontent.com/unslothai/notebooks/main/nb/nemo_gym_sudoku.ipynb
+
+# Run with Jupyter
+jupyter notebook nemo_gym_sudoku.ipynb
+```
+
+:::{warning}
+**Memory requirements**: Qwen-2.5 3B with LoRA requires ~10GB VRAM. If you encounter OOM errors, reduce `per_device_train_batch_size` in the notebook.
 :::
 
 ---

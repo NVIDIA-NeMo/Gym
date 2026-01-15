@@ -1,24 +1,20 @@
 (env-multi-node-docker)=
-# Multi-Node Docker Instances
+# Multi-Node Deployment with Containers
 
-```{warning}
-This article was generated and has not been reviewed. Content may change.
-```
-
-Deploy NeMo Gym environments across multiple Docker instances for scalable rollout collection.
+Scale NeMo Gym environments across multiple machines using container orchestration.
 
 ::::{grid} 2
 :gutter: 3
 
 :::{grid-item-card} {octicon}`clock;1em;` **Time**
-30-60 minutes
+20-40 minutes
 :::
 
 :::{grid-item-card} {octicon}`bookmark;1em;` **Prerequisites**
 
 - Completed {doc}`/get-started/detailed-setup`
-- Docker and Docker Compose installed
-- Multiple machines or VMs (for true multi-node)
+- Docker installed on all nodes
+- Network connectivity between nodes
 
 :::
 
@@ -28,245 +24,382 @@ Deploy NeMo Gym environments across multiple Docker instances for scalable rollo
 
 ## Overview
 
-Multi-node deployment distributes environment execution across multiple Docker containers, enabling:
+NeMo Gym supports two deployment approaches for scaling beyond a single machine:
 
-- **Horizontal scaling** — Add workers to increase throughput
-- **GPU distribution** — Spread GPU workloads across machines
-- **Fault isolation** — Worker failures don't crash the head node
+| Approach | Use Case | Orchestration |
+|----------|----------|---------------|
+| **Standalone containers** | Running environments at scale without training | Manual or Docker Compose |
+| **NeMo RL integration** | Production training with GRPO, DPO, etc. | Slurm + Ray (automatic) |
 
-This guide covers Docker Compose-based deployment. Kubernetes orchestration documentation is coming soon.
+This guide covers standalone container deployment. For training workflows, see the {doc}`/tutorials/nemo-rl-grpo/index` tutorial.
 
----
+:::{dropdown} Terminology
+:icon: book
 
-## When to Use Multi-Node
+**Rollout**
+: A complete interaction sequence between the model and environment—from initial prompt through tool calls to final reward.
 
-Use multi-node deployment when:
+**GRPO** (Group Relative Policy Optimization)
+: A reinforcement learning algorithm for training language models.
 
-- Single machine cannot handle rollout throughput
-- Environment requires GPU resources across nodes
-- Need to scale horizontally for large datasets
-- Want isolation between head coordination and worker execution
+**DPO** (Direct Preference Optimization)
+: An alternative to RLHF that learns from preference data.
+:::
 
 ---
 
 ## Architecture
 
+NeMo Gym uses a head server for service discovery and configuration distribution:
+
 ```text
-                    ┌─────────────────┐
-                    │   Head Server   │
-                    │   (port 11000)  │
-                    └────────┬────────┘
-                             │
-        ┌────────────────────┼────────────────────┐
-        │                    │                    │
-┌───────┴───────┐   ┌───────┴───────┐   ┌───────┴───────┐
-│   Worker 1    │   │   Worker 2    │   │   Worker 3    │
-│ - Model Svc   │   │ - Model Svc   │   │ - Model Svc   │
-│ - Resources   │   │ - Resources   │   │ - Resources   │
-└───────────────┘   └───────────────┘   └───────────────┘
+┌─────────────────────────────┐
+│       Head Server           │
+│    (port 11000 default)     │
+│  /global_config_dict_yaml   │
+│  /server_instances          │
+└──────────────┬──────────────┘
+               │
+    ┌──────────┼──────────┐
+    │          │          │
+┌───┴───┐  ┌───┴───┐  ┌───┴───┐
+│ Agent │  │ Model │  │ Rsrc  │
+│Server │  │Server │  │Server │
+└───────┘  └───────┘  └───────┘
 ```
 
 | Component | Role |
 |-----------|------|
-| **Head Server** | Coordinates work distribution, aggregates results |
-| **Workers** | Execute rollouts, run model inference and resources servers |
+| **Head Server** | Configuration distribution, service discovery |
+| **Agent Server** | Orchestrates rollout collection |
+| **Model Server** | Provides inference (vLLM, OpenAI API) |
+| **Resources Server** | Environment-specific logic (verification, rewards) |
 
 ---
 
-## Quick Start
+## Single-Node (Default)
 
-### 1. Create Docker Compose Configuration
+The `ng_run` command starts all servers in a single process:
+
+```bash
+config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml"
+
+ng_run "+config_paths=[$config_paths]"
+```
+
+This starts:
+- Head server on port 11000
+- All configured servers as subprocesses
+- Servers register with the head server automatically
+
+---
+
+## Multi-Node Deployment
+
+For multi-node deployment, run `ng_run` on each node with configuration pointing to a shared head server.
+
+### Step 1: Configure the Coordinator Node
+
+Create a complete configuration file for the coordinator:
 
 ```yaml
-# docker-compose.yaml
-version: '3.8'
+# coordinator-config.yaml
 
-services:
-  head:
-    image: nemo-gym:latest
-    ports:
-      - "11000:11000"
-    command: ng_run --head-only
-    environment:
-      - NUM_EXPECTED_WORKERS=2
+# Head server configuration - accessible to all nodes
+head_server:
+  host: "192.168.1.100"  # Coordinator's IP
+  port: 11000
 
-  worker-1:
-    image: nemo-gym:latest
-    environment:
-      - HEAD_SERVER_URL=http://head:11000
-    depends_on:
-      - head
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+# Resources server
+example_resources:
+  resources_servers:
+    example_single_tool_call:
+      entrypoint: app.py
+      domain: agent
+      host: "192.168.1.100"
+      port: 8080
 
-  worker-2:
-    image: nemo-gym:latest
-    environment:
-      - HEAD_SERVER_URL=http://head:11000
-    depends_on:
-      - head
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+# Agent server
+example_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      host: "192.168.1.100"
+      port: 8081
+      resources_server:
+        type: resources_servers
+        name: example_resources
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/example_single_tool_call/data/example.jsonl
 ```
 
-### 2. Start the Cluster
+Start the coordinator:
 
 ```bash
-docker compose up -d
+ng_run "+config_paths=[coordinator-config.yaml]"
 ```
 
-### 3. Verify Workers Registered
+### Step 2: Configure Worker Nodes
+
+On each worker node, create a configuration that points to the coordinator's head server:
+
+```yaml
+# worker-config.yaml
+
+# Point to the coordinator's head server
+head_server:
+  host: "192.168.1.100"  # Same as coordinator
+  port: 11000
+
+# Model server (GPU-intensive, runs on worker)
+policy_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      host: "192.168.1.101"  # This worker's IP
+      port: 8000
+      openai_base_url: "http://localhost:8080/v1"  # Local vLLM
+      openai_api_key: "not-needed"
+      openai_model: "meta-llama/Llama-3.1-8B-Instruct"
+```
+
+Start the worker:
 
 ```bash
-# Check head server logs
-docker compose logs head | grep "worker registered"
+ng_run "+config_paths=[worker-config.yaml]"
+```
 
-# Expected output:
-# worker-1 registered successfully
-# worker-2 registered successfully
+### Step 3: Connect to Existing Ray Cluster (Optional)
+
+For CPU-intensive workloads, connect all nodes to a shared Ray cluster:
+
+```yaml
+# Add to any config file
+ray_head_node_address: "ray://192.168.1.100:10001"
+```
+
+When `ray_head_node_address` is set, NeMo Gym connects to that cluster instead of starting a new one.
+
+---
+
+## Containerized Deployment
+
+### Dockerfile for Resources Server
+
+```dockerfile
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Install NeMo Gym
+RUN pip install --no-cache-dir nemo-gym
+
+# Copy server code
+COPY . .
+
+EXPOSE 8080
+
+# Server reads config from environment variable
+CMD ["python", "app.py"]
+```
+
+### Building the Container
+
+```bash
+cd resources_servers/example_single_tool_call
+docker build -t my-resources-server:latest .
+```
+
+### Running with Configuration
+
+Pass configuration via the `NEMO_GYM_CONFIG_DICT` environment variable:
+
+```bash
+docker run -p 8080:8080 \
+    -e NEMO_GYM_CONFIG_DICT='
+head_server:
+  host: "192.168.1.100"
+  port: 11000
+example_resources:
+  resources_servers:
+    example_single_tool_call:
+      entrypoint: app.py
+      host: "0.0.0.0"
+      port: 8080
+' \
+    my-resources-server:latest
 ```
 
 ---
 
-## Configuration
+## Production Training with NeMo RL
 
-### Environment Variables
+```{admonition} Different from Docker deployment
+:class: important
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `HEAD_SERVER_URL` | — | URL of the head server (required for workers) |
-| `NUM_EXPECTED_WORKERS` | `1` | Number of workers the head waits for before starting |
-| `WORKER_HEARTBEAT_INTERVAL` | `30` | Seconds between worker health checks |
-| `WORKER_TIMEOUT` | `300` | Seconds before marking a worker as unhealthy |
-
-### Network Configuration
-
-Workers discover the head server via the `HEAD_SERVER_URL` environment variable. Docker Compose's default bridge network handles DNS resolution:
-
-```yaml
-services:
-  head:
-    networks:
-      - gym-network
-
-  worker-1:
-    environment:
-      - HEAD_SERVER_URL=http://head:11000  # 'head' resolves via Docker DNS
-    networks:
-      - gym-network
-
-networks:
-  gym-network:
-    driver: bridge
+For production training, use NeMo RL's Slurm + Ray orchestration instead of manual Docker deployment. NeMo RL handles cluster management automatically.
 ```
 
-**Port requirements:**
+**How it works**:
 
-| Port | Purpose |
-|------|---------|
-| `11000` | Head server coordination API |
-| `8080` | Resources server (per worker) |
-| `8000` | Model server (per worker) |
+1. **Slurm** allocates physical nodes (GPUs, memory)
+2. **Ray** connects nodes into a unified compute cluster
+3. **NeMo Gym** runs as a Ray actor, receiving the cluster address automatically
+
+### Launch Script
+
+```bash
+# From NeMo RL repository (not NeMo Gym)
+cd $REPO_LOCATION
+
+WANDB_API_KEY=$WANDB_API_KEY \
+NUM_ACTOR_NODES=4 \
+CONTAINER_IMAGE_PATH=$CONTAINER \
+SLURM_ACCOUNT=$ACCOUNT \
+SLURM_PARTITION=$PARTITION \
+bash examples/nemo_gym/launch_nemo_gym_multinode_training.sh
+```
+
+**Source**: `nemo_rl/examples/nemo_gym/launch_nemo_gym_multinode_training.sh`
 
 ---
 
-## Scaling & Resources
+## Network Requirements
 
-### Adding Workers
+| Port | Purpose | Must Be Accessible To |
+|------|---------|----------------------|
+| 11000 | Head server | All worker nodes |
+| 8080 | Resources server (default) | Agent server |
+| 8000 | Model server (default) | Agent server |
 
-Scale workers dynamically:
+### Firewall Configuration
 
 ```bash
-# Scale to 5 workers
-docker compose up -d --scale worker=5
+# Allow head server access from worker subnet
+sudo ufw allow from 192.168.1.0/24 to any port 11000
 ```
-
-Or define additional workers in your compose file for heterogeneous configurations.
-
-### GPU Allocation
-
-Assign specific GPUs to workers:
-
-```yaml
-worker-1:
-  environment:
-    - CUDA_VISIBLE_DEVICES=0
-  deploy:
-    resources:
-      reservations:
-        devices:
-          - driver: nvidia
-            device_ids: ['0']
-            capabilities: [gpu]
-
-worker-2:
-  environment:
-    - CUDA_VISIBLE_DEVICES=1
-  deploy:
-    resources:
-      reservations:
-        devices:
-          - driver: nvidia
-            device_ids: ['1']
-            capabilities: [gpu]
-```
-
-### Load Balancing
-
-The head server distributes work using round-robin by default. Workers pull tasks when ready, ensuring even distribution regardless of individual task duration.
 
 ---
 
-## Monitoring
+## Service Discovery
 
-### Health Checks
+Servers discover each other via the head server using name-based routing:
 
-Add health checks to detect failures:
-
-```yaml
-services:
-  worker-1:
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+```python
+# Servers call each other by name, not IP
+await self.server_client.post(
+    server_name="example_resources",
+    url_path="/verify",
+    json=payload
+)
 ```
 
-### Viewing Logs
+---
+
+## Verifying Your Deployment
+
+### Check Head Server Status
 
 ```bash
-# All services
-docker compose logs -f
+curl http://192.168.1.100:11000/server_instances
+```
 
-# Specific worker
-docker compose logs -f worker-1
+**Expected output** (JSON array of registered servers):
 
-# Head server only
-docker compose logs -f head
+```json
+[
+  {
+    "process_name": "example_resources",
+    "server_type": "resources_servers",
+    "name": "example_single_tool_call",
+    "host": "192.168.1.100",
+    "port": 8080,
+    "url": "http://192.168.1.100:8080",
+    "pid": 12345,
+    "entrypoint": "app.py",
+    "config_path": "example_resources",
+    "start_time": 1704067200.0
+  }
+]
+```
+
+```{tip}
+The response may include additional fields like `dir_path`, `status`, and `uptime_seconds`.
+```
+
+### Check Configuration Distribution
+
+```bash
+curl http://192.168.1.100:11000/global_config_dict_yaml
+```
+
+**Expected output** (YAML configuration):
+
+```yaml
+head_server:
+  host: 192.168.1.100
+  port: 11000
+example_resources:
+  resources_servers:
+    example_single_tool_call:
+      entrypoint: app.py
+      host: 192.168.1.100
+      port: 8080
+# ... rest of config
 ```
 
 ---
 
 ## Troubleshooting
 
-| Symptom | Likely Cause | Solution |
-|---------|--------------|----------|
-| Workers not registering | Network isolation | Verify all services on same Docker network |
-| `HEAD_SERVER_URL` connection refused | Head not ready | Add `depends_on` with health check condition |
-| GPU not visible in worker | Missing device reservation | Add `deploy.resources.reservations.devices` |
-| Uneven work distribution | Workers at different speeds | Check GPU memory, reduce batch size on slow workers |
-| Worker marked unhealthy | Task timeout | Increase `WORKER_TIMEOUT` or optimize task |
+| Symptom | Cause | Solution |
+|---------|-------|----------|
+| "Could not connect to head server" | Head server unreachable | Verify network connectivity, check firewall rules |
+| Servers not finding each other | Different head server configs | Ensure all nodes use same `head_server.host` |
+| Ray tasks failing | Ray cluster not shared | Set `ray_head_node_address` to same cluster |
+| Empty `/server_instances` response | Servers not registered | Check server startup logs, verify config paths |
+
+### Startup Order
+
+1. **Start coordinator first** — Head server must be running before workers connect
+2. **Wait for head server** — Verify with `curl http://<coordinator>:11000/server_instances`
+3. **Start workers** — Workers will register with the head server on startup
+
+---
+
+## Production Checklist
+
+Before deploying to production:
+
+- [ ] **Network isolation**: Servers not exposed to public internet
+- [ ] **TLS termination**: Use nginx/traefik reverse proxy for HTTPS
+- [ ] **Firewall rules**: Restrict access to known IPs only
+- [ ] **Log aggregation**: Ship logs to centralized logging system
+- [ ] **Health monitoring**: Set up alerts for server availability
+- [ ] **Resource limits**: Configure container memory/CPU limits
+
+```{warning}
+NeMo Gym servers have no built-in authentication. Use network-level security (VPC, firewalls) to restrict access.
+```
+
+---
+
+## Limitations
+
+```{note}
+NeMo Gym's multi-node support is designed primarily for integration with NeMo RL training pipelines. Standalone multi-node deployment requires manual configuration of each node.
+
+Future releases may include:
+- CLI flags for head-only and worker modes
+- Automatic worker registration
+- Built-in container orchestration templates
+```
 
 ---
 
@@ -278,25 +411,25 @@ docker compose logs -f head
 :::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` Train with NeMo RL
 :link: training-nemo-rl-grpo-index
 :link-type: ref
-Connect your distributed environment to training.
+Connect NeMo Gym environments to GRPO training.
 :::
 
-:::{grid-item-card} {octicon}`container;1.5em;sd-mr-1` Containerize Resources Servers
+:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` Deployment Topology
+:link: /infrastructure/deployment-topology
+:link-type: doc
+Understand deployment patterns for different scales.
+:::
+
+:::{grid-item-card} {octicon}`broadcast;1.5em;sd-mr-1` Distributed Computing with Ray
+:link: /infrastructure/ray-distributed
+:link-type: doc
+Scale CPU-intensive tasks across nodes.
+:::
+
+:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Containerize Resources Servers
 :link: /resources-server/containerize
 :link-type: doc
 Package custom servers for deployment.
-:::
-
-:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Creating Training Environments
-:link: creating-training-environment
-:link-type: doc
-Design effective environments for RL.
-:::
-
-:::{grid-item-card} {octicon}`graph;1.5em;sd-mr-1` Multi-Step Environments
-:link: multi-step
-:link-type: doc
-Build sequential tool-calling workflows.
 :::
 
 ::::

@@ -1,78 +1,88 @@
 (about-architecture)=
 # Architecture
 
+NeMo Gym runs a set of HTTP servers that coordinate rollout execution (see {doc}`concepts/key-terminology`). The main server roles are model servers for inference, resources servers for environment logic and verification, agent servers for orchestration, and a head server that publishes resolved configuration.
+
+## TL;DR
+
+- **Agent servers** orchestrate rollout execution by calling **model** and **resources** servers.
+- **Resources servers** manage environment state and compute verification rewards.
+- **Model servers** expose OpenAI-compatible inference endpoints.
+- **The head server** publishes the resolved configuration for service discovery.
+
+## High-Level Architecture
+
 ```{note}
-This page is a stub. Content is being developed. See [GitHub Issue #292](https://github.com/NVIDIA-NeMo/Gym/issues/292) for details.
+Architecture diagram not yet available. This section describes the runtime interactions and endpoints defined in the server implementations.
 ```
 
-NeMo Gym uses a modular server-based architecture that decouples environment development from training, enabling scalable rollout collection and seamless integration with RL training frameworks.
+## Components and Responsibilities
 
-## Architecture Diagram
+### Model servers (Responses API)
 
-<!-- TODO: Add architecture diagram showing server relationships and request flow -->
+Model servers expose OpenAI-compatible inference endpoints for chat and responses:
 
-## Design Principles
+- `POST /v1/chat/completions`
+- `POST /v1/responses`
 
-### Decoupled Server Architecture
+The base model server class defines these endpoints. Concrete model servers implement them (for example, the OpenAI-backed model server). Agents call these endpoints through the shared server client.
 
-NeMo Gym separates concerns into three server types that communicate via REST APIs:
+### Resources servers (environment + verification)
 
-- **Model Servers**: Stateless LLM inference—scales horizontally without coordination
-- **Resources Servers**: Stateful environment logic—manages sessions, tools, and verification
-- **Agent Servers**: Orchestration layer—coordinates rollout execution across servers
+Resources servers expose environment lifecycle endpoints:
 
-This separation allows teams to develop and test environments independently from training frameworks.
+- `POST /seed_session` to initialize session state
+- `POST /verify` to compute rewards from a rollout response
 
-### REST API Interoperability
+Individual resources servers can add domain-specific endpoints for tools or environment steps. For example:
 
-All servers expose REST APIs, enabling:
+- A resources server can register a catch-all tool route like `POST /{path}` for tool execution.
+- Aviary-based resources servers add `POST /step` and `POST /close` for multi-step environments.
 
-- Language-agnostic integration (Python, Go, Rust, etc.)
-- Standard HTTP tooling for debugging and monitoring
-- Easy containerization and deployment
+### Agent servers (rollout orchestration)
 
-### Stateless Models, Stateful Resources
+Agent servers expose two primary endpoints:
 
-Models remain stateless for horizontal scaling, while resources servers maintain session state. This design enables efficient GPU utilization for inference while preserving environment context across multi-step rollouts.
+- `POST /v1/responses` for multi-step interaction
+- `POST /run` for full rollout execution and verification
+
+The base agent server class wires these routes, while each agent implementation defines how to call model and resources servers.
+
+### Head server (configuration discovery)
+
+The head server exposes:
+
+- `GET /global_config_dict_yaml` to return the resolved global configuration
+- `GET /server_instances` to list server instances started by the CLI
+
+The shared server client fetches the resolved configuration from the head server and uses server names to resolve host/port for inter-server requests.
 
 ## Request Flow
 
-A typical rollout follows this sequence:
+### Rollout via `POST /run` (SimpleAgent)
 
-```
-Training Framework
-        │
-        ▼
-┌───────────────────┐
-│   Agent Server    │ ◄── Orchestrates rollout lifecycle
-└───────────────────┘
-        │
-        ├──────────────────────────────────────┐
-        ▼                                      ▼
-┌───────────────────┐                ┌───────────────────┐
-│  Model Server     │                │ Resources Server  │
-│                   │                │                   │
-│ /v1/responses     │                │ /seed_session     │
-│ /v1/chat/...      │                │ /verify           │
-└───────────────────┘                └───────────────────┘
-```
+The `SimpleAgent` implementation orchestrates a complete rollout and verification sequence:
 
-1. **Initialize**: Agent calls Resources Server `/seed_session` to set up task state
-2. **Generate**: Agent requests text generation from Model Server `/v1/responses`
-3. **Execute**: Agent sends tool calls to Resources Server for execution
-4. **Iterate**: Steps 2-3 repeat for multi-step rollouts
-5. **Verify**: Agent calls Resources Server `/verify` to compute reward
-6. **Return**: Agent returns complete rollout to training framework
+1. Call the resources server `POST /seed_session` to initialize session state.
+2. Call the agent `POST /v1/responses`. The agent calls the model server `POST /v1/responses` and issues tool calls to the resources server via `POST /{tool_name}`.
+3. Call the resources server `POST /verify` and return the verified rollout response.
 
-## Service Discovery
+The rollout collection flow uses the agent `POST /run` endpoint and writes the returned metrics to JSONL output.
 
-The head server (port 11000) acts as a service registry, enabling servers to discover and communicate with each other by name rather than hardcoded addresses.
+### Multi-step environments (Aviary example)
 
-For deployment patterns and scaling strategies, see {doc}`../infrastructure/index`.
+Some resources servers model environments with explicit step and close endpoints. Aviary-based resources servers accept `POST /step` for environment transitions and `POST /close` to release an environment instance.
 
-## Learn More
+## Session and State
 
-- {doc}`concepts/core-components` — Detailed component descriptions and examples
-- {doc}`concepts/configuration` — Configuration system and Hydra integration
-- {doc}`../infrastructure/deployment-topology` — Production deployment patterns
-- {doc}`../infrastructure/ray-distributed` — Distributed scaling with Ray
+All servers add session handling that assigns a session ID when one is not present. Agents propagate cookies between model and resources servers, which lets resources servers store per-session state. Several resources servers keep in-memory maps keyed by session ID (for example, counters or tool environments) to track environment state across steps.
+
+## Configuration and Port Resolution
+
+The global configuration dict configures server instances. During parsing, servers without explicit host/port values receive defaults (host defaults to `127.0.0.1`, and the system assigns ports from available ports). The head server uses port `11000` by default and publishes the resolved configuration used by the server client.
+
+## Related
+
+- {doc}`concepts/core-components` — Component overview and examples
+- {doc}`concepts/configuration` — Configuration model and server references
+- {doc}`../infrastructure/index` — Deployment guides

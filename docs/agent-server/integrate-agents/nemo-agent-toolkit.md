@@ -1,75 +1,112 @@
 (agent-server-nemo-agent-toolkit)=
+
 # NeMo Agent Toolkit Integration
 
-```{note}
-This page is a stub. Content is being developed. See [GitHub Issue #270](https://github.com/NVIDIA-NeMo/Gym/issues/270) for details.
-```
+This page documents the **NeMo Gym agent-server integration surface** that external agent frameworks must build against. It focuses on the interface and behavior defined in this repository so you can adapt an external agent to NeMo Gym.
 
-Integrate agents from the [NeMo Agent Toolkit](https://github.com/NVIDIA/NeMo-Agent-Toolkit) into NeMo Gym for RL training.
+**Purpose**: Understand the NeMo Gym agent-server integration surface.  
+**Audience**: Developers integrating external agent frameworks into NeMo Gym.
+
+**Key capabilities**:
+
+- **Endpoints**: `SimpleResponsesAPIAgent` registers `/v1/responses` and `/run`.
+- **Run types**: `BaseRunRequest`/`BaseVerifyResponse` define the run path payload and return shape.
+- **Reference behavior**: `SimpleAgent` shows model calls, tool routing, and loop control.
+- **Configuration**: `SimpleAgentConfig` defines the expected agent server fields.
 
 ---
 
-## Overview
+## Integration surface in NeMo Gym
 
-NeMo Agent Toolkit provides:
-- Enterprise-ready agent implementations
-- NVIDIA-optimized inference
-- Production deployment patterns
+**Integration surface** here means the concrete base classes, endpoints, and request/response types your adapter must provide to run as a NeMo Gym agent server.
 
-## Prerequisites
-
-```bash
-pip install nemo-agent-toolkit
-```
-
-## Integration Architecture
-
-```
-NeMo Gym Agent Server
-    └── NeMo Agent Toolkit Agent
-            ├── Model calls → NeMo Gym Model Server (or direct)
-            └── Tool calls → NeMo Gym Resources Server
-```
-
-## Configuration
-
-<!-- TODO: Add configuration example -->
-
-## Implementation
-
-### Wrapping a NeMo Agent
+NeMo Gym implements agent servers as subclasses of `SimpleResponsesAPIAgent`. The base class wires up two HTTP endpoints:
 
 ```python
-from nemo_agent_toolkit import Agent
-from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
-
-class NeMoAgentWrapper(SimpleResponsesAPIAgent):
-    def model_post_init(self, context):
-        self.nemo_agent = Agent(...)
-
-    async def run(self, body: BaseRunRequest) -> BaseVerifyResponse:
-        # Route NeMo agent through NeMo Gym infrastructure
-        pass
+class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, SimpleServer):
+    def setup_webserver(self) -> FastAPI:
+        app = FastAPI()
+        self.setup_session_middleware(app)
+        app.post("/v1/responses")(self.responses)
+        app.post("/run")(self.run)
+        return app
 ```
 
-### Tool Registration
+The request/response types for the run path come from `nemo_gym.base_resources_server`:
 
-<!-- TODO: Document how to register NeMo Gym tools with NeMo Agent Toolkit -->
+```python
+class BaseRunRequest(BaseModel):
+    responses_create_params: NeMoGymResponseCreateParamsNonStreaming
 
-### Workflow Integration
+class BaseVerifyRequest(BaseRunRequest):
+    response: NeMoGymResponse
 
-<!-- TODO: Document workflow compatibility -->
+class BaseVerifyResponse(BaseVerifyRequest):
+    reward: float
+```
 
-## Example
+---
 
-<!-- TODO: Add complete working example -->
+## What you provide
 
-## Benefits
+An external agent adapter should adhere to the abstract interface in `SimpleResponsesAPIAgent`:
 
-- Leverage NVIDIA-optimized agent patterns
-- Use existing enterprise agent deployments
-- Combine with NeMo Gym's RL training infrastructure
+- `responses()` — handles `/v1/responses` and returns a `NeMoGymResponse`.
+- `run()` — handles `/run` and returns a `BaseVerifyResponse`.
 
-## Troubleshooting
+`SimpleResponsesAPIAgent` defines both methods as abstract, so an adapter must supply concrete methods.
 
-<!-- TODO: Add common issues and solutions -->
+---
+
+## Reference behavior: `SimpleAgent`
+
+The built-in `responses_api_agents/simple_agent` shows the default orchestration behavior:
+
+- **Model calls**: `SimpleAgent.responses()` calls the configured model server at `/v1/responses` and validates the response.
+- **Tool routing**: for each `function_call` in the model output, it calls the resources server at `/{tool_name}` and appends a `function_call_output`.
+- **Loop control**: the loop ends when the model returns an assistant message without tool calls, or when `max_steps` hits its limit.
+
+The `/run` endpoint performs a complete run:
+
+1. Call resources server `/seed_session`
+2. Call the agent server `/v1/responses`
+3. Call resources server `/verify` to compute the `reward`
+
+---
+
+## Configuration shape (`responses_api_agents`)
+
+The reference implementation (`SimpleAgent`) defines these configuration fields:
+
+```python
+class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
+    resources_server: ResourcesServerRef
+    model_server: ModelServerRef
+    max_steps: int = None
+```
+
+Configure agent servers under a `responses_api_agents` block in YAML. This example is from `resources_servers/math_with_judge/configs/math_with_judge.yaml`:
+
+```yaml
+math_with_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: math_with_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+```
+
+---
+
+## Where to extend
+
+If you are integrating an external agent framework, build against the interface defined in `nemo_gym/base_responses_api_agent.py`. The reference implementation is `responses_api_agents/simple_agent/app.py`.
+
+## Next steps
+
+- **Agent server overview**: See `docs/agent-server/index.md` for the full agent lifecycle.
+- **Resources servers**: See `docs/resources-server/index.md` for tool and verification servers.

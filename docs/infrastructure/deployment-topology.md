@@ -1,11 +1,18 @@
 (infra-deployment-topology)=
 # Deployment Topology
 
-```{note}
-This page is a stub. Content is being developed. See [GitHub Issue #293](https://github.com/NVIDIA-NeMo/Gym/issues/293) for details.
+Understand how to deploy NeMo Gym components for different scales and use cases.
+
+**Quick Start**: For most use cases, a single `ng_run` command starts all servers:
+
+```bash
+config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml"
+
+ng_run "+config_paths=[$config_paths]"
 ```
 
-Understand how to deploy NeMo Gym components for different scales and use cases.
+For multi-node deployment, see {doc}`/environment-tutorials/multi-node-docker`.
 
 ---
 
@@ -124,33 +131,70 @@ Use this decision matrix to select the right deployment pattern:
 ::::{tab-item} Single-Node
 
 ```bash
-# All-in-one: everything in one process
-ng_run "+config_paths=[config.yaml]"
+# Define your server configurations
+config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml"
+
+# Start all servers in one process
+ng_run "+config_paths=[$config_paths]"
 ```
+
+This starts:
+- Head server on port 11000
+- All configured servers as subprocesses
+- Servers register with the head server automatically
 
 ::::
 
 ::::{tab-item} Multi-Node
 
-```bash
-# Start head server on coordinator node
-ng_run --head-only
+For multi-node deployment, configure each node with YAML files that point to a shared head server.
 
-# Start workers on GPU nodes (run on each worker machine)
-ng_run --worker --head-url=http://coordinator:11000
+**Coordinator node** (`coordinator-config.yaml`):
+
+```yaml
+head_server:
+  host: "192.168.1.100"  # Coordinator's IP
+  port: 11000
+
+example_resources:
+  resources_servers:
+    example_single_tool_call:
+      entrypoint: app.py
+      host: "192.168.1.100"
+      port: 8080
 ```
+
+**Worker node** (`worker-config.yaml`):
+
+```yaml
+head_server:
+  host: "192.168.1.100"  # Points to coordinator
+  port: 11000
+
+policy_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      host: "192.168.1.101"  # This worker's IP
+      port: 8000
+```
+
+Start each node with its configuration:
+
+```bash
+# On coordinator
+ng_run "+config_paths=[coordinator-config.yaml]"
+
+# On each worker
+ng_run "+config_paths=[worker-config.yaml]"
+```
+
+See {doc}`/environment-tutorials/multi-node-docker` for complete examples including Docker Compose.
 
 ::::
 
 :::::
-
-### Key Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `HEAD_SERVER_URL` | — | URL of the head server (required for workers) |
-| `NUM_EXPECTED_WORKERS` | `1` | Workers the head waits for before starting |
-| `WORKER_HEARTBEAT_INTERVAL` | `30` | Seconds between worker health checks |
 
 ---
 
@@ -158,9 +202,21 @@ ng_run --worker --head-url=http://coordinator:11000
 
 ### Service Discovery
 
-The head server (port 11000) acts as a service registry. Servers register on startup, enabling name-based routing:
+The head server (port 11000) acts as a service registry. Servers register on startup, enabling name-based routing. You can query registered servers:
+
+```bash
+# List all registered server instances
+curl http://localhost:11000/server_instances
+
+# Get the resolved global configuration
+curl http://localhost:11000/global_config_dict_yaml
+```
+
+Within server code, use `ServerClient` for inter-server communication:
 
 ```python
+from nemo_gym.server_utils import ServerClient
+
 # Servers call each other by name, not IP
 await self.server_client.post(
     server_name="my_resources",
@@ -173,17 +229,32 @@ await self.server_client.post(
 
 | Server | Default Port | Notes |
 |--------|--------------|-------|
-| Head server | 11000 | Must be accessible to all workers |
-| Model server | 8000 | Per-worker |
-| Resources server | 8080 | Per-worker |
+| Head server | 11000 | Fixed default (`DEFAULT_HEAD_SERVER_PORT` in `global_config.py`) |
+| Model server | Dynamic | Assigned from available ports unless specified in config |
+| Resources server | Dynamic | Assigned from available ports unless specified in config |
+
+```{tip}
+Specify explicit ports in your YAML config for predictable deployments:
+```yaml
+my_resources:
+  resources_servers:
+    my_server:
+      host: "0.0.0.0"
+      port: 8080  # Explicit port
+```
+```
 
 ### Network Requirements
 
-| Requirement | Recommendation |
-|-------------|----------------|
-| **Latency** | < 10ms between head and workers for optimal throughput |
-| **Bandwidth** | 1 Gbps minimum; 10 Gbps recommended for large model weights |
-| **Firewall** | Allow TCP traffic on ports 11000, 8000, 8080 between nodes |
+| Requirement | Guideline |
+|-------------|-----------|
+| **Latency** | Low latency between head and workers improves throughput |
+| **Bandwidth** | Higher bandwidth recommended for large model weights |
+| **Firewall** | Allow TCP traffic between nodes on configured ports |
+
+```{note}
+Actual requirements depend on your model size and rollout complexity. Test your specific workload.
+```
 
 ---
 
@@ -200,16 +271,16 @@ await self.server_client.post(
 
 ### Capacity Planning
 
-Estimate throughput based on your rollout complexity:
+Throughput varies significantly based on model size, GPU type, environment complexity, and network latency. The following are rough estimates for planning purposes:
 
-| Rollout Type | Single Worker | 4 Workers | 8 Workers |
-|--------------|---------------|-----------|-----------|
-| Simple (1-step) | ~100/min | ~400/min | ~800/min |
-| Multi-step (5 steps) | ~20/min | ~80/min | ~160/min |
-| Multi-turn (10 turns) | ~10/min | ~40/min | ~80/min |
+| Rollout Type | Characteristics | Scaling Factor |
+|--------------|-----------------|----------------|
+| Simple (1-step) | Single tool call, fast verification | Linear with workers |
+| Multi-step (5 steps) | Sequential tool calls | ~5× slower per rollout |
+| Multi-turn (10 turns) | Conversation with state | ~10× slower per rollout |
 
-```{note}
-Actual throughput depends on model size, GPU type, and environment complexity.
+```{important}
+Benchmark your specific workload before capacity planning. Use {doc}`/get-started/rollout-collection` to measure actual throughput.
 ```
 
 ---
@@ -238,12 +309,13 @@ Actual throughput depends on model size, GPU type, and environment complexity.
 ::::{dropdown} Scaling Existing Deployments
 :icon: arrow-right
 
-```bash
-# Add workers to running cluster
-ng_run --worker --head-url=http://coordinator:11000
+To add workers to a running cluster:
 
-# Workers auto-register; head distributes work automatically
-```
+1. Create a worker config pointing to the existing head server
+2. Start the worker with `ng_run "+config_paths=[worker-config.yaml]"`
+3. Verify registration via `curl http://coordinator:11000/server_instances`
+
+Workers auto-register with the head server on startup.
 
 ::::
 
@@ -251,43 +323,65 @@ ng_run --worker --head-url=http://coordinator:11000
 
 ## Monitoring
 
-### Health Endpoints
+### Server Status
 
-All servers expose health endpoints:
+Check server status using the CLI or API:
 
 ```bash
-# Check head server health
-curl http://coordinator:11000/health
+# CLI: Show all running servers
+ng_status
 
-# Check worker health
-curl http://worker-1:8080/health
+# API: List registered server instances
+curl http://localhost:11000/server_instances
 ```
 
-### Key Metrics
+Example response:
+
+```json
+[
+  {
+    "process_name": "example_resources",
+    "server_type": "resources_servers",
+    "name": "example_single_tool_call",
+    "host": "127.0.0.1",
+    "port": 62920,
+    "status": "success"
+  }
+]
+```
+
+### Key Metrics to Monitor
 
 | Metric | Description | Alert Threshold |
 |--------|-------------|-----------------|
-| Worker registration | Number of active workers | < expected count |
-| Rollout throughput | Rollouts completed per minute | < baseline |
-| GPU utilization | Per-worker GPU usage | < 50% (underutilized) |
+| Server registration | Number of servers in `/server_instances` | < expected count |
+| Process health | Server process exit codes | Non-zero exit |
+| GPU utilization | Per-worker GPU usage (via `nvidia-smi`) | < 50% (underutilized) |
 | Request latency | Head → worker round-trip | > 100ms |
 
 ---
 
 ## Security Considerations
 
+```{warning}
+NeMo Gym servers have **no built-in authentication**. They are designed for trusted internal networks only.
+```
+
 ### Network Security
 
-- **Internal networks only**: NeMo Gym servers are designed for trusted networks
-- **No built-in auth**: Use network-level security (VPC, firewall rules)
-- **TLS**: Configure reverse proxy (nginx, Traefik) for TLS termination
+- **Internal networks only**: Do not expose servers to the public internet
+- **VPC isolation**: Deploy within a private VPC or subnet
+- **Firewall rules**: Restrict access to known IP ranges
+- **TLS termination**: Use a reverse proxy (nginx, Traefik) for HTTPS
 
 ### Production Checklist
 
-- [ ] Servers not exposed to public internet
+- [ ] Servers deployed in private network (not internet-accessible)
 - [ ] Firewall rules restrict access to known IPs
+- [ ] API keys stored in environment variables, not config files
 - [ ] Monitoring alerts configured for anomalies
 - [ ] Logs shipped to centralized logging system
+- [ ] Reverse proxy configured for TLS termination
 
 ---
 

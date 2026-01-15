@@ -1,111 +1,130 @@
 (training-trl)=
+
 # TRL Training
 
-```{note}
-This page is a stub. Content is being developed.
+```{warning}
+**Status: In Development** — TRL integration is planned but not yet implemented. Track progress at [GitHub Issue #548](https://github.com/NVIDIA-NeMo/Gym/issues/548).
 
-**Blocker**: TRL integration code not yet implemented. See [GitHub Issue #548](https://github.com/NVIDIA-NeMo/Gym/issues/548) for progress.
+Looking to train now? Use {doc}`NeMo RL <../tutorials/nemo-rl-grpo/index>` (production-ready) or {doc}`Unsloth <../tutorials/unsloth-training>` (single GPU).
 ```
 
-Train models with NeMo Gym using [Hugging Face TRL](https://huggingface.co/docs/trl), the Transformer Reinforcement Learning library.
-
-:::{card}
-
-**Goal**: Fine-tune models using TRL's RL algorithms with NeMo Gym verifiers.
-
-^^^
-
-**In this tutorial, you will**:
-
-1. Integrate NeMo Gym verifiers as TRL reward functions
-2. Configure PPO/DPO training with NeMo Gym environments
-3. Train a model on single-step tasks
-
-:::
-
----
-
-## Before You Begin
-
-- ✅ **Hardware**: GPU recommended (single or multi-GPU)
-- ✅ **Software**: Python 3.10+, PyTorch
-- ✅ **Familiarity**: HuggingFace ecosystem, basic RL concepts
-
-```bash
-pip install trl transformers nemo-gym
-```
+Train models using [Hugging Face TRL](https://huggingface.co/docs/trl) with NeMo Gym verifiers as reward functions.
 
 ## Why TRL + NeMo Gym?
 
-**TRL** provides production-ready RL training for LLMs:
-- PPO, DPO, ORPO, and other algorithms out of the box
-- Seamless HuggingFace Hub integration (models, datasets, tokenizers)
-- Active community and extensive documentation
+**TRL** provides production-ready RL training for large language models:
 
-**NeMo Gym** complements TRL by providing:
-- Diverse verifiers for task-specific reward computation
-- Ready-to-use training environments
-- Standardized task interfaces for math, code, tool calling, and more
+- PPO, DPO, ORPO algorithms out of the box
+- Seamless HuggingFace Hub integration
+- Active community and documentation
 
-## Getting Started
+**NeMo Gym** adds:
 
-<!-- TODO: Add notebook link or quick start command -->
+- Domain-specific verifiers (math, code, tool calling)
+- Standardized reward computation via HTTP API
+- Pre-built training environments
+
+## Planned Integration Pattern
+
+When implemented, TRL integration will use NeMo Gym verifiers as reward functions via HTTP:
+
+```text
+┌─────────────┐     HTTP      ┌──────────────────────┐
+│  TRL Trainer │ ──────────▶ │  NeMo Gym Resource   │
+│  (PPO/DPO)   │             │  Server (Verifier)   │
+│              │ ◀────────── │                      │
+│              │   reward    │                      │
+└─────────────┘              └──────────────────────┘
+```
+
+### Proposed Reward Wrapper
+
+The integration will expose NeMo Gym verifiers as TRL-compatible reward functions:
 
 ```python
+# Proposed implementation (not yet available)
+# Location: nemo_gym/integrations/trl.py
+
+from typing import List
+
+class NeMoGymRewardFunction:
+    """Wrap a NeMo Gym resource server as a TRL reward function."""
+    
+    def __init__(self, resources_server_url: str):
+        from nemo_gym import ResourcesServerClient
+        self.client = ResourcesServerClient(resources_server_url)
+    
+    def __call__(self, outputs: List[str]) -> List[float]:
+        """Compute rewards for a batch of model outputs."""
+        rewards = []
+        for output in outputs:
+            response = self.client.verify(output)
+            rewards.append(response.reward)
+        return rewards
+```
+
+### Usage Pattern (Planned)
+
+```python
+# Planned usage (not yet available)
 from trl import PPOTrainer, PPOConfig
-from nemo_gym import ResourceServer
+from nemo_gym.integrations.trl import NeMoGymRewardFunction
 
-# TODO: Add integration code
+# Start a resource server (e.g., math verification)
+# nemo-gym serve math --port 8080
+
+# Create reward function pointing to the server
+reward_fn = NeMoGymRewardFunction("http://localhost:8080")
+
+# Use with TRL trainer
+config = PPOConfig(...)
+trainer = PPOTrainer(config=config, reward_model=reward_fn)
+trainer.train()
 ```
 
-## Integration Pattern
+## Target Algorithms
 
-### NeMo Gym as Reward Function
+| Algorithm | TRL Support | NeMo Gym Integration |
+|-----------|-------------|----------------------|
+| PPO | ✅ Stable | 🔜 Planned |
+| DPO | ✅ Stable | 🔜 Planned |
+| ORPO | ✅ Stable | 🔜 Planned |
+| GRPO | ❌ Not in TRL | ✅ Use {doc}`NeMo RL <../tutorials/nemo-rl-grpo/index>` |
 
-Use NeMo Gym verifiers to compute rewards for TRL training:
+## Architecture Considerations
 
-<!-- TODO: Document how to wrap NeMo Gym verifiers as TRL reward functions -->
+For architects evaluating this integration:
 
-```python
-# Example: Connecting NeMo Gym verifier to TRL
-# TODO: Add integration code
-```
+**Network Latency**
+: Verifier calls add HTTP round-trip latency per batch. Mitigate with batched verification and local resource servers.
 
-### Environment Configuration
+**Distributed Training**
+: Each TRL worker connects to the same or separate resource servers. Compatibility with FSDP and DeepSpeed training modes is a design goal.
 
-<!-- TODO: Document environment setup for TRL -->
+**Error Handling**
+: Planned retry logic and timeout configuration for verifier failures during training.
 
-## Supported Algorithms
+## Contributing
 
-| Algorithm | Status | Best For |
-|-----------|--------|----------|
-| PPO | TBD | Online RL training |
-| DPO | TBD | Preference optimization |
-| ORPO | TBD | Odds ratio preference optimization |
+Help move TRL integration forward:
 
-## Complete Example
+1. **Track progress**: Watch [Issue #548](https://github.com/NVIDIA-NeMo/Gym/issues/548)
+2. **Contribute**: See {doc}`../contribute/rl-framework-integration/index` for integration guidelines
 
-<!-- TODO: Add end-to-end working example -->
+## Available Alternatives
 
-## Troubleshooting
+Ready to train today? These integrations work now:
 
-<!-- TODO: Add common issues and solutions -->
-
----
-
-## What's Next?
-
-After completing this tutorial, explore these options:
-
-::::{grid} 1 1 2 2
+::::{grid} 1 2 2 2
 :gutter: 3
 
-:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Use Other Training Environments
-:link: https://github.com/NVIDIA-NeMo/Gym#-available-resource-servers
+:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` NeMo RL with GRPO
+:link: ../tutorials/nemo-rl-grpo/index
+:link-type: doc
 
-Browse available resource servers on GitHub to find other training environments.
+Production-ready multi-node training with GRPO algorithm.
 +++
-{bdg-secondary}`github` {bdg-secondary}`resource-servers`
+{bdg-success}`available` {bdg-primary}`recommended`
 :::
 
 :::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Unsloth Training
@@ -114,7 +133,7 @@ Browse available resource servers on GitHub to find other training environments.
 
 Fast, memory-efficient fine-tuning on a single GPU.
 +++
-{bdg-secondary}`unsloth` {bdg-secondary}`efficient`
+{bdg-success}`available` {bdg-secondary}`single-gpu`
 :::
 
 ::::

@@ -1,252 +1,262 @@
 (training-verl)=
 # VeRL Training
 
-```{note}
-This page is a stub. Content is being developed.
+:::{admonition} 🚧 Integration Not Yet Implemented
+:class: warning
 
-**Status**: Partial integration exists. See [GitHub Issue #549](https://github.com/NVIDIA-NeMo/Gym/issues/549) for documentation progress.
-```
+**No working VeRL integration exists.** This page documents the conceptual integration pattern for contributors.
 
-Train models with NeMo Gym using [VeRL](https://github.com/volcengine/verl), a distributed reinforcement learning framework designed for large-scale LLM training.
+**Status**: Pattern defined, implementation needed. See [GitHub Issue #549](https://github.com/NVIDIA-NeMo/Gym/issues/549).
 
-:::{card}
-
-**Goal**: Train models using VeRL's distributed RL algorithms with NeMo Gym verifiers.
-
-^^^
-
-**In this tutorial, you will**:
-
-1. Integrate NeMo Gym verifiers as VeRL reward functions
-2. Configure distributed PPO/GRPO training with NeMo Gym environments
-3. Scale training from single-node to multi-node clusters
-4. Monitor and optimize training performance
-
+**Train now?** Use {doc}`NeMo RL <../tutorials/nemo-rl-grpo/index>` (production-ready) or {doc}`Unsloth <../tutorials/unsloth-training>` (single GPU).
 :::
+
+Train models with NeMo Gym using [VeRL](https://github.com/volcengine/verl), a distributed reinforcement learning framework for large language model training.
 
 ---
 
-## Before You Begin
+## Quick Reference
 
-Make sure you have these prerequisites ready:
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Resource server rewards | ✅ Available | NeMo Gym verifiers work with any HTTP client |
+| Rollout collection | ✅ Available | Use `ng_collect_rollouts` CLI |
+| VeRL reward wrapper | ❌ Not implemented | Pattern defined; see below |
+| End-to-end example | ❌ Not implemented | Blocked on wrapper |
 
-- ✅ **Hardware**: Multi-GPU setup (VeRL excels at distributed training)
-  - Single-node: 1+ NVIDIA GPUs (24GB+ VRAM each)
-  - Multi-node: 2+ nodes with 8× GPUs each recommended
-- ✅ **Software**: Python 3.10+, PyTorch 2.0+
-- ✅ **Familiarity**: Basic RL concepts, distributed training fundamentals
+:::{tip}
+**Glossary**
+- **Resource server**: HTTP service that provides tools and verifies model outputs for RL training
+- **Rollout**: One complete interaction sequence (prompt → model response → tool calls → verification)
+- **Verifier**: Logic that evaluates model output and returns a reward score (0.0–1.0)
 
-```bash
-pip install verl nemo-gym
-```
-
-**Optional accounts**:
-
-- **Weights & Biases (W&B)**: For experiment tracking ([sign up](https://wandb.ai/signup))
-- **HuggingFace**: For downloading models ([create token](https://huggingface.co/settings/tokens))
-
-**Total time estimate**: ~2-4 hours (single-node) or ~4-8 hours (multi-node)
+See {doc}`Core Concepts <../about/concepts/index>` for details.
+:::
 
 ---
 
 ## Why VeRL + NeMo Gym?
 
-**VeRL** is designed for large-scale RL training on LLMs:
+[VeRL](https://github.com/volcengine/verl) provides:
 
-- **Hybrid parallelism**: Flexible data, tensor, and pipeline parallelism strategies
-- **Memory efficiency**: Optimized for large models with techniques like activation checkpointing
-- **Research-friendly**: Clean APIs for algorithm experimentation and extension
-- **Production-ready**: Battle-tested on billion-parameter models
+- **Hybrid parallelism**: Data, tensor, and pipeline parallelism
+- **Memory efficiency**: Activation checkpointing for large models
+- **Ray-native**: Built on Ray for distributed orchestration
 
-**NeMo Gym** complements VeRL by providing:
+NeMo Gym adds:
 
-- Diverse verifiers for task-specific reward computation
-- Ready-to-use training environments (math, code, tool calling, reasoning)
-- Standardized task interfaces across modalities
+- Domain-specific verifiers (math, code, tool calling)
+- HTTP-based reward API compatible with any framework
+- Pre-built training environments
 
 ---
 
-## 1. Integration Pattern
+## Integration Pattern (Conceptual)
 
-**Estimated time**: ~30 minutes
+NeMo Gym exposes HTTP endpoints. VeRL integration requires a wrapper:
 
-### NeMo Gym as Reward Function
+```text
+┌─────────────┐     HTTP      ┌──────────────────────┐
+│  VeRL       │ ──────────▶   │  NeMo Gym Resource   │
+│  Trainer    │               │  Server (Verifier)   │
+│             │ ◀──────────   │                      │
+│             │   reward      │                      │
+└─────────────┘               └──────────────────────┘
+```
 
-Use NeMo Gym verifiers to compute rewards for VeRL training:
+### Conceptual Reward Wrapper
+
+:::{warning}
+This code is **conceptual only**—it demonstrates the pattern but requires adaptation to VeRL's actual reward function interface. See [VeRL documentation](https://verl.readthedocs.io/) for the expected interface.
+:::
 
 ```python
-from nemo_gym import ResourceServer
+"""
+Conceptual pattern for VeRL reward wrapper.
+NOT RUNNABLE - adapt to VeRL's actual interface.
 
-# Initialize resource server with your chosen environment
-resource_server = ResourceServer(
-    environment="your_environment",
-    # TODO: Add configuration
-)
+Reference: nemo_rl/environments/nemo_gym.py in NeMo RL repo
+"""
+import asyncio
+import aiohttp
+from typing import List, Dict, Any
 
-# VeRL reward function wrapper
-def nemo_gym_reward_fn(responses, prompts):
-    """Compute rewards using NeMo Gym verifier."""
-    rewards = []
-    for response, prompt in zip(responses, prompts):
-        result = resource_server.verify(response, prompt)
-        rewards.append(result.reward)
-    return rewards
+class NeMoGymRewardWrapper:
+    """Wrap NeMo Gym /verify endpoint for VeRL."""
+    
+    def __init__(self, server_url: str, timeout_seconds: float = 30.0):
+        self.server_url = server_url
+        self.timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+        self._session = None
+    
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """Reuse session for connection pooling."""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(timeout=self.timeout)
+        return self._session
+    
+    async def compute_reward(
+        self,
+        response: Dict[str, Any],
+        ground_truth: Dict[str, Any]
+    ) -> float:
+        """
+        Call NeMo Gym /verify endpoint.
+        
+        Args:
+            response: Model output from VeRL rollout
+            ground_truth: Expected answer from dataset
+            
+        Returns:
+            Reward value (0.0 to 1.0)
+        """
+        session = await self._get_session()
+        payload = {
+            "response": {"output": response},
+            "ground_truth": ground_truth,
+        }
+        try:
+            async with session.post(
+                f"{self.server_url}/verify",
+                json=payload
+            ) as resp:
+                result = await resp.json()
+                return result.get("reward", 0.0)
+        except asyncio.TimeoutError:
+            return 0.0  # Or raise, depending on your error handling
+    
+    async def close(self):
+        """Clean up session."""
+        if self._session:
+            await self._session.close()
 ```
 
-### VeRL Configuration
+### Resource Server Endpoints
 
-<!-- TODO: Document VeRL config for NeMo Gym integration -->
+Every NeMo Gym resource server implements:
 
-```yaml
-# verl_config.yaml
-# TODO: Add VeRL configuration example
-```
+| Endpoint | Purpose | Response |
+|----------|---------|----------|
+| `/seed_session` | Initialize session state | `{"session_id": "..."}` |
+| `/verify` | Compute reward | `{"reward": 0.0-1.0, ...}` |
 
-**✅ Success Check**: Resource server responds to verification requests.
+**Source**: `nemo_gym/base_resources_server.py:63-64`
 
 ---
 
-## 2. Single-Node Training
+## Available Now: Collect Training Data
 
-**Estimated time**: ~1-2 hours
+You can collect rollouts today for offline training or VeRL integration development:
 
-Start with single-node training to validate your setup:
-
-### Launch Training
+### Prerequisites
 
 ```bash
-# TODO: Add single-node training command
+pip install nemo-gym
 ```
 
-### Monitor Progress
-
-<!-- TODO: Document monitoring with W&B or logs -->
-
-**✅ Success Check**: Training loss decreases, rewards increase over steps.
-
----
-
-## 3. Multi-Node Training
-
-**Estimated time**: ~3-6 hours
-
-Scale to multi-node for production training:
-
-### Cluster Configuration
-
-<!-- TODO: Document multi-node cluster setup -->
-
-### Launch Distributed Training
+### Collect Rollouts
 
 ```bash
-# TODO: Add multi-node training command with SLURM or Ray
+# Terminal 1: Start resource server
+ng_run "+config_paths=[resources_servers/math/configs/math.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
+
+# Terminal 2: Collect rollouts
+ng_collect_rollouts +agent_name=math_simple_agent \
+    +input_jsonl_fpath=resources_servers/math/data/example.jsonl \
+    +output_jsonl_fpath=results/rollouts.jsonl \
+    +limit=100
 ```
 
-### Parallelism Strategies
-
-VeRL supports flexible parallelism configurations:
-
-| Strategy | Use Case | Memory Savings |
-|----------|----------|----------------|
-| Data Parallel | Large batch sizes | Low |
-| Tensor Parallel | Large model width | Medium |
-| Pipeline Parallel | Large model depth | High |
-| FSDP | Memory-constrained | Very High |
-
-**✅ Success Check**: All nodes participate in training, gradient sync completes.
-
----
-
-## Supported Algorithms
-
-| Algorithm | Status | Best For |
-|-----------|--------|----------|
-| PPO | TBD | General online RL training |
-| GRPO | TBD | Group-based policy optimization |
-| ReMax | TBD | Reward maximization |
-| REINFORCE | TBD | Policy gradient baseline |
-
----
-
-## Supported Models
-
-VeRL + NeMo Gym works with HuggingFace-compatible models:
-
-| Model | Size | Tested |
-|-------|------|--------|
-| Llama 3.x | 8B-70B | TBD |
-| Nemotron | 8B-70B | TBD |
-| Qwen 2.x | 7B-72B | TBD |
-| Mistral | 7B-22B | TBD |
-
----
-
-## Complete Example
-
-<!-- TODO: Add end-to-end working example with downloadable config -->
-
-```python
-# Full VeRL + NeMo Gym training script
-# TODO: Add complete example
+**Output format** (JSONL):
+```json
+{
+  "reward": 1.0,
+  "output": [
+    {"role": "user", "content": "What is 2 + 2?"},
+    {"role": "assistant", "content": "The answer is 4."}
+  ]
+}
 ```
 
 ---
 
-## Troubleshooting
+## Production Alternative: NeMo RL
 
-### Common Issues
+NeMo RL provides **working** NeMo Gym integration today:
 
-| Issue | Cause | Solution |
-|-------|-------|----------|
-| OOM errors | Model too large for GPU | Enable FSDP or tensor parallelism |
-| Slow training | Inefficient parallelism | Tune DP/TP/PP ratio for your cluster |
-| Reward always zero | Verifier misconfiguration | Check resource server connectivity |
-| Gradient NaN | Learning rate too high | Reduce LR, add gradient clipping |
+```bash
+# Install NeMo RL (separate from NeMo Gym)
+pip install nemo-rl
 
-<!-- TODO: Add detailed troubleshooting for common VeRL + NeMo Gym issues -->
+# Run GRPO training with NeMo Gym environment
+python examples/nemo_gym/run_grpo_nemo_gym.py \
+    --config examples/nemo_gym/grpo_workplace_assistant_nemotron_nano_v2_9b.yaml
+```
+
+NeMo RL includes:
+
+- ✅ Full rollout orchestration
+- ✅ On-policy token ID corrections
+- ✅ GRPO (Group Relative Policy Optimization) and DAPO (Diversity-Aware Policy Optimization)
+- ✅ Multi-node distributed training
+
+**Reference**: `nemo_rl/environments/nemo_gym.py`
+
+See {doc}`NeMo RL GRPO Tutorial <../tutorials/nemo-rl-grpo/index>` for instructions.
+
+---
+
+## Contributing: Implement VeRL Integration
+
+To add VeRL integration, follow the {doc}`Training Framework Integration Guide <../contribute/rl-framework-integration/index>`:
+
+1. **HTTP Server**: Expose VeRL's generation as OpenAI-compatible endpoint
+2. **On-Policy Corrections**: Implement token ID fixes for multi-step scenarios  
+3. **Reward Wrapper**: Adapt the pattern above to VeRL's interface
+4. **Training Loop**: Connect NeMo Gym rollouts to VeRL optimization
+
+**See also**: [VeRL reward function docs](https://verl.readthedocs.io/)
 
 ---
 
 ## What's Next?
 
-After completing this tutorial, explore these options:
-
 ::::{grid} 1 1 2 2
 :gutter: 3
-
-:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Use Other Training Environments
-:link: https://github.com/NVIDIA-NeMo/Gym#-available-resource-servers
-
-Browse available resource servers on GitHub to find other training environments.
-+++
-{bdg-secondary}`github` {bdg-secondary}`resource-servers`
-:::
 
 :::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` NeMo RL with GRPO
 :link: ../tutorials/nemo-rl-grpo/index
 :link-type: doc
 
-Multi-step tool calling with GRPO using NeMo RL.
+Production-ready training with NeMo Gym. Works today.
 +++
-{bdg-secondary}`rl` {bdg-secondary}`grpo`
+{bdg-primary}`recommended`
+:::
+
+:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Browse Environments
+:link: https://github.com/NVIDIA-NeMo/Gym#-available-resource-servers
+
+Find resource servers on GitHub.
++++
+{bdg-secondary}`github`
 :::
 
 :::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Unsloth Training
 :link: ../tutorials/unsloth-training
 :link-type: doc
 
-Fast, memory-efficient fine-tuning on a single GPU.
+Fast fine-tuning on a single GPU.
 +++
-{bdg-secondary}`unsloth` {bdg-secondary}`efficient`
+{bdg-secondary}`single-gpu`
 :::
 
-:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build a Custom Environment
+:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build Custom Environment
 :link: ../tutorials/creating-resource-server
 :link-type: doc
 
-Create your own resource server with custom tools.
+Create your own resource server.
 +++
-{bdg-secondary}`tutorial` {bdg-secondary}`custom-tools`
+{bdg-secondary}`tutorial`
 :::
 
 ::::

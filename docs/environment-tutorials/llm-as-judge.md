@@ -2,58 +2,56 @@
 
 # LLM-as-a-Judge Verification
 
-```{warning}
-This article has not been reviewed by a developer SME. Content may change.
-```
-
-Use large language models to verify and score agent responses.
+Use an LLM to compare model-generated answers against expected answers when exact string matching fails.
 
 ::::{grid} 2
 :gutter: 3
 
 :::{grid-item-card} {octicon}`clock;1em;` **Time**
-30-45 minutes
+20-30 minutes
 :::
 
 :::{grid-item-card} {octicon}`bookmark;1em;` **Prerequisites**
 
 - Completed {doc}`/get-started/detailed-setup`
-- Access to a judge model (OpenAI, vLLM, or other)
+- Access to a judge model (OpenAI API, vLLM, or other)
 
 :::
 
 ::::
 
+:::{tip}
+**New to NeMo Gym?** See {doc}`/about/concepts/core-components` for:
+- **{term}`Resources server <Verifier>`** — Hosts verification logic
+- **{term}`Rollout <Rollout / Trajectory>`** — Complete task attempt from prompt to reward
+- **{term}`Policy model <Policy Model>`** — The LLM being trained
+:::
+
 ---
 
-## What is LLM-as-a-Judge?
+## When to Use LLM-as-Judge
 
-LLM-as-a-Judge uses a separate LLM to evaluate model outputs:
+Use this approach when:
 
-- Flexible evaluation criteria via natural language prompts
-- Works for open-ended tasks without fixed answers
-- Scales without hand-crafted rules
+- Multiple valid phrasings exist ("Paris" vs "The capital is Paris")
+- Semantic equivalence matters more than exact match
+- Answers require domain knowledge to verify (math, science, code)
+
+**Verification flow**:
 
 ```text
-Agent Response → Judge Model → Verdict (equal/not equal) → Reward
+Model Response → Extract Answer → Judge LLM → Verdict → Reward
+                                                         ├─ 1.0 (equivalent)
+                                                         ├─ 0.5 (partial credit)
+                                                         └─ 0.0 (not equivalent)
 ```
-
-## When to Use
-
-Use LLM verification when:
-
-- Tasks have subjective or open-ended answers
-- Multiple valid solutions exist
-- Hand-crafted rules are impractical
-- You need semantic similarity checking
 
 ## Quick Start
 
 ### 1. Configure the Judge
 
-Create a configuration file referencing the `equivalence_llm_judge` resources server:
-
 ```yaml
+# my_judge.yaml
 equivalence_llm_judge:
   resources_servers:
     equivalence_llm_judge:
@@ -63,14 +61,18 @@ equivalence_llm_judge:
         name: policy_model
       judge_responses_create_params:
         input: []
+        temperature: 0  # Deterministic judging
       judge_prompt_template: |
-        Compare the following answers:
-        Question: {question}
-        Expected: {expected_answer}
-        Generated: {generated_answer}
+        Compare the candidate answer to the gold reference.
+        
+        QUESTION: {question}
+        GOLD: {expected_answer}
+        CANDIDATE: {generated_answer}
         
         Output [[A=B]] if equivalent, [[A!=B]] if not.
 ```
+
+**Placeholders**: `{question}` (from user message), `{expected_answer}` (from data), `{generated_answer}` (from model output)
 
 ### 2. Start the Servers
 
@@ -90,176 +92,253 @@ ng_collect_rollouts \
     +output_jsonl_fpath=data/rollouts.jsonl
 ```
 
+**Output** (`data/rollouts.jsonl`):
+```json
+{"reward": 1.0, "expected_answer": "darwin", "judge_evaluations": [...]}
+```
+
+## Input Data Format
+
+:::::{tab-set}
+
+::::{tab-item} Basic Format
+
+```json
+{
+  "responses_create_params": {
+    "input": [
+      {"role": "user", "content": "Who proposed evolution by natural selection?"}
+    ]
+  },
+  "expected_answer": "darwin"
+}
+```
+
+::::
+
+::::{tab-item} With Regex Extraction
+
+For structured outputs, extract the answer before judging:
+
+```json
+{
+  "responses_create_params": {
+    "input": [
+      {"role": "user", "content": "Put your answer in \\boxed{}.\n\nWhat is 2+2?"}
+    ]
+  },
+  "expected_answer": "4",
+  "template_metadata": {
+    "output_regex": "\\\\boxed\\{(.*?)\\}"
+  }
+}
+```
+
+::::
+
+:::::
+
 ## Configuration Reference
 
 ### Core Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `judge_model_server` | ref | required | Model server to use as judge |
+| `judge_model_server` | ModelServerRef | required | Model server used as judge |
 | `judge_prompt_template` | str | required | Prompt with `{question}`, `{expected_answer}`, `{generated_answer}` |
-| `judge_system_message` | str | null | Optional system message for the judge |
-| `judge_equal_label` | str | `[[A=B]]` | Token indicating answers are equivalent |
-| `judge_not_equal_label` | str | `[[A!=B]]` | Token indicating answers differ |
+| `judge_system_message` | str | null | System message for judge |
+| `judge_equal_label` | str | `[[A=B]]` | Verdict token for equivalent |
+| `judge_not_equal_label` | str | `[[A!=B]]` | Verdict token for different |
 
 ### Answer Extraction
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `question_extract_regex` | str | null | Regex to extract question from user message |
-| `response_extract_regex` | str | null | Regex to extract answer from assistant message |
-
-### Per-Record Regex (OpenQA Support)
-
-These options enable mixed datasets with different answer formats:
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
+| `response_extract_regex` | str | null | Global regex to extract answer from response |
 | `use_per_record_regex` | bool | true | Use `template_metadata.output_regex` per record |
-| `extraction_length_threshold` | int | 120 | Skip regex for long answers (use full generation) |
-| `check_full_generation_on_fail` | bool | true | Retry with full generation on regex failure |
-| `reward_if_full_generation_succeeds` | float | 0.5 | Reward when full generation rescue succeeds |
+| `extraction_length_threshold` | int | 120 | Skip regex for answers longer than this |
 
 ### Reliability Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `check_twice_swap` | bool | false | Run second pass with swapped answers |
-| `reward_if_swap_fails` | float | 0.0 | Reward if swap check disagrees |
-
-## Prompt Engineering
-
-### Equivalence Checking
-
-A well-structured judge prompt should:
-
-1. Define the grading criteria clearly
-2. Provide examples of equivalent and non-equivalent answers
-3. Specify the exact output format
-
-Example prompt for STEM grading:
-
-```text
-You are a meticulous STEM grader. Compare a candidate answer to a GOLD reference.
-
-Rules:
-- Treat GOLD as authoritative for what counts as correct.
-- Accept mathematically equivalent transformations.
-- All essential parts must match for "equivalent".
-
-Output (at the end):
-- If equivalent: [[A=B]] they are equivalent
-- If not equivalent: [[A!=B]] they are not equivalent
-
-QUESTION: {question}
-GOLD: {expected_answer}
-CANDIDATE: {generated_answer}
-```
-
-::::{dropdown} Few-Shot Examples
-:icon: code
-
-Include examples in your prompt to improve judge consistency:
-
-```text
-===== Example 1 (equivalent) =====
-QUESTION: State Avogadro's constant (include units).
-GOLD: 6.022 × 10^23 mol^-1
-CANDIDATE: 6.022e23 per mole.
-
-[[A=B]] they are equivalent
-
-===== Example 2 (not equivalent) =====
-QUESTION: State the first law of thermodynamics.
-GOLD: ΔU = Q − W
-CANDIDATE: ΔU = Q + W
-
-[[A!=B]] they are not equivalent
-```
-
-::::
+| `check_twice_swap` | bool | false | Run second pass with swapped answers (bias detection) |
+| `reward_if_swap_fails` | float | 0.0 | Reward when swap check disagrees |
+| `check_full_generation_on_fail` | bool | true | Retry with full output on regex failure |
+| `reward_if_full_generation_succeeds` | float | 0.5 | Partial reward for rescue success |
 
 ## Reliability Features
 
-::::{dropdown} Swap Check (Positional Bias)
-:icon: sync
+### Swap Check (Bias Detection)
 
-LLM judges can exhibit positional bias—preferring the first or second answer. Enable swap checking to detect this:
+LLM judges can favor the first or second position. Detect this with swap checking:
 
 ```yaml
 check_twice_swap: true
 reward_if_swap_fails: 0.0
 ```
 
-When enabled:
+1. First pass: GOLD vs CANDIDATE → equal
+2. Second pass: CANDIDATE vs GOLD → must also be equal
+3. Reward 1.0 only if both agree
 
-1. First pass: Compare expected vs generated
-2. If equal, second pass: Compare generated vs expected (swapped)
-3. Reward 1.0 only if both passes agree
+### Full Generation Rescue
 
-::::
-
-::::{dropdown} Full Generation Rescue
-:icon: rocket
-
-When regex extraction fails, the server can retry with the full generation:
+When regex extraction fails, retry with full output for partial credit:
 
 ```yaml
 check_full_generation_on_fail: true
 reward_if_full_generation_succeeds: 0.5
 ```
 
-This helps recover from extraction failures while giving partial credit.
+## Judge Prompt Examples
+
+::::{dropdown} STEM Grading Prompt
+:icon: beaker
+
+```text
+===== System role =====
+You are a meticulous STEM grader. Compare a candidate answer to a GOLD 
+reference and decide strict equivalence.
+
+Grading priorities:
+1) Factual equivalence (accept algebraically equivalent formulations)
+2) Completeness (all essential parts must match)
+
+Rules:
+- GOLD is authoritative
+- Accept mathematically identical transformations
+- Multi-part: all parts must match
+
+Output:
+- If equivalent: [[A=B]] they are equivalent
+- If not equivalent: [[A!=B]] they are not equivalent
+
+===== Example (equivalent) =====
+GOLD: 6.022 × 10^23 mol^-1
+CANDIDATE: 6.022e23 per mole
+[[A=B]] they are equivalent
+
+===== Example (not equivalent) =====
+GOLD: ΔU = Q − W
+CANDIDATE: ΔU = Q + W
+[[A!=B]] they are not equivalent
+
+===== Inputs =====
+QUESTION: {question}
+GOLD: {expected_answer}
+CANDIDATE: {generated_answer}
+```
 
 ::::
 
-## Input Data Format
+::::{dropdown} Bash Command Equivalence
+:icon: terminal
 
-### Required Fields
+```text
+You are a Bash command grader.
 
-```json
-{
-  "responses_create_params": {
-    "input": [
-      {"role": "user", "content": "Your question here"}
-    ]
-  },
-  "expected_answer": "The correct answer text"
-}
+Determine if the candidate command is functionally equivalent to GOLD:
+1. Does it achieve the same outcome?
+2. Are differences purely syntactic?
+
+Output [[A=B]] if equivalent, [[A!=B]] if not.
 ```
 
-### Optional Metadata
+::::
 
-For per-record regex extraction (OpenQA support):
+## Limitations
 
-```json
-{
-  "responses_create_params": {
-    "input": [
-      {"role": "user", "content": "Your question here"}
-    ]
-  },
-  "expected_answer": "42",
-  "template_metadata": {
-    "output_regex": "\\[ANSWER\\]\\s*(.+?)\\s*\\[/ANSWER\\]"
-  }
-}
+| Consideration | Mitigation |
+|---------------|------------|
+| **Cost** | Each verification = 1 API call. Budget for scale. |
+| **Latency** | Synchronous. Consider batching for throughput. |
+| **Non-determinism** | Set `temperature: 0` for consistency. |
+| **Judge errors** | Enable `check_twice_swap` for bias detection. |
+
+**Alternatives for specific domains**:
+
+| Domain | Better approach |
+|--------|-----------------|
+| Single-token answers | Exact string match |
+| Math expressions | `math_with_judge` (deterministic first) |
+| Code correctness | `code_gen` (test execution) |
+
+## Complete Example
+
+::::{dropdown} Full Config + Sample Data
+:icon: file-code
+
+**Config** (`my_llm_judge.yaml`):
+
+```yaml
+equivalence_llm_judge:
+  resources_servers:
+    equivalence_llm_judge:
+      entrypoint: app.py
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_responses_create_params:
+        input: []
+        temperature: 0
+      judge_prompt_template: |
+        QUESTION: {question}
+        GOLD: {expected_answer}
+        CANDIDATE: {generated_answer}
+        Output [[A=B]] if equivalent, [[A!=B]] if not.
+      check_twice_swap: true
+      
+equivalence_llm_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: equivalence_llm_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: data/questions.jsonl
 ```
 
-## Example Dataset
+**Data** (`data/questions.jsonl`):
 
-An example dataset is available on Hugging Face:
+```json
+{"responses_create_params": {"input": [{"role": "user", "content": "Capital of France?"}]}, "expected_answer": "Paris"}
+{"responses_create_params": {"input": [{"role": "user", "content": "Who wrote Hamlet?"}]}, "expected_answer": "Shakespeare"}
+```
+
+**Run**:
 
 ```bash
-# Download the dataset
-huggingface-cli download nvidia/Nemotron-RL-knowledge-openqa \
-    --local-dir resources_servers/equivalence_llm_judge/data/
+ng_run "+config_paths=[my_llm_judge.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
+
+# In another terminal
+ng_collect_rollouts +agent_name=equivalence_llm_judge_simple_agent \
+    +input_jsonl_fpath=data/questions.jsonl \
+    +output_jsonl_fpath=data/rollouts.jsonl
 ```
 
-See `resources_servers/equivalence_llm_judge/` for the complete implementation.
+::::
+
+## Datasets
+
+| Dataset | Use case |
+|---------|----------|
+| [nvidia/Nemotron-RL-knowledge-openQA](https://huggingface.co/datasets/nvidia/Nemotron-RL-knowledge-openqa) | Knowledge QA with mixed formats |
+| [nvidia/Nemotron-RL-math-OpenMathReasoning](https://huggingface.co/datasets/nvidia/Nemotron-RL-math-OpenMathReasoning) | Math (use with `math_with_judge`) |
+
+## Judge Model Selection
+
+Tested with **Gemma3-27B-it**. Larger models provide more reliable judgments for nuanced equivalence. Verify your judge model's license permits your use case.
 
 ## Next Steps
 
-- Scale to multi-step tasks with {doc}`multi-step`
-- Add multi-turn conversations with {doc}`multi-turn`
-- Train models with {ref}`training-nemo-rl-grpo-index`
+- {doc}`multi-step` — Sequential tool calling
+- {doc}`multi-turn` — Conversational environments
+- {ref}`training-nemo-rl-grpo-index` — Train with verified rewards

@@ -5,7 +5,23 @@
 This article has not been reviewed by a developer SME. Content may change.
 ```
 
-[vLLM](https://docs.vllm.ai/) provides high-throughput, low-latency LLM inference. The NeMo Gym vLLM model server (`responses_api_models/vllm_model/`) wraps vLLM endpoints to provide Responses API compatibility, enabling self-hosted models to work seamlessly with NeMo Gym's agentic workflows.
+[vLLM](https://docs.vllm.ai/) provides high-throughput, low-latency LLM inference. The NeMo Gym vLLM model server wraps vLLM's Chat Completions endpoint and converts requests/responses to OpenAI's [Responses API](https://platform.openai.com/docs/api-reference/responses) format, enabling self-hosted models to work with NeMo Gym's agentic workflows.
+
+:::{tip}
+**Quick Start**: If you have vLLM running at `http://localhost:8000`, you can use it immediately:
+```yaml
+# In your config YAML
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: http://localhost:8000/v1
+      api_key: token-abc123  # Must match vLLM's --api-key
+      model: your-model-name
+      return_token_id_information: false
+      uses_reasoning_parser: false
+```
+:::
 
 ::::{grid} 2
 :gutter: 3
@@ -30,11 +46,13 @@ This article has not been reviewed by a developer SME. Content may change.
 
 Use vLLM when you need:
 
-- **Self-hosted inference** with your own models or fine-tunes
-- **Maximum throughput** for rollout collection at scale
-- **Token ID information** for NeMo RL training (via `return_token_id_information`)
-- **Data privacy** with on-premise deployment
-- **Custom models** not available via cloud APIs
+- **Self-hosted inference** — Run your own models or fine-tunes on your infrastructure
+- **Maximum throughput** — vLLM's PagedAttention enables high batch sizes for rollout collection
+- **Token ID tracking** — Required for on-policy RL training (set `return_token_id_information: true`)
+- **Data privacy** — Keep data on-premise without external API calls
+- **Custom models** — Use models not available via OpenAI/Azure APIs
+
+**Use OpenAI/Azure instead if**: You want quick prototyping without managing infrastructure, or you need GPT-4 class models. See {doc}`index` for comparison.
 
 ## Starting the vLLM Server
 
@@ -90,7 +108,11 @@ vllm serve meta-llama/Llama-3.1-70B-Instruct \
 ::::{tab-item} Reasoning Models
 
 :::{important}
-Do **NOT** use vLLM's `--reasoning-parser` flag. NeMo Gym handles reasoning via `<think>` tags internally through the `uses_reasoning_parser` config option. Using both will cause conflicts.
+Do **NOT** use vLLM's `--reasoning-parser` flag when using NeMo Gym.
+
+**Why?** NeMo Gym has its own reasoning parser (`uses_reasoning_parser: true`) that extracts `<think>...</think>` tags and converts them to Responses API reasoning items. If you also enable vLLM's reasoning parser, both systems will try to parse the same content, causing malformed outputs.
+
+The source code enforces this: if vLLM returns `reasoning_content` when `uses_reasoning_parser` is disabled, NeMo Gym will raise an assertion error.
 :::
 
 For Nemotron, QwQ, or DeepSeek-R1:
@@ -143,14 +165,18 @@ policy_model_name: Qwen/Qwen3-30B-A3B
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `base_url` | `str` or `list[str]` | Required | vLLM server endpoint(s). Supports multiple for load balancing. |
-| `api_key` | `str` | Required | API key matching vLLM's `--api-key` flag |
-| `model` | `str` | Required | Model name as registered in vLLM |
-| `return_token_id_information` | `bool` | Required | Enable token IDs and log probs for training |
-| `uses_reasoning_parser` | `bool` | Required | Parse `<think>` tags for reasoning models |
-| `replace_developer_role_with_system` | `bool` | `false` | Convert developer role to system for compatibility |
-| `chat_template_kwargs` | `dict` | `null` | Override chat template parameters |
-| `extra_body` | `dict` | `null` | Pass additional vLLM-specific parameters |
+| `base_url` | `str` or `list[str]` | — | **Required.** vLLM server endpoint(s). Supports list for load balancing. |
+| `api_key` | `str` | — | **Required.** API key matching vLLM's `--api-key` flag. |
+| `model` | `str` | — | **Required.** Model name as registered in vLLM. |
+| `return_token_id_information` | `bool` | — | **Required.** Set `true` for training (token IDs + log probs), `false` for inference only. |
+| `uses_reasoning_parser` | `bool` | — | **Required.** Set `true` for reasoning models (extracts `<think>` tags), `false` otherwise. |
+| `replace_developer_role_with_system` | `bool` | `false` | Convert "developer" role to "system" for models that don't support developer role. |
+| `chat_template_kwargs` | `dict` | `null` | Override chat template parameters (e.g., `add_generation_prompt`). |
+| `extra_body` | `dict` | `null` | Pass additional vLLM-specific parameters (e.g., `guided_json`). |
+
+:::{note}
+The five "Required" parameters (`base_url`, `api_key`, `model`, `return_token_id_information`, `uses_reasoning_parser`) must be explicitly set in your config. There are no implicit defaults — the shipped configs (`vllm_model.yaml` and `vllm_model_for_training.yaml`) provide working examples.
+:::
 
 ### Advanced: `chat_template_kwargs`
 
@@ -175,7 +201,7 @@ extra_body:
 
 ## Load Balancing
 
-The vLLM model server supports multiple endpoints for horizontal scaling. Requests are distributed across endpoints using session-based affinity (same session stays on same endpoint):
+The vLLM model server supports multiple endpoints for horizontal scaling:
 
 ```yaml
 base_url:
@@ -183,6 +209,15 @@ base_url:
   - http://gpu-node-2:8000/v1
   - http://gpu-node-3:8000/v1
 ```
+
+**How it works**:
+1. **Initial assignment**: New sessions are assigned to endpoints using round-robin (session 1 → endpoint 1, session 2 → endpoint 2, etc.)
+2. **Session affinity**: Once assigned, a session always uses the same endpoint (tracked via HTTP session cookies)
+3. **Why affinity?** Multi-turn conversations and agentic workflows benefit from request locality
+
+:::{warning}
+If a load-balanced endpoint goes down, sessions assigned to it will fail. There is currently no automatic failover — restart the session or remove the failed endpoint from the config.
+:::
 
 ## Function/Tool Calling
 
@@ -260,12 +295,16 @@ Both endpoints route to the same underlying vLLM server, with format conversion 
 
 **Symptom**: Empty responses or `400 Bad Request` errors
 
-vLLM returns errors when input exceeds the model's context length. NeMo Gym handles this gracefully by returning an empty response rather than crashing.
+vLLM returns a 400 error when input exceeds the model's context length. NeMo Gym catches this error and returns an empty response (assistant message with `content=null`) instead of crashing. This allows training to continue, but you should monitor for excessive empty responses.
+
+**Error messages that trigger this handling**:
+- `"This model's maximum context length is X tokens. However, you requested Y tokens..."`
+- Messages containing `"context length"` or `"max_tokens"`
 
 **Solutions**:
-- Increase `--max-model-len` when starting vLLM (if GPU memory allows)
+- Increase `--max-model-len` when starting vLLM (requires more GPU memory)
 - Reduce input length in your prompts
-- Use a model with longer context support
+- Use a model with longer native context support
 
 ::::
 
@@ -313,6 +352,7 @@ Or use `replace_developer_role_with_system: true` if the model doesn't support t
 
 ## See Also
 
-- {doc}`/reference/faq` — vLLM usage FAQ
-- [vLLM Documentation](https://docs.vllm.ai/) 🔗
-- [vLLM Tool Calling Guide](https://docs.vllm.ai/en/latest/features/tool_calling.html) 🔗
+- {doc}`/reference/faq` — Includes vLLM usage patterns and troubleshooting
+- {doc}`index` — Comparison of all model server backends
+- [vLLM Documentation](https://docs.vllm.ai/)
+- [vLLM Tool Calling Guide](https://docs.vllm.ai/en/latest/features/tool_calling.html)

@@ -1,188 +1,253 @@
 (data-prepare-validate)=
 # Prepare and Validate Data
 
-```{note}
-This page is a stub. Content is being developed.
+Format and validate JSONL datasets for NeMo Gym training using `ng_prepare_data`.
+
+## Prerequisites
+
+- **NeMo Gym installed** — See {doc}`/get-started/detailed-setup`
+- **Familiarity with resources servers** — See {doc}`/resources-server/index`
+
+---
+
+## Quick Start
+
+From the repository root:
+
+```bash
+ng_prepare_data \
+    "+config_paths=[resources_servers/example_multi_step/configs/example_multi_step.yaml]" \
+    +output_dirpath=data/test \
+    +mode=example_validation
 ```
 
-Learn how to prepare and validate your data for use with NeMo Gym training environments.
+Success output:
 
-:::{card}
+```text
+####################################################################################################
+#
+# Finished!
+#
+####################################################################################################
+```
 
-**Goal**: Format your data for NeMo Gym and validate it before training.
-
-^^^
-
-**What you'll learn**:
-
-1. Data format requirements for NeMo Gym
-2. How to convert existing datasets
-3. Validation techniques and common issues
-
-:::
+This generates `data/test/example_metrics.json` with dataset statistics.
 
 ---
 
 ## Data Format
 
-NeMo Gym uses JSONL files where each line is a JSON object containing task data.
+NeMo Gym uses JSONL files. Each line requires a `responses_create_params` field following the [OpenAI Responses API schema](https://platform.openai.com/docs/api-reference/responses/create).
 
-:::::{tab-set}
-
-::::{tab-item} Basic Format
-
-Each line must contain `responses_create_params` with an `input` field:
+### Minimal Format
 
 ```json
-{"responses_create_params": {"input": [{"role": "user", "content": "Your task here"}]}}
+{"responses_create_params": {"input": [{"role": "user", "content": "What is 2+2?"}]}}
 ```
 
-::::
+### With Verification Fields
 
-::::{tab-item} Training Format
-
-For training, include verification metadata:
+Most resources servers add fields for reward computation:
 
 ```json
 {
   "responses_create_params": {
-    "input": [
-      {"role": "developer", "content": "You are a helpful assistant."},
-      {"role": "user", "content": "Calculate 15 * 7"}
-    ]
+    "input": [{"role": "user", "content": "What is 15 * 7? Put your answer in \\boxed{}."}]
   },
-  "expected_answer": "105",
-  "metadata": {"source": "math_dataset", "difficulty": "easy"}
+  "question": "What is 15 * 7?",
+  "expected_answer": "105"
 }
 ```
 
-::::
+:::{tip}
+Check `resources_servers/<name>/README.md` for required fields specific to each resources server.
+:::
 
-:::::
+### Key Properties
 
-### Required Fields
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `responses_create_params` | Yes | Container for input |
-| `responses_create_params.input` | Yes | List of messages |
-| `expected_answer` | For training | Ground truth for verification |
+| Property | Type | Description |
+|----------|------|-------------|
+| `input` | string or list | **Required.** User query or message list |
+| `tools` | list | Tool definitions for function calling |
+| `parallel_tool_calls` | bool | Allow parallel tool calls (default: `true`) |
+| `temperature` | float | Sampling temperature |
+| `max_output_tokens` | int | Maximum response tokens |
 
 ### Message Roles
 
-Valid roles for messages in `input`:
-
-- `user` — The user's query or task
-- `assistant` — Model responses (for multi-turn)
-- `developer` — System instructions (preferred)
-- `system` — System instructions (legacy)
+| Role | Use |
+|------|-----|
+| `user` | User queries |
+| `assistant` | Model responses (multi-turn) |
+| `developer` | System instructions (preferred) |
+| `system` | System instructions (legacy) |
 
 ---
 
-## Converting Data
+## Validation Modes
 
-:::::{tab-set}
+| Mode | Purpose | Validates |
+|------|---------|-----------|
+| `example_validation` | PR submission | `example` datasets |
+| `train_preparation` | Training prep | `train`, `validation` datasets |
 
-::::{tab-item} From Custom Datasets
+### Example Validation
+
+```bash
+ng_prepare_data "+config_paths=[resources_servers/example_multi_step/configs/example_multi_step.yaml]" \
+    +output_dirpath=data/example_multi_step \
+    +mode=example_validation
+```
+
+### Training Preparation
+
+```bash
+ng_prepare_data "+config_paths=[resources_servers/workplace_assistant/configs/workplace_assistant.yaml]" \
+    +output_dirpath=data/workplace_assistant \
+    +mode=train_preparation \
+    +should_download=true
+```
+
+### CLI Parameters
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `+config_paths` | Yes | YAML config paths |
+| `+output_dirpath` | Yes | Output directory |
+| `+mode` | Yes | `example_validation` or `train_preparation` |
+| `+should_download` | No | Download missing datasets (default: `false`) |
+| `+data_source` | No | `huggingface` (default) or `gitlab` |
+
+---
+
+## Troubleshooting
+
+| Issue | Symptom | Fix |
+|-------|---------|-----|
+| Missing `responses_create_params` | Sample silently skipped | Add field with valid `input` |
+| Invalid JSON | Sample skipped | Fix JSON syntax |
+| Invalid role | Sample skipped | Use `user`, `assistant`, `system`, or `developer` |
+| Missing dataset file | `AssertionError` | Create file or set `+should_download=true` |
+
+**Key behavior**: Invalid samples are silently skipped. If metrics show fewer examples than expected, check your data.
+
+::::{dropdown} Find invalid samples
+:icon: code
+:open:
 
 ```python
 import json
 
-def convert_to_nemo_gym(examples):
-    for example in examples:
-        yield {
-            "responses_create_params": {
-                "input": [{"role": "user", "content": example["question"]}]
-            },
-            "expected_answer": example["answer"]
-        }
+def validate_sample(line: str) -> tuple[bool, str]:
+    try:
+        data = json.loads(line)
+    except json.JSONDecodeError as e:
+        return False, f"Invalid JSON: {e}"
+    
+    if "responses_create_params" not in data:
+        return False, "Missing 'responses_create_params'"
+    
+    if "input" not in data["responses_create_params"]:
+        return False, "Missing 'input' in responses_create_params"
+    
+    return True, "OK"
 
-with open("data.jsonl", "w") as f:
-    for item in convert_to_nemo_gym(my_data):
-        f.write(json.dumps(item) + "\n")
+with open("your_data.jsonl") as f:
+    for i, line in enumerate(f, 1):
+        valid, msg = validate_sample(line)
+        if not valid:
+            print(f"Line {i}: {msg}")
 ```
 
 ::::
 
-::::{tab-item} Adding System Prompts
+---
 
-Include a `developer` message before the user message:
+## Validation Process
+
+`ng_prepare_data` performs these steps:
+
+1. **Load configs** — Parse server configs, identify datasets
+2. **Check files** — Verify dataset files exist
+3. **Validate samples** — Parse each line, validate against schema
+4. **Compute metrics** — Aggregate statistics
+5. **Collate** — Combine samples with agent references
+
+### Re-Running
+
+- **Output files** (`train.jsonl`, `validation.jsonl`) are overwritten
+- **Metrics files** (`*_metrics.json`) are compared — delete them if your data changed
+
+### Generated Metrics
+
+| Metric | Description |
+|--------|-------------|
+| Number of examples | Valid sample count |
+| Number of tools | Tool count stats (avg/min/max/stddev) |
+| Number of turns | User messages per sample |
+| Temperature | Temperature parameter stats |
+
+::::{dropdown} Example metrics file
+:icon: file
 
 ```json
 {
-  "responses_create_params": {
-    "input": [
-      {"role": "developer", "content": "You are a math tutor. Show your work."},
-      {"role": "user", "content": "Solve: 3x + 5 = 20"}
-    ]
-  }
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/example_multi_step/data/example.jsonl",
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 5,
+        "Average": 2.0,
+        "Min": 2.0,
+        "Max": 2.0
+    }
 }
 ```
 
 ::::
 
-::::{tab-item} From Hugging Face
-
-For datasets on Hugging Face Hub, see {doc}`download-huggingface` for download commands and conversion examples.
-
-::::
-
-:::::
-
 ---
 
-## Validation
+## Dataset Configuration
 
-### Common Issues
+Define datasets in your server's YAML config:
 
-| Issue | Symptom | Fix |
-|-------|---------|-----|
-| Missing `input` field | `KeyError` during rollout collection | Ensure `responses_create_params.input` exists |
-| Invalid role | Unexpected model behavior | Use `user`, `assistant`, `developer`, or `system` |
-| Malformed JSON | Parse errors | Validate each line with `json.loads()` |
-| Empty input list | No model response | Include at least one message |
-
-### Debugging Tips
-
-::::{dropdown} Validate a single line
-:icon: code
-
-```python
-import json
-
-with open("data.jsonl") as f:
-    for i, line in enumerate(f, 1):
-        try:
-            data = json.loads(line)
-            assert "responses_create_params" in data
-            assert "input" in data["responses_create_params"]
-        except Exception as e:
-            print(f"Line {i}: {e}")
+```yaml
+datasets:
+  - name: train
+    type: train
+    jsonl_fpath: resources_servers/my_server/data/train.jsonl
+    license: Apache 2.0
+  - name: validation
+    type: validation
+    jsonl_fpath: resources_servers/my_server/data/validation.jsonl
+    license: Apache 2.0
+  - name: example
+    type: example
+    jsonl_fpath: resources_servers/my_server/data/example.jsonl
 ```
 
-::::
-
-::::{dropdown} Test with a small sample
-:icon: terminal
-
-```bash
-head -5 data.jsonl > sample.jsonl
-ng_collect_rollouts +agent_name=my_agent \
-    +input_jsonl_fpath=sample.jsonl \
-    +output_jsonl_fpath=test_output.jsonl
-```
-
-::::
+| Type | Purpose | Required for |
+|------|---------|--------------|
+| `example` | Small sample (~5 rows) for format checks | PR submission |
+| `train` | Training data | RL training |
+| `validation` | Evaluation during training | RL training |
 
 ---
 
 ## Next Steps
 
-Once your data is prepared and validated:
-
 :::{card} {octicon}`play;1.5em;sd-mr-1` Collect Rollouts
 :link: /get-started/rollout-collection
 :link-type: doc
 
-Generate training examples by running your agent on the prepared data.
+Generate training examples by running your agent on prepared data.
+:::
+
+:::{card} {octicon}`book;1.5em;sd-mr-1` NeMo RL Integration
+:link: /tutorials/nemo-rl-grpo/index
+:link-type: doc
+
+Use validated data with NeMo RL for GRPO training.
 :::

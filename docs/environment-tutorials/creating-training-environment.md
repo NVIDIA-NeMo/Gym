@@ -1,343 +1,427 @@
 (env-creating-training-environment)=
 # Creating a Training Environment
 
-```{warning}
-This article was generated and has not been reviewed. Content may change.
+Implement verification logic, prepare training data, and connect to NeMo RL.
+
+| | |
+|--|--|
+| **Time** | 45-90 minutes |
+| **Prerequisites** | {doc}`/get-started/detailed-setup`, {doc}`/tutorials/creating-resource-server` |
+
+```{mermaid}
+flowchart LR
+    A[Create Server] --> B[Implement verify]
+    B --> C[Create example.jsonl]
+    C --> D[ng_prepare_data]
+    D --> E[ng_collect_rollouts]
+    E --> F[Create train data]
+    F --> G[Train with NeMo RL]
 ```
 
-Build a complete training environment ready for reinforcement learning with NeMo RL.
+---
 
-::::{grid} 2
-:gutter: 3
+## Quick Start
 
-:::{grid-item-card} {octicon}`clock;1em;` **Time**
-1-2 hours
-:::
+**Initialize from template**:
 
-:::{grid-item-card} {octicon}`bookmark;1em;` **Prerequisites**
+```bash
+ng_init_resources_server +entrypoint=resources_servers/my_env
+```
 
-- Completed {doc}`/get-started/detailed-setup`
-- Completed {doc}`/tutorials/creating-resource-server`
+Creates:
 
-:::
+```
+resources_servers/my_env/
+├── app.py              # verify() template
+├── configs/my_env.yaml # Dataset config
+├── data/.gitignore
+├── requirements.txt
+├── tests/test_app.py
+└── README.md
+```
 
-::::
+A training environment requires:
+
+| Component | Description |
+|-----------|-------------|
+| `verify()` method | Computes reward from model response |
+| `example.jsonl` | Exactly 5 examples for PR validation |
+| YAML config | Links datasets to agent |
 
 ---
 
-## Overview
+## Complete Example
 
-You've built a resources server with tools and verification. Now learn how to transform it into a **training environment** — one that can effectively train models via reinforcement learning.
+Minimal math verification server:
 
-A training environment differs from a simple resources server in three key ways:
-
-| Aspect | Resources Server | Training Environment |
-|--------|------------------|----------------------|
-| **Data scale** | 5-10 example inputs | Thousands of training examples |
-| **Reward design** | Basic pass/fail | Carefully shaped for learning |
-| **Evaluation** | Manual testing | Systematic baseline and metrics |
-
----
-
-## Task Design Principles
-
-Good RL tasks share common characteristics that make them learnable.
-
-### Define Clear Success Criteria
-
-Before implementing, answer these questions:
-
-1. **What does success look like?** Define the exact conditions for reward=1.0
-2. **What partial progress exists?** Identify intermediate states worth rewarding
-3. **What are failure modes?** Understand how the model might "cheat" or fail
+:::{dropdown} app.py (click to expand)
+:icon: code
 
 ```python
-# Example: Clear success criteria for a search task
-SUCCESS_CRITERIA = {
-    "found_answer": True,           # Primary goal
-    "used_correct_tool": True,      # Required behavior
-    "max_steps": 5,                 # Efficiency constraint
-}
+from typing import Optional
+from fastapi import FastAPI
+from nemo_gym.base_resources_server import (
+    BaseResourcesServerConfig, BaseRunRequest, BaseVerifyRequest,
+    BaseVerifyResponse, SimpleResourcesServer,
+)
+
+class MathVerifyConfig(BaseResourcesServerConfig):
+    pass
+
+class MathRunRequest(BaseRunRequest):
+    expected_answer: str
+
+class MathVerifyRequest(MathRunRequest, BaseVerifyRequest):
+    pass
+
+class MathVerifyResponse(BaseVerifyResponse):
+    extracted_answer: Optional[str]
+
+class MathResourcesServer(SimpleResourcesServer):
+    config: MathVerifyConfig
+
+    def setup_webserver(self) -> FastAPI:
+        return super().setup_webserver()
+
+    async def verify(self, body: MathVerifyRequest) -> MathVerifyResponse:
+        # Extract answer from \boxed{} pattern
+        extracted = None
+        for output in reversed(body.response.output):
+            if output.type == "message":
+                for content in output.content:
+                    if content.type == "output_text" and "\\boxed{" in content.text:
+                        start = content.text.find("\\boxed{") + 7
+                        end = content.text.find("}", start)
+                        extracted = content.text[start:end].strip()
+                        break
+                if extracted:
+                    break
+
+        is_correct = extracted == body.expected_answer.strip()
+        return MathVerifyResponse(
+            **body.model_dump(),
+            reward=1.0 if is_correct else 0.0,
+            extracted_answer=extracted,
+        )
+
+if __name__ == "__main__":
+    MathResourcesServer.run_webserver()
 ```
 
-### Choose Appropriate Complexity
-
-Start simple and increase complexity gradually:
-
-| Complexity | Example | Training Consideration |
-|------------|---------|------------------------|
-| **Single-step** | Math calculation | Fast iteration, clear signal |
-| **Multi-step** | Information retrieval | Requires intermediate rewards |
-| **Multi-turn** | Dialogue | Needs conversation-level rewards |
-
-:::{tip}
-Begin with single-step tasks. Add complexity only after achieving good performance on simpler variants.
 :::
+
+**data/example.jsonl** (exactly 5 lines required):
+
+```json
+{"responses_create_params": {"input": [{"role": "user", "content": "What is 2+2? Answer in \\boxed{}."}]}, "expected_answer": "4"}
+{"responses_create_params": {"input": [{"role": "user", "content": "What is 3*3? Answer in \\boxed{}."}]}, "expected_answer": "9"}
+{"responses_create_params": {"input": [{"role": "user", "content": "What is 10-7? Answer in \\boxed{}."}]}, "expected_answer": "3"}
+{"responses_create_params": {"input": [{"role": "user", "content": "What is 8/2? Answer in \\boxed{}."}]}, "expected_answer": "4"}
+{"responses_create_params": {"input": [{"role": "user", "content": "What is 5+5? Answer in \\boxed{}."}]}, "expected_answer": "10"}
+```
 
 ---
 
-## Designing Effective Rewards
+## Verification Patterns
 
-Reward design is the most critical aspect of training environment quality.
+The `verify()` method compares model response to expected output and returns a reward.
 
-### Reward Signal Properties
+**Base types** (`nemo_gym.base_resources_server`):
 
-**Density**: How often does the model receive feedback?
+| Type | Contains |
+|------|----------|
+| `BaseRunRequest` | `responses_create_params` |
+| `BaseVerifyRequest` | Adds `response: NeMoGymResponse` |
+| `BaseVerifyResponse` | Adds `reward: float` |
 
-```python
-# Sparse reward — only at task completion
-reward = 1.0 if task_complete else 0.0
-
-# Dense reward — feedback at each step
-reward = step_progress + correctness_bonus
-```
-
-**Scale**: Keep rewards in a consistent range (typically 0.0 to 1.0).
-
-**Informativeness**: Rewards should distinguish good actions from bad ones.
-
-### Reward Patterns
+**Three reward patterns**:
 
 :::::{tab-set}
 
-::::{tab-item} Binary Rewards
+::::{tab-item} Binary (Exact Match)
 
 Use for tasks with clear right/wrong answers:
 
 ```python
-async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
-    correct = extract_answer(body.response) == body.expected_answer
-    reward = 1.0 if correct else 0.0
-    return BaseVerifyResponse(**body.model_dump(), reward=reward)
+# Pattern from resources_servers/mcqa/app.py
+async def verify(self, body: MyVerifyRequest) -> MyVerifyResponse:
+    # Extract model's answer from response
+    extracted = self._extract_answer(body.response)
+    
+    # Compare to expected
+    expected = body.expected_answer.strip().upper()
+    is_correct = (extracted == expected)
+    reward = 1.0 if is_correct else 0.0
+
+    return MyVerifyResponse(
+        **body.model_dump(),
+        reward=reward,
+        extracted_answer=extracted,
+    )
 ```
 
-**Best for**: Math, factual Q&A, code correctness
+**Best for**: Multiple choice, factual Q&A, classification
 
 ::::
 
-::::{tab-item} Partial Credit
+::::{tab-item} Structured Output
 
-Use when intermediate progress is meaningful:
+Use when the model must call specific functions:
 
 ```python
-async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
-    steps = extract_steps(body.response)
-    correct_steps = sum(1 for s in steps if is_correct(s))
-    reward = correct_steps / len(steps)
-    return BaseVerifyResponse(**body.model_dump(), reward=reward)
+# Pattern from resources_servers/example_multi_step/app.py
+import json
+
+async def verify(self, body: MyVerifyRequest) -> MyVerifyResponse:
+    expected = body.expected_values
+    
+    # Find the function call in the response
+    actual = []
+    for output in reversed(body.response.output):
+        if output.type == "function_call" and output.name == "submit_answer":
+            actual = json.loads(output.arguments)["values"]
+            break
+
+    reward = 1.0 if (expected == actual) else 0.0
+    
+    return MyVerifyResponse(**body.model_dump(), reward=reward)
 ```
 
-**Best for**: Multi-step reasoning, structured outputs
+**Best for**: Tool calling, multi-step extraction
 
 ::::
 
-::::{tab-item} Shaped Rewards
+::::{tab-item} Library + Judge
 
-Combine multiple signals for complex tasks:
+Use library verification with LLM judge fallback:
 
 ```python
-async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
-    # Primary objective
-    task_score = 1.0 if task_complete(body.response) else 0.0
+# Pattern from resources_servers/math_with_judge/app.py
+async def verify(self, body: MyVerifyRequest) -> MyVerifyResponse:
+    # Try fast library check first
+    library_reward = self._check_with_library(
+        body.expected_answer, 
+        body.response
+    )
     
-    # Secondary objectives
-    efficiency_bonus = max(0, 1 - (num_steps / max_steps)) * 0.2
-    format_bonus = 0.1 if correct_format(body.response) else 0.0
+    if library_reward > 0.5:
+        return MyVerifyResponse(**body.model_dump(), reward=library_reward)
     
-    reward = task_score + efficiency_bonus + format_bonus
-    reward = min(reward, 1.0)  # Cap at 1.0
-    
-    return BaseVerifyResponse(**body.model_dump(), reward=reward)
+    # Fall back to LLM judge for edge cases
+    judge_reward = await self._check_with_judge(body)
+    return MyVerifyResponse(**body.model_dump(), reward=judge_reward)
 ```
 
-**Best for**: Complex workflows, multi-objective tasks
+**Best for**: Math, open-ended generation
 
 ::::
 
 :::::
 
-### Avoiding Common Pitfalls
-
-:::{warning}
-**Reward hacking**: Models may find unintended shortcuts. Test edge cases.
+### Custom Request/Response Classes
 
 ```python
-# Bad: Rewards length, not quality
-reward = len(response) / 1000  # Model learns to be verbose
+from typing import Optional
+from nemo_gym.base_resources_server import (
+    BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse,
+)
 
-# Good: Rewards actual task completion
-reward = 1.0 if answer_matches_expected else 0.0
+class MyRunRequest(BaseRunRequest):
+    expected_answer: str  # Your verification field
+
+class MyVerifyRequest(MyRunRequest, BaseVerifyRequest):
+    pass
+
+class MyVerifyResponse(BaseVerifyResponse):
+    extracted_answer: Optional[str] = None  # Diagnostic field
 ```
-:::
 
 ---
 
-## Building Your Training Dataset
+## Data Format
 
-Training requires significantly more data than testing.
+JSONL with one example per line:
 
-### Data Requirements
-
-| Dataset | Size | Purpose |
-|---------|------|---------|
-| **Training** | 1,000 - 100,000+ | Model learns from these |
-| **Validation** | 100 - 1,000 | Monitor training progress |
-| **Test** | 100 - 500 | Final evaluation (held out) |
-
-### Creating Training Data
-
-:::::{tab-set}
-
-::::{tab-item} From Existing Datasets
-
-```python
-import json
-from datasets import load_dataset
-
-# Load a HuggingFace dataset
-dataset = load_dataset("gsm8k", "main", split="train")
-
-# Convert to NeMo Gym format
-with open("data/train.jsonl", "w") as f:
-    for example in dataset:
-        item = {
-            "responses_create_params": {
-                "input": [{"role": "user", "content": example["question"]}]
-            },
-            "expected_answer": example["answer"].split("####")[-1].strip()
-        }
-        f.write(json.dumps(item) + "\n")
+```json
+{"responses_create_params": {"input": [{"role": "user", "content": "What is 2+2?"}]}, "expected_answer": "4"}
 ```
 
-::::
-
-::::{tab-item} Synthetic Data Generation
-
-For custom tasks, generate examples programmatically:
-
-```python
-import random
-import json
-
-def generate_math_example():
-    a, b = random.randint(1, 100), random.randint(1, 100)
-    return {
-        "responses_create_params": {
-            "input": [{"role": "user", "content": f"Calculate {a} * {b}"}]
-        },
-        "expected_answer": str(a * b)
-    }
-
-with open("data/train.jsonl", "w") as f:
-    for _ in range(10000):
-        f.write(json.dumps(generate_math_example()) + "\n")
-```
-
-::::
-
-:::::
-
-### Data Quality Checklist
-
-Before training, verify your data:
-
-- [ ] **Balanced difficulty**: Mix of easy, medium, hard examples
-- [ ] **Diverse inputs**: Varied phrasing, edge cases included
-- [ ] **Correct labels**: Expected answers are accurate
-- [ ] **No data leakage**: Test set doesn't overlap with training
+| Field | Required | Description |
+|-------|----------|-------------|
+| `responses_create_params.input` | ✓ | OpenAI-compatible messages |
+| Task-specific fields | ✓ | Fields your `verify()` expects |
+| `responses_create_params.tools` | | Tool definitions |
+| `responses_create_params.temperature` | | Sampling temperature |
+| `id` | | Tracking identifier |
 
 ---
 
-## Evaluation and Iteration
+## Dataset Configuration
 
-### Establish Baselines
-
-Before training, measure baseline performance:
-
-```bash
-# Collect rollouts with your current model
-ng_collect_rollouts \
-    +agent_name=my_agent \
-    +input_jsonl_fpath=data/validation.jsonl \
-    +output_jsonl_fpath=data/baseline_rollouts.jsonl
-```
-
-Analyze the results:
-
-```python
-import json
-
-rewards = []
-with open("data/baseline_rollouts.jsonl") as f:
-    for line in f:
-        data = json.loads(line)
-        rewards.append(data.get("reward", 0))
-
-print(f"Baseline accuracy: {sum(r == 1.0 for r in rewards) / len(rewards):.2%}")
-print(f"Average reward: {sum(rewards) / len(rewards):.3f}")
-```
-
-### Monitor Training Progress
-
-Track these metrics during training:
-
-| Metric | What It Tells You |
-|--------|-------------------|
-| **Mean reward** | Overall performance trend |
-| **Reward variance** | Learning stability |
-| **Success rate** | Percentage of fully correct responses |
-| **Step count** | Efficiency of solutions |
-
-### Common Failure Modes
-
-| Symptom | Likely Cause | Solution |
-|---------|--------------|----------|
-| Reward stays flat | Reward too sparse | Add intermediate rewards |
-| Reward oscillates | Learning rate too high | Reduce LR, increase batch size |
-| Model "cheats" | Reward hacking | Tighten verification logic |
-| Performance plateaus | Task too hard | Simplify or add curriculum |
-
----
-
-## Connecting to Training
-
-Once your environment is ready, connect it to NeMo RL for training.
-
-### Prepare Configuration
-
-Create a training configuration that references your environment:
+:::{dropdown} configs/my_env.yaml (click to expand)
+:icon: file-code
 
 ```yaml
-# configs/my_training.yaml
-training:
-  algorithm: grpo
-  environment:
-    resources_server: my_resources_server
-    agent: simple_agent
-  data:
-    train_jsonl: data/train.jsonl
-    validation_jsonl: data/validation.jsonl
+my_resources_server:
+  resources_servers:
+    my_env:
+      entrypoint: app.py
+      domain: math  # math | coding | agent | knowledge | instruction_following | other
+
+my_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: my_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/my_env/data/train.jsonl
+        num_repeats: 1
+        license: Apache 2.0
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/my_env/data/validation.jsonl
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/my_env/data/example.jsonl
 ```
 
-### Run Training
+:::
+
+| Dataset Type | Size | Purpose |
+|--------------|------|---------|
+| `train` | 1,000+ | Training data |
+| `validation` | 100-1,000 | Progress tracking |
+| `example` | **Exactly 5** | PR validation |
+
+**`num_repeats`**: Duplicates in-place (`abc` → `aabbcc`) so consecutive duplicates get shuffled during training.
+
+---
+
+## Prepare Data
+
+Set config paths (used in all commands below):
 
 ```bash
-# See NeMo RL documentation for full training commands
-# This is a simplified example
-python -m nemo_rl.train \
-    --config configs/my_training.yaml \
-    --output_dir results/my_experiment
+config_paths="resources_servers/my_env/configs/my_env.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml"
+```
+
+**Step 1 — Validate examples** (required for PR):
+
+```bash
+ng_prepare_data "+config_paths=[${config_paths}]" \
+    +output_dirpath=data/my_env +mode=example_validation
+```
+
+**Step 2 — Prepare training data**:
+
+```bash
+ng_prepare_data "+config_paths=[${config_paths}]" \
+    +output_dirpath=data/my_env +mode=train_preparation \
+    +should_download=true +data_source=huggingface
+```
+
+:::{tip}
+For HuggingFace downloads, set `hf_token: hf_xxxxx` in `env.yaml`.
+:::
+
+**Output**: `data/my_env/{train,validation}.jsonl` + `*_metrics.json`
+
+---
+
+## Collect Rollouts
+
+**Start servers** (Terminal 1):
+
+```bash
+ng_run "+config_paths=[${config_paths}]"
+# Wait for: "All 3 / 3 servers ready!"
+```
+
+**Collect rollouts** (Terminal 2):
+
+```bash
+ng_collect_rollouts \
+    +agent_name=my_simple_agent \
+    +input_jsonl_fpath=resources_servers/my_env/data/example.jsonl \
+    +output_jsonl_fpath=resources_servers/my_env/data/example_rollouts.jsonl
+```
+
+| Option | Description |
+|--------|-------------|
+| `+limit=N` | Process first N examples |
+| `+num_repeats=K` | Run each example K times (mean@K) |
+| `+num_samples_in_parallel=P` | Concurrent request limit |
+
+**Analyze results**:
+
+```python
+import json
+rewards = [json.loads(l).get("reward", 0) for l in open("resources_servers/my_env/data/example_rollouts.jsonl")]
+print(f"Accuracy: {sum(r == 1.0 for r in rewards) / len(rewards):.2%}")
+```
+
+---
+
+## Train with NeMo RL
+
+```yaml
+# my_training_config.yaml
+data:
+  train_jsonl_fpath: data/my_env/train.jsonl
+  validation_jsonl_fpath: data/my_env/validation.jsonl
+env:
+  should_use_nemo_gym: true
+  nemo_gym:
+    config_paths:
+      - resources_servers/my_env/configs/my_env.yaml
+```
+
+```bash
+python examples/nemo_gym/run_grpo_nemo_gym.py --config my_training_config.yaml
 ```
 
 :::{seealso}
-For complete training instructions, see {ref}`training-nemo-rl-grpo-index`.
+[NeMo RL GRPO guide](https://github.com/NVIDIA-NeMo/RL/blob/main/docs/guides/grpo.md)
 :::
+
+---
+
+## Production Checklist
+
+| Check | Why |
+|-------|-----|
+| `hf_token` in `env.yaml` | Credentials out of shell history |
+| `mode=example_validation` first | Catch data issues early |
+| Rollouts show non-zero rewards | Verify environment works |
+| `+num_samples_in_parallel` set | Avoid overwhelming servers |
+| Delete `*_metrics.json` on schema change | Prevent stale metrics errors |
+
+**Graceful shutdown**: `Ctrl+C` sends SIGINT to all servers.
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause | Solution |
+|---------|-------|----------|
+| `ValidationError` during `ng_prepare_data` | Invalid JSON or missing `responses_create_params` | Check each line is valid JSON |
+| `reward` always 0.0 | `verify()` not matching response format | Print `body.response.output` to debug |
+| Conflicting metrics error | Stale metrics file | Delete `*_metrics.json` and re-run |
+| Example count mismatch | `example.jsonl` ≠ 5 lines | Ensure exactly 5 examples |
+| Servers never ready | Port conflict or config error | Check port availability, review logs |
 
 ---
 
 ## Next Steps
-
-After creating your training environment:
 
 ::::{grid} 1 2 2 2
 :gutter: 3
@@ -367,17 +451,3 @@ Learn more about data formats and validation.
 :::
 
 ::::
-
----
-
-## Summary
-
-You've learned how to:
-
-✅ Design tasks with clear success criteria  
-✅ Create effective reward functions for RL  
-✅ Build training datasets at scale  
-✅ Establish baselines and monitor progress  
-✅ Connect your environment to training  
-
-Your training environment is now ready for reinforcement learning with NeMo RL!

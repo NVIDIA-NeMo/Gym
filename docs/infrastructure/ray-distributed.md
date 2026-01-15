@@ -1,21 +1,18 @@
 (infra-ray-distributed)=
+
 # Distributed Computing with Ray
 
-```{warning}
-This article has not been reviewed by a developer SME. Content may change.
-```
-
-Scale CPU-intensive tasks in NeMo Gym using [Ray](https://www.ray.io/) for distributed parallel execution.
+Scale CPU-intensive verification tasks using [Ray](https://www.ray.io/) for distributed parallel execution.
 
 ---
 
 ## Overview
 
-NeMo Gym uses Ray for parallelizing CPU-intensive operations, particularly in resources servers where verification logic can be computationally expensive. Ray enables:
+NeMo Gym uses Ray for parallelizing CPU-intensive operations in resources servers where verification logic can be computationally expensive. Ray enables:
 
 - Parallel execution of verification tasks across CPU cores
 - Distribution of work across multiple nodes in a cluster
-- Seamless integration with training frameworks like NeMo-RL
+- Integration with training frameworks like NeMo RL
 
 ```{note}
 Ray is **not** used for rollout collection parallelism. Rollout collection uses async HTTP with aiohttp for high-concurrency request handling. See the {ref}`FAQ <reference-faq>` for details on the async HTTP architecture.
@@ -30,14 +27,15 @@ Ray is **not** used for rollout collection parallelism. Rollout collection uses 
 Ray initializes automatically when you start NeMo Gym servers:
 
 ```bash
-ng_run "+config_paths=[$config_paths]"
+# Example: Start with math verification config
+ng_run "+config_paths=[resources_servers/math/configs/gsm8k.yaml]"
 ```
 
 The initialization flow:
 
-1. **Main process** (`cli.py`): Ray cluster starts when `RunHelper.start()` is called
-2. **Server processes** (`server_utils.py`): Each server calls `initialize_ray()` and connects to the same cluster
-3. **Shared state**: The Ray cluster address is stored in the global config for all child processes
+1. **Main process** (`cli.py:177`): Ray cluster starts when `RunHelper.start()` calls `initialize_ray()`
+2. **Server processes** (`server_utils.py:563`): Servers call `initialize_ray()` during setup, connecting to the same cluster
+3. **Shared state**: The Ray cluster address is stored in `global_config_dict["ray_head_node_address"]` for all child processes
 
 ::::
 
@@ -80,8 +78,12 @@ import ray
 
 @ray.remote(scheduling_strategy="SPREAD")
 def cpu_intensive_task(data):
-    """Expensive computation distributed across nodes."""
-    result = expensive_computation(data)
+    """Expensive computation distributed across nodes.
+    
+    Use for operations >100ms that benefit from parallelization.
+    """
+    # Your CPU-bound logic here
+    result = process(data)
     return result
 
 def process_data_parallel(data_list):
@@ -95,33 +97,34 @@ def process_data_parallel(data_list):
 
 The `scheduling_strategy="SPREAD"` distributes tasks across different nodes for better parallelization.
 
-### Example: Parallel Verification
+### Real Example: Code Execution Verification
 
-Here's a pattern for parallelizing verification in a resources server:
+From `resources_servers/code_gen/lcb_integration/compute_code_generation_metrics.py`:
 
 ```python
 import ray
-from typing import List
 
+# Using SPREAD scheduling so that Ray assigns tasks to as many distinct nodes as possible.
 @ray.remote(scheduling_strategy="SPREAD")
-def verify_single(answer: str, expected: str) -> bool:
-    """CPU-intensive verification for a single answer."""
-    # Your expensive verification logic here
-    return compute_match(answer, expected)
-
-class MyResourcesServer(BaseResourcesServer):
-    async def verify(self, request: VerifyRequest) -> VerifyResponse:
-        # Submit verification tasks in parallel
-        futures = [
-            verify_single.remote(ans, exp) 
-            for ans, exp in zip(request.answers, request.expected)
-        ]
-        
-        # Gather results
-        results = ray.get(futures)
-        
-        return VerifyResponse(correct=results)
+def check_correctness_remote(sample, generation, timeout, debug=True):
+    """Ray wrapper of check_correctness for remote execution."""
+    return check_correctness(sample, generation, timeout, debug)
 ```
+
+Usage pattern for batch verification:
+
+```python
+# Submit all tasks to Ray
+futures = [
+    check_correctness_remote.remote(sample, gen, timeout)
+    for sample, gen in zip(samples, generations)
+]
+
+# Collect results (blocks until all complete)
+results = ray.get(futures)
+```
+
+See also: `resources_servers/swerl_gen/eval/singularity_utils.py:202` for SWE-bench evaluation using Ray.
 
 ## Configuration
 
@@ -131,11 +134,14 @@ class MyResourcesServer(BaseResourcesServer):
 Ray versions must match exactly between the main process and all child processes. NeMo Gym automatically constrains the Ray version in child server environments to match the parent.
 ```
 
-The version constraint is managed in `global_config.py`:
+The version constraint is managed in `global_config.py:288-291`:
 
 ```python
 # Child servers receive this dependency constraint
-f"ray[default]=={ray_version}"
+global_config_dict[HEAD_SERVER_DEPS_KEY_NAME] = [
+    f"ray[default]=={ray_version}",
+    f"openai=={openai_version}",
+]
 ```
 
 ### Resource Allocation
@@ -155,7 +161,7 @@ def multi_cpu_task(data):
 ```
 
 ```{note}
-GPU workloads in NeMo Gym typically go through model servers (vLLM, OpenAI API) rather than Ray GPU allocation. Use model server configuration for GPU resource management.
+GPU workloads in NeMo Gym go through model servers (vLLM, OpenAI API). The `local_vllm_model` server uses Ray for vLLM process scheduling, but GPU allocation is managed by vLLM itself, not Ray's resource system.
 ```
 
 ## Monitoring
@@ -216,8 +222,16 @@ If servers fail to connect to the Ray cluster:
 
 ::::
 
+## Where Ray is Used
+
+| Component | File | Purpose |
+|---|---|---|
+| Code generation | `code_gen/lcb_integration/compute_code_generation_metrics.py` | Parallel test execution |
+| SWE-bench evaluation | `swerl_gen/eval/singularity_utils.py` | Parallel patch verification |
+| Local vLLM | `local_vllm_model/app.py` | vLLM server scheduling |
+
 ## Related Resources
 
-- {doc}`deployment-topology` - Production deployment patterns
-- {ref}`FAQ: Use Ray for parallelizing CPU-intensive tasks <reference-faq>` - Additional examples
-- [Ray Documentation](https://docs.ray.io/) - Comprehensive Ray reference
+- {doc}`deployment-topology` — Production deployment patterns
+- {ref}`FAQ: Use Ray for parallelizing CPU-intensive tasks <reference-faq>` — Additional examples
+- [Ray Documentation](https://docs.ray.io/) — Comprehensive Ray reference
