@@ -115,10 +115,22 @@ def process_entry(theorem_name: str, row: dict) -> dict:
     }
 
 
+def is_clean_statement(stmt: str) -> bool:
+    """Check if formal statement has no custom defs or axioms (pure Mathlib)."""
+    if not stmt:
+        return False
+    has_custom_def = bool(re.search(r'\bdef\s+\w+', stmt))
+    has_axiom = bool(re.search(r'\baxiom\s+', stmt))
+    return not has_custom_def and not has_axiom
+
+
 def load_and_filter_dataset(
     dataset_path: str,
     exclude_nano_v3: bool = True,
     difficulties: list[str] | None = None,
+    first_try_only: bool = False,
+    max_entries: int | None = None,
+    clean_only: bool = False,
 ) -> list[dict]:
     """Load Nemotron-Math-Proofs-v1 and filter by difficulty.
 
@@ -127,6 +139,9 @@ def load_and_filter_dataset(
         exclude_nano_v3: Whether to exclude entries used in nano_v3 SFT
         difficulties: List of difficulties to include ['hard', 'medium', 'easy', 'very_easy']
                      Default: ['hard', 'medium', 'easy']
+        first_try_only: Only include theorems with all first-try successes (no error correction)
+        max_entries: Only include theorems with at most this many entries
+        clean_only: Only include theorems with no custom defs or axioms (pure Mathlib)
 
     Returns:
         List of processed entries ready for Gym
@@ -167,9 +182,13 @@ def load_and_filter_dataset(
         }
     )
 
-    # Count initial successes per theorem
+    # Count initial successes and total entries per theorem
     theorem_stats["initial_count"] = theorem_stats["prompt_type"].apply(lambda x: x.count("initial"))
     theorem_stats["error_count"] = theorem_stats["prompt_type"].apply(lambda x: x.count("error_correction"))
+    theorem_stats["total_entries"] = theorem_stats["prompt_type"].apply(len)
+    theorem_stats["all_first_try"] = theorem_stats["prompt_type"].apply(
+        lambda x: all(p == "initial" for p in x)
+    )
 
     # Filter to solved theorems (at least one initial success)
     solved = theorem_stats[theorem_stats["initial_count"] > 0].copy()
@@ -179,6 +198,22 @@ def load_and_filter_dataset(
     if exclude_nano_v3:
         solved = solved[~solved["in_nano_v3"]]
         print(f"After excluding nano_v3: {len(solved):,}")
+
+    # Filter for first-try-only if requested
+    if first_try_only:
+        solved = solved[solved["all_first_try"]]
+        print(f"After first-try-only filter: {len(solved):,}")
+
+    # Filter by max entries if requested
+    if max_entries is not None:
+        solved = solved[solved["total_entries"] <= max_entries]
+        print(f"After max_entries={max_entries} filter: {len(solved):,}")
+
+    # Filter for clean statements (no custom def/axiom) if requested
+    if clean_only:
+        solved["is_clean"] = solved["formal_statement"].apply(is_clean_statement)
+        solved = solved[solved["is_clean"]]
+        print(f"After clean_only filter: {len(solved):,}")
 
     # Assign difficulty based on initial success count
     def assign_difficulty(initial_count: int) -> str:
@@ -228,6 +263,9 @@ def main(
     output_name: str = "nemotron_math_proofs",
     difficulties: list[str] | None = None,
     include_nano_v3: bool = False,
+    first_try_only: bool = False,
+    max_entries: int | None = None,
+    clean_only: bool = False,
     limit: int | None = None,
 ) -> None:
     """Main entry point."""
@@ -239,6 +277,9 @@ def main(
         dataset_path=dataset_path,
         exclude_nano_v3=not include_nano_v3,
         difficulties=difficulties,
+        first_try_only=first_try_only,
+        max_entries=max_entries,
+        clean_only=clean_only,
     )
 
     if limit:
@@ -267,6 +308,9 @@ Examples:
   # Only hard problems
   python prepare_nemotron_math_proofs.py --difficulties hard
 
+  # First-try-only problems with <=3 entries (790 harder problems)
+  python prepare_nemotron_math_proofs.py --first-try-only --max-entries 3
+
   # Include nano_v3 entries (not recommended for RL)
   python prepare_nemotron_math_proofs.py --include-nano-v3
         """,
@@ -294,6 +338,22 @@ Examples:
         help="Include nano_v3 entries (not recommended for RL, used in SFT)",
     )
     parser.add_argument(
+        "--first-try-only",
+        action="store_true",
+        help="Only include theorems with all first-try successes (no error correction)",
+    )
+    parser.add_argument(
+        "--max-entries",
+        type=int,
+        default=None,
+        help="Only include theorems with at most this many entries",
+    )
+    parser.add_argument(
+        "--clean-only",
+        action="store_true",
+        help="Only include theorems with no custom defs or axioms (pure Mathlib)",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=None,
@@ -306,5 +366,8 @@ Examples:
         output_name=args.output_name,
         difficulties=args.difficulties,
         include_nano_v3=args.include_nano_v3,
+        first_try_only=args.first_try_only,
+        max_entries=args.max_entries,
+        clean_only=args.clean_only,
         limit=args.limit,
     )
