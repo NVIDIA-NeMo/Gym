@@ -24,21 +24,21 @@ swerl_gen_simple_agent:
       datasets:
       - name: train
         type: train
-        jsonl_fpath: resources_servers/swerl_gen/data/train_swebenchverified_n32768.jsonl
+        jsonl_fpath: resources_servers/swerl_gen/data/train.jsonl
         num_repeats: 1
         gitlab_identifier:
           dataset_name: swerl_gen
           version: 0.0.1
-          artifact_fpath: train_swebenchverified_n32768.jsonl
+          artifact_fpath: train.jsonl
         license: Apache 2.0
       - name: validation
         type: validation
-        jsonl_fpath: resources_servers/swerl_gen/data/validation_gym690_curriculum2.jsonl
+        jsonl_fpath: resources_servers/swerl_gen/data/validation.jsonl
         num_repeats: 1
         gitlab_identifier:
           dataset_name: swerl_gen
           version: 0.0.1
-          artifact_fpath: validation_gym690_curriculum2.jsonl
+          artifact_fpath: validation.jsonl
         license: Apache 2.0
       - name: example
         type: example
