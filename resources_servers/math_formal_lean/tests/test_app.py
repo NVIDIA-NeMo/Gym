@@ -25,14 +25,14 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import ServerClient
 from resources_servers.math_formal_lean.app import (
+    REFINEMENT_PROMPT_TEMPLATE,
     MathFormalLeanResourcesServer,
     MathFormalLeanResourcesServerConfig,
     MathFormalLeanVerifyRequest,
-    parse_error,
-    get_error_str,
-    format_error_feedback,
     build_correction_prompt,
-    REFINEMENT_PROMPT_TEMPLATE,
+    format_error_feedback,
+    get_error_str,
+    parse_error,
 )
 
 
@@ -477,9 +477,7 @@ class TestErrorParsing:
 theorem test : True := by
   wrong_tactic
   sorry"""
-        errors = [
-            {"pos": {"line": 4, "column": 2}, "endPos": None, "data": "unknown tactic 'wrong_tactic'"}
-        ]
+        errors = [{"pos": {"line": 4, "column": 2}, "endPos": None, "data": "unknown tactic 'wrong_tactic'"}]
 
         error_str = get_error_str(code, errors)
 
