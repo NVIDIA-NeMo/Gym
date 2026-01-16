@@ -522,6 +522,7 @@ class TestRunSwebenchEvaluation:
                     agent_config=None,
                     agent_tools_file=None,
                     agent_max_turns=100,
+                    swebench_agent_timeout=2700,
                     swebench_tests_timeout=1800,
                     openhands_setup_dir=Path(tmpdir),
                     swebench_setup_dir=Path(tmpdir),
