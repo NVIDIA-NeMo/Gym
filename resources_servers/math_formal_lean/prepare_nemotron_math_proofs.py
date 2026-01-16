@@ -119,8 +119,8 @@ def is_clean_statement(stmt: str) -> bool:
     """Check if formal statement has no custom defs or axioms (pure Mathlib)."""
     if not stmt:
         return False
-    has_custom_def = bool(re.search(r'\bdef\s+\w+', stmt))
-    has_axiom = bool(re.search(r'\baxiom\s+', stmt))
+    has_custom_def = bool(re.search(r"\bdef\s+\w+", stmt))
+    has_axiom = bool(re.search(r"\baxiom\s+", stmt))
     return not has_custom_def and not has_axiom
 
 
@@ -186,9 +186,7 @@ def load_and_filter_dataset(
     theorem_stats["initial_count"] = theorem_stats["prompt_type"].apply(lambda x: x.count("initial"))
     theorem_stats["error_count"] = theorem_stats["prompt_type"].apply(lambda x: x.count("error_correction"))
     theorem_stats["total_entries"] = theorem_stats["prompt_type"].apply(len)
-    theorem_stats["all_first_try"] = theorem_stats["prompt_type"].apply(
-        lambda x: all(p == "initial" for p in x)
-    )
+    theorem_stats["all_first_try"] = theorem_stats["prompt_type"].apply(lambda x: all(p == "initial" for p in x))
 
     # Filter to solved theorems (at least one initial success)
     solved = theorem_stats[theorem_stats["initial_count"] > 0].copy()
