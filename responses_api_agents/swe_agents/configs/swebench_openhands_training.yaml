@@ -8,10 +8,11 @@ swe_agents_train:
       agent_config: responses_api_agents/swe_agents/configs/oh_config.toml
       agent_max_turns: 100
       agent_framework_repo: https://github.com/sdevare-nv/nv-OpenHands.git
-      agent_framework_commit: 94851f512974e65ba7937d07c0ded72a8b485e6d
+      agent_framework_commit: 7af10584eb623e6d50a616d3c3c967d7d4fb3690
       # Container configuration
       container_formatter: ???
       container_folder_path: null
+      swebench_agent_timeout: 2700 # 45 minutes
       swebench_tests_timeout: 900  # 15 minutes
       dataset_path: ???
       model_server:
@@ -38,10 +39,11 @@ swe_agents_val:
       agent_config: responses_api_agents/swe_agents/configs/oh_config.toml
       agent_max_turns: 100
       agent_framework_repo: https://github.com/sdevare-nv/nv-OpenHands.git
-      agent_framework_commit: 94851f512974e65ba7937d07c0ded72a8b485e6d
+      agent_framework_commit: 7af10584eb623e6d50a616d3c3c967d7d4fb3690
       # Container configuration
       container_formatter: ???
       container_folder_path: null
+      swebench_agent_timeout: 2700 # 45 minutes
       swebench_tests_timeout: 1800  # 30 minutes
       dataset_path: ???
       # Optional model server reference

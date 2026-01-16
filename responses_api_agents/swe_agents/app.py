@@ -19,7 +19,7 @@ import uuid
 from asyncio import Semaphore
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
-
+import os
 import ray
 from pydantic import ConfigDict, Field
 
@@ -88,9 +88,9 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
     container_formatter: str | list[str] = Field(
         default="docker://swebench/sweb.eval.x86_64.{instance_id}", description="Container path template"
     )
-    swebench_tests_timeout: int = Field(default=1800, description="Timeout for running tests (seconds)")
+    swebench_tests_timeout: int = Field(default=30 * 60, description="Timeout for running tests (seconds)")
 
-    # Model server reference (optional - can also be passed in request)
+    swebench_agent_timeout: int = Field(default=45 * 60, description="Timeout for running the agent (seconds)")
 
     # Concurrency control
     concurrency: int = Field(default=256, description="Maximum number of concurrent SWE-bench runs")
@@ -199,6 +199,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "agent_tools_file": self.config.agent_tools_file,
                 "agent_max_turns": self.config.agent_max_turns,
                 "swebench_tests_timeout": self.config.swebench_tests_timeout,
+                "swebench_agent_timeout": self.config.swebench_agent_timeout,
                 "agent_framework_repo": self.config.agent_framework_repo,
                 "agent_framework_commit": self.config.agent_framework_commit,
                 "openhands_setup_dir": self.config.openhands_setup_dir,

@@ -635,6 +635,7 @@ async def run_swebench_evaluation(
     agent_tools_file: Optional[str],
     agent_max_turns: int,
     swebench_tests_timeout: int,
+    swebench_agent_timeout: int,
     agent_framework_repo: Optional[str] = None,
     agent_framework_commit: str = "HEAD",
     openhands_setup_dir: Optional[Path] = None,
@@ -675,6 +676,7 @@ async def run_swebench_evaluation(
         agent_config=agent_config,
         agent_max_turns=agent_max_turns,
         swebench_tests_timeout=swebench_tests_timeout,
+        swebench_agent_timeout=swebench_agent_timeout,
         inference=inference_config,
         server=server,
     )

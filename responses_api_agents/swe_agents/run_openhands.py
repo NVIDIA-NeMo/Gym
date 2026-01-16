@@ -60,7 +60,8 @@ class SweBenchGenerationConfig:
     agent_framework_commit: str = "HEAD"
     agent_config: str | None = None
     agent_max_turns: int = 100
-    swebench_tests_timeout: int = 60 * 30
+    swebench_tests_timeout: int = 30 * 60
+    swebench_agent_timeout: int = 45 * 60
     inference: SweBenchInferenceConfig = field(default_factory=SweBenchInferenceConfig)
     server: dict = field(default_factory=dict)
 
@@ -220,7 +221,15 @@ class RunOpenHandsAgent:
 
         assert self.openhands_setup_dir is not None, "OpenHands setup directory is not set"
 
-        openhands_cmd = (
+        agent_script_name = f"agent_script_{agent_run_id}.sh"
+        cleanup_commands = (
+            f"cd /openhands_setup/OpenHands && "
+            f"mkdir -p /trajectories_mount/trajectories && "
+            f"cp -r {eval_dir_in_openhands}/*/*/* /trajectories_mount/trajectories/{data_point['instance_id']}/ &&"
+            f"rm -rf {eval_dir_in_openhands} && rm -rf {config_file_path}"
+        )
+
+        agent_main_cmd = (
             "if [ -d /workspace ]; then "
             "    echo 'Exiting because /workspace is mounted.' && "
             "    echo 'Please make sure /workspace is not mounted inside of Apptainer before running OpenHands.' && "
@@ -282,12 +291,30 @@ class RunOpenHandsAgent:
             f"    {eval_dir_in_openhands} "
             f"    {data_point['instance_id']} "
             f"    {local_dataset_path} "
-            f"    {config_file_path} && "
-            # move outputs to the mounted directory
-            f"mkdir -p /trajectories_mount/trajectories && "
-            f"cp -r {eval_dir_in_openhands}/*/*/* /trajectories_mount/trajectories/{data_point['instance_id']}/ && "
-            # remove the eval_dir_in_openhands directory after the evaluation is done
-            f"rm -rf {eval_dir_in_openhands} && rm -rf {config_file_path}"
+            f"    {config_file_path}"
+        )
+
+        agent_script_path = Path(self.output_dir) / agent_script_name
+        with open(agent_script_path, "w") as f:
+            f.write("#!/bin/bash\nset -e\n")
+            f.write(agent_main_cmd)
+            f.flush()
+            os.fsync(f.fileno())
+
+        for _ in range(10):
+            if agent_script_path.exists():
+                break
+            time.sleep(0.5)
+
+        if not agent_script_path.exists():
+            raise FileNotFoundError(f"Failed to create agent script at {agent_script_path}")
+
+        agent_timeout_seconds = self.cfg.swebench_agent_timeout
+        openhands_cmd = (
+            f"timeout --signal=TERM --kill-after=30 {agent_timeout_seconds} "
+            f"bash /trajectories_mount/{agent_script_name}; "
+            f"echo 'Cleaning up...'; "
+            f"{cleanup_commands}"
         )
 
         search_path = os.path.join(
@@ -298,16 +325,18 @@ class RunOpenHandsAgent:
             "output.jsonl",
         )
 
-        # Execute OpenHands command
-        out_file = await self._execute_container_command(
-            data_point=data_point,
-            command=openhands_cmd,
-            expected_file_pattern=search_path,
-            mode="agent",
-            dataset_mount_path=dataset_mount_path,
-        )
-
         try:
+            # Execute OpenHands command
+            out_file = await self._execute_container_command(
+                data_point=data_point,
+                command=openhands_cmd,
+                expected_file_pattern=search_path,
+                mode="agent",
+                max_retries=1,
+                timeout=self.cfg.swebench_agent_timeout + 60,
+                dataset_mount_path=dataset_mount_path,
+            )
+
             with open(out_file, "r") as f:
                 out_dict = json.loads(f.read().strip())
 
@@ -445,8 +474,8 @@ class RunOpenHandsAgent:
         command: str,
         expected_file_pattern: str,
         mode: str,
-        max_retries: int = 3,
-        timeout: int = 100000,
+        max_retries: int = 2,
+        timeout: int = 45 * 60,  # 45 minutes
         dataset_mount_path: Optional[str] = None,
     ):
         """Execute a command in an Apptainer container with retry logic."""
@@ -497,11 +526,21 @@ class RunOpenHandsAgent:
                 f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/.eval_sessions,dst=/openhands_setup/OpenHands/.eval_sessions"
             )
             mount_args.append(
+                f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/.eval_sessions,dst={self.openhands_setup_dir}/OpenHands/.eval_sessions"
+            )
+            mount_args.append(
                 f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/logs,dst=/openhands_setup/OpenHands/logs"
+            )
+            mount_args.append(
+                f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/logs,dst={self.openhands_setup_dir}/OpenHands/logs"
             )
             mount_args.append(
                 f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/evaluation/oh,dst=/openhands_setup/OpenHands/evaluation/oh"
             )
+            mount_args.append(
+                f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/evaluation/oh,dst={self.openhands_setup_dir}/OpenHands/evaluation/oh"
+            )
+
             mount_args.append(f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl")
 
             miniforge3_path = Path(self.openhands_setup_dir) / "miniforge3"
@@ -577,10 +616,14 @@ class RunOpenHandsAgent:
                             raise ValueError(f"Command failed with return code {process.returncode}")
 
                     except asyncio.TimeoutError:
-                        # Kill the process if it's still running
                         if process.returncode is None:
-                            process.kill()
-                            await process.wait()
+                            process.terminate()
+                            try:
+                                await asyncio.wait_for(process.wait(), timeout=10)
+                            except asyncio.TimeoutError:
+                                # Force kill if still running
+                                process.kill()
+                                await process.wait()
                         attempt = max_retries  # Force exit the loop on timeout
                         raise ValueError("Command timed out")
 
@@ -875,6 +918,7 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
         start_time = asyncio.get_running_loop().time()
         generation_time = None
         evaluation_time = None
+        trajectory_dict = None
         try:
             if self.cfg.agent_framework == SupportedAgentFrameworks.swe_agent:
                 pred_file = await self._run_swe_agent(
