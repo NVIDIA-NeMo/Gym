@@ -469,11 +469,11 @@ class VLLMModel(SimpleResponsesAPIModel):
             """
 
             message_dict = choice_dict["message"]
-            moe_fields = {}
+            moe_kwargs = {}
             if prompt_moe_topk_indices is not None:
-                moe_fields["prompt_moe_topk_indices"] = prompt_moe_topk_indices
+                moe_kwargs["prompt_moe_topk_indices"] = prompt_moe_topk_indices
             if moe_topk_indices is not None:
-                moe_fields["moe_topk_indices"] = moe_topk_indices
+                moe_kwargs["generation_moe_topk_indices"] = moe_topk_indices
             message_dict.update(
                 dict(
                     # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
@@ -482,7 +482,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                     # generation_token_ids=choice_dict["token_ids"],
                     generation_token_ids=generation_token_ids,
                     generation_log_probs=generation_log_probs,
-                    **moe_fields,
+                    **moe_kwargs,
                 )
             )
 
@@ -603,16 +603,16 @@ class VLLMConverter(BaseModel):
                     raise NotImplementedError(f"Unsupported message type: {m}")
 
             if self.return_token_id_information and m.get("prompt_token_ids"):
-                token_information = dict(
+                token_information_kwargs = dict(
                     prompt_token_ids=m["prompt_token_ids"],
                     generation_token_ids=m["generation_token_ids"],
                     generation_log_probs=m["generation_log_probs"],
                 )
                 if "prompt_moe_topk_indices" in m:
-                    token_information["prompt_moe_topk_indices"] = m["prompt_moe_topk_indices"]
-                if "moe_topk_indices" in m:
-                    token_information["moe_topk_indices"] = m["moe_topk_indices"]
-                state.token_information = TokenIDLogProbMixin(**token_information)
+                    token_information_kwargs["prompt_moe_topk_indices"] = m["prompt_moe_topk_indices"]
+                if "generation_moe_topk_indices" in m:
+                    token_information_kwargs["generation_moe_topk_indices"] = m["generation_moe_topk_indices"]
+                state.token_information = TokenIDLogProbMixin(**token_information_kwargs)
 
         state.flush_assistant()
 
@@ -815,17 +815,17 @@ class VLLMConverter(BaseModel):
         if self.return_token_id_information and "prompt_token_ids" in raw_message:
             last_response_output_item = response_output[-1]
             train_cls = RESPONSES_TO_TRAIN[last_response_output_item.__class__]
-            moe_fields = {}
+            moe_kwargs = {}
             if "prompt_moe_topk_indices" in raw_message:
-                moe_fields["prompt_moe_topk_indices"] = raw_message["prompt_moe_topk_indices"]
-            if "moe_topk_indices" in raw_message:
-                moe_fields["moe_topk_indices"] = raw_message["moe_topk_indices"]
+                moe_kwargs["prompt_moe_topk_indices"] = raw_message["prompt_moe_topk_indices"]
+            if "generation_moe_topk_indices" in raw_message:
+                moe_kwargs["generation_moe_topk_indices"] = raw_message["generation_moe_topk_indices"]
             response_output[-1] = train_cls(
                 **last_response_output_item.model_dump(),
                 prompt_token_ids=raw_message["prompt_token_ids"],
                 generation_token_ids=raw_message["generation_token_ids"],
                 generation_log_probs=raw_message["generation_log_probs"],
-                **moe_fields,
+                **moe_kwargs,
             )
 
         return response_output

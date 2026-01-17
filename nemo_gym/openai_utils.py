@@ -114,7 +114,7 @@ class TokenIDLogProbMixin(BaseModel):
     generation_token_ids: List[int]
     generation_log_probs: List[float]
     prompt_moe_topk_indices: Optional[List[Any]] = None
-    moe_topk_indices: Optional[List[Any]] = None
+    generation_moe_topk_indices: Optional[List[Any]] = None
 
 
 class TokenIDLogProbTypedDictMixin(TypedDict):
@@ -122,7 +122,7 @@ class TokenIDLogProbTypedDictMixin(TypedDict):
     generation_token_ids: List[int]
     generation_log_probs: List[float]
     prompt_moe_topk_indices: NotRequired[List[Any]]
-    moe_topk_indices: NotRequired[List[Any]]
+    generation_moe_topk_indices: NotRequired[List[Any]]
 
 
 ########################################
