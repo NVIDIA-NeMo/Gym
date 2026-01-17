@@ -1,0 +1,40 @@
+translation_comet:
+  resources_servers:
+    translation_comet:
+      entrypoint: app.py
+      domain: translation
+      use_reference: true
+      comet_model_name: Unbabel/wmt22-comet-da
+translation_comet_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: translation_comet
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/translation_comet/data/riva_mt_v3_nothinkInSys_train.jsonl
+        num_repeats: 1
+        gitlab_identifier:
+          dataset_name: riva_mt_v3_nothinkInSys_train
+          version: 0.0.1
+          artifact_fpath: riva_mt_v3_nothinkInSys_train.jsonl
+        license: NVIDIA Internal Use Only, Do Not Distribute
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/translation_comet/data/riva_mt_v3_nothinkInSys_validation.jsonl
+        num_repeats: 1
+        gitlab_identifier:
+          dataset_name: riva_mt_v3_nothinkInSys_validation
+          version: 0.0.1
+          artifact_fpath: riva_mt_v3_nothinkInSys_validation.jsonl
+        license: NVIDIA Internal Use Only, Do Not Distribute
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/translation_comet/data/example.jsonl
+        num_repeats: 1
