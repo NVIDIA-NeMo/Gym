@@ -99,7 +99,7 @@ from openai.types.responses.response_reasoning_item import (
 from openai.types.shared.chat_model import ChatModel
 from openai.types.shared_params import FunctionDefinition
 from pydantic import BaseModel, ConfigDict, Field
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 from nemo_gym.server_utils import MAX_NUM_TRIES, ClientResponse, raise_for_status, request
 
@@ -113,12 +113,16 @@ class TokenIDLogProbMixin(BaseModel):
     prompt_token_ids: List[int]
     generation_token_ids: List[int]
     generation_log_probs: List[float]
+    prompt_moe_topk_indices: Optional[List[Any]] = None
+    moe_topk_indices: Optional[List[Any]] = None
 
 
 class TokenIDLogProbTypedDictMixin(TypedDict):
     prompt_token_ids: List[int]
     generation_token_ids: List[int]
     generation_log_probs: List[float]
+    prompt_moe_topk_indices: NotRequired[List[Any]]
+    moe_topk_indices: NotRequired[List[Any]]
 
 
 ########################################

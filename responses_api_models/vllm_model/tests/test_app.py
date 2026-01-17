@@ -2401,6 +2401,8 @@ class TestVLLMConverter:
             prompt_token_ids=[1, 2, 3],
             generation_token_ids=[4, 5, 6],
             generation_log_probs=[7.0, 8.0, 9.0],
+            prompt_moe_topk_indices=[[[10, 11], [12, 13]]],
+            moe_topk_indices=[[[14, 15], [16, 17]]],
         )
         actual_response_output_items = converter.postprocess_chat_response(
             choice=NeMoGymChoice(
@@ -2459,6 +2461,8 @@ class TestVLLMConverter:
                 prompt_token_ids=[1, 2, 3],
                 generation_token_ids=[4, 5, 6],
                 generation_log_probs=[7.0, 8.0, 9.0],
+                prompt_moe_topk_indices=[[[10, 11], [12, 13]]],
+                moe_topk_indices=[[[14, 15], [16, 17]]],
             ),
         ]
         assert expected_messages == actual_messages
