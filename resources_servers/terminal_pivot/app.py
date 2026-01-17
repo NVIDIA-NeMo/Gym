@@ -13,12 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-import re
 from enum import Enum
-from typing import Any, Literal, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI
 from openapi_schema_validator import validate as validate_against_schema_openapi
+from difflib import SequenceMatcher
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -36,41 +36,53 @@ SCHEMA_MAP = {
 }
 
 
-class FailureCode(str, Enum):
-    JSON_PARSING_FAILED = "JSON_PARSING_FAILED"
-    SCHEMA_CHECK_FAILED = "SCHEMA_CHECK_FAILED"
-    TASK_COMPLETE_CHECK_FAILED = "TASK_COMPLETE_CHECK_FAILED"
-    COMMAND_CORRECTNESS_FAILED = "COMMAND_CORRECTNESS_FAILED"
-    UNKNOWN_ERROR = "UNKNOWN_ERROR"
-    UNKNOWN_HARNESS = "UNKNOWN_HARNESS"
+def extract_keystrokes(data: Dict[str, Any]) -> List[str]:
+    """Extract all keystrokes from commands list."""
+    commands = data.get('commands', [])
+    return [cmd.get('keystrokes', '') for cmd in commands if 'keystrokes' in cmd]
 
 
-
-class TBResourcesServerConfig(BaseResourcesServerConfig):
-    pass
-
-
-class TBRunRequest(BaseRunRequest):
-    uuid: Optional[str] = None
-    # Preferred dataset format: top-level `metadata` carries arbitrary data and
-    # is not interpreted by the verifier. Only the fields below are used for
-    # grading.
-    expected_answer: Optional[str] = None
-    # Optional additional metadata for the request; if provided, may contain
-    # fields like options/expected_answer as an alternative location.
-    metadata: Optional[dict[str, Any]] = None
+def text_similarity(s1: str, s2: str) -> float:
+    """Compute similarity ratio between two strings using SequenceMatcher.
+    Returns value between 0 (no similarity) and 1 (identical).
+    """
+    return SequenceMatcher(None, s1, s2).ratio()
 
 
-class TBVerifyRequest(TBRunRequest, BaseVerifyRequest):
-    pass
-
-
-class TBVerifyResponse(BaseVerifyResponse):
-    uuid: Optional[str] = None
-    expected_answer: str
-    model_output: str
-    failure_reason: Optional[FailureCode] = None
-    metadata: Optional[dict[str, Any]] = None
+def command_similarity(
+    gt: Dict[str, Any],
+    pred: Dict[str, Any],
+    separator: str = ''
+) -> float:
+    """
+    Compute text similarity between commands in gt and pred.
+    
+    Concatenates all commands in sequence before comparing, preserving
+    the sequential execution order.
+    
+    Args:
+        gt: Ground truth dictionary with 'commands' key
+        pred: Prediction dictionary with 'commands' key
+        separator: String to join commands with (default: empty string)
+    
+    Returns:
+        Similarity score between 0 (no similarity) and 1 (identical)
+    """
+    gt_keystrokes = extract_keystrokes(gt)
+    pred_keystrokes = extract_keystrokes(pred)
+    
+    if not gt_keystrokes and not pred_keystrokes:
+        return 1.0  # Both empty = identical
+    
+    if not gt_keystrokes or not pred_keystrokes:
+        return 0.0  # One empty, one not = no similarity
+    
+    # Concatenate commands in sequence
+    gt_concat = separator.join(gt_keystrokes)
+    pred_concat = separator.join(pred_keystrokes)
+    
+    # Compare concatenated command sequences
+    return text_similarity(gt_concat, pred_concat)
 
 
 def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
@@ -101,30 +113,42 @@ def check_task_complete(pred: dict, expected_answer: dict) -> bool:
     return True
 
 
-def check_schema(pred: dict, expected_answer: dict) -> bool:
-    required_keys = expected_answer.keys()
-    for key in required_keys:
-        if key not in pred or pred[key] is None:
-            return False
-    if not isinstance(pred['commands'], list):
-        return False
-    for each_command in pred['commands']:
-        if not isinstance(each_command, dict):
-            return False
-        if 'keystrokes' not in each_command:
-            return False
-        if not isinstance(each_command['keystrokes'], str):
-            return False
-    return True
+class FailureCode(str, Enum):
+    JSON_PARSING_FAILED = "JSON_PARSING_FAILED"
+    SCHEMA_CHECK_FAILED = "SCHEMA_CHECK_FAILED"
+    TASK_COMPLETE_CHECK_FAILED = "TASK_COMPLETE_CHECK_FAILED"
+    COMMAND_CORRECTNESS_FAILED = "COMMAND_CORRECTNESS_FAILED"
+    UNKNOWN_ERROR = "UNKNOWN_ERROR"
+    UNKNOWN_HARNESS = "UNKNOWN_HARNESS"
 
 
-def check_command_correctness(pred: dict, expected_answer: dict) -> bool:
-    if len(pred['commands']) != len(expected_answer['commands']):
-        return False
-    for i in range(len(pred['commands'])):
-        if pred['commands'][i]['keystrokes'] != expected_answer['commands'][i]['keystrokes']:
-            return False
-    return True
+class TBResourcesServerConfig(BaseResourcesServerConfig):
+    pass
+
+
+class TBRunRequest(BaseRunRequest):
+    uuid: Optional[str] = None
+    # Preferred dataset format: top-level `metadata` carries arbitrary data and
+    # is not interpreted by the verifier. Only the fields below are used for
+    # grading.
+    expected_answer: str
+    # Additional metadata for the request; must contain 'harness' field.
+    metadata: dict[str, Any]
+    threshold: Optional[float] = None
+
+
+class TBVerifyRequest(TBRunRequest, BaseVerifyRequest):
+    pass
+
+
+class TBVerifyResponse(BaseVerifyResponse):
+    uuid: Optional[str] = None
+    expected_answer: str
+    model_output: str
+    similarity: float
+    failure_reason: Optional[FailureCode] = None
+    metadata: dict[str, Any]
+    threshold: Optional[float] = None
 
 
 class TBResourcesServer(SimpleResourcesServer):
@@ -136,10 +160,12 @@ class TBResourcesServer(SimpleResourcesServer):
 
     async def verify(self, body: TBVerifyRequest) -> TBVerifyResponse:
         text = _extract_last_assistant_text(body)
-        expected_answer = json.loads(body.expected_answer)
         is_correct = True
         failure_reason = None
+        sim_score = -1.0
         try:
+            threshold = body.threshold
+            expected_answer = json.loads(body.expected_answer)
             if "</think>" in text:
                 text = text.split("</think>")[-1].strip()
             pred = json.loads(text)
@@ -156,9 +182,11 @@ class TBResourcesServer(SimpleResourcesServer):
             if is_correct and not check_task_complete(pred, expected_answer):
                 failure_reason = FailureCode.TASK_COMPLETE_CHECK_FAILED
                 is_correct = False
-            if is_correct and not check_command_correctness(pred, expected_answer):
-                failure_reason = FailureCode.COMMAND_CORRECTNESS_FAILED
-                is_correct = False
+            if is_correct:
+                sim_score = command_similarity(expected_answer, pred)
+                if threshold is not None and sim_score < threshold:
+                    failure_reason = FailureCode.COMMAND_CORRECTNESS_FAILED
+                    is_correct = False
         except json.JSONDecodeError:
             failure_reason = FailureCode.JSON_PARSING_FAILED
             is_correct = False
@@ -166,12 +194,13 @@ class TBResourcesServer(SimpleResourcesServer):
             failure_reason = FailureCode.UNKNOWN_ERROR
             is_correct = False
 
-        reward = 1.0 if is_correct else 0.0
+        reward = sim_score if is_correct else 0.0
 
         return TBVerifyResponse(
             **body.model_dump(),
             reward=reward,
             model_output=text,
+            similarity=sim_score,
             failure_reason=failure_reason,
         )
 
