@@ -44,6 +44,8 @@ class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     max_steps: int = None
+    count_tool_calls: bool = False  # count tool calls instead of model calls toward steps
+    use_done_flag: bool = False  # stop when resource server returns {"done": true}
 
 
 class SimpleAgentRunRequest(BaseRunRequest):
@@ -74,6 +76,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
         new_outputs = []
         step = 0
+        tool_call_count = 0
+        done_flag = False
         model_server_cookies = None  # update the cookies on every model response
         resources_server_cookies = request.cookies  # update the cookies on every resources server response
 
@@ -108,10 +112,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             all_output_messages: List[NeMoGymResponseOutputMessage] = [
                 o for o in output if o.type == "message" and o.role == "assistant"
             ]
-            if not all_fn_calls and all_output_messages:
-                break
 
             for output_function_call in all_fn_calls:
+                tool_call_count += 1
                 api_response = await self.server_client.post(
                     server_name=self.config.resources_server.name,
                     url_path=f"/{output_function_call.name}",
@@ -121,15 +124,31 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 # We don't raise for status here since it's a valid return for the API to error e.g. if the model outputs an invalid call or something.
                 resources_server_cookies = api_response.cookies
 
+                raw_output = (await api_response.content.read()).decode()
+                if self.config.use_done_flag:
+                    try:
+                        parsed_output = json.loads(raw_output)
+                        if isinstance(parsed_output, dict):
+                            done_flag = done_flag or bool(parsed_output.get("done"))
+                    except json.JSONDecodeError:
+                        pass
+
                 tool_response = NeMoGymFunctionCallOutput(
                     type="function_call_output",
                     call_id=output_function_call.call_id,
-                    output=(await api_response.content.read()).decode(),
+                    output=raw_output,
                 )
                 new_outputs.append(tool_response)
 
+            if not all_fn_calls and all_output_messages:
+                break
+
             # Check if max steps is not None and if we have exhausted it.
-            if self.config.max_steps and step >= self.config.max_steps:
+            step_count = tool_call_count if self.config.count_tool_calls else step
+            if self.config.max_steps and step_count >= self.config.max_steps:
+                break
+
+            if self.config.use_done_flag and done_flag:
                 break
 
         # Propogate any extra cookies necessary for downstream verification
