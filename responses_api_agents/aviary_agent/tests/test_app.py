@@ -308,6 +308,100 @@ class TestApp:
         assert calls[4][1]["json"]["action"][0]["call_id"] == "call_2"
         assert calls[5] == call(server_name="my resources name", url_path="/close", json={"env_id": env_id})
 
+    async def test_responses_return_transitions_false(self) -> None:
+        config = AviaryAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(
+                type="responses_api_models",
+                name="my model name",
+            ),
+            resources_server=ResourcesServerRef(
+                type="resources_servers",
+                name="my resources name",
+            ),
+            return_transitions=False,
+        )
+        agent = AviaryAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+        env_id = str(uuid.uuid4())
+        mock_seed_session_data = {"env_id": env_id, "obs": [{"role": "user", "content": "Step 0"}], "tools": []}
+
+        mock_response_1 = {
+            "id": "resp_1",
+            "created_at": 1753983920.0,
+            "model": "dummy_model",
+            "object": "response",
+            "output": [
+                NeMoGymResponseFunctionToolCall(
+                    call_id="call_1", name="tool_1", arguments=json.dumps({"arg": "val1"})
+                ).model_dump()
+            ],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        mock_step_1 = {
+            "obs": [{"type": "function_call_output", "call_id": "call_1", "output": "Result 1"}],
+            "reward": 0.0,
+            "done": False,
+        }
+
+        mock_response_2 = {
+            "id": "resp_2",
+            "created_at": 1753983921.0,
+            "model": "dummy_model",
+            "object": "response",
+            "output": [
+                NeMoGymResponseFunctionToolCall(
+                    call_id="call_2", name="tool_2", arguments=json.dumps({"arg": "val2"})
+                ).model_dump()
+            ],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        mock_step_2 = {
+            "obs": [{"type": "function_call_output", "call_id": "call_2", "output": "Result 2"}],
+            "reward": 1.0,
+            "done": True,
+        }
+
+        mock_close_data = {"message": "Success", "success": True}
+
+        dotjson_mock = AsyncMock()
+        dotjson_mock.json.side_effect = [
+            mock_seed_session_data,
+            mock_response_1,
+            mock_step_1,
+            mock_response_2,
+            mock_step_2,
+            mock_close_data,
+        ]
+        dotjson_mock.raise_for_status = MagicMock()
+        dotjson_mock.cookies = MagicMock()
+        agent.server_client.post = AsyncMock(return_value=dotjson_mock)
+
+        request = AviaryAgentRunRequest(
+            task_idx=42, responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[])
+        )
+        response = await agent.responses(request)
+
+        assert response.env_id == env_id
+        assert response.group_id == "42"
+        assert response.contains_transitions is False
+        assert len(response.output) == 4
+        assert response.output[0].type == "function_call"
+        assert response.output[0].call_id == "call_1"
+        assert response.output[1].type == "function_call_output"
+        assert response.output[1].call_id == "call_1"
+        assert response.output[2].type == "function_call"
+        assert response.output[2].call_id == "call_2"
+        assert response.output[3].type == "function_call_output"
+        assert response.output[3].call_id == "call_2"
+
     async def test_responses_collapse_old_env_states(self) -> None:
         config = AviaryAgentConfig(
             host="0.0.0.0",

@@ -70,8 +70,8 @@ class AviaryStepResponse(BaseModel):
 class AviaryNeMoGymResponse(NeMoGymResponse):
     env_id: str
     group_id: str
-    contains_transitions: Literal[True] = True
-    output: list[list[NeMoGymResponseOutputItem]]
+    contains_transitions: bool
+    output: list[NeMoGymResponseOutputItem] | list[list[NeMoGymResponseOutputItem]]
 
 
 class AviaryAgentVerifyRequest(BaseVerifyRequest):
