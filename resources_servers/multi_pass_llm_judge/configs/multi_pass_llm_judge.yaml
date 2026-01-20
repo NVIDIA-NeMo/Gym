@@ -1,0 +1,119 @@
+# Multi-Pass LLM Judge
+# Evaluates model outputs using multiple judge passes with different criteria.
+# Each pass can optionally use a different model via judge_model_server.
+
+# ============================================================================
+# OPTIONAL: Secondary judge model (uncomment to enable per-pass model override)
+# ============================================================================
+# secondary_judge:
+#   responses_api_models:
+#     openai_model:
+#       entrypoint: app.py
+#       openai_base_url: ${secondary_judge_base_url:${policy_base_url}}
+#       openai_api_key: ${secondary_judge_api_key:${policy_api_key}}
+#       openai_model: ${secondary_judge_model_name:gpt-4o-mini}
+# ============================================================================
+
+multi_pass_llm_judge:
+  resources_servers:
+    multi_pass_llm_judge:
+      entrypoint: app.py
+      
+      # Default judge model (passes can override this individually)
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      
+      # Default request params (passes can override this individually)
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 512
+        temperature: 0.0
+      
+      # Aggregation: weighted_sum | min | max | mean | all | any
+      aggregation_mode: weighted_sum
+      parallel_execution: true
+      
+      judge_passes:
+        # Pass 1: Correctness (binary) - uses default model
+        - name: correctness
+          weight: 0.5
+          scoring_mode: binary
+          success_label: "[[CORRECT]]"
+          failure_label: "[[INCORRECT]]"
+          prompt_template: |-
+            Is the CANDIDATE answer correct compared to the EXPECTED answer?
+            
+            QUESTION: {question}
+            EXPECTED: {expected_answer}
+            CANDIDATE: {generated_answer}
+            
+            Semantic equivalence counts as correct (e.g., "Darwin" = "Charles Darwin").
+            Output [[CORRECT]] or [[INCORRECT]]
+        
+        # Pass 2: Reasoning quality (numeric 0-10)
+        - name: reasoning
+          weight: 0.3
+          scoring_mode: numeric
+          numeric_regex: "Score:\\s*(\\d+)"
+          numeric_max: 10.0
+          prompt_template: |-
+            Rate the reasoning quality of this response (0-10).
+            
+            QUESTION: {question}
+            RESPONSE: {generated_answer}
+            
+            0-3: Poor/no reasoning | 4-6: Basic | 7-8: Good | 9-10: Excellent
+            Output: Score: X/10
+        
+        # Pass 3: Clarity (graded labels)
+        # Example: override model for this pass (uncomment to use different model)
+        - name: clarity
+          weight: 0.2
+          # judge_model_server:           # Uncomment to use different model
+          #   type: responses_api_models
+          #   name: secondary_judge
+          # responses_create_params:      # Uncomment for custom params
+          #   input: []
+          #   max_output_tokens: 256
+          scoring_mode: regex
+          regex_patterns:
+            - pattern: "\\[\\[EXCELLENT\\]\\]"
+              score: 1.0
+            - pattern: "\\[\\[GOOD\\]\\]"
+              score: 0.75
+            - pattern: "\\[\\[FAIR\\]\\]"
+              score: 0.5
+            - pattern: "\\[\\[POOR\\]\\]"
+              score: 0.25
+          regex_default_score: 0.0
+          prompt_template: |-
+            Rate the clarity of this response.
+            
+            RESPONSE: {generated_answer}
+            
+            Output one: [[EXCELLENT]] | [[GOOD]] | [[FAIR]] | [[POOR]]
+      
+      domain: knowledge
+      description: "Multi-pass LLM judge with correctness, reasoning, and clarity"
+
+# Agent configuration
+multi_pass_llm_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: multi_pass_llm_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: example
+          type: example
+          license: "Apache 2.0"
+          jsonl_fpath: resources_servers/multi_pass_llm_judge/data/example.jsonl
+        - name: toy_qa
+          type: train
+          license: "Apache 2.0"
+          jsonl_fpath: resources_servers/multi_pass_llm_judge/data/toy_qa.jsonl
