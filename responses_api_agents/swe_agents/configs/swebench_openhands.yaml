@@ -1,0 +1,49 @@
+# SWE-bench wrapper configuration for OpenHands
+swe_agents:
+  responses_api_agents:
+    swe_agents:
+      entrypoint: app.py
+      
+      # Agent framework configuration
+      agent_framework: openhands
+      agent_config: responses_api_agents/swe_agents/configs/oh_config.toml
+      agent_max_turns: 100
+      agent_framework_repo: https://github.com/sdevare-nv/nv-OpenHands.git
+      agent_framework_commit: 7af10584eb623e6d50a616d3c3c967d7d4fb3690  # pragma: allowlist secret
+      
+      # Container configuration
+      container_formatter: ???
+      container_folder_path: null
+      swebench_agent_timeout: 2700 # 45 minutes
+      swebench_tests_timeout: 1800
+
+      dataset_path: ???
+      
+      # Optional model server reference
+      model_server:
+        name: policy_model # openai_model
+        type: responses_api_models
+        
+      datasets:
+        # Training dataset
+        - name: train
+          type: train
+          jsonl_fpath: responses_api_agents/swe_agents/data/swegym_for_sweagent_and_openhands.jsonl
+          gitlab_identifier:
+            dataset_name: swegym_for_sweagent_and_openhands
+            version: 0.0.2
+            artifact_fpath: swegym-converted.jsonl
+          license: Apache 2.0
+        # Validation dataset  
+        - name: validation
+          type: validation
+          jsonl_fpath: responses_api_agents/swe_agents/data/swebench_verified_for_sweagent_and_openhands.jsonl
+          gitlab_identifier:
+            dataset_name: swebench_verified_for_sweagent_and_openhands
+            version: 0.0.1
+            artifact_fpath: swebench_verified_for_sweagent_and_openhands.jsonl
+          license: TBD
+        # Example dataset for quick testing
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/swe_agents/data/example.jsonl
