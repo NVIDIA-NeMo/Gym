@@ -10,7 +10,7 @@ swe_agents:
       agent_max_turns: 100
       agent_tools_file: configs/swe_agent_tools_openai_format.json  # Used for response formatting only
       agent_framework_repo: https://github.com/slikhite-1/nv-SWE-agent.git
-      agent_framework_commit: 34755442cb91fe0500a6dcb0485b91e899812f90
+      agent_framework_commit: 34755442cb91fe0500a6dcb0485b91e899812f90  # pragma: allowlist secret
       
       # Container configuration
       container_formatter: "/lustre/fsw/portfolios/llmservice/users/igitman/images/swe-bench/swebench_sweb.eval.x86_64.{instance_id}.sif"

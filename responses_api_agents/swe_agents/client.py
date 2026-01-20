@@ -34,7 +34,7 @@ async def main():
             input=[],
             metadata={
                 "instance_id": "astropy__astropy-12907",
-                "base_commit": "d16bfe05a744909de4b27f5875fe0d4ed41ce607",
+                "base_commit": "",
                 "dataset_name": "princeton-nlp/SWE-bench_Verified",
                 "split": "test",
                 "problem_statement": """Modeling's `separability_matrix` does not compute separability correctly for nested CompoundModels
