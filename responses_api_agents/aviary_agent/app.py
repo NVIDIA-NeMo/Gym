@@ -30,6 +30,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseInput,
+    NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
 )
 from resources_servers.aviary.schemas import (
@@ -53,6 +54,11 @@ class AviaryAgentConfig(BaseResponsesAPIAgentConfig):
         default=None,
         description="The maximum number of steps to take in the environment. "
         "If not set, the agent will run indefinitely.",
+    )
+    return_transitions: bool = Field(
+        default=True,
+        description="If True, return a list of transitions, instead of the "
+        "whole trajectory as a single NeMoGymResponseOutputItem.",
     )
 
     # Doesn't cause an issue if not set, but if it is, then
@@ -146,6 +152,7 @@ class AviaryAgent(SimpleResponsesAPIAgent):
         env_id = seed_session_response.env_id
         model_response: NeMoGymResponse | None = None
         agent_state_history: list[NeMoGymResponseInput] = []
+        all_messages: list[NeMoGymResponseOutputItem] = []
         model_server_cookies = None
 
         step = 0
@@ -217,7 +224,12 @@ class AviaryAgent(SimpleResponsesAPIAgent):
                     done = env_response.done
 
                 agent_state = self.update_agent_state(agent_state, model_output, obs, successful_transition)
-                agent_state_history.append(cast(NeMoGymResponseInput, agent_state.input))
+                if self.config.return_transitions:
+                    agent_state_history.append(cast(NeMoGymResponseInput, agent_state.input))
+                else:
+                    all_messages.extend(model_output)
+                    if successful_transition:
+                        all_messages.extend(obs)
 
                 if done:
                     break
@@ -231,10 +243,13 @@ class AviaryAgent(SimpleResponsesAPIAgent):
             "Rollout crashed or terminated before first transition completed, cannot proceed."
         )
 
-        output = AviaryNeMoGymResponse.model_validate(
-            model_response.model_dump()
-            | {"output": agent_state_history, "env_id": env_id, "group_id": str(req.task_idx)}
-        )
+        output_overrides = {
+            "env_id": env_id,
+            "group_id": str(req.task_idx),
+            "contains_transitions": self.config.return_transitions,
+            "output": agent_state_history if self.config.return_transitions else all_messages,
+        }
+        output = AviaryNeMoGymResponse.model_validate(model_response.model_dump() | output_overrides)
         return output
 
     async def run(self, body: AviaryAgentRunRequest) -> AviaryAgentVerifyResponse:
