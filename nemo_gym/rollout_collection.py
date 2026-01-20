@@ -18,8 +18,10 @@ from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
 from itertools import chain, repeat
+from multiprocessing import Pool
+from multiprocessing.pool import Pool as PoolType
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
@@ -77,7 +79,22 @@ class RolloutCollectionConfig(BaseNeMoGymCLIConfig):
     )
 
 
+class DynamicMultiprocRolloutState:
+    process_pool: PoolType
+
+
 class RolloutCollectionHelper(BaseModel):  # pragma: no cover
+    def setup_server_client(self, head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:
+        server_client = ServerClient.load_from_global_config(head_server_config)
+
+        # We set this rollout global aiohttp client to use the same max connections as the underlying head server global config.
+        if not is_global_aiohttp_client_setup():
+            set_global_aiohttp_client(
+                cfg=GlobalAIOHTTPAsyncClientConfig.model_validate(server_client.global_config_dict)
+            )
+
+        return server_client
+
     async def run_from_config(self, config: RolloutCollectionConfig):
         range_iterator = repeat(0)
         if config.limit:
@@ -154,16 +171,26 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
             map(_post_subroutine, examples), desc="Collecting rollouts", miniters=10, total=len(examples)
         )
 
-    def setup_server_client(self, head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:
-        server_client = ServerClient.load_from_global_config(head_server_config)
+    # This functionality is meant to be a more advanced version of rollout collection used by training frameworks
+    def setup_dynamic_multiproc(
+        self,
+        num_proc: int,
+        head_server_config: Optional[BaseServerConfig] = None,
+        postprocessing_function: Optional[Callable[[Any], Any]] = None,
+        postprocessing_function_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        assert num_proc > 1
 
-        # We set this rollout global aiohttp client to use the same max connections as the underlying head server global config.
-        if not is_global_aiohttp_client_setup():
-            set_global_aiohttp_client(
-                cfg=GlobalAIOHTTPAsyncClientConfig.model_validate(server_client.global_config_dict)
-            )
+        self._worker_pool = Pool(processes=num_proc)
 
-        return server_client
+    def teardown_dynamic_multiproc(self) -> None:
+        self._worker_pool.close()
+
+    def add_examples_dynamic_multiproc(
+        self,
+        examples: List[Dict],
+    ) -> None:
+        pass
 
 
 def collect_rollouts():  # pragma: no cover
