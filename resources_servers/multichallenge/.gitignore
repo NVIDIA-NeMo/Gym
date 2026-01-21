@@ -1,0 +1,5 @@
+# Ignore data files (datasets should not be committed)
+data/advanced/
+data/vanilla/
+*.json
+!configs/*.yaml
