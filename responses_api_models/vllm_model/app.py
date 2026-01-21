@@ -351,7 +351,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 # For prompt and generation token IDs
                 # return_token_ids=True,
                 # For prompt token IDs
-                # prompt_logprobs=0,
+                prompt_logprobs=0,
             )
 
         if self.config.uses_reasoning_parser:
