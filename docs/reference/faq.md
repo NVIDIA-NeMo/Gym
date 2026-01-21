@@ -1,8 +1,18 @@
+(reference-faq)=
 # FAQ
 
 :::{note}
 This page provides quick answers to commonly asked questions. Over time, these topics will be integrated into the structured product documentation (tutorials, guides, and reference sections) as we expand coverage. We've documented them here to provide immediate help while more comprehensive documentation is in progress.
 :::
+
+## Key Terms
+
+Before diving in, here are some NeMo Gym-specific terms:
+
+- **Resources server**: A server that provides task environments, tools, and verification logic for RL training. Examples include math verifiers, code execution sandboxes, and tool-calling environments.
+- **Agent server**: Orchestrates interactions between the model and resources server, managing conversation flow and tool calls.
+- **Model server**: Wraps an LLM endpoint (vLLM, OpenAI, etc.) to provide a consistent API for NeMo Gym.
+- **Responses API**: OpenAI's structured output format that separates reasoning, messages, and tool calls. NeMo Gym uses this as its native schema.
 
 # How To: Run tests for simple agent
 Run the Simple Chat Agent tests. `ng_test` or `nemo_gym_test` stands for `Nemo Gym Test`.
@@ -15,6 +25,11 @@ Tests are strongly encouraged and you must have at least one test for every serv
 
 # How To: Upload and download a dataset from HuggingFace
 The huggingface client requires that your credentials are in `env.yaml`, along with some other pertinent details needed to upload to the designated place.
+
+:::{warning}
+**Security**: The `env.yaml` file contains sensitive credentials. Ensure it is listed in your `.gitignore` to prevent accidental commits. Never commit API tokens to version control.
+:::
+
 ```yaml
 hf_token: {your huggingface token}
 hf_organization: {your huggingface org}
@@ -47,7 +62,7 @@ ng_upload_dataset_to_hf \
 
 Because of the required dataset nomenclature, the resource server config path is required when uploading. Specifically, `domain` is used in the naming of a dataset in Huggingface.
 
-By default, the `split` parameter for uploading is set to `train`, which will run a check on the required fields `{"responses_create_params", "reward_profiles", "expected_answer"}`. Specifying `validation` or `test` bypasses this check:
+By default, the `split` parameter for uploading is set to `train`, which will run a check on the required fields `{"responses_create_params"}`. Specifying `validation` or `test` bypasses this check:
 
 ```bash
 resource_config_path="resources_servers/multineedle/configs/multineedle.yaml"
@@ -297,7 +312,7 @@ ng_dump_config "+config_paths=[$config_paths]"
 
 
 # How To: Use NeMo Gym with a non-Responses compatible API endpoint like vLLM
-As of Sep 05, 2025, not many models have been trained with middlewares or chat templates that are easily parseable to OpenAI Responses API schema, with the notable exception of OpenAI's own open source model GPT-OSS. Since Gym is first-party Responses API, this makes Gym very difficult to use with basically any model.
+Most models use Chat Completions format rather than the OpenAI Responses API schema that NeMo Gym uses natively. To bridge this gap, NeMo Gym provides a conversion layer.
 
 As a result, we provide a Responses API to Chat Completions mapping middleware layer in the form of `responses_api_models/vllm_model`. VLLMModel assumes that you are pointing to a vLLM instance (since it relies on vLLM-specific endpoints like `/tokenize` and vLLM-specific arguments like `return_tokens_as_token_ids`).
 
@@ -648,7 +663,7 @@ For example, say we are training a Qwen 3 family model. During rollouts, the mod
 
 So, the OpenAI compatible model server in a training framework needs to be able to handle this discrepancy. In order to do that, Gym needs a handle on the ground truth token IDs and it needs to provide that information back to the training frameworks' OpenAI compatible server.
 
-TODO @bxyu-nvidia: expand on this later.
+See the "How To: Use a custom client to call Gym Responses API model endpoints during training" section above for related details on token ID handling.
 
 
 # FAQ: Why use aiohttp backend instead of httpx/httpcore for async http?
