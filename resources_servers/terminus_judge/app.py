@@ -59,6 +59,16 @@ class TerminusJudgeResourcesServerConfig(BaseResourcesServerConfig):
     check_twice_swap: bool = False
     reward_if_swap_fails: float = 0.0
 
+    # String similarity config
+    enable_string_similarity: bool = True
+    string_similarity_threshold: float = 0.9
+    string_similarity_reward: float = 0.3
+
+    # Schema and task check rewards
+    schema_check_reward: float = 0.2
+    task_complete_reward: float = 0.3
+    judge_reward: float = 0.5
+
 
 class TerminusJudgeRunRequest(BaseRunRequest):
     """Run/verify request payload."""
