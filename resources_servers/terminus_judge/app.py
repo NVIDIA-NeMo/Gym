@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
-import json
 from contextlib import nullcontext
 from typing import Any, Optional
 
@@ -121,9 +120,6 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
 
-        # Additional server routes go here! e.g.:
-        # app.post("/get_weather")(self.get_weather)
-
         return app
 
     async def verify(self, body: TerminusJudgeVerifyRequest) -> TerminusJudgeVerifyResponse:
@@ -153,9 +149,6 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
 
         payload = body.model_dump()
         payload.pop("expected_answer", None)
-
-        with open("payload.txt", "w") as file:
-            file.write(str(payload))
 
         return TerminusJudgeVerifyResponse(
             **payload,
@@ -192,8 +185,6 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
                     url_path="/v1/responses",
                     json=responses_create_params,
                 )
-                with open("judge_response.txt", "w") as file:
-                    json.dump(await response.json(), file, indent=2)
 
                 judge_response = NeMoGymResponse.model_validate(await response.json())
 
@@ -216,28 +207,33 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
             verdict_label=None,
         )
 
-        #    the verdict from the judge response
+        verdict_label = None
+        is_equal = False
+
+        # extract text
         try:
             last_output = judge_response.output[-1]
             if getattr(last_output, "type", None) != "message":
-                return False, eval_record
-            last_content = last_output.content[-1]
-            text = getattr(last_content, "text", "")
+                text = ""
+            else:
+                last_content = last_output.content[-1]
+                text = getattr(last_content, "text", "")
         except Exception:
-            return False, eval_record
+            text = ""
 
-        eq_pos = text.find(equal_label)
-        neq_pos = text.find(not_equal_label)
+        # check text for verdict labels
+        if text:
+            eq_pos = text.find(equal_label)
+            neq_pos = text.find(not_equal_label)
 
-        if eq_pos < 0 and neq_pos < 0:
-            eval_record.verdict_label = None
-            return False, eval_record
-        if eq_pos >= 0 and (neq_pos < 0 or eq_pos < neq_pos):
-            eval_record.verdict_label = equal_label
-            return True, eval_record
+            if eq_pos >= 0 and (neq_pos < 0 or eq_pos < neq_pos):
+                verdict_label = equal_label
+                is_equal = True
+            elif neq_pos >= 0:
+                verdict_label = not_equal_label
 
-        eval_record.verdict_label = not_equal_label
-        return False, eval_record
+        eval_record.verdict_label = verdict_label
+        return is_equal, eval_record
 
 
 if __name__ == "__main__":
