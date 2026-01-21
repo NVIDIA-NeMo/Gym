@@ -410,7 +410,7 @@ if __name__ == "__main__":
 Run with:
 
 ```bash
-export OPENAI_API_KEY="your-key"
+export OPENAI_API_KEY="your-key"  # pragma: allowlist secret
 python minimal_user_modeling.py
 ```
 
@@ -613,7 +613,7 @@ Never commit API keys to version control:
 export OPENAI_API_KEY="sk-..."  # pragma: allowlist secret
 
 # Bad: Don't put keys in scripts
-api_key = "sk-..."  # NEVER DO THIS
+api_key = "sk-..."  # NEVER DO THIS  # pragma: allowlist secret
 ```
 
 ---
