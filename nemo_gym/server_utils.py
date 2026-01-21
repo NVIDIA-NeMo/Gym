@@ -433,6 +433,9 @@ class SimpleServer(BaseServer):
                 )
 
                 response_content = f"Hit an exception in {self.get_session_middleware_key()} calling an inner server: {e.response_content}"
+                if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
+                    print(response_content)
+
                 return JSONResponse(content=response_content, status_code=500)
             except Exception as e:
                 print(
