@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 from contextlib import nullcontext
+from enum import Enum
 from typing import Any, Optional
 
 from fastapi import FastAPI
@@ -32,6 +33,18 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+
+
+class FailureCode(str, Enum):
+    """Enumeration of possible failure reasons."""
+
+    NONE = "none"
+    UNKNOWN_HARNESS = "unknown_harness"
+    SCHEMA_CHECK_FAILED = "schema_check_failed"
+    TASK_COMPLETE_CHECK_FAILED = "task_complete_check_failed"
+    JSON_PARSE_FAILED = "json_parse_failed"
+    STRING_SIMILARITY_FAILED = "string_similarity_failed"
+    JUDGE_EVALUATION_FAILED = "judge_evaluation_failed"
 
 
 class TerminusJudgeResourcesServerConfig(BaseResourcesServerConfig):
