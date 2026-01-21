@@ -389,7 +389,7 @@ head -1 results/my_first_rollouts.jsonl | python -m json.tool
 
 Each rollout contains:
 
-```json
+```text
 {
     "responses_create_params": { ... },  // Input task
     "response": { ... },                  // Model output + tool calls
