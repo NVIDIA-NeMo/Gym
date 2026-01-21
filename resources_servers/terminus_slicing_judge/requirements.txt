@@ -1,3 +1,0 @@
--e nemo-gym[dev] @ ../../
-datasets==4.0.0
-
