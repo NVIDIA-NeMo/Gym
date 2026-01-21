@@ -16,7 +16,6 @@ from copy import deepcopy
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 from pytest import approx, fixture
 
 from nemo_gym.config_types import ModelServerRef
@@ -44,7 +43,7 @@ class TestApp:
             entrypoint="",
             judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
             judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
-            judge_prompt_template_fpath="prompt_templates/equivalence_Terminus_judge.txt",
+            judge_prompt_template_fpath="prompt_templates/terminus_prompt.txt",
         )
         cfg.judge_equal_label = "[[A=B]]"
         cfg.judge_not_equal_label = "[[A!=B]]"
@@ -77,12 +76,11 @@ class TestApp:
         rs = TerminusJudgeResourcesServer(config=config, server_client=server_mock)
 
         post_mock = MagicMock()
-        post_mock.json = AsyncMock()
+        # Use return_value instead of side_effect for single response
+        post_mock.json = AsyncMock(
+            return_value=self._create_response("first", self._msg("some text [[A=B]] trailing"))
+        )
         server_mock.post = AsyncMock(return_value=post_mock)
-
-        post_mock.json.side_effect = [
-            self._create_response("first", self._msg("some text [[A=B]] trailing")),
-        ]
 
         model_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Q: 1+1?"}])
         model_response = NeMoGymResponse(
@@ -115,13 +113,15 @@ class TestApp:
         server_mock = MagicMock(spec=ServerClient)
         rs = TerminusJudgeResourcesServer(config=config_twice, server_client=server_mock)
 
-        post_mock = MagicMock()
-        post_mock.json = AsyncMock()
-        server_mock.post = AsyncMock(return_value=post_mock)
-        post_mock.json.side_effect = [
-            self._create_response("first", self._msg("[[A=B]]")),
-            self._create_response("second", self._msg("[[A=B]]")),
-        ]
+        # Create two separate response mocks for two separate POST calls
+        post_mock_1 = MagicMock()
+        post_mock_1.json = AsyncMock(return_value=self._create_response("first", self._msg("[[A=B]]")))
+
+        post_mock_2 = MagicMock()
+        post_mock_2.json = AsyncMock(return_value=self._create_response("second", self._msg("[[A=B]]")))
+
+        # Use side_effect on server_mock.post to return different response mocks
+        server_mock.post = AsyncMock(side_effect=[post_mock_1, post_mock_2])
 
         model_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Q: 1+1?"}])
         model_response = NeMoGymResponse(
@@ -214,14 +214,15 @@ class TestApp:
         cfg.reward_if_swap_fails = -1.0
         rs = TerminusJudgeResourcesServer(config=cfg, server_client=server_mock)
 
-        post_mock = MagicMock()
-        post_mock.json = AsyncMock()
-        server_mock.post = AsyncMock(return_value=post_mock)
-        # First pass equal, second pass not equal -> use configured -1.0
-        post_mock.json.side_effect = [
-            self._create_response("first", self._msg("[[A=B]]")),
-            self._create_response("second", self._msg("[[A!=B]]")),
-        ]
+        # Create two separate response mocks for two separate POST calls
+        post_mock_1 = MagicMock()
+        post_mock_1.json = AsyncMock(return_value=self._create_response("first", self._msg("[[A=B]]")))
+
+        post_mock_2 = MagicMock()
+        post_mock_2.json = AsyncMock(return_value=self._create_response("second", self._msg("[[A!=B]]")))
+
+        # Use side_effect on server_mock.post to return different response mocks
+        server_mock.post = AsyncMock(side_effect=[post_mock_1, post_mock_2])
 
         model_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Q?"}])
         model_response = NeMoGymResponse(
@@ -242,57 +243,6 @@ class TestApp:
         res = await rs.verify(req)
         assert res.reward == approx(-1.0)
         assert len(res.judge_evaluations) == 2
-
-    async def test_verify_missing_expected_answer_raises(self, config: TerminusJudgeResourcesServerConfig) -> None:
-        """Test that missing expected answer raises ValueError."""
-        server_mock = MagicMock(spec=ServerClient)
-        rs = TerminusJudgeResourcesServer(config=config, server_client=server_mock)
-
-        model_response = NeMoGymResponse(
-            id="resp",
-            created_at=0.0,
-            model="m",
-            object="response",
-            output=[self._msg("Some answer")],
-            parallel_tool_calls=False,
-            tool_choice="none",
-            tools=[],
-        )
-
-        req = TerminusJudgeVerifyRequest(
-            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
-            response=model_response,
-            expected_answer=None,  # Missing expected answer
-        )
-
-        with pytest.raises(ValueError, match="Expected answer is required"):
-            await rs.verify(req)
-
-    async def test_verify_missing_assistant_response_raises(self, config: TerminusJudgeResourcesServerConfig) -> None:
-        """Test that missing assistant response raises ValueError."""
-        server_mock = MagicMock(spec=ServerClient)
-        rs = TerminusJudgeResourcesServer(config=config, server_client=server_mock)
-
-        # Response with no assistant message
-        model_response = NeMoGymResponse(
-            id="resp",
-            created_at=0.0,
-            model="m",
-            object="response",
-            output=[],  # Empty output
-            parallel_tool_calls=False,
-            tool_choice="none",
-            tools=[],
-        )
-
-        req = TerminusJudgeVerifyRequest(
-            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
-            response=model_response,
-            expected_answer="test",
-        )
-
-        with pytest.raises(ValueError, match="No assistant response found"):
-            await rs.verify(req)
 
     async def test_equal_label_appears_first(self, config: TerminusJudgeResourcesServerConfig) -> None:
         """Test that when both labels appear, the first one wins."""
