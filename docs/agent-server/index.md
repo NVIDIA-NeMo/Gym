@@ -21,7 +21,7 @@ They expose two HTTP endpoints:
 
 Before using agent servers:
 
-1. **Install NeMo Gym** — See [Installation](../get-started/installation)
+1. **Install NeMo Gym** — See [Installation](../get-started/detailed-setup)
 2. **Set up a model server** — See [Model Server](../model-server/index)
 3. **Set up a resources server** — See [Resources Server](../resources-server/index)
 
@@ -431,7 +431,7 @@ class BaseVerifyResponse(BaseVerifyRequest):
 
 ### Example Response
 
-```json
+```text
 {
   "responses_create_params": {"input": [...]},
   "response": {"output": [...], "model": "..."},

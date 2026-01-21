@@ -25,7 +25,7 @@ Understand the [NeMo Gym server architecture](/about/architecture):
 | **Standard endpoints** | `/v1/responses` and `/run` pre-wired |
 | **Config injection** | Your config class parsed and injected at startup |
 
-For a minimal HTTP wrapper without these features, see [Custom Implementation](../index.md#custom-implementation).
+For a minimal HTTP wrapper without these features, see the [Complete Example](../index.md#complete-example) section.
 
 ---
 

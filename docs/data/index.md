@@ -1,7 +1,7 @@
 (data-index)=
 # Data
 
-NeMo Gym datasets use JSONL format for reinforcement learning (RL) training. Each dataset connects to an {term}`Agent Server`—the component that orchestrates agent-environment interactions during training.
+NeMo Gym datasets use JSONL format for reinforcement learning (RL) training. Each dataset connects to an agent server—the component that orchestrates agent-environment interactions during training.
 
 ## Prerequisites
 
@@ -24,7 +24,7 @@ Each JSONL line requires a `responses_create_params` field following the [OpenAI
 {"responses_create_params": {"input": [{"role": "user", "content": "What is 2+2?"}]}}
 ```
 
-Additional fields like `expected_answer` vary by {term}`Resources Server`—the component that provides tools and reward signals.
+Additional fields like `expected_answer` vary by resources server—the component that provides tools and reward signals.
 
 **Source**: `nemo_gym/base_resources_server.py:35-36`
 

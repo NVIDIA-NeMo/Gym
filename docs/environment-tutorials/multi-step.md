@@ -93,7 +93,7 @@ Run the built-in multi-step example.
 ### 1. Start Servers
 
 ```bash
-export OPENAI_API_KEY="your-api-key"
+export OPENAI_API_KEY="your-api-key"  # pragma: allowlist secret
 
 config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
 resources_servers/example_multi_step/configs/example_multi_step.yaml"

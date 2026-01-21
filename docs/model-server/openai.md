@@ -23,7 +23,7 @@ Verify your OpenAI connection works:
 import openai
 
 client = openai.OpenAI(
-    api_key="sk-your-api-key",
+    api_key="sk-your-api-key",  # pragma: allowlist secret
     base_url="https://api.openai.com/v1"
 )
 

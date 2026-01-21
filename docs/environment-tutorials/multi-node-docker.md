@@ -170,7 +170,7 @@ policy_model:
       host: "192.168.1.101"  # This worker's IP
       port: 8000
       openai_base_url: "http://localhost:8080/v1"  # Local vLLM
-      openai_api_key: "not-needed"
+      openai_api_key: "not-needed"  # pragma: allowlist secret
       openai_model: "meta-llama/Llama-3.1-8B-Instruct"
 ```
 

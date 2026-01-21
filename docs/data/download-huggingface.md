@@ -185,7 +185,7 @@ ng_download_dataset_from_hf \
 :::{dropdown} Automatic Downloads During Data Preparation
 :icon: download
 
-NeMo Gym can automatically download missing datasets during data preparation. Configure `huggingface_identifier` in your {term}`resources server` config:
+NeMo Gym can automatically download missing datasets during data preparation. Configure `huggingface_identifier` in your resources server config:
 
 ```yaml
 datasets:

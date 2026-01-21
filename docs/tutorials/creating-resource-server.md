@@ -336,7 +336,7 @@ policy_model_name: gpt-4o-mini
 Set your API key as an environment variable before running:
 
 ```bash
-export OPENAI_API_KEY="sk-your-key-here"
+export OPENAI_API_KEY="sk-your-key-here"  # pragma: allowlist secret
 ```
 
 Never commit API keys directly in YAML files.

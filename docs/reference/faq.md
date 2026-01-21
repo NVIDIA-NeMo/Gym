@@ -663,7 +663,7 @@ For example, say we are training a Qwen 3 family model. During rollouts, the mod
 
 So, the OpenAI compatible model server in a training framework needs to be able to handle this discrepancy. In order to do that, Gym needs a handle on the ground truth token IDs and it needs to provide that information back to the training frameworks' OpenAI compatible server.
 
-See the [Token ID and On-Policy Training](../training/token-ids.md) guide for detailed coverage of this topic.
+See the "How To: Use a custom client to call Gym Responses API model endpoints during training" section above for related details on token ID handling.
 
 
 # FAQ: Why use aiohttp backend instead of httpx/httpcore for async http?

@@ -8,7 +8,7 @@ NeMo Customizer integration is blocked by an external service dependency.
 
 **Status**: No integration code exists in NeMo Gym. See [GitHub Issue #550](https://github.com/NVIDIA-NeMo/Gym/issues/550).
 
-**What you CAN do now**: Collect {term}`rollouts <Rollout>` and prepare training data for manual upload.
+**What you CAN do now**: Collect rollouts and prepare training data for manual upload.
 :::
 
 ---
@@ -57,7 +57,7 @@ ng_collect_rollouts +agent_name=example_single_tool_call_simple_agent \
 ```
 
 **Output format** (JSONL, one rollout per line):
-```json
+```text
 {
   "reward": 1.0,
   "output": [

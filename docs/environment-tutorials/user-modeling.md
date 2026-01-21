@@ -39,10 +39,10 @@ Set up API credentials (choose one):
 
 ```bash
 # Option A: OpenAI API
-export OPENAI_API_KEY="your-openai-key"
+export OPENAI_API_KEY="your-openai-key"  # pragma: allowlist secret
 
 # Option B: NVIDIA NIMs
-export NIMS_API_KEY="your-nims-key"
+export NIMS_API_KEY="your-nims-key"  # pragma: allowlist secret
 
 # Option C: Local vLLM (no key needed, but server must be running)
 # vLLM serves an OpenAI-compatible API at http://localhost:8000
@@ -325,7 +325,7 @@ from openai import OpenAI
 
 # Initialize client (works with OpenAI, vLLM, or any OpenAI-compatible API)
 client = OpenAI(
-    api_key="your-key",  # Or use OPENAI_API_KEY env var
+    api_key="your-key",  # Or use OPENAI_API_KEY env var  # pragma: allowlist secret
     base_url="https://api.openai.com/v1",  # Or http://localhost:8000/v1 for vLLM
 )
 
@@ -610,7 +610,7 @@ Never commit API keys to version control:
 
 ```bash
 # Good: Use environment variables
-export OPENAI_API_KEY="sk-..."
+export OPENAI_API_KEY="sk-..."  # pragma: allowlist secret
 
 # Bad: Don't put keys in scripts
 api_key = "sk-..."  # NEVER DO THIS

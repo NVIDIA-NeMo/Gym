@@ -92,7 +92,7 @@ ng_collect_rollouts \
 ```
 
 **Output** (`data/rollouts.jsonl`):
-```json
+```text
 {"reward": 1.0, "expected_answer": "darwin", "judge_evaluations": [...]}
 ```
 
