@@ -209,10 +209,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "instance_dir": instance_dir,
             }
 
-            print("BEFORE REMOTE", runner_ray_remote, run_swebench_evaluation, len(params))
+            print("BEFORE REMOTE", runner_ray_remote, run_swebench_evaluation, len(params), flush=True)
             future = runner_ray_remote.remote(run_swebench_evaluation, params)
             # TODO remove
-            print("FUTURE", future)
+            print("FUTURE", future, flush=True)
 
             result = await future
 
@@ -306,6 +306,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     async def run(self, body: SWEBenchRunRequest) -> SWEBenchVerifyResponse:
         """Run and verify SWE-bench solution."""
         async with self.sem:
+            # TODO remove
+            print("hit inside run", flush=True)
+
             # Fix None values in responses_create_params to use defaults
             # This is needed because the pydantic model has non-Optional fields with defaults
 
