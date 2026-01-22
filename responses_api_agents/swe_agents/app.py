@@ -81,7 +81,8 @@ def runner_ray_remote(
 
     from logging import getLogger
 
-    getLogger().info(f"Concurrent container #{concurrent_containers}")
+    getLogger().info(f"Concurrent container #{concurrent_containers} info")
+    getLogger().warning(f"Concurrent container #{concurrent_containers} warning")
 
     ray_submit_time = time.time()
     params["ray_submit_time"] = ray_submit_time
