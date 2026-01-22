@@ -77,14 +77,14 @@ class ConcurrentContainerCounter:
 def runner_ray_remote(
     concurrent_container_counter: ConcurrentContainerCounter, runner: Callable, params: dict[str, Any]
 ) -> Any:
-    concurrent_containers = concurrent_container_counter.increment.remote()
+    concurrent_containers = ray.get(concurrent_container_counter.increment.remote())
     print(f"Concurrent container #{concurrent_containers}", flush=True)
 
     ray_submit_time = time.time()
     params["ray_submit_time"] = ray_submit_time
     result = asyncio.run(runner(**params))
 
-    concurrent_container_counter.decrement.remote()
+    ray.get(concurrent_container_counter.decrement.remote())
 
     return result
 
