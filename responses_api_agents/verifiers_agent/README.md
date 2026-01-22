@@ -25,7 +25,7 @@ policy_model_name: "Qwen/Qwen3-4B-Instruct-2507"
 
 Next, serve the model. 
 
-Make sure to serve the model with longer context length than the generation length in your agent config (e.g. verifiers_acereason-math.yaml)
+Make sure to serve the model with longer context length than the generation length in your agent config (e.g. acereason-math.yaml)
 <!-- we could probably be smarter about that -->
 
 ```
@@ -36,7 +36,7 @@ vllm serve Qwen/Qwen3-4B-Instruct-2507 --max-model-len 32768 --reasoning-parser 
 
 Now launch NeMo Gym servers:
 ```
-uv sync # uv pip install vllm or uv add vllm can mess with the venv, so resync
+uv sync # uv pip install vllm can mess with the venv, so resync
 
 ng_run "+config_paths=[responses_api_agents/verifiers_agent/configs/verifiers_acereason-math.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
 ```
@@ -140,7 +140,7 @@ prime env install kalomaze/alphabet-sort
 python3 scripts/create_dataset.py --env-id kalomaze/alphabet-sort --size 5 --output data/alphabet-sort-example.jsonl
 ```
 
-Now update the agent requirements.txt. We find for this environment we need to pin a specific version, due to recent changes in the environment. 
+Now update the agent requirements.txt. We find for this environment we need to pin a specific version, and use `primeintellect/alphabet-sort` rather than `kalomaze/alphabet-sort` due to version compatibility issues. We should pin versions of verifiers and environments in case things continue to change. 
 ```
 -e nemo-gym[dev] @ ../../
 verifiers>=0.1.9
@@ -185,9 +185,11 @@ ng_collect_rollouts \
     +limit=5
 ```
 
+Note we only change the env_id for each config so far, but environments can accept custom args, so we are providing separate configs in case we need these.
+
 ## Training 
 
-For single prime environment training, the datasets created by `create_dataset.py` work for environments we tested.
+For single prime environment training, the datasets created by `create_dataset.py` work for environments we tested. Training should be straightforward as with any other NeMo-Gym environment.
 
 For multi prime environment training, we suggest making a separate agent for each environment, essentially duplicating this folder with a prefix added to the name, and updating the agent config to prefix the env name in the agent name. Also update requirements. Then, we should update `agent_ref` in each env's dataset to match the new env-specific agent name, then blend them together in one for trainig, like in normal NeMo-Gym multi-environment setup.
 
