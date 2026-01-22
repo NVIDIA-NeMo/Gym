@@ -60,6 +60,8 @@ from responses_api_agents.swe_agents.utils import (
     },
 )
 def runner_ray_remote(runner: Callable, params: dict[str, Any]) -> Any:
+    # TODO remove
+    print("Hit in runner_ray_remote")
     return asyncio.run(runner(**params))
 
 
@@ -298,10 +300,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 tools=[],
                 metadata={"error": str(e)},
             )
-        except:
-            import traceback
-
-            traceback.print_exc()
 
     async def run(self, body: SWEBenchRunRequest) -> SWEBenchVerifyResponse:
         """Run and verify SWE-bench solution."""
