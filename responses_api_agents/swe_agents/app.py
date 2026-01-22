@@ -53,16 +53,40 @@ from responses_api_agents.swe_agents.utils import (
 )
 
 
+@ray.remote
+class ConcurrentContainerCounter:
+    def __init__(self):
+        self.concurrent_containers = 0
+
+    def increment(self):
+        self.counter += 1
+        return self.counter
+
+    def decrement(self):
+        self.counter += 1
+        return self.counter
+
+
 @ray.remote(
     scheduling_strategy="SPREAD",
     runtime_env={
         "py_executable": sys.executable,
     },
+    num_cpus=0.5,
 )
-def runner_ray_remote(runner: Callable, params: dict[str, Any]) -> Any:
+def runner_ray_remote(
+    concurrent_container_counter: ConcurrentContainerCounter, runner: Callable, params: dict[str, Any]
+) -> Any:
+    concurrent_containers = concurrent_container_counter.increment.remote()
+    print(f"Concurrent container #{concurrent_containers}", flush=True)
+
     ray_submit_time = time.time()
     params["ray_submit_time"] = ray_submit_time
-    return asyncio.run(runner(**params))
+    result = asyncio.run(runner(**params))
+
+    concurrent_container_counter.decrement.remote()
+
+    return result
 
 
 class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
@@ -162,6 +186,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
+        self.container_counter = ConcurrentContainerCounter.remote()
 
         # Pre-build OpenHands environment if using openhands framework
         if self.config.agent_framework == "openhands":
@@ -214,7 +239,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "ray_queue_time": ray_queue_time,
             }
 
-            future = runner_ray_remote.remote(run_swebench_evaluation, params)
+            future = runner_ray_remote.remote(self.container_counter, run_swebench_evaluation, params)
             result = await future
 
             # Extract trajectory and convert to proper NeMoGym format
@@ -307,6 +332,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     async def run(self, body: SWEBenchRunRequest) -> SWEBenchVerifyResponse:
         """Run and verify SWE-bench solution."""
         async with self.sem:
+            print(f"Semaphore: {self.config.concurrency - self.sem._value} / {self.config.concurrency}", flush=True)
+            body.responses_create_params.metadata["container_concurrency"] = self.config.concurrency - self.sem._value
+
             # Fix None values in responses_create_params to use defaults
             # This is needed because the pydantic model has non-Optional fields with defaults
 
