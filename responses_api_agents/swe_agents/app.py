@@ -182,6 +182,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
     config: SWEBenchWrapperConfig
     sem: Semaphore = None
+    container_counter: ConcurrentContainerCounter = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
