@@ -17,7 +17,6 @@ import sys
 import time
 import uuid
 from asyncio import Semaphore
-from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -79,13 +78,12 @@ def runner_ray_remote(
     concurrent_container_counter: ConcurrentContainerCounter, runner: Callable, params: dict[str, Any]
 ) -> Any:
     concurrent_containers = ray.get(concurrent_container_counter.increment.remote())
+    print(f"Concurrent container #{concurrent_containers}", file=sys.stderr)
 
     ray_submit_time = time.time()
     params["ray_submit_time"] = ray_submit_time
 
-    with redirect_stdout(sys.stderr):
-        print(f"Concurrent container #{concurrent_containers}")
-        result = asyncio.run(runner(**params))
+    result = asyncio.run(runner(**params))
 
     ray.get(concurrent_container_counter.decrement.remote())
 
