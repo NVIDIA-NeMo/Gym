@@ -298,6 +298,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 tools=[],
                 metadata={"error": str(e)},
             )
+        except:
+            import traceback
+
+            traceback.print_exc()
 
     async def run(self, body: SWEBenchRunRequest) -> SWEBenchVerifyResponse:
         """Run and verify SWE-bench solution."""
