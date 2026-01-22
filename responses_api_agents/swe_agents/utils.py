@@ -640,9 +640,6 @@ async def run_swebench_evaluation(
     dataset_path: Optional[str] = None,
     instance_dir: Optional[str] = None,
 ) -> Dict:
-    # TODO remove
-    print("Hit inside")
-
     # Create persistent directory for I/O and logs in local workspace
     workspace_root = Path(os.path.dirname(os.path.abspath(__file__)))
     instance_id = problem_info.get("instance_id", "unknown")
@@ -687,9 +684,6 @@ async def run_swebench_evaluation(
         r2e_gym_setup_dir=r2e_gym_setup_dir,
         dataset_path=dataset_path,
     )
-
-    # TODO remove
-    print("Hit before run_oh")
 
     result = await run_oh.process_single_datapoint(problem_info)
     print(f"Process completed for {instance_id}", flush=True)

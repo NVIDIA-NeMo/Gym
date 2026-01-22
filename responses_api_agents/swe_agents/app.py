@@ -209,14 +209,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "instance_dir": instance_dir,
             }
 
-            # TODO remove
-            print(params)
-
             future = runner_ray_remote.remote(run_swebench_evaluation, params)
             result = await future
-
-            # TODO remove
-            print(result)
 
             # Extract trajectory and convert to proper NeMoGym format
             output_items = []
