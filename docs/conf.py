@@ -42,10 +42,11 @@ extensions = [
     "sphinx_copybutton",  # For copy button in code blocks
     "sphinx_design",  # For grid layouts and card components
     "sphinx_reredirects",  # For URL redirects when pages move
+    "sphinxcontrib.mermaid",  # For mermaid diagrams
 ]
 
 templates_path = ["_templates"]
-exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
+exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "rfc"]
 
 # -- Options for MyST Parser (Markdown) --------------------------------------
 # MyST Parser settings

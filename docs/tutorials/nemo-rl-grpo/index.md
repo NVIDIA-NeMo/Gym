@@ -152,4 +152,5 @@ nemo-rl-configuration.md
 setup.md
 single-node-training.md
 multi-node-training.md
+🟡 Multi-Verifier Training <multi-verifier-training.md>
 ```

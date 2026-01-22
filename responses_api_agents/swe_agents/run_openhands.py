@@ -353,6 +353,7 @@ class RunOpenHandsAgent:
                             "model_name_or_path": out_dict["metadata"]["llm_config"]["model"],
                             "instance_id": out_dict["instance_id"],
                             "model_patch": patch + "\n" if patch and not patch.endswith("\n") else patch,
+                            "oh_time_metrics": out_dict["metrics"],
                         }
                     )
                 )
@@ -1018,7 +1019,7 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
 
             output_dict = {
                 "swe-bench-metrics": report_json[data_point["instance_id"]],
-                "swe-bench-outputs": trajectory_dict,
+                "oh_time_metrics": trajectory_dict.get("oh_time_metrics", None) if trajectory_dict else {},
                 "generation": "",  # required TODO: we should fix this
                 "generation_time": generation_time,
                 "evaluation_time": evaluation_time,
