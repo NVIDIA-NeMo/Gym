@@ -182,12 +182,12 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
     config: SWEBenchWrapperConfig
     sem: Semaphore = None
-    container_counter: ConcurrentContainerCounter = None
+    _container_counter: ConcurrentContainerCounter = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
-        self.container_counter = ConcurrentContainerCounter.remote()
+        self._container_counter = ConcurrentContainerCounter.remote()
 
         # Pre-build OpenHands environment if using openhands framework
         if self.config.agent_framework == "openhands":
@@ -240,7 +240,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "ray_queue_time": ray_queue_time,
             }
 
-            future = runner_ray_remote.remote(self.container_counter, run_swebench_evaluation, params)
+            future = runner_ray_remote.remote(self._container_counter, run_swebench_evaluation, params)
             result = await future
 
             # Extract trajectory and convert to proper NeMoGym format
