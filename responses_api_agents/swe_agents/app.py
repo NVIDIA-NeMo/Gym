@@ -59,12 +59,12 @@ class ConcurrentContainerCounter:
         self.concurrent_containers = 0
 
     def increment(self):
-        self.counter += 1
-        return self.counter
+        self.concurrent_containers += 1
+        return self.concurrent_containers
 
     def decrement(self):
-        self.counter += 1
-        return self.counter
+        self.concurrent_containers -= 1
+        return self.concurrent_containers
 
 
 @ray.remote(
