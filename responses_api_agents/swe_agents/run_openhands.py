@@ -1025,5 +1025,10 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
             }
 
             return output_dict
+        except:
+            # TODO remove
+            import traceback
+
+            print("Hit exception in process_single_datapoint", traceback.format_exc(), flush=True)
         finally:
             self._cleanup_instance_dataset(instance_dataset_path)

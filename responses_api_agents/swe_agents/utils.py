@@ -685,14 +685,7 @@ async def run_swebench_evaluation(
         dataset_path=dataset_path,
     )
 
-    try:
-        result = await run_oh.process_single_datapoint(problem_info)
-    except:
-        # TODO remove
-        import traceback
-
-        print("Hit exception in process_single_datapoint", traceback.format_exc(), flush=True)
-
+    result = await run_oh.process_single_datapoint(problem_info)
     print(f"Process completed for {instance_id}", flush=True)
 
     try:
