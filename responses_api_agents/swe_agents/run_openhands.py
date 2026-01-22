@@ -909,6 +909,7 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
         return required_tests <= passed_tests
 
     async def process_single_datapoint(self, data_point: dict[str, Any]):
+        print("HIT 1", flush=True)
         self.output_dir = Path(self.cfg.output_file).parent
 
         agent_run_id = f"{data_point['instance_id']}_{int(time.time())}_{str(uuid.uuid4())[:8]}"
@@ -921,12 +922,14 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
         trajectory_dict = None
         try:
             if self.cfg.agent_framework == SupportedAgentFrameworks.swe_agent:
+                print("HIT 2", flush=True)
                 pred_file = await self._run_swe_agent(
                     data_point,
                     api_base,
                     instance_dataset_path,
                 )
             elif self.cfg.agent_framework == SupportedAgentFrameworks.openhands:
+                print("HIT 3", flush=True)
                 pred_file = await self._run_openhands(
                     data_point,
                     api_base,
@@ -934,14 +937,17 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
                     instance_dataset_path,
                 )
             else:
+                print("HIT 4", flush=True)
                 raise ValueError(
                     f"Unsupported agent framework: {self.cfg.agent_framework}. "
                     f"Supported frameworks: {', '.join(SupportedAgentFrameworks)}."
                 )
 
+            print("HIT 5", flush=True)
             generation_time = asyncio.get_running_loop().time() - start_time
 
             if pred_file is None:
+                print("HIT 6", flush=True)
                 report_json = {
                     data_point["instance_id"]: {
                         "resolved": False,
@@ -952,6 +958,7 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
                     }
                 }
             else:
+                print("HIT 7", flush=True)
                 pred_mounted_path = pred_file.replace(str(self.output_dir), "/trajectories_mount")
                 with open(pred_file, "r") as f:
                     trajectory_dict = json.loads(f.read())
@@ -960,6 +967,7 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
                 has_patch = trajectory_dict["model_patch"] is not None
 
                 if not has_patch:
+                    print("HIT 8", flush=True)
                     report_json = {
                         data_point["instance_id"]: {
                             "resolved": False,
@@ -971,17 +979,20 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
                     }
 
                 else:
+                    print("HIT 9", flush=True)
                     # Run full evaluation with streaming output
                     # TODO: should we fail on errors here? Seems that json isn't always generated
                     try:
                         start_time = asyncio.get_running_loop().time()
                         if data_point["dataset_name"] == "nv-internal-1":
+                            print("HIT 10", flush=True)
                             report_file = await self._run_nv_internal_eval(
                                 data_point,
                                 trajectory_dict["model_patch"],
                                 instance_dataset_path,
                             )
                         elif "R2E-Gym" in data_point["dataset_name"]:
+                            print("HIT 11", flush=True)
                             report_file = await self._run_r2e_gym_eval(
                                 pred_mounted_path,
                                 data_point,
@@ -989,6 +1000,7 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
                                 instance_dataset_path,
                             )
                         else:
+                            print("HIT 12", flush=True)
                             report_file = await self._run_swebench_eval(
                                 pred_mounted_path,
                                 data_point,
@@ -997,6 +1009,7 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
                             )
                         evaluation_time = asyncio.get_running_loop().time() - start_time
                     except ValueError:
+                        print("HIT 13", flush=True)
                         print(
                             f"Failed to execute SWE-bench evaluation command for {data_point['instance_id']}",
                             flush=True,
@@ -1012,10 +1025,13 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
                         }
                         report_file = None
 
+                    print("HIT 14", flush=True)
                     if report_file is not None:
+                        print("HIT 15", flush=True)
                         with open(report_file, "r") as f:
                             report_json = json.loads(f.read().strip())
 
+            print("HIT 16", flush=True)
             output_dict = {
                 "swe-bench-metrics": report_json[data_point["instance_id"]],
                 "swe-bench-outputs": trajectory_dict,
