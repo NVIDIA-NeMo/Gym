@@ -640,6 +640,9 @@ async def run_swebench_evaluation(
     dataset_path: Optional[str] = None,
     instance_dir: Optional[str] = None,
 ) -> Dict:
+    # TODO remove
+    print("Hit inside")
+
     # Create persistent directory for I/O and logs in local workspace
     workspace_root = Path(os.path.dirname(os.path.abspath(__file__)))
     instance_id = problem_info.get("instance_id", "unknown")
