@@ -80,14 +80,11 @@ def runner_ray_remote(
     concurrent_containers = ray.get(concurrent_container_counter.increment.remote())
 
     import sys
-    from contextlib import redirect_stdout
-    from logging import DEBUG, getLogger
+    from logging import getLogger
 
-    logger = getLogger()
-    logger.setLevel(DEBUG)
-    with redirect_stdout(sys.stderr):
-        logger.info(f"Concurrent container #{concurrent_containers} info")
-    logger.warning(f"Concurrent container #{concurrent_containers} warning")
+    print(f"Concurrent container #{concurrent_containers} print file sys.stderr", file=sys.stderr)
+    print(f"Concurrent container #{concurrent_containers} print file default")
+    getLogger().warning(f"Concurrent container #{concurrent_containers} warning")
 
     ray_submit_time = time.time()
     params["ray_submit_time"] = ray_submit_time
@@ -414,8 +411,4 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
 
 if __name__ == "__main__":
-    import sys
-    from contextlib import redirect_stdout
-
-    with redirect_stdout(sys.stderr):
-        SWEBenchWrapper.run_webserver()
+    SWEBenchWrapper.run_webserver()
