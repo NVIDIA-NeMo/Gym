@@ -640,9 +640,6 @@ async def run_swebench_evaluation(
     dataset_path: Optional[str] = None,
     instance_dir: Optional[str] = None,
 ) -> Dict:
-    # TODO remove
-    print("Hit inside run_swebench_evaluation", problem_info, flush=True)
-
     # Create persistent directory for I/O and logs in local workspace
     workspace_root = Path(os.path.dirname(os.path.abspath(__file__)))
     instance_id = problem_info.get("instance_id", "unknown")
@@ -688,9 +685,14 @@ async def run_swebench_evaluation(
         dataset_path=dataset_path,
     )
 
-    # TODO remove
-    print("Hit before process_single_datapoint", problem_info, flush=True)
-    result = await run_oh.process_single_datapoint(problem_info)
+    try:
+        result = await run_oh.process_single_datapoint(problem_info)
+    except:
+        # TODO remove
+        import traceback
+
+        print("Hit exception in process_single_datapoint", traceback.format_exc(), flush=True)
+
     print(f"Process completed for {instance_id}", flush=True)
 
     try:
