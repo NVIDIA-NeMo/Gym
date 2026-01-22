@@ -685,7 +685,6 @@ async def run_swebench_evaluation(
         dataset_path=dataset_path,
     )
 
-    print("HIT before process_single_datapoint", problem_info, flush=True)
     result = await run_oh.process_single_datapoint(problem_info)
     print(f"Process completed for {instance_id}", flush=True)
 
