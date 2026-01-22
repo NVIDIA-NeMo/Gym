@@ -212,6 +212,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             future = runner_ray_remote.remote(run_swebench_evaluation, params)
             result = await future
 
+            # TODO remove
+            print("RESULT", result, flush=True)
+
             # Extract trajectory and convert to proper NeMoGym format
             output_items = []
             trajectory = result.get("trajectory", [])
@@ -277,6 +280,11 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             )
 
         except Exception as e:
+            # TODO remove
+            import traceback
+
+            print(traceback.format_exc(), flush=True)
+
             print(f"SWE-bench evaluation failed: {str(e)}", flush=True)
             # Return error response
             error_message = NeMoGymResponseOutputMessage(
@@ -298,6 +306,11 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 tools=[],
                 metadata={"error": str(e)},
             )
+        except:
+            # TODO remove
+            import traceback
+
+            print(traceback.format_exc(), flush=True)
 
     async def run(self, body: SWEBenchRunRequest) -> SWEBenchVerifyResponse:
         """Run and verify SWE-bench solution."""
