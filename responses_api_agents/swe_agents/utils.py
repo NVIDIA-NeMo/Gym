@@ -639,6 +639,8 @@ async def run_swebench_evaluation(
     r2e_gym_setup_dir: Optional[Path] = None,
     dataset_path: Optional[str] = None,
     instance_dir: Optional[str] = None,
+    ray_queue_time: Optional[float] = None,
+    ray_submit_time: Optional[float] = None,
 ) -> Dict:
     # Create persistent directory for I/O and logs in local workspace
     workspace_root = Path(os.path.dirname(os.path.abspath(__file__)))
@@ -687,6 +689,8 @@ async def run_swebench_evaluation(
     result = await run_oh.process_single_datapoint(problem_info)
     print(f"Process completed for {instance_id}", flush=True)
 
+    result["oh_time_metrics"]["ray_time_in_queue"] = ray_submit_time - ray_queue_time
+
     try:
         with open(output_file, "w") as f:
             json.dump(result, f)
@@ -706,8 +710,6 @@ async def run_swebench_evaluation(
         agent_framework,
         agent_tools_file if agent_framework == "swe_agent" else None,
     )
-
-    # tools = convert_tools_to_function_format(tools) if tools else []
 
     result["tools"] = tools
     result["trajectory"] = trajectory_data
