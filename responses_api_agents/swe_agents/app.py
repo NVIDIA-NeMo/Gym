@@ -409,4 +409,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
 
 if __name__ == "__main__":
-    SWEBenchWrapper.run_webserver()
+    import sys
+    from contextlib import redirect_stdout
+
+    with redirect_stdout(sys.stderr):
+        SWEBenchWrapper.run_webserver()
