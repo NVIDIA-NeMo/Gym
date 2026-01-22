@@ -251,9 +251,6 @@ class VLLMModel(SimpleResponsesAPIModel):
             else:
                 raise e
 
-        # TODO remove
-        print(chat_completion_dict["usage"], flush=True)
-
         choice_dict = chat_completion_dict["choices"][0]
         if self.config.uses_reasoning_parser:
             reasoning_content = choice_dict["message"].get("reasoning_content")
