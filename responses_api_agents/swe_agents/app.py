@@ -209,6 +209,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "instance_dir": instance_dir,
             }
 
+            print("BEFORE REMOTE", runner_ray_remote, run_swebench_evaluation, len(params))
             future = runner_ray_remote.remote(run_swebench_evaluation, params)
             # TODO remove
             print("FUTURE", future)
