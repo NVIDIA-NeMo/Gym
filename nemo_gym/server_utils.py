@@ -576,7 +576,8 @@ repr(e): {repr(e)}"""
 
         app = server.setup_webserver()
         server.set_ulimit()
-        server.prefix_server_logs()
+        # TODO remove
+        # server.prefix_server_logs()
         server.setup_exception_middleware(app)
 
         @app.exception_handler(RequestValidationError)
