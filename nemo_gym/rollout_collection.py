@@ -150,9 +150,8 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
             await raise_for_status(res)
             return row, await get_response_json(res)
 
-        # TODO revert disable=True
         return tqdm.as_completed(
-            map(_post_subroutine, examples), desc="Collecting rollouts", miniters=10, total=len(examples), disable=True
+            map(_post_subroutine, examples), desc="Collecting rollouts", miniters=10, total=len(examples)
         )
 
     def setup_server_client(self, head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:
