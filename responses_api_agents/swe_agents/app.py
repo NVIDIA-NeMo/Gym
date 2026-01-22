@@ -60,8 +60,6 @@ from responses_api_agents.swe_agents.utils import (
     },
 )
 def runner_ray_remote(runner: Callable, params: dict[str, Any]) -> Any:
-    # TODO remove
-    print("Hit in runner_ray_remote")
     return asyncio.run(runner(**params))
 
 
@@ -212,6 +210,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             }
 
             future = runner_ray_remote.remote(run_swebench_evaluation, params)
+            # TODO remove
+            print("FUTURE", future)
+
             result = await future
 
             # Extract trajectory and convert to proper NeMoGym format
