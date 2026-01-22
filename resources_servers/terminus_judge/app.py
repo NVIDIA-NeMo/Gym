@@ -168,7 +168,6 @@ class TerminusJudgeRunRequest(BaseRunRequest):
 
     uuid: Optional[str | int] = None
     expected_answer: Optional[str] = None
-    options: Optional[list[dict[str, str]]] = None
     metadata: Optional[dict[str, Any]] = None
     threshold: Optional[float] = None
 
