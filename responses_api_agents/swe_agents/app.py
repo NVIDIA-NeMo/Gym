@@ -80,10 +80,13 @@ def runner_ray_remote(
     concurrent_containers = ray.get(concurrent_container_counter.increment.remote())
 
     import sys
+    from contextlib import redirect_stdout
     from logging import getLogger
 
     print(f"Concurrent container #{concurrent_containers} print file sys.stderr", file=sys.stderr)
     print(f"Concurrent container #{concurrent_containers} print file default")
+    with redirect_stdout(sys.stderr):
+        print(f"Concurrent container #{concurrent_containers} print file redirect stdout to stderr")
     getLogger().warning(f"Concurrent container #{concurrent_containers} warning")
 
     ray_submit_time = time.time()
