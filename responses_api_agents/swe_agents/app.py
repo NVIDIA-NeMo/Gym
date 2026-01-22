@@ -79,9 +79,13 @@ def runner_ray_remote(
 ) -> Any:
     concurrent_containers = ray.get(concurrent_container_counter.increment.remote())
 
+    import sys
+    from contextlib import redirect_stdout
     from logging import getLogger
 
-    getLogger().info(f"Concurrent container #{concurrent_containers} info")
+    with redirect_stdout(sys.stderr):
+        getLogger().info(f"Concurrent container #{concurrent_containers} info")
+
     getLogger().warning(f"Concurrent container #{concurrent_containers} warning")
 
     ray_submit_time = time.time()
