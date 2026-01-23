@@ -227,7 +227,7 @@ Certain deterministic datasets may require an `expected_answer` field, such as m
 
 With the dataset processed locally, we need to create a config file to instruct NeMo Gym how to process the data during post-training. This is done by creating a new resource server config.
 
-Since this tutorial is focused on math, we will use one of the existing math-based resource server configs as a template. For other domains, use an existing resource server's config as a template that best matches your use-case. For custom resource servers, refer to the [Creating Resource Server](creating-resource-server) guide. We will use the `resources_servers/math_with_judge/configs/math_with_judge.yaml` config as a template for this example.
+Since this tutorial is focused on math, we will use one of the existing math-based resource server configs as a template. For other domains, use an existing resource server's config as a template that best matches your use-case. For custom resource servers, refer to the [Creating Resource Server](creating-resource-server.md) guide. We will use the `resources_servers/math_with_judge/configs/math_with_judge.yaml` config as a template for this example.
 
 Create a new YAML file called `openmathinstruct2.yaml` and save it in `resources_servers/math_with_judge/configs/`. Copy the following contents to the config file:
 
