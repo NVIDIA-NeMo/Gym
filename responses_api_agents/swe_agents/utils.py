@@ -390,6 +390,8 @@ def convert_tools_to_function_format(raw_tools: List[Dict]) -> List:
         # Convert to Response FunctionTool format which is flat
         if tool.get("type") == "function" and "function" in tool:
             func_def = tool["function"]
+            # TODO remove
+            print(func_def, file=sys.stderr)
             tools.append(
                 dict(
                     type="function",
