@@ -181,6 +181,7 @@ class RunOpenHandsAgent:
         data_point: dict[str, Any],
         api_base: str,
         agent_run_id: str,
+        profiling_dir: str,
         dataset_mount_path: Optional[str] = None,
     ):
         """
@@ -262,6 +263,7 @@ class RunOpenHandsAgent:
             "export PATH=$PATH:/openhands_setup/OpenHands/.venv/bin && "
             # CRITICAL: Configure poetry to only use the OpenHands venv (ignore external venvs)
             "export POETRY_VIRTUALENVS_IN_PROJECT=true && "
+            f"export NG_PROFILING_DIR={profiling_dir} && "
             "export POETRY_VIRTUALENVS_CREATE=false && "
             "export POETRY_VIRTUALENVS_PATH=/openhands_setup/OpenHands && "
             # TODO (sugam): fix cryptography issue
