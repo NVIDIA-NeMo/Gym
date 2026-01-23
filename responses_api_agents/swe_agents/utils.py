@@ -626,28 +626,23 @@ async def run_swebench_evaluation(
     problem_info: Dict,
     model_endpoint: str,
     body: NeMoGymResponseCreateParamsNonStreaming,
-    run_session_id: str,
     agent_framework: str,
     agent_config: Optional[str],
     agent_tools_file: Optional[str],
     agent_max_turns: int,
     swebench_tests_timeout: int,
     swebench_agent_timeout: int,
+    persistent_dir: str,
     agent_framework_repo: Optional[str] = None,
     agent_framework_commit: str = "HEAD",
     openhands_setup_dir: Optional[Path] = None,
     swebench_setup_dir: Optional[Path] = None,
     r2e_gym_setup_dir: Optional[Path] = None,
     dataset_path: Optional[str] = None,
-    instance_dir: Optional[str] = None,
     ray_queue_time: Optional[float] = None,
     ray_submit_time: Optional[float] = None,
 ) -> Dict:
-    # Create persistent directory for I/O and logs in local workspace
-    workspace_root = Path(os.path.dirname(os.path.abspath(__file__)))
     instance_id = problem_info.get("instance_id", "unknown")
-    persistent_dir = workspace_root / f"swebench_results_{run_session_id}" / instance_dir
-    persistent_dir.mkdir(parents=True, exist_ok=True)
     output_file = persistent_dir / "output.jsonl"
 
     inference_params = {}
