@@ -181,7 +181,6 @@ class RunOpenHandsAgent:
         data_point: dict[str, Any],
         api_base: str,
         agent_run_id: str,
-        profiling_dir: str,
         dataset_mount_path: Optional[str] = None,
     ):
         """
@@ -263,7 +262,7 @@ class RunOpenHandsAgent:
             "export PATH=$PATH:/openhands_setup/OpenHands/.venv/bin && "
             # CRITICAL: Configure poetry to only use the OpenHands venv (ignore external venvs)
             "export POETRY_VIRTUALENVS_IN_PROJECT=true && "
-            f"export NG_PROFILING_DIR={profiling_dir} && "
+            f"export NG_PROFILING_DIR=/trajectories_mount/profiling && "
             "export POETRY_VIRTUALENVS_CREATE=false && "
             "export POETRY_VIRTUALENVS_PATH=/openhands_setup/OpenHands && "
             # TODO (sugam): fix cryptography issue
@@ -337,7 +336,6 @@ class RunOpenHandsAgent:
                 max_retries=1,
                 timeout=self.cfg.swebench_agent_timeout + 60,
                 dataset_mount_path=dataset_mount_path,
-                profiling_dir=profiling_dir,
             )
 
             with open(out_file, "r") as f:
@@ -481,7 +479,6 @@ class RunOpenHandsAgent:
         max_retries: int = 2,
         timeout: int = 45 * 60,  # 45 minutes
         dataset_mount_path: Optional[str] = None,
-        profiling_dir: Optional[str] = None,
     ):
         """Execute a command in an Apptainer container with retry logic."""
         # Find the container using multiple strategies
@@ -537,11 +534,6 @@ class RunOpenHandsAgent:
                     f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl",
                 ]
             )
-
-            if profiling_dir:
-                mount_args.append(
-                    f"--mount type=bind,src={profiling_dir},dst={profiling_dir}",
-                )
 
             miniforge3_path = Path(self.openhands_setup_dir) / "miniforge3"
             mount_args.append(f"--mount type=bind,src={miniforge3_path},dst=/openhands_setup/miniforge3,ro")
@@ -937,7 +929,6 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
                     api_base,
                     agent_run_id,
                     instance_dataset_path,
-                    persistent_dir / "profiling",
                 )
             else:
                 raise ValueError(
