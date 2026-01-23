@@ -17,6 +17,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -774,7 +775,7 @@ def _run_setup_shell_script(
             raise RuntimeError("Failed to capture script output")
 
         for line in process.stdout:
-            print(line, end="", flush=True)
+            print(line, end="", file=sys.stderr)
             output_lines.append(line)
 
         process.wait(timeout=timeout_seconds)
