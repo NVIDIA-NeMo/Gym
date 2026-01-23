@@ -1,0 +1,46 @@
+single_step_tool_use_with_judge_resources_server:
+  resources_servers:
+    single_step_tool_use_with_judge:
+      entrypoint: app.py
+      domain: agent
+      model_step_verifier_config:
+        evaluation_model_server:
+          type: responses_api_models
+          name: ???
+        evaluation_responses_create_params: {
+          input: []
+        }
+        evaluation_generation_attempts: 10
+single_step_tool_use_with_judge_agent:
+  responses_api_agents:
+    tool_simulation_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: single_step_tool_use_with_judge_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/single_step_tool_use_with_judge/data/train.jsonl
+        num_repeats: 1
+        gitlab_identifier:
+          dataset_name: single_step_tool_use_with_judge
+          version: 0.0.1
+          artifact_fpath: train.jsonl
+        license: Apache 2.0
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/single_step_tool_use_with_judge/data/validation.jsonl
+        num_repeats: 1
+        gitlab_identifier:
+          dataset_name: single_step_tool_use_with_judge
+          version: 0.0.1
+          artifact_fpath: validation.jsonl
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/single_step_tool_use_with_judge/data/example.jsonl
+        num_repeats: 1

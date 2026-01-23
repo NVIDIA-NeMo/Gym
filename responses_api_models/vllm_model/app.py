@@ -66,7 +66,7 @@ from nemo_gym.ray_utils import (
     lookup_current_ray_node_ip,
     spinup_single_ray_gpu_node_worker,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_worker
 
 
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
@@ -819,3 +819,5 @@ class VLLMConverter(BaseModel):
 
 if __name__ == "__main__":
     VLLMModel.run_webserver()
+elif is_nemo_gym_fastapi_worker():
+    app = VLLMModel.run_webserver()  # noqa: F401

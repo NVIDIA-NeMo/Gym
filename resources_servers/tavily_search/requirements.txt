@@ -1,0 +1,2 @@
+-e nemo-gym[dev] @ ../../
+tavily==1.1.0

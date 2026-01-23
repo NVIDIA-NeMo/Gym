@@ -1,0 +1,39 @@
+cohesity_netbackup_rag_resources_server:
+  resources_servers:
+    cohesity_netbackup_rag:
+      entrypoint: app.py
+      domain: e2e
+      judge_model:
+        type: responses_api_models
+        name: cohesity_netbackup_rag_judge_model
+cohesity_netbackup_rag_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: https://api.openai.com/v1
+      openai_api_key: ???
+      openai_model: gpt-4.1-2025-04-14
+cohesity_netbackup_rag_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: cohesity_netbackup_rag_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/cohesity_netbackup_rag/data/validation.jsonl
+        num_repeats: 4
+        gitlab_identifier:
+          dataset_name: cohesity_netbackup_rag
+          version: 0.0.1
+          artifact_fpath: validation.jsonl
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/cohesity_netbackup_rag/data/example.jsonl
+        num_repeats: 1

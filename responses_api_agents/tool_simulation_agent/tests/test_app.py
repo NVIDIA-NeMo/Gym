@@ -49,7 +49,10 @@ class TestApp:
         first_response: dict[str, Any],
         *additional_responses: dict[str, Any],
     ) -> None:
-        server_client_post_mock.reset_mock()
+        server_client_post_mock.reset_mock(
+            return_value=True,
+            side_effect=True,
+        )
         responses = [first_response]
         additional_responses_present = len(additional_responses) > 0
         if additional_responses_present:
@@ -70,7 +73,10 @@ class TestApp:
         server_client_post_mock = AsyncMock()
         server_client_mock = MagicMock(spec=ServerClient)
         server_client_mock.post = server_client_post_mock
-        agent_server = ToolSimulationAgent(config=agent_config, server_client=server_client_mock)
+        agent_server = ToolSimulationAgent(
+            config=agent_config,
+            server_client=server_client_mock,
+        )
         webserver = agent_server.setup_webserver()
         test_client = TestClient(webserver)
 
@@ -196,7 +202,10 @@ class TestApp:
         server_client_post_mock = AsyncMock()
         server_client_mock = MagicMock(spec=ServerClient)
         server_client_mock.post = server_client_post_mock
-        agent_server = ToolSimulationAgent(config=agent_config, server_client=server_client_mock)
+        agent_server = ToolSimulationAgent(
+            config=agent_config,
+            server_client=server_client_mock,
+        )
         webserver = agent_server.setup_webserver()
         test_client = TestClient(webserver)
 
