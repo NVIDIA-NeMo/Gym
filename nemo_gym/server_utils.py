@@ -48,8 +48,10 @@ from fastapi import FastAPI, Request, Response
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from gprof2dot import main as gprof2dot_main
 from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import BaseModel, ConfigDict
+from pydot import graph_from_dot_file
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -452,14 +454,25 @@ repr(e): {repr(e)}"""
                 return JSONResponse(content="An unknown error occurred", status_code=500)
 
     def setup_profiling(self, app: FastAPI, profiling_config: ProfilingMiddlewareConfig) -> None:  # pragma: no cover
-        base_profile_dir = PARENT_DIR / profiling_config.profiling_results_dirpath
-        server_profile_path = (base_profile_dir / self.get_session_middleware_key()).with_suffix(".log")
+        base_profile_dir = PARENT_DIR / profiling_config.profiling_results_dirpath / self.get_session_middleware_key()
+        server_profile_path = base_profile_dir / "yappi.log"
+        callgrind_path = base_profile_dir / "yappi.callgrind"
+        callgrind_dotfile_path = base_profile_dir / "yappi.dot"
+        callgrind_graph_path = base_profile_dir / "yappi.png"
 
         base_profile_dir.mkdir(parents=True, exist_ok=True)
 
         main_app_lifespan = app.router.lifespan_context
 
         def _dump_yappi_stats() -> str:
+            yappi.get_func_stats().save(callgrind_path, type="CALLGRIND")
+            gprof2dot_main(
+                argv=f"--format=callgrind --output={callgrind_dotfile_path} -e 1 -n 1 {callgrind_path}".split()
+            )
+
+            (graph,) = graph_from_dot_file(callgrind_dotfile_path)
+            graph.write_png(callgrind_graph_path)
+
             buffer = StringIO()
             yappi.get_func_stats().print_all(
                 out=buffer,
