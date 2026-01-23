@@ -315,7 +315,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 metadata["swe-bench-metrics"] = json.dumps(result["swe-bench-metrics"])
 
             # TODO remove
-            print(metadata, file=sys.stderr)
+            print(f"METADATA: {metadata}\n\n\n\n", file=sys.stderr)
 
             return NeMoGymResponse(
                 id=f"swebench-{problem_info.get('instance_id', 'unknown')}",
