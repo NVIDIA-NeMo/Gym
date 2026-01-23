@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from openai.types.responses.function_tool import FunctionTool
 
+from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -33,7 +34,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient, get_first_server_config_dict
+from nemo_gym.server_utils import get_first_server_config_dict
 from responses_api_agents.swe_agents.run_openhands import (
     RunOpenHandsAgent,
     SupportedAgentFrameworks,
@@ -610,7 +611,7 @@ def extract_problem_info(
 
 
 def get_model_endpoint(model_server_name: str) -> str:
-    global_config_dict = ServerClient.load_from_global_config().global_config_dict
+    global_config_dict = get_global_config_dict()
 
     model_server_config = get_first_server_config_dict(
         global_config_dict,
