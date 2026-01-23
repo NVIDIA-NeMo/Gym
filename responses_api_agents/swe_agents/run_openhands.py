@@ -62,6 +62,8 @@ class SweBenchGenerationConfig:
     agent_max_turns: int = 100
     swebench_tests_timeout: int = 30 * 60
     swebench_agent_timeout: int = 45 * 60
+    apptainer_memory_limit_mb: int = 32 * 1024
+    command_exec_timeout: int = 5 * 60
     inference: SweBenchInferenceConfig = field(default_factory=SweBenchInferenceConfig)
     server: dict = field(default_factory=dict)
 
@@ -224,8 +226,10 @@ class RunOpenHandsAgent:
         agent_script_name = f"agent_script_{agent_run_id}.sh"
         cleanup_commands = (
             f"cd /openhands_setup/OpenHands && "
-            f"mkdir -p /trajectories_mount/trajectories && "
-            f"cp -r {eval_dir_in_openhands}/*/*/* /trajectories_mount/trajectories/{data_point['instance_id']}/ &&"
+            f"mkdir -p /trajectories_mount/trajectories/{data_point['instance_id']}/llm_completions/{data_point['instance_id']}/ && "
+            f"cp {eval_dir_in_openhands}/*/*/*/output.jsonl /trajectories_mount/trajectories/{data_point['instance_id']}/ && "
+            f"latest=$(ls -t {eval_dir_in_openhands}/*/*/*/llm_completions/*/*.json 2>/dev/null | head -1); "
+            f'[ -n "$latest" ] && cp "$latest" /trajectories_mount/trajectories/{data_point["instance_id"]}/llm_completions/{data_point["instance_id"]}/ && '
             f"rm -rf {eval_dir_in_openhands} && rm -rf {config_file_path}"
         )
 
@@ -264,6 +268,8 @@ class RunOpenHandsAgent:
             "export POETRY_VIRTUALENVS_IN_PROJECT=true && "
             "export POETRY_VIRTUALENVS_CREATE=false && "
             "export POETRY_VIRTUALENVS_PATH=/openhands_setup/OpenHands && "
+            f"export TMUX_MEMORY_LIMIT={self.cfg.apptainer_memory_limit_mb} && "
+            f"export COMMAND_EXEC_TIMEOUT={self.cfg.command_exec_timeout} && "
             # TODO (sugam): fix cryptography issue
             # "override_dir=$(mktemp -d /tmp/cryptography_override.XXXX) && "
             # # Reinstall cryptography inside the container (via poetry's venv) using a compatible wheel
@@ -358,7 +364,7 @@ class RunOpenHandsAgent:
                     )
                 )
         except Exception as e:
-            print(f"oh run_infer.sh output parsing failed: {e}", flush=True)
+            print(f"Running OpenHands failed: {e}", flush=True)
             return None
         return pred_file
 
@@ -595,10 +601,14 @@ class RunOpenHandsAgent:
 
         # Launch Apptainer container and execute the command
         apptainer_cmd = (
-            f"apptainer exec --writable-tmpfs --cleanenv --no-mount home,tmp,bind-paths "
+            f"apptainer exec --writable-tmpfs --cleanenv --pid --no-mount home,tmp,bind-paths "
             f"{mount_str} "
             f" {container_name} bash -c {shlex.quote(combined_command)}"
         )
+        memory_limit_mb = self.cfg.apptainer_memory_limit_mb
+        if memory_limit_mb is not None and memory_limit_mb > 0:
+            memory_limit_kb = int(memory_limit_mb) * 1024
+            apptainer_cmd = f"ulimit -v {memory_limit_kb} && {apptainer_cmd}"
 
         # Retry apptainer command up to max_retries times
         for attempt in range(max_retries):
@@ -633,6 +643,14 @@ class RunOpenHandsAgent:
 
                 if len(pred_files) == 1:
                     return pred_files[0]
+                elif len(pred_files) > 1:
+                    latest_file = max(pred_files, key=os.path.getmtime)
+                    print(
+                        f"Multiple outputs found for {data_point['instance_id']} "
+                        f"({len(pred_files)}). Using latest: {latest_file}",
+                        flush=True,
+                    )
+                    return latest_file
                 else:
                     raise ValueError(
                         f"Expected exactly one file matching {expected_file_pattern} for {data_point['instance_id']}, "
