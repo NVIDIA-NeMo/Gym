@@ -603,6 +603,7 @@ Full body: {json.dumps(exc.body, indent=4)}
 
         profiling_config = ProfilingMiddlewareConfig.model_validate(global_config_dict)
         if profiling_config.profiling_enabled:
+            print(f"Enabled profiling for {server.config.name}")
             server.setup_profiling(app, profiling_config)
 
         uvicorn_logging_cfg = UvicornLoggingConfig.model_validate(global_config_dict)
