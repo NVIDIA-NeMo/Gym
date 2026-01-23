@@ -24,9 +24,13 @@ This resources server provides:
 import asyncio
 import json
 import logging
+import subprocess
+import sys
+import time
 import uuid
 from typing import Any, Dict, List, Optional
 
+import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 from nemo_skills.mcp.tool_manager import ToolManager
@@ -71,6 +75,9 @@ class NSToolsConfig(BaseResourcesServerConfig):
     sandbox_host: str = "127.0.0.1"
     sandbox_port: str = "6000"
 
+    # python_tool HTTP server port (spawned automatically)
+    python_tool_port: int = 8765
+
 
 # ============================================================
 # Run/Verify Request/Response Models
@@ -109,12 +116,15 @@ class NSToolsResourcesServer(SimpleResourcesServer):
     config: NSToolsConfig
     tool_manager: Optional[Any] = None
     _tool_name_map: Dict[str, str] = {}  # Maps tool names to qualified names
+    _python_tool_process: Optional[subprocess.Popen] = None
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
 
         # Initialize nemo_skills ToolManager if tools are configured
         if self.config.nemo_skills_tools:
+            # Start the python_tool HTTP server first
+            self._start_python_tool_server()
             self._initialize_nemo_skills_tools()
 
             # Register a catch-all endpoint for tool execution
@@ -123,12 +133,85 @@ class NSToolsResourcesServer(SimpleResourcesServer):
 
         return app
 
+    def _start_python_tool_server(self):
+        """Spawn python_tool HTTP server as a subprocess."""
+        logger.info(f"Starting python_tool HTTP server on port {self.config.python_tool_port}")
+
+        # Build command with sandbox config
+        cmd = [
+            sys.executable,
+            "-m",
+            "nemo_skills.mcp.servers.python_tool",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(self.config.python_tool_port),
+            "--sandbox-host",
+            self.config.sandbox_host,
+            "--sandbox-port",
+            str(self.config.sandbox_port),
+        ]
+        logger.info(f"python_tool command: {' '.join(cmd)}")
+
+        # Don't pipe stdout/stderr so we can see output directly in logs
+        self._python_tool_process = subprocess.Popen(cmd)
+
+        # Wait for server to be ready
+        self._wait_for_server_ready()
+        logger.info(f"python_tool HTTP server started (PID: {self._python_tool_process.pid})")
+
+    def _wait_for_server_ready(self, timeout: float = 30.0, poll_interval: float = 0.5):
+        """Wait for the python_tool HTTP server to be ready."""
+        url = f"http://127.0.0.1:{self.config.python_tool_port}/mcp"
+        start_time = time.time()
+
+        while time.time() - start_time < timeout:
+            # Check if process died
+            if self._python_tool_process.poll() is not None:
+                raise RuntimeError(
+                    f"python_tool server died during startup (exit code: {self._python_tool_process.returncode}). "
+                    f"Check logs above for details."
+                )
+
+            try:
+                # Try to connect to the server
+                with httpx.Client(timeout=2.0) as client:
+                    # MCP servers respond to POST on /mcp, but we can check if the port is open
+                    # by attempting a connection. The server might return an error, but that's fine.
+                    response = client.post(url, json={})
+                    # Any response means server is up
+                    logger.info(f"python_tool server is ready (status: {response.status_code})")
+                    return
+            except (httpx.ConnectError, httpx.ConnectTimeout):
+                # Server not ready yet
+                time.sleep(poll_interval)
+            except Exception as e:
+                # Other errors might indicate server is up but returned an error - that's ok
+                logger.info(f"python_tool server responded with error (server is ready): {e}")
+                return
+
+        # Terminate the process if still running
+        if self._python_tool_process.poll() is None:
+            self._python_tool_process.terminate()
+            self._python_tool_process.wait(timeout=5)
+        raise TimeoutError(f"python_tool server did not start within {timeout}s. Check logs above for details.")
+
     def _initialize_nemo_skills_tools(self):
         """Initialize the nemo_skills ToolManager with configured tools."""
 
+        # Reduce verbosity of MCP and httpx loggers (they log every HTTP request at INFO)
+        for noisy_logger in [
+            "mcp.server.streamable_http_manager",
+            "mcp.server.streamable_http",
+            "mcp.server.lowlevel.server",
+            "mcp.server",
+            "mcp.client.streamable_http",
+            "httpx",
+        ]:
+            logging.getLogger(noisy_logger).setLevel(logging.WARNING)
+
         logger.info(f"Initializing NeMo Skills ToolManager with tools: {self.config.nemo_skills_tools}")
 
-        # Build context with sandbox config for PythonTool
         context = {
             "sandbox": {
                 "sandbox_type": "local",
@@ -137,9 +220,15 @@ class NSToolsResourcesServer(SimpleResourcesServer):
             }
         }
 
+        # Merge in PythonTool URL override to point to our spawned HTTP server
+        overrides = dict(self.config.nemo_skills_tool_overrides)
+        python_tool_url = f"http://127.0.0.1:{self.config.python_tool_port}/mcp"
+        overrides.setdefault("PythonTool", {})
+        overrides["PythonTool"]["client_params"] = {"base_url": python_tool_url}
+
         self.tool_manager = ToolManager(
             module_specs=self.config.nemo_skills_tools,
-            overrides=self.config.nemo_skills_tool_overrides,
+            overrides=overrides,
             context=context,
         )
 
@@ -242,6 +331,17 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         """Cleanup resources on server shutdown."""
         if self.tool_manager:
             await self.tool_manager.shutdown()
+
+        # Terminate the python_tool subprocess
+        if self._python_tool_process:
+            logger.info(f"Terminating python_tool server (PID: {self._python_tool_process.pid})")
+            self._python_tool_process.terminate()
+            try:
+                self._python_tool_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                logger.warning("python_tool server did not terminate gracefully, killing...")
+                self._python_tool_process.kill()
+            self._python_tool_process = None
 
 
 if __name__ == "__main__":
