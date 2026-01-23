@@ -465,17 +465,12 @@ repr(e): {repr(e)}"""
         main_app_lifespan = app.router.lifespan_context
 
         def _dump_yappi_stats() -> str:
-            # TODO remove
-            print("yappi get func stats", file=sys.stderr)
             yappi.get_func_stats().save(callgrind_path, type="CALLGRIND")
-            print("gprof2dot_main", file=sys.stderr)
             gprof2dot_main(
                 argv=f"--format=callgrind --output={callgrind_dotfile_path} -e 1 -n 1 {callgrind_path}".split()
             )
 
-            print("graph_from_dot_file", file=sys.stderr)
             (graph,) = graph_from_dot_file(callgrind_dotfile_path)
-            print("graph.write_png", file=sys.stderr)
             graph.write_png(callgrind_graph_path)
 
             buffer = StringIO()
