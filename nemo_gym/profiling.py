@@ -27,10 +27,10 @@ class Profiler(BaseModel):
 
     def dump(self) -> None:
         self.base_profile_dir.mkdir(parents=True, exist_ok=True)
-        log_path = self.base_profile_dir / "yappi.log"
-        callgrind_path = self.base_profile_dir / "yappi.callgrind"
-        callgrind_dotfile_path = self.base_profile_dir / "yappi.dot"
-        callgrind_graph_path = self.base_profile_dir / "yappi.png"
+        log_path = self.base_profile_dir / f"{self.name}.log"
+        callgrind_path = self.base_profile_dir / f"{self.name}.callgrind"
+        callgrind_dotfile_path = self.base_profile_dir / f"{self.name}.dot"
+        callgrind_graph_path = self.base_profile_dir / f"{self.name}.png"
 
         yappi.get_func_stats().save(callgrind_path, type="CALLGRIND")
         gprof2dot_main(argv=f"--format=callgrind --output={callgrind_dotfile_path} -e 1 -n 1 {callgrind_path}".split())
