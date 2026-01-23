@@ -337,6 +337,7 @@ class RunOpenHandsAgent:
                 max_retries=1,
                 timeout=self.cfg.swebench_agent_timeout + 60,
                 dataset_mount_path=dataset_mount_path,
+                profiling_dir=profiling_dir,
             )
 
             with open(out_file, "r") as f:
@@ -480,6 +481,7 @@ class RunOpenHandsAgent:
         max_retries: int = 2,
         timeout: int = 45 * 60,  # 45 minutes
         dataset_mount_path: Optional[str] = None,
+        profiling_dir: Optional[str] = None,
     ):
         """Execute a command in an Apptainer container with retry logic."""
         # Find the container using multiple strategies
@@ -535,6 +537,11 @@ class RunOpenHandsAgent:
                     f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl",
                 ]
             )
+
+            if profiling_dir:
+                mount_args.append(
+                    f"--mount type=bind,src={profiling_dir},dst={profiling_dir}",
+                )
 
             miniforge3_path = Path(self.openhands_setup_dir) / "miniforge3"
             mount_args.append(f"--mount type=bind,src={miniforge3_path},dst=/openhands_setup/miniforge3,ro")
