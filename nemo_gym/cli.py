@@ -25,7 +25,7 @@ from os import environ, makedirs
 from os.path import exists
 from pathlib import Path
 from signal import SIGINT
-from subprocess import Popen, TimeoutExpired
+from subprocess import Popen
 from threading import Thread
 from time import sleep, time
 from typing import Dict, List, Optional, Tuple
@@ -343,12 +343,8 @@ Process `{process_name}` stderr:
             process.send_signal(SIGINT)
 
         print("Waiting for processes to finish...")
-        for top_level_path, process in self._processes.items():
-            try:
-                process.wait(timeout=5)
-            except TimeoutExpired:
-                print(f"Waiting for process {top_level_path} timed out. Killing process instead.")
-                process.kill()
+        for process in self._processes.values():
+            process.wait()
 
         self._processes = dict()
 
