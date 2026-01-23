@@ -1,5 +1,6 @@
 from io import StringIO
 from pathlib import Path
+from typing import Optional
 
 import yappi
 from gprof2dot import main as gprof2dot_main
@@ -10,6 +11,9 @@ from pydot import graph_from_dot_file
 class Profiler(BaseModel):
     name: str
     base_profile_dir: Path
+
+    # Used to clean up and filter out unnecessary information in the yappi log
+    required_str: Optional[str] = None
 
     def start(self) -> None:
         yappi.set_clock_type("CPU")
@@ -50,7 +54,7 @@ class Profiler(BaseModel):
         res = ""
         past_header = False
         for line in buffer:
-            if not past_header or self.config.entrypoint in line:
+            if not past_header or (self.required_str and self.required_str in line):
                 res += line
 
             if line.startswith("name"):
