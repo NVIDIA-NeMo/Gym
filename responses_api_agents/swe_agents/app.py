@@ -262,6 +262,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             future = runner_ray_remote.remote(self._container_counter, run_swebench_evaluation, params)
             result = await future
 
+            # TODO remove
+            print("HIT 1", file=sys.stderr)
+
             # Extract trajectory and convert to proper NeMoGym format
             output_items = []
             trajectory = result.get("trajectory", [])
@@ -270,12 +273,18 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             raw_tools = result.get("tools", [])
             tools = convert_tools_to_function_format(raw_tools) if raw_tools else []
 
+            # TODO remove
+            print("HIT 2", file=sys.stderr)
+
             # Convert trajectory to NeMoGym output items
             if trajectory:
                 output_items = convert_trajectory_to_output_items(
                     trajectory,
                     self.config.agent_framework,
                 )
+
+            # TODO remove
+            print("HIT 3", file=sys.stderr)
 
             # If no trajectory or empty output, create a summary message
             if not output_items:
@@ -297,6 +306,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     )
                 ]
 
+            # TODO remove
+            print("HIT 4", file=sys.stderr)
+
             # Store the full result in metadata for the verify step
             # Note: metadata values must be strings for NeMoGymResponse
             metadata = {
@@ -310,12 +322,16 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 if key in result:
                     metadata[key] = str(result[key])
 
+            # TODO remove
+            print("HIT 5", file=sys.stderr)
+
             # For complex metrics, store as JSON string
             if "swe-bench-metrics" in result:
                 metadata["swe-bench-metrics"] = json.dumps(result["swe-bench-metrics"])
 
             # TODO remove
             print(f"METADATA: {metadata}\n\n\n\n", file=sys.stderr)
+            1 / 0
             with open("temp.json", "w") as f:
                 json.dump(metadata, f)
 
