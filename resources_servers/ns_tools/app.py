@@ -199,6 +199,15 @@ class NSToolsResourcesServer(SimpleResourcesServer):
     def _initialize_nemo_skills_tools(self):
         """Initialize the nemo_skills ToolManager with configured tools."""
 
+        # Reduce verbosity of MCP and httpx loggers (they log every HTTP request at INFO)
+        for noisy_logger in [
+            "mcp.server.streamable_http_manager",
+            "mcp.server.streamable_http",
+            "mcp.client.streamable_http",
+            "httpx",
+        ]:
+            logging.getLogger(noisy_logger).setLevel(logging.WARNING)
+
         logger.info(f"Initializing NeMo Skills ToolManager with tools: {self.config.nemo_skills_tools}")
 
         context = {
