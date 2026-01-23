@@ -399,7 +399,7 @@ def convert_tools_to_function_format(raw_tools: List[Dict]) -> List:
                 parameters=func_def.get("parameters"),
                 strict=func_def.get("strict"),  # May be None
             )
-            tools.append(function_tool)
+            tools.append(function_tool.model_dump())
     return tools
 
 
