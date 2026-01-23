@@ -641,6 +641,8 @@ async def run_swebench_evaluation(
     instance_dir: Optional[str] = None,
     ray_queue_time: Optional[float] = None,
     ray_submit_time: Optional[float] = None,
+    apptainer_memory_limit_mb: Optional[int] = None,
+    command_exec_timeout: Optional[int] = None,
 ) -> Dict:
     # Create persistent directory for I/O and logs in local workspace
     workspace_root = Path(os.path.dirname(os.path.abspath(__file__)))
@@ -675,6 +677,8 @@ async def run_swebench_evaluation(
         agent_max_turns=agent_max_turns,
         swebench_tests_timeout=swebench_tests_timeout,
         swebench_agent_timeout=swebench_agent_timeout,
+        apptainer_memory_limit_mb=apptainer_memory_limit_mb,
+        command_exec_timeout=command_exec_timeout,
         inference=inference_config,
         server=server,
     )

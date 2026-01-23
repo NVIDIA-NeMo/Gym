@@ -94,6 +94,12 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
 
     swebench_agent_timeout: int = Field(default=45 * 60, description="Timeout for running the agent (seconds)")
 
+    apptainer_memory_limit_mb: int = Field(
+        default=32 * 1024, description="Memory limit for the apptainer container (MB)"
+    )
+
+    command_exec_timeout: int = Field(default=5 * 60, description="Timeout for executing the command (seconds)")
+
     # Concurrency control
     concurrency: int = Field(default=256, description="Maximum number of concurrent SWE-bench runs")
 
@@ -212,6 +218,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "dataset_path": self.config.dataset_path,
                 "instance_dir": instance_dir,
                 "ray_queue_time": ray_queue_time,
+                "apptainer_memory_limit_mb": self.config.apptainer_memory_limit_mb,
+                "command_exec_timeout": self.config.command_exec_timeout,
             }
 
             future = runner_ray_remote.remote(run_swebench_evaluation, params)
