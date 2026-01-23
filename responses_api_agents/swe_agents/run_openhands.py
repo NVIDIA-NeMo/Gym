@@ -590,6 +590,11 @@ class RunOpenHandsAgent:
         container_commands.append(command)
         combined_command = " && ".join(container_commands)
 
+        # TODO remove
+        import sys
+
+        print("\n".join(mount_args), file=sys.stderr)
+
         mount_str = " ".join(mount_args)
 
         # Launch Apptainer container and execute the command
