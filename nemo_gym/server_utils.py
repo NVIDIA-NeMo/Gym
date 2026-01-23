@@ -19,7 +19,6 @@ import resource
 import sys
 from abc import abstractmethod
 from contextlib import asynccontextmanager
-from io import StringIO
 from logging import Filter as LoggingFilter
 from logging import LogRecord, getLogger
 from os import environ, getenv
@@ -33,7 +32,6 @@ import orjson
 import ray
 import requests
 import uvicorn
-import yappi
 from aiohttp import (
     ClientResponse,
     ClientResponseError,
@@ -48,10 +46,8 @@ from fastapi import FastAPI, Request, Response
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from gprof2dot import main as gprof2dot_main
 from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import BaseModel, ConfigDict
-from pydot import graph_from_dot_file
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -69,6 +65,7 @@ from nemo_gym.global_config import (
     get_first_server_config_dict,
     get_global_config_dict,
 )
+from nemo_gym.profiling import Profiler
 
 
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
@@ -455,68 +452,25 @@ repr(e): {repr(e)}"""
 
     def setup_profiling(self, app: FastAPI, profiling_config: ProfilingMiddlewareConfig) -> None:  # pragma: no cover
         base_profile_dir = PARENT_DIR / profiling_config.profiling_results_dirpath / self.get_session_middleware_key()
-        server_profile_path = base_profile_dir / "yappi.log"
-        callgrind_path = base_profile_dir / "yappi.callgrind"
-        callgrind_dotfile_path = base_profile_dir / "yappi.dot"
-        callgrind_graph_path = base_profile_dir / "yappi.png"
-
-        base_profile_dir.mkdir(parents=True, exist_ok=True)
+        profiler = Profiler(name=self.config.name, base_profile_dir=base_profile_dir)
 
         main_app_lifespan = app.router.lifespan_context
 
-        def _dump_yappi_stats() -> str:
-            yappi.get_func_stats().save(callgrind_path, type="CALLGRIND")
-            gprof2dot_main(
-                argv=f"--format=callgrind --output={callgrind_dotfile_path} -e 1 -n 1 {callgrind_path}".split()
-            )
-
-            (graph,) = graph_from_dot_file(callgrind_dotfile_path)
-            graph.write_png(callgrind_graph_path)
-
-            buffer = StringIO()
-            yappi.get_func_stats().print_all(
-                out=buffer,
-                columns={
-                    0: ("name", 200),
-                    1: ("ncall", 10),
-                    2: ("tsub", 8),
-                    3: ("ttot", 8),
-                    4: ("tavg", 8),
-                },
-            )
-
-            buffer.seek(0)
-            res = ""
-            past_header = False
-            for line in buffer:
-                if not past_header or self.config.entrypoint in line:
-                    res += line
-
-                if line.startswith("name"):
-                    past_header = True
-
-            return res
-
         @asynccontextmanager
         async def lifespan_wrapper(app):
-            yappi.set_clock_type("CPU")
-            yappi.start()
-            print(f"🔍 Enabled profiling for {self.config.name}")
+            profiler.start()
 
             async with main_app_lifespan(app) as maybe_state:
                 yield maybe_state
 
-            print(f"🛑 Stopping profiler for {self.config.name}. Check {server_profile_path} for the metrics!")
-            yappi.stop()
-
-            with open(server_profile_path, "w") as f:
-                f.write(_dump_yappi_stats())
+            profiler.stop()
 
         app.router.lifespan_context = lifespan_wrapper
 
         @app.get("/stats")
         def stats():
-            return Response(_dump_yappi_stats())
+            profiler.dump()
+            return Response()
 
     def set_ulimit(self, target_soft_limit: int = 65535):  # pragma: no cover
         # From https://github.com/vllm-project/vllm/blob/fed8a9b107df3e27d57728c6911c7d308b871477/vllm/utils/__init__.py#L2790
