@@ -316,6 +316,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
             # TODO remove
             print(f"METADATA: {metadata}\n\n\n\n", file=sys.stderr)
+            with open("temp.json", "w") as f:
+                json.dump(metadata, f)
 
             return NeMoGymResponse(
                 id=f"swebench-{problem_info.get('instance_id', 'unknown')}",
