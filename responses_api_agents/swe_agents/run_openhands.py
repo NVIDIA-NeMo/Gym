@@ -911,7 +911,7 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
 
         return required_tests <= passed_tests
 
-    async def process_single_datapoint(self, data_point: dict[str, Any]):
+    async def process_single_datapoint(self, data_point: dict[str, Any], persistent_dir: Path):
         self.output_dir = Path(self.cfg.output_file).parent
 
         agent_run_id = f"{data_point['instance_id']}_{int(time.time())}_{str(uuid.uuid4())[:8]}"
@@ -935,6 +935,7 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
                     api_base,
                     agent_run_id,
                     instance_dataset_path,
+                    persistent_dir / "profiling",
                 )
             else:
                 raise ValueError(

@@ -632,7 +632,7 @@ async def run_swebench_evaluation(
     agent_max_turns: int,
     swebench_tests_timeout: int,
     swebench_agent_timeout: int,
-    persistent_dir: str,
+    persistent_dir: Path,
     agent_framework_repo: Optional[str] = None,
     agent_framework_commit: str = "HEAD",
     openhands_setup_dir: Optional[Path] = None,
@@ -683,7 +683,7 @@ async def run_swebench_evaluation(
         dataset_path=dataset_path,
     )
 
-    result = await run_oh.process_single_datapoint(problem_info)
+    result = await run_oh.process_single_datapoint(problem_info, persistent_dir)
     print(f"Process completed for {instance_id}", flush=True)
 
     result["oh_time_metrics"]["ray_time_in_queue"] = ray_submit_time - ray_queue_time
