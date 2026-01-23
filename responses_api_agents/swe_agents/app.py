@@ -13,6 +13,7 @@
 # limitations under the License.
 import asyncio
 import json
+import os
 import sys
 import time
 import uuid
@@ -40,6 +41,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.profiling import Profiler
 from responses_api_agents.swe_agents.utils import (
     convert_tools_to_function_format,
     convert_trajectory_to_output_items,
@@ -83,7 +85,13 @@ def runner_ray_remote(
     ray_submit_time = time.time()
     params["ray_submit_time"] = ray_submit_time
 
+    instance_id = params["problem_info"].get("instance_id", "unknown")
+    profiler = Profiler(name=instance_id, base_profile_dir=params["persistent_dir"] / "profiling")
+    profiler.start()
+
     result = asyncio.run(runner(**params))
+
+    profiler.stop()
 
     ray.get(concurrent_container_counter.decrement.remote())
 
@@ -214,33 +222,36 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # Get model endpoint
         model_endpoint = get_model_endpoint(self.config.model_server.name)
 
-        # Run SWE-bench evaluation
+        # Create persistent directory for I/O and logs in local workspace
         instance_dir = (
             f"{problem_info.get('instance_id', 'unknown')}_{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
         )
+        workspace_root = Path(os.path.dirname(os.path.abspath(__file__)))
+        persistent_dir = workspace_root / f"swebench_results_{self.config.run_session_id}" / instance_dir
+        persistent_dir.mkdir(parents=True, exist_ok=True)
         try:
             ray_queue_time = time.time()
             params = {
                 "problem_info": problem_info,
                 "model_endpoint": model_endpoint,
                 "body": body,
-                "run_session_id": self.config.run_session_id,
                 "agent_framework": self.config.agent_framework,
                 "agent_config": self.config.agent_config,
                 "agent_tools_file": self.config.agent_tools_file,
                 "agent_max_turns": self.config.agent_max_turns,
                 "swebench_tests_timeout": self.config.swebench_tests_timeout,
                 "swebench_agent_timeout": self.config.swebench_agent_timeout,
+                "persistent_dir": persistent_dir,
                 "agent_framework_repo": self.config.agent_framework_repo,
                 "agent_framework_commit": self.config.agent_framework_commit,
                 "openhands_setup_dir": self.config.openhands_setup_dir,
                 "swebench_setup_dir": self.config.swebench_setup_dir,
                 "r2e_gym_setup_dir": self.config.r2e_gym_setup_dir,
                 "dataset_path": self.config.dataset_path,
-                "instance_dir": instance_dir,
                 "ray_queue_time": ray_queue_time,
             }
 
+            # Run SWE-bench evaluation
             future = runner_ray_remote.remote(self._container_counter, run_swebench_evaluation, params)
             result = await future
 
