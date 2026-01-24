@@ -25,6 +25,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 import tomlkit
+from gprof2dot import main as gprof2dot_main
+from pydot import graph_from_dot_file
 
 
 class SupportedAgentFrameworks(str, Enum):
@@ -366,6 +368,21 @@ class RunOpenHandsAgent:
                         }
                     )
                 )
+
+            # Dump out dot and png files from profiling on OpenHands level
+            if self.debug:
+                base_profile_dir = Path(self.output_dir) / "profiling"
+                profiling_name = "openhands"
+                callgrind_path = base_profile_dir / f"{profiling_name}.callgrind"
+                callgrind_dotfile_path = base_profile_dir / f"{profiling_name}.dot"
+                callgrind_graph_path = base_profile_dir / f"{profiling_name}.png"
+
+                gprof2dot_main(
+                    argv=f"--format=callgrind --output={callgrind_dotfile_path} -e 1 -n 1 {callgrind_path}".split()
+                )
+
+                (graph,) = graph_from_dot_file(callgrind_dotfile_path)
+                graph.write_png(callgrind_graph_path)
         except Exception as e:
             print(f"oh run_infer.sh output parsing failed: {e}", flush=True)
             return None
