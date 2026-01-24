@@ -264,7 +264,7 @@ class RunOpenHandsAgent:
             "export PATH=$PATH:/openhands_setup/OpenHands/.venv/bin && "
             # CRITICAL: Configure poetry to only use the OpenHands venv (ignore external venvs)
             "export POETRY_VIRTUALENVS_IN_PROJECT=true && "
-            f"export NG_PROFILING_DIR=/trajectories_mount/profiling_openhands && "
+            f"export NG_PROFILING_DIR=/trajectories_mount/profiling && "
             "export POETRY_VIRTUALENVS_CREATE=false && "
             "export POETRY_VIRTUALENVS_PATH=/openhands_setup/OpenHands && "
             # TODO (sugam): fix cryptography issue
