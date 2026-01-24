@@ -19,7 +19,6 @@ import time
 import uuid
 
 # TODO remove if doesn't work
-import warnings
 from asyncio import Semaphore
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -56,10 +55,6 @@ from responses_api_agents.swe_agents.utils import (
     setup_r2e_gym_environment,
     setup_swebench_environment,
 )
-
-
-# Set all warnings to be treated as errors
-warnings.filterwarnings("error")
 
 
 @ray.remote
