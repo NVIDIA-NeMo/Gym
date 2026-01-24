@@ -232,7 +232,9 @@ class RunOpenHandsAgent:
 
         if self.debug:
             log_cmd = "export LOG_LEVEL=DEBUG && export LOG_TO_FILE=true && "
-            profiling_cmd = "export NG_PROFILING_DIR=/trajectories_mount/profiling && "
+            profiling_cmd = (
+                "export NG_PROFILING_DIR=/trajectories_mount/profiling && apt update && apt install -y graphviz &&"
+            )
         else:
             log_cmd = (
                 "export LOG_LEVEL=CRITICAL && "
