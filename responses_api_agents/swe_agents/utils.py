@@ -642,6 +642,7 @@ async def run_swebench_evaluation(
     dataset_path: Optional[str] = None,
     ray_queue_time: Optional[float] = None,
     ray_submit_time: Optional[float] = None,
+    debug: bool = False,
 ) -> Dict:
     instance_id = problem_info.get("instance_id", "unknown")
     output_file = persistent_dir / "output.jsonl"
@@ -682,6 +683,7 @@ async def run_swebench_evaluation(
         swebench_setup_dir=swebench_setup_dir,
         r2e_gym_setup_dir=r2e_gym_setup_dir,
         dataset_path=dataset_path,
+        debug=debug,
     )
 
     result = await run_oh.process_single_datapoint(problem_info, persistent_dir)
@@ -750,6 +752,7 @@ def _run_setup_shell_script(
     timeout_seconds: int,
     label: str,
     timeout_error_message: Optional[str] = None,
+    debug: bool = False,
 ) -> None:
     script_path = setup_dir / script_name
 
@@ -774,8 +777,9 @@ def _run_setup_shell_script(
         if process.stdout is None:
             raise RuntimeError("Failed to capture script output")
 
+        target_file = sys.stderr if debug else sys.stdout
         for line in process.stdout:
-            print(line, end="", file=sys.stderr)
+            print(line, end="", file=target_file)
             output_lines.append(line)
 
         process.wait(timeout=timeout_seconds)
@@ -1039,6 +1043,7 @@ def setup_openhands_environment(
     agent_framework_repo: Optional[str] = "https://github.com/sdevare-nv/nv-OpenHands.git",
     agent_framework_commit: str = "gym",
     setup_dir: Optional[Path] = None,
+    debug: bool = False,
 ) -> Path:
     setup_dir = _resolve_setup_directory(setup_dir, "swe_openhands_setup")
 
@@ -1207,6 +1212,7 @@ echo "OpenHands setup complete!"
             timeout_seconds=1800,
             label="OpenHands",
             timeout_error_message="OpenHands setup timed out after 30 minutes",
+            debug=debug,
         )
 
         print(f"Setup directory: {setup_dir}", flush=True)

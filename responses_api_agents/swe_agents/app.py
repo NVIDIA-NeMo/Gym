@@ -86,21 +86,23 @@ class ConcurrentContainerCounter:
 def runner_ray_remote(
     concurrent_container_counter: ConcurrentContainerCounter, runner: Callable, params: dict[str, Any]
 ) -> Any:
-    concurrent_containers = ray.get(concurrent_container_counter.increment.remote())
-    print(f"Concurrent container #{concurrent_containers}", file=sys.stderr)
-
     ray_submit_time = time.time()
     params["ray_submit_time"] = ray_submit_time
 
-    instance_id = params["problem_info"].get("instance_id", "unknown")
-    profiler = Profiler(name=instance_id, base_profile_dir=params["persistent_dir"] / "profiling")
-    profiler.start()
+    if params["debug"]:
+        concurrent_containers = ray.get(concurrent_container_counter.increment.remote())
+        print(f"Concurrent container #{concurrent_containers}", file=sys.stderr)
+
+        instance_id = params["problem_info"].get("instance_id", "unknown")
+        profiler = Profiler(name=instance_id, base_profile_dir=params["persistent_dir"] / "profiling")
+        profiler.start()
 
     result = asyncio.run(runner(**params))
 
-    profiler.stop()
+    if params["debug"]:
+        profiler.stop()
 
-    ray.get(concurrent_container_counter.decrement.remote())
+        ray.get(concurrent_container_counter.decrement.remote())
 
     return result
 
@@ -166,6 +168,8 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         description="Session ID for the run",
     )
 
+    debug: bool = False
+
 
 class SWEBenchRunRequest(BaseRunRequest):
     """Request format for SWE-bench runs."""
@@ -210,6 +214,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             self.config.openhands_setup_dir = setup_openhands_environment(
                 agent_framework_repo=self.config.agent_framework_repo,
                 agent_framework_commit=self.config.agent_framework_commit,
+                debug=self.config.debug,
             )
         self.config.swebench_setup_dir = setup_swebench_environment()
         self.config.r2e_gym_setup_dir = setup_r2e_gym_environment()
@@ -256,6 +261,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "r2e_gym_setup_dir": self.config.r2e_gym_setup_dir,
                 "dataset_path": self.config.dataset_path,
                 "ray_queue_time": ray_queue_time,
+                "debug": self.config.debug,
             }
 
             # Run SWE-bench evaluation
