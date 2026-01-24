@@ -250,14 +250,16 @@ class RunOpenHandsAgent:
             # Use pre-built OpenHands
             "cd /openhands_setup/OpenHands && "
             "export RUNTIME=local && "
-            # "export LOG_LEVEL=DEBUG && "
-            # "export LOG_TO_FILE=true && "
-            "export LOG_LEVEL=CRITICAL && "
-            "export DEBUG=False && "
-            "export DEBUG_LLM=False && "
-            "export LOG_TO_FILE=False && "
-            "export LOG_ALL_EVENTS=False && "
-            "export DEBUG_RUNTIME=False && "
+            # Enable these two for debug logging
+            "export LOG_LEVEL=DEBUG && "
+            "export LOG_TO_FILE=true && "
+            # Disable these 5 for logging
+            # "export LOG_LEVEL=CRITICAL && "
+            # "export DEBUG=False && "
+            # "export DEBUG_LLM=False && "
+            # "export LOG_TO_FILE=False && "
+            # "export LOG_ALL_EVENTS=False && "
+            # "export DEBUG_RUNTIME=False && "
             "export VIRTUAL_ENV=/openhands_setup/OpenHands/.venv && "
             "export PATH=$PATH:/openhands_setup/OpenHands/.venv/bin && "
             # CRITICAL: Configure poetry to only use the OpenHands venv (ignore external venvs)
