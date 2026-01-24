@@ -56,6 +56,8 @@ from responses_api_agents.swe_agents.utils import (
 )
 
 
+# There are some mysterious Pydantic serialization warnings related to FunctionTool that are not fatal that clutter up logs.
+# At some point we can try continue chasing this one down.
 warnings.filterwarnings("ignore", message="FunctionTool")
 
 
