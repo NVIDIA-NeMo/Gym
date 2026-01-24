@@ -150,7 +150,7 @@ class TerminusJudgeResourcesServerConfig(BaseResourcesServerConfig):
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     judge_endpoint_max_concurrency: Optional[int] = 64
     judge_system_message: Optional[str] = None
-    judge_prompt_template_fpath: str = "prompt_templates/terminus_judge.txt"
+    judge_prompt_template_fpath: str = "prompt_templates/terminus_prompt.txt"
     judge_equal_label: str = "[[A=B]]"
     judge_not_equal_label: str = "[[A!=B]]"
     check_twice_swap: bool = False
