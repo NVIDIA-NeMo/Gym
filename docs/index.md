@@ -418,8 +418,8 @@ Rollout Collection <get-started/rollout-collection.md>
 🟡 Nemotron Nano <training-tutorials/nemotron-nano>
 🟡 Nemotron Super <training-tutorials/nemotron-super>
 NeMo RL GRPO <tutorials/nemo-rl-grpo/index.md>
-TRL <training-tutorials/trl>
-Unsloth <training-tutorials/unsloth>
+🟡 TRL <training-tutorials/trl>
+🟡 Unsloth <training-tutorials/unsloth>
 🟡 VERL <training-tutorials/verl>
 🟡 NeMo Customizer <training-tutorials/nemo-customizer>
 Offline Training <tutorials/offline-training-w-rollouts>

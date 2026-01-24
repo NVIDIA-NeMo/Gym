@@ -22,7 +22,7 @@ NeMo Gym currently integrates with the following RL training frameworks:
 
 **[TRL](https://github.com/huggingface/trl)**: Hugging Face's transformer reinforcement learning library. Supports GRPO with single and multi-turn NeMo Gym environments using vLLM generation, multi-environment training, and distributed training via Accelerate and DeepSpeed. See the {doc}`TRL tutorial <../training-tutorials/trl>` for usage examples.
 
-**[Unsloth](https://github.com/unslothai/unsloth)**: Fast, memory-efficient fine-tuning library. Supports optimized GRPO with single and multi-turn NeMo Gym environments including low precision, parameter-efficient fine-tuning, and training in notebook environments. See the {doc}`Unsloth tutorial <../training-tutorials/unsloth>` for getting started.
+**[Unsloth](https://github.com/unslothai/unsloth)**: Fast, memory-efficient fine-tuning library. Supports optimized GRPO with single-step NeMo Gym environments including low precision, parameter-efficient fine-tuning, and training in notebook environments. See the {doc}`Unsloth tutorial <../training-tutorials/unsloth>` for getting started.
 
 ## Prerequisites
 
