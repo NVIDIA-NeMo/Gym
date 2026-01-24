@@ -97,6 +97,7 @@ class RunOpenHandsAgent:
     swebench_setup_dir: Path | None = None
     r2e_gym_setup_dir: Path | None = None
     dataset_path: str | None = None
+    debug: bool = False
 
     async def _run_swe_agent(self, data_point, api_base):
         """
@@ -229,6 +230,20 @@ class RunOpenHandsAgent:
             f"rm -rf {eval_dir_in_openhands} && rm -rf {config_file_path}"
         )
 
+        if self.debug:
+            log_cmd = "export LOG_LEVEL=DEBUG && export LOG_TO_FILE=true && "
+            profiling_cmd = "export NG_PROFILING_DIR=/trajectories_mount/profiling && "
+        else:
+            log_cmd = (
+                "export LOG_LEVEL=CRITICAL && "
+                "export DEBUG=False && "
+                "export DEBUG_LLM=False && "
+                "export LOG_TO_FILE=False && "
+                "export LOG_ALL_EVENTS=False && "
+                "export DEBUG_RUNTIME=False && "
+            )
+            profiling_cmd = ""
+
         agent_main_cmd = (
             "if [ -d /workspace ]; then "
             "    echo 'Exiting because /workspace is mounted.' && "
@@ -250,21 +265,12 @@ class RunOpenHandsAgent:
             # Use pre-built OpenHands
             "cd /openhands_setup/OpenHands && "
             "export RUNTIME=local && "
-            # Enable these two for debug logging
-            "export LOG_LEVEL=DEBUG && "
-            "export LOG_TO_FILE=true && "
-            # Disable these 5 for logging
-            # "export LOG_LEVEL=CRITICAL && "
-            # "export DEBUG=False && "
-            # "export DEBUG_LLM=False && "
-            # "export LOG_TO_FILE=False && "
-            # "export LOG_ALL_EVENTS=False && "
-            # "export DEBUG_RUNTIME=False && "
+            f"{log_cmd}"
+            f"{profiling_cmd}"
             "export VIRTUAL_ENV=/openhands_setup/OpenHands/.venv && "
             "export PATH=$PATH:/openhands_setup/OpenHands/.venv/bin && "
             # CRITICAL: Configure poetry to only use the OpenHands venv (ignore external venvs)
             "export POETRY_VIRTUALENVS_IN_PROJECT=true && "
-            f"export NG_PROFILING_DIR=/trajectories_mount/profiling && "
             "export POETRY_VIRTUALENVS_CREATE=false && "
             "export POETRY_VIRTUALENVS_PATH=/openhands_setup/OpenHands && "
             # TODO (sugam): fix cryptography issue
