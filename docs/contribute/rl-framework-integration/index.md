@@ -8,8 +8,21 @@ These guides cover how to integrate NeMo Gym into a new RL training framework. U
 - Contributing NeMo Gym integration for a training framework that does not have one yet
 
 :::{tip}
-Just want to train models? Use {ref}`NeMo RL <training-nemo-rl-grpo-index>` instead.
+Just want to train models? See existing integrations:
+- {ref}`NeMo RL <training-nemo-rl-grpo-index>` - Multi-step and multi-turn RL training at scale
+- {doc}`TRL (Hugging Face) <../training-tutorials/trl>` - GRPO training with distributed training support
+- {doc}`Unsloth <../training-tutorials/unsloth>` - Fast, memory-efficient training for single-step tasks
 :::
+
+## Existing Integrations
+
+NeMo Gym currently integrates with the following RL training frameworks:
+
+**[NeMo RL](https://github.com/NVIDIA-NeMo/RL)**: NVIDIA's RL training framework, purpose-built for large-scale frontier model training. Provides full support for multi-step and multi-turn environments with production-grade distributed training capabilities.
+
+**[TRL](https://github.com/huggingface/trl)**: Hugging Face's transformer reinforcement learning library. Supports GRPO with single and multi-turn NeMo Gym environments using vLLM generation, multi-environment training, and distributed training via Accelerate and DeepSpeed. See the {doc}`TRL tutorial <../training-tutorials/trl>` for usage examples.
+
+**[Unsloth](https://github.com/unslothai/unsloth)**: Fast, memory-efficient fine-tuning library. Supports optimized GRPO with single and multi-turn NeMo Gym environments including low precision, parameter-efficient fine-tuning, and training in notebook environments. See the {doc}`Unsloth tutorial <../training-tutorials/unsloth>` for getting started.
 
 ## Prerequisites
 
