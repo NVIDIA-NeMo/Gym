@@ -17,12 +17,14 @@ import os
 import sys
 import time
 import uuid
+import warnings
 from asyncio import Semaphore
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 import ray
 from pydantic import ConfigDict, Field
+from pydantic_core import PydanticSerializationUnexpectedValue
 
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
@@ -53,6 +55,9 @@ from responses_api_agents.swe_agents.utils import (
     setup_r2e_gym_environment,
     setup_swebench_environment,
 )
+
+
+warnings.filterwarnings("ignore", category=PydanticSerializationUnexpectedValue)
 
 
 @ray.remote
