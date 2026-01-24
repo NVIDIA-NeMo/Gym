@@ -24,7 +24,6 @@ from typing import Any, Callable, Dict, Optional
 
 import ray
 from pydantic import ConfigDict, Field
-from pydantic_core import PydanticSerializationUnexpectedValue
 
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
@@ -57,7 +56,7 @@ from responses_api_agents.swe_agents.utils import (
 )
 
 
-warnings.filterwarnings("ignore", category=PydanticSerializationUnexpectedValue)
+warnings.filterwarnings("ignore", message="FunctionTool")
 
 
 @ray.remote
