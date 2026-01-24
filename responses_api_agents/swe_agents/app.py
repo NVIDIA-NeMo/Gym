@@ -57,7 +57,8 @@ from responses_api_agents.swe_agents.utils import (
 
 
 # There are some mysterious Pydantic serialization warnings related to FunctionTool that are not fatal that clutter up logs.
-# At some point we can try continue chasing this one down.
+# At some point we can try continue chasing this one down. Example:
+# (NemoGym pid=3160799) (swe_agents_val)   PydanticSerializationUnexpectedValue(Expected `general-fields` - serialized value may not be as expected [field_name='tools', input_value=FunctionTool(name='str_re... a single call each.\n'), input_type=FunctionTool])
 warnings.filterwarnings("ignore", message="FunctionTool")
 
 
