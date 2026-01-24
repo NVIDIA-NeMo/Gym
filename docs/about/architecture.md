@@ -25,7 +25,7 @@ Model servers expose OpenAI-compatible inference endpoints for chat and response
 - `POST /v1/chat/completions`
 - `POST /v1/responses`
 
-The base model server class defines these endpoints. Concrete model servers implement them (for example, the OpenAI-backed model server). Agents call these endpoints through the shared server client.
+The base model server class defines these endpoints. Concrete model servers implement them (for example, the OpenAI or vLLM model server). Agents call these endpoints through the shared server client.
 
 ### Resources servers (environment + verification)
 
@@ -36,14 +36,15 @@ Resources servers expose environment lifecycle endpoints:
 
 Individual resources servers can add domain-specific endpoints for tools or environment steps. For example:
 
-- A resources server can register a catch-all tool route like `POST /{path}` for tool execution.
-- Aviary-based resources servers add `POST /step` and `POST /close` for multi-step environments.
+- Individual tools as `POST /get_weather` or `POST /search`
+- A resources server can register a catch-all tool route like `POST /{path}` for dynamic environments.
+- Supports `POST /step` and `POST /close` for Gymnasium-style environments .
 
 ### Agent servers (rollout orchestration)
 
 Agent servers expose two primary endpoints:
 
-- `POST /v1/responses` for multi-step interaction
+- `POST /v1/responses` for individual generations
 - `POST /run` for full rollout execution and verification
 
 The base agent server class wires these routes, while each agent implementation defines how to call model and resources servers.
@@ -63,19 +64,15 @@ The shared server client fetches the resolved configuration from the head server
 
 The `SimpleAgent` implementation orchestrates a complete rollout and verification sequence:
 
-1. Call the resources server `POST /seed_session` to initialize session state.
-2. Call the agent `POST /v1/responses`. The agent calls the model server `POST /v1/responses` and issues tool calls to the resources server via `POST /{tool_name}`.
-3. Call the resources server `POST /verify` and return the verified rollout response.
+1. Call the resources server `POST /seed_session` to initialize environment state.
+2. Call the agent `POST /v1/responses`. The agent calls the model server `POST /v1/responses` and issues tool calls to the resources server via `POST /{tool_name}` to interact with the environment.
+3. Call the resources server `POST /verify` and return the rollout and reward.
 
 The rollout collection flow uses the agent `POST /run` endpoint and writes the returned metrics to JSONL output.
 
-### Multi-step environments (Aviary example)
-
-Some resources servers model environments with explicit step and close endpoints. Aviary-based resources servers accept `POST /step` for environment transitions and `POST /close` to release an environment instance.
-
 ## Session and State
 
-All servers add session handling that assigns a session ID when one is not present. Agents propagate cookies between model and resources servers, which lets resources servers store per-session state. Several resources servers keep in-memory maps keyed by session ID (for example, counters or tool environments) to track environment state across steps.
+All servers add session handling that assigns a session ID on initialization. Agents propagate cookies between model and resources servers, which lets resources servers store per-session state. Several resources servers keep in-memory maps keyed by session ID (for example, counters or tool environments) to track environment state across steps.
 
 ## Configuration and Port Resolution
 
