@@ -398,7 +398,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # Add the extracted input messages and tools to the params
             # Note: tools should already be in the correct format from the response
             params_with_input = fixed_params.model_copy(
-                update={"input": input_messages, "tools": response.tools if response.tools else []}
+                update={
+                    "input": input_messages,
+                    "tools": [t.model_dump() for t in response.tools] if response.tools else [],
+                }
             )
 
             # Extract metrics from response metadata
@@ -425,8 +428,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
             # Build verification response with top-level numeric fields for statistics
             return SWEBenchVerifyResponse(
-                responses_create_params=params_with_input.model_dump(),
-                response=response.model_dump(),
+                responses_create_params=params_with_input,
+                response=response,
                 reward=reward,
                 resolved=1.0 if resolved else 0.0,
                 patch_exists=1.0 if patch_exists else 0.0,
