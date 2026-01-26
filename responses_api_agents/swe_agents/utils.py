@@ -643,6 +643,8 @@ async def run_swebench_evaluation(
     ray_queue_time: Optional[float] = None,
     ray_submit_time: Optional[float] = None,
     debug: bool = False,
+    apptainer_memory_limit_mb: Optional[int] = None,
+    command_exec_timeout: Optional[int] = None,
 ) -> Dict:
     instance_id = problem_info.get("instance_id", "unknown")
     output_file = persistent_dir / "output.jsonl"
@@ -673,6 +675,8 @@ async def run_swebench_evaluation(
         agent_max_turns=agent_max_turns,
         swebench_tests_timeout=swebench_tests_timeout,
         swebench_agent_timeout=swebench_agent_timeout,
+        apptainer_memory_limit_mb=apptainer_memory_limit_mb,
+        command_exec_timeout=command_exec_timeout,
         inference=inference_config,
         server=server,
     )

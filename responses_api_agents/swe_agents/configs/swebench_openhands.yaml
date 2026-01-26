@@ -14,9 +14,11 @@ swe_agents:
       # Container configuration
       container_formatter: ???
       container_folder_path: null
-      swebench_agent_timeout: 2700 # 45 minutes
-      swebench_tests_timeout: 1800
-
+      swebench_agent_timeout: 1800
+      swebench_tests_timeout: 900
+      apptainer_memory_limit_mb: 32768
+      command_exec_timeout: 300
+      
       dataset_path: ???
       
       # Optional model server reference

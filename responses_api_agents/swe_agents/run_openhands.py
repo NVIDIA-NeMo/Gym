@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -64,6 +65,8 @@ class SweBenchGenerationConfig:
     agent_max_turns: int = 100
     swebench_tests_timeout: int = 30 * 60
     swebench_agent_timeout: int = 45 * 60
+    apptainer_memory_limit_mb: int = 32 * 1024
+    command_exec_timeout: int = 5 * 60
     inference: SweBenchInferenceConfig = field(default_factory=SweBenchInferenceConfig)
     server: dict = field(default_factory=dict)
 
@@ -225,12 +228,6 @@ class RunOpenHandsAgent:
         assert self.openhands_setup_dir is not None, "OpenHands setup directory is not set"
 
         agent_script_name = f"agent_script_{agent_run_id}.sh"
-        cleanup_commands = (
-            f"cd /openhands_setup/OpenHands && "
-            f"mkdir -p /trajectories_mount/trajectories && "
-            f"cp -r {eval_dir_in_openhands}/*/*/* /trajectories_mount/trajectories/{data_point['instance_id']}/ &&"
-            f"rm -rf {eval_dir_in_openhands} && rm -rf {config_file_path}"
-        )
 
         if self.debug:
             log_cmd = "export LOG_LEVEL=DEBUG && export LOG_TO_FILE=true && "
@@ -275,6 +272,8 @@ class RunOpenHandsAgent:
             "export POETRY_VIRTUALENVS_IN_PROJECT=true && "
             "export POETRY_VIRTUALENVS_CREATE=false && "
             "export POETRY_VIRTUALENVS_PATH=/openhands_setup/OpenHands && "
+            f"export TMUX_MEMORY_LIMIT={self.cfg.apptainer_memory_limit_mb} && "
+            f"export COMMAND_EXEC_TIMEOUT={self.cfg.command_exec_timeout} && "
             # TODO (sugam): fix cryptography issue
             # "override_dir=$(mktemp -d /tmp/cryptography_override.XXXX) && "
             # # Reinstall cryptography inside the container (via poetry's venv) using a compatible wheel
@@ -323,22 +322,18 @@ class RunOpenHandsAgent:
         agent_timeout_seconds = self.cfg.swebench_agent_timeout
         openhands_cmd = (
             f"timeout --signal=TERM --kill-after=30 {agent_timeout_seconds} "
-            f"bash /trajectories_mount/{agent_script_name}; "
-            f"echo 'Cleaning up...'; "
-            f"{cleanup_commands}"
+            f"bash /trajectories_mount/{agent_script_name}"
         )
 
         search_path = os.path.join(
-            self.output_dir / "trajectories",
-            "**",
-            data_point["instance_id"],
+            self.openhands_setup_dir / "OpenHands" / eval_dir_in_openhands,
             "**",
             "output.jsonl",
         )
 
         try:
             # Execute OpenHands command
-            out_file = await self._execute_container_command(
+            out_file_in_eval = await self._execute_container_command(
                 data_point=data_point,
                 command=openhands_cmd,
                 expected_file_pattern=search_path,
@@ -346,6 +341,12 @@ class RunOpenHandsAgent:
                 max_retries=1,
                 timeout=self.cfg.swebench_agent_timeout + 60,
                 dataset_mount_path=dataset_mount_path,
+            )
+            out_file = self._openhands_dir_copy_from_host(
+                data_point=data_point,
+                eval_dir_in_openhands=eval_dir_in_openhands,
+                config_file_path=config_file_path,
+                output_file_path=out_file_in_eval,
             )
 
             with open(out_file, "r") as f:
@@ -384,9 +385,61 @@ class RunOpenHandsAgent:
                 (graph,) = graph_from_dot_file(callgrind_dotfile_path)
                 graph.write_png(callgrind_graph_path)
         except Exception as e:
-            print(f"oh run_infer.sh output parsing failed: {e}", flush=True)
+            self._openhands_dir_copy_from_host(
+                data_point=data_point,
+                eval_dir_in_openhands=eval_dir_in_openhands,
+                config_file_path=config_file_path,
+                output_file_path=None,
+            )
+            print(f"Running OpenHands failed: {e}", flush=True)
             return None
         return pred_file
+
+    def _openhands_dir_copy_from_host(
+        self,
+        data_point: dict[str, Any],
+        eval_dir_in_openhands: str,
+        config_file_path: str,
+        output_file_path: Optional[str],
+    ) -> Optional[str]:
+        eval_dir_on_host = Path(self.openhands_setup_dir) / "OpenHands" / eval_dir_in_openhands
+        trajectories_root = Path(self.output_dir) / "trajectories" / data_point["instance_id"]
+        llm_completions_dir = trajectories_root / "llm_completions" / data_point["instance_id"]
+        trajectories_root.mkdir(parents=True, exist_ok=True)
+        llm_completions_dir.mkdir(parents=True, exist_ok=True)
+
+        dest_output: Optional[str] = None
+        if output_file_path:
+            source_output = Path(output_file_path)
+            if not source_output.is_absolute():
+                source_output = eval_dir_on_host / source_output
+            if not source_output.exists():
+                output_candidates = sorted(eval_dir_on_host.glob("*/*/*/output.jsonl"), key=os.path.getmtime)
+                if not output_candidates:
+                    raise FileNotFoundError(
+                        f"No output.jsonl found under {eval_dir_on_host} for {data_point['instance_id']}."
+                    )
+                source_output = output_candidates[-1]
+
+            dest_output_path = trajectories_root / "output.jsonl"
+            shutil.copy2(source_output, dest_output_path)
+            dest_output = str(dest_output_path)
+
+        completion_candidates = glob.glob(str(eval_dir_on_host / "*/*/*/llm_completions/*/*.json"))
+        if completion_candidates:
+            latest_completion = max(completion_candidates, key=os.path.getmtime)
+            shutil.copy2(
+                latest_completion,
+                llm_completions_dir / Path(latest_completion).name,
+            )
+
+        shutil.rmtree(eval_dir_on_host, ignore_errors=True)
+        try:
+            Path(config_file_path).unlink()
+        except OSError:
+            pass
+
+        return dest_output
 
     def _write_instance_dataset(self, data_point: dict[str, Any], agent_run_id: str) -> Path:
         """
@@ -611,10 +664,14 @@ class RunOpenHandsAgent:
 
         # Launch Apptainer container and execute the command
         apptainer_cmd = (
-            f"apptainer exec --writable-tmpfs --cleanenv --no-mount home,tmp,bind-paths "
+            f"apptainer exec --writable-tmpfs --cleanenv --pid --no-mount home,tmp,bind-paths "
             f"{mount_str} "
             f" {container_name} bash -c {shlex.quote(combined_command)}"
         )
+        memory_limit_mb = self.cfg.apptainer_memory_limit_mb
+        if memory_limit_mb is not None and memory_limit_mb > 0:
+            memory_limit_kb = int(memory_limit_mb) * 1024
+            apptainer_cmd = f"ulimit -v {memory_limit_kb} && {apptainer_cmd}"
 
         # Retry apptainer command up to max_retries times
         for attempt in range(max_retries):
@@ -649,6 +706,14 @@ class RunOpenHandsAgent:
 
                 if len(pred_files) == 1:
                     return pred_files[0]
+                elif len(pred_files) > 1:
+                    latest_file = max(pred_files, key=os.path.getmtime)
+                    print(
+                        f"Multiple outputs found for {data_point['instance_id']} "
+                        f"({len(pred_files)}). Using latest: {latest_file}",
+                        flush=True,
+                    )
+                    return latest_file
                 else:
                     raise ValueError(
                         f"Expected exactly one file matching {expected_file_pattern} for {data_point['instance_id']}, "
