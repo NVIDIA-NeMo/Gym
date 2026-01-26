@@ -378,7 +378,7 @@ class RunOpenHandsAgent:
                 callgrind_graph_path = base_profile_dir / f"{profiling_name}.png"
 
                 gprof2dot_main(
-                    argv=f"--format=callgrind --output={callgrind_dotfile_path} -e 1 -n 1 {callgrind_path}".split()
+                    argv=f"--format=callgrind --output={callgrind_dotfile_path} -e 5 -n 5 {callgrind_path}".split()
                 )
 
                 (graph,) = graph_from_dot_file(callgrind_dotfile_path)
