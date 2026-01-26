@@ -276,8 +276,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             future = runner_ray_remote.remote(self._container_counter, run_swebench_evaluation, params)
             result = await future
 
-            print("HIT A", file=sys.stderr)
-
             # Extract trajectory and convert to proper NeMoGym format
             output_items = []
             trajectory = result.get("trajectory", [])
@@ -292,8 +290,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     trajectory,
                     self.config.agent_framework,
                 )
-
-            print("HIT B", file=sys.stderr)
 
             # If no trajectory or empty output, create a summary message
             if not output_items:
@@ -332,7 +328,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             if "swe-bench-metrics" in result:
                 metadata["swe-bench-metrics"] = json.dumps(result["swe-bench-metrics"])
 
-            print("HIT C", file=sys.stderr)
             return NeMoGymResponse(
                 id=f"swebench-{problem_info.get('instance_id', 'unknown')}",
                 created_at=int(time.time()),
@@ -393,8 +388,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # Run the evaluation
             response = await self.responses(fixed_params)
 
-            print("HIT D", file=sys.stderr)
-
             # Extract initial input messages from the response output and get filtered output
             # These are the system/user messages that were actually sent to the agent
             input_messages, filtered_output = extract_input_messages_from_trajectory(response.output)
@@ -413,8 +406,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # Remove metadata from response after extracting metrics
             response = response.model_copy(update={"metadata": None})
 
-            print("HIT E", file=sys.stderr)
-
             # Parse metrics from JSON string if present
             metrics = json.loads(metadata.get("swe-bench-metrics", "{}")) if "swe-bench-metrics" in metadata else {}
 
@@ -426,8 +417,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             )
 
             reward = 1.0 if resolved else 0.0
-
-            print("HIT F", file=sys.stderr)
 
             # Build verification response with top-level numeric fields for statistics
             return SWEBenchVerifyResponse(
