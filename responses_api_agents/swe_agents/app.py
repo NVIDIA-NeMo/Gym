@@ -421,7 +421,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             params_with_input.model_dump()
             response.model_dump()
 
-            print("HIT BREAKPOINT")
+            print("HIT BREAKPOINT", file=sys.stderr)
 
             # Build verification response with top-level numeric fields for statistics
             return SWEBenchVerifyResponse(
