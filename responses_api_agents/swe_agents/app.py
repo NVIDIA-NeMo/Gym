@@ -14,6 +14,7 @@
 import asyncio
 import json
 import os
+import shlex
 import sys
 import time
 import uuid
@@ -36,6 +37,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.global_config import OmegaConf, get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -210,6 +212,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     config: SWEBenchWrapperConfig
     sem: Semaphore = None
     _container_counter: ConcurrentContainerCounter = None
+    _global_config_dict_str: str = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
@@ -230,6 +233,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         self.config.run_session_id = f"{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
         print(f"Run session ID: {self.config.run_session_id}", flush=True)
+
+        self._global_config_dict_str = shlex.quote(OmegaConf.to_yaml(get_global_config_dict()))
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         # Extract problem information from request
@@ -270,6 +275,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "ray_queue_time": ray_queue_time,
                 "openhands_should_log": self.config.openhands_should_log,
                 "debug": self.config.debug,
+                "ng_global_config_dict_str": self._global_config_dict_str,
                 "apptainer_memory_limit_mb": self.config.apptainer_memory_limit_mb,
                 "command_exec_timeout": self.config.command_exec_timeout,
             }

@@ -634,6 +634,7 @@ async def run_swebench_evaluation(
     swebench_tests_timeout: int,
     swebench_agent_timeout: int,
     persistent_dir: Path,
+    ng_global_config_dict_str: str,
     agent_framework_repo: Optional[str] = None,
     agent_framework_commit: str = "HEAD",
     openhands_setup_dir: Optional[Path] = None,
@@ -688,6 +689,7 @@ async def run_swebench_evaluation(
         swebench_setup_dir=swebench_setup_dir,
         r2e_gym_setup_dir=r2e_gym_setup_dir,
         dataset_path=dataset_path,
+        ng_global_config_dict_str=ng_global_config_dict_str,
         openhands_should_log=openhands_should_log,
         debug=debug,
     )
