@@ -419,9 +419,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             reward = 1.0 if resolved else 0.0
 
             params_with_input.model_dump()
+            print("HIT BREAKPOINT A", file=sys.stderr)
             response.model_dump()
-
-            print("HIT BREAKPOINT", file=sys.stderr)
+            print("HIT BREAKPOINT B", file=sys.stderr)
 
             # Build verification response with top-level numeric fields for statistics
             return SWEBenchVerifyResponse(
