@@ -423,7 +423,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # Build verification response with top-level numeric fields for statistics
             return SWEBenchVerifyResponse(
                 responses_create_params=params_with_input,
-                response=response,
+                response=response.model_dump(),
                 reward=reward,
                 resolved=1.0 if resolved else 0.0,
                 patch_exists=1.0 if patch_exists else 0.0,
