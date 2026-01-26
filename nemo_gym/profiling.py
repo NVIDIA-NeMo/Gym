@@ -33,7 +33,7 @@ class Profiler(BaseModel):
         callgrind_graph_path = self.base_profile_dir / f"{self.name}.png"
 
         yappi.get_func_stats().save(callgrind_path, type="CALLGRIND")
-        gprof2dot_main(argv=f"--format=callgrind --output={callgrind_dotfile_path} -e 1 -n 1 {callgrind_path}".split())
+        gprof2dot_main(argv=f"--format=callgrind --output={callgrind_dotfile_path} -e 5 -n 5 {callgrind_path}".split())
 
         (graph,) = graph_from_dot_file(callgrind_dotfile_path)
         graph.write_png(callgrind_graph_path)
