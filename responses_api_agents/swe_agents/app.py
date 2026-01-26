@@ -418,6 +418,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
             reward = 1.0 if resolved else 0.0
 
+            print(f"{params_with_input=}\n{response=}\n{metrics=}", file=sys.stderr)
+
             # Build verification response with top-level numeric fields for statistics
             return SWEBenchVerifyResponse(
                 responses_create_params=params_with_input,
