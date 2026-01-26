@@ -642,6 +642,7 @@ async def run_swebench_evaluation(
     dataset_path: Optional[str] = None,
     ray_queue_time: Optional[float] = None,
     ray_submit_time: Optional[float] = None,
+    openhands_should_log: bool = False,
     debug: bool = False,
     apptainer_memory_limit_mb: Optional[int] = None,
     command_exec_timeout: Optional[int] = None,
@@ -687,6 +688,7 @@ async def run_swebench_evaluation(
         swebench_setup_dir=swebench_setup_dir,
         r2e_gym_setup_dir=r2e_gym_setup_dir,
         dataset_path=dataset_path,
+        openhands_should_log=openhands_should_log,
         debug=debug,
     )
 
