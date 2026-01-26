@@ -370,7 +370,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 print(
                     f"Semaphore: {self.config.concurrency - self.sem._value} / {self.config.concurrency}", flush=True
                 )
-            body.responses_create_params.metadata["container_concurrency"] = self.config.concurrency - self.sem._value
+            body.responses_create_params.metadata["container_concurrency"] = str(
+                self.config.concurrency - self.sem._value
+            )
 
             # Fix None values in responses_create_params to use defaults
             # This is needed because the pydantic model has non-Optional fields with defaults
@@ -423,12 +425,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             )
 
             reward = 1.0 if resolved else 0.0
-
-            print(params_with_input.model_dump(), file=sys.stderr)
-            print(params_with_input.metadata, file=sys.stderr)
-            for k, v in params_with_input.metadata.items():
-                print(f"{k}: {type(v)}", file=sys.stderr)
-            print("HIT BREAKPOINT A", file=sys.stderr)
 
             # Build verification response with top-level numeric fields for statistics
             return SWEBenchVerifyResponse(
