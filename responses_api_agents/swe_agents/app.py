@@ -174,6 +174,7 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         description="Session ID for the run",
     )
 
+    openhands_should_log: bool = False
     debug: bool = False
 
 
@@ -267,6 +268,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "r2e_gym_setup_dir": self.config.r2e_gym_setup_dir,
                 "dataset_path": self.config.dataset_path,
                 "ray_queue_time": ray_queue_time,
+                "openhands_should_log": self.config.openhands_should_log,
                 "debug": self.config.debug,
                 "apptainer_memory_limit_mb": self.config.apptainer_memory_limit_mb,
                 "command_exec_timeout": self.config.command_exec_timeout,

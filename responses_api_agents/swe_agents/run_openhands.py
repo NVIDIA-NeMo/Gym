@@ -102,6 +102,7 @@ class RunOpenHandsAgent:
     swebench_setup_dir: Path | None = None
     r2e_gym_setup_dir: Path | None = None
     dataset_path: str | None = None
+    openhands_should_log: bool = False
     debug: bool = False
 
     async def _run_swe_agent(self, data_point, api_base):
@@ -230,8 +231,12 @@ class RunOpenHandsAgent:
         agent_script_name = f"agent_script_{agent_run_id}.sh"
 
         if self.debug:
-            log_cmd = "export LOG_LEVEL=DEBUG && export LOG_TO_FILE=true && "
             profiling_cmd = "export NG_PROFILING_DIR=/trajectories_mount/profiling && "
+        else:
+            profiling_cmd = ""
+
+        if self.openhands_should_log:
+            log_cmd = "export LOG_LEVEL=DEBUG && export LOG_TO_FILE=true && export NG_OPENHANDS_SHOULD_LOG=true && "
         else:
             log_cmd = (
                 "export LOG_LEVEL=CRITICAL && "
@@ -241,7 +246,6 @@ class RunOpenHandsAgent:
                 "export LOG_ALL_EVENTS=False && "
                 "export DEBUG_RUNTIME=False && "
             )
-            profiling_cmd = ""
 
         agent_main_cmd = (
             "if [ -d /workspace ]; then "
