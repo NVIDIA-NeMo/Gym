@@ -13,10 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import json
 from contextlib import nullcontext
-from typing import Any, Optional
+from difflib import SequenceMatcher
+from enum import Enum
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI
+from openapi_schema_validator import validate as validate_against_schema_openapi
 from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.base_resources_server import (
@@ -32,45 +36,82 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from resources_servers.terminus_judge.schemas import TERMINUS_1_SCHEMA, TERMINUS_2_SCHEMA
 
 
-class TerminusJudgeResourcesServerConfig(BaseResourcesServerConfig):
-    name: str = "terminus_judge"
-    judge_model_server: ModelServerRef
-    judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
-    judge_endpoint_max_concurrency: Optional[int] = 64
-    judge_system_message: Optional[str] = None
-    judge_prompt_template_fpath: str = "prompt_templates/terminus_judge.txt"
-    judge_equal_label: str = "[[A=B]]"
-    judge_not_equal_label: str = "[[A!=B]]"
-    check_twice_swap: bool = False
-    reward_if_swap_fails: float = 0.0
+SCHEMA_MAP = {
+    "terminus_1": TERMINUS_1_SCHEMA,
+    "terminus_2": TERMINUS_2_SCHEMA,
+}
 
 
-class TerminusJudgeRunRequest(BaseRunRequest):
-    """Run/verify request payload."""
+class FailureCode(str, Enum):
+    """Enumeration of possible failure reasons."""
 
-    model_config = ConfigDict(extra="allow")
-
-    uuid: Optional[str | int] = None
-    expected_answer: Optional[str] = None
-    options: Optional[list[dict[str, str]]] = None
-    metadata: Optional[dict[str, Any]] = None
-
-
-class TerminusJudgeVerifyRequest(TerminusJudgeRunRequest, BaseVerifyRequest):
-    pass
+    NONE = "none"
+    JSON_PARSING_FAILED = "json_parsing_failed"
+    SCHEMA_CHECK_FAILED = "schema_check_failed"
+    TASK_COMPLETE_CHECK_FAILED = "task_complete_check_failed"
+    COMMAND_CORRECTNESS_FAILED = "command_correctness_failed"
+    UNKNOWN_HARNESS = "unknown_harness"
+    JUDGE_EVALUATION_FAILED = "judge_evaluation_failed"
+    UNKNOWN_ERROR = "unknown_error"
 
 
-class JudgeEvaluation(BaseModel):
-    responses_create_params: NeMoGymResponseCreateParamsNonStreaming
-    response: NeMoGymResponse
-    verdict_label: Optional[str] = None
+def extract_keystrokes(data: Dict[str, Any]) -> List[str]:
+    """Extract all keystrokes from commands list."""
+    commands = data.get("commands", [])
+    return [cmd.get("keystrokes", "") for cmd in commands if "keystrokes" in cmd]
 
 
-class TerminusJudgeVerifyResponse(BaseVerifyResponse):
-    expected_answer: str
-    judge_evaluations: list[JudgeEvaluation]
+def text_similarity(s1: str, s2: str) -> float:
+    """Compute similarity ratio between two strings using SequenceMatcher.
+    Returns value between 0 (no similarity) and 1 (identical).
+    """
+    return SequenceMatcher(None, s1, s2).ratio()
+
+
+def command_similarity(gt: Dict[str, Any], pred: Dict[str, Any], separator: str = "") -> float:
+    """
+    Compute text similarity between commands in gt and pred.
+
+    Concatenates all commands in sequence before comparing, preserving
+    the sequential execution order.
+
+    Args:
+        gt: Ground truth dictionary with 'commands' key
+        pred: Prediction dictionary with 'commands' key
+        separator: String to join commands with (default: empty string)
+
+    Returns:
+        Similarity score between 0 (no similarity) and 1 (identical)
+    """
+    gt_keystrokes = extract_keystrokes(gt)
+    pred_keystrokes = extract_keystrokes(pred)
+
+    if not gt_keystrokes and not pred_keystrokes:
+        return 1.0  # Both empty = identical
+
+    if not gt_keystrokes or not pred_keystrokes:
+        return 0.0  # One empty, one not = no similarity
+
+    # Concatenate commands in sequence
+    gt_concat = separator.join(gt_keystrokes)
+    pred_concat = separator.join(pred_keystrokes)
+
+    # Compare concatenated command sequences
+    return text_similarity(gt_concat, pred_concat)
+
+
+def check_task_complete(pred: dict, expected_answer: dict) -> bool:
+    """Check if task completion flags are properly set."""
+    if "task_complete" in expected_answer and expected_answer["task_complete"]:
+        if "task_complete" not in pred or not pred["task_complete"]:
+            return False
+    elif "is_task_complete" in expected_answer and expected_answer["is_task_complete"]:
+        if "is_task_complete" not in pred or not pred["is_task_complete"]:
+            return False
+    return True
 
 
 def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
@@ -94,13 +135,67 @@ def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
     return ""
 
 
-def _extract_expected_answer(req: TerminusJudgeRunRequest) -> Optional[str]:
+def _extract_expected_answer(req: BaseRunRequest) -> Optional[str]:
     """Extract expected answer from request."""
-    if req.expected_answer:
+    if hasattr(req, "expected_answer") and req.expected_answer:
         return str(req.expected_answer)
-    md = req.metadata or {}
+    md = getattr(req, "metadata", None) or {}
     exp = md.get("expected_answer")
     return str(exp) if exp is not None else None
+
+
+class TerminusJudgeResourcesServerConfig(BaseResourcesServerConfig):
+    name: str = "terminus_judge"
+    judge_model_server: ModelServerRef
+    judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+    judge_endpoint_max_concurrency: Optional[int] = 64
+    judge_system_message: Optional[str] = None
+    judge_prompt_template_fpath: str = "prompt_templates/terminus_prompt.txt"
+    judge_equal_label: str = "[[A=B]]"
+    judge_not_equal_label: str = "[[A!=B]]"
+    check_twice_swap: bool = False
+    reward_if_swap_fails: float = 0.0
+
+    # String similarity config
+    enable_string_similarity: bool = True
+    string_similarity_threshold: float = None
+
+
+class TerminusJudgeRunRequest(BaseRunRequest):
+    """Run/verify request payload."""
+
+    model_config = ConfigDict(extra="allow")
+
+    uuid: Optional[str | int] = None
+    expected_answer: Optional[str] = None
+    metadata: Optional[dict[str, Any]] = None
+    threshold: Optional[float] = None
+
+
+class TerminusJudgeVerifyRequest(TerminusJudgeRunRequest, BaseVerifyRequest):
+    pass
+
+
+class JudgeEvaluation(BaseModel):
+    responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+    response: NeMoGymResponse
+    verdict_label: Optional[str] = None
+
+
+class TerminusJudgeVerifyResponse(BaseVerifyResponse):
+    uuid: Optional[str | int] = None
+    expected_answer: str
+    model_output: str
+    parsed_output: Optional[dict] = None
+    similarity_score: float = -1.0
+    schema_check_passed: bool = False
+    task_complete_check_passed: bool = False
+    string_similarity_passed: bool = False
+    judge_passed: bool = False
+    failure_reason: Optional[FailureCode] = None
+    judge_evaluations: list[JudgeEvaluation] = []
+    metadata: Optional[dict[str, Any]] = None
+    threshold: Optional[float] = None
 
 
 class TerminusJudgeResourcesServer(SimpleResourcesServer):
@@ -119,7 +214,6 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
-
         return app
 
     async def verify(self, body: TerminusJudgeVerifyRequest) -> TerminusJudgeVerifyResponse:
@@ -130,22 +224,98 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
         generated = _extract_last_assistant_text(body)
         if not generated:
             raise ValueError("No assistant response found/extracted to verify")
-        # Run first judge evaluation
-        first_equal, first_eval = await self._generate_judge_evaluation(
-            expected_answer=expected, generated_answer=generated
-        )
 
-        evaluations = [first_eval]
+        reward = 0.0
+        failure_reason = None
+        schema_passed = False
+        task_complete_passed = False
+        string_similarity_passed = False
+        judge_passed = False
+        similarity_score = -1.0
+        parsed_output = None
+        judge_evaluations = []
 
-        # Handle swap check if configured
-        if first_equal and self.config.check_twice_swap:
-            second_equal, second_eval = await self._generate_judge_evaluation(
-                expected_answer=generated, generated_answer=expected
-            )
-            evaluations.append(second_eval)
-            reward = 1.0 if second_equal else self.config.reward_if_swap_fails
-        else:
-            reward = 1.0 if first_equal else 0.0
+        # Extract thinking tags if present
+        text = generated
+        if "</think>" in text:
+            text = text.split("</think>")[-1].strip()
+
+        # Schema and Task Completion Checks
+        try:
+            expected_dict = json.loads(expected)
+            pred = json.loads(text)
+            parsed_output = pred
+
+            # Check harness type
+            harness = body.metadata.get("harness", None) if body.metadata else None
+            if harness is None or harness not in ["terminus_1", "terminus_2"]:
+                failure_reason = FailureCode.UNKNOWN_HARNESS
+            else:
+                # Schema validation (must pass)
+                try:
+                    validate_against_schema_openapi(pred, SCHEMA_MAP[harness])
+                    schema_passed = True
+                except Exception:
+                    failure_reason = FailureCode.SCHEMA_CHECK_FAILED
+
+                # Task completion check (must pass)
+                if schema_passed:
+                    if check_task_complete(pred, expected_dict):
+                        task_complete_passed = True
+                    else:
+                        failure_reason = FailureCode.TASK_COMPLETE_CHECK_FAILED
+
+                # String Similarity Check
+                if schema_passed and task_complete_passed and self.config.enable_string_similarity:
+                    similarity_score = command_similarity(expected_dict, pred)
+                    threshold = (
+                        body.threshold if body.threshold is not None else self.config.string_similarity_threshold
+                    )
+
+                    if similarity_score >= threshold:
+                        # String similarity passed - binary reward of 1.0
+                        string_similarity_passed = True
+                        reward = 1.0
+                        failure_reason = FailureCode.NONE
+                    else:
+                        # String similarity failed - invoke judge
+                        failure_reason = FailureCode.COMMAND_CORRECTNESS_FAILED
+
+                        # Judge Evaluation
+                        first_equal, first_eval = await self._generate_judge_evaluation(
+                            expected_answer=expected, generated_answer=text
+                        )
+                        judge_evaluations.append(first_eval)
+
+                        if first_equal:
+                            if self.config.check_twice_swap:
+                                second_equal, second_eval = await self._generate_judge_evaluation(
+                                    expected_answer=text, generated_answer=expected
+                                )
+                                judge_evaluations.append(second_eval)
+
+                                if second_equal:
+                                    judge_passed = True
+                                    reward = 1.0
+                                    failure_reason = FailureCode.NONE
+                                else:
+                                    reward = self.config.reward_if_swap_fails
+                                    failure_reason = FailureCode.JUDGE_EVALUATION_FAILED
+                            else:
+                                judge_passed = True
+                                reward = 1.0
+                                failure_reason = FailureCode.NONE
+                        else:
+                            failure_reason = FailureCode.JUDGE_EVALUATION_FAILED
+                            reward = 0.0
+
+        except json.JSONDecodeError:
+            failure_reason = FailureCode.JSON_PARSING_FAILED
+            reward = 0.0
+        except Exception as e:
+            failure_reason = FailureCode.UNKNOWN_ERROR
+            reward = 0.0
+            print(f"DEBUG: Unknown error in verify: {type(e).__name__} {e}", flush=True)
 
         payload = body.model_dump()
         payload.pop("expected_answer", None)
@@ -154,7 +324,15 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
             **payload,
             reward=reward,
             expected_answer=expected,
-            judge_evaluations=evaluations,
+            model_output=text,
+            parsed_output=parsed_output,
+            similarity_score=similarity_score,
+            schema_check_passed=schema_passed,
+            task_complete_check_passed=task_complete_passed,
+            string_similarity_passed=string_similarity_passed,
+            judge_passed=judge_passed,
+            failure_reason=failure_reason,
+            judge_evaluations=judge_evaluations,
         )
 
     async def _generate_judge_evaluation(
