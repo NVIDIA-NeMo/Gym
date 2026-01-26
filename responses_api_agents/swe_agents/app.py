@@ -418,6 +418,11 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
             reward = 1.0 if resolved else 0.0
 
+            params_with_input.model_dump()
+            response.model_dump()
+
+            print("HIT BREAKPOINT")
+
             # Build verification response with top-level numeric fields for statistics
             return SWEBenchVerifyResponse(
                 responses_create_params=params_with_input.model_dump(),
