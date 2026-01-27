@@ -95,7 +95,7 @@ class _NeMoGymRayGPUSchedulingHelper:  # pragma: no cover
             allowed_gpu_nodes = set(allowed_gpu_nodes)
 
         head = self.cfg["ray_head_node_address"]
-        node_states = ray.util.state.list_nodes(head, detail=True)
+        node_states = ray.util.state.list_nodes(head, detail=True, limit=10000)
         for state in node_states:
             assert state.node_id is not None
             avail_num_gpus = state.resources_total.get("GPU", 0)
@@ -116,7 +116,7 @@ def lookup_ray_node_id_to_ip_dict() -> Dict[str, str]:  # pragma: no cover
     cfg = get_global_config_dict()
     head = cfg["ray_head_node_address"]
     id_to_ip = {}
-    node_states = ray.util.state.list_nodes(head)
+    node_states = ray.util.state.list_nodes(head, limit=10000)
     for state in node_states:
         id_to_ip[state.node_id] = state.node_ip
     return id_to_ip
