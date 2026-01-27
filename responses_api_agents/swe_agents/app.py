@@ -83,7 +83,7 @@ class ConcurrentContainerCounter:
     runtime_env={
         "py_executable": sys.executable,
     },
-    num_cpus=0.5,
+    num_cpus=1,
 )
 def runner_ray_remote(
     concurrent_container_counter: ConcurrentContainerCounter, runner: Callable, params: dict[str, Any]
