@@ -94,8 +94,10 @@ class _NeMoGymRayGPUSchedulingHelper:  # pragma: no cover
         if allowed_gpu_nodes is not None:
             allowed_gpu_nodes = set(allowed_gpu_nodes)
 
+        print(f"DEBUG: _NeMoGymRayGPUSchedulingHelper: post init: allow gpus = {allowed_gpu_nodes}", flush=True)
+
         head = self.cfg["ray_head_node_address"]
-        node_states = ray.util.state.list_nodes(head, detail=True)
+        node_states = ray.util.state.list_nodes(head, detail=True, limit=10000)
         for state in node_states:
             assert state.node_id is not None
             avail_num_gpus = state.resources_total.get("GPU", 0)
@@ -103,12 +105,27 @@ class _NeMoGymRayGPUSchedulingHelper:  # pragma: no cover
                 continue
             self.avail_gpus_dict[state.node_id] += avail_num_gpus
 
-    def alloc_gpu_node(self, num_gpus: int) -> Optional[str]:
+        print(f"DEBUG: _NeMoGymRayGPUSchedulingHelper: post init: avail gpus = {self.avail_gpus_dict} (intermediate)", flush=True)
+
+        default_num_gpus_per_node = self.cfg.get(RAY_NUM_GPUS_PER_NODE_KEY_NAME, 8)
+        for node_id in allowed_gpu_nodes:
+            if node_id in self.avail_gpus_dict:
+                continue
+            print(f"DEBUG: _NeMoGymRayGPUSchedulingHelper: post init: warning: ray state API did not return info for node={repr(node_id)}", flush=True)
+            self.avail_gpus_dict[node_id] = default_num_gpus_per_node
+
+        print(f"DEBUG: _NeMoGymRayGPUSchedulingHelper: post init: avail gpus = {self.avail_gpus_dict}", flush=True)
+
+    def alloc_gpu_node(self, num_gpus: int, desc: Optional[str]) -> Optional[str]:
+        print(f"DEBUG: _NeMoGymRayGPUSchedulingHelper: alloc gpu [{desc}]: avail gpus = {self.avail_gpus_dict}", flush=True)
+        print(f"DEBUG: _NeMoGymRayGPUSchedulingHelper: alloc gpu [{desc}]: used gpus  = {self.used_gpus_dict}", flush=True)
         for node_id, avail_num_gpus in self.avail_gpus_dict.items():
             used_num_gpus = self.used_gpus_dict[node_id]
             if used_num_gpus + num_gpus <= avail_num_gpus:
                 self.used_gpus_dict[node_id] += num_gpus
+                print(f"DEBUG: _NeMoGymRayGPUSchedulingHelper: alloc gpu [{desc}]: node = {node_id} gpus = {num_gpus}", flush=True)
                 return node_id
+        print(f"DEBUG: _NeMoGymRayGPUSchedulingHelper: alloc gpu [{desc}]: no available node", flush=True)
         return None
 
 
@@ -116,7 +133,7 @@ def lookup_ray_node_id_to_ip_dict() -> Dict[str, str]:  # pragma: no cover
     cfg = get_global_config_dict()
     head = cfg["ray_head_node_address"]
     id_to_ip = {}
-    node_states = ray.util.state.list_nodes(head)
+    node_states = ray.util.state.list_nodes(head, limit=10000)
     for state in node_states:
         id_to_ip[state.node_id] = state.node_ip
     return id_to_ip
@@ -145,7 +162,7 @@ def spinup_single_ray_gpu_node_worker(
     )
 
     helper = get_global_ray_gpu_scheduling_helper()
-    node_id = ray.get(helper.alloc_gpu_node.remote(num_gpus))
+    node_id = ray.get(helper.alloc_gpu_node.remote(num_gpus, f"{worker_cls}"))
     if node_id is None:
         raise RuntimeError(f"Cannot find an available Ray node with {num_gpus} GPUs to spin up {worker_cls}")
 
