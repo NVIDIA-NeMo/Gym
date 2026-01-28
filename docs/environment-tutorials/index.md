@@ -199,7 +199,7 @@ NeMo Gym includes working examples in `resources_servers/`:
 | `calendar/` | Multi-turn | State comparison |
 | `equivalence_llm_judge/` | Single-step | LLM judge with swap check |
 | `math_with_judge/` | Single-step | Library + judge fallback |
-| `aviary/` | Multi-step | Aviary framework integration (GSM8K, HotPotQA, BixBench) |
+| `aviary/` | Multi-step | Aviary framework integration |
 | `workplace_assistant/` | Multi-step | Session state, tool routing |
 | `reasoning_gym/` | Single-step | Algorithmic verification with reasoning-gym library |
 
