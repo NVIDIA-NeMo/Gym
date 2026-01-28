@@ -27,6 +27,12 @@ mcqa_simple_agent:
         huggingface_identifier:
           repo_id: nvidia/Nemotron-RL-knowledge-mcqa
         license: Apache 2.0
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/mcqa/data/validation.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-knowledge-mcqa
+        license: Apache 2.0
       - name: example
         type: example
         jsonl_fpath: resources_servers/mcqa/data/example.jsonl
