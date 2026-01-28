@@ -180,25 +180,13 @@ ng_collect_rollouts +agent_name=math_simple_agent \
 
 ---
 
-## Production Alternative: NeMo RL
+## Alternative: NeMo RL
 
-NeMo RL provides **working** NeMo Gym integration today:
+NeMo RL provides working NeMo Gym integration today:
 
-```bash
-# Install NeMo RL (separate from NeMo Gym)
-pip install nemo-rl
-
-# Run GRPO training with NeMo Gym environment
-python examples/nemo_gym/run_grpo_nemo_gym.py \
-    --config examples/nemo_gym/grpo_workplace_assistant_nemotron_nano_v2_9b.yaml
-```
-
-NeMo RL includes:
-
-- ✅ Full rollout orchestration
-- ✅ On-policy token ID corrections (see {doc}`/about/concepts/on-policy-training`)
-- ✅ GRPO (Group Relative Policy Optimization) and DAPO (Diversity-Aware Policy Optimization)
-- ✅ Multi-node distributed training
+- Efficient and scalable post-training
+- SFT, DPO, GRPO, DAPO
+- Multi-turn and agent environments
 
 **Reference**: `nemo_rl/environments/nemo_gym.py`
 
