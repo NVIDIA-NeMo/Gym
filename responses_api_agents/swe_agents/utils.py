@@ -635,6 +635,7 @@ async def run_swebench_evaluation(
     swebench_agent_timeout: int,
     persistent_dir: Path,
     ng_global_config_dict_str: str,
+    model_server_name: str,
     agent_framework_repo: Optional[str] = None,
     agent_framework_commit: str = "HEAD",
     openhands_setup_dir: Optional[Path] = None,
@@ -692,6 +693,7 @@ async def run_swebench_evaluation(
         ng_global_config_dict_str=ng_global_config_dict_str,
         openhands_should_log=openhands_should_log,
         debug=debug,
+        model_server_name=model_server_name,
     )
 
     result = await run_oh.process_single_datapoint(problem_info, persistent_dir)
