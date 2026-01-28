@@ -8,6 +8,10 @@
         "version": "0.0.2",
         "artifact_fpath": "structured_outputs_251027_nano_v3_sdg_json_train.jsonl"
     },
+    "huggingface_identifier": {
+        "repo_id": "nvidia/Nemotron-RL-instruction_following-structured_outputs",
+        "artifact_fpath": "structured_outputs_251027_nano_v3_sdg_json_train.jsonl"
+    },
     "license": "Apache 2.0",
     "Number of examples": 9437,
     "Number of tools": {
@@ -23,7 +27,7 @@
         "Average": 685.8,
         "Min": 133.0,
         "Max": 2888.0,
-        "Median": 639.98,
+        "Median": 639.92,
         "Standard deviation": 257.12
     },
     "Number of turns": {
