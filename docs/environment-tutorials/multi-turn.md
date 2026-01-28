@@ -28,6 +28,10 @@ Train models on extended conversations where context accumulates across user/ass
 
 ---
 
+:::{note}
+Multi-turn environments require on-policy corrections to prevent token ID mismatches across turns. See {doc}`/about/concepts/on-policy-training` for more information.
+:::
+
 ## Why Multi-Turn RL?
 
 Standard fine-tuning trains models on static conversation transcripts. Multi-turn RL goes further:

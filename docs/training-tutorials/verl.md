@@ -196,7 +196,7 @@ python examples/nemo_gym/run_grpo_nemo_gym.py \
 NeMo RL includes:
 
 - ✅ Full rollout orchestration
-- ✅ On-policy token ID corrections
+- ✅ On-policy token ID corrections (see {doc}`/about/concepts/on-policy-training`)
 - ✅ GRPO (Group Relative Policy Optimization) and DAPO (Diversity-Aware Policy Optimization)
 - ✅ Multi-node distributed training
 
