@@ -209,6 +209,7 @@ Rollout Collection <get-started/rollout-collection.md>
 
 tutorials/index.md
 tutorials/creating-resource-server
+tutorials/verifiers-environments
 tutorials/offline-training-w-rollouts
 tutorials/nemo-rl-grpo/index.md
 tutorials/unsloth-training
