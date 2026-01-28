@@ -85,6 +85,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     spinup_server: bool = False
     server_args: Optional[Dict[str, Any]] = None
+    server_env: Optional[Dict[str, str]] = None
 
     router_dp_size: int = 1
 
@@ -95,6 +96,9 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
 
 def _start_vllm_server(config: VLLMModelConfig, server_host: str, server_port: int, router_dp_rank: int) -> None:
+    for k, v in (config.server_env or {}).items():
+        os.environ[k] = v
+
     import uvloop
     import vllm.engine.arg_utils
     import vllm.entrypoints.openai.api_server
