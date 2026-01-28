@@ -2,7 +2,7 @@
 
 # Using Verifiers Environments
 
-Learn how to run environments from Prime Intellect's [Environments Hub](https://app.primeintellect.ai/dashboard/environments) within NeMo Gym.
+Learn how to run environments from Prime Intellect's [Environments Hub](https://app.primeintellect.ai/dashboard/environments) within NeMo Gym. If you are building an environment for Environments Hub, it can also be ran through NeMo-Gym, enabling training with NeMo-RL! 
 
 ::::{grid} 2
 :gutter: 3
@@ -23,17 +23,19 @@ Learn how to run environments from Prime Intellect's [Environments Hub](https://
 
 ## What is this integration?
 
-The verifiers integration enables NeMo Gym to use pre-built environments from Prime Intellect's Environments Hub. Unlike typical NeMo Gym environments that require a separate resource server, verifiers environments handle state management, verification, and tool execution internally.
+The verifiers integration enables NeMo Gym to use environments from Prime Intellect's Environments Hub. Unlike typical NeMo Gym environments that require a separate resource server, verifiers environments handle state management, verification, and tool execution internally.
 
 **Key differences:**
 - No resource server needed - verification logic is built into the environment
-- Uses an agent server that wraps verifiers environments
+- Uses an agent server that orchestrates verifiers environments
 
 **Available environments include:**
-- `primeintellect/acereason-math` - Mathematical reasoning with chain-of-thought
-- `kalomaze/alphabet-sort` - Multi-turn alphabetical sorting
+- `primeintellect/acereason-math` - Mathematical reasoning
+- `kalomaze/alphabet-sort` - Multi-turn list sorting
 - `primeintellect/ascii-tree` - ASCII tree generation
 - And [many more (600+) on Environments Hub](https://app.primeintellect.ai/dashboard/environments)
+
+Note that not all environments have been tested in NeMo-Gym. 
 
 :::{note}
 **Multi-turn environments:** Currently require disabling `enforce_monotonicity` in training configuration until token propagation is fully patched.
@@ -51,7 +53,7 @@ uv venv
 source .venv/bin/activate
 uv sync
 uv add verifiers
-uv add tool prime
+uv tool install prime
 ```
 
 Install the acereason-math environment:
@@ -130,7 +132,7 @@ The `--reasoning-parser qwen3` flag enables the model to generate chain-of-thoug
 Start the verifiers agent and model server:
 
 ```bash
-ng_run "+config_paths=[responses_api_agents/verifiers_agent/configs/verifiers_acereason-math.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+ng_run "+config_paths=[responses_api_agents/verifiers_agent/configs/acereason-math.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
 ```
 
 This launches:
@@ -161,7 +163,7 @@ tail -n 1 responses_api_agents/verifiers_agent/data/acereason-math-example-rollo
 
 ## Understanding the Configuration
 
-The verifiers agent configuration (`configs/verifiers_acereason-math.yaml`) specifies:
+The verifiers agent configuration (`configs/acereason-math.yaml`) specifies:
 
 ```yaml
 verifiers_agent:
@@ -189,62 +191,6 @@ verifiers_agent:
 
 ---
 
-## Adding New Environments
-
-To use a different environment from Environments Hub:
-
-### 1. Install the environment package
-
-```bash
-prime env install primeintellect/ascii-tree
-```
-
-### 2. Generate example data
-
-Use the provided helper script:
-
-```bash
-python3 responses_api_agents/verifiers_agent/scripts/create_dataset.py \
-  --env-id primeintellect/ascii-tree \
-  --size 5 \
-  --output responses_api_agents/verifiers_agent/data/ascii-tree-example.jsonl
-```
-
-### 3. Update requirements.txt
-
-Add the environment package to `responses_api_agents/verifiers_agent/requirements.txt`:
-
-```txt
--e nemo-gym[dev] @ ../../
-verifiers>=0.1.9
---extra-index-url https://hub.primeintellect.ai/primeintellect/simple/
-ascii-tree
-```
-
-### 4. Create a new config file
-
-Copy an existing config and update the `vf_env_id`:
-
-```bash
-cp responses_api_agents/verifiers_agent/configs/verifiers_acereason-math.yaml \
-   responses_api_agents/verifiers_agent/configs/verifiers_ascii-tree.yaml
-# Edit the file to change vf_env_id to "ascii-tree"
-```
-
-### 5. Collect rollouts
-
-```bash
-# ng_run will automatically build the agent's venv and install requirements
-ng_run "+config_paths=[responses_api_agents/verifiers_agent/configs/verifiers_ascii-tree.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
-
-ng_collect_rollouts \
-    +agent_name=verifiers_agent \
-    +input_jsonl_fpath=responses_api_agents/verifiers_agent/data/ascii-tree-example.jsonl \
-    +output_jsonl_fpath=responses_api_agents/verifiers_agent/data/ascii-tree-example-rollouts.jsonl \
-    +limit=5
-```
-
----
 
 ## Training with Verifiers Environments
 
@@ -254,7 +200,7 @@ Training works the same as with standard NeMo Gym environments. Use the generate
 - {doc}`unsloth-training` for efficient single-GPU training
 - {doc}`offline-training-w-rollouts` for SFT/DPO
 
-For multi-environment training, create separate agent instances for each environment and blend the datasets.
+For multi-environment training, create separate agent instances for each environment by creating a separate directory for each environment, to isolate dependencies.
 
 ---
 
@@ -262,5 +208,4 @@ For multi-environment training, create separate agent instances for each environ
 
 - [Prime Intellect Environments Hub](https://app.primeintellect.ai/dashboard/environments) - Browse available environments
 - [Verifiers GitHub](https://github.com/PrimeIntellect-ai/verifiers) - Verifiers library documentation
-- {doc}`creating-resource-server` - For building custom NeMo Gym environments
 - {doc}`../contribute/environments/new-environment` - Environment contribution guide
