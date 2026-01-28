@@ -69,22 +69,3 @@ Fast, memory-efficient fine-tuning for single-step tasks: math, structured outpu
 :::
 
 ::::
-
----
-
-## Verifiers Environments
-
-Run environments from Prime Intellect's Environments Hub.
-
-::::{grid} 1 1 1 1
-:gutter: 1 1 1 2
-
-:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Using Verifiers Environments
-:link: verifiers-environments
-:link-type: doc
-Use diverse environments from Prime Intellect's Environments Hub with NeMo Gym.
-+++
-{bdg-primary}`beginner` {bdg-secondary}`20 min` {bdg-secondary}`verifiers` {bdg-secondary}`environments-hub`
-:::
-
-::::
