@@ -29,7 +29,7 @@ Build training environments where models make sequential tool calls, using resul
 ---
 
 :::{note}
-Multi-step environments require on-policy corrections to prevent token ID mismatches between tool calls. See {doc}`/about/concepts/on-policy-training` for more information.
+Multi-step environments enforce on-policy training by default. See {doc}`/about/concepts/on-policy-training` for more information.
 :::
 
 ## Key Concepts
