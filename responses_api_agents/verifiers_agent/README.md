@@ -140,7 +140,7 @@ prime env install kalomaze/alphabet-sort
 python3 scripts/create_dataset.py --env-id kalomaze/alphabet-sort --size 5 --output data/alphabet-sort-example.jsonl
 ```
 
-Now update the agent requirements.txt. We find for this environment we need to pin a specific version, and use `primeintellect/alphabet-sort` rather than `kalomaze/alphabet-sort` due to version compatibility issues. We should pin versions of verifiers and environments in case things continue to change. 
+Now update the agent requirements.txt. We find for this environment we need to pin a specific version, and use `primeintellect/alphabet-sort` here. We should pin versions of verifiers and environments in case things continue to change. 
 ```
 -e nemo-gym[dev] @ ../../
 verifiers>=0.1.9
