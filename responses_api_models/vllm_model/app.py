@@ -111,7 +111,6 @@ class VLLMModel(SimpleResponsesAPIModel):
             self._session_id_to_client[session_id] = client
         client = self._session_id_to_client[session_id]
 
-        # Native Responses API path (vLLM 0.10.2+)
         if self.config.use_native_responses_api:
             body_dict = body.model_dump(exclude_unset=True)
             body_dict["model"] = self.config.model
