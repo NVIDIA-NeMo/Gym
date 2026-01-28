@@ -25,16 +25,15 @@ enforce_monotonicity: false  # TODO: Implement this. Not supported yet. RL issue
 
 ## Recommended Approaches
 
-**For Qwen3 thinking mode**:
+**For models that drop subsequent reasoning traces**:
 1. **Preferred**: Train with reasoning truncation disabled (keep reasoning across all turns)
 2. **Alternative**: Train models with no reasoning component
 
-**For complex agents with context management**:
+**For agents with context management**:
 - Consider whether history modification is necessary
 - If required, disable enforcement and monitor training stability
 - Use techniques like importance sampling to handle off-policy data
 
 ## Related Topics
 
-- {doc}`openai-compatible-http-server-on-policy-correction` - Detailed technical explanation and token ID fix
-- {doc}`generation-backend-and-openai-compatible-http-server` - Generation backend requirements
+- {doc}`openai-compatible-http-server-on-policy-correction` - Detailed technical explanation of the token ID fix
