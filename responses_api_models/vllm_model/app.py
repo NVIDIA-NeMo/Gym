@@ -111,6 +111,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             self._session_id_to_client[session_id] = client
         client = self._session_id_to_client[session_id]
 
+        # Native Responses API path (vLLM 0.10.2+)
         if self.config.use_native_responses_api:
             body_dict = body.model_dump(exclude_unset=True)
             body_dict["model"] = self.config.model
@@ -128,10 +129,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             try:
                 vllm_response_dict = await client.create_response(**body_dict)
             except ClientResponseError as e:
-                """
-                """
                 result_content_str = e.response_content.decode()
-
                 is_out_of_context_length = e.status == 400 and (
                     "context length" in result_content_str or "max_tokens" in result_content_str
                 )
@@ -166,7 +164,6 @@ class VLLMModel(SimpleResponsesAPIModel):
                             if content_item.get("type") == "output_text":
                                 text = content_item.get("text", "")
                                 reasoning_matches, cleaned_text = self._converter._extract_reasoning_from_content(text)
-
                                 if reasoning_matches:
                                     content_item["text"] = cleaned_text
                                     reasoning_item = {
@@ -178,7 +175,6 @@ class VLLMModel(SimpleResponsesAPIModel):
                                         ],
                                         "status": "completed",
                                     }
-
                                     output_idx = output.index(output_item)
                                     output.insert(output_idx, reasoning_item)
 
@@ -216,7 +212,6 @@ class VLLMModel(SimpleResponsesAPIModel):
                                     output_item["generation_token_ids"] = generation_token_ids
                                     output_item["generation_log_probs"] = generation_log_probs
 
-                                    # Rebuild content item without logprobs
                                     new_content_item = {
                                         "type": content_item["type"],
                                         "text": content_item["text"],
