@@ -2,15 +2,15 @@
 
 # On-Policy Training
 
-In reinforcement learning, **on-policy training** means the model you're training is the same model that generated the rollouts. When token IDs and log probabilities (logprobs) match between generation and training, you have on-policy training. When they don't match, you have off-policy training—which can cause instability or collapse, though in some cases it may be acceptable or even desired.
+In reinforcement learning, **on-policy training** means the model weights that you are training match the model weights used in inference. When token IDs and sampling log probabilities (logprobs) match between generation and training, you have on-policy training. When they don't match, you have off-policy training—which can cause instability or collapse, though in some cases it may be acceptable or even desired.
 
 ## Why On-Policy Matters
 
-Policy optimization algorithms backpropagate through a loss calculated using logprobs. When the logprobs computed during training differ from those computed during generation, the gradients become unreliable. Small mismatches are tolerable, but large mismatches typically cause training runs to crash.
+Policy optimization algorithms backpropagate through a loss calculated using logprobs. When the logprobs computed during training differ from those computed during generation, the gradients become large and potentially unreliable. Small mismatches are tolerable, but large mismatches can cause training runs to crash.
 
 ### Common Causes of Mismatch
 
-Several scenarios lead to train-generation mismatch, including differences in training and inference algorithms or kernels (such as vLLM vs Megatron-core):
+Several scenarios lead to train-generation mismatch, including differences in training and inference algorithm implementations or kernel implementations (e.g., vLLM vs Megatron-core):
 
 **Re-tokenization**
 : When generated tokens are de-tokenized to strings and then re-tokenized for the next model call, the token IDs can change. For example, tokens that de-tokenize to `"_Ski" + "nny"` might re-tokenize as a single `"_Skinny"` token.
@@ -37,11 +37,13 @@ By default, NeMo-Gym and NeMo-RL enforce monotonicity (strictly increasing traje
 Disabling on-policy enforcement may lead to training instability. Use only when necessary and monitor training metrics closely.
 :::
 
-To disable enforcement:
+To disable enforcement, use the NeMo-RL training config parameter:
 
 ```yaml
 # Disable monotonicity enforcement and on-policy token ID correction
-enforce_monotonicity: false
+generation:
+  vllm_cfg:
+    enforce_monotonicity: false
 ```
 
 ## Recommended Approaches
@@ -49,13 +51,13 @@ enforce_monotonicity: false
 ### For Models with Reasoning Traces
 
 1. **Preferred**: Disable reasoning truncation and keep reasoning across all turns
-2. **Alternative**: Use models without a reasoning component
+2. **Alternative**: Disable monotonicity enforcement and on-policy token ID correction
 
 ### For Agents with Context Management
 
 - Evaluate whether history modification is necessary for your use case
-- If you must modify history, monitor training stability closely
-- Consider importance sampling to handle off-policy data
+- If you must modify history, monitor training stability closely with checks disabled
+- Leverage importance sampling to account for off-policy 
 
 ## Related Topics
 
