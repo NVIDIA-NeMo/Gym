@@ -4,7 +4,7 @@
 
 This tutorial demonstrates how to use [Hugging Face TRL](https://github.com/huggingface/trl) to train models in NeMo Gym environments using GRPO.
 
-**TRL (Transformer Reinforcement Learning)** is Hugging Face's library for post-training foundation models. It provides implementations of algorithms like SFT, GRPO, and DPO, with support for distributed training using Accelerate and DeepSpeed.
+**TRL (Transformer Reinforcement Learning)** is Hugging Face's library for post-training foundation models. It provides implementations of algorithms like SFT, GRPO, and DPO, with support for distributed training with vLLM inference.
 
 TRL integrates with NeMo Gym to support both single-step and multi-step verifiable environments including math tasks, tool calling, reasoning, coding, and more.
 
