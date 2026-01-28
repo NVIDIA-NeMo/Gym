@@ -275,6 +275,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "ray_queue_time": ray_queue_time,
                 "openhands_should_log": self.config.openhands_should_log,
                 "debug": self.config.debug,
+                "model_server_name": self.config.model_server.name,
                 "ng_global_config_dict_str": self._global_config_dict_str,
                 "apptainer_memory_limit_mb": self.config.apptainer_memory_limit_mb,
                 "command_exec_timeout": self.config.command_exec_timeout,

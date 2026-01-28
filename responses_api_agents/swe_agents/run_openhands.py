@@ -98,6 +98,7 @@ NS_TO_OPENHANDS_PARAM = {
 class RunOpenHandsAgent:
     cfg: SweBenchGenerationConfig
     ng_global_config_dict_str: str
+    model_server_name: str
     output_dir: str = None
     openhands_setup_dir: Path | None = None
     swebench_setup_dir: Path | None = None
@@ -272,6 +273,7 @@ class RunOpenHandsAgent:
             f"{log_cmd}"
             f"{profiling_cmd}"
             f"export NEMO_GYM_CONFIG_DICT={self.ng_global_config_dict_str} && "
+            f"export NEMO_GYM_MODEL_SERVER_NAME={self.model_server_name} &&"
             "export VIRTUAL_ENV=/openhands_setup/OpenHands/.venv && "
             "export PATH=$PATH:/openhands_setup/OpenHands/.venv/bin && "
             # CRITICAL: Configure poetry to only use the OpenHands venv (ignore external venvs)
