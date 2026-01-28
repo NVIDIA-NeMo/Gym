@@ -423,6 +423,7 @@ Unsloth Training <tutorials/unsloth-training>
 🟡 VERL <training-tutorials/verl>
 🟡 NeMo Customizer <training-tutorials/nemo-customizer>
 Offline Training <tutorials/offline-training-w-rollouts>
+On-Policy Training <training-tutorials/on-policy-training>
 ```
 
 ```{toctree}

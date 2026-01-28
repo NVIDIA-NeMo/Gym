@@ -6,7 +6,7 @@
 
 On-policy training refers to the scenario where the policy (or model) we are training matches the policy used to generate rollouts. This requires that the token ids and log probabilities (logprobs) are the same in the training and inference parts of our training algorithm. There are various scenarios that lead to subtle off policy training. Off policy training can be unstable and collapse, but sometimes it is fine or desired.
 
-The mismatch between the training and inference token ids and logprobs often leads to large gradients that lead to training collapse. This can occur due to differences in the training and inference algorihms and kernels, such as vLLM vs Megatron-core. Additionally, retokenization of generated tokens can lead to mismatches (see {doc}`openai-compatible-http-server-on-policy-correction`). Multi-step and multi-turn agent environments also lead to mismatch if the trajectory is handled in any way other than exactly what the model sees during the rollout. For example, with Qwen3 thinking models, reasoning traces in previous turns are not stored in later turns during inference. Therefore, when we recompute the logprobs with the training policy, we are recomputing without these previous thinking blocks, leading to a mismatch in logprobs of generated tokens between inference and train policy. More complex agents, that do context management, or multi-agent systems, lead to even further complexity.
+The mismatch between the training and inference token ids and logprobs often leads to large gradients that lead to training collapse. This can occur due to differences in the training and inference algorihms and kernels, such as vLLM vs Megatron-core. Additionally, retokenization of generated tokens can lead to mismatches (see {doc}`../contribute/rl-framework-integration/openai-compatible-http-server-on-policy-correction`). Multi-step and multi-turn agent environments also lead to mismatch if the trajectory is handled in any way other than exactly what the model sees during the rollout. For example, with Qwen3 thinking models, reasoning traces in previous turns are not stored in later turns during inference. Therefore, when we recompute the logprobs with the training policy, we are recomputing without these previous thinking blocks, leading to a mismatch in logprobs of generated tokens between inference and train policy. More complex agents, that do context management, or multi-agent systems, lead to even further complexity.
 
 ## Configuration
 
@@ -36,4 +36,4 @@ enforce_monotonicity: false  # TODO: Implement this. Not supported yet. RL issue
 
 ## Related Topics
 
-- {doc}`openai-compatible-http-server-on-policy-correction` - Detailed technical explanation of the token ID fix
+- {doc}`../contribute/rl-framework-integration/openai-compatible-http-server-on-policy-correction` - Detailed technical explanation of the token ID fix
