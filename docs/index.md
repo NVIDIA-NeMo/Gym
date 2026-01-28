@@ -407,6 +407,9 @@ Rollout Collection <get-started/rollout-collection.md>
 🟡 Multi-Node Docker <environment-tutorials/multi-node-docker>
 🟡 LLM as Judge <environment-tutorials/llm-as-judge>
 🟡 RLHF Reward Models <environment-tutorials/rlhf-reward-models>
+Reasoning Gym <environment-tutorials/reasoning-gym>
+Aviary <environment-tutorials/aviary>
+Verifiers <environment-tutorials/verifiers>
 ```
 
 ```{toctree}

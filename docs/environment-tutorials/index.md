@@ -125,6 +125,43 @@ Scale environments across machines with containers.
 
 ::::
 
+### Integrations
+
+::::{grid} 1 2 3 3
+:gutter: 2
+
+:::{grid-item-card} {octicon}`light-bulb;1.5em;sd-mr-1` Reasoning Gym
+:link: reasoning-gym
+:link-type: doc
+
+100+ procedurally generated reasoning tasks across multiple domains.
+
++++
+{bdg-secondary}`integration` {bdg-secondary}`15-20 min`
+:::
+
+:::{grid-item-card} {octicon}`beaker;1.5em;sd-mr-1` Aviary
+:link: aviary
+:link-type: doc
+
+Custom language agent environments for scientific and reasoning tasks.
+
++++
+{bdg-secondary}`integration` {bdg-secondary}`10-15 min`
+:::
+
+:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Verifiers
+:link: verifiers
+:link-type: doc
+
+600+ environments from Prime Intellect's Environments Hub.
+
++++
+{bdg-secondary}`integration` {bdg-secondary}`20 min`
+:::
+
+::::
+
 ---
 
 ## Learning Path
@@ -162,8 +199,9 @@ NeMo Gym includes working examples in `resources_servers/`:
 | `calendar/` | Multi-turn | State comparison |
 | `equivalence_llm_judge/` | Single-step | LLM judge with swap check |
 | `math_with_judge/` | Single-step | Library + judge fallback |
-| `aviary/` | Multi-step | Aviary environment integration |
+| `aviary/` | Multi-step | Aviary framework integration (GSM8K, HotPotQA, BixBench) |
 | `workplace_assistant/` | Multi-step | Session state, tool routing |
+| `reasoning_gym/` | Single-step | Algorithmic verification with reasoning-gym library |
 
 :::{tip}
 Use `ng_init_resources_server +entrypoint=resources_servers/my_env` to scaffold a new environment from a template.
