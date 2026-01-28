@@ -20,7 +20,7 @@ Build novel training environments for coding, reasoning, tool use, games, and mo
 :::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Verifiers Environments
 :link: /tutorials/verifiers-environments
 :link-type: doc
-Use pre-built environments from Prime Intellect's Environments Hub.
+Build environments in verifiers that can be run in NeMo Gym.
 
 → Tutorial: {doc}`/tutorials/verifiers-environments`
 +++
