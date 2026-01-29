@@ -30,6 +30,7 @@ from nemo_gym.train_data_utils import (
     StringMetrics,
     TrainDataProcessor,
     TrainDataProcessorConfig,
+    validate_backend_credentials,
 )
 
 
@@ -76,6 +77,7 @@ class TestLoadAndValidateServerInstanceConfigs:
                         "host": "127.0.0.1",
                         "port": 12345,
                         "entrypoint": "app.py",
+                        "num_workers": None,
                         "datasets": [
                             {
                                 "name": "example",
@@ -257,6 +259,95 @@ class TestLoadDatasets:
                 ],
             )
 
+    def test_load_datasets_missing_credentials(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.train_data_utils, "get_global_config_dict", lambda: DictConfig({}))
+
+        config = TrainDataProcessorConfig(
+            output_dirpath="",
+            mode="train_preparation",
+            should_download=True,
+        )
+        processor = TrainDataProcessor()
+
+        server_type_config_dict = {
+            "responses_api_agents": {
+                "simple_agent": {
+                    "host": "127.0.0.1",
+                    "port": 12345,
+                    "entrypoint": "app.py",
+                    "datasets": [
+                        {
+                            "name": "train",
+                            "type": "train",
+                            "jsonl_fpath": "some/nonexistent/path.jsonl",
+                            "num_repeats": 1,
+                            "gitlab_identifier": {
+                                "dataset_name": "example_multi_step",
+                                "version": "0.0.1",
+                                "artifact_fpath": "train.jsonl",
+                            },
+                            "license": "Apache 2.0",
+                        }
+                    ],
+                    "resources_server": {
+                        "type": "resources_servers",
+                        "name": "example_multi_step_resources_server",
+                    },
+                    "model_server": {
+                        "type": "responses_api_models",
+                        "name": "policy_model",
+                    },
+                }
+            }
+        }
+
+        with raises(SystemExit) as exc_info:
+            processor.load_datasets(
+                config=config,
+                server_instance_configs=[
+                    ResponsesAPIAgentServerInstanceConfig(
+                        name="example_multi_step_simple_agent",
+                        server_type_config_dict=DictConfig(server_type_config_dict),
+                        responses_api_agents=server_type_config_dict["responses_api_agents"],
+                    ),
+                ],
+            )
+        assert exc_info.value.code == 1
+
+    def test_validate_backend_credentials_missing(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            nemo_gym.train_data_utils,
+            "get_global_config_dict",
+            lambda: DictConfig({}),
+        )
+
+        is_valid, error_msg = validate_backend_credentials("gitlab")
+        assert not is_valid
+        assert "GitLab backend selected but missing credentials" in error_msg
+        assert "mlflow_tracking_uri" in error_msg
+        assert "mlflow_tracking_token" in error_msg
+
+        is_valid, error_msg = validate_backend_credentials("huggingface")
+        assert not is_valid
+        assert "HuggingFace backend selected but missing credentials" in error_msg
+        assert "hf_token" in error_msg
+
+    def test_validate_backend_credentials_valid(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            nemo_gym.train_data_utils,
+            "get_global_config_dict",
+            lambda: DictConfig(
+                {
+                    "mlflow_tracking_uri": "https://example.com",
+                    "mlflow_tracking_token": "token123",
+                }
+            ),
+        )
+
+        is_valid, error_msg = validate_backend_credentials("gitlab")
+        assert is_valid is True
+        assert error_msg == ""
+
 
 class TestValidateSamplesAndAggregateMetrics:
     def test_validate_samples_and_aggregate_metrics_sanity(self, monkeypatch: MonkeyPatch) -> None:
@@ -323,7 +414,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     average=0,
                     min=2.0,
                     max=2.0,
-                    median=0,
                     stddev=0,
                 ),
                 json_dumped_number_of_words=AvgMinMax(
@@ -332,7 +422,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     average=0,
                     min=1499.0,
                     max=1509.0,
-                    median=0,
                     stddev=0,
                 ),
                 number_of_turns=AvgMinMax(
@@ -341,7 +430,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     average=0,
                     min=1.0,
                     max=1.0,
-                    median=0,
                     stddev=0,
                 ),
                 temperature=AvgMinMax(
@@ -350,7 +438,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     average=0,
                     min=float("inf"),
                     max=float("-inf"),
-                    median=0,
                     stddev=0,
                 ),
                 id=AvgMinMax(
@@ -359,7 +446,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     average=2.0,
                     min=0.0,
                     max=4.0,
-                    median=2.0,
                     stddev=1.58,
                 ),
                 expected_synonym_values=AvgMinMax(
@@ -368,7 +454,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     average=559.0,
                     min=407.0,
                     max=711.0,
-                    median=559.0,
                     stddev=160.22,
                 ),
                 minefield_label_value=AvgMinMax(
@@ -377,7 +462,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     average=299.0,
                     min=299.0,
                     max=299.0,
-                    median=299.0,
                     stddev=0.0,
                 ),
                 expected_synonyms=StringMetrics(unique_count=2, total_count=10),
@@ -496,7 +580,6 @@ class TestValidateSamplesAndAggregateMetrics:
                 average=0,
                 min=float("inf"),
                 max=float("-inf"),
-                median=0,
                 stddev=0,
             ),
             json_dumped_number_of_words=AvgMinMax(
@@ -505,7 +588,6 @@ class TestValidateSamplesAndAggregateMetrics:
                 average=0,
                 min=2.0,
                 max=2.0,
-                median=0,
                 stddev=0,
             ),
             number_of_turns=AvgMinMax(
@@ -514,7 +596,6 @@ class TestValidateSamplesAndAggregateMetrics:
                 average=0,
                 min=float("inf"),
                 max=float("-inf"),
-                median=0,
                 stddev=0,
             ),
             temperature=AvgMinMax(
@@ -523,7 +604,6 @@ class TestValidateSamplesAndAggregateMetrics:
                 average=0,
                 min=float("inf"),
                 max=float("-inf"),
-                median=0,
                 stddev=0,
             ),
         )
@@ -656,6 +736,11 @@ class TestValidateSamplesAndAggregateMetrics:
                 {"items": [1, 1, 2]},
                 {"items": [1, 2, 2]},  # different duplicates
                 False,
+            ),
+            (
+                {"items": [{"a": 1}, {"b": 2}]},
+                {"items": [{"b": 2}, {"a": 1}]},  # lists containing dicts
+                True,
             ),
         ]
 

@@ -174,9 +174,10 @@ ng_prepare_data "+config_paths=[${config_paths}]" \
     +data_source=huggingface
 ```
 
-Return to the NeMo RL directory:
+Return to the NeMo RL Python environment and directory:
 
 ```bash
+deactivate
 cd ../../..
 ```
 
