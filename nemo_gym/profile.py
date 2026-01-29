@@ -19,7 +19,8 @@ from typing import Optional
 
 from pydantic import Field
 
-from nemo_gym.global_config import BaseNeMoGymCLIConfig, get_global_config_dict
+from nemo_gym.config_types import BaseNeMoGymCLIConfig
+from nemo_gym.global_config import get_global_config_dict
 
 
 class ProfileConfig(BaseNeMoGymCLIConfig):
