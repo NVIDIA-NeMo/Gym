@@ -349,6 +349,15 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.return_token_id_information:
             create_params |= dict(
                 logprobs=True,
+                # vLLM treats `top_logprobs=None` as "do not compute/return
+                # logprobs", so we must ensure it is a valid integer when
+                # requesting logprobs for RL training.
+                #
+                # `0` means "sampled token logprob only" (no top-k alternatives),
+                # which is what NeMo-RL needs.
+                top_logprobs=0
+                if create_params.get("top_logprobs") is None
+                else create_params.get("top_logprobs"),
                 # Typically passed via OpenAI client extra_body.
                 return_tokens_as_token_ids=True,
                 # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
