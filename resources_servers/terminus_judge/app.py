@@ -398,15 +398,19 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
         verdict_label = None
         is_equal = False
 
-        # extract text
         try:
-            last_output = judge_response.output[-1]
-            if getattr(last_output, "type", None) != "message":
-                text = ""
-            else:
-                last_content = last_output.content[-1]
-                text = getattr(last_content, "text", "")
-        except Exception:
+            if judge_response.output and len(judge_response.output) > 0:
+                last_output = judge_response.output[-1]
+                if getattr(last_output, "type", None) == "message":
+                    if last_output.content and len(last_output.content) > 0:
+                        last_content = last_output.content[-1]
+                        text = getattr(last_content, "text", "")
+
+            if not text:
+                print("DEBUG: Judge returned empty text response.", flush=True)
+                raise ValueError("Judge returned empty response")
+        except Exception as e:
+            print(f"DEBUG: Error extracting judge text: {e}", flush=True)
             text = ""
 
         # check text for verdict labels
