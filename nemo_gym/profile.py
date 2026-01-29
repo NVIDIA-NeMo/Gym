@@ -71,5 +71,3 @@ def profile():
                 profiled_task["pass_threshold"] = config.pass_threshold
 
             f.write(json.dumps(profiled_task) + "\n")
-
-    print(f"Profiled {len(grouped)} dataset written to {config.output_jsonl_fpath}")
