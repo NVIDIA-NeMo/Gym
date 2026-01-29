@@ -47,6 +47,9 @@ genrm_compare:
       # Shorter responses get bonus, longer get penalty (mean-centered)
       group_reasoning_length_penalty_coeff: 0.0
       group_answer_length_penalty_coeff: 0.0
+      # Group-relative style penalty coefficient
+      # Lower formatting density (headers, lists, bold, emoji) gets bonus
+      group_style_penalty_coeff: 0.0
       
       # Default scores when parsing fails
       default_score: 3.0
@@ -69,6 +72,22 @@ genrm_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
+      datasets:
+      - name: example
+        type: example
+        license: Apache 2.0
+        jsonl_fpath: resources_servers/genrm_compare/data/example.jsonl
+
+genrm_simple_agent_reasoning_off:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: genrm_compare
+      model_server:
+        type: responses_api_models
+        name: policy_model_reasoning_off
       datasets:
       - name: example
         type: example

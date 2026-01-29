@@ -72,6 +72,7 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
         top_percentile: Percentile threshold for applying bonuses
         group_reasoning_length_penalty_coeff: Coefficient for reasoning length penalty
         group_answer_length_penalty_coeff: Coefficient for answer length penalty
+        group_style_penalty_coeff: Coefficient for style density penalty
         default_score: Default neutral score when parsing fails
         default_ranking: Default neutral ranking when parsing fails
         debug_logging: Enable verbose logging for debugging
@@ -115,6 +116,7 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
     top_percentile: float = 0.2
     group_reasoning_length_penalty_coeff: float = 0.0
     group_answer_length_penalty_coeff: float = 0.0
+    group_style_penalty_coeff: float = 0.0
 
     # Default neutral scores when parsing fails
     default_score: float = 3.0
@@ -229,6 +231,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             top_percentile=cfg.top_percentile,
             group_reasoning_length_penalty_coeff=cfg.group_reasoning_length_penalty_coeff,
             group_answer_length_penalty_coeff=cfg.group_answer_length_penalty_coeff,
+            group_style_penalty_coeff=cfg.group_style_penalty_coeff,
         )
 
         # Format detailed results
