@@ -146,6 +146,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
                     result = await get_response_json(response)
                     if config.output_profiled_jsonl_fpath:
                         result["_prompt_index"] = row.get("_prompt_index")
+                        result["_original_row"] = {k: v for k, v in row.items() if not k.startswith("_")}
                         results.append(result)
                     f.write(json.dumps(result) + "\n")
                     metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float)) and not k.startswith("_")})
@@ -171,10 +172,9 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
                         task_rollouts = grouped[prompt_idx]
                         rewards = [r.get("reward", 0.0) for r in task_rollouts]
 
-                        profiled_task = {
-                            "responses_create_params": task_rollouts[0]["responses_create_params"],
-                            "task_name": task_rollouts[0].get("task_name"),
-                        }
+                        original_row = task_rollouts[0].get("_original_row", {})
+                        profiled_task = {**original_row}
+                        profiled_task["task_name"] = task_rollouts[0].get("task_name")
 
                         profiled_task["avg_reward"] = sum(rewards) / len(rewards)
                         profiled_task["std_reward"] = (sum((r - profiled_task["avg_reward"]) ** 2 for r in rewards) / len(rewards)) ** 0.5
