@@ -176,7 +176,6 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
 
                         original_row = task_rollouts[0].get("_original_row", {})
                         profiled_task = {**original_row}
-                        profiled_task["task_name"] = task_rollouts[0].get("task_name")
 
                         profiled_task["avg_reward"] = sum(rewards) / len(rewards)
                         profiled_task["std_reward"] = (
