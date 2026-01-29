@@ -90,7 +90,11 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
 
         if config.num_repeats:
             previous_length = len(rows)
-            rows = list(chain.from_iterable(repeat(row, config.num_repeats) for row in rows))
+            expanded = []
+            for task_idx, row in enumerate(rows):
+                for _ in range(config.num_repeats):
+                    expanded.append({**row, "_task_index": task_idx})
+            rows = expanded
             print(f"Repeating rows (in a pattern of abc to aabbcc) from {previous_length} to {len(rows)}!")
 
         semaphore = nullcontext()
@@ -128,8 +132,10 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
                     response = await server_client.post(server_name=agent_name, url_path="/run", json=row)
                     await raise_for_status(response)
                     result = await get_response_json(response)
+                    if "_task_index" in row:
+                        result["_task_index"] = row["_task_index"]
                     f.write(json.dumps(result) + "\n")
-                    metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
+                    metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float)) and not k.startswith("_")})
 
             await tqdm.gather(*map(_post_coroutine, rows), desc="Collecting rollouts", miniters=tqdm_miniters)
 

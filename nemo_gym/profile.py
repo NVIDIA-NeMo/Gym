@@ -41,22 +41,20 @@ def profile():
     with open(config.rollouts_jsonl_fpath) as f:
         rollouts = [json.loads(line) for line in f]
 
-    def task_key(task):
-        return json.dumps(task.get("responses_create_params", {}), sort_keys=True)
-
     grouped = defaultdict(list)
     for rollout in rollouts:
-        grouped[task_key(rollout)].append(rollout)
+        task_idx = rollout.get("_task_index")
+        if task_idx is not None:
+            grouped[task_idx].append(rollout)
 
     Path(config.output_jsonl_fpath).parent.mkdir(exist_ok=True, parents=True)
     with open(config.output_jsonl_fpath, "w") as f:
-        for task in tasks:
-            task_rollouts = grouped.get(task_key(task), [])
-            if not task_rollouts:
+        for task_idx, task_rollouts in sorted(grouped.items()):
+            if task_idx >= len(tasks):
                 continue
 
             rewards = [r.get("reward", 0.0) for r in task_rollouts]
-            profiled_task = {**task}
+            profiled_task = {**tasks[task_idx]}
 
             avg = sum(rewards) / len(rewards)
             profiled_task["avg_reward"] = avg
