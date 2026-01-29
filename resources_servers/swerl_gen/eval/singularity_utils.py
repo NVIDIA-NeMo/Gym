@@ -87,6 +87,7 @@ def _run_instance(
             "singularity",
             "exec",
             "--writable-tmpfs",
+            "--no-home",
         ]
         cmd.extend(["--bind", f"{eval_dir}:{eval_dir}"])
         if script_dir and script_dir != eval_dir:
