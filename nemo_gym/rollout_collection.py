@@ -185,13 +185,6 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
                         profiled_task["max_reward"] = max(rewards)
                         profiled_task["total_samples"] = len(rewards)
 
-                        sorted_rewards = sorted(rewards)
-                        n = len(sorted_rewards)
-                        if n % 2 == 0:
-                            profiled_task["median_reward"] = (sorted_rewards[n // 2 - 1] + sorted_rewards[n // 2]) / 2
-                        else:
-                            profiled_task["median_reward"] = sorted_rewards[n // 2]
-
                         if config.pass_threshold is not None:
                             passed = sum(1 for r in rewards if r >= config.pass_threshold)
                             profiled_task["pass_rate"] = passed / len(rewards)
