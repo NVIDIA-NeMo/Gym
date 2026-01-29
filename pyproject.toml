@@ -158,6 +158,9 @@ dependencies = [
     # Updated: Thu Jan 08, 2026 with orjson==3.11.3
     # License: Apache 2.0 https://github.com/ijl/orjson/blob/fb3eb1f729c7e7b019f780af5695722c99c7c695/LICENSE-APACHE
     "orjson",
+
+    "gprof2dot",
+    "pydot",
 ]
 
 [dependency-groups]
