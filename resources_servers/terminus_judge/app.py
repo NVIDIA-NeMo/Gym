@@ -244,7 +244,12 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
         try:
             expected_dict = json.loads(expected)
             pred = json.loads(text)
-            parsed_output = pred
+
+            if not isinstance(pred, dict):
+                failure_reason = FailureCode.JSON_PARSING_FAILED
+                reward = 0.0
+            else:
+                parsed_output = pred
 
             # Check harness type
             harness = body.metadata.get("harness", None) if body.metadata else None
@@ -266,7 +271,7 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
                         failure_reason = FailureCode.TASK_COMPLETE_CHECK_FAILED
 
                 # String Similarity Check
-                if schema_passed and task_complete_passed and self.config.enable_string_similarity:
+                if failure_reason == None and self.config.enable_string_similarity:
                     similarity_score = command_similarity(expected_dict, pred)
                     threshold = (
                         body.threshold if body.threshold is not None else self.config.string_similarity_threshold
