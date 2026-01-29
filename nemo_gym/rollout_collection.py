@@ -15,7 +15,7 @@
 import asyncio
 import json
 from asyncio import Future, Semaphore
-from collections import Counter
+from collections import Counter, defaultdict
 from contextlib import nullcontext
 from itertools import chain, repeat
 from pathlib import Path
@@ -75,6 +75,14 @@ class RolloutCollectionConfig(BaseNeMoGymCLIConfig):
         default_factory=dict,
         description="Overrides for the responses_create_params e.g. temperature, max_output_tokens, etc.",
     )
+    output_profiled_jsonl_fpath: Optional[str] = Field(
+        default=None,
+        description="Output file for aggregated metrics per prompt (requires num_repeats > 1).",
+    )
+    pass_threshold: Optional[float] = Field(
+        default=None,
+        description="Reward threshold for pass_rate calculation. If None, pass_rate not computed.",
+    )
 
 
 class RolloutCollectionHelper(BaseModel):  # pragma: no cover
@@ -90,7 +98,14 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
 
         if config.num_repeats:
             previous_length = len(rows)
-            rows = list(chain.from_iterable(repeat(row, config.num_repeats) for row in rows))
+            if config.output_profiled_jsonl_fpath:
+                expanded = []
+                for prompt_idx, row in enumerate(rows):
+                    for _ in range(config.num_repeats):
+                        expanded.append({**row, "_prompt_index": prompt_idx})
+                rows = expanded
+            else:
+                rows = list(chain.from_iterable(repeat(row, config.num_repeats) for row in rows))
             print(f"Repeating rows (in a pattern of abc to aabbcc) from {previous_length} to {len(rows)}!")
 
         semaphore = nullcontext()
@@ -117,6 +132,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
                 )
 
         metrics = Counter()
+        results = [] if config.output_profiled_jsonl_fpath else None
         Path(config.output_jsonl_fpath).parent.mkdir(exist_ok=True, parents=True)
         with open(config.output_jsonl_fpath, "a") as f:
 
@@ -128,14 +144,59 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
                     response = await server_client.post(server_name=agent_name, url_path="/run", json=row)
                     await raise_for_status(response)
                     result = await get_response_json(response)
+                    if config.output_profiled_jsonl_fpath:
+                        result["_prompt_index"] = row.get("_prompt_index")
+                        results.append(result)
                     f.write(json.dumps(result) + "\n")
-                    metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
+                    metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float)) and not k.startswith("_")})
 
             await tqdm.gather(*map(_post_coroutine, rows), desc="Collecting rollouts", miniters=tqdm_miniters)
 
         avg_metrics = {k: v / len(rows) for k, v in metrics.items()}
         avg_metrics.setdefault("reward", 0.0)
         print(json.dumps(avg_metrics, indent=4))
+
+        if config.output_profiled_jsonl_fpath:
+            if not config.num_repeats or config.num_repeats < 2:
+                print("Warning: output_profiled_jsonl_fpath requires num_repeats >= 2. Skipping profiling.")
+            else:
+                grouped = defaultdict(list)
+                for result in results:
+                    prompt_idx = result.get("_prompt_index", 0)
+                    grouped[prompt_idx].append(result)
+
+                Path(config.output_profiled_jsonl_fpath).parent.mkdir(exist_ok=True, parents=True)
+                with open(config.output_profiled_jsonl_fpath, "w") as profiled_tasks:
+                    for prompt_idx in sorted(grouped.keys()):
+                        task_rollouts = grouped[prompt_idx]
+                        rewards = [r.get("reward", 0.0) for r in task_rollouts]
+
+                        profiled_task = {
+                            "responses_create_params": task_rollouts[0]["responses_create_params"],
+                            "task_name": task_rollouts[0].get("task_name"),
+                        }
+
+                        profiled_task["avg_reward"] = sum(rewards) / len(rewards)
+                        profiled_task["std_reward"] = (sum((r - profiled_task["avg_reward"]) ** 2 for r in rewards) / len(rewards)) ** 0.5
+                        profiled_task["min_reward"] = min(rewards)
+                        profiled_task["max_reward"] = max(rewards)
+                        profiled_task["total_samples"] = len(rewards)
+
+                        sorted_rewards = sorted(rewards)
+                        n = len(sorted_rewards)
+                        if n % 2 == 0:
+                            profiled_task["median_reward"] = (sorted_rewards[n // 2 - 1] + sorted_rewards[n // 2]) / 2
+                        else:
+                            profiled_task["median_reward"] = sorted_rewards[n // 2]
+
+                        if config.pass_threshold is not None:
+                            passed = sum(1 for r in rewards if r >= config.pass_threshold)
+                            profiled_task["pass_rate"] = passed / len(rewards)
+                            profiled_task["pass_rate_total"] = len(rewards)
+                            profiled_task["pass_rate_passed"] = passed
+                            profiled_task["pass_threshold"] = config.pass_threshold
+
+                        profiled_tasks.write(json.dumps(profiled_task) + "\n")
 
     def run_examples(
         self, examples: List[Dict], head_server_config: Optional[BaseServerConfig] = None
