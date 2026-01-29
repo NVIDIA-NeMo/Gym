@@ -211,7 +211,15 @@ class RunHelper:  # pragma: no cover
             entrypoint_fpath = Path(server_config_dict.entrypoint)
             assert not entrypoint_fpath.is_absolute()
 
-            dir_path = PARENT_DIR / Path(first_key, second_key)
+            # Get server directory from config file abs path
+            # This enables using custom servers outside the Gym installation directory
+            # Requires format my_server/configs/config.yaml
+            config_file = global_config_dict.get("_config_files", {}).get(top_level_path)
+            if config_file:
+                dir_path = Path(config_file).parent.parent
+            else:
+                # Old path resolution probably shouldnt happen
+                dir_path = PARENT_DIR / Path(first_key, second_key)
 
             command = f"""{_setup_env_command(dir_path, global_config_dict)} \\
     && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\

@@ -291,10 +291,23 @@ class GlobalConfigDictParser(BaseModel):
                 f"ray[default]=={ray_version}",
                 # OpenAI version is also sensitive since it changes so often and may introduce subtle incompatibilities.
                 f"openai=={openai_version}",
+                # f"nemo-gym=={nemo_gym_version}", # When nemo-gym is on PyPI, we can auto include nemo-gym in every server requirements
             ]
 
             # Constrain python version since ray is sensitive to this.
             global_config_dict[PYTHON_VERSION_KEY_NAME] = python_version()
+
+            # Map each top-level config key to its source file for path resolution
+            config_file_map = {}
+            for config_path_str in config_paths:
+                config_path = Path(config_path_str)
+                if not config_path.is_absolute():
+                    config_path = PARENT_DIR / config_path
+                cfg = OmegaConf.load(config_path)
+                for key in cfg:
+                    if key not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS:
+                        config_file_map[key] = str(config_path.absolute())
+            global_config_dict["_config_files"] = config_file_map
 
         if parse_config.hide_secrets:
             self._recursively_hide_secrets(global_config_dict)
