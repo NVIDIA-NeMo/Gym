@@ -71,7 +71,7 @@ def text_similarity(s1: str, s2: str) -> float:
     return SequenceMatcher(None, s1, s2).ratio()
 
 
-def command_similarity(gt: Dict[str, Any], pred: Dict[str, Any], separator: str = "") -> float:
+def command_similarity(gt: Dict[str, Any], pred: Dict[str, Any], separator: str = " ") -> float:
     """
     Compute text similarity between commands in gt and pred.
 
