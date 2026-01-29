@@ -149,7 +149,9 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
                         result["_original_row"] = {k: v for k, v in row.items() if not k.startswith("_")}
                         results.append(result)
                     f.write(json.dumps(result) + "\n")
-                    metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float)) and not k.startswith("_")})
+                    metrics.update(
+                        {k: v for k, v in result.items() if isinstance(v, (int, float)) and not k.startswith("_")}
+                    )
 
             await tqdm.gather(*map(_post_coroutine, rows), desc="Collecting rollouts", miniters=tqdm_miniters)
 
@@ -177,7 +179,9 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
                         profiled_task["task_name"] = task_rollouts[0].get("task_name")
 
                         profiled_task["avg_reward"] = sum(rewards) / len(rewards)
-                        profiled_task["std_reward"] = (sum((r - profiled_task["avg_reward"]) ** 2 for r in rewards) / len(rewards)) ** 0.5
+                        profiled_task["std_reward"] = (
+                            sum((r - profiled_task["avg_reward"]) ** 2 for r in rewards) / len(rewards)
+                        ) ** 0.5
                         profiled_task["min_reward"] = min(rewards)
                         profiled_task["max_reward"] = max(rewards)
                         profiled_task["total_samples"] = len(rewards)
