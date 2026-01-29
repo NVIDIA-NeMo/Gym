@@ -105,13 +105,9 @@ def command_similarity(gt: Dict[str, Any], pred: Dict[str, Any], separator: str 
 
 def check_task_complete(pred: dict, expected_answer: dict) -> bool:
     """Check if task completion flags are properly set."""
-    if "task_complete" in expected_answer and expected_answer["task_complete"]:
-        if "task_complete" not in pred or not pred["task_complete"]:
-            return False
-    elif "is_task_complete" in expected_answer and expected_answer["is_task_complete"]:
-        if "is_task_complete" not in pred or not pred["is_task_complete"]:
-            return False
-    return True
+    exp_status = expected_answer.get("task_complete") or expected_answer.get("is_task_complete") or False
+    pred_status = pred.get("task_complete") or pred.get("is_task_complete") or False
+    return bool(exp_status) == bool(pred_status)
 
 
 def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
