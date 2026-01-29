@@ -60,6 +60,8 @@ from responses_api_agents.swe_agents.utils import (
     },
 )
 def runner_ray_remote(runner: Callable, params: dict[str, Any]) -> Any:
+    ray_submit_time = time.time()
+    params["ray_submit_time"] = ray_submit_time
     return asyncio.run(runner(**params))
 
 
@@ -91,6 +93,12 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
     swebench_tests_timeout: int = Field(default=30 * 60, description="Timeout for running tests (seconds)")
 
     swebench_agent_timeout: int = Field(default=45 * 60, description="Timeout for running the agent (seconds)")
+
+    apptainer_memory_limit_mb: int = Field(
+        default=32 * 1024, description="Memory limit for the apptainer container (MB)"
+    )
+
+    command_exec_timeout: int = Field(default=5 * 60, description="Timeout for executing the command (seconds)")
 
     # Concurrency control
     concurrency: int = Field(default=256, description="Maximum number of concurrent SWE-bench runs")
@@ -173,6 +181,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         print("Dependencies repositories set up complete", flush=True)
 
         self.config.run_session_id = f"{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
+        print(f"Run session ID: {self.config.run_session_id}", flush=True)
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         # Extract problem information from request
@@ -189,6 +198,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             f"{problem_info.get('instance_id', 'unknown')}_{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
         )
         try:
+            ray_queue_time = time.time()
             params = {
                 "problem_info": problem_info,
                 "model_endpoint": model_endpoint,
@@ -207,6 +217,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "r2e_gym_setup_dir": self.config.r2e_gym_setup_dir,
                 "dataset_path": self.config.dataset_path,
                 "instance_dir": instance_dir,
+                "ray_queue_time": ray_queue_time,
+                "apptainer_memory_limit_mb": self.config.apptainer_memory_limit_mb,
+                "command_exec_timeout": self.config.command_exec_timeout,
             }
 
             future = runner_ray_remote.remote(run_swebench_evaluation, params)
