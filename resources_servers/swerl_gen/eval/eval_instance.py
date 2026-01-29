@@ -25,6 +25,7 @@ import tempfile
 import xml.etree.ElementTree as ET
 from copy import deepcopy
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, TypedDict
 
 
@@ -522,14 +523,17 @@ def get_eval_tests_report(
 
 
 def analyze_eval_tests(instance, test_map):
+    def _get_present(instance, *keys):
+        for k in keys:
+            if k in instance:
+                v = instance[k]
+                return json.loads(v) if isinstance(v, str) else v
+        return []
+
     eval_ref = {
         "instance_id": instance["instance_id"],
-        FAIL_TO_PASS: json.loads(instance[FAIL_TO_PASS])
-        if isinstance(instance[FAIL_TO_PASS], str)
-        else instance[FAIL_TO_PASS],
-        PASS_TO_PASS: json.loads(instance[PASS_TO_PASS])
-        if isinstance(instance[PASS_TO_PASS], str)
-        else instance[PASS_TO_PASS],
+        FAIL_TO_PASS: _get_present(instance, "FAIL_TO_PASS", "fail_to_pass_select", "fail_to_pass"),
+        PASS_TO_PASS: _get_present(instance, "PASS_TO_PASS", "pass_to_pass_select", "pass_to_pass"),
     }
 
     report = get_eval_tests_report(test_map, eval_ref)
@@ -541,11 +545,11 @@ def get_root_path():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def update_files(edit_file_path, patch=None):
+def update_files(edit_file_path, base_dir, patch=None):
     if patch:
         content = (
             "#!/bin/bash\n"  # Add shebang line
-            + "cd /testbed\n"  # Add newline for better readability
+            + f"cd {base_dir}\n"  # Add newline for better readability
             + "\ngit apply -v - <<'EOF_114329324912'\n"
             + (f"{patch}")
             + "\nEOF_114329324912\n\n"
@@ -674,6 +678,7 @@ def run_evaluation_on_instance(
     edit_file=True,
     setup_script_content: Optional[str] = None,
     test_script_content: Optional[str] = None,
+    output_dir: Optional[str] = Path("/root"),
 ):
     instance_id = instance["instance_id"]
     repo_name = instance["repo"].split("/")[-1]
@@ -687,6 +692,19 @@ def run_evaluation_on_instance(
             )
         script_setup_path = get_bash_file_path(instance_id, script_dir, setup=True, regression=False)
         script_test_path = get_bash_file_path(instance_id, script_dir, setup=False, regression=False)
+
+    instance_comes_with_parser = False
+    base_dir = instance.get("base_dir", "/testbed")
+    if "run_script.sh" in instance and "parsing_script.py" in instance:
+        instance_comes_with_parser = True
+        run_script = instance["run_script.sh"]
+        parsing_script = instance["parsing_script.py"]
+        run_script_path = output_dir / "run_script.sh"
+        parsing_script_path = output_dir / "parsing_script.py"
+        with open(run_script_path, "w") as f:
+            f.write(run_script)
+        with open(parsing_script_path, "w") as f:
+            f.write(parsing_script)
 
     # Define a regex pattern to match ANSI escape codes to remove color from output
     ansi_escape = re.compile(r"\x1b\[[0-9;]*m")
@@ -710,7 +728,7 @@ def run_evaluation_on_instance(
             else:
                 raise ValueError("model_patch must be provided in instance_stats")
 
-            update_status = update_files(edit_file_path, patch)
+            update_status = update_files(edit_file_path, base_dir, patch)
             content += update_status
         else:
             update_status = ""
@@ -747,9 +765,16 @@ def run_evaluation_on_instance(
         # Eval patch was not applied successfully
         instance_stats[instance_id]["resolution"] = ResolvedStatus.NO.value
     else:
-        if repo_name not in repo_list:
-            repo_name = "default"
-        instance_eval_results = PARSER_FUNCS[repo_name](content)
+        if instance_comes_with_parser:
+            eval_results_file = output_dir / "output.json"
+            with open(eval_results_file, "r") as f:
+                eval_results_content = json.load(f)
+                test_results = eval_results_content.get("tests", {})
+            instance_eval_results = {"test_status_map": {t.get("name", ""): t.get("status", "") for t in test_results}}
+        else:
+            if repo_name not in repo_list:
+                repo_name = "default"
+            instance_eval_results = PARSER_FUNCS[repo_name](content)
         instance_stats[instance_id]["resolution"] = analyze_eval_tests(
             instance, instance_eval_results["test_status_map"]
         )
@@ -812,6 +837,7 @@ def run_reproduction_on_instance(
     regression_script_content: Optional[str] = None,
 ):
     instance_id = instance["instance_id"]
+    base_dir = instance.get("base_dir", "/testbed")
     script_setup_path = None
     if regression_script_content is None:
         if not script_dir:
@@ -842,7 +868,7 @@ def run_reproduction_on_instance(
             else:
                 raise ValueError("model_patch must be provided in instance_stats")
 
-            update_status = update_files(edit_file_path, patch)
+            update_status = update_files(edit_file_path, base_dir, patch)
             content += update_status
         else:
             update_status = ""
