@@ -271,22 +271,32 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
                         failure_reason = FailureCode.TASK_COMPLETE_CHECK_FAILED
 
                 # String Similarity Check
-                if failure_reason == None and self.config.enable_string_similarity:
-                    similarity_score = command_similarity(expected_dict, pred)
-                    threshold = (
-                        body.threshold if body.threshold is not None else self.config.string_similarity_threshold
-                    )
+                if failure_reason is None:
+                    if self.config.enable_string_similarity:
+                        similarity_score = command_similarity(expected_dict, parsed_output)
+                        threshold = (
+                            body.threshold if body.threshold is not None else self.config.string_similarity_threshold
+                        )
 
-                    if similarity_score >= threshold:
-                        # String similarity passed - binary reward of 1.0
-                        string_similarity_passed = True
-                        reward = 1.0
-                        failure_reason = FailureCode.NONE
+                        if threshold is None:
+                            raise ValueError(
+                                "String similarity threshold must be set when enable_string_similarity=True"
+                            )
+
+                        if similarity_score >= threshold:
+                            # String similarity passed - binary reward of 1.0
+                            string_similarity_passed = True
+                            reward = 1.0
+                            failure_reason = FailureCode.NONE
+                        else:
+                            # String similarity failed - invoke judge
+                            failure_reason = FailureCode.COMMAND_CORRECTNESS_FAILED
                     else:
-                        # String similarity failed - invoke judge
+                        # String similarity disabled - go straight to judge
                         failure_reason = FailureCode.COMMAND_CORRECTNESS_FAILED
 
-                        # Judge Evaluation
+                    # Judge Evaluation - runs if similarity check failed OR was disabled
+                    if failure_reason == FailureCode.COMMAND_CORRECTNESS_FAILED:
                         first_equal, first_eval = await self._generate_judge_evaluation(
                             expected_answer=expected, generated_answer=text
                         )
@@ -313,7 +323,6 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
                         else:
                             failure_reason = FailureCode.JUDGE_EVALUATION_FAILED
                             reward = 0.0
-
         except json.JSONDecodeError:
             failure_reason = FailureCode.JSON_PARSING_FAILED
             reward = 0.0
