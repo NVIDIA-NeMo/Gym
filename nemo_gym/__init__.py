@@ -14,15 +14,15 @@
 # limitations under the License.
 import sys
 from os import environ
-from os.path import abspath, dirname, join
+from pathlib import Path
 
 
-ROOT_DIR = dirname(abspath(__file__))
-PARENT_DIR = abspath(join(ROOT_DIR, ".."))
-CACHE_DIR = join(PARENT_DIR, "cache")
-RESULTS_DIR = join(PARENT_DIR, "results")
+ROOT_DIR = Path(__file__).absolute().parent
+PARENT_DIR = ROOT_DIR.parent
+CACHE_DIR = PARENT_DIR / "cache"
+RESULTS_DIR = PARENT_DIR / "results"
 
-sys.path.append(PARENT_DIR)
+sys.path.append(str(PARENT_DIR))
 
 # TODO: Maybe eventually we want an override for OMP_NUM_THREADS ?
 
@@ -30,13 +30,13 @@ sys.path.append(PARENT_DIR)
 environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # Huggingface related caching directory overrides to local folders.
-environ["HF_DATASETS_CACHE"] = join(CACHE_DIR, "huggingface")
+environ["HF_DATASETS_CACHE"] = str(CACHE_DIR / "huggingface")
 environ["TRANSFORMERS_CACHE"] = environ["HF_DATASETS_CACHE"]
 # TODO When `TRANSFORMERS_CACHE` is no longer supported in transformers>=5.0.0, migrate to `HF_HOME`
 # environ["HF_HOME"] = join(CACHE_DIR, "huggingface")
 
 # UV caching directory overrides to local folders.
-environ["UV_CACHE_DIR"] = join(CACHE_DIR, "uv")
+environ["UV_CACHE_DIR"] = str(CACHE_DIR / "uv")
 
 # Turn off Gradio analytics
 environ["GRADIO_ANALYTICS_ENABLED"] = "False"

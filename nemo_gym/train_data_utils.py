@@ -24,7 +24,6 @@ from typing import Any, Dict, List, Literal, Optional, Self, Tuple, Union
 from devtools import pprint
 from omegaconf import DictConfig
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from tdigest import TDigest
 from tqdm.auto import tqdm
 
 from nemo_gym.base_resources_server import BaseRunRequest
@@ -40,6 +39,7 @@ from nemo_gym.config_types import (
 )
 from nemo_gym.gitlab_utils import download_jsonl_dataset
 from nemo_gym.global_config import (
+    HF_TOKEN_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
@@ -115,15 +115,10 @@ class AvgMinMax(Accumulator):
     average: float = Field(serialization_alias="Average", default=0)
     min: float = Field(serialization_alias="Min", default=float("inf"))
     max: float = Field(serialization_alias="Max", default=float("-inf"))
-    median: float = Field(serialization_alias="Median", default=0)
     stddev: float = Field(serialization_alias="Standard deviation", default=0)
     # Internal state
     mean: float = Field(default=0, exclude=True)  # running value (before final average)
     M2: float = Field(default=0, exclude=True)  # sum of squared differences (for variance)
-    tdigest: TDigest = Field(default_factory=TDigest, exclude=True)
-    """
-    T-Digest is used to estimate the Median without storing and sorting all values. The Median is essentially an approximation using the 50th percentile, which is very close to the true Median.
-    """
 
     def observe(self, x: float) -> None:
         if x < self.min:
@@ -137,9 +132,6 @@ class AvgMinMax(Accumulator):
         self.mean += delta / self.total
         self.M2 += delta * (x - self.mean)
 
-        # Update quantile estimator (for median)
-        self.tdigest.update(x)
-
     def _add(self: Self, other: Self) -> None:
         # Merge accumulators
         if other.total == 0:
@@ -150,8 +142,6 @@ class AvgMinMax(Accumulator):
             self.M2 = other.M2
             self.min = other.min
             self.max = other.max
-            self.tdigest = TDigest()
-            self.tdigest = self.tdigest + other.tdigest
             return
 
         # Merge mean and variance
@@ -167,9 +157,6 @@ class AvgMinMax(Accumulator):
         if other.max > self.max:
             self.max = other.max
 
-        # Merge t-digests for quantiles/median
-        self.tdigest = self.tdigest + other.tdigest
-
     def _aggregate(self: Self) -> Self:
         def round_metric(x: float) -> float:
             if x >= 1 or x <= -1:
@@ -179,14 +166,12 @@ class AvgMinMax(Accumulator):
         n = self.total
         mean = self.mean if n > 0 else 0.0
         stddev = sqrt(self.M2 / (n - 1)) if n > 1 else 0.0
-        med = float(self.tdigest.percentile(50)) if n > 0 and self.tdigest.n > 0 else 0.0
 
         params = {
             "total": self.total,
             "average": mean,
             "min": self.min if n > 0 else 0.0,
             "max": self.max if n > 0 else 0.0,
-            "median": med,
             "stddev": stddev,
         }
 
@@ -502,7 +487,7 @@ class TrainDataProcessor(BaseModel):
                                 "output_fpath": d.jsonl_fpath,
                                 # Only pass split if artifact_fpath is not set
                                 **({"split": d.type} if not hf_identifier.artifact_fpath else {}),
-                                "hf_token": global_config.get("hf_token"),
+                                HF_TOKEN_KEY_NAME: global_config.get(HF_TOKEN_KEY_NAME),
                             }
                         )
                         print(f"Downloading '{d.type}' split from {hf_identifier.repo_id} to {d.jsonl_fpath}...")
@@ -737,7 +722,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
             aggregate_metrics_dict = aggregate_metrics.model_dump(mode="json", by_alias=True)
 
             parent = Path(config.output_dirpath)
-            parent.mkdir(exist_ok=True)
+            parent.mkdir(exist_ok=True, parents=True)
             metrics_fpath = parent / f"{type}_metrics.json"
             maybe_conflicting_metrics_fpath = self._validate_aggregate_metrics(
                 aggregate_metrics_dict=aggregate_metrics_dict,
@@ -796,13 +781,13 @@ def validate_backend_credentials(backend: str) -> tuple[bool, str]:
             )
 
     elif backend == "huggingface":
-        required = ["hf_token"]
+        required = [HF_TOKEN_KEY_NAME]
         missing = [k for k in required if k not in global_config or not global_config[k]]
         if missing:
             return False, (
                 f"HuggingFace backend selected but missing credentials: {missing}\n"
                 f"Add to env.yaml:\n"
-                f"  hf_token: <your_hf_token>\n"
+                f"  {HF_TOKEN_KEY_NAME}: <your_hf_token>\n"
             )
 
     return True, ""

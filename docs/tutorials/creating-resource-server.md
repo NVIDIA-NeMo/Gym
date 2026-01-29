@@ -1,24 +1,50 @@
+---
+orphan: true
+---
+
 (creating-resource-server)=
 
 # Creating a Resource Server
 
 Learn how to create a custom resource server to implement tools, verifiers, and business logic for your training environment.
 
-::::{grid} 2
-:gutter: 3
+:::{card}
 
-:::{grid-item-card} {octicon}`clock;1em;` **Time**
-30 minutes
+**Goal**: Build a custom resource server with tools and verification logic.
+
+^^^
+
+**In this tutorial, you will**:
+
+1. Initialize a resource server from template
+2. Implement tool endpoints
+3. Add verification logic for rewards
+4. Test with rollout collection
+
 :::
 
-:::{grid-item-card} {octicon}`bookmark;1em;` **Prerequisites**
+:::{button-ref} ../get-started/rollout-collection
+:color: secondary
+:outline:
+:ref-type: doc
 
-- Completed {doc}`../get-started/detailed-setup`
-- Basic Python and FastAPI knowledge
-
+← Previous: Rollout Collection
 :::
 
-::::
+:::{important}
+Run all commands from the **repository root** directory (where `pyproject.toml` is located).
+:::
+
+## What You'll Build
+
+By the end of this tutorial, you'll have:
+
+- [ ] A runnable resource server with `ng_run`
+- [ ] Unit tests in `tests/test_app.py`
+- [ ] Configuration with required `domain` field
+- [ ] Example data in `data/example.jsonl` (5 examples)
+- [ ] Example rollouts in `data/example_rollouts.jsonl`
+- [ ] Documentation with licensing information
 
 ---
 
@@ -31,6 +57,8 @@ Resource servers are the backbone of tool-based interactions in NeMo Gym. They p
 - **Business logic abstraction**: Clean separation between model logic and domain-specific functionality
 
 Each resource server must implement a `verify` function that evaluates the model's interactions and returns a reward signal for reinforcement learning.
+
+**Key term**: A **rollout** is a complete interaction trace—the model's inputs, tool calls, and final outputs—used for training and evaluation.
 
 ---
 
@@ -77,18 +105,22 @@ my_weather_tool_resources_server:
       domain: agent  # Change from 'other' to 'agent' for this use case
 ```
 
-The `domain` field categorizes your resource server and is **required**. Choose from:
+The `domain` field categorizes your resource server and is **required**. Common categories include:
 
-- `math` - Mathematical problem-solving
-- `coding` - Code generation and programming
-- `agent` - Agent-based interactions and tool calling
-- `knowledge` - Knowledge-based question answering
-- `instruction_following` - Instruction following benchmarks
-- `long_context` - Long context handling
-- `safety` - Safety and alignment
-- `games` - Game-playing scenarios
-- `e2e` - End-to-end workflows
-- `other` - General purpose
+- `math` — Mathematical problem-solving
+- `coding` — Code generation and programming
+- `agent` — Agent-based interactions and tool calling
+- `knowledge` — Knowledge-based question answering
+- `instruction_following` — Instruction following benchmarks
+- `long_context` — Long context handling
+- `safety` — Safety and alignment
+- `games` — Game-playing scenarios
+- `e2e` — End-to-end workflows
+- `other` — General purpose
+
+:::{tip}
+The domain is used for metrics grouping and dataset naming. Choose the category that best describes your task.
+:::
 
 ---
 
@@ -157,11 +189,17 @@ class MyWeatherResourcesServer(SimpleResourcesServer):
         
         This function is called after a rollout completes.
         Return a reward between 0.0 and 1.0.
-        
-        For this simple example, we always return 1.0 (success).
-        In practice, implement custom verification logic based on your requirements.
         """
-        return BaseVerifyResponse(**body.model_dump(), reward=1.0)
+        # Check if the model called the get_weather tool
+        used_tool = False
+        for output in body.response.output:
+            if output.type == "function_call" and output.name == "get_weather":
+                used_tool = True
+                break
+        
+        # Return higher reward if the tool was used correctly
+        reward = 1.0 if used_tool else 0.0
+        return BaseVerifyResponse(**body.model_dump(), reward=reward)
 
 
 if __name__ == "__main__":
@@ -280,18 +318,29 @@ ng_run "+config_paths=[$config_paths]" \
 ```
 
 This starts three servers:
+
 1. The simple agent server (coordinates interactions)
 2. The OpenAI model server (provides LLM responses)
 3. Your weather resource server (provides the `get_weather` tool)
 
-Configure your OpenAI API key in `env.yaml`:
+Configure your OpenAI API key in `env.yaml` (located in the repository root):
 
 ```yaml
-openai_api_key: your-key-here
+openai_api_key: ${oc.env:OPENAI_API_KEY}  # Reads from environment variable
 policy_api_key: ${openai_api_key}
 policy_base_url: https://api.openai.com/v1
 policy_model_name: gpt-4o-mini
 ```
+
+:::{tip}
+Set your API key as an environment variable before running:
+
+```bash
+export OPENAI_API_KEY="sk-your-key-here"  # pragma: allowlist secret
+```
+
+Never commit API keys directly in YAML files.
+:::
 
 ### Test the resources server
 
@@ -307,7 +356,11 @@ The model should be able to use your `get_weather` tool to answer questions abou
 
 ## 7. Create Example Data
 
-Your resource server needs example data for testing and validation. Create `resources_servers/my_weather_tool/data/example.jsonl` with at least five example inputs:
+Your resource server needs example data for testing and validation. Create `resources_servers/my_weather_tool/data/example.jsonl` with at least five example inputs.
+
+:::{note}
+JSONL (JSON Lines) format: one JSON object per line, no wrapping array or trailing commas.
+:::
 
 ```json
 {"input": [{"type": "text", "text": "What's the weather in San Francisco?"}]}
@@ -370,46 +423,62 @@ Your PR will not be merged unless licensing information is present and accurate!
 
 ---
 
-## Required Artifacts Checklist
+## Advanced: Verification Patterns
 
-Before submitting a PR, ensure you have:
+:::{dropdown} Multi-step verification with output parsing
+:icon: code
 
-- [ ] **Runnable server**: Can start with `ng_run`
-- [ ] **Unit tests**: At least one test in `tests/test_app.py`
-- [ ] **Configuration**: Valid `configs/*.yaml` with correct `domain` field
-- [ ] **Example data**: `data/example.jsonl` with at least five examples
-- [ ] **Example rollouts**: `data/example_rollouts.jsonl`
-- [ ] **Documentation**: Complete `README.md` with licensing information
-- [ ] **Dependencies**: Properly declared in `requirements.txt`
-
----
-
-## Advanced: Custom Verification
-
-For more sophisticated verification, you can implement custom logic in the `verify` function. Here's an example that checks if the model used the correct tool:
+For tasks requiring multiple tool calls, parse the final output to compute accuracy:
 
 ```python
 async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
-    """
-    Advanced verification: Check if model called the get_weather tool.
-    """
-    # Check if the model made a function call
-    used_tool = False
-    for output in body.response.output:
-        if output.type == "function_call" and output.name == "get_weather":
-            used_tool = True
+    """Extract and validate multi-step results."""
+    expected = body.expected_values  # From request
+    
+    # Parse the final tool call output
+    actual = []
+    for output in reversed(body.response.output):
+        if output.type == "function_call" and output.name == "submit_answer":
+            import json
+            actual = json.loads(output.arguments).get("values", [])
             break
     
-    # Return higher reward if the tool was used correctly
-    reward = 1.0 if used_tool else 0.0
+    # Compute accuracy metrics
+    accuracy = expected == actual
+    set_overlap = len(set(actual) & set(expected)) / len(expected) if expected else 0
     
-    return BaseVerifyResponse(**body.model_dump(), reward=reward)
+    return BaseVerifyResponse(
+        **body.model_dump(),
+        reward=float(accuracy),
+    )
 ```
 
-For examples of more complex verification logic, refer to:
-- `resources_servers/example_multi_step/app.py` — Multi-step task verification
-- `resources_servers/math_with_judge/app.py` — LLM-as-judge verification
-- `resources_servers/code_gen/app.py` — Unit test based verification
+See `resources_servers/example_multi_step/app.py` for a complete example.
+:::
+
+:::{dropdown} LLM-as-judge verification
+:icon: sparkle-fill
+
+For tasks with multiple valid answers, use an LLM to judge correctness:
+
+```python
+# See resources_servers/math_with_judge/app.py for the full pattern
+```
+
+See `resources_servers/math_with_judge/app.py` for implementation details.
+:::
+
+:::{dropdown} Unit test verification (code generation)
+:icon: beaker
+
+For code generation tasks, run unit tests against model output:
+
+```python
+# See resources_servers/code_gen/app.py for the full pattern
+```
+
+See `resources_servers/code_gen/app.py` for implementation details.
+:::
 
 ---
 
@@ -458,6 +527,7 @@ uv sync
 ### Server does not start
 
 Check that:
+
 - Port is not already in use
 - Configuration file syntax is valid YAML
 - All imports in `app.py` are correct
@@ -469,6 +539,22 @@ Ensure:
 - You are in the correct Python environment
 - All dependencies are installed
 - Test file imports match your actual file structure
+
+### Debugging server behavior
+
+Check server status and logs:
+
+```bash
+# View running servers
+ng_status
+
+# For detailed logs, run the server directly:
+cd resources_servers/my_weather_tool
+source .venv/bin/activate
+python app.py
+```
+
+Server logs appear in the terminal where `ng_run` was executed.
 
 ---
 
@@ -484,4 +570,3 @@ You've learned how to:
 ✅ Create required data artifacts  
 
 Resource servers are the foundation for building custom RL environments in NeMo Gym. Experiment with different tool implementations and verification strategies to create engaging tasks for your models!
-

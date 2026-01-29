@@ -129,11 +129,6 @@ dependencies = [
     # License: Apache 2.0 https://github.com/mlflow/mlflow/blob/1510ed1bc92d3a4258973005d64f64a43136e251/LICENSE.txt
     "mlflow",
 
-    # Tdigest: Data structure for percentiles and quantiles, specifically calculating metrics such as median in a memory-efficient way.
-    # Updated Wed Sep 17, 2025 with tdigest==0.5.2.2
-    # License: MIT https://github.com/CamDavidsonPilon/tdigest/blob/e35cfd708962ae5e9d1c5d2b15a99af7b2e2f323/LICENSE.txt
-    "tdigest>=0.5.2.2",
-
     # aiohttp: async http backend
     # Updated Sun Sep 21, 2025 with aiohttp==3.12.15
     # License: Apache 2.0 https://github.com/aio-libs/aiohttp/blob/9a2f146a12e3525b43e96723ef41584bf9cf784e/LICENSE.txt
@@ -158,6 +153,11 @@ dependencies = [
     # Updated Thu Dec 04, 2025 with datasets==4.4.1
     # License: Apache 2.0 https://github.com/huggingface/datasets/blob/main/LICENSE
     "datasets",
+
+    # orjson: JSON library for faster serialization/deserialization
+    # Updated: Thu Jan 08, 2026 with orjson==3.11.3
+    # License: Apache 2.0 https://github.com/ijl/orjson/blob/fb3eb1f729c7e7b019f780af5695722c99c7c695/LICENSE-APACHE
+    "orjson",
 ]
 
 [dependency-groups]
