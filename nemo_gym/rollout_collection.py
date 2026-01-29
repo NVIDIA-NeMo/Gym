@@ -77,7 +77,7 @@ class RolloutCollectionConfig(BaseNeMoGymCLIConfig):
     )
     output_profiled_jsonl_fpath: Optional[str] = Field(
         default=None,
-        description="Output file for aggregated metrics per prompt (requires num_repeats > 1).",
+        description="Output file for reward profiled dataset (requires num_repeats > 1).",
     )
     pass_threshold: Optional[float] = Field(
         default=None,
