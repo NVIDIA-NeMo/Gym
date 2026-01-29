@@ -47,9 +47,8 @@ Important Instructions:
 
 2. Correct Format: Ensure that each line of content maintains proper indentation. For instance, if the code block is inside a function or a loop, the new content should align with that structure.
 
-Output format requirement: Please put your reasoning tokens in a separate code block, starting with <think> and ending with </think>, and the solution tokens containing the *SEARCH/REPLACE* edits in a separate code block, starting with <solution> and ending with </solution>.
+Output format requirement: Please put the *SEARCH/REPLACE* edits in a code block, starting with <solution> and ending with </solution>.
 Wrap the *SEARCH/REPLACE* edits in ```python...``` blocks. If you have multiple *SEARCH/REPLACE* edits, use a separate ```python...``` block for each one.
-<think>
 """
 
 PREMISE_TEST_GEN_PROMPT = """You are an expert Python coder and are given:
@@ -103,7 +102,7 @@ if __name__ == "__main__":
 Please ensure the generated test reflects the issue described in the provided issue text.
 Since you are writing the test script before the issue is resolved, your test should fail and return an exit code of 2. I will run your script without any modifications, so do not leave any placeholders that I need to fill in.
 
-Output format requirement: Please put your reasoning tokens in a separate code block, starting with <think> and ending with </think>, and the solution tokens containing the complete test in a separate code block, starting with <solution> and ending with </solution>.
+Output format requirement: Please put the complete test in a code block, starting with <solution> and ending with </solution>.
 Wrap the complete test in ```python...``` blocks.
 """
 
