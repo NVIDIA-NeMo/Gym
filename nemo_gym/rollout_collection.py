@@ -17,7 +17,7 @@ import json
 from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
-from itertools import chain, repeat
+from itertools import repeat
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
@@ -135,7 +135,9 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
                     if "_task_index" in row:
                         result["_task_index"] = row["_task_index"]
                     f.write(json.dumps(result) + "\n")
-                    metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float)) and not k.startswith("_")})
+                    metrics.update(
+                        {k: v for k, v in result.items() if isinstance(v, (int, float)) and not k.startswith("_")}
+                    )
 
             await tqdm.gather(*map(_post_coroutine, rows), desc="Collecting rollouts", miniters=tqdm_miniters)
 
