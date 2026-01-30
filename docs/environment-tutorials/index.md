@@ -127,11 +127,13 @@ Scale environments across machines with containers.
 
 ### Integrations
 
+Run environments from external RL frameworks in NeMo Gym.
+
 ::::{grid} 1 2 3 3
 :gutter: 2
 
 :::{grid-item-card} {octicon}`light-bulb;1.5em;sd-mr-1` Reasoning Gym
-:link: reasoning-gym
+:link: integrations/reasoning-gym
 :link-type: doc
 
 100+ procedurally generated reasoning tasks across multiple domains.
@@ -141,7 +143,7 @@ Scale environments across machines with containers.
 :::
 
 :::{grid-item-card} {octicon}`beaker;1.5em;sd-mr-1` Aviary
-:link: aviary
+:link: integrations/aviary
 :link-type: doc
 
 Custom language agent environments for scientific and reasoning tasks.
@@ -151,7 +153,7 @@ Custom language agent environments for scientific and reasoning tasks.
 :::
 
 :::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Verifiers
-:link: verifiers
+:link: integrations/verifiers
 :link-type: doc
 
 600+ environments from Prime Intellect's Environments Hub.
@@ -161,6 +163,14 @@ Custom language agent environments for scientific and reasoning tasks.
 :::
 
 ::::
+
+```{button-ref} integrations/index
+:ref-type: doc
+:color: secondary
+:outline:
+
+View all integrations →
+```
 
 ---
 
