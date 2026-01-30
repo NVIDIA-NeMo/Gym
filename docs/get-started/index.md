@@ -116,6 +116,15 @@ Now that you can generate rollouts, choose your path:
 ::::{grid} 1 1 2 2
 :gutter: 3
 
+:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` First Training Run
+:link: first-training-run
+:link-type: doc
+
+Train your first RL model on a single GPU using Unsloth and NeMo Gym verification.
++++
+{bdg-secondary}`tutorial` {bdg-secondary}`single-gpu`
+:::
+
 :::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Use an Existing Training Environment
 :link: https://github.com/NVIDIA-NeMo/Gym#-available-resource-servers
 
@@ -134,4 +143,3 @@ Implement or integrate existing tools and define task verification logic.
 :::
 
 ::::
-
