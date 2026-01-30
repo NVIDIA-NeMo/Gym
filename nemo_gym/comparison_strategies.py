@@ -10,6 +10,32 @@ from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
 from pydantic import BaseModel, Field
 
 from nemo_gym.server_utils import ServerClient, raise_for_status
+from nemo_gym.global_config import get_first_server_config_dict
+
+def resolve_policy_model_server_name(server_client: ServerClient, agent_name: str | None, default: str) -> str:
+    """Resolve the policy model server name for a given agent.
+
+    Agents (e.g. genrm_simple_agent_reasoning_off) can reference different model servers via
+    `model_server.name`. The GenRM comparison strategy must generate using the correct model
+    server per-agent, otherwise all traffic goes to the default policy model.
+
+    Falls back to `default` if the agent cannot be resolved.
+    """
+    if not agent_name:
+        return default
+    try:
+        agent_cfg = get_first_server_config_dict(server_client.global_config_dict, agent_name)
+        model_server = agent_cfg.get("model_server")
+        if isinstance(model_server, dict) and model_server.get("name"):
+            return model_server["name"]
+        if hasattr(model_server, "get"):
+            name = model_server.get("name")
+            if name:
+                return name
+    except Exception:
+        pass
+    return default
+
 
 
 @runtime_checkable

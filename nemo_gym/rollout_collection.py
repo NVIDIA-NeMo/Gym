@@ -187,6 +187,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
             extract_conversation_history,
             generate_response,
             get_prompt_key,
+            resolve_policy_model_server_name,
         )
 
         strategy_agent_names = set(strategy.agent_names)
@@ -264,7 +265,9 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
                         }
 
                 async def gen_and_notify(idx: int, example: Dict):
-                    gen_result = await generate_response(example, server_client, policy_model)
+                    agent_name = example.get("agent_ref", {}).get("name")
+                    model_server = resolve_policy_model_server_name(server_client, agent_name, policy_model)
+                    gen_result = await generate_response(example, server_client, model_server)
                     await on_gen_complete(idx, example, gen_result)
 
                 await asyncio.gather(*[gen_and_notify(idx, ex) for idx, ex in strategy_samples])
