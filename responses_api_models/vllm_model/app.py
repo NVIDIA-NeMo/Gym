@@ -336,6 +336,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.chat_template_kwargs:
             body_dict["chat_template_kwargs"] = deepcopy(self.config.chat_template_kwargs)
 
+        print(f'[DEBUG chat_template_kwargs][gym->vllm_model] process={self.config.name} model={self.config.model} injected={body_dict.get("chat_template_kwargs")}')
+
         session_id = request.session[SESSION_ID_KEY]
         if session_id not in self._session_id_to_client:
             # There is probably a better way to select the endpoint for this request. But this will do for now.
@@ -402,6 +404,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             create_params = self.config.extra_body | create_params
 
         try:
+            print(f'[DEBUG chat_template_kwargs][gym->vllm_model] process={self.config.name} sending.chat_template_kwargs={create_params.get("chat_template_kwargs")} add_generation_prompt={create_params.get("add_generation_prompt")}')
             chat_completion_dict = await client.create_chat_completion(**create_params)
         except ClientResponseError as e:
             """
@@ -468,8 +471,13 @@ class VLLMModel(SimpleResponsesAPIModel):
 
             # The tokenize endpoint doesn't accept any sampling parameters
             # The only relevant params are model, messages, and tools.
+            #
+            # IMPORTANT: pass through chat-template knobs (e.g. enable_thinking)
+            # when tokenizing, otherwise `prompt_token_ids` (and therefore logged
+            # `prompt_str`) can be built with different chat template settings than
+            # the actual generation request.
             tokenize_body_dict = dict()
-            for key in ("model", "messages", "tools"):
+            for key in ("model", "messages", "tools", "chat_template_kwargs", "add_generation_prompt"):
                 if key in body_dict:
                     tokenize_body_dict[key] = body_dict[key]
 
