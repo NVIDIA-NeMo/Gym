@@ -12,10 +12,11 @@ Now that you understand the configuration parameters for GRPO training, it's tim
 
 **In this section, you will**:
 
-1. Launch an interactive GPU session
-2. Clone and install NeMo RL and NeMo Gym
-3. Run sanity tests to validate the setup
-4. Prepare the Workplace Assistant dataset
+1. Authenticate with NVIDIA GPU Cloud (NGC)
+2. Launch an interactive GPU session
+3. Clone and install NeMo RL and NeMo Gym
+4. Run sanity tests to validate the setup
+5. Prepare the Workplace Assistant dataset
 
 :::
 
@@ -36,10 +37,65 @@ Make sure you have:
 - ✅ Access to a Slurm cluster with GPU nodes
 - ✅ A shared filesystem accessible from all nodes
 - ✅ HuggingFace token for downloading models
+- ✅ NGC account for accessing NVIDIA containers
 
 ---
 
-## 1. Enter a GPU Node
+## 1. Authenticate with NGC
+
+**Estimated time**: ~5 minutes
+
+The NeMo RL container is hosted on NVIDIA GPU Cloud (NGC), which requires authentication to pull containers. You need to create an NGC API key and configure your container runtime to use it.
+
+### Get Your NGC API Key
+
+1. Go to [NGC API Keys](https://org.ngc.nvidia.com/setup/api-keys)
+2. Click **Generate API Key**
+3. Copy the generated key (you won't be able to see it again)
+
+:::{important}
+Store your API key securely. You'll need it for container authentication.
+:::
+
+### Authenticate with Docker
+
+If you're using Docker as your container runtime:
+
+```bash
+# Login to NGC registry
+docker login nvcr.io
+
+# When prompted:
+# Username: $oauthtoken
+# Password: <paste your NGC API key>
+```
+
+**✅ Success Check**: You should see "Login Succeeded" after entering your credentials.
+
+### Authenticate with enroot
+
+If you're using enroot as your container runtime:
+
+```bash
+# Create credentials file
+mkdir -p ~/.config/enroot
+cat > ~/.config/enroot/.credentials << EOF
+machine nvcr.io login \$oauthtoken password <your-ngc-api-key>
+EOF
+
+# Secure the credentials file
+chmod 600 ~/.config/enroot/.credentials
+```
+
+**✅ Success Check**: The credentials file should exist at `~/.config/enroot/.credentials` with restricted permissions (600).
+
+:::{tip}
+You only need to authenticate once per machine. The credentials will be stored for future container pulls.
+:::
+
+---
+
+## 2. Enter a GPU Node
 
 **Estimated time**: ~5 minutes
 
@@ -88,7 +144,7 @@ srun \
 
 ---
 
-## 2. Clone and Setup NeMo RL + NeMo Gym
+## 3. Clone and Setup NeMo RL + NeMo Gym
 
 **Estimated time**: ~5-10 minutes
 
@@ -107,7 +163,7 @@ git submodule update --init --recursive
 
 ---
 
-## 3. Run Sanity Tests
+## 4. Run Sanity Tests
 
 **Estimated time**: ~5-10 minutes
 
@@ -139,7 +195,7 @@ uv run python -c "import ray; ray.shutdown()"
 
 ---
 
-## 4. Prepare NeMo Gym Data
+## 5. Prepare NeMo Gym Data
 
 **Estimated time**: ~5 minutes
 
