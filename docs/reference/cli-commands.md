@@ -187,6 +187,55 @@ ng_collect_rollouts \
 
 ---
 
+### `ng_profile` / `nemo_gym_profile`
+
+Computes statistics on rewards and task difficulty for rollouts collected with `ng_collect_rollouts` with `num_repeats` > 1. This outputs a new "reward profiled" dataset, where each task in the dataset has metrics like the average reward, standard deviation, min/max, and pass rate. This is useful in filtering tasks before training for difficulty, variance, or creating a curriculum. 
+
+**Parameters**
+
+```{list-table}
+:header-rows: 1
+:widths: 25 15 60
+
+* - Parameter
+  - Type
+  - Description
+* - `input_jsonl_fpath`
+  - str
+  - Path to the original task dataset JSONL file.
+* - `rollouts_jsonl_fpath`
+  - str
+  - Path to the rollouts file from `ng_collect_rollouts` (must have been run with `num_repeats` > 1).
+* - `output_jsonl_fpath`
+  - str
+  - Output file path for the reward profiled dataset.
+* - `pass_threshold`
+  - Optional[float]
+  - Reward threshold for computing pass rate. If not specified, pass rate metrics are not included.
+```
+
+**Output Fields**
+
+Each output row contains all original task fields plus:
+- `avg_reward`: Average reward across all rollouts
+- `std_reward`: Standard deviation of rewards
+- `min_reward`: Minimum reward observed
+- `max_reward`: Maximum reward observed
+- `total_samples`: Number of rollout samples
+- `pass_rate`, `pass_rate_total`, `pass_rate_passed`, `pass_threshold`: (Only if `pass_threshold` is specified)
+
+**Example**
+
+```bash
+ng_profile \
+    +input_jsonl_fpath=tasks.jsonl \
+    +rollouts_jsonl_fpath=rollouts.jsonl \
+    +output_jsonl_fpath=profiled_tasks.jsonl \
+    +pass_threshold=1.0
+```
+
+---
+
 ## Data Management
 
 Commands for preparing and viewing training data.
