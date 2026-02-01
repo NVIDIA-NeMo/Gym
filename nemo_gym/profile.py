@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -47,9 +47,6 @@ class RewardProfilingMetrics(BaseModel):
 def profile():
     config = ProfileConfig.model_validate(get_global_config_dict())
 
-    with open(config.input_jsonl_fpath) as f:
-        tasks = [json.loads(line) for line in f]
-
     grouped_rewards: dict[int, list[float]] = defaultdict(list)
     with open(config.rollouts_jsonl_fpath) as f:
         for line in f:
@@ -59,10 +56,13 @@ def profile():
                 grouped_rewards[task_idx].append(rollout.get("reward", 0.0))
 
     Path(config.output_jsonl_fpath).parent.mkdir(exist_ok=True, parents=True)
-    with open(config.output_jsonl_fpath, "w") as f:
-        for task_idx, rewards in sorted(grouped_rewards.items()):
-            if task_idx >= len(tasks):
+    with open(config.input_jsonl_fpath) as f_in, open(config.output_jsonl_fpath, "w") as f_out:
+        for task_idx, line in enumerate(f_in):
+            if task_idx not in grouped_rewards:
                 continue
+
+            task = json.loads(line)
+            rewards = grouped_rewards[task_idx]
             avg = sum(rewards) / len(rewards)
 
             metrics = RewardProfilingMetrics(
@@ -80,5 +80,5 @@ def profile():
                 metrics.pass_rate_passed = passed
                 metrics.pass_threshold = config.pass_threshold
 
-            profiled_task = {**tasks[task_idx], **metrics.model_dump(exclude_none=True)}
-            f.write(json.dumps(profiled_task) + "\n")
+            profiled_task = {**task, **metrics.model_dump(exclude_none=True)}
+            f_out.write(json.dumps(profiled_task) + "\n")
