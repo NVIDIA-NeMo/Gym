@@ -212,33 +212,41 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
             del self._sessions[sid]
         return ExecutePythonResponse(success=True, stdout="", stderr="")
 
-    async def verify(self, body: PythonMathVerifyRequest) -> PythonMathVerifyResponse:
-        expected = body.expected_result
+    async def verify(self, request: Request, body: PythonMathVerifyRequest) -> PythonMathVerifyResponse:
+        session_id = request.session[SESSION_ID_KEY]
 
-        # Extract actual answer from final assistant message
-        actual = None
-        for output in reversed(body.response.output):
-            if output.type == "message" and output.role == "assistant":
-                text_content = ""
-                for content in output.content:
-                    if content.type == "output_text":
-                        text_content += content.text
+        try:
+            expected = body.expected_result
 
-                # Extract boxed answer
-                match = re.search(r"\\boxed\{([^}]+)\}", text_content)
-                if match:
-                    actual = match.group(1).strip()
-                    break
+            # Extract actual answer from final assistant message
+            actual = None
+            for output in reversed(body.response.output):
+                if output.type == "message" and output.role == "assistant":
+                    text_content = ""
+                    for content in output.content:
+                        if content.type == "output_text":
+                            text_content += content.text
 
-        accuracy = str(actual) == str(expected)
-        reward = 1.0 if accuracy else 0.0
+                    # Extract boxed answer
+                    match = re.search(r"\\boxed\{([^}]+)\}", text_content)
+                    if match:
+                        actual = match.group(1).strip()
+                        break
 
-        return PythonMathVerifyResponse(
-            **body.model_dump(),
-            reward=reward,
-            extracted_answer=actual,
-            accuracy=accuracy,
-        )
+            accuracy = str(actual) == str(expected)
+            reward = 1.0 if accuracy else 0.0
+
+            return PythonMathVerifyResponse(
+                **body.model_dump(),
+                reward=reward,
+                extracted_answer=actual,
+                accuracy=accuracy,
+            )
+        finally:
+            # Cleanup subprocess for this session
+            if session_id in self._sessions:
+                self._sessions[session_id].close()
+                del self._sessions[session_id]
 
 
 def _get_last_expr_value(code: str, globals_dict: dict, locals_dict: dict):
