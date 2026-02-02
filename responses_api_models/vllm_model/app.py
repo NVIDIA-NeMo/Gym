@@ -116,6 +116,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             body_dict["model"] = self.config.model
 
             if self.config.return_token_id_information:
+                body_dict["enable_response_messages"] = True
                 body_dict["top_logprobs"] = 1
                 if "include" not in body_dict:
                     body_dict["include"] = []
@@ -150,80 +151,44 @@ class VLLMModel(SimpleResponsesAPIModel):
                                 type="message",
                             )
                         ],
+                        incomplete_details={"reason": "max_output_tokens"},
                     )
                 else:
                     raise e
 
-            if self.config.uses_reasoning_parser:
-                output = vllm_response_dict.get("output", [])
-                for output_item in output:
-                    if output_item.get("type") == "message" and output_item.get("role") == "assistant":
-                        content = output_item.get("content", [])
-                        for content_item in content:
-                            if content_item.get("type") == "output_text":
-                                text = content_item.get("text", "")
-                                reasoning_matches, cleaned_text = self._converter._extract_reasoning_from_content(text)
-                                if reasoning_matches:
-                                    content_item["text"] = cleaned_text
-                                    reasoning_item = {
-                                        "id": f"rs_{uuid4().hex}",
-                                        "type": "reasoning",
-                                        "summary": [
-                                            {"text": reasoning_text, "type": "summary_text"}
-                                            for reasoning_text in reasoning_matches
-                                        ],
-                                        "status": "completed",
-                                    }
-                                    output_idx = output.index(output_item)
-                                    output.insert(output_idx, reasoning_item)
-
             if self.config.return_token_id_information:
+                prompt_token_ids = vllm_response_dict["input_messages"][0]["tokens"]
+                generation_token_ids = vllm_response_dict["output_messages"][0]["tokens"]
+
                 output = vllm_response_dict.get("output", [])
                 for output_item in output:
                     if output_item.get("type") == "message" and output_item.get("role") == "assistant":
+                        output_item["prompt_token_ids"] = prompt_token_ids
+                        output_item["generation_token_ids"] = generation_token_ids
+
+                        generation_log_probs = []
                         content = output_item.get("content", [])
                         new_content = []
                         for content_item in content:
                             if content_item.get("type") == "output_text":
                                 logprobs = content_item.get("logprobs", [])
-                                if logprobs:
-                                    generation_token_ids = []
-                                    generation_log_probs = []
-                                    for logprob_item in logprobs:
-                                        token = logprob_item.get("token", "")
-                                        if token.startswith("token_id:"):
-                                            token_id = token.removeprefix("token_id:")
-                                        else:
-                                            token_id = str(logprob_item.get("token_id", token))
-                                        generation_token_ids.append(token_id)
-                                        generation_log_probs.append(logprob_item.get("logprob", 0.0))
-
-                                    tokenize_body_dict = {"model": body_dict["model"]}
-                                    if "input" in body_dict:
-                                        tokenize_body_dict["messages"] = body_dict["input"]
-                                    if "tools" in body_dict:
-                                        tokenize_body_dict["tools"] = body_dict["tools"]
-
-                                    tokenize_response = await client.create_tokenize(**tokenize_body_dict)
-                                    prompt_token_ids = tokenize_response.get("tokens", [])
-
-                                    output_item["prompt_token_ids"] = prompt_token_ids
-                                    output_item["generation_token_ids"] = generation_token_ids
-                                    output_item["generation_log_probs"] = generation_log_probs
-
-                                    new_content_item = {
-                                        "type": content_item["type"],
-                                        "text": content_item["text"],
-                                        "annotations": content_item.get("annotations", []),
-                                    }
-                                    new_content.append(new_content_item)
-                                else:
-                                    new_content.append(content_item)
+                                for logprob_item in logprobs:
+                                    generation_log_probs.append(logprob_item.get("logprob", 0.0))
+                                new_content_item = {
+                                    "type": content_item["type"],
+                                    "text": content_item["text"],
+                                    "annotations": content_item.get("annotations", []),
+                                }
+                                new_content.append(new_content_item)
                             else:
                                 new_content.append(content_item)
-
                         if new_content:
                             output_item["content"] = new_content
+                        if generation_log_probs:
+                            output_item["generation_log_probs"] = generation_log_probs
+
+                vllm_response_dict.pop("input_messages", None)
+                vllm_response_dict.pop("output_messages", None)
 
             validated_response = NeMoGymResponse.model_validate(vllm_response_dict)
             return JSONResponse(

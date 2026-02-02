@@ -2108,12 +2108,11 @@ class TestApp:
         assert mock_create_response.called
         assert mock_create_response.call_args.kwargs["model"] == "dummy_model"
 
-    def test_native_responses_api_with_reasoning_parser(self, monkeypatch: MonkeyPatch):
-        server = self._setup_server_native_api(monkeypatch, uses_reasoning_parser=True)
+    def test_native_responses_api_with_reasoning(self, monkeypatch: MonkeyPatch):
+        """Test that vLLM returns reasoning items natively (no client-side parsing needed)."""
+        server = self._setup_server_native_api(monkeypatch)
         app = server.setup_webserver()
         client = TestClient(app)
-
-        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
 
         mock_vllm_response = {
             "id": "resp_native_123",
@@ -2125,13 +2124,18 @@ class TestApp:
             "tools": [],
             "output": [
                 {
+                    "id": "rs_123",
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "I should check the weather for the user"}],
+                },
+                {
                     "id": "msg_456",
                     "type": "message",
                     "role": "assistant",
                     "content": [
                         {
                             "type": "output_text",
-                            "text": "<think>I should check the weather for the user</think>Let me help you with that!",
+                            "text": "Let me help you with that!",
                             "annotations": [],
                         }
                     ],
@@ -2183,23 +2187,21 @@ class TestApp:
                             "text": "Hello!",
                             "annotations": [],
                             "logprobs": [
-                                {"token": "token_id:100", "token_id": 100, "logprob": -0.5},
-                                {"token": "token_id:200", "token_id": 200, "logprob": -1.2},
+                                {"token": "Hello", "logprob": -0.5},
+                                {"token": "!", "logprob": -1.2},
                             ],
                         }
                     ],
                     "status": "completed",
                 }
             ],
+            "input_messages": [{"tokens": [1, 2, 3, 4, 5], "type": "raw_message_tokens"}],
+            "output_messages": [{"tokens": [100, 200], "type": "raw_message_tokens"}],
         }
 
-        mock_tokenize_response = {"tokens": [1, 2, 3, 4, 5]}
-
         mock_create_response = AsyncMock(return_value=mock_vllm_response)
-        mock_create_tokenize = AsyncMock(return_value=mock_tokenize_response)
 
         monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_response", mock_create_response)
-        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_tokenize", mock_create_tokenize)
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(input="What is the weather?")
 
@@ -2219,8 +2221,9 @@ class TestApp:
         assert "generation_log_probs" in output_item
         assert output_item["generation_log_probs"] == [-0.5, -1.2]
         assert "logprobs" not in output_item["content"][0]
+        assert "input_messages" not in data
+        assert "output_messages" not in data
         assert mock_create_response.called
-        assert mock_create_tokenize.called
 
     def test_native_responses_api_context_length_error(self, monkeypatch: MonkeyPatch):
         server = self._setup_server_native_api(monkeypatch)
