@@ -1,7 +1,7 @@
 (data-index)=
 # Data
 
-NeMo Gym datasets use JSONL format for reinforcement learning (RL) training. Each dataset connects to an agent server—the component that orchestrates agent-environment interactions during training.
+NeMo Gym datasets use JSONL format for reinforcement learning (RL) training. Each dataset connects to an **agent server** (orchestrates agent-environment interactions) which routes requests to a **resources server** (provides tools and computes rewards).
 
 ## Prerequisites
 

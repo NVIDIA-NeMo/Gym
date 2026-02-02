@@ -32,7 +32,9 @@ Success output:
 ####################################################################################################
 ```
 
-This generates `data/test/example_metrics.json` with dataset statistics.
+This generates two types of output:
+- **Per-dataset metrics**: `resources_servers/example_multi_step/data/example_metrics.json` (alongside source JSONL)
+- **Aggregated metrics**: `data/test/example_metrics.json` (in output directory)
 
 ---
 
@@ -98,18 +100,18 @@ If your dataset doesn't have `responses_create_params`, you need to preprocess i
 
 The `responses_create_params` field wraps your input in the Responses API format. This typically includes a system prompt and the user content.
 
-::::{dropdown} Preprocessing script
+::::{dropdown} Preprocessing script (preprocess.py)
 :icon: code
 :open:
 
-This script reads a raw JSONL file, adds `responses_create_params`, and splits into train/validation:
+Save this script as `preprocess.py`. It reads a raw JSONL file, adds `responses_create_params`, and splits into train/validation:
 
 ```python
 import json
 import os
 
-# Configuration
-INPUT_FIELD = "problem"  # Field containing the input text in your dataset
+# Configuration — customize these for your dataset
+INPUT_FIELD = "problem"  # Field containing the input text (e.g., "problem", "question", "prompt")
 FILENAME = "raw_data.jsonl"
 SYSTEM_PROMPT = "Your task is to solve a math problem. Put the answer inside \\boxed{}."
 TRAIN_RATIO = 0.999  # 99.9% train, 0.1% validation
@@ -134,7 +136,7 @@ with open(FILENAME, "r", encoding="utf-8") as fin, \
         # Add responses_create_params
         row["responses_create_params"] = {
             "input": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "developer", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": row.get(INPUT_FIELD, "")},
             ]
         }
@@ -143,10 +145,12 @@ with open(FILENAME, "r", encoding="utf-8") as fin, \
         (ftrain if i < split_idx else fval).write(out)
 ```
 
-**Customize for your dataset**:
-- Change `INPUT_FIELD` to match your data's input field name
-- Adjust `SYSTEM_PROMPT` for your task
-- Modify `TRAIN_RATIO` for your split needs
+:::{important}
+You must customize these variables for your dataset:
+- `INPUT_FIELD`: The field name containing your input text. Common values: `"problem"` (math), `"question"` (QA), `"prompt"` (general), `"instruction"` (instruction-following)
+- `SYSTEM_PROMPT`: Task-specific instructions for the model
+- `TRAIN_RATIO`: Train/validation split ratio
+:::
 
 ::::
 
@@ -252,7 +256,9 @@ ng_prepare_data "+config_paths=[resources_servers/workplace_assistant/configs/wo
 | Invalid role | Sample skipped | Use `user`, `assistant`, `system`, or `developer` |
 | Missing dataset file | `AssertionError` | Create file or set `+should_download=true` |
 
-**Key behavior**: Invalid samples are silently skipped. If metrics show fewer examples than expected, check your data.
+:::{warning}
+Invalid samples are silently skipped. If metrics show fewer examples than expected, check your data format.
+:::
 
 ::::{dropdown} Find invalid samples
 :icon: code
@@ -296,9 +302,15 @@ with open("your_data.jsonl") as f:
 4. **Compute metrics** — Aggregate statistics
 5. **Collate** — Combine samples with agent references
 
+### Output Locations
+
+Metrics files are written to two locations:
+- **Per-dataset**: `{dataset_jsonl_path}_metrics.json` — alongside each source JSONL file
+- **Aggregated**: `{output_dirpath}/{type}_metrics.json` — combined metrics per dataset type
+
 ### Re-Running
 
-- **Output files** (`train.jsonl`, `validation.jsonl`) are overwritten
+- **Output files** (`train.jsonl`, `validation.jsonl`) are overwritten in `output_dirpath`
 - **Metrics files** (`*_metrics.json`) are compared — delete them if your data changed
 
 ### Generated Metrics
