@@ -92,6 +92,54 @@ ng_download_dataset_from_hf \
 
 ::::
 
+::::{tab-item} Python Script
+Downloads using the `datasets` library directly with streaming support.
+
+**Use when**: You need custom preprocessing, streaming for large datasets, or specific split handling.
+
+```python
+import json
+from datasets import load_dataset
+
+output_file = "train.jsonl"
+dataset_name = "nvidia/OpenMathInstruct-2"
+split_name = "train_1M"  # Check dataset page for available splits
+
+with open(output_file, "w", encoding="utf-8") as f:
+    for line in load_dataset(dataset_name, split=split_name, streaming=True):
+        f.write(json.dumps(line) + "\n")
+```
+
+Run the script:
+
+```bash
+uv run download.py
+```
+
+Verify the download:
+
+```bash
+wc -l train.jsonl
+# Expected: 1000000 train.jsonl
+```
+
+**Streaming benefits**:
+- Memory-efficient for large datasets (millions of rows)
+- Progress visible during download
+- Can be interrupted and resumed
+
+:::{note}
+For gated or private datasets, authenticate first:
+
+```bash
+export HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+Or use `huggingface-cli login` before running the script.
+:::
+
+::::
+
 :::::
 
 ---
