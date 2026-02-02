@@ -255,6 +255,10 @@ ng_init_resources_server = "nemo_gym.cli:init_resources_server"
 nemo_gym_collect_rollouts = "nemo_gym.rollout_collection:collect_rollouts"
 ng_collect_rollouts = "nemo_gym.rollout_collection:collect_rollouts"
 
+# Reward profiling
+nemo_gym_profile = "nemo_gym.profile:profile"
+ng_profile = "nemo_gym.profile:profile"
+
 # Dataset management
 nemo_gym_upload_dataset_to_gitlab = "nemo_gym.gitlab_utils:upload_jsonl_dataset_cli"
 ng_upload_dataset_to_gitlab = "nemo_gym.gitlab_utils:upload_jsonl_dataset_cli"
