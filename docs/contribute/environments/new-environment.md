@@ -89,7 +89,7 @@ Build your resource server:
 
 - Run `ng_init_resources_server +entrypoint=resources_servers/my_server` to scaffold the new resource server
 - Follow the {doc}`/tutorials/creating-resource-server` guide to implement your specific logic
-- Implement verification logic for your tasks by defining the `verify()` function
+- Implement verification logic for your tasks by defining the `verify()` function. See {doc}`/about/concepts/task-verification` for common verification patterns.
 - Set the `domain` field in your resource server configuration (see {py:class}`~nemo_gym.config_types.Domain`).
 - Complete the auto-generated `README.md` with licensing information
 

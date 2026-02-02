@@ -1,7 +1,7 @@
 (env-creating-training-environment)=
 # Creating a Training Environment
 
-Implement verification logic, prepare training data, and connect to NeMo RL.
+An environment consists of three components: Agents, Models, and Resources. Most contributors will create new resource servers while using existing agent server and model server implementations. If you need to create custom agents or models, you can reference the implementations in `responses_api_agents/` and `responses_api_models/`.
 
 :::{card}
 
@@ -127,7 +127,7 @@ if __name__ == "__main__":
 
 :::
 
-**data/example.jsonl** (exactly 5 lines required):
+**data/example.jsonl**:
 
 ```json
 {"responses_create_params": {"input": [{"role": "user", "content": "What is 2+2? Answer in \\boxed{}."}]}, "expected_answer": "4"}
@@ -141,7 +141,7 @@ if __name__ == "__main__":
 
 ## Verification Patterns
 
-The `verify()` method compares model response to expected output and returns a reward.
+The `verify()` method compares model response to expected output and returns a reward. See {doc}`/about/concepts/task-verification` for common verification patterns.
 
 **Base types** (`nemo_gym.base_resources_server`):
 
