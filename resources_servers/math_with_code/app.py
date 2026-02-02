@@ -206,10 +206,8 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
             )
 
     async def end_session(self, request: Request) -> ExecutePythonResponse:
-        sid = request.session[SESSION_ID_KEY]
-        if sid in self._sessions:
-            self._sessions[sid].close()
-            del self._sessions[sid]
+        session_id = request.session[SESSION_ID_KEY]
+        self._cleanup_session(session_id)
         return ExecutePythonResponse(success=True, stdout="", stderr="")
 
     async def verify(self, request: Request, body: PythonMathVerifyRequest) -> PythonMathVerifyResponse:
@@ -243,10 +241,13 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
                 accuracy=accuracy,
             )
         finally:
-            # Cleanup subprocess for this session
-            if session_id in self._sessions:
-                self._sessions[session_id].close()
-                del self._sessions[session_id]
+            self._cleanup_session(session_id)
+
+    def _cleanup_session(self, session_id: str) -> None:
+        """Clean up subprocess for the given session."""
+        if session_id in self._sessions:
+            self._sessions[session_id].close()
+            del self._sessions[session_id]
 
 
 def _get_last_expr_value(code: str, globals_dict: dict, locals_dict: dict):
