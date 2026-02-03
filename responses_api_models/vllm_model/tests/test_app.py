@@ -661,7 +661,13 @@ PARAMETERIZE_DATA = [
 
 
 class TestApp:
-    def _setup_server(self, monkeypatch: MonkeyPatch):
+    def _setup_server(
+        self,
+        monkeypatch: MonkeyPatch,
+        return_token_id_information: bool = False,
+        uses_reasoning_parser: bool = False,
+        use_native_responses_api: bool = False,
+    ):
         config = VLLMModelConfig(
             host="0.0.0.0",
             port=8081,
@@ -670,30 +676,9 @@ class TestApp:
             model="dummy_model",
             entrypoint="",
             name="",
-            return_token_id_information=False,
-            uses_reasoning_parser=False,
-        )
-
-        get_global_config_dict_mock = MagicMock()
-        get_global_config_dict_mock.return_value = dict()
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
-
-        return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
-
-    def _setup_server_native_api(
-        self, monkeypatch: MonkeyPatch, return_token_id_information: bool = False, uses_reasoning_parser: bool = False
-    ):
-        config = VLLMModelConfig(
-            host="0.0.0.0",
-            port=8081,
-            base_url="http://api.openai.com/v1",
-            api_key="dummy_key",
-            model="dummy_model",
-            entrypoint="",
-            name="",
             return_token_id_information=return_token_id_information,
             uses_reasoning_parser=uses_reasoning_parser,
-            use_native_responses_api=True,
+            use_native_responses_api=use_native_responses_api,
         )
 
         get_global_config_dict_mock = MagicMock()
@@ -2062,7 +2047,7 @@ class TestApp:
         assert expected_messages == actual_messages
 
     def test_native_responses_api_basic(self, monkeypatch: MonkeyPatch):
-        server = self._setup_server_native_api(monkeypatch)
+        server = self._setup_server(monkeypatch, use_native_responses_api=True)
         app = server.setup_webserver()
         client = TestClient(app)
 
@@ -2108,7 +2093,7 @@ class TestApp:
         assert mock_create_response.call_args.kwargs["model"] == "dummy_model"
 
     def test_native_responses_api_with_reasoning(self, monkeypatch: MonkeyPatch):
-        server = self._setup_server_native_api(monkeypatch)
+        server = self._setup_server(monkeypatch, use_native_responses_api=True)
         app = server.setup_webserver()
         client = TestClient(app)
 
@@ -2162,7 +2147,7 @@ class TestApp:
         assert data["output"][1]["content"][0]["text"] == "Let me help you with that!"
 
     def test_native_responses_api_with_token_ids(self, monkeypatch: MonkeyPatch):
-        server = self._setup_server_native_api(monkeypatch, return_token_id_information=True)
+        server = self._setup_server(monkeypatch, return_token_id_information=True, use_native_responses_api=True)
         app = server.setup_webserver()
         client = TestClient(app)
 
@@ -2224,7 +2209,7 @@ class TestApp:
         assert mock_create_response.called
 
     def test_native_responses_api_tool_calls(self, monkeypatch: MonkeyPatch):
-        server = self._setup_server_native_api(monkeypatch)
+        server = self._setup_server(monkeypatch, use_native_responses_api=True)
         app = server.setup_webserver()
         client = TestClient(app)
 
@@ -2266,7 +2251,7 @@ class TestApp:
         assert mock_create_response.called
 
     def test_native_responses_api_multiturn(self, monkeypatch: MonkeyPatch):
-        server = self._setup_server_native_api(monkeypatch)
+        server = self._setup_server(monkeypatch, use_native_responses_api=True)
         app = server.setup_webserver()
         client = TestClient(app)
 
@@ -2323,7 +2308,7 @@ class TestApp:
         ]
 
     def test_native_responses_api_string_input(self, monkeypatch: MonkeyPatch):
-        server = self._setup_server_native_api(monkeypatch)
+        server = self._setup_server(monkeypatch, use_native_responses_api=True)
         app = server.setup_webserver()
         client = TestClient(app)
 
@@ -2369,7 +2354,7 @@ class TestApp:
         assert mock_create_response.call_args.kwargs["input"] == "Hello"
 
     def test_native_responses_api_with_instructions(self, monkeypatch: MonkeyPatch):
-        server = self._setup_server_native_api(monkeypatch)
+        server = self._setup_server(monkeypatch, use_native_responses_api=True)
         app = server.setup_webserver()
         client = TestClient(app)
 
