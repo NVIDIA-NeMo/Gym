@@ -106,6 +106,7 @@ class RunOpenHandsAgent:
     dataset_path: str | None = None
     openhands_should_log: bool = False
     debug: bool = False
+    metrics_fpath: Path
 
     async def _run_swe_agent(self, data_point, api_base):
         """
@@ -272,6 +273,7 @@ class RunOpenHandsAgent:
             "export RUNTIME=local && "
             f"{log_cmd}"
             f"{profiling_cmd}"
+            f"export NEMO_GYM_METRICS_FPATH={self.metrics_fpath} && "
             f"export NEMO_GYM_CONFIG_DICT={self.ng_global_config_dict_str} && "
             f"export NEMO_GYM_MODEL_SERVER_NAME={self.model_server_name} &&"
             "export VIRTUAL_ENV=/openhands_setup/OpenHands/.venv && "
