@@ -639,7 +639,7 @@ class VLLMConverter(BaseModel):
         # Maybe parameterize to support other model formats in the future.
         return self._parse_think_tags(content)
 
-    def _chat_completions_messages_to_responses_items(
+    def chat_completions_messages_to_responses_items(
         self, messages: List[Dict[str, Any]]
     ) -> List[NeMoGymResponseOutputItem]:
         output_items = []
@@ -662,6 +662,16 @@ class VLLMConverter(BaseModel):
                 raise NotImplementedError(f"Unrecognized role: {role}!")
 
         return output_items
+
+
+def split_responses_input_output_items(
+    items: List[NeMoGymResponseOutputItem],
+) -> Tuple[List[NeMoGymResponseOutputItem], List[NeMoGymResponseOutputItem]]:
+    for i, item in enumerate(items):
+        if getattr(item, "role", None) == "assistant":
+            break
+
+    return items[:i], items[i:]
 
 
 if __name__ == "__main__":
