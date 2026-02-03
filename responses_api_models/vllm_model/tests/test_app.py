@@ -2220,7 +2220,7 @@ class TestApp:
         assert output_item["generation_token_ids"] == [100, 200]
         assert "generation_log_probs" in output_item
         assert output_item["generation_log_probs"] == [-0.5, -1.2]
-        assert "logprobs" not in output_item["content"][0]
+        assert output_item["content"][0].get("logprobs") is None
         assert "input_messages" not in data
         assert "output_messages" not in data
         assert mock_create_response.called
