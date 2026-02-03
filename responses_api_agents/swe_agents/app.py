@@ -91,6 +91,10 @@ def runner_ray_remote(
     ray_submit_time = time.time()
     params["ray_submit_time"] = ray_submit_time
 
+    # This is the first instance so we don't need to load anything
+    with params["metrics_fpath"].open("w") as f:
+        json.dump({"ray_queue_time": ray_submit_time - params["ray_queue_time"]}, f)
+
     if params["debug"]:
         concurrent_containers = ray.get(concurrent_container_counter.increment.remote())
         print(f"Concurrent container #{concurrent_containers}", file=sys.stderr)
@@ -206,7 +210,7 @@ class SWEBenchVerifyResponse(BaseVerifyResponse):
     patch_successfully_applied: Optional[float] = None  # 1.0 if patch applied, 0.0 otherwise
 
     # Profiling time metrics to report
-    # ray_queue_time: float
+    ray_queue_time: float
     # generation_apptainer_spinup_time: float
     # create_runtime_time: float
     # container_initialization_time: float
@@ -364,6 +368,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             if "swe-bench-metrics" in result:
                 metadata["swe-bench-metrics"] = json.dumps(result["swe-bench-metrics"])
 
+            metadata["timing_metrics"] = metrics_fpath.read_text()
+
             return NeMoGymResponse(
                 id=f"swebench-{problem_info.get('instance_id', 'unknown')}",
                 created_at=int(time.time()),
@@ -485,16 +491,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     "patch_successfully_applied": patch_applied,
                     "resolved": resolved,
                 },
-                # ray_queue_time=,
-                # generation_apptainer_spinup_time=,
-                # create_runtime_time=,
-                # container_initialization_time=,
-                # connect_to_runtime_time=,
-                # runtime_initialization_fn_time=,
-                # total_command_exec_time=,
-                # total_model_call_time=,
-                # final_eval_apptainer_spinup_time=,
-                # final_eval_time=,
+                **json.loads(metadata["timing_metrics"]),
                 **hit_metrics,
             )
 
