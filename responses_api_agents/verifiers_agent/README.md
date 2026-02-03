@@ -129,62 +129,6 @@ ng_collect_rollouts \
     +limit=5
 ```
 
-## Example Multi Turn
-
-Let's try kalomaze/alphabet-sort as an example multi-turn environment.
-
-First, generate an example task dataset: 
-```
-uv sync --reinstall # may not be necessary
-prime env install kalomaze/alphabet-sort
-python3 scripts/create_dataset.py --env-id kalomaze/alphabet-sort --size 5 --output data/alphabet-sort-example.jsonl
-```
-
-Now update the agent requirements.txt. We find for this environment we need to pin a specific version, and use `primeintellect/alphabet-sort` here. We should pin versions of verifiers and environments in case things continue to change. 
-```
--e nemo-gym[dev] @ ../../
-verifiers>=0.1.9
---extra-index-url https://hub.primeintellect.ai/primeintellect/simple/
-alphabet-sort==0.1.9.1
-```
-
-Make new agent config alphabet-sort.yaml:
-```
-verifiers_agent:
-  responses_api_agents:
-    verifiers_agent:
-      entrypoint: app.py
-      model_server:
-        type: responses_api_models
-        name: policy_model
-      model_name: ""
-      vf_env_id: alphabet-sort
-      vf_env_args: {}
-      group_size: 1
-      max_concurrent_generation: -1
-      max_concurrent_scoring: -1
-      max_tokens: 8192
-      temperature: 1.0
-      top_p: 1.0
-
-```
-
-Restart NeMo-Gym servers:
-```
-uv sync
-ng_run "+config_paths=[responses_api_agents/verifiers_agent/configs/alphabet-sort.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
-```
-
-
-Collect rollouts:
-```
-ng_collect_rollouts \
-    +agent_name=verifiers_agent \
-    +input_jsonl_fpath=responses_api_agents/verifiers_agent/data/alphabet-sort-example.jsonl \
-    +output_jsonl_fpath=responses_api_agents/verifiers_agent/data/alphabet-sort-example-rollouts.jsonl \
-    +limit=5
-```
-
 Note we only change the env_id for each config so far, but environments can accept custom args, so we are providing separate configs in case we need these.
 
 ## Training 
