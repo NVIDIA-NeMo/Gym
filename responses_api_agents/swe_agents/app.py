@@ -222,7 +222,7 @@ class SWEBenchVerifyResponse(BaseVerifyResponse):
     # hit_sample_timeout: bool
     # hit_trajectory_command_exec_timeout: bool
     # hit_eval_timeout: bool
-    # hit_results_parsing_failure: bool
+    hit_empty_trajectory: bool
     hit_success: bool
     hit_unknown: bool
 
@@ -349,6 +349,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "instance_id": result.get("instance_id", problem_info.get("instance_id", "unknown")),
                 "instance_dir": instance_dir,
                 "hit_success_str": json.dumps(bool(output_items)),
+                "hit_empty_trajectory_str": json.dumps(not trajectory),
             }
 
             # Add evaluation results to metadata (convert to strings)
@@ -395,6 +396,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 metadata={
                     "error": str(e),
                     "hit_success_str": json.dumps(False),
+                    "hit_empty_trajectory_str": json.dumps((not trajectory) if "trajectory" in dir() else False),
                 },
             )
 
@@ -466,6 +468,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 # hit_trajectory_command_exec_timeout=,
                 # hit_eval_timeout=,
                 # hit_results_parsing_failure=,
+                hit_empty_trajectory=json.loads(metadata["hit_empty_trajectory_str"]),
                 hit_success=json.loads(metadata["hit_success_str"]),
             )
             hit_metrics["hit_unknown"] = not any(hit_metrics.values())
