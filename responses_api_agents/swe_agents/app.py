@@ -274,6 +274,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         workspace_root = Path(os.path.dirname(os.path.abspath(__file__)))
         persistent_dir = workspace_root / f"swebench_results_{self.config.run_session_id}" / instance_dir
         persistent_dir.mkdir(parents=True, exist_ok=True)
+        metrics_fpath = persistent_dir / "nemo_gym_metrics.json"
         try:
             ray_queue_time = time.time()
             params = {
@@ -287,6 +288,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "swebench_tests_timeout": self.config.swebench_tests_timeout,
                 "swebench_agent_timeout": self.config.swebench_agent_timeout,
                 "persistent_dir": persistent_dir,
+                "metrics_fpath": metrics_fpath,
                 "agent_framework_repo": self.config.agent_framework_repo,
                 "agent_framework_commit": self.config.agent_framework_commit,
                 "openhands_setup_dir": self.config.openhands_setup_dir,
