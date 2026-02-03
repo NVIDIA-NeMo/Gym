@@ -39,6 +39,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseOutputMessageForTraining,
 )
 from responses_api_agents.swe_agents.utils import (
     convert_tools_to_function_format,
@@ -157,6 +158,10 @@ class SWEBenchVerifyResponse(BaseVerifyResponse):
     resolved: Optional[float] = None  # 1.0 if resolved, 0.0 otherwise
     patch_exists: Optional[float] = None  # 1.0 if patch exists, 0.0 otherwise
     patch_successfully_applied: Optional[float] = None  # 1.0 if patch applied, 0.0 otherwise
+    is_nemo_gym_in_assistant_message: Optional[float] = (
+        None  # 1.0 if nemo-gym is in the assistant message, 0.0 otherwise
+    )
+    is_finish_tool_call: Optional[float] = None  # 1.0 if finish tool call is detected, 0.0 otherwise
 
 
 class SWEBenchWrapper(SimpleResponsesAPIAgent):
@@ -313,13 +318,28 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             )
 
     def check_finish_tool_call(self, response: NeMoGymResponse) -> bool:
-        """Check if the last message is a finish tool call."""
         if not response.output:
             return False
 
         last_message = response.output[-1]
         if isinstance(last_message, NeMoGymResponseFunctionToolCall) and last_message.name == "finish":
+            print(f"[REWARD] Finish tool call: {last_message.name} detected", flush=True)
             return True
+
+        return False
+
+    def check_nemo_gym_in_assistant_message(self, response: NeMoGymResponse) -> bool:
+        if not response.output:
+            return False
+
+        for message in response.output:
+            if (
+                isinstance(message, NeMoGymResponseOutputMessageForTraining)
+                and message.role == "assistant"
+                and ("nemogym" in message.content[0].text.lower() or "litellm" in message.content[0].text.lower())
+            ):
+                print(f"[REWARD] Nemo-Gym in assistant message: {message.content[0].text}", flush=True)
+                return True
 
         return False
 
@@ -367,10 +387,15 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             metrics = json.loads(metadata.get("swe-bench-metrics", "{}")) if "swe-bench-metrics" in metadata else {}
 
             # Only consider the response resolved if the finish tool call is present and the resolved metric is True
-            if self.check_finish_tool_call(response):
+            is_finish_tool_call = self.check_finish_tool_call(response)
+            if is_finish_tool_call:
                 resolved = metrics.get("resolved") or (metadata.get("resolved") == "True")
             else:
                 resolved = False
+
+            # TODO: remove this check after behavior fix
+            is_nemo_gym_in_assistant_message = self.check_nemo_gym_in_assistant_message(response)
+            resolved = resolved and not is_nemo_gym_in_assistant_message
 
             # Extract individual metrics with proper type conversion
             patch_exists = metrics.get("patch_exists") or (metadata.get("patch_exists") == "True")
@@ -388,6 +413,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 resolved=1.0 if resolved else 0.0,
                 patch_exists=1.0 if patch_exists else 0.0,
                 patch_successfully_applied=1.0 if patch_applied else 0.0,
+                is_nemo_gym_in_assistant_message=1.0 if is_nemo_gym_in_assistant_message else 0.0,
+                is_finish_tool_call=1.0 if is_finish_tool_call else 0.0,
                 swebench_metrics=metrics,
                 metadata={
                     "instance_id": metadata.get("instance_id", "unknown"),
@@ -395,6 +422,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     "patch_exists": patch_exists,
                     "patch_successfully_applied": patch_applied,
                     "resolved": resolved,
+                    "is_nemo_gym_in_assistant_message": is_nemo_gym_in_assistant_message,
+                    "is_finish_tool_call": is_finish_tool_call,
                 },
             )
 
