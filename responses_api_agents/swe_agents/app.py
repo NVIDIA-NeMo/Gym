@@ -224,7 +224,7 @@ class SWEBenchVerifyResponse(BaseVerifyResponse):
     # hit_eval_timeout: bool
     hit_empty_trajectory: bool
     hit_success: bool
-    hit_unknown: bool
+    hit_responses_exception: bool
 
 
 class SWEBenchWrapper(SimpleResponsesAPIAgent):
@@ -350,6 +350,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "instance_dir": instance_dir,
                 "hit_success_str": json.dumps(bool(output_items)),
                 "hit_empty_trajectory_str": json.dumps(not trajectory),
+                "hit_responses_exception_str": json.dumps(False),
             }
 
             # Add evaluation results to metadata (convert to strings)
@@ -397,6 +398,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     "error": str(e),
                     "hit_success_str": json.dumps(False),
                     "hit_empty_trajectory_str": json.dumps((not trajectory) if "trajectory" in dir() else False),
+                    "hit_responses_exception_str": json.dumps(True),
                 },
             )
 
@@ -463,15 +465,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
             reward = 1.0 if resolved else 0.0
 
-            hit_metrics = dict(
-                # hit_sample_timeout=,
-                # hit_trajectory_command_exec_timeout=,
-                # hit_eval_timeout=,
-                # hit_results_parsing_failure=,
-                hit_empty_trajectory=json.loads(metadata["hit_empty_trajectory_str"]),
-                hit_success=json.loads(metadata["hit_success_str"]),
-            )
-            hit_metrics["hit_unknown"] = not any(hit_metrics.values())
+            hit_metrics = {k.removesuffix("_str"): json.loads(v) for k, v in metadata.items() if k.startswith("hit_")}
 
             # Build verification response with top-level numeric fields for statistics
             return SWEBenchVerifyResponse(
