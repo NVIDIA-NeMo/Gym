@@ -285,19 +285,15 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             "command_exec_timeout": self.config.command_exec_timeout,
         }
 
-        # Run SWE-bench evaluation
-        future = runner_ray_remote.remote(self._container_counter, run_swebench_evaluation, params)
-        result = await future
-
-        # Extract trajectory and convert to proper NeMoGym format
-        output_items = []
-        trajectory = result.get("trajectory", [])
+        result = await runner_ray_remote.remote(self._container_counter, run_swebench_evaluation, params)
 
         # Convert tools from ChatCompletion format to Response FunctionTool format
         raw_tools = result.get("tools", [])
         tools = [FunctionTool.model_validate(tool["function"] | {"type": "function"}) for tool in raw_tools]
 
-        # Convert trajectory to NeMoGym output items
+        # Extract trajectory and convert to proper NeMoGym format
+        output_items = []
+        trajectory = result.get("trajectory", [])
         if trajectory:
             output_items = convert_trajectory_to_output_items(
                 trajectory,
