@@ -224,7 +224,7 @@ class SWEBenchVerifyResponse(BaseVerifyResponse):
     # hit_eval_timeout: bool
     # hit_results_parsing_failure: bool
     hit_success: bool
-    # hit_unknown: bool
+    hit_unknown: bool
 
 
 class SWEBenchWrapper(SimpleResponsesAPIAgent):
@@ -461,6 +461,15 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
             reward = 1.0 if resolved else 0.0
 
+            hit_metrics = dict(
+                # hit_sample_timeout=,
+                # hit_trajectory_command_exec_timeout=,
+                # hit_eval_timeout=,
+                # hit_results_parsing_failure=,
+                hit_success=json.loads(metadata["hit_success_str"]),
+            )
+            hit_metrics["hit_unknown"] = not any(hit_metrics.values())
+
             # Build verification response with top-level numeric fields for statistics
             return SWEBenchVerifyResponse(
                 responses_create_params=params_with_input,
@@ -487,12 +496,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 # total_model_call_time=,
                 # final_eval_apptainer_spinup_time=,
                 # final_eval_time=,
-                # hit_sample_timeout=,
-                # hit_trajectory_command_exec_timeout=,
-                # hit_eval_timeout=,
-                # hit_results_parsing_failure=,
-                hit_success=json.loads(metadata["hit_success_str"]),
-                # hit_unknown=,
+                **hit_metrics,
             )
 
 
