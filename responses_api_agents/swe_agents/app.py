@@ -322,12 +322,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             return await self._run(body)
 
     async def _run(self, body: BaseRunRequest) -> SWEBenchVerifyResponse:
-        # SWE-agent processes tool calls sequentially, OpenHands can do parallel
-        body.responses_create_params.parallel_tool_calls = (
-            False if self.config.agent_framework == "swe_agent" else True
-        )
-        if body.responses_create_params.tool_choice is None:
-            body.responses_create_params.tool_choice = "auto"
+        body.responses_create_params.parallel_tool_calls = True
+        body.responses_create_params.tool_choice = "auto"
 
         response = await self.responses(body.responses_create_params)
 
