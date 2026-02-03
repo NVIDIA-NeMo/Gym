@@ -219,7 +219,7 @@ class SWEBenchVerifyResponse(BaseVerifyResponse):
     # total_command_exec_time: float
     # total_model_call_time: float
     # final_eval_apptainer_spinup_time: float
-    # final_eval_time: float
+    final_eval_time: float
 
     # Exit condition metrics to report
     # TODO add more exit conditions

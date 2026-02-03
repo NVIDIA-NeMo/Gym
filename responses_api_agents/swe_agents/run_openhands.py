@@ -1116,6 +1116,10 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
                 "evaluation_time": evaluation_time,
             }
 
+            nemo_gym_metrics = json.loads(self.metrics_fpath.read_text())
+            with self.metrics_fpath.open("w") as f:
+                json.dump(nemo_gym_metrics | {"final_eval_time": evaluation_time}, f)
+
             return output_dict
         finally:
             self._cleanup_instance_dataset(instance_dataset_path)
