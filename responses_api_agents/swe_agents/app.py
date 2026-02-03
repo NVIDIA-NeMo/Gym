@@ -222,9 +222,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     _model_endpoint: str
 
     def model_post_init(self, __context: Any) -> None:
-        self._sem = Semaphore(self.config.concurrency)
-        self._container_counter = ConcurrentContainerCounter.remote()
-
         # Pre-build OpenHands environment if using openhands framework
         if self.config.agent_framework == "openhands":
             self.config.openhands_setup_dir = setup_openhands_environment(
@@ -240,6 +237,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         self.config.run_session_id = f"{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
         print(f"Run session ID: {self.config.run_session_id}", flush=True)
 
+        self._sem = Semaphore(self.config.concurrency)
+        self._container_counter = ConcurrentContainerCounter.remote()
         self._global_config_dict_str = shlex.quote(OmegaConf.to_yaml(get_global_config_dict()))
         self._vllm_converter = VLLMConverter(return_token_id_information=True)
         self._model_endpoint = get_server_url(self.config.model_server.name)
