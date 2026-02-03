@@ -1,7 +1,7 @@
 (data-index)=
 # Data
 
-NeMo Gym datasets use JSONL format for reinforcement learning (RL) training. Each dataset connects to an agent server—the component that orchestrates agent-environment interactions during training.
+NeMo Gym datasets use JSONL format for reinforcement learning (RL) training. Each dataset connects to an **agent server** (orchestrates agent-environment interactions) which routes requests to a **resources server** (provides tools and computes rewards).
 
 ## Prerequisites
 
@@ -27,6 +27,38 @@ Each JSONL line requires a `responses_create_params` field following the [OpenAI
 Additional fields like `expected_answer` vary by resources server—the component that provides tools and reward signals.
 
 **Source**: `nemo_gym/base_resources_server.py:35-36`
+
+### Required Fields
+
+| Field | Added By | Description |
+|-------|----------|-------------|
+| `responses_create_params` | User | Input to the model during training. Contains `input` (messages) and optional `tools`, `temperature`, etc. |
+| `agent_ref` | `ng_prepare_data` | Routes each row to its resource server. Auto-generated during data preparation. |
+
+### Optional Fields
+
+| Field | Description |
+|-------|-------------|
+| `expected_answer` | Ground truth for verification (task-specific). |
+| `question` | Original question text (for reference). |
+| `id` | Tracking identifier. |
+
+:::{tip}
+Check `resources_servers/<name>/README.md` for fields required by each resource server's `verify()` method.
+:::
+
+### The `agent_ref` Field
+
+The `agent_ref` field maps each row to a specific resource server. A training dataset can blend multiple resource servers in a single file—`agent_ref` tells NeMo Gym which server handles each row.
+
+```json
+{
+  "responses_create_params": {"input": [{"role": "user", "content": "..."}]},
+  "agent_ref": {"type": "responses_api_agents", "name": "math_with_judge_simple_agent"}
+}
+```
+
+**You don't create `agent_ref` manually.** The `ng_prepare_data` tool adds it automatically based on your config file. The tool matches the agent type (`responses_api_agents`) with the agent name from the config.
 
 ### Example Data
 
