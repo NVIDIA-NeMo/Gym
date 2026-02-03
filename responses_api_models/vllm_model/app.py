@@ -162,7 +162,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                     incomplete_details={"reason": "max_output_tokens"},
                 )
             else:
-                raise e
+                raise
 
         if self.config.return_token_id_information:
             prompt_token_ids = vllm_response_dict["input_messages"][0]["tokens"]
@@ -179,7 +179,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                     new_content = []
                     for content_item in content:
                         if content_item.get("type") == "output_text":
-                            logprobs = content_item.get("logprobs", [])
+                            logprobs = content_item.get("logprobs") or []
                             for logprob_item in logprobs:
                                 generation_log_probs.append(logprob_item.get("logprob", 0.0))
                             new_content_item = {
