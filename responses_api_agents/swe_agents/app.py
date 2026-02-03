@@ -259,136 +259,108 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         persistent_dir = workspace_root / f"swebench_results_{self.config.run_session_id}" / instance_dir
         persistent_dir.mkdir(parents=True, exist_ok=True)
         metrics_fpath = persistent_dir / "nemo_gym_metrics.json"
-        try:
-            ray_queue_time = time.time()
-            params = {
-                "problem_info": problem_info,
-                "model_endpoint": model_endpoint,
-                "body": body,
-                "agent_framework": self.config.agent_framework,
-                "agent_config": self.config.agent_config,
-                "agent_tools_file": self.config.agent_tools_file,
-                "agent_max_turns": self.config.agent_max_turns,
-                "swebench_tests_timeout": self.config.swebench_tests_timeout,
-                "swebench_agent_timeout": self.config.swebench_agent_timeout,
-                "persistent_dir": persistent_dir,
-                "metrics_fpath": metrics_fpath,
-                "agent_framework_repo": self.config.agent_framework_repo,
-                "agent_framework_commit": self.config.agent_framework_commit,
-                "openhands_setup_dir": self.config.openhands_setup_dir,
-                "swebench_setup_dir": self.config.swebench_setup_dir,
-                "r2e_gym_setup_dir": self.config.r2e_gym_setup_dir,
-                "dataset_path": self.config.dataset_path,
-                "ray_queue_time": ray_queue_time,
-                "openhands_should_log": self.config.openhands_should_log,
-                "debug": self.config.debug,
-                "model_server_name": self.config.model_server.name,
-                "ng_global_config_dict_str": self._global_config_dict_str,
-                "apptainer_memory_limit_mb": self.config.apptainer_memory_limit_mb,
-                "command_exec_timeout": self.config.command_exec_timeout,
-            }
 
-            # Run SWE-bench evaluation
-            future = runner_ray_remote.remote(self._container_counter, run_swebench_evaluation, params)
-            result = await future
+        ray_queue_time = time.time()
+        params = {
+            "problem_info": problem_info,
+            "model_endpoint": model_endpoint,
+            "body": body,
+            "agent_framework": self.config.agent_framework,
+            "agent_config": self.config.agent_config,
+            "agent_tools_file": self.config.agent_tools_file,
+            "agent_max_turns": self.config.agent_max_turns,
+            "swebench_tests_timeout": self.config.swebench_tests_timeout,
+            "swebench_agent_timeout": self.config.swebench_agent_timeout,
+            "persistent_dir": persistent_dir,
+            "metrics_fpath": metrics_fpath,
+            "agent_framework_repo": self.config.agent_framework_repo,
+            "agent_framework_commit": self.config.agent_framework_commit,
+            "openhands_setup_dir": self.config.openhands_setup_dir,
+            "swebench_setup_dir": self.config.swebench_setup_dir,
+            "r2e_gym_setup_dir": self.config.r2e_gym_setup_dir,
+            "dataset_path": self.config.dataset_path,
+            "ray_queue_time": ray_queue_time,
+            "openhands_should_log": self.config.openhands_should_log,
+            "debug": self.config.debug,
+            "model_server_name": self.config.model_server.name,
+            "ng_global_config_dict_str": self._global_config_dict_str,
+            "apptainer_memory_limit_mb": self.config.apptainer_memory_limit_mb,
+            "command_exec_timeout": self.config.command_exec_timeout,
+        }
 
-            # Extract trajectory and convert to proper NeMoGym format
-            output_items = []
-            trajectory = result.get("trajectory", [])
+        # Run SWE-bench evaluation
+        future = runner_ray_remote.remote(self._container_counter, run_swebench_evaluation, params)
+        result = await future
 
-            # Convert tools from ChatCompletion format to Response FunctionTool format
-            raw_tools = result.get("tools", [])
-            tools = convert_tools_to_function_format(raw_tools) if raw_tools else []
+        # Extract trajectory and convert to proper NeMoGym format
+        output_items = []
+        trajectory = result.get("trajectory", [])
 
-            # Convert trajectory to NeMoGym output items
-            if trajectory:
-                output_items = convert_trajectory_to_output_items(
-                    trajectory,
-                    self.config.agent_framework,
+        # Convert tools from ChatCompletion format to Response FunctionTool format
+        raw_tools = result.get("tools", [])
+        tools = convert_tools_to_function_format(raw_tools) if raw_tools else []
+
+        # Convert trajectory to NeMoGym output items
+        if trajectory:
+            output_items = convert_trajectory_to_output_items(
+                trajectory,
+                self.config.agent_framework,
+            )
+
+        # If no trajectory or empty output, create a summary message
+        if not output_items:
+            output_items = [
+                NeMoGymResponseOutputMessage(
+                    id=f"msg-{problem_info.get('instance_id', 'unknown')}",
+                    content=[
+                        NeMoGymResponseOutputText(
+                            type="output_text",
+                            text=json.dumps(
+                                {k: v for k, v in result.items() if k not in ["trajectory", "tools"]}, indent=2
+                            ),
+                            annotations=[],
+                        )
+                    ],
+                    role="assistant",
+                    status="completed",
+                    type="message",
                 )
+            ]
 
-            # If no trajectory or empty output, create a summary message
-            if not output_items:
-                output_items = [
-                    NeMoGymResponseOutputMessage(
-                        id=f"msg-{problem_info.get('instance_id', 'unknown')}",
-                        content=[
-                            NeMoGymResponseOutputText(
-                                type="output_text",
-                                text=json.dumps(
-                                    {k: v for k, v in result.items() if k not in ["trajectory", "tools"]}, indent=2
-                                ),
-                                annotations=[],
-                            )
-                        ],
-                        role="assistant",
-                        status="completed",
-                        type="message",
-                    )
-                ]
+        # Store the full result in metadata for the verify step
+        # Note: metadata values must be strings for NeMoGymResponse
+        metadata = {
+            "agent_framework": self.config.agent_framework,
+            "has_trajectory": str(trajectory is not None),
+            "instance_id": result.get("instance_id", problem_info.get("instance_id", "unknown")),
+            "instance_dir": instance_dir,
+            "hit_success_str": json.dumps(bool(output_items)),
+            "hit_empty_trajectory_str": json.dumps(not trajectory),
+            "hit_responses_exception_str": json.dumps(False),
+        }
 
-            # Store the full result in metadata for the verify step
-            # Note: metadata values must be strings for NeMoGymResponse
-            metadata = {
-                "agent_framework": self.config.agent_framework,
-                "has_trajectory": str(trajectory is not None),
-                "instance_id": result.get("instance_id", problem_info.get("instance_id", "unknown")),
-                "instance_dir": instance_dir,
-                "hit_success_str": json.dumps(bool(output_items)),
-                "hit_empty_trajectory_str": json.dumps(not trajectory),
-                "hit_responses_exception_str": json.dumps(False),
-            }
+        # Add evaluation results to metadata (convert to strings)
+        for key in ["resolved", "patch_exists", "patch_successfully_applied"]:
+            if key in result:
+                metadata[key] = str(result[key])
 
-            # Add evaluation results to metadata (convert to strings)
-            for key in ["resolved", "patch_exists", "patch_successfully_applied"]:
-                if key in result:
-                    metadata[key] = str(result[key])
+        # For complex metrics, store as JSON string
+        if "swe-bench-metrics" in result:
+            metadata["swe-bench-metrics"] = json.dumps(result["swe-bench-metrics"])
 
-            # For complex metrics, store as JSON string
-            if "swe-bench-metrics" in result:
-                metadata["swe-bench-metrics"] = json.dumps(result["swe-bench-metrics"])
+        metadata["timing_metrics"] = metrics_fpath.read_text()
 
-            metadata["timing_metrics"] = metrics_fpath.read_text()
-
-            return NeMoGymResponse(
-                id=f"swebench-{problem_info.get('instance_id', 'unknown')}",
-                created_at=int(time.time()),
-                model=getattr(body, "model", "gpt-4.1-2025-04-14"),
-                object="response",
-                output=output_items,
-                parallel_tool_calls=(False if self.config.agent_framework == "swe_agent" else True),
-                tool_choice="auto",
-                tools=tools,
-                metadata=metadata,
-            )
-
-        except Exception as e:
-            print(f"SWE-bench evaluation failed: {str(e)}", flush=True)
-            # Return error response
-            error_message = NeMoGymResponseOutputMessage(
-                id=f"msg-{problem_info.get('instance_id', 'unknown')}-error",
-                content=[NeMoGymResponseOutputText(type="output_text", text=f"Error: {str(e)}", annotations=[])],
-                role="assistant",
-                status="completed",
-                type="message",
-            )
-
-            return NeMoGymResponse(
-                id=f"swebench-{problem_info.get('instance_id', 'unknown')}-error",
-                created_at=int(time.time()),
-                model=getattr(body, "model", "gpt-4.1-2025-04-14"),
-                object="response",
-                output=[error_message],
-                parallel_tool_calls=False,
-                tool_choice="none",
-                tools=[],
-                metadata={
-                    "error": str(e),
-                    "hit_success_str": json.dumps(False),
-                    "hit_empty_trajectory_str": json.dumps((not trajectory) if "trajectory" in dir() else False),
-                    "hit_responses_exception_str": json.dumps(True),
-                },
-            )
+        return NeMoGymResponse(
+            id=f"swebench-{problem_info.get('instance_id', 'unknown')}",
+            created_at=int(time.time()),
+            model=getattr(body, "model", "gpt-4.1-2025-04-14"),
+            object="response",
+            output=output_items,
+            parallel_tool_calls=(False if self.config.agent_framework == "swe_agent" else True),
+            tool_choice="auto",
+            tools=tools,
+            metadata=metadata,
+        )
 
     async def run(self, body: BaseRunRequest) -> SWEBenchVerifyResponse:
         """Run and verify SWE-bench solution."""
