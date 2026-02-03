@@ -211,11 +211,12 @@ class SWEBenchVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
 class SWEBenchWrapper(SimpleResponsesAPIAgent):
     """Wrapper for NeMo-Skills SWE-bench evaluation in NeMo-Gym."""
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     config: SWEBenchWrapperConfig
     sem: Semaphore = None
     _container_counter: ConcurrentContainerCounter = None
     _global_config_dict_str: str = None
-    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
@@ -292,7 +293,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         tools = [FunctionTool.model_validate(tool["function"] | {"type": "function"}) for tool in raw_tools]
 
         # Extract trajectory and convert to proper NeMoGym format
-        output_items = []
+        input_items, output_items = [], []
         trajectory = result.get("trajectory", [])
         if trajectory:
             output_items = convert_trajectory_to_output_items(
@@ -302,7 +303,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         # Note: metadata values must be strings for NeMoGymResponse
         metadata = {
-            "input": None,
+            "input": input_items,
             "metrics": None,
         }
 

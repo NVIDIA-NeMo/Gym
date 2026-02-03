@@ -128,181 +128,86 @@ def convert_trajectory_to_output_items(
     """
     output_items = []
 
-    # For OpenHands, trajectory is already in OpenAI format
-    if agent_framework == "openhands" and isinstance(trajectory, list):
-        for item in trajectory:
-            if isinstance(item, dict):
-                role = item["role"]
+    for item in trajectory:
+        role = item["role"]
 
-                # Extract text content from content data
-                content_data = item.get("content", "")
-                text_content = ""
-                if isinstance(content_data, str):
-                    text_content = content_data
-                elif isinstance(content_data, list):
-                    # Handle list of content items
-                    for c in content_data:
-                        if isinstance(c, dict) and c.get("type") == "text":
-                            text_content = c.get("text", "")
-                            break  # Take first text content
+        # Extract text content from content data
+        content_data = item.get("content", "")
+        text_content = ""
+        if isinstance(content_data, str):
+            text_content = content_data
+        elif isinstance(content_data, list):
+            # Handle list of content items
+            for c in content_data:
+                if isinstance(c, dict) and c.get("type") == "text":
+                    text_content = c.get("text", "")
+                    break  # Take first text content
 
-                if role in ["user", "system", "developer"]:
-                    if text_content:
-                        output_items.append(
-                            NeMoGymMessage(
-                                content=[{"type": "input_text", "text": text_content}],
-                                role=role,
-                                status="completed",
-                                type="message",
-                            )
-                        )
-
-                elif role == "assistant":
-                    # Handle assistant messages with potential tool calls
-                    tool_calls = item.get("tool_calls", [])
-
-                    # Add assistant message if there's content (even if there are also tool calls)
-                    prompt_token_ids = item.get("prompt_token_ids", [])
-                    generation_token_ids = item.get("generation_token_ids", [])
-                    generation_log_probs = item.get("generation_log_probs", [])
-
-                    output_items.append(
-                        NeMoGymResponseOutputMessageForTraining(
-                            id=f"msg-{len(output_items)}",
-                            content=[
-                                NeMoGymResponseOutputText(
-                                    type="output_text",
-                                    text=text_content,
-                                    annotations=[],
-                                )
-                            ],
-                            role="assistant",
-                            status="completed",
-                            type="message",
-                            prompt_token_ids=prompt_token_ids,
-                            generation_token_ids=generation_token_ids,
-                            generation_log_probs=generation_log_probs,
-                        )
+        if role in ["user", "system", "developer"]:
+            if text_content:
+                output_items.append(
+                    NeMoGymMessage(
+                        content=[{"type": "input_text", "text": text_content}],
+                        role=role,
+                        status="completed",
+                        type="message",
                     )
+                )
 
-                    # Also add tool calls if present
-                    if tool_calls:
-                        # Create function call items
-                        for tc in tool_calls:
-                            if "function" in tc:
-                                output_items.append(
-                                    NeMoGymResponseFunctionToolCall(
-                                        arguments=tc["function"].get("arguments", ""),
-                                        call_id=tc.get("id", ""),
-                                        name=tc["function"].get("name", ""),
-                                        type="function_call",
-                                        id=tc.get("id"),
-                                        status="completed",
-                                    )
-                                )
+        elif role == "assistant":
+            # Handle assistant messages with potential tool calls
+            tool_calls = item.get("tool_calls", [])
 
-                elif role == "tool":
-                    # Tool response
-                    content = item.get("content", "")
-                    tool_call_id = item.get("tool_call_id")
-                    if not tool_call_id and "tool_call_ids" in item:
-                        tool_call_ids = item.get("tool_call_ids", [])
-                        tool_call_id = tool_call_ids[0] if tool_call_ids else None
-                    if tool_call_id:
-                        output_items.append(
-                            NeMoGymFunctionCallOutput(
-                                call_id=tool_call_id,
-                                output=text_content,
-                                type="function_call_output",
-                                status="completed",
-                            )
+            # Add assistant message if there's content (even if there are also tool calls)
+            prompt_token_ids = item.get("prompt_token_ids", [])
+            generation_token_ids = item.get("generation_token_ids", [])
+            generation_log_probs = item.get("generation_log_probs", [])
+
+            output_items.append(
+                NeMoGymResponseOutputMessageForTraining(
+                    id=f"msg-{len(output_items)}",
+                    content=[
+                        NeMoGymResponseOutputText(
+                            type="output_text",
+                            text=text_content,
+                            annotations=[],
                         )
+                    ],
+                    role="assistant",
+                    status="completed",
+                    type="message",
+                    prompt_token_ids=prompt_token_ids,
+                    generation_token_ids=generation_token_ids,
+                    generation_log_probs=generation_log_probs,
+                )
+            )
 
-    # For SWE-agent, trajectory format is similar to OpenAI but with additional fields
-    elif agent_framework == "swe_agent" and isinstance(trajectory, list):
-        for item in trajectory:
-            if isinstance(item, dict):
-                role = item.get("role", "")
-                content = item.get("content", "")
+            for tc in tool_calls:
+                output_items.append(
+                    NeMoGymResponseFunctionToolCall(
+                        arguments=tc["function"].get("arguments", ""),
+                        call_id=tc.get("id", ""),
+                        name=tc["function"].get("name", ""),
+                        type="function_call",
+                        id=tc.get("id"),
+                        status="completed",
+                    )
+                )
 
-                if role in ["system", "user"]:
-                    # Create input message
-                    if content:
-                        output_items.append(
-                            NeMoGymMessage(
-                                content=[{"type": "input_text", "text": content}],
-                                role="system" if role == "system" else "user",
-                                status="completed",
-                                type="message",
-                            )
-                        )
-
-                elif role == "assistant":
-                    # Handle assistant messages which may have tool calls
-                    tool_calls = item.get("tool_calls", [])
-
-                    prompt_token_ids = item.get("provider_specific_fields", {}).get("prompt_token_ids", [])
-                    generation_token_ids = item.get("provider_specific_fields", {}).get("generation_token_ids", [])
-                    generation_log_probs = item.get("provider_specific_fields", {}).get("generation_log_probs", [])
-                    # Add assistant message if there's content (even if there are also tool calls)
-                    if content:
-                        output_items.append(
-                            NeMoGymResponseOutputMessageForTraining(
-                                id=f"msg-{len(output_items)}",
-                                content=[
-                                    NeMoGymResponseOutputText(
-                                        type="output_text",
-                                        text=content,
-                                        annotations=[],
-                                        logprobs=None,
-                                    )
-                                ],
-                                role="assistant",
-                                status="completed",
-                                type="message",
-                                prompt_token_ids=prompt_token_ids,
-                                generation_token_ids=generation_token_ids,
-                                generation_log_probs=generation_log_probs,
-                            )
-                        )
-
-                    # Also add tool calls if present
-                    if tool_calls:
-                        for tc in tool_calls:
-                            if "function" in tc:
-                                # Handle both dict and string formats for tc["function"]
-                                func = tc["function"]
-                                if isinstance(func, str):
-                                    # If it's a string, try to parse as JSON or use as name
-                                    try:
-                                        func = json.loads(func)
-                                    except (json.JSONDecodeError, TypeError):
-                                        # If not valid JSON, treat the string as the function name
-                                        func = {"name": func, "arguments": ""}
-
-                                output_items.append(
-                                    NeMoGymResponseFunctionToolCall(
-                                        arguments=func.get("arguments", ""),
-                                        call_id=tc.get("id", ""),
-                                        name=func.get("name", ""),
-                                        type="function_call",
-                                        id=tc.get("id"),
-                                        status="completed",
-                                    )
-                                )
-
-                elif role == "tool":
-                    # Tool response
-                    tool_call_ids = item.get("tool_call_ids", [])
-                    if tool_call_ids and content:
-                        output_items.append(
-                            NeMoGymFunctionCallOutput(
-                                call_id=tool_call_ids[0],  # Use first ID
-                                output=content if isinstance(content, str) else json.dumps(content),
-                                type="function_call_output",
-                                status="completed",
-                            )
-                        )
+        elif role == "tool":
+            tool_call_id = item.get("tool_call_id")
+            if not tool_call_id and "tool_call_ids" in item:
+                tool_call_ids = item.get("tool_call_ids", [])
+                tool_call_id = tool_call_ids[0] if tool_call_ids else None
+            if tool_call_id:
+                output_items.append(
+                    NeMoGymFunctionCallOutput(
+                        call_id=tool_call_id,
+                        output=text_content,
+                        type="function_call_output",
+                        status="completed",
+                    )
+                )
 
     return output_items
 
