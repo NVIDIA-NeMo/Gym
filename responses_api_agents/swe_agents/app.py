@@ -348,6 +348,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "has_trajectory": str(trajectory is not None),
                 "instance_id": result.get("instance_id", problem_info.get("instance_id", "unknown")),
                 "instance_dir": instance_dir,
+                "hit_success_str": json.dumps(bool(output_items)),
             }
 
             # Add evaluation results to metadata (convert to strings)
@@ -391,7 +392,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 parallel_tool_calls=False,
                 tool_choice="none",
                 tools=[],
-                metadata={"error": str(e)},
+                metadata={
+                    "error": str(e),
+                    "hit_success_str": json.dumps(False),
+                },
             )
 
     async def run(self, body: SWEBenchRunRequest) -> SWEBenchVerifyResponse:
@@ -487,7 +491,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 # hit_trajectory_command_exec_timeout=,
                 # hit_eval_timeout=,
                 # hit_results_parsing_failure=,
-                # hit_success=,
+                hit_success=json.loads(metadata["hit_success_str"]),
                 # hit_unknown=,
             )
 
