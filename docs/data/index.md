@@ -53,7 +53,7 @@ The `agent_ref` field maps each row to a specific resource server. A training da
 
 ```json
 {
-  "responses_create_params": {"input": [...]},
+  "responses_create_params": {"input": [{"role": "user", "content": "..."}]},
   "agent_ref": {"type": "responses_api_agents", "name": "math_with_judge_simple_agent"}
 }
 ```
