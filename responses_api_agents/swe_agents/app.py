@@ -350,24 +350,19 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         response = await self.responses(body.responses_create_params)
 
-        # Extract metrics from response metadata and remove metadata from response after extracting metrics
         metadata, response.metadata = response.metadata, None
-
         params_with_input = body.responses_create_params.model_copy(
             update={
                 "input": json.loads(metadata["input"]),
                 "tools": [t.model_dump() for t in response.tools] if response.tools else [],
             }
         )
-
         metrics = SWEBenchMetrics.model_validate_json(metadata["metrics"])
-        reward = 1.0 if metrics.resolved else 0.0
 
-        # Build verification response with top-level numeric fields for statistics
         return SWEBenchVerifyResponse(
             responses_create_params=params_with_input,
             response=response,
-            reward=reward,
+            reward=1.0 if metrics.resolved else 0.0,
             **metrics.model_dump(),
         )
 
