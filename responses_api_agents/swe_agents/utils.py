@@ -212,73 +212,6 @@ def convert_trajectory_to_output_items(
     return output_items
 
 
-def get_trajectory_and_tools(
-    trajectories_dir: Path,
-    instance_id: str,
-    agent_framework: str,
-    agent_tools_file: Optional[str] = None,
-) -> tuple:
-    """Get trajectory and tools from evaluation results.
-
-    Args:
-        trajectories_dir: Directory containing trajectories
-        instance_id: Instance ID
-        agent_framework: Agent framework
-        agent_tools_file: Path to tools JSON file (for SWE-agent)
-
-    Returns:
-        Tuple of (trajectory_data, tools)
-    """
-    trajectory_data = None
-    tools = []
-
-    if agent_framework == "openhands":
-        trajectory_data, tools = get_openhands_trajectory_from_completions(trajectories_dir, instance_id)
-        # if trajectory_data:
-        #     print(
-        #         f"Loaded OpenHands trajectory from llm_completions ({len(trajectory_data)} messages)",
-        #         flush=True,
-        #     )
-        # else:
-        #     print(f"No trajectory files found in {trajectories_dir}", flush=True)
-
-    elif agent_framework == "swe_agent":
-        # For SWE-agent, look for .traj files
-        if trajectories_dir.exists():
-            traj_files = [f for f in trajectories_dir.glob("**/*.traj") if "demonstrations" not in str(f)]
-
-            if traj_files:
-                # Read the first trajectory file found
-                try:
-                    with open(traj_files[0], "r") as f:
-                        traj_content = json.load(f)
-                        history = traj_content["history"]
-                        trajectory_steps = traj_content["trajectory"]
-                        trajectory_data = extract_data_from_trajectory(trajectory_steps, history)
-                    print(f"Found and loaded SWE-agent trajectory file: {traj_files[0]}", flush=True)
-                except Exception as e:
-                    print(f"Failed to read trajectory file {traj_files[0]}: {e}", flush=True)
-
-                # Load SWE-agent tools from the configured JSON file
-                if agent_tools_file:
-                    tools_file = Path(__file__).parent / agent_tools_file
-                    if tools_file.exists():
-                        with open(tools_file, "r") as f:
-                            tools_data = json.load(f)
-                            tools = tools_data.get("tools", [])
-                            print(f"Loaded SWE-agent tools from {tools_file}", flush=True)
-                    else:
-                        print(f"SWE-agent tools file not found: {tools_file}", flush=True)
-                else:
-                    print("No agent_tools_file configured for SWE-agent", flush=True)
-        else:
-            print(f"No trajectory files found in {trajectories_dir}", flush=True)
-    else:
-        print(f"Unsupported agent framework: {agent_framework}", flush=True)
-
-    return trajectory_data, tools
-
-
 ### SWE Agent Harness Utils ###
 
 
@@ -591,12 +524,7 @@ async def run_swebench_evaluation(
 
     # Try to find and include trajectory file
     trajectories_dir = persistent_dir / "trajectories"
-    trajectory_data, tools = get_trajectory_and_tools(
-        trajectories_dir,
-        instance_id,
-        agent_framework,
-        agent_tools_file if agent_framework == "swe_agent" else None,
-    )
+    trajectory_data, tools = get_openhands_trajectory_from_completions(trajectories_dir, instance_id)
 
     result["tools"] = tools
     result["trajectory"] = trajectory_data
