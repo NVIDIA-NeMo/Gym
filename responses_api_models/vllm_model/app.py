@@ -112,95 +112,103 @@ class VLLMModel(SimpleResponsesAPIModel):
         client = self._session_id_to_client[session_id]
 
         if self.config.use_native_responses_api:
-            body_dict = body.model_dump(exclude_unset=True)
-            body_dict["model"] = self.config.model
+            return await self._handle_native_responses_api(client, body)
 
-            if self.config.return_token_id_information:
-                body_dict["enable_response_messages"] = True
-                body_dict["top_logprobs"] = 1
-                if "include" not in body_dict:
-                    body_dict["include"] = []
-                if "message.output_text.logprobs" not in body_dict["include"]:
-                    body_dict["include"].append("message.output_text.logprobs")
+        return await self._handle_chat_completions_responses(request, body)
 
-            if self.config.extra_body:
-                body_dict = {**self.config.extra_body, **body_dict}
+    async def _handle_native_responses_api(
+        self, client: NeMoGymAsyncOpenAI, body: NeMoGymResponseCreateParamsNonStreaming
+    ) -> JSONResponse:
+        body_dict = body.model_dump(exclude_unset=True)
+        body_dict["model"] = self.config.model
 
-            try:
-                vllm_response_dict = await client.create_response(**body_dict)
-            except ClientResponseError as e:
-                result_content_str = e.response_content.decode()
-                is_out_of_context_length = e.status == 400 and (
-                    "context length" in result_content_str or "max_tokens" in result_content_str
-                )
-                if is_out_of_context_length:
-                    return NeMoGymResponse(
-                        id=f"resp_{uuid4().hex}",
-                        created_at=int(time()),
-                        model=self.config.model,
-                        object="response",
-                        parallel_tool_calls=True,
-                        tool_choice="auto",
-                        tools=[],
-                        output=[
-                            NeMoGymResponseOutputMessage(
-                                id=f"msg_{uuid4().hex}",
-                                role="assistant",
-                                content=[NeMoGymResponseOutputText(type="output_text", text="", annotations=[])],
-                                status="completed",
-                                type="message",
-                            )
-                        ],
-                        incomplete_details={"reason": "max_output_tokens"},
-                    )
-                else:
-                    raise e
+        if self.config.return_token_id_information:
+            body_dict["enable_response_messages"] = True
+            body_dict["top_logprobs"] = 1
+            if "include" not in body_dict:
+                body_dict["include"] = []
+            if "message.output_text.logprobs" not in body_dict["include"]:
+                body_dict["include"].append("message.output_text.logprobs")
 
-            if self.config.return_token_id_information:
-                prompt_token_ids = vllm_response_dict["input_messages"][0]["tokens"]
-                generation_token_ids = vllm_response_dict["output_messages"][0]["tokens"]
+        if self.config.extra_body:
+            body_dict = {**self.config.extra_body, **body_dict}
 
-                output = vllm_response_dict.get("output", [])
-                for output_item in output:
-                    if output_item.get("type") == "message" and output_item.get("role") == "assistant":
-                        output_item["prompt_token_ids"] = prompt_token_ids
-                        output_item["generation_token_ids"] = generation_token_ids
-
-                        generation_log_probs = []
-                        content = output_item.get("content", [])
-                        new_content = []
-                        for content_item in content:
-                            if content_item.get("type") == "output_text":
-                                logprobs = content_item.get("logprobs", [])
-                                for logprob_item in logprobs:
-                                    generation_log_probs.append(logprob_item.get("logprob", 0.0))
-                                new_content_item = {
-                                    "type": content_item["type"],
-                                    "text": content_item["text"],
-                                    "annotations": content_item.get("annotations", []),
-                                }
-                                new_content.append(new_content_item)
-                            else:
-                                new_content.append(content_item)
-                        if new_content:
-                            output_item["content"] = new_content
-                        if generation_log_probs:
-                            output_item["generation_log_probs"] = generation_log_probs
-
-                vllm_response_dict.pop("input_messages", None)
-                vllm_response_dict.pop("output_messages", None)
-
-            validated_response = NeMoGymResponse.model_validate(vllm_response_dict)
-            return JSONResponse(
-                content=validated_response.model_dump(mode="json", exclude_none=True),
-                status_code=200
+        try:
+            vllm_response_dict = await client.create_response(**body_dict)
+        except ClientResponseError as e:
+            result_content_str = e.response_content.decode()
+            is_out_of_context_length = e.status == 400 and (
+                "context length" in result_content_str or "max_tokens" in result_content_str
             )
+            if is_out_of_context_length:
+                return NeMoGymResponse(
+                    id=f"resp_{uuid4().hex}",
+                    created_at=int(time()),
+                    model=self.config.model,
+                    object="response",
+                    parallel_tool_calls=True,
+                    tool_choice="auto",
+                    tools=[],
+                    output=[
+                        NeMoGymResponseOutputMessage(
+                            id=f"msg_{uuid4().hex}",
+                            role="assistant",
+                            content=[NeMoGymResponseOutputText(type="output_text", text="", annotations=[])],
+                            status="completed",
+                            type="message",
+                        )
+                    ],
+                    incomplete_details={"reason": "max_output_tokens"},
+                )
+            else:
+                raise e
 
-        # Response Create Params -> Chat Completion Create Params
+        if self.config.return_token_id_information:
+            prompt_token_ids = vllm_response_dict["input_messages"][0]["tokens"]
+            generation_token_ids = vllm_response_dict["output_messages"][0]["tokens"]
+
+            output = vllm_response_dict.get("output", [])
+            for output_item in output:
+                if output_item.get("type") == "message" and output_item.get("role") == "assistant":
+                    output_item["prompt_token_ids"] = prompt_token_ids
+                    output_item["generation_token_ids"] = generation_token_ids
+
+                    generation_log_probs = []
+                    content = output_item.get("content", [])
+                    new_content = []
+                    for content_item in content:
+                        if content_item.get("type") == "output_text":
+                            logprobs = content_item.get("logprobs", [])
+                            for logprob_item in logprobs:
+                                generation_log_probs.append(logprob_item.get("logprob", 0.0))
+                            new_content_item = {
+                                "type": content_item["type"],
+                                "text": content_item["text"],
+                                "annotations": content_item.get("annotations", []),
+                            }
+                            new_content.append(new_content_item)
+                        else:
+                            new_content.append(content_item)
+                    if new_content:
+                        output_item["content"] = new_content
+                    if generation_log_probs:
+                        output_item["generation_log_probs"] = generation_log_probs
+
+            vllm_response_dict.pop("input_messages", None)
+            vllm_response_dict.pop("output_messages", None)
+
+        validated_response = NeMoGymResponse.model_validate(vllm_response_dict)
+        return JSONResponse(
+            content=validated_response.model_dump(mode="json", exclude_none=True),
+            status_code=200
+        )
+
+    async def _handle_chat_completions_responses(
+        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming
+    ) -> NeMoGymResponse:
         chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(body)
         body.model = self.config.model
 
-        # Chat Completion Create Params -> Chat Completion
         chat_completion_response = await self.chat_completions(request, chat_completion_create_params)
 
         choice = chat_completion_response.choices[0]
@@ -208,7 +216,6 @@ class VLLMModel(SimpleResponsesAPIModel):
         response_output = self._converter.postprocess_chat_response(choice)
         response_output_dicts = [item.model_dump() for item in response_output]
 
-        # Chat Completion -> Response
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
