@@ -934,24 +934,12 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
         evaluation_time = None
         trajectory_dict = None
         try:
-            if self.cfg.agent_framework == SupportedAgentFrameworks.swe_agent:
-                pred_file = await self._run_swe_agent(
-                    data_point,
-                    api_base,
-                    instance_dataset_path,
-                )
-            elif self.cfg.agent_framework == SupportedAgentFrameworks.openhands:
-                pred_file = await self._run_openhands(
-                    data_point,
-                    api_base,
-                    agent_run_id,
-                    instance_dataset_path,
-                )
-            else:
-                raise ValueError(
-                    f"Unsupported agent framework: {self.cfg.agent_framework}. "
-                    f"Supported frameworks: {', '.join(SupportedAgentFrameworks)}."
-                )
+            pred_file = await self._run_openhands(
+                data_point,
+                api_base,
+                agent_run_id,
+                instance_dataset_path,
+            )
 
             generation_time = asyncio.get_running_loop().time() - start_time
 
