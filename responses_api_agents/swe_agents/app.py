@@ -18,7 +18,6 @@ import shlex
 import sys
 import time
 import uuid
-import warnings
 from asyncio import Semaphore
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -28,7 +27,6 @@ from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
-    BaseVerifyRequest,
     BaseVerifyResponse,
 )
 from nemo_gym.base_responses_api_agent import (
@@ -56,12 +54,6 @@ from responses_api_agents.swe_agents.utils import (
     setup_r2e_gym_environment,
     setup_swebench_environment,
 )
-
-
-# There are some mysterious Pydantic serialization warnings related to FunctionTool that are not fatal that clutter up logs.
-# At some point we can try continue chasing this one down. Example:
-# (NemoGym pid=3160799) (swe_agents_val)   PydanticSerializationUnexpectedValue(Expected `general-fields` - serialized value may not be as expected [field_name='tools', input_value=FunctionTool(name='str_re... a single call each.\n'), input_type=FunctionTool])
-warnings.filterwarnings("ignore", message="FunctionTool")
 
 
 @ray.remote
@@ -182,18 +174,6 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
 
     openhands_should_log: bool = False
     debug: bool = False
-
-
-class SWEBenchRunRequest(BaseRunRequest):
-    """Request format for SWE-bench runs."""
-
-    model_config = {"extra": "allow"}
-
-
-class SWEBenchVerifyRequest(BaseVerifyRequest):
-    """Request format for SWE-bench verification."""
-
-    model_config = {"extra": "allow"}
 
 
 class SWEBenchVerifyResponse(BaseVerifyResponse):
@@ -410,7 +390,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 },
             )
 
-    async def run(self, body: SWEBenchRunRequest) -> SWEBenchVerifyResponse:
+    async def run(self, body: BaseRunRequest) -> SWEBenchVerifyResponse:
         """Run and verify SWE-bench solution."""
         async with self.sem:
             if self.config.debug:
