@@ -63,10 +63,15 @@ from nemo_gym.server_utils import (
 )
 
 
-def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  # pragma: no cover
+def _setup_env_command(dir_path: Path, global_config_dict: DictConfig, top_level_name: Optional[str] = None) -> str:  # pragma: no cover
     head_server_deps = global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]
 
-    uv_venv_cmd = f"uv venv --seed --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} .venv"
+    if top_level_name is not None:
+        venv = f".venv-{top_level_name}"
+    else:
+        venv = ".venv"
+
+    uv_venv_cmd = f"uv venv --seed --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} {venv}"
 
     has_pyproject_toml = exists(f"{dir_path / 'pyproject.toml'}")
     has_requirements_txt = exists(f"{dir_path / 'requirements.txt'}")
@@ -86,9 +91,13 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
     else:
         raise RuntimeError(f"Missing pyproject.toml or requirements.txt for uv venv setup in server dir: {dir_path}")
 
+    if top_level_name is not None:
+        uv_venv_cmd = f"{uv_venv_cmd} > >(sed 's/^/({top_level_name}) /') 2> >(sed 's/^/({top_level_name}) /' >&2)"
+        install_cmd = f"{install_cmd} > >(sed 's/^/({top_level_name}) /') 2> >(sed 's/^/({top_level_name}) /' >&2)"
+
     cmd = f"""cd {dir_path} \\
     && {uv_venv_cmd} \\
-    && source .venv/bin/activate \\
+    && source {venv}/bin/activate \\
     && {install_cmd} \\
     """
 
@@ -103,8 +112,8 @@ def _run_command(command: str, working_dir_path: Path, top_level_name: Optional[
         custom_env["PYTHONPATH"] = f"{work_dir}:{py_path}"
     else:
         custom_env["PYTHONPATH"] = work_dir
-    redirect_stdout = None
-    redirect_stderr = None
+    redirect_stdout = sys.stdout
+    redirect_stderr = sys.stderr
     if top_level_name is not None:
         redirect_stdout = open(f"{work_dir}/run-{top_level_name}.out.log", "a")
         redirect_stderr = open(f"{work_dir}/run-{top_level_name}.err.log", "a")
@@ -223,12 +232,12 @@ class RunHelper:  # pragma: no cover
 
             dir_path = PARENT_DIR / Path(first_key, second_key)
 
-            command = f"""{_setup_env_command(dir_path, global_config_dict)} \\
+            command = f"""{_setup_env_command(dir_path, global_config_dict, top_level_path)} \\
     && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
     {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(top_level_path)} \\
     python {str(entrypoint_fpath)}"""
 
-            process = _run_command(command, dir_path, top_level_path)
+            process = _run_command(command, dir_path)
             self._processes[top_level_path] = process
 
             host = server_config_dict.get("host")
