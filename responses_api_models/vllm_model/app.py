@@ -20,7 +20,6 @@ from uuid import uuid4
 
 from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from nemo_gym.base_responses_api_model import (
@@ -118,7 +117,7 @@ class VLLMModel(SimpleResponsesAPIModel):
 
     async def _handle_native_responses_api(
         self, client: NeMoGymAsyncOpenAI, body: NeMoGymResponseCreateParamsNonStreaming
-    ) -> JSONResponse:
+    ) -> NeMoGymResponse:
         body_dict = body.model_dump(exclude_unset=True)
         body_dict["model"] = self.config.model
 
@@ -199,8 +198,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             vllm_response_dict.pop("input_messages", None)
             vllm_response_dict.pop("output_messages", None)
 
-        validated_response = NeMoGymResponse.model_validate(vllm_response_dict)
-        return JSONResponse(content=validated_response.model_dump(mode="json", exclude_none=True), status_code=200)
+        return NeMoGymResponse.model_validate(vllm_response_dict)
 
     async def _handle_chat_completions_responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming
