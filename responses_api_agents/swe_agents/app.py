@@ -106,10 +106,6 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
 
     # Agent framework configuration
-    agent_framework: str = Field(
-        default="swe_agent",
-        description="Agent framework to use: swe_agent or openhands",
-    )
     agent_config: Optional[str] = Field(default=None, description="Path to agent configuration file")
     agent_tools_file: Optional[str] = Field(
         default=None, description="Path to JSON file containing tool definitions in OpenAI format (for SWE-agent)"
@@ -174,7 +170,6 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
 
 
 class SWEBenchMetrics(BaseModel):
-    agent_framework: str
     instance_id: str
     instance_dir: str
 
@@ -223,12 +218,11 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
     def model_post_init(self, __context: Any) -> None:
         # Pre-build OpenHands environment if using openhands framework
-        if self.config.agent_framework == "openhands":
-            self.config.openhands_setup_dir = setup_openhands_environment(
-                agent_framework_repo=self.config.agent_framework_repo,
-                agent_framework_commit=self.config.agent_framework_commit,
-                debug=self.config.debug,
-            )
+        self.config.openhands_setup_dir = setup_openhands_environment(
+            agent_framework_repo=self.config.agent_framework_repo,
+            agent_framework_commit=self.config.agent_framework_commit,
+            debug=self.config.debug,
+        )
         self.config.swebench_setup_dir = setup_swebench_environment()
         self.config.r2e_gym_setup_dir = setup_r2e_gym_environment()
 
@@ -264,7 +258,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             "problem_info": problem_info,
             "model_endpoint": self._model_endpoint,
             "body": body,
-            "agent_framework": self.config.agent_framework,
             "agent_config": self.config.agent_config,
             "agent_tools_file": self.config.agent_tools_file,
             "agent_max_turns": self.config.agent_max_turns,
