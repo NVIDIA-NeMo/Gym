@@ -44,7 +44,6 @@ from nemo_gym.openai_utils import (
 from nemo_gym.profiling import Profiler
 from nemo_gym.server_utils import get_server_url
 from responses_api_agents.swe_agents.utils import (
-    extract_problem_info,
     run_swebench_evaluation,
     setup_openhands_environment,
     setup_r2e_gym_environment,
@@ -239,10 +238,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         # Extract problem information from request
-        problem_info = extract_problem_info(
-            body,
-            self.config.container_formatter,
-        )
+        problem_info = body.metadata | {"container_formatter": self.config.container_formatter}
 
         # Create persistent directory for I/O and logs in local workspace
         instance_dir = (
