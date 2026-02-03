@@ -20,10 +20,10 @@ import time
 import uuid
 from asyncio import Semaphore
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Optional
 
 import ray
-from pydantic import ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
@@ -39,14 +39,11 @@ from nemo_gym.global_config import OmegaConf, get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseOutputMessage,
-    NeMoGymResponseOutputText,
 )
 from nemo_gym.profiling import Profiler
 from responses_api_agents.swe_agents.utils import (
     convert_tools_to_function_format,
     convert_trajectory_to_output_items,
-    extract_input_messages_from_trajectory,
     extract_problem_info,
     get_model_endpoint,
     run_swebench_evaluation,
@@ -176,18 +173,14 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
     debug: bool = False
 
 
-class SWEBenchVerifyResponse(BaseVerifyResponse):
-    """Response format for SWE-bench verification."""
+class SWEBenchMetrics(BaseModel):
+    agent_framework: str
+    instance_id: str
+    instance_dir: str
 
-    model_config = {"extra": "allow"}
-
-    # Additional SWE-bench specific fields
-    swebench_metrics: Optional[Dict[str, Any]] = None
-
-    # Additional numeric fields for rollout statistics
-    resolved: Optional[float] = None  # 1.0 if resolved, 0.0 otherwise
-    patch_exists: Optional[float] = None  # 1.0 if patch exists, 0.0 otherwise
-    patch_successfully_applied: Optional[float] = None  # 1.0 if patch applied, 0.0 otherwise
+    resolved: bool
+    patch_exists: bool
+    patch_successfully_applied: bool
 
     # Profiling time metrics to report
     ray_queue_time: float
@@ -209,6 +202,10 @@ class SWEBenchVerifyResponse(BaseVerifyResponse):
     hit_empty_trajectory: bool
     hit_success: bool
     hit_responses_exception: bool
+
+
+class SWEBenchVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
+    pass
 
 
 class SWEBenchWrapper(SimpleResponsesAPIAgent):
@@ -307,26 +304,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 self.config.agent_framework,
             )
 
-        # If no trajectory or empty output, create a summary message
-        if not output_items:
-            output_items = [
-                NeMoGymResponseOutputMessage(
-                    id=f"msg-{problem_info.get('instance_id', 'unknown')}",
-                    content=[
-                        NeMoGymResponseOutputText(
-                            type="output_text",
-                            text=json.dumps(
-                                {k: v for k, v in result.items() if k not in ["trajectory", "tools"]}, indent=2
-                            ),
-                            annotations=[],
-                        )
-                    ],
-                    role="assistant",
-                    status="completed",
-                    type="message",
-                )
-            ]
-
         # Store the full result in metadata for the verify step
         # Note: metadata values must be strings for NeMoGymResponse
         metadata = {
@@ -338,17 +315,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             "hit_empty_trajectory_str": json.dumps(not trajectory),
             "hit_responses_exception_str": json.dumps(False),
         }
-
-        # Add evaluation results to metadata (convert to strings)
-        for key in ["resolved", "patch_exists", "patch_successfully_applied"]:
-            if key in result:
-                metadata[key] = str(result[key])
-
-        # For complex metrics, store as JSON string
-        if "swe-bench-metrics" in result:
-            metadata["swe-bench-metrics"] = json.dumps(result["swe-bench-metrics"])
-
-        metadata["timing_metrics"] = metrics_fpath.read_text()
 
         return NeMoGymResponse(
             id=f"swebench-{problem_info.get('instance_id', 'unknown')}",
@@ -363,7 +329,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         )
 
     async def run(self, body: BaseRunRequest) -> SWEBenchVerifyResponse:
-        """Run and verify SWE-bench solution."""
         async with self.sem:
             if self.config.debug:
                 print(
@@ -373,79 +338,38 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 self.config.concurrency - self.sem._value
             )
 
-            # Fix None values in responses_create_params to use defaults
-            # This is needed because the pydantic model has non-Optional fields with defaults
+            return await self._run(body)
 
-            update_dict = {}
-            # SWE-agent processes tool calls sequentially, OpenHands can do parallel
-            update_dict["parallel_tool_calls"] = False if self.config.agent_framework == "swe_agent" else True
-            if body.responses_create_params.tool_choice is None:
-                update_dict["tool_choice"] = "auto"
+    async def _run(self, body: BaseRunRequest) -> SWEBenchVerifyResponse:
+        # SWE-agent processes tool calls sequentially, OpenHands can do parallel
+        body.responses_create_params.parallel_tool_calls = (
+            False if self.config.agent_framework == "swe_agent" else True
+        )
+        if body.responses_create_params.tool_choice is None:
+            body.responses_create_params.tool_choice = "auto"
 
-            # Create a copy with the fixed values if needed
-            fixed_params = (
-                body.responses_create_params.model_copy(update=update_dict)
-                if update_dict
-                else body.responses_create_params
-            )
+        response = await self.responses(body.responses_create_params)
 
-            # Run the evaluation
-            response = await self.responses(fixed_params)
+        # Extract metrics from response metadata and remove metadata from response after extracting metrics
+        metadata, response.metadata = response.metadata, None
 
-            # Extract initial input messages from the response output and get filtered output
-            # These are the system/user messages that were actually sent to the agent
-            input_messages, filtered_output = extract_input_messages_from_trajectory(response.output)
+        params_with_input = body.responses_create_params.model_copy(
+            update={
+                "input": json.loads(metadata["input"]),
+                "tools": [t.model_dump() for t in response.tools] if response.tools else [],
+            }
+        )
 
-            # Update response with filtered output (system/user messages removed)
-            response = response.model_copy(update={"output": filtered_output})
+        metrics = SWEBenchMetrics.model_validate_json(metadata["metrics"])
+        reward = 1.0 if metrics.resolved else 0.0
 
-            # Add the extracted input messages and tools to the params
-            # Note: tools should already be in the correct format from the response
-            params_with_input = fixed_params.model_copy(
-                update={
-                    "input": input_messages,
-                    "tools": [t.model_dump() for t in response.tools] if response.tools else [],
-                }
-            )
-
-            # Extract metrics from response metadata
-            metadata = response.metadata or {}
-            # Remove metadata from response after extracting metrics
-            response = response.model_copy(update={"metadata": None})
-
-            # Parse metrics from JSON string if present
-            metrics = json.loads(metadata.get("swe-bench-metrics", "{}")) if "swe-bench-metrics" in metadata else {}
-
-            # Extract individual metrics with proper type conversion
-            resolved = metrics.get("resolved") or (metadata.get("resolved") == "True")
-            patch_exists = metrics.get("patch_exists") or (metadata.get("patch_exists") == "True")
-            patch_applied = metrics.get("patch_successfully_applied") or (
-                metadata.get("patch_successfully_applied") == "True"
-            )
-
-            reward = 1.0 if resolved else 0.0
-
-            hit_metrics = {k.removesuffix("_str"): json.loads(v) for k, v in metadata.items() if k.startswith("hit_")}
-
-            # Build verification response with top-level numeric fields for statistics
-            return SWEBenchVerifyResponse(
-                responses_create_params=params_with_input,
-                response=response,
-                reward=reward,
-                resolved=1.0 if resolved else 0.0,
-                patch_exists=1.0 if patch_exists else 0.0,
-                patch_successfully_applied=1.0 if patch_applied else 0.0,
-                swebench_metrics=metrics,
-                metadata={
-                    "instance_id": metadata.get("instance_id", "unknown"),
-                    "agent_framework": self.config.agent_framework,
-                    "patch_exists": patch_exists,
-                    "patch_successfully_applied": patch_applied,
-                    "resolved": resolved,
-                },
-                **json.loads(metadata["timing_metrics"]),
-                **hit_metrics,
-            )
+        # Build verification response with top-level numeric fields for statistics
+        return SWEBenchVerifyResponse(
+            responses_create_params=params_with_input,
+            response=response,
+            reward=reward,
+            **metrics.model_dump(),
+        )
 
 
 if __name__ == "__main__":
