@@ -22,8 +22,6 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from openai.types.responses.function_tool import FunctionTool
-
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -374,34 +372,6 @@ def get_trajectory_and_tools(
         print(f"Unsupported agent framework: {agent_framework}", flush=True)
 
     return trajectory_data, tools
-
-
-def convert_tools_to_function_format(raw_tools: List[Dict]) -> List:
-    """Convert tools from ChatCompletion format to Response FunctionTool format.
-
-    Args:
-        raw_tools: List of tools in ChatCompletion format
-
-    Returns:
-        List of FunctionTool objects
-    """
-
-    tools = []
-    for tool in raw_tools:
-        # Tools from SWE-agent are in ChatCompletion format with nested structure
-        # Convert to Response FunctionTool format which is flat
-        if tool.get("type") == "function" and "function" in tool:
-            func_def = tool["function"]
-            # Create FunctionTool object with flat structure
-            function_tool = FunctionTool(
-                type="function",
-                name=func_def.get("name", ""),
-                description=func_def.get("description"),
-                parameters=func_def.get("parameters"),
-                strict=func_def.get("strict"),  # May be None
-            )
-            tools.append(function_tool)
-    return tools
 
 
 ### SWE Agent Harness Utils ###
