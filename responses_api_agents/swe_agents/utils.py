@@ -21,11 +21,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import get_first_server_config_dict
 from responses_api_agents.swe_agents.run_openhands import (
     RunOpenHandsAgent,
     SupportedAgentFrameworks,
@@ -132,18 +130,6 @@ def extract_problem_info(
     }
 
     return problem_info
-
-
-def get_model_endpoint(model_server_name: str) -> str:
-    global_config_dict = get_global_config_dict()
-
-    model_server_config = get_first_server_config_dict(
-        global_config_dict,
-        model_server_name,
-    )
-
-    base_url = f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
-    return base_url
 
 
 async def run_swebench_evaluation(

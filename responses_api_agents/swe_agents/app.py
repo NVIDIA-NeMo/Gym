@@ -42,9 +42,9 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.profiling import Profiler
+from nemo_gym.server_utils import get_server_url
 from responses_api_agents.swe_agents.utils import (
     extract_problem_info,
-    get_model_endpoint,
     run_swebench_evaluation,
     setup_openhands_environment,
     setup_r2e_gym_environment,
@@ -219,6 +219,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     _container_counter: ConcurrentContainerCounter
     _global_config_dict_str: str
     _vllm_converter: VLLMConverter
+    _model_endpoint: str
 
     def model_post_init(self, __context: Any) -> None:
         self._sem = Semaphore(self.config.concurrency)
@@ -241,6 +242,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         self._global_config_dict_str = shlex.quote(OmegaConf.to_yaml(get_global_config_dict()))
         self._vllm_converter = VLLMConverter(return_token_id_information=True)
+        self._model_endpoint = get_server_url(self.config.model_server.name)
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         # Extract problem information from request
@@ -248,9 +250,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             body,
             self.config.container_formatter,
         )
-
-        # Get model endpoint
-        model_endpoint = get_model_endpoint(self.config.model_server.name)
 
         # Create persistent directory for I/O and logs in local workspace
         instance_dir = (
@@ -264,7 +263,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         ray_queue_time = time.time()
         params = {
             "problem_info": problem_info,
-            "model_endpoint": model_endpoint,
+            "model_endpoint": self._model_endpoint,
             "body": body,
             "agent_framework": self.config.agent_framework,
             "agent_config": self.config.agent_config,
