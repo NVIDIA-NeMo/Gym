@@ -26,7 +26,6 @@ from nemo_gym.openai_utils import (
 )
 from responses_api_agents.swe_agents.run_openhands import (
     RunOpenHandsAgent,
-    SupportedAgentFrameworks,
     SweBenchGenerationConfig,
     SweBenchInferenceConfig,
 )
@@ -181,7 +180,6 @@ async def run_swebench_evaluation(
 
     cfg = SweBenchGenerationConfig(
         output_file=output_file,
-        agent_framework=SupportedAgentFrameworks.openhands,
         agent_framework_repo=agent_framework_repo,
         agent_framework_commit=agent_framework_commit,
         agent_config=agent_config,

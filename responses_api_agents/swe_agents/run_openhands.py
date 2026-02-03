@@ -21,18 +21,12 @@ import shutil
 import time
 import uuid
 from dataclasses import dataclass, field
-from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
 import tomlkit
 from gprof2dot import main as gprof2dot_main
 from pydot import graph_from_dot_file
-
-
-class SupportedAgentFrameworks(str, Enum):
-    swe_agent = "swe_agent"
-    openhands = "openhands"
 
 
 SUPPORTED_DATASETS = [
@@ -58,7 +52,6 @@ class SweBenchInferenceConfig:
 @dataclass
 class SweBenchGenerationConfig:
     output_file: Path
-    agent_framework: SupportedAgentFrameworks
     agent_framework_repo: str | None = None
     agent_framework_commit: str = "HEAD"
     agent_config: str | None = None
@@ -516,38 +509,37 @@ class RunOpenHandsAgent:
         ]
 
         # Add OpenHands setup directory mount if available (for OpenHands)
-        if mode == "agent" and self.cfg.agent_framework == SupportedAgentFrameworks.openhands:
-            # Mount the entire setup directory at both /openhands_setup and its original absolute path
-            # This is needed because poetry and other tools have hardcoded absolute paths
-            # print(
-            #     f"Mounting pre-built OpenHands from: {self.openhands_setup_dir}",
-            #     flush=True,
-            # )
-            mount_args.append(f"--mount type=bind,src={self.openhands_setup_dir},dst=/openhands_setup,ro")
-            mount_args.append(f"--mount type=bind,src={self.openhands_setup_dir},dst={self.openhands_setup_dir},ro")
-            # Mount only the venv and miniforge as read-only to prevent mutation while keeping the rest writable
-            venv_path = Path(self.openhands_setup_dir) / "OpenHands/.venv"
-            mount_args.append(f"--mount type=bind,src={venv_path},dst=/openhands_setup/OpenHands/.venv,ro")
-            mount_args.append(f"--mount type=bind,src={venv_path},dst={venv_path},ro")
+        # Mount the entire setup directory at both /openhands_setup and its original absolute path
+        # This is needed because poetry and other tools have hardcoded absolute paths
+        # print(
+        #     f"Mounting pre-built OpenHands from: {self.openhands_setup_dir}",
+        #     flush=True,
+        # )
+        mount_args.append(f"--mount type=bind,src={self.openhands_setup_dir},dst=/openhands_setup,ro")
+        mount_args.append(f"--mount type=bind,src={self.openhands_setup_dir},dst={self.openhands_setup_dir},ro")
+        # Mount only the venv and miniforge as read-only to prevent mutation while keeping the rest writable
+        venv_path = Path(self.openhands_setup_dir) / "OpenHands/.venv"
+        mount_args.append(f"--mount type=bind,src={venv_path},dst=/openhands_setup/OpenHands/.venv,ro")
+        mount_args.append(f"--mount type=bind,src={venv_path},dst={venv_path},ro")
 
-            mount_args.extend(
-                [
-                    # make everything in OpenHands read-only
-                    f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands,dst=/openhands_setup/OpenHands,ro",
-                    f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/.eval_sessions,dst=/openhands_setup/OpenHands/.eval_sessions",
-                    f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/.eval_sessions,dst={self.openhands_setup_dir}/OpenHands/.eval_sessions",
-                    f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/logs,dst=/openhands_setup/OpenHands/logs",
-                    f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/logs,dst={self.openhands_setup_dir}/OpenHands/logs",
-                    f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/evaluation/oh,dst=/openhands_setup/OpenHands/evaluation/oh",
-                    f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/evaluation/oh,dst={self.openhands_setup_dir}/OpenHands/evaluation/oh",
-                    # Data
-                    f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl",
-                ]
-            )
+        mount_args.extend(
+            [
+                # make everything in OpenHands read-only
+                f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands,dst=/openhands_setup/OpenHands,ro",
+                f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/.eval_sessions,dst=/openhands_setup/OpenHands/.eval_sessions",
+                f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/.eval_sessions,dst={self.openhands_setup_dir}/OpenHands/.eval_sessions",
+                f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/logs,dst=/openhands_setup/OpenHands/logs",
+                f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/logs,dst={self.openhands_setup_dir}/OpenHands/logs",
+                f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/evaluation/oh,dst=/openhands_setup/OpenHands/evaluation/oh",
+                f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/evaluation/oh,dst={self.openhands_setup_dir}/OpenHands/evaluation/oh",
+                # Data
+                f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl",
+            ]
+        )
 
-            miniforge3_path = Path(self.openhands_setup_dir) / "miniforge3"
-            mount_args.append(f"--mount type=bind,src={miniforge3_path},dst=/openhands_setup/miniforge3,ro")
-            mount_args.append(f"--mount type=bind,src={miniforge3_path},dst={miniforge3_path},ro")
+        miniforge3_path = Path(self.openhands_setup_dir) / "miniforge3"
+        mount_args.append(f"--mount type=bind,src={miniforge3_path},dst=/openhands_setup/miniforge3,ro")
+        mount_args.append(f"--mount type=bind,src={miniforge3_path},dst={miniforge3_path},ro")
 
         # Add SWE-bench setup directory mount if available (for evaluation)
         if mode == "eval" and data_point["dataset_name"] != "nv-internal-1":
