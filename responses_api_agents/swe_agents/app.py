@@ -205,6 +205,27 @@ class SWEBenchVerifyResponse(BaseVerifyResponse):
     patch_exists: Optional[float] = None  # 1.0 if patch exists, 0.0 otherwise
     patch_successfully_applied: Optional[float] = None  # 1.0 if patch applied, 0.0 otherwise
 
+    # Profiling time metrics to report
+    # ray_queue_time: float
+    # generation_apptainer_spinup_time: float
+    # create_runtime_time: float
+    # container_initialization_time: float
+    # connect_to_runtime_time: float
+    # runtime_initialization_fn_time: float
+    # total_command_exec_time: float
+    # total_model_call_time: float
+    # final_eval_apptainer_spinup_time: float
+    # final_eval_time: float
+
+    # Exit condition metrics to report
+    # TODO add more exit conditions
+    # hit_sample_timeout: bool
+    # hit_trajectory_command_exec_timeout: bool
+    # hit_eval_timeout: bool
+    # hit_results_parsing_failure: bool
+    # hit_success: bool
+    # hit_unknown: bool
+
 
 class SWEBenchWrapper(SimpleResponsesAPIAgent):
     """Wrapper for NeMo-Skills SWE-bench evaluation in NeMo-Gym."""
@@ -326,6 +347,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "agent_framework": self.config.agent_framework,
                 "has_trajectory": str(trajectory is not None),
                 "instance_id": result.get("instance_id", problem_info.get("instance_id", "unknown")),
+                "instance_dir": instance_dir,
             }
 
             # Add evaluation results to metadata (convert to strings)
