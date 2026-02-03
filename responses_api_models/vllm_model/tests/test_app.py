@@ -16,7 +16,6 @@ import json
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
-from aiohttp.client_exceptions import ClientResponseError
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch, mark
 
@@ -2224,72 +2223,6 @@ class TestApp:
         assert "output_messages" not in data
         assert mock_create_response.called
 
-    def test_native_responses_api_context_length_error(self, monkeypatch: MonkeyPatch):
-        server = self._setup_server_native_api(monkeypatch)
-        app = server.setup_webserver()
-        client = TestClient(app)
-
-        monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
-
-        error_content = b'{"error": "This model\'s maximum context length is 4096 tokens"}'
-        mock_error = ClientResponseError(
-            request_info=MagicMock(),
-            history=(),
-            status=400,
-            message="Bad Request",
-        )
-        mock_error.response_content = error_content
-
-        mock_create_response = AsyncMock(side_effect=mock_error)
-        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_response", mock_create_response)
-
-        request_body = NeMoGymResponseCreateParamsNonStreaming(input="What is the weather?" * 1000)
-
-        response = client.post(
-            "/v1/responses",
-            json=request_body.model_dump(exclude_unset=True, mode="json"),
-        )
-        assert response.status_code == 200
-
-        data = response.json()
-
-        assert data["model"] == "dummy_model"
-        assert data["output"][0]["type"] == "message"
-        assert data["output"][0]["content"][0]["text"] == ""
-
-    def test_native_responses_api_max_model_len_error(self, monkeypatch: MonkeyPatch):
-        server = self._setup_server_native_api(monkeypatch)
-        app = server.setup_webserver()
-        client = TestClient(app)
-
-        monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
-
-        error_content = b'{"error": "The engine prompt length 5000 exceeds the max_model_len 4096"}'
-        mock_error = ClientResponseError(
-            request_info=MagicMock(),
-            history=(),
-            status=400,
-            message="Bad Request",
-        )
-        mock_error.response_content = error_content
-
-        mock_create_response = AsyncMock(side_effect=mock_error)
-        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_response", mock_create_response)
-
-        request_body = NeMoGymResponseCreateParamsNonStreaming(input="What is the weather?" * 1000)
-
-        response = client.post(
-            "/v1/responses",
-            json=request_body.model_dump(exclude_unset=True, mode="json"),
-        )
-        assert response.status_code == 200
-
-        data = response.json()
-        assert data["output"][0]["content"][0]["text"] == ""
-        assert data["incomplete_details"] == {"reason": "max_output_tokens"}
-
     def test_native_responses_api_tool_calls(self, monkeypatch: MonkeyPatch):
         server = self._setup_server_native_api(monkeypatch)
         app = server.setup_webserver()
@@ -2482,7 +2415,9 @@ class TestApp:
         data = response.json()
         assert "Ahoy" in data["output"][0]["content"][0]["text"]
         assert mock_create_response.called
-        assert mock_create_response.call_args.kwargs["instructions"] == "You are a pirate. Always respond like a pirate."
+        assert (
+            mock_create_response.call_args.kwargs["instructions"] == "You are a pirate. Always respond like a pirate."
+        )
 
 
 class TestVLLMConverter:

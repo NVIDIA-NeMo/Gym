@@ -206,6 +206,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(body)
         body.model = self.config.model
 
+        # Chat Completion Create Params -> Chat Completion
         chat_completion_response = await self.chat_completions(request, chat_completion_create_params)
 
         choice = chat_completion_response.choices[0]
@@ -213,6 +214,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         response_output = self._converter.postprocess_chat_response(choice)
         response_output_dicts = [item.model_dump() for item in response_output]
 
+        # Chat Completion -> Response
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
