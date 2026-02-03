@@ -58,11 +58,11 @@ tail -n 1 responses_api_agents/verifiers_agent/data/acereason-math-example-rollo
 
 ## Testing new prime environments from environments hub
 
-Testing new prime environments currently requires a few steps. We have tested a handful of prime environments, but not all, and found some to work for us, others to not or require various paid API keys. 
+Testing new prime environments currently requires a few steps. 
 
-Note that for Nemo RL training, multi-step environments currently require disabling monotonicity checks and prefix token id correction, until we patch token propagation into verifiers (or something).   
+Note that for Nemo RL training, multi-step environments currently require disabling replace prefix tokens and on policy assertion (todo: link).   
 
-Some of the environments we found to work in developing this integration include: `primeintellect/acereason-math`, `primeintellect/i3-math`, `kalomaze/alphabet-sort` (multi-turn), `primeintellect/ascii-tree`.
+Some of the environments we found to work well as exampples include: `primeintellect/acereason-math`, `primeintellect/ascii-tree` and `primeintellect/alphabet-sort`.
 
 ### Creating a new dataset
 
@@ -93,7 +93,7 @@ ascii-tree
 ```
 ### Update agent config
 Create `configs/ascii-tree.yaml`, primarily updating env id, and any other env specific args: 
-<!-- we could prob do this automatically with one config, but for now -->
+<!-- we could probably do this automatically with one config, but for now -->
 ```
 verifiers_agent:
   responses_api_agents:
@@ -133,10 +133,7 @@ Note we only change the env_id for each config so far, but environments can acce
 
 ## Training 
 
-For single prime environment training, the datasets created by `create_dataset.py` work for environments we tested. Training should be straightforward as with any other NeMo-Gym environment.
-
-For multi prime environment training, we suggest making a separate agent for each environment, essentially duplicating this folder with a prefix added to the name, and updating the agent config to prefix the env name in the agent name. Also update requirements. Then, we should update `agent_ref` in each env's dataset to match the new env-specific agent name, then blend them together in one for trainig, like in normal NeMo-Gym multi-environment setup.
-
+Training with prime environments works like any other environment. However, using multiple prime environments may work best with separate agent servers for each environment for dependency isolation.
 
 
 # Licensing information
