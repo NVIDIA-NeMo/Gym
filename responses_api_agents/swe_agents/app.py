@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 import ray
+from openai.types.responses.function_tool import FunctionTool
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
@@ -42,7 +43,6 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.profiling import Profiler
 from responses_api_agents.swe_agents.utils import (
-    convert_tools_to_function_format,
     convert_trajectory_to_output_items,
     extract_problem_info,
     get_model_endpoint,
@@ -295,7 +295,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         # Convert tools from ChatCompletion format to Response FunctionTool format
         raw_tools = result.get("tools", [])
-        tools = convert_tools_to_function_format(raw_tools) if raw_tools else []
+        tools = [FunctionTool.model_validate(tool["function"] | {"type": "function"}) for tool in raw_tools]
 
         # Convert trajectory to NeMoGym output items
         if trajectory:
@@ -304,26 +304,20 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 self.config.agent_framework,
             )
 
-        # Store the full result in metadata for the verify step
         # Note: metadata values must be strings for NeMoGymResponse
         metadata = {
-            "agent_framework": self.config.agent_framework,
-            "has_trajectory": str(trajectory is not None),
-            "instance_id": result.get("instance_id", problem_info.get("instance_id", "unknown")),
-            "instance_dir": instance_dir,
-            "hit_success_str": json.dumps(bool(output_items)),
-            "hit_empty_trajectory_str": json.dumps(not trajectory),
-            "hit_responses_exception_str": json.dumps(False),
+            "input": None,
+            "metrics": None,
         }
 
         return NeMoGymResponse(
             id=f"swebench-{problem_info.get('instance_id', 'unknown')}",
             created_at=int(time.time()),
-            model=getattr(body, "model", "gpt-4.1-2025-04-14"),
+            model=body.model,
             object="response",
             output=output_items,
-            parallel_tool_calls=(False if self.config.agent_framework == "swe_agent" else True),
-            tool_choice="auto",
+            parallel_tool_calls=body.parallel_tool_calls,
+            tool_choice=body.tool_choice,
             tools=tools,
             metadata=metadata,
         )
