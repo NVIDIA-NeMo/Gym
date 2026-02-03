@@ -109,28 +109,6 @@ def get_openhands_trajectory_from_completions(
 ### Run SWE Harness Utils ###
 
 
-def extract_problem_info(
-    body: NeMoGymResponseCreateParamsNonStreaming,
-    container_formatter: str | list[str],
-) -> Dict:
-    # Get metadata
-    metadata = body.metadata
-
-    # Build problem info
-    problem_info = {
-        "problem_statement": metadata["problem_statement"],
-        "instance_id": metadata["instance_id"],
-        "base_commit": metadata["base_commit"],
-        "dataset_name": metadata["dataset_name"],
-        "split": metadata["split"],
-        # TODO (sugam): refactor this to a cleaner approach
-        "instance_dict": metadata["instance_dict"],
-        "container_formatter": container_formatter,
-    }
-
-    return problem_info
-
-
 async def run_swebench_evaluation(
     problem_info: Dict,
     model_endpoint: str,
