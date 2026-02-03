@@ -2109,7 +2109,6 @@ class TestApp:
         assert mock_create_response.call_args.kwargs["model"] == "dummy_model"
 
     def test_native_responses_api_with_reasoning(self, monkeypatch: MonkeyPatch):
-        """Test that vLLM returns reasoning items natively (no client-side parsing needed)."""
         server = self._setup_server_native_api(monkeypatch)
         app = server.setup_webserver()
         client = TestClient(app)
@@ -2258,6 +2257,232 @@ class TestApp:
         assert data["model"] == "dummy_model"
         assert data["output"][0]["type"] == "message"
         assert data["output"][0]["content"][0]["text"] == ""
+
+    def test_native_responses_api_max_model_len_error(self, monkeypatch: MonkeyPatch):
+        server = self._setup_server_native_api(monkeypatch)
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
+        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
+
+        error_content = b'{"error": "The engine prompt length 5000 exceeds the max_model_len 4096"}'
+        mock_error = ClientResponseError(
+            request_info=MagicMock(),
+            history=(),
+            status=400,
+            message="Bad Request",
+        )
+        mock_error.response_content = error_content
+
+        mock_create_response = AsyncMock(side_effect=mock_error)
+        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_response", mock_create_response)
+
+        request_body = NeMoGymResponseCreateParamsNonStreaming(input="What is the weather?" * 1000)
+
+        response = client.post(
+            "/v1/responses",
+            json=request_body.model_dump(exclude_unset=True, mode="json"),
+        )
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["output"][0]["content"][0]["text"] == ""
+        assert data["incomplete_details"] == {"reason": "max_output_tokens"}
+
+    def test_native_responses_api_tool_calls(self, monkeypatch: MonkeyPatch):
+        server = self._setup_server_native_api(monkeypatch)
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        mock_vllm_response = {
+            "id": "resp_native_tools",
+            "created_at": FIXED_TIME,
+            "model": "dummy_model",
+            "object": "response",
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+            "output": [
+                {
+                    "id": "fc_123",
+                    "type": "function_call",
+                    "name": "get_weather",
+                    "arguments": '{"location": "San Francisco"}',
+                    "call_id": "call_123",
+                    "status": "completed",
+                }
+            ],
+        }
+
+        mock_create_response = AsyncMock(return_value=mock_vllm_response)
+        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_response", mock_create_response)
+
+        request_body = NeMoGymResponseCreateParamsNonStreaming(input="What is the weather in San Francisco?")
+
+        response = client.post(
+            "/v1/responses",
+            json=request_body.model_dump(exclude_unset=True, mode="json"),
+        )
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["output"][0]["type"] == "function_call"
+        assert data["output"][0]["name"] == "get_weather"
+        assert data["output"][0]["arguments"] == '{"location": "San Francisco"}'
+        assert mock_create_response.called
+
+    def test_native_responses_api_multiturn(self, monkeypatch: MonkeyPatch):
+        server = self._setup_server_native_api(monkeypatch)
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        mock_vllm_response = {
+            "id": "resp_native_multiturn",
+            "created_at": FIXED_TIME,
+            "model": "dummy_model",
+            "object": "response",
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+            "output": [
+                {
+                    "id": "msg_789",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "The capital of France is Paris.",
+                            "annotations": [],
+                        }
+                    ],
+                    "status": "completed",
+                }
+            ],
+        }
+
+        mock_create_response = AsyncMock(return_value=mock_vllm_response)
+        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_response", mock_create_response)
+
+        request_body = NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {"role": "user", "content": "What is the capital of Germany?"},
+                {"role": "assistant", "content": "The capital of Germany is Berlin."},
+                {"role": "user", "content": "What about France?"},
+            ]
+        )
+
+        response = client.post(
+            "/v1/responses",
+            json=request_body.model_dump(exclude_unset=True, mode="json"),
+        )
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["output"][0]["content"][0]["text"] == "The capital of France is Paris."
+        assert mock_create_response.called
+        # Verify the input was passed through
+        assert mock_create_response.call_args.kwargs["input"] == [
+            {"role": "user", "content": "What is the capital of Germany?"},
+            {"role": "assistant", "content": "The capital of Germany is Berlin."},
+            {"role": "user", "content": "What about France?"},
+        ]
+
+    def test_native_responses_api_string_input(self, monkeypatch: MonkeyPatch):
+        server = self._setup_server_native_api(monkeypatch)
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        mock_vllm_response = {
+            "id": "resp_native_str",
+            "created_at": FIXED_TIME,
+            "model": "dummy_model",
+            "object": "response",
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+            "output": [
+                {
+                    "id": "msg_str",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Hello there!",
+                            "annotations": [],
+                        }
+                    ],
+                    "status": "completed",
+                }
+            ],
+        }
+
+        mock_create_response = AsyncMock(return_value=mock_vllm_response)
+        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_response", mock_create_response)
+
+        request_body = NeMoGymResponseCreateParamsNonStreaming(input="Hello")
+
+        response = client.post(
+            "/v1/responses",
+            json=request_body.model_dump(exclude_unset=True, mode="json"),
+        )
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["output"][0]["content"][0]["text"] == "Hello there!"
+        assert mock_create_response.called
+        assert mock_create_response.call_args.kwargs["input"] == "Hello"
+
+    def test_native_responses_api_with_instructions(self, monkeypatch: MonkeyPatch):
+        server = self._setup_server_native_api(monkeypatch)
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        mock_vllm_response = {
+            "id": "resp_native_inst",
+            "created_at": FIXED_TIME,
+            "model": "dummy_model",
+            "object": "response",
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+            "output": [
+                {
+                    "id": "msg_inst",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Ahoy! How can I help ye today?",
+                            "annotations": [],
+                        }
+                    ],
+                    "status": "completed",
+                }
+            ],
+        }
+
+        mock_create_response = AsyncMock(return_value=mock_vllm_response)
+        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_response", mock_create_response)
+
+        request_body = NeMoGymResponseCreateParamsNonStreaming(
+            input="Hello",
+            instructions="You are a pirate. Always respond like a pirate.",
+        )
+
+        response = client.post(
+            "/v1/responses",
+            json=request_body.model_dump(exclude_unset=True, mode="json"),
+        )
+        assert response.status_code == 200
+
+        data = response.json()
+        assert "Ahoy" in data["output"][0]["content"][0]["text"]
+        assert mock_create_response.called
+        assert mock_create_response.call_args.kwargs["instructions"] == "You are a pirate. Always respond like a pirate."
 
 
 class TestVLLMConverter:
