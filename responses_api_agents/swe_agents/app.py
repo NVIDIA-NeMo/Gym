@@ -43,7 +43,6 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.profiling import Profiler
 from responses_api_agents.swe_agents.utils import (
-    convert_trajectory_to_output_items,
     extract_problem_info,
     get_model_endpoint,
     run_swebench_evaluation,
@@ -51,6 +50,7 @@ from responses_api_agents.swe_agents.utils import (
     setup_r2e_gym_environment,
     setup_swebench_environment,
 )
+from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 
 
 @ray.remote
@@ -214,12 +214,14 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     config: SWEBenchWrapperConfig
-    sem: Semaphore = None
-    _container_counter: ConcurrentContainerCounter = None
-    _global_config_dict_str: str = None
+
+    _sem: Semaphore
+    _container_counter: ConcurrentContainerCounter
+    _global_config_dict_str: str
+    _vllm_converter: VLLMConverter
 
     def model_post_init(self, __context: Any) -> None:
-        self.sem = Semaphore(self.config.concurrency)
+        self._sem = Semaphore(self.config.concurrency)
         self._container_counter = ConcurrentContainerCounter.remote()
 
         # Pre-build OpenHands environment if using openhands framework
@@ -238,6 +240,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         print(f"Run session ID: {self.config.run_session_id}", flush=True)
 
         self._global_config_dict_str = shlex.quote(OmegaConf.to_yaml(get_global_config_dict()))
+        self._vllm_converter = VLLMConverter(return_token_id_information=True)
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         # Extract problem information from request
@@ -293,13 +296,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         tools = [FunctionTool.model_validate(tool["function"] | {"type": "function"}) for tool in raw_tools]
 
         # Extract trajectory and convert to proper NeMoGym format
-        input_items, output_items = [], []
         trajectory = result.get("trajectory", [])
-        if trajectory:
-            output_items = convert_trajectory_to_output_items(
-                trajectory,
-                self.config.agent_framework,
-            )
+        responses_items = self._vllm_converter.chat_completions_messages_to_responses_items(trajectory)
+        input_items, output_items = split_responses_input_output_items(responses_items)
 
         # Note: metadata values must be strings for NeMoGymResponse
         metadata = {
@@ -320,13 +319,13 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         )
 
     async def run(self, body: BaseRunRequest) -> SWEBenchVerifyResponse:
-        async with self.sem:
+        async with self._sem:
             if self.config.debug:
                 print(
-                    f"Semaphore: {self.config.concurrency - self.sem._value} / {self.config.concurrency}", flush=True
+                    f"Semaphore: {self.config.concurrency - self._sem._value} / {self.config.concurrency}", flush=True
                 )
             body.responses_create_params.metadata["container_concurrency"] = str(
-                self.config.concurrency - self.sem._value
+                self.config.concurrency - self._sem._value
             )
 
             return await self._run(body)
