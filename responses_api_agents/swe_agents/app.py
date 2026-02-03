@@ -19,7 +19,6 @@ import uuid
 from asyncio import Semaphore
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
-
 import ray
 from pydantic import ConfigDict, Field
 
@@ -39,6 +38,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NeMoGymResponseFunctionToolCall,
 )
 from responses_api_agents.swe_agents.utils import (
     convert_tools_to_function_format,
@@ -312,6 +312,17 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 metadata={"error": str(e)},
             )
 
+    def check_finish_tool_call(self, response: NeMoGymResponse) -> bool:
+        """Check if the last message is a finish tool call."""
+        if not response.output:
+            return False
+
+        last_message = response.output[-1]
+        if isinstance(last_message, NeMoGymResponseFunctionToolCall) and last_message.name == "finish":
+            return True
+
+        return False
+
     async def run(self, body: SWEBenchRunRequest) -> SWEBenchVerifyResponse:
         """Run and verify SWE-bench solution."""
         async with self.sem:
@@ -355,8 +366,13 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # Parse metrics from JSON string if present
             metrics = json.loads(metadata.get("swe-bench-metrics", "{}")) if "swe-bench-metrics" in metadata else {}
 
+            # Only consider the response resolved if the finish tool call is present and the resolved metric is True
+            if self.check_finish_tool_call(response):
+                resolved = metrics.get("resolved") or (metadata.get("resolved") == "True")
+            else:
+                resolved = False
+
             # Extract individual metrics with proper type conversion
-            resolved = metrics.get("resolved") or (metadata.get("resolved") == "True")
             patch_exists = metrics.get("patch_exists") or (metadata.get("patch_exists") == "True")
             patch_applied = metrics.get("patch_successfully_applied") or (
                 metadata.get("patch_successfully_applied") == "True"
