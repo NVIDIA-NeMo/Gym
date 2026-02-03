@@ -473,6 +473,22 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     "patch_successfully_applied": patch_applied,
                     "resolved": resolved,
                 },
+                # ray_queue_time=,
+                # generation_apptainer_spinup_time=,
+                # create_runtime_time=,
+                # container_initialization_time=,
+                # connect_to_runtime_time=,
+                # runtime_initialization_fn_time=,
+                # total_command_exec_time=,
+                # total_model_call_time=,
+                # final_eval_apptainer_spinup_time=,
+                # final_eval_time=,
+                # hit_sample_timeout=,
+                # hit_trajectory_command_exec_timeout=,
+                # hit_eval_timeout=,
+                # hit_results_parsing_failure=,
+                # hit_success=,
+                # hit_unknown=,
             )
 
 
