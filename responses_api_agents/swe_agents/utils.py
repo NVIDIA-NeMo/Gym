@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import copy
 import fcntl
 import json
 import os
@@ -210,110 +209,6 @@ def convert_trajectory_to_output_items(
                 )
 
     return output_items
-
-
-### SWE Agent Harness Utils ###
-
-
-def extract_messages(trajectory_item) -> List[Dict]:
-    """
-    Trajectory might have failed assistant messages, hence we take trajectory as ground truth instead of history.
-    Convert a trajectory item into assistant and tool messages.
-    Returns a list of messages.
-    """
-    # Defensive check: if trajectory_item is not a dict, return empty list
-    if not isinstance(trajectory_item, dict):
-        print(f"trajectory_item is not a dict (type: {type(trajectory_item)}). Skipping.", flush=True)
-        return []
-
-    tool_calls = trajectory_item.get("tool_calls")
-    final_message = []
-
-    # Get extra_info safely
-    extra_info = trajectory_item.get("extra_info", {})
-    if isinstance(extra_info, dict):
-        provider_specific_fields = extra_info.get("provider_specific_fields", {})
-    else:
-        provider_specific_fields = {}
-
-    # Create assistant message
-    assistant_msg = {
-        "role": "assistant",
-        "content": trajectory_item.get("response", ""),
-        "thought": trajectory_item.get("thought", ""),
-        "action": trajectory_item.get("action", ""),
-        "agent": "main",
-        "tool_calls": tool_calls,
-        "message_type": "action",
-        "thinking_blocks": [],
-        "provider_specific_fields": provider_specific_fields,
-    }
-    final_message.append(assistant_msg)
-    if tool_calls is not None:
-        # Create tool message
-        tool_msg = {
-            "role": "tool",
-            "content": trajectory_item.get("observation", ""),
-            "agent": "main",
-            "message_type": "observation",
-            "tool_call_ids": trajectory_item.get("tool_call_ids", [""]),
-        }
-        final_message.append(tool_msg)
-
-    return final_message
-
-
-def extract_data_from_trajectory(
-    trajectory_data: List[Dict], history: List[Dict]
-) -> Tuple[List[Dict], Dict[int, Dict]]:
-    """
-    Extract final trajectory from trajectory and history.
-    """
-    final_trajectory = []
-    history_copy = copy.deepcopy(history)
-    trajectories_copy = copy.deepcopy(trajectory_data)
-
-    # Defensive checks for trajectory_data structure
-    if not trajectories_copy or len(trajectories_copy) == 0:
-        print("Empty trajectories_copy, returning empty trajectory", flush=True)
-        return []
-
-    # Check if last trajectory item is a dict
-    if not isinstance(trajectories_copy[-1], dict):
-        print(
-            f"Last trajectory item is not a dict (type: {type(trajectories_copy[-1])}), returning empty trajectory",
-            flush=True,
-        )
-        return []
-
-    # Check if "query" key exists and is a list
-    if "query" not in trajectories_copy[-1] or not isinstance(trajectories_copy[-1]["query"], list):
-        print("'query' key missing or not a list in last trajectory item, returning empty trajectory", flush=True)
-        return []
-
-    if len(trajectories_copy[-1]["query"]) > 0 and len(trajectories_copy[-1]["query"][0]) == 0:  # error case
-        if len(trajectories_copy) < 2:
-            print("Not enough trajectory items for error case, returning empty trajectory", flush=True)
-            return []
-        if not isinstance(trajectories_copy[-2], dict) or "query" not in trajectories_copy[-2]:
-            print("Second-to-last trajectory item is malformed, returning empty trajectory", flush=True)
-            return []
-        final_trajectory = trajectories_copy[-2]["query"].copy()
-        final_trajectory.extend(extract_messages(trajectories_copy[-2]))
-        if len(history_copy) >= 2:
-            user_message = history_copy.pop()
-            assistant_message = history_copy.pop()
-            if isinstance(user_message, dict) and isinstance(assistant_message, dict):
-                user_message["content"] = user_message.get("content", "") + "." + assistant_message.get("content", "")
-                final_trajectory.append(user_message)
-    else:
-        final_trajectory = trajectories_copy[-1]["query"].copy()
-        final_trajectory.extend(extract_messages(trajectories_copy[-1]))
-
-    # Filter out any non-dict items that might have been added
-    final_trajectory = [item for item in final_trajectory if isinstance(item, dict)]
-
-    return final_trajectory
 
 
 ### OpenHands Harness Utils ###
