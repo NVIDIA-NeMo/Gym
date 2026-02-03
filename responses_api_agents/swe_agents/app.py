@@ -223,7 +223,7 @@ class SWEBenchVerifyResponse(BaseVerifyResponse):
     # hit_trajectory_command_exec_timeout: bool
     # hit_eval_timeout: bool
     # hit_results_parsing_failure: bool
-    # hit_success: bool
+    hit_success: bool
     # hit_unknown: bool
 
 
