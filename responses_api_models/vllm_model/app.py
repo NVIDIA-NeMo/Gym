@@ -138,7 +138,9 @@ class VLLMModel(SimpleResponsesAPIModel):
         except ClientResponseError as e:
             result_content_str = e.response_content.decode()
             is_out_of_context_length = e.status == 400 and (
-                "context length" in result_content_str or "max_tokens" in result_content_str
+                "context length" in result_content_str
+                or "max_tokens" in result_content_str
+                or "max_model_len" in result_content_str
             )
             if is_out_of_context_length:
                 return NeMoGymResponse(
@@ -198,10 +200,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             vllm_response_dict.pop("output_messages", None)
 
         validated_response = NeMoGymResponse.model_validate(vllm_response_dict)
-        return JSONResponse(
-            content=validated_response.model_dump(mode="json", exclude_none=True),
-            status_code=200
-        )
+        return JSONResponse(content=validated_response.model_dump(mode="json", exclude_none=True), status_code=200)
 
     async def _handle_chat_completions_responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming

@@ -2140,7 +2140,7 @@ class TestApp:
                         }
                     ],
                     "status": "completed",
-                }
+                },
             ],
         }
 
