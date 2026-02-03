@@ -7,4 +7,4 @@ policy_model:
       model: ${policy_model_name}
       return_token_id_information: true
       uses_reasoning_parser: true
-      use_native_responses_api: false
+      use_responses_endpoint: false

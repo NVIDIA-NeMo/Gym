@@ -67,7 +67,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     uses_reasoning_parser: bool
     replace_developer_role_with_system: bool = False
 
-    use_native_responses_api: bool = False
+    use_responses_endpoint: bool = False
 
     chat_template_kwargs: Optional[Dict[str, Any]] = None
 
@@ -110,12 +110,12 @@ class VLLMModel(SimpleResponsesAPIModel):
             self._session_id_to_client[session_id] = client
         client = self._session_id_to_client[session_id]
 
-        if self.config.use_native_responses_api:
-            return await self._handle_native_responses_api(client, body)
+        if self.config.use_responses_endpoint:
+            return await self._call_responses(client, body)
 
-        return await self._handle_chat_completions_responses(request, body)
+        return await self._call_chat_completions(request, body)
 
-    async def _handle_native_responses_api(
+    async def _call_responses(
         self, client: NeMoGymAsyncOpenAI, body: NeMoGymResponseCreateParamsNonStreaming
     ) -> NeMoGymResponse:
         body_dict = body.model_dump(exclude_unset=True)
@@ -200,7 +200,7 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         return NeMoGymResponse.model_validate(vllm_response_dict)
 
-    async def _handle_chat_completions_responses(
+    async def _call_chat_completions(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming
     ) -> NeMoGymResponse:
         chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(body)
