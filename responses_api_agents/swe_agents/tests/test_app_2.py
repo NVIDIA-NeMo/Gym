@@ -1,9 +1,15 @@
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import responses_api_agents.swe_agents.app
 from nemo_gym.config_types import ModelServerRef, OmegaConf
 from nemo_gym.server_utils import ServerClient
-from responses_api_agents.swe_agents.app import BaseDatasetHarnessProcessor, SWEBenchWrapper, SWEBenchWrapperConfig
+from responses_api_agents.swe_agents.app import (
+    BaseDatasetHarnessProcessor,
+    BaseRunRequest,
+    SWEBenchWrapper,
+    SWEBenchWrapperConfig,
+)
 
 
 class TestSWEBenchWrapper:
@@ -35,3 +41,11 @@ class TestSWEBenchWrapper:
 
     def test_sanity(self, monkeypatch) -> None:
         self._setup_wrapper(monkeypatch)
+
+    async def test_sanity_run(self, monkeypatch) -> None:
+        wrapper = self._setup_wrapper(monkeypatch)
+
+        with (Path(__file__).parent / "../data/example.jsonl").open() as f:
+            lines = f.readlines()
+
+        await wrapper.run(body=BaseRunRequest.model_validate_json(lines[0]))
