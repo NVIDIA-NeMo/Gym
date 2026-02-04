@@ -62,15 +62,15 @@ from responses_api_models.vllm_model.app import VLLMConverter, split_responses_i
 )
 def runner_ray_remote(params_dict: dict[str, Any]) -> None:
     params = SWEBenchWrapperInstanceConfig.model_validate(params_dict)
+    instance_id = params.problem_info["instance_id"]
 
     if params.debug:
-        instance_id = params.problem_info.get("instance_id", "unknown")
         profiler = Profiler(name=instance_id, base_profile_dir=params.persistent_dir / "profiling")
         profiler.start()
 
     run_oh = RunOpenHandsAgent(config=params)
 
-    asyncio.run(run_oh.process_single_datapoint(params.problem_info, params.persistent_dir))
+    asyncio.run(run_oh.process_single_datapoint())
 
     if params.debug:
         profiler.stop()
@@ -137,8 +137,9 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     persistent_dir: Path
     metrics_fpath: Path
     ray_queue_time: float
-
     inference_params: Dict[str, Any]
+    agent_run_id: str
+    instance_dataset_path: Path
 
 
 class SWEBenchMetrics(BaseModel):
@@ -383,6 +384,18 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
         persistent_dir = self._swe_bench_wrapper_server_config.base_results_dir / instance_dir
         persistent_dir.mkdir(parents=True, exist_ok=True)
 
+        agent_run_id = f"{instance_id}_{int(time.time())}_{str(uuid.uuid4())[:8]}"
+
+        # To avoid making HF dataset API calls, we write the instance dictionary to a file and mount it in the container.
+        instance_dataset_dir = Path(persistent_dir) / "instance_datasets"
+        instance_dataset_dir.mkdir(parents=True, exist_ok=True)
+        instance_dataset_path = instance_dataset_dir / f"{agent_run_id}.jsonl"
+        instance_dict = json.loads(problem_info["instance_dict"])
+        if "repo" in instance_dict and "repo_name" not in instance_dict:
+            instance_dict["repo_name"] = instance_dict["repo"]
+        with open(instance_dataset_path, "w") as f:
+            f.write(json.dumps(instance_dict) + "\n")
+
         # Map from Responses to OpenHands
         inference_params = {}
         for param, key in [
@@ -403,6 +416,8 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
             metrics_fpath=persistent_dir / "nemo_gym_metrics.json",
             ray_queue_time=time.time(),
             inference_params=inference_params,
+            agent_run_id=agent_run_id,
+            instance_dataset_path=instance_dataset_path,
         )
 
         await runner_ray_remote.remote(params.model_dump())

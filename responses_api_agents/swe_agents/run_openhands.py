@@ -19,7 +19,6 @@ import re
 import shlex
 import shutil
 import time
-import uuid
 from pathlib import Path
 from typing import Any, Optional
 
@@ -28,19 +27,21 @@ from gprof2dot import main as gprof2dot_main
 from pydantic import BaseModel
 from pydot import graph_from_dot_file
 
+from responses_api_agents.swe_agents.app import SWEBenchWrapperInstanceConfig
+
 
 class RunOpenHandsAgent(BaseModel):
-    async def _run_openhands(
-        self,
-        data_point: dict[str, Any],
-        api_base: str,
-        agent_run_id: str,
-        dataset_mount_path: Optional[str] = None,
-    ):
+    config: SWEBenchWrapperInstanceConfig
+
+    async def _run_openhands(self):
         """
         Runs OpenHands on one instance.
         Returns the absolute (not mounted) path to a .jsonl file in the SWE-bench evaluation format.
         """
+        data_point = self.config.problem_info
+        agent_run_id = self.config.agent_run_id
+        api_base = ""
+
         agent_config = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs/oh_config.toml")
 
         # Add parameters to config.toml
@@ -173,68 +174,59 @@ class RunOpenHandsAgent(BaseModel):
             "output.jsonl",
         )
 
-        try:
-            # Execute OpenHands command
-            out_file_in_eval = await self._execute_container_command(
-                data_point=data_point,
-                command=openhands_cmd,
-                expected_file_pattern=search_path,
-                mode="agent",
-                max_retries=1,
-                timeout=self.cfg.swebench_agent_timeout + 60,
-                dataset_mount_path=dataset_mount_path,
-            )
-            out_file = self._openhands_dir_copy_from_host(
-                data_point=data_point,
-                eval_dir_in_openhands=eval_dir_in_openhands,
-                config_file_path=config_file_path,
-                output_file_path=out_file_in_eval,
-            )
+        # Execute OpenHands command
+        out_file_in_eval = await self._execute_container_command(
+            data_point=data_point,
+            command=openhands_cmd,
+            expected_file_pattern=search_path,
+            mode="agent",
+            max_retries=1,
+            timeout=self.cfg.swebench_agent_timeout + 60,
+            dataset_mount_path=self.config.instance_dataset_path,
+        )
+        out_file = self._openhands_dir_copy_from_host(
+            data_point=data_point,
+            eval_dir_in_openhands=eval_dir_in_openhands,
+            config_file_path=config_file_path,
+            output_file_path=out_file_in_eval,
+        )
 
-            with open(out_file, "r") as f:
-                out_dict = json.loads(f.read().strip())
+        with open(out_file, "r") as f:
+            out_dict = json.loads(f.read().strip())
 
-            patch = out_dict["test_result"]["git_patch"]
-            if not patch:
-                patch = None
+        patch = out_dict["test_result"]["git_patch"]
+        if not patch:
+            patch = None
 
-            # Create file in the SWE-bench evaluation format
-            pred_file = out_file.replace("output.jsonl", "output_for_eval.jsonl")
-            with open(pred_file, "w") as f:
-                f.write(
-                    json.dumps(
-                        {
-                            "model_name_or_path": out_dict["metadata"]["llm_config"]["model"],
-                            "instance_id": out_dict["instance_id"],
-                            "model_patch": patch + "\n" if patch and not patch.endswith("\n") else patch,
-                            "oh_time_metrics": out_dict["metrics"],
-                        }
-                    )
+        # Create file in the SWE-bench evaluation format
+        pred_file = out_file.replace("output.jsonl", "output_for_eval.jsonl")
+        with open(pred_file, "w") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "model_name_or_path": out_dict["metadata"]["llm_config"]["model"],
+                        "instance_id": out_dict["instance_id"],
+                        "model_patch": patch + "\n" if patch and not patch.endswith("\n") else patch,
+                        "oh_time_metrics": out_dict["metrics"],
+                    }
                 )
-
-            # Dump out dot and png files from profiling on OpenHands level
-            if self.debug:
-                base_profile_dir = Path(self.output_dir) / "profiling"
-                profiling_name = "openhands"
-                callgrind_path = base_profile_dir / f"{profiling_name}.callgrind"
-                callgrind_dotfile_path = base_profile_dir / f"{profiling_name}.dot"
-                callgrind_graph_path = base_profile_dir / f"{profiling_name}.png"
-
-                gprof2dot_main(
-                    argv=f"--format=callgrind --output={callgrind_dotfile_path} -e 5 -n 5 {callgrind_path}".split()
-                )
-
-                (graph,) = graph_from_dot_file(callgrind_dotfile_path)
-                graph.write_png(callgrind_graph_path)
-        except Exception as e:
-            self._openhands_dir_copy_from_host(
-                data_point=data_point,
-                eval_dir_in_openhands=eval_dir_in_openhands,
-                config_file_path=config_file_path,
-                output_file_path=None,
             )
-            print(f"Running OpenHands failed: {e}", flush=True)
-            return None
+
+        # Dump out dot and png files from profiling on OpenHands level
+        if self.debug:
+            base_profile_dir = Path(self.output_dir) / "profiling"
+            profiling_name = "openhands"
+            callgrind_path = base_profile_dir / f"{profiling_name}.callgrind"
+            callgrind_dotfile_path = base_profile_dir / f"{profiling_name}.dot"
+            callgrind_graph_path = base_profile_dir / f"{profiling_name}.png"
+
+            gprof2dot_main(
+                argv=f"--format=callgrind --output={callgrind_dotfile_path} -e 5 -n 5 {callgrind_path}".split()
+            )
+
+            (graph,) = graph_from_dot_file(callgrind_dotfile_path)
+            graph.write_png(callgrind_graph_path)
+
         return pred_file
 
     def _openhands_dir_copy_from_host(
@@ -282,23 +274,6 @@ class RunOpenHandsAgent(BaseModel):
             pass
 
         return dest_output
-
-    def _write_instance_dataset(self, data_point: dict[str, Any], agent_run_id: str) -> Path:
-        """
-        To avoid making HF dataset API calls, we write the instance dictionary to a file and mount it in the container.
-        """
-        instance_dataset_dir = Path(self.output_dir) / "instance_datasets"
-        instance_dataset_dir.mkdir(parents=True, exist_ok=True)
-        instance_dataset_path = instance_dataset_dir / f"{agent_run_id}.jsonl"
-
-        # Parse instance_dict to ensure repo_name field exists
-        instance_dict = json.loads(data_point["instance_dict"])
-        if "repo" in instance_dict and "repo_name" not in instance_dict:
-            instance_dict["repo_name"] = instance_dict["repo"]
-
-        with open(instance_dataset_path, "w") as f:
-            f.write(json.dumps(instance_dict) + "\n")
-        return instance_dataset_path
 
     def _find_container(self, data_point: dict) -> str:
         """Find the container file using multiple strategies (Exact match > Fuzzy match).
@@ -817,18 +792,8 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
 
         return required_tests <= passed_tests
 
-    async def process_single_datapoint(self, data_point: dict[str, Any]) -> None:
-        agent_run_id = f"{data_point['instance_id']}_{int(time.time())}_{str(uuid.uuid4())[:8]}"
-        instance_dataset_path = self._write_instance_dataset(data_point, agent_run_id)
-        api_base = self.cfg.server["base_url"]
-
-        pred_file = await self._run_openhands(
-            data_point,
-            api_base,
-            agent_run_id,
-            instance_dataset_path,
-        )
-
+    async def process_single_datapoint(self) -> None:
+        pred_file = await self._run_openhands()
         if pred_file is None:
             return
 
@@ -841,23 +806,9 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
         if not has_patch:
             return
 
-        if data_point["dataset_name"] == "nv-internal-1":
-            await self._run_nv_internal_eval(
-                data_point,
-                trajectory_dict["model_patch"],
-                instance_dataset_path,
-            )
-        elif "R2E-Gym" in data_point["dataset_name"]:
-            await self._run_r2e_gym_eval(
-                pred_mounted_path,
-                data_point,
-                agent_run_id,
-                instance_dataset_path,
-            )
+        if self.config.problem_info["dataset_name"] == "nv-internal-1":
+            await self._run_nv_internal_eval(trajectory_dict["model_patch"])
+        elif "R2E-Gym" in self.config.problem_info["dataset_name"]:
+            await self._run_r2e_gym_eval(pred_mounted_path)
         else:
-            await self._run_swebench_eval(
-                pred_mounted_path,
-                data_point,
-                agent_run_id,
-                instance_dataset_path,
-            )
+            await self._run_swebench_eval(pred_mounted_path)
