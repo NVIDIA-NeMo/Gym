@@ -8,15 +8,15 @@
 # Judge: Nemotron-Content-Safety-Reasoning-4B (vLLM spinup on dedicated node, TP=8)
 
 # Judge model server - references the shared Nemotron judge
-judge_model:
-  responses_api_models:
-    vllm_model:
-      entrypoint: app.py
-      base_url: http://127.0.0.1:8001/v1
-      api_key: dummy_key
-      model: ${judge_model_name}
-      return_token_id_information: false
-      uses_reasoning_parser: false
+# safety_judge_model:
+#   responses_api_models:
+#     vllm_model:
+#       entrypoint: app.py
+#       base_url: http://127.0.0.1:8001/v1
+#       api_key: dummy_key
+#       model: ${judge_model_name}
+#       return_token_id_information: false
+#       uses_reasoning_parser: false
 
 over_refusal_detection:
   resources_servers:
@@ -24,7 +24,7 @@ over_refusal_detection:
       entrypoint: app.py
       judge_model_server:
         type: responses_api_models
-        name: judge_model
+        name: safety_judge_model
       judge_responses_create_params:
         input: []
         temperature: 0.0
@@ -130,6 +130,7 @@ over_refusal_detection:
 over_refusal_detection_simple_agent:
   responses_api_agents:
     simple_agent:
+      max_steps: 1  # Single-turn over-refusal detection
       entrypoint: app.py
       resources_server:
         type: resources_servers
@@ -141,6 +142,7 @@ over_refusal_detection_simple_agent:
 xstest_eval_agent:
   responses_api_agents:
     simple_agent:
+      max_steps: 1  # Single-turn over-refusal detection
       entrypoint: app.py
       resources_server:
         type: resources_servers

@@ -19,11 +19,10 @@ jailbreak_detection:
 
       judge_model_server:
         type: responses_api_models
-        name: judge_model
+        name: safety_judge_model
 
       judge_responses_create_params:
         input: []
-        model: ${judge_model_name}
         temperature: 0.0
         max_output_tokens: 1024
 
@@ -168,6 +167,7 @@ jailbreak_detection:
 jailbreak_detection_simple_agent:
   responses_api_agents:
     simple_agent:
+      max_steps: 1  # Single-turn jailbreak detection
       entrypoint: app.py
       resources_server:
         type: resources_servers
@@ -196,6 +196,7 @@ jailbreak_detection_simple_agent:
 jbb_behaviors_judge_comparison_agent:
   responses_api_agents:
     simple_agent:
+      max_steps: 1  # Single-turn jailbreak detection
       entrypoint: app.py
       resources_server:
         type: resources_servers
@@ -207,6 +208,7 @@ jbb_behaviors_judge_comparison_agent:
 jailbreakv28k_transfer_llm_agent:
   responses_api_agents:
     simple_agent:
+      max_steps: 1  # Single-turn jailbreak detection
       entrypoint: app.py
       resources_server:
         type: resources_servers
