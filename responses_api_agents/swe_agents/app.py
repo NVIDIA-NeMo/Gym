@@ -51,20 +51,6 @@ from responses_api_agents.swe_agents.utils import (
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 
 
-@ray.remote
-class ConcurrentContainerCounter:
-    def __init__(self):
-        self.concurrent_containers = 0
-
-    def increment(self):
-        self.concurrent_containers += 1
-        return self.concurrent_containers
-
-    def decrement(self):
-        self.concurrent_containers -= 1
-        return self.concurrent_containers
-
-
 @ray.remote(
     scheduling_strategy="SPREAD",
     runtime_env={
@@ -72,9 +58,7 @@ class ConcurrentContainerCounter:
     },
     num_cpus=1,
 )
-def runner_ray_remote(
-    concurrent_container_counter: ConcurrentContainerCounter, runner: Callable, params: dict[str, Any]
-) -> Any:
+def runner_ray_remote(runner: Callable, params: dict[str, Any]) -> Any:
     ray_submit_time = time.time()
     params["ray_submit_time"] = ray_submit_time
 
@@ -83,9 +67,6 @@ def runner_ray_remote(
         json.dump({"ray_queue_time": ray_submit_time - params["ray_queue_time"]}, f)
 
     if params["debug"]:
-        concurrent_containers = ray.get(concurrent_container_counter.increment.remote())
-        print(f"Concurrent container #{concurrent_containers}", file=sys.stderr)
-
         instance_id = params["problem_info"].get("instance_id", "unknown")
         profiler = Profiler(name=instance_id, base_profile_dir=params["persistent_dir"] / "profiling")
         profiler.start()
@@ -94,8 +75,6 @@ def runner_ray_remote(
 
     if params["debug"]:
         profiler.stop()
-
-        ray.get(concurrent_container_counter.decrement.remote())
 
     return result
 
@@ -205,7 +184,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     config: SWEBenchWrapperConfig
 
     _sem: Semaphore
-    _container_counter: ConcurrentContainerCounter
     _vllm_converter: VLLMConverter
     _swe_bench_wrapper_server_config: SWEBenchWrapperServerConfig
 
@@ -233,7 +211,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         self._swe_bench_wrapper_server_config.base_results_dir.mkdir(parents=True, exist_ok=True)
 
         self._sem = Semaphore(self.config.concurrency)
-        self._container_counter = ConcurrentContainerCounter.remote()
         self._vllm_converter = VLLMConverter(return_token_id_information=True)
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
