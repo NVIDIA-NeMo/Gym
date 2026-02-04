@@ -139,10 +139,12 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     container: str
     eval_dir_in_openhands: str
     openhands_config_file_path: str
+    agent_script_path: Path
 
     # Set later
     eval_command: Optional[ExecuteContainerCommandArgs] = None
     agent_command: Optional[ExecuteContainerCommandArgs] = None
+    agent_script: Optional[str] = None
 
     @property
     def instance_id(self) -> str:
@@ -573,9 +575,7 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
         local_dataset_path = "/root/dataset/data.jsonl"
         config_file_path = self.config.openhands_config_file_path
 
-        assert self.openhands_setup_dir is not None, "OpenHands setup directory is not set"
-
-        agent_script_name = f"agent_script_{agent_run_id}.sh"
+        assert self.config.openhands_setup_dir is not None, "OpenHands setup directory is not set"
 
         if self.config.debug:
             profiling_cmd = "export NG_PROFILING_DIR=/trajectories_mount/profiling && "
@@ -658,6 +658,7 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
             f"    {config_file_path}"
         )
 
+        agent_script_name = f"agent_script_{agent_run_id}.sh"
         agent_script_path = self.config.persistent_dir / agent_script_name
         with open(agent_script_path, "w") as f:
             f.write("#!/bin/bash\nset -e\n")
@@ -1214,6 +1215,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         eval_dir_in_openhands = f"evaluation/oh/{agent_run_id}"
         openhands_config_file_path = f"/tmp/config_{agent_run_id}.toml"
 
+        agent_script_name = f"agent_script_{agent_run_id}.sh"
+        agent_script_path = self.config.persistent_dir / agent_script_name
+
         params: SWEBenchWrapperInstanceConfig = SWEBenchWrapperInstanceConfig.model_validate(
             **self.config.model_dump(),
             **self._swe_bench_wrapper_server_config,
@@ -1232,6 +1236,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             container=container,
             eval_dir_in_openhands=eval_dir_in_openhands,
             openhands_config_file_path=openhands_config_file_path,
+            agent_script_path=agent_script_path,
         )
 
         if params.problem_info["dataset_name"] == "nv-internal-1":
@@ -1244,6 +1249,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         params.eval_command = dataset_processor.get_run_command()
 
         params.agent_command = OpenHandsHarnessProcessor(params).get_run_command()
+        params.agent_script = params.agent_script_path.read_text()
 
         return params, dataset_processor
 
