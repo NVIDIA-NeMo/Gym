@@ -68,14 +68,9 @@ def runner_ray_remote(params_dict: dict[str, Any]) -> None:
         profiler = Profiler(name=instance_id, base_profile_dir=params.persistent_dir / "profiling")
         profiler.start()
 
-    output_file = params.persistent_dir / "output.jsonl"
-
     run_oh = RunOpenHandsAgent(config=params)
 
-    result = asyncio.run(run_oh.process_single_datapoint(params.problem_info, params.persistent_dir))
-
-    with open(output_file, "w") as f:
-        json.dump(result, f)
+    asyncio.run(run_oh.process_single_datapoint(params.problem_info, params.persistent_dir))
 
     if params.debug:
         profiler.stop()
