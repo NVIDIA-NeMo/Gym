@@ -251,6 +251,43 @@ SWEBENCH_COMMIT={swebench_commit} \\
 
             return setup_dir
 
+    def get_run_command(self) -> ExecuteContainerCommandArgs:
+        swebench_cmd = (
+            # Use pre-built SWE-bench
+            "cd /swebench_setup/SWE-bench && "
+            # Set UV environment variables to use the mounted portable directories
+            f'export UV_INSTALL_DIR="{self.config.swebench_setup_dir}/uv" && '
+            f'export UV_PYTHON_INSTALL_DIR="{self.config.swebench_setup_dir}/python" && '
+            f'export PATH="{self.config.swebench_setup_dir}/uv/bin:$PATH" && '
+            f"ls -lrt /root/dataset && "
+            # Run with clean environment to avoid venv contamination
+            # Use the pre-built venv directly with its absolute path
+            f"env -u VIRTUAL_ENV {self.swebench_setup_dir}/SWE-bench/venv/bin/python -m swebench.harness.run_local_evaluation "
+            f"    --predictions_path {self.config.prediction_mounted_path} "
+            f"    --instance_ids {self.config.problem_info['instance_id']} "
+            f"    --timeout {self.cfg.swebench_tests_timeout} "
+            f"    --dataset_name /root/dataset/data.jsonl "
+            f"    --split {self.config.problem_info['split']} "
+            f"    --run_id {self.config.agent_run_id} && "
+            f"cp -r logs/run_evaluation/{self.config.agent_run_id} /trajectories_mount/ && "
+            f"rm -rf logs/run_evaluation/{self.config.agent_run_id} && rm -rf *{self.config.agent_run_id}*"
+        )
+
+        # Execute SWE-bench evaluation command
+        search_path = os.path.join(
+            self.config.persistent_dir,
+            self.config.agent_run_id,
+            "**",
+            f"{self.config.problem_info['instance_id']}/report.json",
+        )
+
+        return ExecuteContainerCommandArgs(
+            command=swebench_cmd,
+            expected_file_pattern=search_path,
+            mode="eval",
+            timeout=self.config.swebench_tests_timeout + 120,
+        )
+
 
 class R2EGymDatasetProcessor(BaseDatasetHarnessProcessor):
     def setup(self) -> Path:
@@ -309,7 +346,7 @@ EVAL_HARNESS_COMMIT={eval_harness_commit} \\
         )
 
         search_path = os.path.join(
-            self.output_dir,
+            self.config.persistent_dir,
             "eval-outputs",
             self.config.agent_run_id,
             "report.json",
@@ -891,56 +928,6 @@ class RunOpenHandsAgent(BaseModel):
                         f"Expected exactly one file matching {expected_file_pattern}, "
                         f"found {len(pred_files) if 'pred_files' in locals() else 'unknown'}."
                     )
-
-    async def _run_swebench_eval(
-        self,
-        pred_mounted_path: str,
-        data_point: dict[str, Any],
-        agent_run_id: str,
-        instance_dataset_path: str,
-    ):
-        assert self.swebench_setup_dir is not None, "SWE-bench setup directory is not set"
-        assert self.dataset_path is not None, "Dataset path is not set"
-
-        swebench_cmd = (
-            # Use pre-built SWE-bench
-            "cd /swebench_setup/SWE-bench && "
-            # Set UV environment variables to use the mounted portable directories
-            f'export UV_INSTALL_DIR="{self.swebench_setup_dir}/uv" && '
-            f'export UV_PYTHON_INSTALL_DIR="{self.swebench_setup_dir}/python" && '
-            f'export PATH="{self.swebench_setup_dir}/uv/bin:$PATH" && '
-            f"ls -lrt /root/dataset && "
-            # Run with clean environment to avoid venv contamination
-            # Use the pre-built venv directly with its absolute path
-            f"env -u VIRTUAL_ENV {self.swebench_setup_dir}/SWE-bench/venv/bin/python -m swebench.harness.run_local_evaluation "
-            f"    --predictions_path {pred_mounted_path} "
-            f"    --instance_ids {data_point['instance_id']} "
-            f"    --timeout {self.cfg.swebench_tests_timeout} "
-            f"    --dataset_name /root/dataset/data.jsonl "
-            f"    --split {data_point['split']} "
-            f"    --run_id {agent_run_id} && "
-            f"cp -r logs/run_evaluation/{agent_run_id} /trajectories_mount/ && "
-            f"rm -rf logs/run_evaluation/{agent_run_id} && rm -rf *{agent_run_id}*"
-        )
-
-        # Execute SWE-bench evaluation command
-        search_path = os.path.join(
-            self.output_dir,
-            agent_run_id,
-            "**",
-            f"{data_point['instance_id']}/report.json",
-        )
-
-        report_file = await self._execute_container_command(
-            data_point,
-            swebench_cmd,
-            search_path,
-            mode="eval",
-            timeout=self.cfg.swebench_tests_timeout + 120,
-            dataset_mount_path=instance_dataset_path,
-        )
-
-        return report_file
 
     async def _run_nv_internal_eval(
         self, data_point: dict[str, Any], model_patch: str, instance_dataset_path: str
