@@ -191,7 +191,7 @@ class SWEBenchVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
 
 
 class BaseDatasetHarnessProcessor(BaseModel):
-    config: SWEBenchWrapperInstanceConfig
+    config: SWEBenchWrapperConfig | SWEBenchWrapperInstanceConfig
 
     ########################################
     # START Setup logic
@@ -1021,21 +1021,19 @@ class RunOpenHandsAgent(BaseModel):
 
 
 class SWEBenchWrapper(SimpleResponsesAPIAgent):
-    """Wrapper for NeMo-Skills SWE-bench evaluation in NeMo-Gym."""
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
     config: SWEBenchWrapperConfig
 
-    _sem: Semaphore
-    _vllm_converter: VLLMConverter
-    _swe_bench_wrapper_server_config: SWEBenchWrapperServerConfig
+    _sem: Optional[Semaphore] = None
+    _vllm_converter: Optional[VLLMConverter] = None
+    _swe_bench_wrapper_server_config: Optional[SWEBenchWrapperServerConfig] = None
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     ########################################
     # START Init
     ########################################
 
-    def model_post_init(self, __context: Any) -> None:
+    def model_post_init(self, context: Any) -> None:
         run_session_id = f"{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
         workspace_root = Path(os.path.dirname(os.path.abspath(__file__)))
         self._swe_bench_wrapper_server_config = SWEBenchWrapperServerConfig(
@@ -1043,14 +1041,16 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             base_results_dir=workspace_root / f"swebench_results_{run_session_id}",
             ng_global_config_dict_str=shlex.quote(OmegaConf.to_yaml(get_global_config_dict())),
             model_server_name=self.config.model_server.name,
-            openhands_setup_dir=OpenHandsHarnessProcessor.setup(self),
-            swebench_setup_dir=SWEBenchWrapper.setup(self),
-            r2e_gym_setup_dir=R2EGymDatasetProcessor.setup(self),
+            openhands_setup_dir=OpenHandsHarnessProcessor(config=self.config).setup(),
+            swebench_setup_dir=SweBenchDatasetProcessor(config=self.config).setup(),
+            r2e_gym_setup_dir=R2EGymDatasetProcessor(config=self.config).setup(),
         )
         self._swe_bench_wrapper_server_config.base_results_dir.mkdir(parents=True, exist_ok=True)
 
         self._sem = Semaphore(self.config.concurrency)
         self._vllm_converter = VLLMConverter(return_token_id_information=True)
+
+        return super().model_post_init(context)
 
     ########################################
     # START Results processing logic
