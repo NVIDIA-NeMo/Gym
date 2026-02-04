@@ -25,43 +25,6 @@ from responses_api_agents.swe_agents.run_openhands import (
 )
 
 
-def get_openhands_trajectory_from_completions(trajectories_dir: Path, instance_id: str) -> tuple:
-    """
-    This reads the trajectories directly dumped by OpenHands.
-    """
-    messages, tools = [], []
-
-    completions_dir = trajectories_dir / instance_id / "llm_completions" / instance_id
-    if not completions_dir.exists():
-        print(f"No llm_completions directory found: {completions_dir}", flush=True)
-        return messages, tools
-
-    completion_files = sorted(completions_dir.glob("*.json"))
-    if not completion_files:
-        print(f"No completion files found in: {completions_dir}", flush=True)
-        return messages, tools
-
-    last_file = completion_files[-1]
-
-    with open(last_file, "r") as f:
-        data = json.load(f)
-
-    messages = data["messages"]
-    provider_specific_fields = data.get("provider_specific_fields", {})
-    final_assistant_message = data["response"]["choices"][0]["message"]
-
-    for key in ["prompt_token_ids", "generation_token_ids", "generation_log_probs"]:
-        if key in provider_specific_fields:
-            final_assistant_message[key] = provider_specific_fields[key]
-
-    if final_assistant_message.get("content") or final_assistant_message.get("tool_calls"):
-        messages.append(final_assistant_message)
-
-    tools = data.get("kwargs", {}).get("tools", [])
-
-    return messages, tools
-
-
 async def run_swebench_evaluation(
     problem_info: Dict,
     model_endpoint: str,
@@ -88,8 +51,7 @@ async def run_swebench_evaluation(
     debug: bool = False,
     apptainer_memory_limit_mb: Optional[int] = None,
     command_exec_timeout: Optional[int] = None,
-) -> Dict:
-    instance_id = problem_info.get("instance_id", "unknown")
+) -> None:
     output_file = persistent_dir / "output.jsonl"
 
     inference_params = {}
@@ -137,18 +99,5 @@ async def run_swebench_evaluation(
     )
 
     result = await run_oh.process_single_datapoint(problem_info, persistent_dir)
-    print(f"Process completed for {instance_id}", flush=True)
-
-    result["oh_time_metrics"]["ray_time_in_queue"] = ray_submit_time - ray_queue_time
-
     with open(output_file, "w") as f:
         json.dump(result, f)
-
-    # Try to find and include trajectory file
-    trajectories_dir = persistent_dir / "trajectories"
-    trajectory_data, tools = get_openhands_trajectory_from_completions(trajectories_dir, instance_id)
-
-    result["tools"] = tools
-    result["trajectory"] = trajectory_data
-
-    return result

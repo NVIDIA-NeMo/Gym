@@ -206,6 +206,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         self._sem = Semaphore(self.config.concurrency)
         self._vllm_converter = VLLMConverter(return_token_id_information=True)
 
+    ########################################
+    # START Setup logic
+    ########################################
+
     @property
     def parent_dir(self) -> Path:
         return Path(__file__).parent
@@ -329,13 +333,56 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
 
             return setup_dir
 
+    ########################################
+    # START Results processing logic
+    ########################################
+
+    def get_openhands_trajectory_from_completions(self, trajectories_dir: Path, instance_id: str) -> tuple:
+        """
+        This reads the trajectories directly dumped by OpenHands.
+        """
+        messages, tools = [], []
+
+        completions_dir = trajectories_dir / instance_id / "llm_completions" / instance_id
+        if not completions_dir.exists():
+            print(f"No llm_completions directory found: {completions_dir}", flush=True)
+            return messages, tools
+
+        completion_files = sorted(completions_dir.glob("*.json"))
+        if not completion_files:
+            print(f"No completion files found in: {completions_dir}", flush=True)
+            return messages, tools
+
+        last_file = completion_files[-1]
+
+        with open(last_file, "r") as f:
+            data = json.load(f)
+
+        messages = data["messages"]
+        provider_specific_fields = data.get("provider_specific_fields", {})
+        final_assistant_message = data["response"]["choices"][0]["message"]
+
+        for key in ["prompt_token_ids", "generation_token_ids", "generation_log_probs"]:
+            if key in provider_specific_fields:
+                final_assistant_message[key] = provider_specific_fields[key]
+
+        if final_assistant_message.get("content") or final_assistant_message.get("tool_calls"):
+            messages.append(final_assistant_message)
+
+        tools = data.get("kwargs", {}).get("tools", [])
+
+        return messages, tools
+
+    ########################################
+    # START Main methods
+    ########################################
+
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         problem_info = body.metadata | {"container_formatter": self.config.container_formatter}
+        instance_id = problem_info.get("instance_id", "unknown")
 
         # Create persistent directory for I/O and logs in local workspace
-        instance_dir = (
-            f"{problem_info.get('instance_id', 'unknown')}_{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
-        )
+        instance_dir = f"{instance_id}_{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
         persistent_dir = self._swe_bench_wrapper_server_config.base_results_dir / instance_dir
         persistent_dir.mkdir(parents=True, exist_ok=True)
 
@@ -349,10 +396,19 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
             ray_queue_time=time.time(),
         )
 
-        result = await runner_ray_remote.remote(self._container_counter, run_swebench_evaluation, params)
+        await runner_ray_remote.remote(self._container_counter, run_swebench_evaluation, params)
 
-        tools = [FunctionTool.model_validate(tool["function"] | {"type": "function"}) for tool in result["tools"]]
-        responses_items = self._vllm_converter.chat_completions_messages_to_responses_items(result["trajectory"])
+        trajectories_dir = persistent_dir / "trajectories"
+        chat_completions_trajectory, chat_completions_tools = self.get_openhands_trajectory_from_completions(
+            trajectories_dir, instance_id
+        )
+
+        tools = [
+            FunctionTool.model_validate(tool["function"] | {"type": "function"}) for tool in chat_completions_tools
+        ]
+        responses_items = self._vllm_converter.chat_completions_messages_to_responses_items(
+            chat_completions_trajectory
+        )
         input_items, output_items = split_responses_input_output_items(responses_items)
 
         return NeMoGymResponse(
