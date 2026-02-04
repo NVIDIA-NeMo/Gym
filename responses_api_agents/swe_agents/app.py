@@ -25,7 +25,7 @@ from pathlib import Path
 from shutil import rmtree
 from subprocess import DEVNULL, Popen
 from subprocess import run as subprocess_run
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Dict, Optional
 
 import ray
 from openai.types.responses.function_tool import FunctionTool
@@ -47,8 +47,10 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.profiling import Profiler
-from responses_api_agents.swe_agents.utils import (
-    run_swebench_evaluation,
+from responses_api_agents.swe_agents.run_openhands import (
+    RunOpenHandsAgent,
+    SweBenchGenerationConfig,
+    SweBenchInferenceConfig,
 )
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 
@@ -60,25 +62,67 @@ from responses_api_models.vllm_model.app import VLLMConverter, split_responses_i
     },
     num_cpus=1,
 )
-def runner_ray_remote(runner: Callable, params: dict[str, Any]) -> Any:
-    ray_submit_time = time.time()
-    params["ray_submit_time"] = ray_submit_time
-
-    # This is the first instance so we don't need to load anything
-    with params["metrics_fpath"].open("w") as f:
-        json.dump({"ray_queue_time": ray_submit_time - params["ray_queue_time"]}, f)
+def runner_ray_remote(params_dict: dict[str, Any]) -> None:
+    params = SWEBenchWrapperInstanceConfig.model_validate(params_dict)
 
     if params["debug"]:
-        instance_id = params["problem_info"].get("instance_id", "unknown")
-        profiler = Profiler(name=instance_id, base_profile_dir=params["persistent_dir"] / "profiling")
+        instance_id = params.problem_info.get("instance_id", "unknown")
+        profiler = Profiler(name=instance_id, base_profile_dir=params.persistent_dir / "profiling")
         profiler.start()
 
-    result = asyncio.run(runner(**params))
+    output_file = params.persistent_dir / "output.jsonl"
+
+    inference_params = {}
+
+    for param, key in [
+        ("temperature", "temperature"),
+        ("top_p", "top_p"),
+        ("max_output_tokens", "tokens_to_generate"),
+    ]:
+        value = getattr(params.body, param, None)
+        if value is not None:
+            inference_params[key] = value
+
+    inference_config = SweBenchInferenceConfig(**inference_params)
+    server = {
+        "model": params.body.model,
+        "base_url": params.model_server_name,
+    }
+
+    cfg = SweBenchGenerationConfig(
+        output_file=output_file,
+        agent_framework_repo=params.agent_framework_repo,
+        agent_framework_commit=params.agent_framework_commit,
+        agent_config=params.agent_config,
+        agent_max_turns=params.agent_max_turns,
+        swebench_tests_timeout=params.swebench_tests_timeout,
+        swebench_agent_timeout=params.swebench_agent_timeout,
+        apptainer_memory_limit_mb=params.apptainer_memory_limit_mb,
+        command_exec_timeout=params.command_exec_timeout,
+        inference=inference_config,
+        server=server,
+    )
+
+    run_oh = RunOpenHandsAgent(
+        cfg=cfg,
+        openhands_setup_dir=params.openhands_setup_dir,
+        swebench_setup_dir=params.swebench_setup_dir,
+        r2e_gym_setup_dir=params.r2e_gym_setup_dir,
+        dataset_path=params.dataset_path,
+        ng_global_config_dict_str=params.ng_global_config_dict_str,
+        openhands_should_log=params.openhands_should_log,
+        debug=params.debug,
+        model_server_name=params.model_server_name,
+        metrics_fpath=params.metrics_fpath,
+    )
+
+    result = asyncio.run(run_oh.process_single_datapoint(params.problem_info, params.persistent_dir))
+
+    with open(output_file, "w") as f:
+        json.dump(result, f)
 
     if params["debug"]:
         profiler.stop()
-
-    return result
 
 
 class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
@@ -396,7 +440,7 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
             ray_queue_time=time.time(),
         )
 
-        await runner_ray_remote.remote(self._container_counter, run_swebench_evaluation, params)
+        await runner_ray_remote.remote(params.model_dump())
 
         trajectories_dir = persistent_dir / "trajectories"
         chat_completions_trajectory, chat_completions_tools = self.get_openhands_trajectory_from_completions(
