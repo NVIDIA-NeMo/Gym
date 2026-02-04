@@ -125,6 +125,8 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     inference_params: Dict[str, Any]
     agent_run_id: str
     instance_dataset_path: Path
+    trajectories_root: Path
+    prediction_mounted_path: Path
 
 
 class SWEBenchMetrics(BaseModel):
@@ -215,8 +217,7 @@ class BaseDatasetHarnessProcessor(BaseModel):
     def setup(self) -> Path:
         pass
 
-    # prediction_mounted_path is only passed to some calls to get_run_command for evaluation
-    def get_run_command(self, prediction_mounted_path: Optional[Path] = None) -> ExecuteContainerCommandArgs:
+    def get_run_command(self) -> ExecuteContainerCommandArgs:
         pass
 
 
@@ -289,18 +290,18 @@ EVAL_HARNESS_COMMIT={eval_harness_commit} \\
 
             return setup_dir
 
-    def get_run_command(self, prediction_mounted_path: Optional[Path] = None) -> ExecuteContainerCommandArgs:
+    def get_run_command(self) -> ExecuteContainerCommandArgs:
         r2e_gym_cmd = (
             # Use mounted directory path for cd
             "cd /r2egym_setup/R2E-Gym && "
             # Set UV environment variables to use the mounted portable directories
-            f'export UV_INSTALL_DIR="{self.r2e_gym_setup_dir}/uv" && '
-            f'export UV_PYTHON_INSTALL_DIR="{self.r2e_gym_setup_dir}/python" && '
-            f'export PATH="{self.r2e_gym_setup_dir}/uv/bin:$PATH" && '
+            f'export UV_INSTALL_DIR="{self.config.r2e_gym_setup_dir}/uv" && '
+            f'export UV_PYTHON_INSTALL_DIR="{self.config.r2e_gym_setup_dir}/python" && '
+            f'export PATH="{self.config.r2e_gym_setup_dir}/uv/bin:$PATH" && '
             # Run with clean environment to avoid venv contamination
             # Use the pre-built venv directly with its absolute path
-            f"env -u VIRTUAL_ENV {self.r2e_gym_setup_dir}/R2E-Gym/venv/bin/python src/r2egym/agenthub/run/run_local_evaluation.py "
-            f"    --predictions_path {prediction_mounted_path} "
+            f"env -u VIRTUAL_ENV {self.config.r2e_gym_setup_dir}/R2E-Gym/venv/bin/python src/r2egym/agenthub/run/run_local_evaluation.py "
+            f"    --predictions_path {self.config.prediction_mounted_path} "
             f"    --instance_id {self.config.problem_info['instance_id']} "
             f"    --timeout {self.cfg.swebench_tests_timeout} "
             f"    --dataset /root/dataset/data.jsonl "
@@ -584,8 +585,8 @@ class RunOpenHandsAgent(BaseModel):
         config_file_path: str,
         output_file_path: Optional[str],
     ) -> Optional[str]:
-        eval_dir_on_host = Path(self.openhands_setup_dir) / "OpenHands" / eval_dir_in_openhands
-        trajectories_root = Path(self.output_dir) / "trajectories" / data_point["instance_id"]
+        eval_dir_on_host = Path(self.config.openhands_setup_dir) / "OpenHands" / eval_dir_in_openhands
+        trajectories_root = self.config.trajectories_root
         llm_completions_dir = trajectories_root / "llm_completions" / data_point["instance_id"]
         trajectories_root.mkdir(parents=True, exist_ok=True)
         llm_completions_dir.mkdir(parents=True, exist_ok=True)
@@ -603,7 +604,7 @@ class RunOpenHandsAgent(BaseModel):
                     )
                 source_output = output_candidates[-1]
 
-            dest_output_path = trajectories_root / "output.jsonl"
+            dest_output_path = self.config.prediction_mounted_path
             shutil.copy2(source_output, dest_output_path)
             dest_output = str(dest_output_path)
 
@@ -1223,6 +1224,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         with open(instance_dataset_path, "w") as f:
             f.write(json.dumps(instance_dict) + "\n")
 
+        trajectories_root = persistent_dir / "trajectories" / instance_id
+        prediction_mounted_path = trajectories_root / "output.jsonl"
+
         # Map from Responses to OpenHands
         inference_params = {}
         for param, key in [
@@ -1245,6 +1249,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             inference_params=inference_params,
             agent_run_id=agent_run_id,
             instance_dataset_path=instance_dataset_path,
+            trajectories_root=trajectories_root,
+            prediction_mounted_path=prediction_mounted_path,
         )
 
         await runner_ray_remote.remote(params.model_dump())
