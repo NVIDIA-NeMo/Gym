@@ -137,9 +137,12 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     prediction_mounted_path: Path
     model_patch_path: Path
     container: str
+    eval_dir_in_openhands: str
+    openhands_config_file_path: str
 
     # Set later
     eval_command: Optional[ExecuteContainerCommandArgs] = None
+    agent_command: Optional[ExecuteContainerCommandArgs] = None
 
     @property
     def instance_id(self) -> str:
@@ -546,48 +549,9 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
 
             return setup_dir
 
-
-########################################
-# START Ray worker logic
-########################################
-
-
-@ray.remote(
-    scheduling_strategy="SPREAD",
-    runtime_env={
-        "py_executable": sys.executable,
-    },
-    num_cpus=1,
-)
-def runner_ray_remote(params_dict: dict[str, Any]) -> Path:
-    params = SWEBenchWrapperInstanceConfig.model_validate(params_dict)
-    instance_id = params.instance_id
-
-    if params.debug:
-        profiler = Profiler(name=instance_id, base_profile_dir=params.persistent_dir / "profiling")
-        profiler.start()
-
-    run_oh = RunOpenHandsAgent(config=params)
-
-    report_file = asyncio.run(run_oh.process_single_datapoint())
-
-    if params.debug:
-        profiler.stop()
-
-    return report_file
-
-
-class RunOpenHandsAgent(BaseModel):
-    config: SWEBenchWrapperInstanceConfig
-
-    async def _run_openhands(self):
-        """
-        Runs OpenHands on one instance.
-        Returns the absolute (not mounted) path to a .jsonl file in the SWE-bench evaluation format.
-        """
+    def get_run_command(self) -> ExecuteContainerCommandArgs:
         data_point = self.config.problem_info
         agent_run_id = self.config.agent_run_id
-        api_base = ""
 
         agent_config = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs/oh_config.toml")
 
@@ -597,28 +561,28 @@ class RunOpenHandsAgent(BaseModel):
             config = tomlkit.parse(f.read())
 
         config["llm"]["model"] |= {
-            "model": self.cfg.server["model"],
-            "base_url": api_base,
-            "temperature": self.cfg.inference.temperature,
-            "top_p": self.cfg.inference.top_p,
+            "model": self.config.body.model,
+            "base_url": "",  # May need to populate this
+            "temperature": self.config.inference_params["temperature"],
+            "top_p": self.config.inference_params["top_p"],
         }
 
         config_str = tomlkit.dumps(config)
 
-        eval_dir_in_openhands = f"evaluation/oh/{agent_run_id}"
+        eval_dir_in_openhands = self.config.eval_dir_in_openhands
         local_dataset_path = "/root/dataset/data.jsonl"
-        config_file_path = f"/tmp/config_{agent_run_id}.toml"
+        config_file_path = self.config.openhands_config_file_path
 
         assert self.openhands_setup_dir is not None, "OpenHands setup directory is not set"
 
         agent_script_name = f"agent_script_{agent_run_id}.sh"
 
-        if self.debug:
+        if self.config.debug:
             profiling_cmd = "export NG_PROFILING_DIR=/trajectories_mount/profiling && "
         else:
             profiling_cmd = ""
 
-        if self.openhands_should_log:
+        if self.config.openhands_should_log:
             log_cmd = "export LOG_LEVEL=DEBUG && export LOG_TO_FILE=true && export NG_OPENHANDS_SHOULD_LOG=true && "
         else:
             log_cmd = (
@@ -653,17 +617,17 @@ class RunOpenHandsAgent(BaseModel):
             "export RUNTIME=local && "
             f"{log_cmd}"
             f"{profiling_cmd}"
-            f"export NEMO_GYM_METRICS_FPATH={self.metrics_fpath} && "
-            f"export NEMO_GYM_CONFIG_DICT={self.ng_global_config_dict_str} && "
-            f"export NEMO_GYM_MODEL_SERVER_NAME={self.model_server_name} &&"
+            f"export NEMO_GYM_METRICS_FPATH={self.config.metrics_fpath} && "
+            f"export NEMO_GYM_CONFIG_DICT={self.config.ng_global_config_dict_str} && "
+            f"export NEMO_GYM_MODEL_SERVER_NAME={self.config.model_server_name} &&"
             "export VIRTUAL_ENV=/openhands_setup/OpenHands/.venv && "
             "export PATH=$PATH:/openhands_setup/OpenHands/.venv/bin && "
             # CRITICAL: Configure poetry to only use the OpenHands venv (ignore external venvs)
             "export POETRY_VIRTUALENVS_IN_PROJECT=true && "
             "export POETRY_VIRTUALENVS_CREATE=false && "
             "export POETRY_VIRTUALENVS_PATH=/openhands_setup/OpenHands && "
-            f"export TMUX_MEMORY_LIMIT={self.cfg.apptainer_memory_limit_mb} && "
-            f"export COMMAND_EXEC_TIMEOUT={self.cfg.command_exec_timeout} && "
+            f"export TMUX_MEMORY_LIMIT={self.config.apptainer_memory_limit_mb} && "
+            f"export COMMAND_EXEC_TIMEOUT={self.config.command_exec_timeout} && "
             # TODO (sugam): fix cryptography issue
             # "override_dir=$(mktemp -d /tmp/cryptography_override.XXXX) && "
             # # Reinstall cryptography inside the container (via poetry's venv) using a compatible wheel
@@ -681,10 +645,10 @@ class RunOpenHandsAgent(BaseModel):
             # f" export EVAL_OUTPUT_DIR={eval_dir_in_openhands} && "
             f"./evaluation/benchmarks/swe_bench/scripts/run_infer.sh "
             f"    llm.model "  # name of llm config section in config.toml
-            f"    {self.cfg.agent_framework_commit} "  # openhands commit
+            f"    {self.config.agent_framework_commit} "  # openhands commit
             f"    CodeActAgent "  # agent
             f"    0 "  # Note: this is eval limit which randomly chooses an instance from the dataset
-            f"    {self.cfg.agent_max_turns} "  # max agent iterations
+            f"    {self.config.agent_max_turns} "  # max agent iterations
             f"    1 "  # number of workers
             f"    {data_point['dataset_name']} "  # dataset name
             f"    {data_point['split']} "  # dataset split
@@ -694,95 +658,72 @@ class RunOpenHandsAgent(BaseModel):
             f"    {config_file_path}"
         )
 
-        agent_script_path = Path(self.output_dir) / agent_script_name
+        agent_script_path = self.config.persistent_dir / agent_script_name
         with open(agent_script_path, "w") as f:
             f.write("#!/bin/bash\nset -e\n")
             f.write(agent_main_cmd)
             f.flush()
             os.fsync(f.fileno())
 
-        for _ in range(10):
-            if agent_script_path.exists():
-                break
-            time.sleep(0.5)
-
-        if not agent_script_path.exists():
-            raise FileNotFoundError(f"Failed to create agent script at {agent_script_path}")
-
-        agent_timeout_seconds = self.cfg.swebench_agent_timeout
+        agent_timeout_seconds = self.config.swebench_agent_timeout
         openhands_cmd = (
             f"timeout --signal=TERM --kill-after=30 {agent_timeout_seconds} "
             f"bash /trajectories_mount/{agent_script_name}"
         )
 
         search_path = os.path.join(
-            self.openhands_setup_dir / "OpenHands" / eval_dir_in_openhands,
+            self.config.openhands_setup_dir / "OpenHands" / eval_dir_in_openhands,
             "**",
             "output.jsonl",
         )
 
         # Execute OpenHands command
-        out_file_in_eval = await self._execute_container_command(
-            data_point=data_point,
+        return ExecuteContainerCommandArgs(
             command=openhands_cmd,
             expected_file_pattern=search_path,
             mode="agent",
-            max_retries=1,
             timeout=self.cfg.swebench_agent_timeout + 60,
-            dataset_mount_path=self.config.instance_dataset_path,
-        )
-        out_file = self._openhands_dir_copy_from_host(
-            data_point=data_point,
-            eval_dir_in_openhands=eval_dir_in_openhands,
-            config_file_path=config_file_path,
-            output_file_path=out_file_in_eval,
         )
 
-        with open(out_file, "r") as f:
-            out_dict = json.loads(f.read().strip())
 
-        patch = out_dict["test_result"]["git_patch"]
-        if not patch:
-            patch = None
+########################################
+# START Ray worker logic
+########################################
 
-        # Create file in the SWE-bench evaluation format
-        pred_file = out_file.replace("output.jsonl", "output_for_eval.jsonl")
-        with open(pred_file, "w") as f:
-            f.write(
-                json.dumps(
-                    {
-                        "model_name_or_path": out_dict["metadata"]["llm_config"]["model"],
-                        "instance_id": out_dict["instance_id"],
-                        "model_patch": patch + "\n" if patch and not patch.endswith("\n") else patch,
-                        "oh_time_metrics": out_dict["metrics"],
-                    }
-                )
-            )
 
-        # Dump out dot and png files from profiling on OpenHands level
-        if self.debug:
-            base_profile_dir = Path(self.output_dir) / "profiling"
-            profiling_name = "openhands"
-            callgrind_path = base_profile_dir / f"{profiling_name}.callgrind"
-            callgrind_dotfile_path = base_profile_dir / f"{profiling_name}.dot"
-            callgrind_graph_path = base_profile_dir / f"{profiling_name}.png"
+@ray.remote(
+    scheduling_strategy="SPREAD",
+    runtime_env={
+        "py_executable": sys.executable,
+    },
+    num_cpus=1,
+)
+def runner_ray_remote(params_dict: dict[str, Any]) -> Path:
+    params = SWEBenchWrapperInstanceConfig.model_validate(params_dict)
+    instance_id = params.instance_id
 
-            gprof2dot_main(
-                argv=f"--format=callgrind --output={callgrind_dotfile_path} -e 5 -n 5 {callgrind_path}".split()
-            )
+    if params.debug:
+        profiler = Profiler(name=instance_id, base_profile_dir=params.persistent_dir / "profiling")
+        profiler.start()
 
-            (graph,) = graph_from_dot_file(callgrind_dotfile_path)
-            graph.write_png(callgrind_graph_path)
+    run_oh = RunOpenHandsAgent(config=params)
 
-        return pred_file
+    report_file = asyncio.run(run_oh.process_single_datapoint())
 
-    def _openhands_dir_copy_from_host(
-        self,
-        data_point: dict[str, Any],
-        eval_dir_in_openhands: str,
-        config_file_path: str,
-        output_file_path: Optional[str],
-    ) -> Optional[str]:
+    if params.debug:
+        profiler.stop()
+
+    return report_file
+
+
+class RunOpenHandsAgent(BaseModel):
+    config: SWEBenchWrapperInstanceConfig
+
+    def _openhands_dir_copy_from_host(self, output_file_path: Optional[str]) -> Optional[str]:
+        data_point = self.config.problem_info
+        eval_dir_in_openhands = self.config.eval_dir_in_openhands
+        config_file_path = self.config.openhands_config_file_path
+
         eval_dir_on_host = Path(self.config.openhands_setup_dir) / "OpenHands" / eval_dir_in_openhands
         trajectories_root = self.config.trajectories_root
         llm_completions_dir = trajectories_root / "llm_completions" / data_point["instance_id"]
@@ -1012,7 +953,45 @@ class RunOpenHandsAgent(BaseModel):
                     )
 
     async def process_single_datapoint(self) -> Path:
-        pred_file = await self._run_openhands()
+        out_file_in_eval = await self._execute_container_command(self.config.agent_command)
+        out_file = self._openhands_dir_copy_from_host(output_file_path=out_file_in_eval)
+
+        with open(out_file, "r") as f:
+            out_dict = json.loads(f.read().strip())
+
+        patch = out_dict["test_result"]["git_patch"]
+        if not patch:
+            patch = None
+
+        # Create file in the SWE-bench evaluation format
+        pred_file = out_file.replace("output.jsonl", "output_for_eval.jsonl")
+        with open(pred_file, "w") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "model_name_or_path": out_dict["metadata"]["llm_config"]["model"],
+                        "instance_id": out_dict["instance_id"],
+                        "model_patch": patch + "\n" if patch and not patch.endswith("\n") else patch,
+                        "oh_time_metrics": out_dict["metrics"],
+                    }
+                )
+            )
+
+        # Dump out dot and png files from profiling on OpenHands level
+        if self.config.debug:
+            base_profile_dir = self.config.persistent_dir / "profiling"
+            profiling_name = "openhands"
+            callgrind_path = base_profile_dir / f"{profiling_name}.callgrind"
+            callgrind_dotfile_path = base_profile_dir / f"{profiling_name}.dot"
+            callgrind_graph_path = base_profile_dir / f"{profiling_name}.png"
+
+            gprof2dot_main(
+                argv=f"--format=callgrind --output={callgrind_dotfile_path} -e 5 -n 5 {callgrind_path}".split()
+            )
+
+            (graph,) = graph_from_dot_file(callgrind_dotfile_path)
+            graph.write_png(callgrind_graph_path)
+
         if pred_file is None:
             return
 
@@ -1232,6 +1211,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         container = self._find_container(problem_info)
 
+        eval_dir_in_openhands = f"evaluation/oh/{agent_run_id}"
+        openhands_config_file_path = f"/tmp/config_{agent_run_id}.toml"
+
         params: SWEBenchWrapperInstanceConfig = SWEBenchWrapperInstanceConfig.model_validate(
             **self.config.model_dump(),
             **self._swe_bench_wrapper_server_config,
@@ -1248,6 +1230,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             prediction_mounted_path=prediction_mounted_path,
             model_patch_path=persistent_dir / "patch.diff",
             container=container,
+            eval_dir_in_openhands=eval_dir_in_openhands,
+            openhands_config_file_path=openhands_config_file_path,
         )
 
         if params.problem_info["dataset_name"] == "nv-internal-1":
@@ -1258,6 +1242,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             dataset_processor = SweBenchDatasetProcessor(params)
 
         params.eval_command = dataset_processor.get_run_command()
+
+        params.agent_command = OpenHandsHarnessProcessor(params).get_run_command()
 
         return params, dataset_processor
 
