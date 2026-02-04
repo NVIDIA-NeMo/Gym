@@ -9,7 +9,7 @@ openhands_dir=$OPENHANDS_DIR
 agent_framework_repo=$AGENT_FRAMEWORK_REPO
 agent_framework_commit=$AGENT_FRAMEWORK_COMMIT
 
-cd setup_dir
+cd $setup_dir
 
 # Install miniforge if not properly installed
 if [ ! -f "$miniforge_dir/bin/conda" ] || [ ! -f "$miniforge_dir/bin/mamba" ]; then
