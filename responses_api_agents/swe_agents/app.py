@@ -160,7 +160,7 @@ class SWEBenchMetrics(BaseModel):
 
 
 class SWEBenchVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
-    pass
+    instance_config: SWEBenchWrapperInstanceConfig
 
 
 ########################################
@@ -1280,6 +1280,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             metadata={
                 "input": json.dumps([i.model_dump() for i in input_items]),
                 "metrics": params.metrics_fpath.read_text(),
+                "instance_config": params.model_dump_json(),
             },
         )
 
@@ -1304,6 +1305,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 response=response,
                 reward=1.0 if metrics.resolved else 0.0,
                 **metrics.model_dump(),
+                **SWEBenchWrapperInstanceConfig.model_validate_json(metadata["instance_config"]).model_dump(),
             )
 
 
