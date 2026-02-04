@@ -1,0 +1,8 @@
+# Ignore generated rollouts and metrics
+*_rollouts.jsonl
+*_metrics.json
+train*.jsonl
+validation*.jsonl
+
+# Keep example files
+!example.jsonl
