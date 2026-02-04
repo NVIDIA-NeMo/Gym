@@ -114,6 +114,7 @@ def runner_ray_remote(params_dict: dict[str, Any]) -> None:
         debug=params.debug,
         model_server_name=params.model_server_name,
         metrics_fpath=params.metrics_fpath,
+        persistent_dir=params.persistent_dir,
     )
 
     result = asyncio.run(run_oh.process_single_datapoint(params.problem_info, params.persistent_dir))
@@ -430,7 +431,7 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
         persistent_dir = self._swe_bench_wrapper_server_config.base_results_dir / instance_dir
         persistent_dir.mkdir(parents=True, exist_ok=True)
 
-        params = SWEBenchWrapperInstanceConfig.model_validate(
+        params: SWEBenchWrapperInstanceConfig = SWEBenchWrapperInstanceConfig.model_validate(
             **self.config.model_dump(),
             **self._swe_bench_wrapper_server_config,
             problem_info=problem_info,
@@ -466,7 +467,7 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
             tools=tools,
             metadata={
                 "input": json.dumps([i.model_dump() for i in input_items]),
-                "metrics": None,
+                "metrics": params.metrics_fpath.read_text(),
             },
         )
 

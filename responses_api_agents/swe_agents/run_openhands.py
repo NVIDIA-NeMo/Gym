@@ -100,6 +100,7 @@ class RunOpenHandsAgent:
     openhands_should_log: bool = False
     debug: bool = False
     metrics_fpath: Path
+    persistent_dir: Path
 
     async def _run_openhands(
         self,
@@ -382,20 +383,6 @@ class RunOpenHandsAgent:
         with open(instance_dataset_path, "w") as f:
             f.write(json.dumps(instance_dict) + "\n")
         return instance_dataset_path
-
-    def _cleanup_instance_dataset(self, dataset_path):
-        if dataset_path is None:
-            return
-        try:
-            Path(dataset_path).unlink(missing_ok=True)
-        except OSError:
-            pass
-        try:
-            parent_dir = Path(dataset_path).parent
-            if parent_dir.exists() and not any(parent_dir.iterdir()):
-                parent_dir.rmdir()
-        except OSError:
-            pass
 
     def _find_container(self, data_point: dict) -> str:
         """Find the container file using multiple strategies (Exact match > Fuzzy match).
@@ -914,17 +901,10 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
 
         return required_tests <= passed_tests
 
-    async def process_single_datapoint(self, data_point: dict[str, Any], persistent_dir: Path):
-        self.output_dir = Path(self.cfg.output_file).parent
-
+    async def process_single_datapoint(self, data_point: dict[str, Any]) -> None:
         agent_run_id = f"{data_point['instance_id']}_{int(time.time())}_{str(uuid.uuid4())[:8]}"
         instance_dataset_path = self._write_instance_dataset(data_point, agent_run_id)
         api_base = self.cfg.server["base_url"]
-
-        start_time = asyncio.get_running_loop().time()
-        generation_time = None
-        evaluation_time = None
-        trajectory_dict = None
 
         pred_file = await self._run_openhands(
             data_point,
@@ -933,89 +913,35 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
             instance_dataset_path,
         )
 
-        generation_time = asyncio.get_running_loop().time() - start_time
-
         if pred_file is None:
-            report_json = {
-                data_point["instance_id"]: {
-                    "resolved": False,
-                    "patch_exists": False,
-                    "patch_successfully_applied": False,
-                    "generation_time": generation_time,
-                    "evaluation_time": evaluation_time,
-                }
-            }
+            return
+
+        pred_mounted_path = pred_file.replace(str(self.output_dir), "/trajectories_mount")
+        with open(pred_file, "r") as f:
+            trajectory_dict = json.loads(f.read())
+
+        # Check if the trajectory has an empty patch before running evaluation
+        has_patch = trajectory_dict["model_patch"] is not None
+        if not has_patch:
+            return
+
+        if data_point["dataset_name"] == "nv-internal-1":
+            await self._run_nv_internal_eval(
+                data_point,
+                trajectory_dict["model_patch"],
+                instance_dataset_path,
+            )
+        elif "R2E-Gym" in data_point["dataset_name"]:
+            await self._run_r2e_gym_eval(
+                pred_mounted_path,
+                data_point,
+                agent_run_id,
+                instance_dataset_path,
+            )
         else:
-            pred_mounted_path = pred_file.replace(str(self.output_dir), "/trajectories_mount")
-            with open(pred_file, "r") as f:
-                trajectory_dict = json.loads(f.read())
-
-            # Check if the trajectory has an empty patch before running evaluation
-            has_patch = trajectory_dict["model_patch"] is not None
-
-            if not has_patch:
-                report_json = {
-                    data_point["instance_id"]: {
-                        "resolved": False,
-                        "patch_exists": False,
-                        "patch_successfully_applied": False,
-                        "generation_time": generation_time,
-                        "evaluation_time": evaluation_time,
-                    }
-                }
-
-            else:
-                # Run full evaluation with streaming output
-                # TODO: should we fail on errors here? Seems that json isn't always generated
-                try:
-                    start_time = asyncio.get_running_loop().time()
-                    if data_point["dataset_name"] == "nv-internal-1":
-                        report_file = await self._run_nv_internal_eval(
-                            data_point,
-                            trajectory_dict["model_patch"],
-                            instance_dataset_path,
-                        )
-                    elif "R2E-Gym" in data_point["dataset_name"]:
-                        report_file = await self._run_r2e_gym_eval(
-                            pred_mounted_path,
-                            data_point,
-                            agent_run_id,
-                            instance_dataset_path,
-                        )
-                    else:
-                        report_file = await self._run_swebench_eval(
-                            pred_mounted_path,
-                            data_point,
-                            agent_run_id,
-                            instance_dataset_path,
-                        )
-                    evaluation_time = asyncio.get_running_loop().time() - start_time
-                except ValueError:
-                    print(
-                        f"Failed to execute SWE-bench evaluation command for {data_point['instance_id']}",
-                        flush=True,
-                    )
-                    report_json = {
-                        data_point["instance_id"]: {
-                            "resolved": False,
-                            "patch_exists": True,
-                            "patch_successfully_applied": False,
-                            "generation_time": generation_time,
-                            "evaluation_time": evaluation_time,
-                        }
-                    }
-                    report_file = None
-
-                if report_file is not None:
-                    with open(report_file, "r") as f:
-                        report_json = json.loads(f.read().strip())
-
-        output_dict = {
-            "swe-bench-metrics": report_json[data_point["instance_id"]],
-            "oh_time_metrics": trajectory_dict.get("oh_time_metrics", None) if trajectory_dict else {},
-            "generation": "",  # required TODO: we should fix this
-            "generation_time": generation_time,
-            "evaluation_time": evaluation_time,
-        }
-
-        return output_dict
+            await self._run_swebench_eval(
+                pred_mounted_path,
+                data_point,
+                agent_run_id,
+                instance_dataset_path,
+            )
