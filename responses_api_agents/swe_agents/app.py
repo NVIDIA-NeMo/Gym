@@ -256,7 +256,7 @@ PYTHON_DIR={python_dir} \\
 SWEBENCH_DIR={swebench_dir} \\
 SWEBENCH_REPO={swebench_repo} \\
 SWEBENCH_COMMIT={swebench_commit} \\
-    ./{script_fpath}"""
+    {script_fpath}"""
             self._run_setup_command(command)
 
             return setup_dir
@@ -332,7 +332,7 @@ PYTHON_DIR={python_dir} \\
 R2E_GYM_DIR={r2e_gym_dir} \\
 EVAL_HARNESS_REPO={eval_harness_repo} \\
 EVAL_HARNESS_COMMIT={eval_harness_commit} \\
-    ./{script_fpath}"""
+    {script_fpath}"""
             self._run_setup_command(command)
 
             return setup_dir
@@ -538,7 +538,7 @@ MINIFORGE_DIR={miniforge_dir} \\
 OPENHANDS_DIR={openhands_dir} \\
 AGENT_FRAMEWORK_REPO={self.config.agent_framework_repo} \\
 AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
-    ./{script_fpath}"""
+    {script_fpath}"""
             self._run_setup_command(command)
 
             return setup_dir
