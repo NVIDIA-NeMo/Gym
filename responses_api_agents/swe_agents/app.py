@@ -28,7 +28,7 @@ from pathlib import Path
 from shutil import rmtree
 from subprocess import DEVNULL, Popen
 from subprocess import run as subprocess_run
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional, Union
 
 import ray
 import tomlkit
@@ -53,9 +53,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.profiling import Profiler
-from responses_api_agents.swe_agents.run_openhands import (
-    RunOpenHandsAgent,
-)
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 
 
@@ -169,8 +166,15 @@ class SWEBenchVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
 ########################################
 
 
+class ExecuteContainerCommandArgs(BaseModel):
+    command: str
+    expected_file_pattern: str
+    mode: Union[Literal["agent"], Literal["eval"]]
+    timeout: int
+
+
 class BaseDatasetHarnessProcessor(BaseModel):
-    config: SWEBenchWrapperConfig
+    config: SWEBenchWrapperInstanceConfig
 
     ########################################
     # START Setup logic
@@ -209,6 +213,10 @@ class BaseDatasetHarnessProcessor(BaseModel):
 
     # Setup method is sync for now since there's been no need to concurrently set up
     def setup(self) -> Path:
+        pass
+
+    # prediction_mounted_path is only passed to some calls to get_run_command for evaluation
+    def get_run_command(self, prediction_mounted_path: Optional[Path] = None) -> ExecuteContainerCommandArgs:
         pass
 
 
@@ -280,6 +288,38 @@ EVAL_HARNESS_COMMIT={eval_harness_commit} \\
             self._run_setup_command(command)
 
             return setup_dir
+
+    def get_run_command(self, prediction_mounted_path: Optional[Path] = None) -> ExecuteContainerCommandArgs:
+        r2e_gym_cmd = (
+            # Use mounted directory path for cd
+            "cd /r2egym_setup/R2E-Gym && "
+            # Set UV environment variables to use the mounted portable directories
+            f'export UV_INSTALL_DIR="{self.r2e_gym_setup_dir}/uv" && '
+            f'export UV_PYTHON_INSTALL_DIR="{self.r2e_gym_setup_dir}/python" && '
+            f'export PATH="{self.r2e_gym_setup_dir}/uv/bin:$PATH" && '
+            # Run with clean environment to avoid venv contamination
+            # Use the pre-built venv directly with its absolute path
+            f"env -u VIRTUAL_ENV {self.r2e_gym_setup_dir}/R2E-Gym/venv/bin/python src/r2egym/agenthub/run/run_local_evaluation.py "
+            f"    --predictions_path {prediction_mounted_path} "
+            f"    --instance_id {self.config.problem_info['instance_id']} "
+            f"    --timeout {self.cfg.swebench_tests_timeout} "
+            f"    --dataset /root/dataset/data.jsonl "
+            f"    --output_dir /trajectories_mount/eval-outputs/{self.config.agent_run_id}"
+        )
+
+        search_path = os.path.join(
+            self.output_dir,
+            "eval-outputs",
+            self.config.agent_run_id,
+            "report.json",
+        )
+
+        return ExecuteContainerCommandArgs(
+            command=r2e_gym_cmd,
+            expected_file_pattern=search_path,
+            mode="eval",
+            timeout=self.config.swebench_tests_timeout + 120,
+        )
 
 
 class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
@@ -851,49 +891,6 @@ class RunOpenHandsAgent(BaseModel):
                         f"found {len(pred_files) if 'pred_files' in locals() else 'unknown'}."
                     )
 
-    async def _run_r2e_gym_eval(
-        self,
-        pred_mounted_path: str,
-        data_point: dict[str, Any],
-        agent_run_id: str,
-        instance_dataset_path: str,
-    ):
-        assert self.r2e_gym_setup_dir is not None, "R2E-Gym setup directory is not set"
-        assert self.dataset_path is not None, "Dataset path is not set"
-
-        r2e_gym_cmd = (
-            # Use mounted directory path for cd
-            "cd /r2egym_setup/R2E-Gym && "
-            # Set UV environment variables to use the mounted portable directories
-            f'export UV_INSTALL_DIR="{self.r2e_gym_setup_dir}/uv" && '
-            f'export UV_PYTHON_INSTALL_DIR="{self.r2e_gym_setup_dir}/python" && '
-            f'export PATH="{self.r2e_gym_setup_dir}/uv/bin:$PATH" && '
-            # Run with clean environment to avoid venv contamination
-            # Use the pre-built venv directly with its absolute path
-            f"env -u VIRTUAL_ENV {self.r2e_gym_setup_dir}/R2E-Gym/venv/bin/python src/r2egym/agenthub/run/run_local_evaluation.py "
-            f"    --predictions_path {pred_mounted_path} "
-            f"    --instance_id {data_point['instance_id']} "
-            f"    --timeout {self.cfg.swebench_tests_timeout} "
-            f"    --dataset /root/dataset/data.jsonl "
-            f"    --output_dir /trajectories_mount/eval-outputs/{agent_run_id}"
-        )
-
-        search_path = os.path.join(
-            self.output_dir,
-            "eval-outputs",
-            agent_run_id,
-            "report.json",
-        )
-        report_file = await self._execute_container_command(
-            data_point,
-            r2e_gym_cmd,
-            search_path,
-            mode="eval",
-            timeout=self.cfg.swebench_tests_timeout + 120,
-            dataset_mount_path=instance_dataset_path,
-        )
-        return report_file
-
     async def _run_swebench_eval(
         self,
         pred_mounted_path: str,
@@ -1115,11 +1112,13 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
             return
 
         if self.config.problem_info["dataset_name"] == "nv-internal-1":
-            await self._run_nv_internal_eval(trajectory_dict["model_patch"])
+            run_command = self._run_nv_internal_eval(trajectory_dict["model_patch"])
         elif "R2E-Gym" in self.config.problem_info["dataset_name"]:
-            await self._run_r2e_gym_eval(pred_mounted_path)
+            run_command = R2EGymDatasetProcessor(self.config).get_run_command()
         else:
-            await self._run_swebench_eval(pred_mounted_path)
+            run_command = self._run_swebench_eval(pred_mounted_path)
+
+        await self._execute_container_command(run_command)
 
 
 ########################################
@@ -1150,9 +1149,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             base_results_dir=workspace_root / f"swebench_results_{run_session_id}",
             ng_global_config_dict_str=shlex.quote(OmegaConf.to_yaml(get_global_config_dict())),
             model_server_name=self.config.model_server.name,
-            openhands_setup_dir=OpenHandsHarnessProcessor(self.config).setup(),
-            swebench_setup_dir=SWEBenchWrapper(self.config).setup(),
-            r2e_gym_setup_dir=R2EGymDatasetProcessor(self.config).setup(),
+            openhands_setup_dir=OpenHandsHarnessProcessor.setup(self),
+            swebench_setup_dir=SWEBenchWrapper.setup(self),
+            r2e_gym_setup_dir=R2EGymDatasetProcessor.setup(self),
         )
         self._swe_bench_wrapper_server_config.base_results_dir.mkdir(parents=True, exist_ok=True)
 
