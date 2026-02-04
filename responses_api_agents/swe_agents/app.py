@@ -126,7 +126,9 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     agent_run_id: str
     instance_dataset_path: Path
     trajectories_root: Path
+    prediction_path: Path
     prediction_mounted_path: Path
+    model_patch_path: Path
 
 
 class SWEBenchMetrics(BaseModel):
@@ -1028,11 +1030,6 @@ class RunOpenHandsAgent(BaseModel):
         parsing_script = instance_dict["parsing_script.py"]
         run_script_path = self.output_dir / "run_script.sh"
         parsing_script_path = self.output_dir / "parsing_script.py"
-        model_patch_path = self.output_dir / "patch.diff"
-        with open(model_patch_path, "w") as f:
-            # Add a newline to the end of the patch if it doesn't have one
-            model_patch = model_patch + "\n" if not model_patch.endswith("\n") else model_patch
-            f.write(model_patch)
         with open(run_script_path, "w") as f:
             f.write(run_script)
         with open(parsing_script_path, "w") as f:
@@ -1090,7 +1087,6 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
         if pred_file is None:
             return
 
-        pred_mounted_path = pred_file.replace(str(self.output_dir), "/trajectories_mount")
         with open(pred_file, "r") as f:
             trajectory_dict = json.loads(f.read())
 
@@ -1099,12 +1095,19 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
         if not has_patch:
             return
 
+        with open(self.config.model_patch_path, "w") as f:
+            model_patch = trajectory_dict["model_patch"]
+
+            # Add a newline to the end of the patch if it doesn't have one
+            model_patch = model_patch + "\n" if not model_patch.endswith("\n") else model_patch
+            f.write(model_patch)
+
         if self.config.problem_info["dataset_name"] == "nv-internal-1":
             run_command = self._run_nv_internal_eval(trajectory_dict["model_patch"])
         elif "R2E-Gym" in self.config.problem_info["dataset_name"]:
             run_command = R2EGymDatasetProcessor(self.config).get_run_command()
         else:
-            run_command = self._run_swebench_eval(pred_mounted_path)
+            run_command = SweBenchDatasetProcessor(self.config).get_run_command()
 
         await self._execute_container_command(run_command)
 
@@ -1212,7 +1215,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             f.write(json.dumps(instance_dict) + "\n")
 
         trajectories_root = persistent_dir / "trajectories" / instance_id
-        prediction_mounted_path = trajectories_root / "output.jsonl"
+        prediction_mounted_path = Path("/trajectories_mount") / "trajectories" / instance_id
+        prediction_path = trajectories_root / "output.jsonl"
 
         # Map from Responses to OpenHands
         inference_params = {}
@@ -1237,7 +1241,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             agent_run_id=agent_run_id,
             instance_dataset_path=instance_dataset_path,
             trajectories_root=trajectories_root,
+            prediction_path=prediction_path,
             prediction_mounted_path=prediction_mounted_path,
+            model_patch_path=persistent_dir / "patch.diff",
         )
 
         await runner_ray_remote.remote(params.model_dump())
