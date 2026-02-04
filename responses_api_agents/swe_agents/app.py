@@ -207,6 +207,7 @@ class BaseDatasetHarnessProcessor(BaseModel):
             finally:
                 flock(lock_file, LOCK_UN)
 
+    # Setup method is sync for now since there's been no need to concurrently set up
     def setup(self) -> Path:
         pass
 
