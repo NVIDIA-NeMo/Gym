@@ -279,37 +279,26 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
     async def run(self, body: BaseRunRequest) -> SWEBenchVerifyResponse:
         async with self._sem:
-            if self.config.debug:
-                print(
-                    f"Semaphore: {self.config.concurrency - self._sem._value} / {self.config.concurrency}", flush=True
-                )
-            body.responses_create_params.metadata["container_concurrency"] = str(
-                self.config.concurrency - self._sem._value
+            body.responses_create_params.parallel_tool_calls = True
+            body.responses_create_params.tool_choice = "auto"
+
+            response = await self.responses(body.responses_create_params)
+
+            metadata, response.metadata = response.metadata, None
+            params_with_input = body.responses_create_params.model_copy(
+                update={
+                    "input": json.loads(metadata["input"]),
+                    "tools": [t.model_dump() for t in response.tools] if response.tools else [],
+                }
             )
+            metrics = SWEBenchMetrics.model_validate_json(metadata["metrics"])
 
-            return await self._run(body)
-
-    async def _run(self, body: BaseRunRequest) -> SWEBenchVerifyResponse:
-        body.responses_create_params.parallel_tool_calls = True
-        body.responses_create_params.tool_choice = "auto"
-
-        response = await self.responses(body.responses_create_params)
-
-        metadata, response.metadata = response.metadata, None
-        params_with_input = body.responses_create_params.model_copy(
-            update={
-                "input": json.loads(metadata["input"]),
-                "tools": [t.model_dump() for t in response.tools] if response.tools else [],
-            }
-        )
-        metrics = SWEBenchMetrics.model_validate_json(metadata["metrics"])
-
-        return SWEBenchVerifyResponse(
-            responses_create_params=params_with_input,
-            response=response,
-            reward=1.0 if metrics.resolved else 0.0,
-            **metrics.model_dump(),
-        )
+            return SWEBenchVerifyResponse(
+                responses_create_params=params_with_input,
+                response=response,
+                reward=1.0 if metrics.resolved else 0.0,
+                **metrics.model_dump(),
+            )
 
 
 if __name__ == "__main__":
