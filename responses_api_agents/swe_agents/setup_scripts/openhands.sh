@@ -88,42 +88,7 @@ export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v '\.venv' | tr '\n' ':' | sed 
 export POETRY_VIRTUALENVS_IN_PROJECT=true
 
 # Retry `make build` with a timeout guard on the first attempt
-MAX_MAKE_BUILD_ATTEMPTS=2
-MAKE_BUILD_TIMEOUT_SECONDS=$((2 * 60))
-MAKE_BUILD_TIMEOUT_MINUTES=$((MAKE_BUILD_TIMEOUT_SECONDS / 60))
-
-attempt=1
-while [ "$attempt" -le "$MAX_MAKE_BUILD_ATTEMPTS" ]; do
-    echo "Running make build (attempt $attempt/$MAX_MAKE_BUILD_ATTEMPTS)..."
-
-    if [ "$attempt" -lt "$MAX_MAKE_BUILD_ATTEMPTS" ]; then
-        if timeout "$MAKE_BUILD_TIMEOUT_SECONDS" make build; then
-            echo "make build completed successfully."
-            break
-        fi
-
-        exit_code=$?
-        if [ "$exit_code" -eq 124 ]; then
-            echo "make build timed out after $MAKE_BUILD_TIMEOUT_MINUTES minutes."
-        else
-            echo "make build failed with exit code $exit_code."
-        fi
-
-        echo "Retrying make build after cleanup..."
-        make clean || true
-        attempt=$((attempt + 1))
-        continue
-    fi
-
-    if make build; then
-        echo "make build completed successfully."
-        break
-    fi
-
-    exit_code=$?
-    echo "make build failed on the final attempt with exit code $exit_code."
-done
-
+make build
 
 # Install Python dependencies with poetry
 echo "Installing Python dependencies (creating .venv in OpenHands directory)..."
