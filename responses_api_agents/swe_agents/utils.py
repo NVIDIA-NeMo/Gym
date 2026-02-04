@@ -11,13 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import fcntl
 import json
-import shutil
-import subprocess
-from contextlib import contextmanager
 from pathlib import Path
-from subprocess import Popen
 from typing import Dict, Optional
 
 from nemo_gym.openai_utils import (
@@ -103,9 +98,6 @@ def get_openhands_trajectory_from_completions(
             raise ValueError(f"Expected content in message, got {msg}")
 
     return messages, tools
-
-
-### Run SWE Harness Utils ###
 
 
 async def run_swebench_evaluation(
@@ -206,154 +198,3 @@ async def run_swebench_evaluation(
     result["trajectory"] = trajectory_data
 
     return result
-
-
-### Harness and Evaluation Setup Utils ###
-
-PARENT_DIR = Path(__file__).parent
-
-
-def _run_setup_command(command: str, debug: bool) -> None:
-    std_params = dict()
-    if not debug:
-        std_params = dict(
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-    process = Popen(command, shell=True, **std_params)
-    return_code = process.wait()
-    assert return_code == 0, f"Command failed: {command}"
-
-
-@contextmanager
-def _setup_directory_lock(setup_dir: Path, label: str):
-    """File-based lock to ensure only one process performs the setup."""
-    lock_dir = setup_dir.parent
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = lock_dir / f".{setup_dir.name}.lock"
-
-    with open(lock_path, "w") as lock_file:
-        print(f"Acquiring {label} setup lock at {lock_path}", flush=True)
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
-
-
-def setup_swebench_environment(swebench_repo: str, swebench_commit: str, debug: bool) -> Path:
-    setup_dir = PARENT_DIR / "swe_swebench_setup"
-
-    with _setup_directory_lock(setup_dir, "SWE-bench"):
-        swebench_dir = setup_dir / "SWE-bench"
-        uv_dir = setup_dir / "uv"
-        python_dir = setup_dir / "python"
-
-        if swebench_dir.exists():
-            print(f"SWE-bench already set up at {setup_dir}", flush=True)
-        else:
-            print(f"Setting up SWE-bench environment at {setup_dir}...", flush=True)
-            setup_dir.mkdir(parents=True, exist_ok=True)
-
-            script_fpath = PARENT_DIR / "setup_scripts/swebench.sh"
-            command = f"""SETUP_DIR={setup_dir} \\
-UV_DIR={uv_dir} \\
-PYTHON_DIR={python_dir} \\
-SWEBENCH_DIR={swebench_dir} \\
-SWEBENCH_REPO={swebench_repo} \\
-SWEBENCH_COMMIT={swebench_commit} \\
-    ./{script_fpath}"""
-            _run_setup_command(command, debug)
-
-            print(f"Setup directory: {setup_dir}", flush=True)
-
-        print(f"  - SWE-bench: {swebench_dir}", flush=True)
-        print(f"  - venv: {swebench_dir / 'venv'}", flush=True)
-        print(f"  - uv: {uv_dir}", flush=True)
-        print(f"  - Python: {python_dir}", flush=True)
-
-        return setup_dir
-
-
-def setup_r2e_gym_environment(debug: bool) -> Path:
-    eval_harness_repo = "https://github.com/ludwig-n/R2E-Gym.git"
-    eval_harness_commit = "local-eval"
-
-    setup_dir = PARENT_DIR / "swe_r2e_gym_setup"
-
-    with _setup_directory_lock(setup_dir, "R2E-Gym"):
-        r2e_gym_dir = setup_dir / "R2E-Gym"
-        uv_dir = setup_dir / "uv"
-        python_dir = setup_dir / "python"
-
-        # Check if setup is complete by verifying venv and installed module
-        venv_dir = r2e_gym_dir / "venv"
-        python_bin = venv_dir / "bin" / "python"
-        should_setup = True
-        if r2e_gym_dir.exists() and venv_dir.exists() and python_bin.exists():
-            result = subprocess.run([str(python_bin), "-c", "import r2egym"])
-            if result.returncode == 0:
-                print(f"R2E-Gym already set up at {setup_dir}", flush=True)
-                should_setup = False
-            else:
-                print("R2E-Gym directory exists but module not properly installed, rebuilding...", flush=True)
-
-        if should_setup:
-            print(f"Setting up R2E-Gym environment at {setup_dir}...", flush=True)
-            setup_dir.mkdir(parents=True, exist_ok=True)
-
-            script_fpath = PARENT_DIR / "setup_scripts/r2e_gym.sh"
-            command = f"""SETUP_DIR={setup_dir} \\
-UV_DIR={uv_dir} \\
-PYTHON_DIR={python_dir} \\
-R2E_GYM_DIR={r2e_gym_dir} \\
-EVAL_HARNESS_REPO={eval_harness_repo} \\
-EVAL_HARNESS_COMMIT={eval_harness_commit} \\
-    ./{script_fpath}"""
-            _run_setup_command(command, debug)
-
-            print(f"Setup directory: {setup_dir}", flush=True)
-
-        print(f"  - R2E-Gym: {r2e_gym_dir}", flush=True)
-        print(f"  - venv: {r2e_gym_dir / '.venv'}", flush=True)
-        print(f"  - uv: {uv_dir}", flush=True)
-        print(f"  - Python: {python_dir}", flush=True)
-
-        return setup_dir
-
-
-def setup_openhands_environment(
-    agent_framework_repo: str,
-    agent_framework_commit: str,
-    setup_dir: Optional[Path] = None,
-    debug: bool = False,
-) -> Path:
-    setup_dir = PARENT_DIR / "swe_openhands_setup"
-
-    with _setup_directory_lock(setup_dir, "OpenHands"):
-        openhands_dir = setup_dir / "OpenHands"
-        miniforge_dir = setup_dir / "miniforge3"
-
-        if openhands_dir.exists() and Path(openhands_dir / ".venv" / "bin" / "python").exists():
-            print(f"OpenHands already set up at {setup_dir}", flush=True)
-        else:
-            print(f"Setting up OpenHands environment at {setup_dir}...", flush=True)
-            shutil.rmtree(setup_dir, ignore_errors=True)
-            setup_dir.mkdir(parents=True, exist_ok=True)
-
-            script_fpath = PARENT_DIR / "setup_scripts/openhands.sh"
-            command = f"""SETUP_DIR={setup_dir} \\
-MINIFORGE_DIR={miniforge_dir} \\
-OPENHANDS_DIR={openhands_dir} \\
-AGENT_FRAMEWORK_REPO={agent_framework_repo} \\
-AGENT_FRAMEWORK_COMMIT={agent_framework_commit} \\
-    ./{script_fpath}"""
-            _run_setup_command(command, debug)
-
-            print(f"Setup directory: {setup_dir}", flush=True)
-
-        print(f"  - Miniforge: {miniforge_dir}", flush=True)
-        print(f"  - OpenHands: {openhands_dir}", flush=True)
-
-        return setup_dir
