@@ -246,7 +246,7 @@ class SweBenchDatasetProcessor(BaseDatasetHarnessProcessor):
 
             if swebench_dir.exists():
                 print(f"SWE-bench already set up at {setup_dir}")
-                return
+                return setup_dir
 
             print(f"Setting up SWE-bench environment at {setup_dir}...", flush=True)
             script_fpath = self.parent_dir / "setup_scripts/swebench.sh"
@@ -318,7 +318,7 @@ class R2EGymDatasetProcessor(BaseDatasetHarnessProcessor):
                 result = subprocess_run([str(python_bin), "-c", "import r2egym"])
                 if result.returncode == 0:
                     print(f"R2E-Gym already set up at {setup_dir}", flush=True)
-                    return
+                    return setup_dir
 
                 print("R2E-Gym directory exists but module not properly installed, rebuilding...", flush=True)
 
@@ -526,7 +526,7 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
 
             if openhands_dir.exists() and Path(openhands_dir / ".venv" / "bin" / "python").exists():
                 print(f"OpenHands already set up at {setup_dir}", flush=True)
-                return
+                return setup_dir
 
             print(f"Setting up OpenHands environment at {setup_dir}...", flush=True)
             rmtree(setup_dir, ignore_errors=True)
