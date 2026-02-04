@@ -25,77 +25,39 @@ from responses_api_agents.swe_agents.run_openhands import (
 )
 
 
-def get_openhands_trajectory_from_completions(
-    trajectories_dir: Path,
-    instance_id: str,
-) -> tuple:
-    """Get trajectory from llm_completions directory for OpenHands.
-
-    Args:
-        trajectories_dir: Trajectories directory
-        instance_id: Instance ID
-
-    Returns:
-        Tuple of (messages, tools)
+def get_openhands_trajectory_from_completions(trajectories_dir: Path, instance_id: str) -> tuple:
     """
-    messages = []
-    tools = []
-    completions_dir = trajectories_dir / instance_id / "llm_completions" / instance_id
+    This reads the trajectories directly dumped by OpenHands.
+    """
+    messages, tools = [], []
 
+    completions_dir = trajectories_dir / instance_id / "llm_completions" / instance_id
     if not completions_dir.exists():
         print(f"No llm_completions directory found: {completions_dir}", flush=True)
         return messages, tools
 
     completion_files = sorted(completions_dir.glob("*.json"))
-
     if not completion_files:
         print(f"No completion files found in: {completions_dir}", flush=True)
         return messages, tools
 
     last_file = completion_files[-1]
 
-    try:
-        with open(last_file, "r") as f:
-            data = json.load(f)
+    with open(last_file, "r") as f:
+        data = json.load(f)
 
-        messages = data["messages"]
-        provider_specific_fields = data.get("provider_specific_fields", {})
-        final_assistant_message = data["response"]["choices"][0]["message"]
+    messages = data["messages"]
+    provider_specific_fields = data.get("provider_specific_fields", {})
+    final_assistant_message = data["response"]["choices"][0]["message"]
 
-        for key in ["prompt_token_ids", "generation_token_ids", "generation_log_probs"]:
-            if key in provider_specific_fields:
-                final_assistant_message[key] = provider_specific_fields[key]
+    for key in ["prompt_token_ids", "generation_token_ids", "generation_log_probs"]:
+        if key in provider_specific_fields:
+            final_assistant_message[key] = provider_specific_fields[key]
 
-        if final_assistant_message.get("content") or final_assistant_message.get("tool_calls"):
-            messages.append(final_assistant_message)
+    if final_assistant_message.get("content") or final_assistant_message.get("tool_calls"):
+        messages.append(final_assistant_message)
 
-        tools = data.get("kwargs", {}).get("tools", [])
-
-        # print(
-        #     f"Loaded {len(messages)} messages from last completion file: {last_file}",
-        #     flush=True,
-        # )
-
-    except Exception as e:
-        print(f"Failed to read completion file {last_file}: {e}", flush=True)
-        return [], []
-
-    for msg in messages:
-        if "content" in msg:
-            msg["content"] = msg["content"] or ""
-            if isinstance(msg["content"], list):
-                # Handle empty content lists (e.g., assistant messages with only tool calls)
-                if len(msg["content"]) == 0:
-                    msg["content"] = ""
-                elif len(msg["content"]) == 1:
-                    item = msg["content"][0]
-                    if not isinstance(item, dict) or item.get("type") != "text" or "text" not in item:
-                        raise ValueError(f"Expected content item to be {{type: 'text', text: '...'}}, got {item}")
-                    msg["content"] = item["text"]
-                else:
-                    raise ValueError(f"Expected 0 or 1 content items, got {len(msg['content'])}")
-        else:
-            raise ValueError(f"Expected content in message, got {msg}")
+    tools = data.get("kwargs", {}).get("tools", [])
 
     return messages, tools
 
@@ -179,16 +141,8 @@ async def run_swebench_evaluation(
 
     result["oh_time_metrics"]["ray_time_in_queue"] = ray_submit_time - ray_queue_time
 
-    try:
-        with open(output_file, "w") as f:
-            json.dump(result, f)
-    except Exception as e:
-        print(f"Failed to write result to {output_file}: {e}", flush=True)
-        raise e
-
-    # Read results
-    if not output_file.exists():
-        raise RuntimeError(f"No output file generated: {output_file}")
+    with open(output_file, "w") as f:
+        json.dump(result, f)
 
     # Try to find and include trajectory file
     trajectories_dir = persistent_dir / "trajectories"
