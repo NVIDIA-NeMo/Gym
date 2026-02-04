@@ -26,7 +26,7 @@ from contextlib import contextmanager
 from fcntl import LOCK_EX, LOCK_UN, flock
 from pathlib import Path
 from shutil import rmtree
-from subprocess import DEVNULL, Popen
+from subprocess import Popen
 from subprocess import run as subprocess_run
 from typing import Any, Dict, Literal, Optional, Tuple, Union
 
@@ -201,14 +201,7 @@ class BaseDatasetHarnessProcessor(BaseModel):
         return Path(__file__).parent
 
     def _run_setup_command(self, command: str) -> None:
-        std_params = dict()
-        if not self.config.debug:
-            std_params = dict(
-                stdout=DEVNULL,
-                stderr=DEVNULL,
-            )
-
-        process = Popen(command, shell=True, **std_params)
+        process = Popen(command, shell=True)
         return_code = process.wait()
         assert return_code == 0, f"Command failed: {command}"
 
