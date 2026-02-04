@@ -28,7 +28,7 @@ from pathlib import Path
 from shutil import rmtree
 from subprocess import DEVNULL, Popen
 from subprocess import run as subprocess_run
-from typing import Any, Dict, Literal, Optional, Union
+from typing import Any, Dict, Literal, Optional, Tuple, Union
 
 import ray
 import tomlkit
@@ -114,6 +114,13 @@ class SWEBenchWrapperServerConfig(BaseModel):
     base_results_dir: Path
 
 
+class ExecuteContainerCommandArgs(BaseModel):
+    command: str
+    expected_file_pattern: str
+    mode: Union[Literal["agent"], Literal["eval"]]
+    timeout: int
+
+
 class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapperConfig):
     output_dir: str
     metrics_fpath: Path
@@ -129,6 +136,14 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     prediction_path: Path
     prediction_mounted_path: Path
     model_patch_path: Path
+    container: str
+
+    # Set later
+    eval_command: Optional[ExecuteContainerCommandArgs] = None
+
+    @property
+    def instance_id(self) -> str:
+        return self.instance_id
 
 
 class SWEBenchMetrics(BaseModel):
@@ -168,13 +183,6 @@ class SWEBenchVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
 ########################################
 # START Dataset and harness handling
 ########################################
-
-
-class ExecuteContainerCommandArgs(BaseModel):
-    command: str
-    expected_file_pattern: str
-    mode: Union[Literal["agent"], Literal["eval"]]
-    timeout: int
 
 
 class BaseDatasetHarnessProcessor(BaseModel):
@@ -222,6 +230,9 @@ class BaseDatasetHarnessProcessor(BaseModel):
     def get_run_command(self) -> ExecuteContainerCommandArgs:
         pass
 
+    def postprocess_after_eval_run(self, report_file: Path) -> None:
+        pass
+
 
 class SweBenchDatasetProcessor(BaseDatasetHarnessProcessor):
     def setup(self) -> Path:
@@ -266,7 +277,7 @@ SWEBENCH_COMMIT={swebench_commit} \\
             # Use the pre-built venv directly with its absolute path
             f"env -u VIRTUAL_ENV {self.swebench_setup_dir}/SWE-bench/venv/bin/python -m swebench.harness.run_local_evaluation "
             f"    --predictions_path {self.config.prediction_mounted_path} "
-            f"    --instance_ids {self.config.problem_info['instance_id']} "
+            f"    --instance_ids {self.config.instance_id} "
             f"    --timeout {self.cfg.swebench_tests_timeout} "
             f"    --dataset_name /root/dataset/data.jsonl "
             f"    --split {self.config.problem_info['split']} "
@@ -280,7 +291,7 @@ SWEBENCH_COMMIT={swebench_commit} \\
             self.config.persistent_dir,
             self.config.agent_run_id,
             "**",
-            f"{self.config.problem_info['instance_id']}/report.json",
+            f"{self.config.instance_id}/report.json",
         )
 
         return ExecuteContainerCommandArgs(
@@ -341,7 +352,7 @@ EVAL_HARNESS_COMMIT={eval_harness_commit} \\
             # Use the pre-built venv directly with its absolute path
             f"env -u VIRTUAL_ENV {self.config.r2e_gym_setup_dir}/R2E-Gym/venv/bin/python src/r2egym/agenthub/run/run_local_evaluation.py "
             f"    --predictions_path {self.config.prediction_mounted_path} "
-            f"    --instance_id {self.config.problem_info['instance_id']} "
+            f"    --instance_id {self.config.instance_id} "
             f"    --timeout {self.cfg.swebench_tests_timeout} "
             f"    --dataset /root/dataset/data.jsonl "
             f"    --output_dir /trajectories_mount/eval-outputs/{self.config.agent_run_id}"
@@ -360,6 +371,152 @@ EVAL_HARNESS_COMMIT={eval_harness_commit} \\
             mode="eval",
             timeout=self.config.swebench_tests_timeout + 120,
         )
+
+
+class NVInternalDatasetProcessor(BaseDatasetHarnessProcessor):
+    def get_run_command(self) -> ExecuteContainerCommandArgs:
+        instance_dict = json.loads(self.config.problem_info["instance_dict"])
+        base_dockerfile = instance_dict.get("base_dockerfile", "")
+        instance_dockerfile = instance_dict.get("instance_dockerfile", "")
+
+        env_lines = []
+        for line in (base_dockerfile + "\n" + instance_dockerfile).split("\n"):
+            line = line.strip()
+            if line.startswith("ENV "):
+                # Convert ENV KEY=VALUE or ENV KEY VALUE to export KEY="VALUE"
+                export_line = line.replace("ENV ", "export ", 1)
+                # Handle both Docker ENV formats:
+                # 1. ENV KEY=VALUE (with equals)
+                # 2. ENV KEY VALUE (space-separated)
+                if "=" in export_line:
+                    # Format: export KEY=VALUE -> normalize spaces around =
+                    export_line = re.sub(r"\s*=\s*", "=", export_line)
+                else:
+                    # Format: export KEY VALUE -> convert to export KEY="VALUE"
+                    parts = export_line.split(None, 2)  # Split into at most 3 parts
+                    if len(parts) >= 3:  # export KEY VALUE
+                        key = parts[1]
+                        value = parts[2]
+                        export_line = f'export {key}="{value}"'
+
+                env_lines.append(export_line)
+
+        env_exports = "\n".join(env_lines)
+
+        # Get repo setup command
+        repo_cmd = instance_dict.get("before_repo_set_cmd", "").strip()
+        if repo_cmd:
+            repo_cmd = repo_cmd.split("\n")[-1]
+
+        # Get test files
+        test_files_str = instance_dict.get("selected_test_files_to_run", "[]")
+        if isinstance(test_files_str, str):
+            test_files = ",".join(eval(test_files_str))
+        else:
+            test_files = ",".join(test_files_str)
+
+        run_script = instance_dict["run_script.sh"]
+        parsing_script = instance_dict["parsing_script.py"]
+        run_script_path = self.config.persistent_dir / "run_script.sh"
+        parsing_script_path = self.config.persistent_dir / "parsing_script.py"
+        with open(run_script_path, "w") as f:
+            f.write(run_script)
+        with open(parsing_script_path, "w") as f:
+            f.write(parsing_script)
+
+        cmd = f"""#!/bin/bash
+set -e
+
+{env_exports}
+
+# Apply patch
+cd /app
+git reset --hard {instance_dict.get("base_commit", "")}
+git checkout {instance_dict.get("base_commit", "")}
+
+# Apply patch with rejection to handle conflicts
+git apply --ignore-space-change --ignore-whitespace --reject -v /root/patch.diff || true
+
+# Setup repository
+{repo_cmd}
+
+# Run tests
+bash /root/run_script.sh {test_files} > /root/stdout.log 2> /root/stderr.log || true
+
+# Parse results
+python /root/parsing_script.py /root/stdout.log /root/stderr.log /root/output.json
+
+# Move outputs to the mounted directory
+mkdir -p /trajectories_mount/eval_results
+cp /root/output.json /trajectories_mount/eval_results/output.json
+"""
+
+        search_path = os.path.join(
+            self.config.persistent_dir,
+            "eval_results",
+            "output.json",
+        )
+
+        return ExecuteContainerCommandArgs(
+            command=cmd,
+            expected_file_pattern=search_path,
+            mode="eval",
+            timeout=self.config.swebench_tests_timeout + 120,
+        )
+
+    def postprocess_after_run(self, report_file: Path) -> None:
+        instance_dict = json.loads(self.config.problem_info["instance_dict"])
+
+        fail_to_pass_str = instance_dict.get("fail_to_pass_select", instance_dict.get("fail_to_pass", "[]"))
+        pass_to_pass_str = instance_dict.get("pass_to_pass_select", instance_dict.get("pass_to_pass", "[]"))
+
+        if isinstance(fail_to_pass_str, str):
+            f2p = set(json.loads(fail_to_pass_str))
+        else:
+            f2p = set(fail_to_pass_str)
+
+        if isinstance(pass_to_pass_str, str):
+            p2p = set(json.loads(pass_to_pass_str))
+        else:
+            p2p = set(pass_to_pass_str)
+
+        with open(report_file, "r+") as f:
+            test_results = json.loads(f.read())
+            is_resolved = self.check_tests_passed(
+                test_results,
+                f2p,
+                p2p,
+            )
+            report_dict = dict(
+                resolved=is_resolved,
+                patch_exists=True,
+                patch_successfully_applied=is_resolved,
+                metadata={
+                    "test_results": test_results,
+                    "f2p": list(f2p),
+                    "p2p": list(p2p),
+                },
+            )
+            f.seek(0)
+            f.write(json.dumps({self.config.instance_id: report_dict}, indent=4))
+
+    def check_tests_passed(
+        self,
+        test_results: dict[str, Any],
+        f2p: set[str],
+        p2p: set[str],
+    ) -> bool:
+        if not test_results:
+            return False
+
+        passed_tests = {test["name"] for test in test_results.get("tests", []) if test.get("status") == "PASSED"}
+        required_tests = f2p.union(p2p)
+
+        # Check if all required tests passed
+        if len(passed_tests) == 0 or len(required_tests) == 0:
+            return False
+
+        return required_tests <= passed_tests
 
 
 class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
@@ -402,9 +559,9 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
     },
     num_cpus=1,
 )
-def runner_ray_remote(params_dict: dict[str, Any]) -> None:
+def runner_ray_remote(params_dict: dict[str, Any]) -> Path:
     params = SWEBenchWrapperInstanceConfig.model_validate(params_dict)
-    instance_id = params.problem_info["instance_id"]
+    instance_id = params.instance_id
 
     if params.debug:
         profiler = Profiler(name=instance_id, base_profile_dir=params.persistent_dir / "profiling")
@@ -412,10 +569,12 @@ def runner_ray_remote(params_dict: dict[str, Any]) -> None:
 
     run_oh = RunOpenHandsAgent(config=params)
 
-    asyncio.run(run_oh.process_single_datapoint())
+    report_file = asyncio.run(run_oh.process_single_datapoint())
 
     if params.debug:
         profiler.stop()
+
+    return report_file
 
 
 class RunOpenHandsAgent(BaseModel):
@@ -663,82 +822,6 @@ class RunOpenHandsAgent(BaseModel):
 
         return dest_output
 
-    def _find_container(self, data_point: dict) -> str:
-        """Find the container file using multiple strategies (Exact match > Fuzzy match).
-
-        Strategies:
-        1. Replace "__" with "_1776_" (Original case, then Lowercase)
-        2. Replace "__" with "_s_" (Original case, then Lowercase)
-        3. Fuzzy search directory for .sif files matching above patterns.
-
-        Returns:
-            str: Path to the container file.
-
-        Raises:
-            FileNotFoundError: If no matching container file is found.
-        """
-        instance_id = data_point["instance_id"]
-        container_formatters = data_point["container_formatter"]
-
-        if isinstance(container_formatters, str):
-            container_formatters = [container_formatters]
-
-        if "R2E-Gym" in data_point["dataset_name"]:
-            instance_id_modified = re.sub(
-                r"[^_]+__([^-]+)-", lambda m: m.group(1).lower() + "_final_", data_point["instance_id"]
-            )
-            for container_formatter in container_formatters:
-                container_name = container_formatter.format(instance_id=instance_id_modified)
-                if os.path.exists(container_name):
-                    # print(f"container found: {container_name}", flush=True)
-                    # print(f"container formatter: {container_formatter}", flush=True)
-                    return container_name
-
-        replacements = ["_1776_", "_s_"]
-
-        # Generate all candidate IDs in order of priority
-        candidate_ids = [instance_id]
-        for replacement in replacements:
-            replaced_id = instance_id.replace("__", replacement)
-            candidate_ids.append(replaced_id)
-            candidate_ids.append(replaced_id.lower())
-
-        # Phase 1: Exact Matches - try all container formatters
-        for container_formatter in container_formatters:
-            for candidate_id in candidate_ids:
-                path = container_formatter.format(instance_id=candidate_id)
-                if os.path.exists(path):
-                    return path
-
-        # Phase 2: Fuzzy Search - try all container formatters
-        search_terms = [instance_id, instance_id.lower()] + candidate_ids
-
-        for container_formatter in container_formatters:
-            # Define the default fallback path (Strategy 1, original case)
-            fallback_path = container_formatter.format(instance_id=instance_id.replace("__", replacements[0]))
-            container_dir = os.path.dirname(fallback_path)
-
-            if os.path.exists(container_dir):
-                for term in search_terms:
-                    pattern = os.path.join(container_dir, f"*{term}*.sif")
-                    matches = glob.glob(pattern)
-                    if matches:
-                        return matches[0]
-            else:
-                print(f"Container directory {container_dir} does not exist", flush=True)
-
-        # Phase 3: Fallback
-        tried_paths = []
-        for container_formatter in container_formatters:
-            for candidate_id in candidate_ids:
-                tried_paths.append(container_formatter.format(instance_id=candidate_id))
-
-        raise FileNotFoundError(
-            f"No container file found for instance_id {instance_id}. "
-            f"Tried the following candidate IDs: {candidate_ids}. "
-            f"Searched in paths: {tried_paths}."
-        )
-
     async def _execute_container_command(
         self,
         data_point: dict[str, Any],
@@ -750,9 +833,6 @@ class RunOpenHandsAgent(BaseModel):
         dataset_mount_path: Optional[str] = None,
     ):
         """Execute a command in an Apptainer container with retry logic."""
-        # Find the container using multiple strategies
-        container_name = self._find_container(data_point)
-
         dataset_path_to_mount = dataset_mount_path or self.dataset_path
         if dataset_path_to_mount is None:
             raise ValueError("Dataset path is not set")
@@ -856,7 +936,7 @@ class RunOpenHandsAgent(BaseModel):
         apptainer_cmd = (
             f"apptainer exec --writable-tmpfs --cleanenv --pid --no-mount home,tmp,bind-paths "
             f"{mount_str} "
-            f" {container_name} bash -c {shlex.quote(combined_command)}"
+            f" {self.config.container} bash -c {shlex.quote(combined_command)}"
         )
         memory_limit_mb = self.cfg.apptainer_memory_limit_mb
         if memory_limit_mb is not None and memory_limit_mb > 0:
@@ -931,158 +1011,7 @@ class RunOpenHandsAgent(BaseModel):
                         f"found {len(pred_files) if 'pred_files' in locals() else 'unknown'}."
                     )
 
-    async def _run_nv_internal_eval(
-        self, data_point: dict[str, Any], model_patch: str, instance_dataset_path: str
-    ) -> str:
-        nv_internal_eval_cmd = await self.prepare_nv_internal_eval(data_point, model_patch)
-        instance_dict = json.loads(data_point["instance_dict"])
-
-        fail_to_pass_str = instance_dict.get("fail_to_pass_select", instance_dict.get("fail_to_pass", "[]"))
-        pass_to_pass_str = instance_dict.get("pass_to_pass_select", instance_dict.get("pass_to_pass", "[]"))
-
-        if isinstance(fail_to_pass_str, str):
-            f2p = set(json.loads(fail_to_pass_str))
-        else:
-            f2p = set(fail_to_pass_str)
-
-        if isinstance(pass_to_pass_str, str):
-            p2p = set(json.loads(pass_to_pass_str))
-        else:
-            p2p = set(pass_to_pass_str)
-
-        search_path = os.path.join(
-            self.output_dir,
-            "eval_results",
-            "output.json",
-        )
-        report_file = await self._execute_container_command(
-            data_point,
-            nv_internal_eval_cmd,
-            search_path,
-            mode="eval",
-            timeout=self.cfg.swebench_tests_timeout + 120,
-            dataset_mount_path=instance_dataset_path,
-        )
-
-        with open(report_file, "r+") as f:
-            test_results = json.loads(f.read())
-            is_resolved = self.check_tests_passed(
-                test_results,
-                f2p,
-                p2p,
-            )
-            report_dict = dict(
-                resolved=is_resolved,
-                patch_exists=True,
-                patch_successfully_applied=is_resolved,
-                metadata={
-                    "test_results": test_results,
-                    "f2p": list(f2p),
-                    "p2p": list(p2p),
-                },
-            )
-            f.seek(0)
-            f.write(json.dumps({data_point["instance_id"]: report_dict}, indent=4))
-            return report_file
-
-    async def prepare_nv_internal_eval(self, data_point: dict[str, Any], model_patch: str):
-        instance_dict = json.loads(data_point["instance_dict"])
-        base_dockerfile = instance_dict.get("base_dockerfile", "")
-        instance_dockerfile = instance_dict.get("instance_dockerfile", "")
-
-        env_lines = []
-        for line in (base_dockerfile + "\n" + instance_dockerfile).split("\n"):
-            line = line.strip()
-            if line.startswith("ENV "):
-                # Convert ENV KEY=VALUE or ENV KEY VALUE to export KEY="VALUE"
-                export_line = line.replace("ENV ", "export ", 1)
-                # Handle both Docker ENV formats:
-                # 1. ENV KEY=VALUE (with equals)
-                # 2. ENV KEY VALUE (space-separated)
-                if "=" in export_line:
-                    # Format: export KEY=VALUE -> normalize spaces around =
-                    export_line = re.sub(r"\s*=\s*", "=", export_line)
-                else:
-                    # Format: export KEY VALUE -> convert to export KEY="VALUE"
-                    parts = export_line.split(None, 2)  # Split into at most 3 parts
-                    if len(parts) >= 3:  # export KEY VALUE
-                        key = parts[1]
-                        value = parts[2]
-                        export_line = f'export {key}="{value}"'
-
-                env_lines.append(export_line)
-
-        env_exports = "\n".join(env_lines)
-
-        # Get repo setup command
-        repo_cmd = instance_dict.get("before_repo_set_cmd", "").strip()
-        if repo_cmd:
-            repo_cmd = repo_cmd.split("\n")[-1]
-
-        # Get test files
-        test_files_str = instance_dict.get("selected_test_files_to_run", "[]")
-        if isinstance(test_files_str, str):
-            test_files = ",".join(eval(test_files_str))
-        else:
-            test_files = ",".join(test_files_str)
-
-        run_script = instance_dict["run_script.sh"]
-        parsing_script = instance_dict["parsing_script.py"]
-        run_script_path = self.output_dir / "run_script.sh"
-        parsing_script_path = self.output_dir / "parsing_script.py"
-        with open(run_script_path, "w") as f:
-            f.write(run_script)
-        with open(parsing_script_path, "w") as f:
-            f.write(parsing_script)
-
-        cmd = f"""#!/bin/bash
-set -e
-
-{env_exports}
-
-# Apply patch
-cd /app
-git reset --hard {instance_dict.get("base_commit", "")}
-git checkout {instance_dict.get("base_commit", "")}
-
-# Apply patch with rejection to handle conflicts
-git apply --ignore-space-change --ignore-whitespace --reject -v /root/patch.diff || true
-
-# Setup repository
-{repo_cmd}
-
-# Run tests
-bash /root/run_script.sh {test_files} > /root/stdout.log 2> /root/stderr.log || true
-
-# Parse results
-python /root/parsing_script.py /root/stdout.log /root/stderr.log /root/output.json
-
-# Move outputs to the mounted directory
-mkdir -p /trajectories_mount/eval_results
-cp /root/output.json /trajectories_mount/eval_results/output.json
-"""
-
-        return cmd
-
-    def check_tests_passed(
-        self,
-        test_results: dict[str, Any],
-        f2p: set[str],
-        p2p: set[str],
-    ) -> bool:
-        if not test_results:
-            return False
-
-        passed_tests = {test["name"] for test in test_results.get("tests", []) if test.get("status") == "PASSED"}
-        required_tests = f2p.union(p2p)
-
-        # Check if all required tests passed
-        if len(passed_tests) == 0 or len(required_tests) == 0:
-            return False
-
-        return required_tests <= passed_tests
-
-    async def process_single_datapoint(self) -> None:
+    async def process_single_datapoint(self) -> Path:
         pred_file = await self._run_openhands()
         if pred_file is None:
             return
@@ -1102,14 +1031,8 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
             model_patch = model_patch + "\n" if not model_patch.endswith("\n") else model_patch
             f.write(model_patch)
 
-        if self.config.problem_info["dataset_name"] == "nv-internal-1":
-            run_command = self._run_nv_internal_eval(trajectory_dict["model_patch"])
-        elif "R2E-Gym" in self.config.problem_info["dataset_name"]:
-            run_command = R2EGymDatasetProcessor(self.config).get_run_command()
-        else:
-            run_command = SweBenchDatasetProcessor(self.config).get_run_command()
-
-        await self._execute_container_command(run_command)
+        report_file = await self._execute_container_command(self.config.eval_command)
+        return report_file
 
 
 ########################################
@@ -1193,7 +1116,85 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     # START Main methods
     ########################################
 
-    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+    def _find_container(self, data_point: dict) -> str:
+        """Find the container file using multiple strategies (Exact match > Fuzzy match).
+
+        Strategies:
+        1. Replace "__" with "_1776_" (Original case, then Lowercase)
+        2. Replace "__" with "_s_" (Original case, then Lowercase)
+        3. Fuzzy search directory for .sif files matching above patterns.
+
+        Returns:
+            str: Path to the container file.
+
+        Raises:
+            FileNotFoundError: If no matching container file is found.
+        """
+        instance_id = data_point["instance_id"]
+        container_formatters = data_point["container_formatter"]
+
+        if isinstance(container_formatters, str):
+            container_formatters = [container_formatters]
+
+        if "R2E-Gym" in data_point["dataset_name"]:
+            instance_id_modified = re.sub(
+                r"[^_]+__([^-]+)-", lambda m: m.group(1).lower() + "_final_", data_point["instance_id"]
+            )
+            for container_formatter in container_formatters:
+                container_name = container_formatter.format(instance_id=instance_id_modified)
+                if os.path.exists(container_name):
+                    # print(f"container found: {container_name}", flush=True)
+                    # print(f"container formatter: {container_formatter}", flush=True)
+                    return container_name
+
+        replacements = ["_1776_", "_s_"]
+
+        # Generate all candidate IDs in order of priority
+        candidate_ids = [instance_id]
+        for replacement in replacements:
+            replaced_id = instance_id.replace("__", replacement)
+            candidate_ids.append(replaced_id)
+            candidate_ids.append(replaced_id.lower())
+
+        # Phase 1: Exact Matches - try all container formatters
+        for container_formatter in container_formatters:
+            for candidate_id in candidate_ids:
+                path = container_formatter.format(instance_id=candidate_id)
+                if os.path.exists(path):
+                    return path
+
+        # Phase 2: Fuzzy Search - try all container formatters
+        search_terms = [instance_id, instance_id.lower()] + candidate_ids
+
+        for container_formatter in container_formatters:
+            # Define the default fallback path (Strategy 1, original case)
+            fallback_path = container_formatter.format(instance_id=instance_id.replace("__", replacements[0]))
+            container_dir = os.path.dirname(fallback_path)
+
+            if os.path.exists(container_dir):
+                for term in search_terms:
+                    pattern = os.path.join(container_dir, f"*{term}*.sif")
+                    matches = glob.glob(pattern)
+                    if matches:
+                        return matches[0]
+            else:
+                print(f"Container directory {container_dir} does not exist", flush=True)
+
+        # Phase 3: Fallback
+        tried_paths = []
+        for container_formatter in container_formatters:
+            for candidate_id in candidate_ids:
+                tried_paths.append(container_formatter.format(instance_id=candidate_id))
+
+        raise FileNotFoundError(
+            f"No container file found for instance_id {instance_id}. "
+            f"Tried the following candidate IDs: {candidate_ids}. "
+            f"Searched in paths: {tried_paths}."
+        )
+
+    def _setup_params(
+        self, body: NeMoGymResponseCreateParamsNonStreaming
+    ) -> Tuple[SWEBenchWrapperInstanceConfig, BaseDatasetHarnessProcessor]:
         problem_info = body.metadata | {"container_formatter": self.config.container_formatter}
         instance_id = problem_info.get("instance_id", "unknown")
 
@@ -1229,6 +1230,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             if value is not None:
                 inference_params[key] = value
 
+        container = self._find_container(problem_info)
+
         params: SWEBenchWrapperInstanceConfig = SWEBenchWrapperInstanceConfig.model_validate(
             **self.config.model_dump(),
             **self._swe_bench_wrapper_server_config,
@@ -1244,13 +1247,30 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             prediction_path=prediction_path,
             prediction_mounted_path=prediction_mounted_path,
             model_patch_path=persistent_dir / "patch.diff",
+            container=container,
         )
 
-        await runner_ray_remote.remote(params.model_dump())
+        if params.problem_info["dataset_name"] == "nv-internal-1":
+            dataset_processor = NVInternalDatasetProcessor(params)
+        elif "R2E-Gym" in params.problem_info["dataset_name"]:
+            dataset_processor = R2EGymDatasetProcessor(params)
+        else:
+            dataset_processor = SweBenchDatasetProcessor(params)
 
-        trajectories_dir = persistent_dir / "trajectories"
+        params.eval_command = dataset_processor.get_run_command()
+
+        return params, dataset_processor
+
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        params, dataset_processor = self._setup_params(body)
+
+        report_file = await runner_ray_remote.remote(params.model_dump())
+
+        dataset_processor.postprocess_after_eval_run(report_file)
+
+        trajectories_dir = params.persistent_dir / "trajectories"
         chat_completions_trajectory, chat_completions_tools = self.get_openhands_trajectory_from_completions(
-            trajectories_dir, instance_id
+            trajectories_dir, params.instance_id
         )
 
         tools = [
@@ -1262,7 +1282,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         input_items, output_items = split_responses_input_output_items(responses_items)
 
         return NeMoGymResponse(
-            id=f"swebench-{problem_info.get('instance_id', 'unknown')}",
+            id=f"swebench-{params.instance_id}",
             created_at=int(time.time()),
             model=body.model,
             object="response",
