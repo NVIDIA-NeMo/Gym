@@ -76,6 +76,11 @@ def runner_ray_remote(params_dict: dict[str, Any]) -> None:
         profiler.stop()
 
 
+########################################
+# START Configuration
+########################################
+
+
 class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
 
@@ -176,33 +181,13 @@ class SWEBenchVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
     pass
 
 
-class SWEBenchWrapper(SimpleResponsesAPIAgent):
-    """Wrapper for NeMo-Skills SWE-bench evaluation in NeMo-Gym."""
+########################################
+# START Dataset and harness handling
+########################################
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
 
+class BaseDatasetHarnessProcessor(BaseModel):
     config: SWEBenchWrapperConfig
-
-    _sem: Semaphore
-    _vllm_converter: VLLMConverter
-    _swe_bench_wrapper_server_config: SWEBenchWrapperServerConfig
-
-    def model_post_init(self, __context: Any) -> None:
-        run_session_id = f"{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
-        workspace_root = Path(os.path.dirname(os.path.abspath(__file__)))
-        self._swe_bench_wrapper_server_config = SWEBenchWrapperServerConfig(
-            run_session_id=run_session_id,
-            base_results_dir=workspace_root / f"swebench_results_{run_session_id}",
-            ng_global_config_dict_str=shlex.quote(OmegaConf.to_yaml(get_global_config_dict())),
-            model_server_name=self.config.model_server.name,
-            openhands_setup_dir=self.setup_openhands_environment(),
-            swebench_setup_dir=self.setup_swebench_environment(),
-            r2e_gym_setup_dir=self.setup_r2e_gym_environment(),
-        )
-        self._swe_bench_wrapper_server_config.base_results_dir.mkdir(parents=True, exist_ok=True)
-
-        self._sem = Semaphore(self.config.concurrency)
-        self._vllm_converter = VLLMConverter(return_token_id_information=True)
 
     ########################################
     # START Setup logic
@@ -239,7 +224,12 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             finally:
                 flock(lock_file, LOCK_UN)
 
-    def setup_swebench_environment(self) -> Path:
+    def setup(self) -> Path:
+        pass
+
+
+class SweBenchDatasetProcessor(BaseDatasetHarnessProcessor):
+    def setup(self) -> Path:
         swebench_repo = "https://github.com/HeyyyyyyG/SWE-bench.git"
         swebench_commit = "HEAD"
 
@@ -268,7 +258,9 @@ SWEBENCH_COMMIT={swebench_commit} \\
 
             return setup_dir
 
-    def setup_r2e_gym_environment(self) -> Path:
+
+class R2EGymDatasetProcessor(BaseDatasetHarnessProcessor):
+    def setup(self) -> Path:
         eval_harness_repo = "https://github.com/ludwig-n/R2E-Gym.git"
         eval_harness_commit = "local-eval"
 
@@ -305,7 +297,9 @@ EVAL_HARNESS_COMMIT={eval_harness_commit} \\
 
             return setup_dir
 
-    def setup_openhands_environment(self) -> Path:
+
+class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
+    def setup(self) -> Path:
         setup_dir = self.parent_dir / "swe_openhands_setup"
 
         with self._setup_directory_lock(setup_dir, "OpenHands"):
@@ -330,6 +324,44 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
             self._run_setup_command(command)
 
             return setup_dir
+
+
+########################################
+# START Server logic
+########################################
+
+
+class SWEBenchWrapper(SimpleResponsesAPIAgent):
+    """Wrapper for NeMo-Skills SWE-bench evaluation in NeMo-Gym."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    config: SWEBenchWrapperConfig
+
+    _sem: Semaphore
+    _vllm_converter: VLLMConverter
+    _swe_bench_wrapper_server_config: SWEBenchWrapperServerConfig
+
+    ########################################
+    # START Init
+    ########################################
+
+    def model_post_init(self, __context: Any) -> None:
+        run_session_id = f"{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
+        workspace_root = Path(os.path.dirname(os.path.abspath(__file__)))
+        self._swe_bench_wrapper_server_config = SWEBenchWrapperServerConfig(
+            run_session_id=run_session_id,
+            base_results_dir=workspace_root / f"swebench_results_{run_session_id}",
+            ng_global_config_dict_str=shlex.quote(OmegaConf.to_yaml(get_global_config_dict())),
+            model_server_name=self.config.model_server.name,
+            openhands_setup_dir=OpenHandsHarnessProcessor(self.config).setup(),
+            swebench_setup_dir=SWEBenchWrapper(self.config).setup(),
+            r2e_gym_setup_dir=R2EGymDatasetProcessor(self.config).setup(),
+        )
+        self._swe_bench_wrapper_server_config.base_results_dir.mkdir(parents=True, exist_ok=True)
+
+        self._sem = Semaphore(self.config.concurrency)
+        self._vllm_converter = VLLMConverter(return_token_id_information=True)
 
     ########################################
     # START Results processing logic
