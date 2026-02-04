@@ -65,7 +65,7 @@ from responses_api_models.vllm_model.app import VLLMConverter, split_responses_i
 def runner_ray_remote(params_dict: dict[str, Any]) -> None:
     params = SWEBenchWrapperInstanceConfig.model_validate(params_dict)
 
-    if params["debug"]:
+    if params.debug:
         instance_id = params.problem_info.get("instance_id", "unknown")
         profiler = Profiler(name=instance_id, base_profile_dir=params.persistent_dir / "profiling")
         profiler.start()
@@ -121,7 +121,7 @@ def runner_ray_remote(params_dict: dict[str, Any]) -> None:
     with open(output_file, "w") as f:
         json.dump(result, f)
 
-    if params["debug"]:
+    if params.debug:
         profiler.stop()
 
 
