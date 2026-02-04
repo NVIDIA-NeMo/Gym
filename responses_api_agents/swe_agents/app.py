@@ -122,13 +122,12 @@ class ExecuteContainerCommandArgs(BaseModel):
 
 
 class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapperConfig):
-    output_dir: str
     metrics_fpath: Path
     problem_info: Dict[str, Any]
     body: NeMoGymResponseCreateParamsNonStreaming
     persistent_dir: Path
     metrics_fpath: Path
-    ray_queue_time: float
+    ray_queue_timestamp: float
     inference_params: Dict[str, Any]
     agent_run_id: str
     instance_dataset_path: Path
@@ -148,7 +147,7 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
 
     @property
     def instance_id(self) -> str:
-        return self.instance_id
+        return self.problem_info["instance_id"]
 
 
 class SWEBenchMetrics(BaseModel):
@@ -280,10 +279,10 @@ SWEBENCH_COMMIT={swebench_commit} \\
             f"ls -lrt /root/dataset && "
             # Run with clean environment to avoid venv contamination
             # Use the pre-built venv directly with its absolute path
-            f"env -u VIRTUAL_ENV {self.swebench_setup_dir}/SWE-bench/venv/bin/python -m swebench.harness.run_local_evaluation "
+            f"env -u VIRTUAL_ENV {self.config.swebench_setup_dir}/SWE-bench/venv/bin/python -m swebench.harness.run_local_evaluation "
             f"    --predictions_path {self.config.prediction_mounted_path} "
             f"    --instance_ids {self.config.instance_id} "
-            f"    --timeout {self.cfg.swebench_tests_timeout} "
+            f"    --timeout {self.config.swebench_tests_timeout} "
             f"    --dataset_name /root/dataset/data.jsonl "
             f"    --split {self.config.problem_info['split']} "
             f"    --run_id {self.config.agent_run_id} && "
@@ -683,7 +682,7 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
             command=openhands_cmd,
             expected_file_pattern=search_path,
             mode="agent",
-            timeout=self.cfg.swebench_agent_timeout + 60,
+            timeout=self.config.swebench_agent_timeout + 60,
         )
 
 
@@ -780,7 +779,7 @@ class RunOpenHandsAgent(BaseModel):
             raise ValueError("Dataset path is not set")
         dataset_path_to_mount = str(dataset_path_to_mount)
 
-        logs_dir = self.output_dir / "apptainer_logs"
+        logs_dir = self.config.persistent_dir / "apptainer_logs"
         logs_dir.mkdir(exist_ok=True)
         log_file_path = logs_dir / f"{data_point['instance_id']}_{mode}.log"
         # print(
@@ -793,7 +792,7 @@ class RunOpenHandsAgent(BaseModel):
 
         # Build mount arguments
         mount_args = [
-            f"--mount type=bind,src={self.output_dir},dst=/trajectories_mount",
+            f"--mount type=bind,src={self.config.persistent_dir},dst=/trajectories_mount",
         ]
 
         # Add OpenHands setup directory mount if available (for OpenHands)
@@ -842,9 +841,9 @@ class RunOpenHandsAgent(BaseModel):
             mount_args.append(f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl")
 
         if mode == "eval" and data_point["dataset_name"] == "nv-internal-1":
-            run_script_path = self.output_dir / "run_script.sh"
-            parsing_script_path = self.output_dir / "parsing_script.py"
-            model_patch_path = self.output_dir / "patch.diff"
+            run_script_path = self.config.persistent_dir / "run_script.sh"
+            parsing_script_path = self.config.persistent_dir / "parsing_script.py"
+            model_patch_path = self.config.persistent_dir / "patch.diff"
 
             mount_args.append(f"--mount type=bind,src={run_script_path},dst=/root/run_script.sh")
             mount_args.append(f"--mount type=bind,src={parsing_script_path},dst=/root/parsing_script.py")
@@ -1216,16 +1215,16 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         openhands_config_file_path = f"/tmp/config_{agent_run_id}.toml"
 
         agent_script_name = f"agent_script_{agent_run_id}.sh"
-        agent_script_path = self.config.persistent_dir / agent_script_name
+        agent_script_path = persistent_dir / agent_script_name
 
-        params: SWEBenchWrapperInstanceConfig = SWEBenchWrapperInstanceConfig.model_validate(
+        params: SWEBenchWrapperInstanceConfig = SWEBenchWrapperInstanceConfig(
             **self.config.model_dump(),
-            **self._swe_bench_wrapper_server_config,
+            **self._swe_bench_wrapper_server_config.model_dump(),
             problem_info=problem_info,
             body=body,
             persistent_dir=persistent_dir,
             metrics_fpath=persistent_dir / "nemo_gym_metrics.json",
-            ray_queue_time=time.time(),
+            ray_queue_timestamp=time.time(),
             inference_params=inference_params,
             agent_run_id=agent_run_id,
             instance_dataset_path=instance_dataset_path,
@@ -1240,15 +1239,15 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         )
 
         if params.problem_info["dataset_name"] == "nv-internal-1":
-            dataset_processor = NVInternalDatasetProcessor(params)
+            dataset_processor = NVInternalDatasetProcessor(config=params)
         elif "R2E-Gym" in params.problem_info["dataset_name"]:
-            dataset_processor = R2EGymDatasetProcessor(params)
+            dataset_processor = R2EGymDatasetProcessor(config=params)
         else:
-            dataset_processor = SweBenchDatasetProcessor(params)
+            dataset_processor = SweBenchDatasetProcessor(config=params)
 
         params.eval_command = dataset_processor.get_run_command()
 
-        params.agent_command = OpenHandsHarnessProcessor(params).get_run_command()
+        params.agent_command = OpenHandsHarnessProcessor(config=params).get_run_command()
         params.agent_script = params.agent_script_path.read_text()
 
         return params, dataset_processor
@@ -1310,7 +1309,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 response=response,
                 reward=1.0 if metrics.resolved else 0.0,
                 **metrics.model_dump(),
-                **SWEBenchWrapperInstanceConfig.model_validate_json(metadata["instance_config"]).model_dump(),
+                instance_config=SWEBenchWrapperInstanceConfig.model_validate_json(
+                    metadata["instance_config"]
+                ).model_dump(),
             )
 
 

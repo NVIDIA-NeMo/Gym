@@ -667,6 +667,9 @@ class VLLMConverter(BaseModel):
 def split_responses_input_output_items(
     items: List[NeMoGymResponseOutputItem],
 ) -> Tuple[List[NeMoGymResponseOutputItem], List[NeMoGymResponseOutputItem]]:
+    if not items:
+        return [], []
+
     for i, item in enumerate(items):
         if getattr(item, "role", None) == "assistant":
             break
