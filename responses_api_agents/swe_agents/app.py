@@ -388,6 +388,7 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
         persistent_dir = self._swe_bench_wrapper_server_config.base_results_dir / instance_dir
         persistent_dir.mkdir(parents=True, exist_ok=True)
 
+        # Map from Responses to OpenHands
         inference_params = {}
         for param, key in [
             ("temperature", "temperature"),
