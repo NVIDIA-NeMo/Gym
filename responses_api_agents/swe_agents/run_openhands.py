@@ -20,88 +20,16 @@ import shlex
 import shutil
 import time
 import uuid
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
 import tomlkit
 from gprof2dot import main as gprof2dot_main
+from pydantic import BaseModel
 from pydot import graph_from_dot_file
 
 
-SUPPORTED_DATASETS = [
-    "SWE-Gym/SWE-Gym",
-    "R2E-Gym/R2E-Gym-Subset",
-    "princeton-nlp/SWE-bench_Verified",
-    "nv-internal-1",
-]
-
-
-@dataclass
-class SweBenchInferenceConfig:
-    temperature: float = 1.0
-    top_k: int | None = None
-    top_p: float = 1.0
-    min_p: float | None = None
-    random_seed: int | None = None
-    tokens_to_generate: int | None = None
-    repetition_penalty: float | None = None
-    top_logprobs: int | None = None
-
-
-@dataclass
-class SweBenchGenerationConfig:
-    output_file: Path
-    agent_framework_repo: str | None = None
-    agent_framework_commit: str = "HEAD"
-    agent_config: str | None = None
-    agent_max_turns: int = 100
-    swebench_tests_timeout: int = 30 * 60
-    swebench_agent_timeout: int = 45 * 60
-    apptainer_memory_limit_mb: int = 32 * 1024
-    command_exec_timeout: int = 5 * 60
-    inference: SweBenchInferenceConfig = field(default_factory=SweBenchInferenceConfig)
-    server: dict = field(default_factory=dict)
-
-
-# Converts the parameter names above to the corresponding OpenAI parameter names.
-NS_TO_OPENAI_PARAM = {
-    "tokens_to_generate": "max_tokens",
-    "top_logprobs": "top_logprobs",
-    "random_seed": "seed",
-    "top_k": "top_k",
-    "min_p": "min_p",
-    "repetition_penalty": "repetition_penalty",
-}
-
-
-# Converts the parameter names above to the corresponding parameters in OpenHands's LLM config.
-# https://github.com/All-Hands-AI/OpenHands/blob/main/openhands/core/config/llm_config.py#L12
-NS_TO_OPENHANDS_PARAM = {
-    "tokens_to_generate": "max_output_tokens",
-    "top_k": "top_k",
-    "random_seed": "seed",
-    "min_p": None,
-    "repetition_penalty": None,
-    "top_logprobs": None,
-}
-
-
-@dataclass
-class RunOpenHandsAgent:
-    cfg: SweBenchGenerationConfig
-    ng_global_config_dict_str: str
-    model_server_name: str
-    output_dir: str = None
-    openhands_setup_dir: Path | None = None
-    swebench_setup_dir: Path | None = None
-    r2e_gym_setup_dir: Path | None = None
-    dataset_path: str | None = None
-    openhands_should_log: bool = False
-    debug: bool = False
-    metrics_fpath: Path
-    persistent_dir: Path
-
+class RunOpenHandsAgent(BaseModel):
     async def _run_openhands(
         self,
         data_point: dict[str, Any],
@@ -126,18 +54,6 @@ class RunOpenHandsAgent:
             "temperature": self.cfg.inference.temperature,
             "top_p": self.cfg.inference.top_p,
         }
-
-        for ns_param, oh_param in NS_TO_OPENHANDS_PARAM.items():
-            if not getattr(self.cfg.inference, ns_param):
-                continue
-            if oh_param:
-                config["llm"]["model"][oh_param] = getattr(self.cfg.inference, ns_param)
-            else:
-                supported_params = [key for key, value in NS_TO_OPENHANDS_PARAM.items() if value is not None]
-                raise ValueError(
-                    f"Inference parameter {ns_param} is not supported by OpenHands. "
-                    f"Supported inference parameters: temperature, top_p, {', '.join(supported_params)}."
-                )
 
         config_str = tomlkit.dumps(config)
 
