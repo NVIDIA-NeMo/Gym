@@ -18,6 +18,7 @@ from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
 from itertools import chain, repeat
+from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
@@ -104,20 +105,61 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
             print(f"Overriding responses_create_params fields with {config.responses_create_params}")
 
         metrics = Counter()
+        skipped_count = 0
+        successful_count = 0
+        
+        # Derive errors file path from output path
+        output_path = Path(config.output_jsonl_fpath)
+        errors_fpath = output_path.parent / "errors.json"
+        
+        # Initialize errors list (will be written at the end)
+        schema_errors: List[Dict[str, Any]] = []
+        
         with open(config.output_jsonl_fpath, "a") as f:
 
             async def _post_coroutine(row: dict) -> None:
+                nonlocal skipped_count, successful_count
+                row_id = row.get("id", "unknown")
                 row["responses_create_params"] = row["responses_create_params"] | config.responses_create_params
                 async with semaphore:
                     response = await server_client.post(server_name=config.agent_name, url_path="/run", json=row)
                     await raise_for_status(response)
                     result = await response.json()
-                    f.write(json.dumps(result) + "\n")
-                    metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
+                    
+                    # Check for schema validation errors
+                    validation_results = result.get("validation_results", [])
+                    schema_validation_errors = [
+                        vr for vr in validation_results 
+                        if vr.get("instruction") == "schema_validation" and vr.get("status") == "Failed"
+                    ]
+                    
+                    if schema_validation_errors:
+                        # Skip this rollout and log to errors
+                        skipped_count += 1
+                        schema_errors.append({
+                            "id": row_id,
+                            "errors": [err.get("message") for err in schema_validation_errors]
+                        })
+                    else:
+                        # Write to output file
+                        successful_count += 1
+                        f.write(json.dumps(result) + "\n")
+                        metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
 
             await tqdm.gather(*map(_post_coroutine, rows), desc="Collecting rollouts", miniters=tqdm_miniters)
 
-        avg_metrics = {k: v / len(rows) for k, v in metrics.items()}
+        # Write schema errors to errors.json
+        if schema_errors:
+            with open(errors_fpath, "w") as ef:
+                json.dump(schema_errors, ef, indent=2)
+            print(f"\n{skipped_count} rollout(s) skipped due to schema validation errors. See {errors_fpath}")
+        
+        print(f"\n{successful_count} rollout(s) completed successfully.")
+        
+        if successful_count > 0:
+            avg_metrics = {k: v / successful_count for k, v in metrics.items()}
+        else:
+            avg_metrics = {}
         avg_metrics.setdefault("reward", 0.0)
         print(json.dumps(avg_metrics, indent=4))
 
