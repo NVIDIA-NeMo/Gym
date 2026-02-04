@@ -20,7 +20,7 @@ import time
 import uuid
 from asyncio import Semaphore
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, Optional
 
 import ray
 from openai.types.responses.function_tool import FunctionTool
@@ -42,7 +42,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.profiling import Profiler
-from nemo_gym.server_utils import get_server_url
 from responses_api_agents.swe_agents.utils import (
     run_swebench_evaluation,
     setup_openhands_environment,
@@ -135,37 +134,33 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
     # Concurrency control
     concurrency: int = Field(default=256, description="Maximum number of concurrent SWE-bench runs")
 
-    # Pre-built OpenHands directory path (set during initialization)
-    openhands_setup_dir: Optional[Path] = Field(
-        default=None,
-        description="Path to pre-built OpenHands directory (automatically set during initialization)",
-        exclude=True,
-    )
-
-    # Pre-built SWE-bench directory path (set during initialization)
-    swebench_setup_dir: Optional[Path] = Field(
-        default=None,
-        description="Path to pre-built SWE-bench directory (automatically set during initialization)",
-        exclude=True,
-    )
-    # Pre-built R2E-gym directory path (set during initialization)
-    r2e_gym_setup_dir: Optional[Path] = Field(
-        default=None,
-        description="Path to pre-built R2E-gym directory (automatically set during initialization)",
-        exclude=True,
-    )
     dataset_path: Optional[str] = Field(
         default=None,
         description="Path to the dataset for SWE-bench evaluation",
     )
 
-    run_session_id: str = Field(
-        default=None,
-        description="Session ID for the run",
-    )
-
     openhands_should_log: bool = False
     debug: bool = False
+
+
+class SWEBenchWrapperServerConfig(BaseModel):
+    ng_global_config_dict_str: str
+    model_server_name: str
+    openhands_setup_dir: Path
+    swebench_setup_dir: Path
+    r2e_gym_setup_dir: Path
+    run_session_id: str
+    base_results_dir: Path
+
+
+class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapperConfig):
+    output_dir: str
+    metrics_fpath: Path
+    problem_info: Dict[str, Any]
+    body: NeMoGymResponseCreateParamsNonStreaming
+    persistent_dir: Path
+    metrics_fpath: Path
+    ray_queue_time: float
 
 
 class SWEBenchMetrics(BaseModel):
@@ -211,87 +206,61 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
     _sem: Semaphore
     _container_counter: ConcurrentContainerCounter
-    _global_config_dict_str: str
     _vllm_converter: VLLMConverter
-    _model_endpoint: str
+    _swe_bench_wrapper_server_config: SWEBenchWrapperServerConfig
 
     def model_post_init(self, __context: Any) -> None:
-        # Pre-build OpenHands environment if using openhands framework
-        self.config.openhands_setup_dir = setup_openhands_environment(
+        openhands_setup_dir = setup_openhands_environment(
             agent_framework_repo=self.config.agent_framework_repo,
             agent_framework_commit=self.config.agent_framework_commit,
             debug=self.config.debug,
         )
-        self.config.swebench_setup_dir = setup_swebench_environment()
-        self.config.r2e_gym_setup_dir = setup_r2e_gym_environment()
+        swebench_setup_dir = setup_swebench_environment()
+        r2e_gym_setup_dir = setup_r2e_gym_environment()
+        print("Dependencies repositories set up complete")
 
-        print("Dependencies repositories set up complete", flush=True)
-
-        self.config.run_session_id = f"{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
-        print(f"Run session ID: {self.config.run_session_id}", flush=True)
+        run_session_id = f"{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
+        workspace_root = Path(os.path.dirname(os.path.abspath(__file__)))
+        self._swe_bench_wrapper_server_config = SWEBenchWrapperServerConfig(
+            run_session_id=run_session_id,
+            base_results_dir=workspace_root / f"swebench_results_{run_session_id}",
+            ng_global_config_dict_str=shlex.quote(OmegaConf.to_yaml(get_global_config_dict())),
+            model_server_name=self.config.model_server.name,
+            openhands_setup_dir=openhands_setup_dir,
+            swebench_setup_dir=swebench_setup_dir,
+            r2e_gym_setup_dir=r2e_gym_setup_dir,
+        )
+        self._swe_bench_wrapper_server_config.base_results_dir.mkdir(parents=True, exist_ok=True)
 
         self._sem = Semaphore(self.config.concurrency)
         self._container_counter = ConcurrentContainerCounter.remote()
-        self._global_config_dict_str = shlex.quote(OmegaConf.to_yaml(get_global_config_dict()))
         self._vllm_converter = VLLMConverter(return_token_id_information=True)
-        self._model_endpoint = get_server_url(self.config.model_server.name)
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
-        # Extract problem information from request
         problem_info = body.metadata | {"container_formatter": self.config.container_formatter}
 
         # Create persistent directory for I/O and logs in local workspace
         instance_dir = (
             f"{problem_info.get('instance_id', 'unknown')}_{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
         )
-        workspace_root = Path(os.path.dirname(os.path.abspath(__file__)))
-        persistent_dir = workspace_root / f"swebench_results_{self.config.run_session_id}" / instance_dir
+        persistent_dir = self._swe_bench_wrapper_server_config.base_results_dir / instance_dir
         persistent_dir.mkdir(parents=True, exist_ok=True)
-        metrics_fpath = persistent_dir / "nemo_gym_metrics.json"
 
-        ray_queue_time = time.time()
-        params = {
-            "problem_info": problem_info,
-            "model_endpoint": self._model_endpoint,
-            "body": body,
-            "agent_config": self.config.agent_config,
-            "agent_tools_file": self.config.agent_tools_file,
-            "agent_max_turns": self.config.agent_max_turns,
-            "swebench_tests_timeout": self.config.swebench_tests_timeout,
-            "swebench_agent_timeout": self.config.swebench_agent_timeout,
-            "persistent_dir": persistent_dir,
-            "metrics_fpath": metrics_fpath,
-            "agent_framework_repo": self.config.agent_framework_repo,
-            "agent_framework_commit": self.config.agent_framework_commit,
-            "openhands_setup_dir": self.config.openhands_setup_dir,
-            "swebench_setup_dir": self.config.swebench_setup_dir,
-            "r2e_gym_setup_dir": self.config.r2e_gym_setup_dir,
-            "dataset_path": self.config.dataset_path,
-            "ray_queue_time": ray_queue_time,
-            "openhands_should_log": self.config.openhands_should_log,
-            "debug": self.config.debug,
-            "model_server_name": self.config.model_server.name,
-            "ng_global_config_dict_str": self._global_config_dict_str,
-            "apptainer_memory_limit_mb": self.config.apptainer_memory_limit_mb,
-            "command_exec_timeout": self.config.command_exec_timeout,
-        }
+        params = SWEBenchWrapperInstanceConfig.model_validate(
+            **self.config.model_dump(),
+            **self._swe_bench_wrapper_server_config,
+            problem_info=problem_info,
+            body=body,
+            persistent_dir=persistent_dir,
+            metrics_fpath=persistent_dir / "nemo_gym_metrics.json",
+            ray_queue_time=time.time(),
+        )
 
         result = await runner_ray_remote.remote(self._container_counter, run_swebench_evaluation, params)
 
-        # Convert tools from ChatCompletion format to Response FunctionTool format
-        raw_tools = result.get("tools", [])
-        tools = [FunctionTool.model_validate(tool["function"] | {"type": "function"}) for tool in raw_tools]
-
-        # Extract trajectory and convert to proper NeMoGym format
-        trajectory = result.get("trajectory", [])
-        responses_items = self._vllm_converter.chat_completions_messages_to_responses_items(trajectory)
+        tools = [FunctionTool.model_validate(tool["function"] | {"type": "function"}) for tool in result["tools"]]
+        responses_items = self._vllm_converter.chat_completions_messages_to_responses_items(result["trajectory"])
         input_items, output_items = split_responses_input_output_items(responses_items)
-
-        # Note: metadata values must be strings for NeMoGymResponse
-        metadata = {
-            "input": input_items,
-            "metrics": None,
-        }
 
         return NeMoGymResponse(
             id=f"swebench-{problem_info.get('instance_id', 'unknown')}",
@@ -302,7 +271,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             parallel_tool_calls=body.parallel_tool_calls,
             tool_choice=body.tool_choice,
             tools=tools,
-            metadata=metadata,
+            metadata={
+                "input": json.dumps([i.model_dump() for i in input_items]),
+                "metrics": None,
+            },
         )
 
     async def run(self, body: BaseRunRequest) -> SWEBenchVerifyResponse:
