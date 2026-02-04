@@ -49,8 +49,6 @@ from nemo_gym.openai_utils import (
 from nemo_gym.profiling import Profiler
 from responses_api_agents.swe_agents.run_openhands import (
     RunOpenHandsAgent,
-    SweBenchGenerationConfig,
-    SweBenchInferenceConfig,
 )
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 
@@ -72,50 +70,7 @@ def runner_ray_remote(params_dict: dict[str, Any]) -> None:
 
     output_file = params.persistent_dir / "output.jsonl"
 
-    inference_params = {}
-
-    for param, key in [
-        ("temperature", "temperature"),
-        ("top_p", "top_p"),
-        ("max_output_tokens", "tokens_to_generate"),
-    ]:
-        value = getattr(params.body, param, None)
-        if value is not None:
-            inference_params[key] = value
-
-    inference_config = SweBenchInferenceConfig(**inference_params)
-    server = {
-        "model": params.body.model,
-        "base_url": params.model_server_name,
-    }
-
-    cfg = SweBenchGenerationConfig(
-        output_file=output_file,
-        agent_framework_repo=params.agent_framework_repo,
-        agent_framework_commit=params.agent_framework_commit,
-        agent_config=params.agent_config,
-        agent_max_turns=params.agent_max_turns,
-        swebench_tests_timeout=params.swebench_tests_timeout,
-        swebench_agent_timeout=params.swebench_agent_timeout,
-        apptainer_memory_limit_mb=params.apptainer_memory_limit_mb,
-        command_exec_timeout=params.command_exec_timeout,
-        inference=inference_config,
-        server=server,
-    )
-
-    run_oh = RunOpenHandsAgent(
-        cfg=cfg,
-        openhands_setup_dir=params.openhands_setup_dir,
-        swebench_setup_dir=params.swebench_setup_dir,
-        r2e_gym_setup_dir=params.r2e_gym_setup_dir,
-        dataset_path=params.dataset_path,
-        ng_global_config_dict_str=params.ng_global_config_dict_str,
-        openhands_should_log=params.openhands_should_log,
-        debug=params.debug,
-        model_server_name=params.model_server_name,
-        metrics_fpath=params.metrics_fpath,
-        persistent_dir=params.persistent_dir,
-    )
+    run_oh = RunOpenHandsAgent(config=params)
 
     result = asyncio.run(run_oh.process_single_datapoint(params.problem_info, params.persistent_dir))
 
@@ -187,6 +142,8 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     persistent_dir: Path
     metrics_fpath: Path
     ray_queue_time: float
+
+    inference_params: Dict[str, Any]
 
 
 class SWEBenchMetrics(BaseModel):
@@ -431,6 +388,16 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
         persistent_dir = self._swe_bench_wrapper_server_config.base_results_dir / instance_dir
         persistent_dir.mkdir(parents=True, exist_ok=True)
 
+        inference_params = {}
+        for param, key in [
+            ("temperature", "temperature"),
+            ("top_p", "top_p"),
+            ("max_output_tokens", "tokens_to_generate"),
+        ]:
+            value = getattr(body, param, None)
+            if value is not None:
+                inference_params[key] = value
+
         params: SWEBenchWrapperInstanceConfig = SWEBenchWrapperInstanceConfig.model_validate(
             **self.config.model_dump(),
             **self._swe_bench_wrapper_server_config,
@@ -439,6 +406,7 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
             persistent_dir=persistent_dir,
             metrics_fpath=persistent_dir / "nemo_gym_metrics.json",
             ray_queue_time=time.time(),
+            inference_params=inference_params,
         )
 
         await runner_ray_remote.remote(params.model_dump())
