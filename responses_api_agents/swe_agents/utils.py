@@ -13,14 +13,12 @@
 # limitations under the License.
 import fcntl
 import json
-import os
 import shutil
 import subprocess
-import sys
 from contextlib import contextmanager
 from pathlib import Path
 from subprocess import Popen
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
@@ -212,14 +210,20 @@ async def run_swebench_evaluation(
 
 ### Harness and Evaluation Setup Utils ###
 
-
-def _get_workspace_root() -> Path:
-    return Path(os.path.dirname(os.path.abspath(__file__)))
+PARENT_DIR = Path(__file__).parent
 
 
-def _resolve_setup_directory(provided_dir: Optional[Path], default_subdir: str) -> Path:
-    base_dir = provided_dir or (_get_workspace_root() / default_subdir)
-    return base_dir.resolve()
+def _run_setup_command(command: str, debug: bool) -> None:
+    std_params = dict()
+    if not debug:
+        std_params = dict(
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    process = Popen(command, shell=True, **std_params)
+    return_code = process.wait()
+    assert return_code == 0, f"Command failed: {command}"
 
 
 @contextmanager
@@ -238,70 +242,8 @@ def _setup_directory_lock(setup_dir: Path, label: str):
             fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
-def _run_setup_shell_script(
-    setup_dir: Path,
-    script_name: str,
-    script_content: str,
-    timeout_seconds: int,
-    label: str,
-    timeout_error_message: Optional[str] = None,
-    debug: bool = False,
-) -> None:
-    script_path = setup_dir / script_name
-
-    with open(script_path, "w") as f:
-        f.write(script_content)
-    script_path.chmod(0o755)
-
-    print(f"Running {label} setup script...", flush=True)
-    print(f"Setup script: {script_path}", flush=True)
-
-    process = None
-    try:
-        process = subprocess.Popen(
-            [str(script_path)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-
-        output_lines: List[str] = []
-        if process.stdout is None:
-            raise RuntimeError("Failed to capture script output")
-
-        target_file = sys.stderr if debug else sys.stdout
-        for line in process.stdout:
-            print(line, end="", file=target_file)
-            output_lines.append(line)
-
-        process.wait(timeout=timeout_seconds)
-
-        if process.returncode != 0:
-            full_output = "".join(output_lines)
-            raise RuntimeError(f"{label} setup failed with return code {process.returncode}:\n{full_output}")
-
-        print(f"{label} setup completed successfully!", flush=True)
-    except subprocess.TimeoutExpired:
-        if process:
-            process.kill()
-        message = timeout_error_message or f"{label} setup timed out after {timeout_seconds} seconds"
-        raise RuntimeError(message)
-    except Exception as exc:
-        if isinstance(exc, RuntimeError):
-            raise
-        raise RuntimeError(f"{label} setup failed: {exc}") from exc
-    finally:
-        if process and process.stdout:
-            process.stdout.close()
-
-
-def setup_swebench_environment(
-    swebench_repo: Optional[str] = "https://github.com/HeyyyyyyG/SWE-bench.git",
-    swebench_commit: str = "HEAD",
-    setup_dir: Optional[Path] = None,
-) -> Path:
-    setup_dir = _resolve_setup_directory(setup_dir, "swe_swebench_setup")
+def setup_swebench_environment(swebench_repo: str, swebench_commit: str, debug: bool) -> Path:
+    setup_dir = PARENT_DIR / "swe_swebench_setup"
 
     with _setup_directory_lock(setup_dir, "SWE-bench"):
         swebench_dir = setup_dir / "SWE-bench"
@@ -310,84 +252,22 @@ def setup_swebench_environment(
 
         if swebench_dir.exists():
             print(f"SWE-bench already set up at {setup_dir}", flush=True)
-            print(f"  - SWE-bench: {swebench_dir}", flush=True)
-            print(f"  - venv: {swebench_dir / 'venv'}", flush=True)
-            print(f"  - uv: {uv_dir}", flush=True)
-            print(f"  - Python: {python_dir}", flush=True)
-            return setup_dir
+        else:
+            print(f"Setting up SWE-bench environment at {setup_dir}...", flush=True)
+            setup_dir.mkdir(parents=True, exist_ok=True)
 
-        print(f"Setting up SWE-bench environment at {setup_dir}...", flush=True)
-        setup_dir.mkdir(parents=True, exist_ok=True)
+            script_fpath = PARENT_DIR / "setup_scripts/swebench.sh"
+            command = f"""SETUP_DIR={setup_dir} \\
+UV_DIR={uv_dir} \\
+PYTHON_DIR={python_dir} \\
+SWEBENCH_DIR={swebench_dir} \\
+SWEBENCH_REPO={swebench_repo} \\
+SWEBENCH_COMMIT={swebench_commit} \\
+    ./{script_fpath}"""
+            _run_setup_command(command, debug)
 
-        script_name = "setup_swebench.sh"
-        script_content = f"""#!/bin/bash
-set -e
-set -x
+            print(f"Setup directory: {setup_dir}", flush=True)
 
-cd {setup_dir}
-
-export UV_INSTALL_DIR="{uv_dir}"
-export UV_PYTHON_INSTALL_DIR="{python_dir}"
-if [ ! -f "{uv_dir}/bin/uv" ]; then
-    echo "Installing uv to {uv_dir}..."
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-else
-    echo "uv already installed at {uv_dir}"
-fi
-
-export PATH="{uv_dir}/bin:$PATH"
-echo "Verifying uv installation..."
-which uv
-uv --version
-
-# Clone SWE-bench
-if [ ! -d "{swebench_dir}/.git" ]; then
-    echo "Cloning SWE-bench..."
-    # Clean up any partial clone
-    rm -rf "{swebench_dir}"
-    git clone {swebench_repo} {swebench_dir}
-else
-    echo "SWE-bench already cloned at {swebench_dir}"
-fi
-
-cd {swebench_dir}
-echo "Checking out {swebench_commit}..."
-git checkout {swebench_commit}
-
-echo "Installing Python 3.12 to portable location..."
-uv python install 3.12
-
-echo "Python installations:"
-uv python list
-
-echo "Creating virtual environment with uv..."
-rm -rf venv
-uv venv --python 3.12 venv
-
-echo "Installing SWE-bench..."
-uv pip install -p {swebench_dir}/venv/bin/python -e .
-
-if [ -d venv ] && [ -f venv/bin/python ]; then
-    echo "✓ venv created at $(pwd)/venv"
-    echo "✓ Python version: $(venv/bin/python --version)"
-else
-    echo "✗ ERROR: venv was not created properly!"
-    exit 1
-fi
-
-echo "SWE-bench setup complete!"
-"""
-
-        _run_setup_shell_script(
-            setup_dir=setup_dir,
-            script_name=script_name,
-            script_content=script_content,
-            timeout_seconds=600,
-            label="SWE-bench",
-            timeout_error_message="SWE-bench setup timed out after 10 minutes",
-        )
-
-        print(f"Setup directory: {setup_dir}", flush=True)
         print(f"  - SWE-bench: {swebench_dir}", flush=True)
         print(f"  - venv: {swebench_dir / 'venv'}", flush=True)
         print(f"  - uv: {uv_dir}", flush=True)
@@ -396,31 +276,11 @@ echo "SWE-bench setup complete!"
         return setup_dir
 
 
-def setup_r2e_gym_environment(
-    eval_harness_repo: Optional[str] = None,
-    eval_harness_commit: str = "local-eval",
-    setup_dir: Optional[Path] = None,
-) -> Path:
-    """Set up R2E-Gym environment once during initialization.
+def setup_r2e_gym_environment(debug: bool) -> Path:
+    eval_harness_repo = "https://github.com/ludwig-n/R2E-Gym.git"
+    eval_harness_commit = "local-eval"
 
-    This function builds R2E-Gym in a persistent location that can be mounted
-    into Apptainer containers, avoiding repeated setup for each request.
-
-    Args:
-        eval_harness_repo: URL of the R2E-Gym repo (default: official repo)
-        eval_harness_commit: Commit/branch to use (default: local-eval)
-        setup_dir: Directory to set up R2E-Gym (default: workspace_root/swe_r2e_gym_setup)
-
-    Returns:
-        Path to the built R2E-Gym directory
-
-    Raises:
-        RuntimeError: If setup fails
-    """
-    if eval_harness_repo is None:
-        eval_harness_repo = "https://github.com/ludwig-n/R2E-Gym.git"
-
-    setup_dir = _resolve_setup_directory(setup_dir, "swe_r2e_gym_setup")
+    setup_dir = PARENT_DIR / "swe_r2e_gym_setup"
 
     with _setup_directory_lock(setup_dir, "R2E-Gym"):
         r2e_gym_dir = setup_dir / "R2E-Gym"
@@ -429,101 +289,32 @@ def setup_r2e_gym_environment(
 
         # Check if setup is complete by verifying venv and installed module
         venv_dir = r2e_gym_dir / "venv"
-        if r2e_gym_dir.exists() and venv_dir.exists():
-            # Verify r2egym module is actually installed
-            python_bin = venv_dir / "bin" / "python"
-            if python_bin.exists():
-                import subprocess
+        python_bin = venv_dir / "bin" / "python"
+        should_setup = True
+        if r2e_gym_dir.exists() and venv_dir.exists() and python_bin.exists():
+            result = subprocess.run([str(python_bin), "-c", "import r2egym"])
+            if result.returncode == 0:
+                print(f"R2E-Gym already set up at {setup_dir}", flush=True)
+                should_setup = False
+            else:
+                print("R2E-Gym directory exists but module not properly installed, rebuilding...", flush=True)
 
-                try:
-                    result = subprocess.run([str(python_bin), "-c", "import r2egym"], capture_output=True, timeout=5)
-                    if result.returncode == 0:
-                        print(f"R2E-Gym already set up at {setup_dir}", flush=True)
-                        print(f"  - R2E-Gym: {r2e_gym_dir}", flush=True)
-                        print(f"  - venv: {venv_dir}", flush=True)
-                        print(f"  - uv: {uv_dir}", flush=True)
-                        print(f"  - Python: {python_dir}", flush=True)
-                        return setup_dir
-                    else:
-                        print("R2E-Gym directory exists but module not properly installed, rebuilding...", flush=True)
-                except (subprocess.TimeoutExpired, Exception) as e:
-                    print(f"R2E-Gym verification failed: {e}, rebuilding...", flush=True)
+        if should_setup:
+            print(f"Setting up R2E-Gym environment at {setup_dir}...", flush=True)
+            setup_dir.mkdir(parents=True, exist_ok=True)
 
-        print(f"Setting up R2E-Gym environment at {setup_dir}...", flush=True)
-        setup_dir.mkdir(parents=True, exist_ok=True)
+            script_fpath = PARENT_DIR / "setup_scripts/r2e_gym.sh"
+            command = f"""SETUP_DIR={setup_dir} \\
+UV_DIR={uv_dir} \\
+PYTHON_DIR={python_dir} \\
+R2E_GYM_DIR={r2e_gym_dir} \\
+EVAL_HARNESS_REPO={eval_harness_repo} \\
+EVAL_HARNESS_COMMIT={eval_harness_commit} \\
+    ./{script_fpath}"""
+            _run_setup_command(command, debug)
 
-        script_name = "setup_r2e_gym.sh"
-        script_content = f"""#!/bin/bash
-set -e
-set -x
+            print(f"Setup directory: {setup_dir}", flush=True)
 
-cd {setup_dir}
-
-export UV_INSTALL_DIR="{uv_dir}"
-export UV_PYTHON_INSTALL_DIR="{python_dir}"
-if [ ! -f "{uv_dir}/bin/uv" ]; then
-    echo "Installing uv to {uv_dir}..."
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-else
-    echo "uv already installed at {uv_dir}"
-fi
-
-export PATH="{uv_dir}/bin:$PATH"
-echo "Verifying uv installation..."
-which uv
-uv --version
-
-# Clone R2E-Gym
-if [ ! -d "{r2e_gym_dir}/.git" ]; then
-    echo "Cloning R2E-Gym..."
-    # Clean up any partial clone
-    rm -rf "{r2e_gym_dir}"
-    git clone {eval_harness_repo} {r2e_gym_dir}
-else
-    echo "R2E-Gym already cloned at {r2e_gym_dir}"
-fi
-
-cd {r2e_gym_dir}
-echo "Checking out {eval_harness_commit}..."
-git checkout {eval_harness_commit}
-
-echo "Installing Python 3.12 to portable location..."
-uv python install 3.12
-
-echo "Python installations:"
-uv python list
-
-echo "Creating virtual environment with uv..."
-rm -rf venv
-uv venv --python 3.12 venv
-
-echo "Installing R2E-Gym in editable mode..."
-uv pip install -p {r2e_gym_dir}/venv/bin/python -e . --no-cache
-
-echo "Verifying installation..."
-{r2e_gym_dir}/venv/bin/python -c "import r2egym; print('✓ r2egym installed successfully')"
-
-if [ -d venv ] && [ -f venv/bin/python ]; then
-    echo "✓ venv created at $(pwd)/venv"
-    echo "✓ Python version: $(venv/bin/python --version)"
-else
-    echo "✗ ERROR: venv was not created properly!"
-    exit 1
-fi
-
-echo "R2E-Gym setup complete!"
-"""
-
-        _run_setup_shell_script(
-            setup_dir=setup_dir,
-            script_name=script_name,
-            script_content=script_content,
-            timeout_seconds=1200,
-            label="R2E-Gym",
-            timeout_error_message="R2E-Gym setup timed out after 20 minutes",
-        )
-
-        print(f"Setup directory: {setup_dir}", flush=True)
         print(f"  - R2E-Gym: {r2e_gym_dir}", flush=True)
         print(f"  - venv: {r2e_gym_dir / '.venv'}", flush=True)
         print(f"  - uv: {uv_dir}", flush=True)
@@ -532,26 +323,13 @@ echo "R2E-Gym setup complete!"
         return setup_dir
 
 
-def _run_setup_command(command: str, debug: bool) -> None:
-    std_params = dict()
-    if not debug:
-        std_params = dict(
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-    process = Popen(command, shell=True, **std_params)
-    return_code = process.wait()
-    assert return_code == 0, f"Command failed: {command}"
-
-
 def setup_openhands_environment(
     agent_framework_repo: str,
     agent_framework_commit: str,
     setup_dir: Optional[Path] = None,
     debug: bool = False,
 ) -> Path:
-    setup_dir = Path(__file__).parent / "swe_openhands_setup"
+    setup_dir = PARENT_DIR / "swe_openhands_setup"
 
     with _setup_directory_lock(setup_dir, "OpenHands"):
         openhands_dir = setup_dir / "OpenHands"
@@ -564,7 +342,7 @@ def setup_openhands_environment(
             shutil.rmtree(setup_dir, ignore_errors=True)
             setup_dir.mkdir(parents=True, exist_ok=True)
 
-            script_fpath = Path(__file__).parent / "setup_scripts/openhands.sh"
+            script_fpath = PARENT_DIR / "setup_scripts/openhands.sh"
             command = f"""SETUP_DIR={setup_dir} \\
 MINIFORGE_DIR={miniforge_dir} \\
 OPENHANDS_DIR={openhands_dir} \\
