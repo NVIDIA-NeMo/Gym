@@ -78,6 +78,9 @@ class NSToolsConfig(BaseResourcesServerConfig):
     # python_tool HTTP server port (spawned automatically)
     python_tool_port: int = 8765
 
+    # Verbose logging for tool execution timing (disabled by default)
+    verbose_tool_logging: bool = False
+
 
 # ============================================================
 # Run/Verify Request/Response Models
@@ -324,13 +327,14 @@ class NSToolsResourcesServer(SimpleResourcesServer):
             }
         )
 
-        # Log tool execution
-        timeout_info = ""
-        if is_internal_timeout:
-            timeout_info = " [INTERNAL_TIMEOUT]"
-        elif is_request_timeout:
-            timeout_info = " [REQUEST_TIMEOUT]"
-        logger.info(f"Tool '{tool_name}' executed in {elapsed:.3f}s{timeout_info} (session={session_id[:8]}...)")
+        # Log tool execution (only if verbose logging enabled)
+        if self.config.verbose_tool_logging:
+            timeout_info = ""
+            if is_internal_timeout:
+                timeout_info = " [INTERNAL_TIMEOUT]"
+            elif is_request_timeout:
+                timeout_info = " [REQUEST_TIMEOUT]"
+            logger.info(f"Tool '{tool_name}' executed in {elapsed:.3f}s{timeout_info} (session={session_id[:8]}...)")
 
         # Return result as plain text to avoid double JSON serialization
         if isinstance(result, str):
@@ -382,13 +386,14 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         # Aggregate timing metrics
         metrics = self._aggregate_timing_metrics(session_id)
 
-        # Log summary
-        logger.info(
-            f"Session {session_id[:8] if session_id else 'unknown'}... metrics: "
-            f"{metrics['num_tool_calls']} tool calls, total={metrics['total_tool_execution_time_seconds']:.3f}s, "
-            f"avg={metrics['avg_tool_call_time_seconds']:.3f}s, "
-            f"internal_timeouts={metrics['tool_timeout_count']}, request_timeouts={metrics['tool_request_timeout_count']}"
-        )
+        # Log summary (only if verbose logging enabled)
+        if self.config.verbose_tool_logging:
+            logger.info(
+                f"Session {session_id[:8] if session_id else 'unknown'}... metrics: "
+                f"{metrics['num_tool_calls']} tool calls, total={metrics['total_tool_execution_time_seconds']:.3f}s, "
+                f"avg={metrics['avg_tool_call_time_seconds']:.3f}s, "
+                f"internal_timeouts={metrics['tool_timeout_count']}, request_timeouts={metrics['tool_request_timeout_count']}"
+            )
 
         # Select verifier
         verifier_type = body.verifier_type or self.config.default_verifier
