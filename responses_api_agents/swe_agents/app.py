@@ -19,7 +19,12 @@ import sys
 import time
 import uuid
 from asyncio import Semaphore
+from contextlib import contextmanager
+from fcntl import LOCK_EX, LOCK_UN, flock
 from pathlib import Path
+from shutil import rmtree
+from subprocess import DEVNULL, Popen
+from subprocess import run as subprocess_run
 from typing import Any, Callable, Dict, Optional
 
 import ray
@@ -44,9 +49,6 @@ from nemo_gym.openai_utils import (
 from nemo_gym.profiling import Profiler
 from responses_api_agents.swe_agents.utils import (
     run_swebench_evaluation,
-    setup_openhands_environment,
-    setup_r2e_gym_environment,
-    setup_swebench_environment,
 )
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 
@@ -188,15 +190,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     _swe_bench_wrapper_server_config: SWEBenchWrapperServerConfig
 
     def model_post_init(self, __context: Any) -> None:
-        openhands_setup_dir = setup_openhands_environment(
-            agent_framework_repo=self.config.agent_framework_repo,
-            agent_framework_commit=self.config.agent_framework_commit,
-            debug=self.config.debug,
-        )
-        swebench_setup_dir = setup_swebench_environment()
-        r2e_gym_setup_dir = setup_r2e_gym_environment()
-        print("Dependencies repositories set up complete")
-
         run_session_id = f"{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
         workspace_root = Path(os.path.dirname(os.path.abspath(__file__)))
         self._swe_bench_wrapper_server_config = SWEBenchWrapperServerConfig(
@@ -204,14 +197,137 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             base_results_dir=workspace_root / f"swebench_results_{run_session_id}",
             ng_global_config_dict_str=shlex.quote(OmegaConf.to_yaml(get_global_config_dict())),
             model_server_name=self.config.model_server.name,
-            openhands_setup_dir=openhands_setup_dir,
-            swebench_setup_dir=swebench_setup_dir,
-            r2e_gym_setup_dir=r2e_gym_setup_dir,
+            openhands_setup_dir=self.setup_openhands_environment(),
+            swebench_setup_dir=self.setup_swebench_environment(),
+            r2e_gym_setup_dir=self.setup_r2e_gym_environment(),
         )
         self._swe_bench_wrapper_server_config.base_results_dir.mkdir(parents=True, exist_ok=True)
 
         self._sem = Semaphore(self.config.concurrency)
         self._vllm_converter = VLLMConverter(return_token_id_information=True)
+
+    @property
+    def parent_dir(self) -> Path:
+        return Path(__file__).parent
+
+    def _run_setup_command(self, command: str) -> None:
+        std_params = dict()
+        if not self.config.debug:
+            std_params = dict(
+                stdout=DEVNULL,
+                stderr=DEVNULL,
+            )
+
+        process = Popen(command, shell=True, **std_params)
+        return_code = process.wait()
+        assert return_code == 0, f"Command failed: {command}"
+
+    @contextmanager
+    def _setup_directory_lock(self, setup_dir: Path, label: str):
+        """File-based lock to ensure only one process performs the setup."""
+        lock_dir = setup_dir.parent
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = lock_dir / f".{setup_dir.name}.lock"
+
+        with open(lock_path, "w") as lock_file:
+            print(f"Acquiring {label} setup lock at {lock_path}", flush=True)
+            flock(lock_file, LOCK_EX)
+            try:
+                yield
+            finally:
+                flock(lock_file, LOCK_UN)
+
+    def setup_swebench_environment(self) -> Path:
+        swebench_repo = "https://github.com/HeyyyyyyG/SWE-bench.git"
+        swebench_commit = "HEAD"
+
+        setup_dir = self.parent_dir / "swe_swebench_setup"
+        setup_dir.mkdir(parents=True, exist_ok=True)
+
+        with self._setup_directory_lock(setup_dir, "SWE-bench"):
+            swebench_dir = setup_dir / "SWE-bench"
+            uv_dir = setup_dir / "uv"
+            python_dir = setup_dir / "python"
+
+            if swebench_dir.exists():
+                print(f"SWE-bench already set up at {setup_dir}")
+                return
+
+            print(f"Setting up SWE-bench environment at {setup_dir}...", flush=True)
+            script_fpath = self.parent_dir / "setup_scripts/swebench.sh"
+            command = f"""SETUP_DIR={setup_dir} \\
+UV_DIR={uv_dir} \\
+PYTHON_DIR={python_dir} \\
+SWEBENCH_DIR={swebench_dir} \\
+SWEBENCH_REPO={swebench_repo} \\
+SWEBENCH_COMMIT={swebench_commit} \\
+    ./{script_fpath}"""
+            self._run_setup_command(command)
+
+            return setup_dir
+
+    def setup_r2e_gym_environment(self) -> Path:
+        eval_harness_repo = "https://github.com/ludwig-n/R2E-Gym.git"
+        eval_harness_commit = "local-eval"
+
+        setup_dir = self.parent_dir / "swe_r2e_gym_setup"
+
+        with self._setup_directory_lock(setup_dir, "R2E-Gym"):
+            r2e_gym_dir = setup_dir / "R2E-Gym"
+            uv_dir = setup_dir / "uv"
+            python_dir = setup_dir / "python"
+
+            # Check if setup is complete by verifying venv and installed module
+            venv_dir = r2e_gym_dir / "venv"
+            python_bin = venv_dir / "bin" / "python"
+            if r2e_gym_dir.exists() and venv_dir.exists() and python_bin.exists():
+                result = subprocess_run([str(python_bin), "-c", "import r2egym"])
+                if result.returncode == 0:
+                    print(f"R2E-Gym already set up at {setup_dir}", flush=True)
+                    return
+
+                print("R2E-Gym directory exists but module not properly installed, rebuilding...", flush=True)
+
+            print(f"Setting up R2E-Gym environment at {setup_dir}...", flush=True)
+            setup_dir.mkdir(parents=True, exist_ok=True)
+
+            script_fpath = self.parent_dir / "setup_scripts/r2e_gym.sh"
+            command = f"""SETUP_DIR={setup_dir} \\
+UV_DIR={uv_dir} \\
+PYTHON_DIR={python_dir} \\
+R2E_GYM_DIR={r2e_gym_dir} \\
+EVAL_HARNESS_REPO={eval_harness_repo} \\
+EVAL_HARNESS_COMMIT={eval_harness_commit} \\
+    ./{script_fpath}"""
+            self._run_setup_command(command)
+
+            return setup_dir
+
+    def setup_openhands_environment(self) -> Path:
+        setup_dir = self.parent_dir / "swe_openhands_setup"
+
+        with self._setup_directory_lock(setup_dir, "OpenHands"):
+            openhands_dir = setup_dir / "OpenHands"
+            miniforge_dir = setup_dir / "miniforge3"
+
+            if openhands_dir.exists() and Path(openhands_dir / ".venv" / "bin" / "python").exists():
+                print(f"OpenHands already set up at {setup_dir}", flush=True)
+                return
+
+            print(f"Setting up OpenHands environment at {setup_dir}...", flush=True)
+            rmtree(setup_dir, ignore_errors=True)
+            setup_dir.mkdir(parents=True, exist_ok=True)
+
+            script_fpath = self.parent_dir / "setup_scripts/openhands.sh"
+            command = f"""SETUP_DIR={setup_dir} \\
+MINIFORGE_DIR={miniforge_dir} \\
+OPENHANDS_DIR={openhands_dir} \\
+AGENT_FRAMEWORK_REPO={self.config.agent_framework_repo} \\
+AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
+    ./{script_fpath}"""
+            self._run_setup_command(command)
+
+            return setup_dir
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         problem_info = body.metadata | {"container_formatter": self.config.container_formatter}
