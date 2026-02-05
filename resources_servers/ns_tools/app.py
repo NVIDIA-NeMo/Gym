@@ -27,6 +27,7 @@ import logging
 import os
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
@@ -34,6 +35,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
+import yaml
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 from nemo_skills.mcp.tool_manager import ToolManager
@@ -178,27 +180,42 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         """Spawn python_tool HTTP server as a subprocess."""
         logger.info(f"Starting python_tool HTTP server on port {self.config.python_tool_port}")
 
-        # Build command with sandbox config
+        # Write config file for python_tool (compatible with both old and new versions)
+        config_content = {
+            "sandbox": {
+                "sandbox_type": "remote",
+                "host": self.config.sandbox_host,
+                "port": int(self.config.sandbox_port),
+            }
+        }
+        self._python_tool_config_file = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False, prefix="python_tool_config_"
+        )
+        yaml.dump(config_content, self._python_tool_config_file)
+        self._python_tool_config_file.flush()
+        logger.info(f"python_tool config file: {self._python_tool_config_file.name}")
+        logger.info(f"python_tool config: {config_content}")
+
+        # Build command - use config file instead of CLI args for compatibility
+        # Old python_tool.py only accepts --config, new version accepts both
         cmd = [
             sys.executable,
             "-m",
             "nemo_skills.mcp.servers.python_tool",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(self.config.python_tool_port),
-            "--sandbox-host",
-            self.config.sandbox_host,
-            "--sandbox-port",
-            str(self.config.sandbox_port),
+            "--config",
+            self._python_tool_config_file.name,
         ]
         logger.info(f"python_tool command: {' '.join(cmd)}")
 
-        # Ensure /nemo_run/code is FIRST in PYTHONPATH so mounted nemo_skills takes precedence
+        # Set environment for subprocess
         env = os.environ.copy()
+        # Set port via env var as fallback (new python_tool reads PYTHON_TOOL_PORT)
+        env["PYTHON_TOOL_PORT"] = str(self.config.python_tool_port)
+        env["PYTHON_TOOL_HOST"] = "127.0.0.1"
+
+        # Ensure /nemo_run/code is FIRST in PYTHONPATH so mounted nemo_skills takes precedence
         current_pythonpath = env.get("PYTHONPATH", "")
         if "/nemo_run/code" in current_pythonpath:
-            # Move /nemo_run/code to the front
             paths = [p for p in current_pythonpath.split(":") if p and p != "/nemo_run/code"]
             env["PYTHONPATH"] = "/nemo_run/code:" + ":".join(paths)
         else:
