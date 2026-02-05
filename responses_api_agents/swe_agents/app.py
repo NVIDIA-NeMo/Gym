@@ -1080,8 +1080,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             #     f"Mounting pre-built SWE-bench from: {self.swebench_setup_dir}",
             #     flush=True,
             # )
-            mount_args.append(f"--mount type=bind,src={self.swebench_setup_dir},dst=/swebench_setup")
-            mount_args.append(f"--mount type=bind,src={self.swebench_setup_dir},dst={self.swebench_setup_dir}")
+            mount_args.append(f"--mount type=bind,src={params.swebench_setup_dir},dst=/swebench_setup")
+            mount_args.append(f"--mount type=bind,src={params.swebench_setup_dir},dst={params.swebench_setup_dir}")
             mount_args.append(f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl")
 
         if command.mode == "eval" and data_point["dataset_name"] == "nv-internal-1":
@@ -1097,8 +1097,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # Mount the entire setup directory at both /r2egym_setup and its original absolute path
             # This is needed because uv venv has hardcoded absolute paths in its wrappers
             # print(f"Mounting R2E-Gym setup directory from: {self.r2e_gym_setup_dir}", flush=True)
-            mount_args.append(f"--mount type=bind,src={self.r2e_gym_setup_dir},dst=/r2egym_setup")
-            mount_args.append(f"--mount type=bind,src={self.r2e_gym_setup_dir},dst={self.r2e_gym_setup_dir}")
+            mount_args.append(f"--mount type=bind,src={params.r2e_gym_setup_dir},dst=/r2egym_setup")
+            mount_args.append(f"--mount type=bind,src={params.r2e_gym_setup_dir},dst={params.r2e_gym_setup_dir}")
             mount_args.append(f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl")
 
         if command.mode == "agent" and "R2E-Gym" in data_point["dataset_name"]:
