@@ -682,9 +682,6 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
 # START Ray worker logic
 ########################################
 
-# TODO move inside runner ray remote
-SWEBenchWrapperInstanceConfig.model_rebuild(force=True)
-
 
 @ray.remote(
     scheduling_strategy="SPREAD",
@@ -694,6 +691,10 @@ SWEBenchWrapperInstanceConfig.model_rebuild(force=True)
     num_cpus=1,
 )
 def runner_ray_remote(params_dict: dict[str, Any]) -> Path:
+    # For some reason Ray may not pick up the proper model fields if we don't rebuild the model here. Very strange.
+    SWEBenchWrapperInstanceConfig.model_rebuild(force=True)
+    RunOpenHandsAgent.model_rebuild(force=True)
+
     params = SWEBenchWrapperInstanceConfig.model_validate(params_dict)
     instance_id = params.instance_id
 
