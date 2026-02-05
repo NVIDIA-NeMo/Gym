@@ -97,27 +97,6 @@ def extract_sql_from_response(text: str) -> Optional[str]:
     return None
 
 
-def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
-    """Extract the last assistant message text from the response.
-
-    Returns an empty string when no assistant text is available.
-    """
-    for o in reversed(body.response.output):
-        if getattr(o, "type", None) == "message" and getattr(o, "role", None) == "assistant":
-            content = getattr(o, "content", None)
-            if isinstance(content, list):
-                texts: list[str] = []
-                for c in content:
-                    t = getattr(c, "text", None)
-                    if isinstance(t, str):
-                        texts.append(t)
-                return "\n".join(texts).strip()
-            elif isinstance(content, str):
-                return content.strip()
-            break
-    return ""
-
-
 def _extract_question_text(params: NeMoGymResponseCreateParamsNonStreaming) -> str:
     """Extract the question text from the last user message."""
     last_text: Optional[str] = None
@@ -259,7 +238,8 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
         # Extract question from request field or from user message
         sql_prompt = body.sql_prompt or _extract_question_text(body.responses_create_params)
 
-        generated = _extract_last_assistant_text(body)
+        # Get model output text directly from response
+        generated = body.response.output_text or ""
         if not generated:
             raise ValueError("No assistant response found/extracted to verify")
 
@@ -269,14 +249,9 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
         judge_evaluations = []
         extracted_sql = None
 
-        # Extract thinking tags if present
-        text = generated
-        if "</think>" in text:
-            text = text.split("</think>")[-1].strip()
-
         try:
             # Extract SQL from model output
-            extracted_sql = extract_sql_from_response(text)
+            extracted_sql = extract_sql_from_response(generated)
 
             if not extracted_sql:
                 failure_reason = FailureCode.NO_SQL_EXTRACTED
@@ -334,7 +309,7 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
             **payload,
             reward=reward,
             sql=expected_sql,
-            model_output=text,
+            model_output=generated,
             extracted_sql=extracted_sql,
             sql_dialect=sql_dialect,
             sql_context=sql_context,

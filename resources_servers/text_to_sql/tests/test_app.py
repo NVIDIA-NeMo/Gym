@@ -29,7 +29,6 @@ from resources_servers.text_to_sql.app import (
     TextToSqlResourcesServer,
     TextToSqlResourcesServerConfig,
     TextToSqlVerifyRequest,
-    _extract_last_assistant_text,
     extract_sql_from_response,
 )
 
@@ -95,49 +94,6 @@ ORDER BY order_count DESC;
         assert "SELECT" in result
         assert "LEFT JOIN" in result
         assert "GROUP BY" in result
-
-
-class TestExtractLastAssistantText:
-    """Tests for the _extract_last_assistant_text function."""
-
-    def _create_verify_request_with_output(self, output_items: list) -> TextToSqlVerifyRequest:
-        """Helper to create a TextToSqlVerifyRequest with specified output items."""
-        response = NeMoGymResponse(
-            id="test_response",
-            created_at=1000,
-            model="test_model",
-            object="response",
-            output=output_items,
-            parallel_tool_calls=False,
-            tool_choice="auto",
-            tools=[],
-        )
-        return TextToSqlVerifyRequest(
-            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
-                input=[NeMoGymEasyInputMessage(role="user", content="test")]
-            ),
-            response=response,
-            sql="SELECT 1;",
-            sql_dialect="postgresql",
-            sql_context="CREATE TABLE test (id INT);",
-            sql_prompt="Select one",
-        )
-
-    def test_extract_single_assistant_message(self):
-        """Test extracting text from a single assistant message."""
-        output_message = NeMoGymResponseOutputMessage(
-            id="msg_1",
-            content=[NeMoGymResponseOutputText(annotations=[], text="SELECT * FROM users;")],
-        )
-        body = self._create_verify_request_with_output([output_message])
-        result = _extract_last_assistant_text(body)
-        assert result == "SELECT * FROM users;"
-
-    def test_extract_empty_output(self):
-        """Test extracting from empty output."""
-        body = self._create_verify_request_with_output([])
-        result = _extract_last_assistant_text(body)
-        assert result == ""
 
 
 class TestTextToSqlResourcesServerVerify:
@@ -326,44 +282,6 @@ class TestTextToSqlResourcesServerVerify:
         assert response.reward == 1.0
         assert response.judge_passed is True
         assert len(response.judge_evaluations) == 2
-
-    @pytest.mark.asyncio
-    async def test_verify_with_think_tags(self, resources_server: TextToSqlResourcesServer):
-        """Test verify handles </think> tags correctly."""
-        resources_server.config.check_twice_swap = False
-
-        request = self._create_verify_request(
-            model_output="<think>Let me think...</think>```sql\nSELECT * FROM users;\n```",
-            sql="SELECT * FROM users;",
-        )
-
-        # Mock judge to return equal
-        mock_response = MagicMock()
-        mock_response.json = AsyncMock(
-            return_value={
-                "id": "judge_resp",
-                "created_at": 1000,
-                "model": "judge",
-                "object": "response",
-                "output": [
-                    {
-                        "id": "msg_judge",
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": "[[A=B]]", "annotations": []}],
-                    }
-                ],
-                "parallel_tool_calls": False,
-                "tool_choice": "auto",
-                "tools": [],
-            }
-        )
-        resources_server.server_client.post = AsyncMock(return_value=mock_response)
-
-        response = await resources_server.verify(request)
-
-        assert response.reward == 1.0
-        assert "SELECT * FROM users;" in response.extracted_sql
 
     def test_verify_missing_sql_field(self):
         """Test that Pydantic raises ValidationError when sql field is missing."""
