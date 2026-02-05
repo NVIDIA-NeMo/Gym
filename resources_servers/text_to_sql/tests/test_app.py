@@ -391,3 +391,68 @@ class TestTextToSqlResourcesServerVerify:
 
         with pytest.raises(ValueError, match="Expected answer is required"):
             await resources_server.verify(request)
+
+    @pytest.mark.asyncio
+    async def test_verify_missing_sql_dialect(self, resources_server: TextToSqlResourcesServer):
+        """Test verify raises error when SQL dialect is missing."""
+        request = self._create_verify_request(
+            model_output="```sql\nSELECT * FROM users;\n```",
+            expected_answer="SELECT * FROM users;",
+            sql_dialect="",  # Empty dialect
+        )
+        # Clear the dialect
+        request.sql_dialect = None
+
+        with pytest.raises(ValueError, match="SQL dialect is required"):
+            await resources_server.verify(request)
+
+    @pytest.mark.asyncio
+    async def test_verify_unsupported_sql_dialect(self, resources_server: TextToSqlResourcesServer):
+        """Test verify raises error for unsupported SQL dialect."""
+        request = self._create_verify_request(
+            model_output="```sql\nSELECT * FROM users;\n```",
+            expected_answer="SELECT * FROM users;",
+            sql_dialect="oracle",  # Unsupported dialect
+        )
+
+        with pytest.raises(ValueError, match="Unsupported SQL dialect"):
+            await resources_server.verify(request)
+
+    @pytest.mark.asyncio
+    async def test_verify_with_empty_sql_context(self, resources_server: TextToSqlResourcesServer):
+        """Test verify works with empty sql_context."""
+        resources_server.config.check_twice_swap = False
+
+        request = self._create_verify_request(
+            model_output="```sql\nSELECT * FROM users;\n```",
+            expected_answer="SELECT * FROM users;",
+            sql_context="",  # Empty context
+        )
+
+        # Mock judge to return equal
+        mock_response = MagicMock()
+        mock_response.json = AsyncMock(
+            return_value={
+                "id": "judge_resp",
+                "created_at": 1000,
+                "model": "judge",
+                "object": "response",
+                "output": [
+                    {
+                        "id": "msg_judge",
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "[[A=B]]", "annotations": []}],
+                    }
+                ],
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        )
+        resources_server.server_client.post = AsyncMock(return_value=mock_response)
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 1.0
+        assert response.sql_context == ""

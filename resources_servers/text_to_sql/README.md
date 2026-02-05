@@ -61,6 +61,7 @@ Each data sample should include:
 | `sql_context` | Yes | Database schema (CREATE TABLE) and sample data (INSERT statements) |
 | `sql_prompt` | Yes | Natural language question describing the query |
 | `responses_create_params` | Yes | Model input containing the full prompt |
+| `uuid` | Recommended | Unique identifier for tracking the example |
 
 ## Usage
 
@@ -70,7 +71,7 @@ Each data sample should include:
 config_paths="resources_servers/text_to_sql/configs/text_to_sql.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml"
 
-ng_run "+config_paths=[$config_paths]" \
+ng_run "+config_paths=[${config_paths}]" \
   +text_to_sql_resources_server.resources_servers.text_to_sql.judge_responses_create_params.max_output_tokens=512
 ```
 
