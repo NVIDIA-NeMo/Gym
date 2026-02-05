@@ -1133,7 +1133,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         agent_run_id = f"{instance_id}_{int(time.time())}_{str(uuid.uuid4())[:8]}"
 
         # To avoid making HF dataset API calls, we write the instance dictionary to a file and mount it in the container.
-        instance_dataset_dir = Path(persistent_dir) / "instance_datasets"
+        instance_dataset_dir = persistent_dir / "instance_datasets"
         instance_dataset_dir.mkdir(parents=True, exist_ok=True)
         instance_dataset_path = instance_dataset_dir / f"{agent_run_id}.jsonl"
         instance_dict = json.loads(problem_info["instance_dict"])
