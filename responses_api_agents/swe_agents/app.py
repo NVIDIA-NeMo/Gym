@@ -981,7 +981,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
     def model_post_init(self, context: Any) -> None:
         run_session_id = f"{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
-        workspace_root = Path(os.path.dirname(os.path.abspath(__file__)))
+        workspace_root = Path(__file__).parent
         self._swe_bench_wrapper_server_config = SWEBenchWrapperServerConfig(
             run_session_id=run_session_id,
             base_results_dir=workspace_root / f"swebench_results_{run_session_id}",
@@ -991,6 +991,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             swebench_setup_dir=SweBenchDatasetProcessor(config=self.config).setup(),
             r2e_gym_setup_dir=R2EGymDatasetProcessor(config=self.config).setup(),
         )
+        print(f"SWE results directory: {self._swe_bench_wrapper_server_config}", file=sys.stderr)
         self._swe_bench_wrapper_server_config.base_results_dir.mkdir(parents=True, exist_ok=True)
 
         self._sem = Semaphore(self.config.concurrency)
