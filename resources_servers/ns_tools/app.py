@@ -183,7 +183,7 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         # Write config file for python_tool (compatible with both old and new versions)
         config_content = {
             "sandbox": {
-                "sandbox_type": "remote",
+                "sandbox_type": "local",  # "local" sandbox type connects via HTTP to host:port
                 "host": self.config.sandbox_host,
                 "port": int(self.config.sandbox_port),
             }
