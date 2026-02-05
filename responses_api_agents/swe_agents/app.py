@@ -1216,6 +1216,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         params, dataset_processor = self._setup_params(body)
 
+        # TODO remove
+        with open("temp.json", "w") as f:
+            f.write(params.model_dump_json(indent=4))
+
         report_file = await runner_ray_remote.remote(params.model_dump())
 
         dataset_processor.postprocess_after_eval_run(report_file)
