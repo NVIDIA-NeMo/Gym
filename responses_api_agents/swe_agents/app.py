@@ -991,7 +991,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             swebench_setup_dir=SweBenchDatasetProcessor(config=self.config).setup(),
             r2e_gym_setup_dir=R2EGymDatasetProcessor(config=self.config).setup(),
         )
-        print(f"SWE results directory: {self._swe_bench_wrapper_server_config}", file=sys.stderr)
+        print(f"SWE results directory: {self._swe_bench_wrapper_server_config.base_results_dir}", file=sys.stderr)
         self._swe_bench_wrapper_server_config.base_results_dir.mkdir(parents=True, exist_ok=True)
 
         self._sem = Semaphore(self.config.concurrency)
