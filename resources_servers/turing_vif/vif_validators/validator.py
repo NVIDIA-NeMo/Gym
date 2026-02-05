@@ -45,6 +45,38 @@ class DefinitionResponse(BaseModel):
 # Helper Functions for Text Processing
 # ============================================================================
 
+def check_relation(count, relation: str, expected: int ) -> Tuple[bool, Optional[str]]:
+    """
+    Check if a count satisfies a relation against an expected value.
+    
+    Args:
+        count: The actual count to check (must be numeric)
+        relation: One of "at least", "equal to", "less than"
+        expected: The expected value to compare against (must be numeric)
+        
+    Returns:
+        Tuple of (is_valid, error_message). error_message is None if valid, 
+        or an error string if validation fails.
+    """
+    # Validate count is numeric
+    if not isinstance(count, (int, float)):
+        return (False, f"Invalid count type: expected numeric, got {type(count).__name__}.")
+    
+    # Validate expected is numeric
+    if not isinstance(expected, (int, float)):
+        return (False, f"Invalid expected value type: expected numeric, got {type(expected).__name__}.")
+    
+    # Validate relation
+    if relation == "at least":
+        return (count >= expected, None)
+    elif relation == "equal to":
+        return (count == expected, None)
+    elif relation == "less than":
+        return (count < expected, None)
+    else:
+        return (False, f"Invalid relation: '{relation}'. Must be 'at least', 'equal to', or 'less than'.")
+
+
 def is_strict_alternating(word: str) -> bool:
     """Check if a word has strictly alternating case."""
     prev_is_upper = None
@@ -296,13 +328,17 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
         if inst_type == "change_case:capital_word_frequency":
             count = count_all_caps_words(response)
             rel, val = kwargs['capital_relation'], kwargs['capital_frequency']
-            valid = eval(f"{count} {'>=' if rel == 'at least' else '==' if rel == 'equal to' else '<'} {val}")
+            valid, err = check_relation(count, rel, val)
+            if err:
+                return (False, err)
             return (valid, "No error" if valid else f"Expected {rel} {val} all-cap words, found {count}.")
 
         if inst_type == "change_case:lowercase_word_frequency":
             count = count_lowercase_words(response)
             rel, val = kwargs['lowercase_relation'], kwargs['lowercase_frequency']
-            valid = eval(f"{count} {'>=' if rel == 'at least' else '==' if rel == 'equal to' else '<'} {val}")
+            valid, err = check_relation(count, rel, val)
+            if err:
+                return (False, err)
             return (valid, "No error" if valid else f"Expected {rel} {val} lowercase words, found {count}.")
 
         if "_target" in inst_type:
@@ -330,7 +366,9 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
         if inst_type == "detectable_content:number_placeholders":
             count = count_placeholders(response)
             rel, val = kwargs["relation"], kwargs["num_placeholders"]
-            valid = eval(f"{count} {'>=' if rel == 'at least' else '==' if rel == 'equal to' else '<'} {val}")
+            valid, err = check_relation(count, rel, val)
+            if err:
+                return (False, err)
             return (valid, "No error" if valid else f"Expected {rel} {val} placeholders, found {count}.")
 
         if inst_type == "detectable_content:postscript":
@@ -370,27 +408,25 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
             sections = header_re.findall(response)
             count = len(sections)
 
-            if rel in ("at least", ">="):
-                valid = count >= val
-            elif rel in ("equal to", "==", "equals"):
-                valid = count == val
-            elif rel in ("less than", "<"):
-                valid = count < val
-            else:
-                valid = count == val
-
+            valid, err = check_relation(count, rel, val)
+            if err:
+                return (False, err)
             return (valid, "No error" if valid else f"Expected {rel} {val} sections, found {count}.")
 
         if inst_type == "detectable_format:numbered_list":
             count = count_numbered_items(response)
             rel, val = kwargs["relation"], kwargs["num_numbered_items"]
-            valid = eval(f"{count} {'>=' if rel == 'at least' else '==' if rel == 'equal to' else '<'} {val}")
+            valid, err = check_relation(count, rel, val)
+            if err:
+                return (False, err)
             return (valid, "No error" if valid else f"Expected {rel} {val} numbered items, found {count}.")
 
         if inst_type == "detectable_format:number_bullet_lists":
             count = count_bullet_points(response)
             rel, val = kwargs["relation"], kwargs["num_bullets"]
-            valid = eval(f"{count} {'>=' if rel == 'at least' else '==' if rel == 'equal to' else '<'} {val}")
+            valid, err = check_relation(count, rel, val)
+            if err:
+                return (False, err)
             return (valid, "No error" if valid else f"Expected {rel} {val} bullet points, found {count}.")
 
         if inst_type == "detectable_format:title":
@@ -407,7 +443,9 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
             count = keyword_frequency(response, keyword)
             rel = kwargs["relation"]
             val = kwargs["frequency"]
-            valid = eval(f"{count} {'>=' if rel == 'at least' else '==' if rel == 'equal to' else '<'} {val}")
+            valid, err = check_relation(count, rel, val)
+            if err:
+                return (False, err)
             return (valid, "No error" if valid else f"Expected {rel} {val} of '{keyword}', found {count}.")
 
         if inst_type == "keywords:forbidden_words":
@@ -418,7 +456,9 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
             letter = kwargs["letter"].lower()
             count = response.lower().count(letter)
             rel, val = kwargs["let_relation"], kwargs["let_frequency"]
-            valid = eval(f"{count} {'>=' if rel == 'at least' else '==' if rel == 'equal to' else '<'} {val}")
+            valid, err = check_relation(count, rel, val)
+            if err:
+                return (False, err)
             return (valid, "No error" if valid else f"Expected {rel} {val} '{letter}', found {count}.")
 
         if inst_type == "punctuation:no_comma":
@@ -427,13 +467,17 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
         if inst_type == "length_constraints:number_characters":
             count = len(response)
             rel, val = kwargs["relation"], kwargs["num_chars"]
-            valid = eval(f"{count} {'>=' if rel == 'at least' else '==' if rel == 'equal to' else '<'} {val}")
+            valid, err = check_relation(count, rel, val)
+            if err:
+                return (False, err)
             return (valid, "No error" if valid else f"Expected {rel} {val} characters, found {count}.")
 
         if inst_type == "length_constraints:number_words":
             count = len(re.compile(r'\b(?=\S*[A-Za-z0-9])\S+\b').findall(response))
             rel, val = kwargs["relation"], kwargs["num_words"]
-            valid = eval(f"{count} {'>=' if rel == 'at least' else '==' if rel == 'equal to' else '<'} {val}")
+            valid, err = check_relation(count, rel, val)
+            if err:
+                return (False, err)
             return (valid, "No error" if valid else f"Expected {rel} {val} words, found {count}.")
 
         if inst_type == "startend:start_checker":
@@ -562,15 +606,9 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
             relation = kwargs["relation"]
             num_paragraphs = kwargs["num_paragraphs"]
 
-            if relation == "equal to":
-                is_valid = actual_count == num_paragraphs
-            elif relation == "at least":
-                is_valid = actual_count >= num_paragraphs
-            elif relation == "less than":
-                is_valid = actual_count < num_paragraphs
-            else:
-                return (False, "Invalid relation.")
-            
+            is_valid, err = check_relation(actual_count, relation, num_paragraphs)
+            if err:
+                return (False, err)
             return (is_valid, "No error." if is_valid else f"Found {actual_count} paragraphs, expected {num_paragraphs}")
 
         if inst_type == "detectable_format:max_paragraph_length":
@@ -595,15 +633,9 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
                 if sentence_count == 0 and p.strip():
                     sentence_count = 1
 
-                if relation == "equal to":
-                    is_valid = sentence_count == num_sentences
-                elif relation == "at least":
-                    is_valid = sentence_count >= num_sentences
-                elif relation == "less than":
-                    is_valid = sentence_count < num_sentences
-                else:
-                    return (False, "Invalid relation.")
-
+                is_valid, err = check_relation(sentence_count, relation, num_sentences)
+                if err:
+                    return (False, err)
                 if not is_valid:
                     return (False, f"Found {sentence_count} sentences, expected {relation} {num_sentences}")
             return (True, "No error.")
@@ -637,15 +669,9 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
             words = extract_clean_words(response)
             unique_words_count = len(set(words))
 
-            if relation == "equal to":
-                is_valid = unique_words_count == num_unique
-            elif relation == "at least":
-                is_valid = unique_words_count >= num_unique
-            elif relation == "less than":
-                is_valid = unique_words_count < num_unique
-            else:
-                return (False, "Invalid relation.")
-
+            is_valid, err = check_relation(unique_words_count, relation, num_unique)
+            if err:
+                return (False, err)
             return (is_valid, "No error" if is_valid else f"Found {unique_words_count} unique words, expected {relation} {num_unique}")
 
         if inst_type == "punctuation:question_exclaim":
@@ -654,15 +680,9 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
             punctuations = re.findall(r"[?!]", response)
             count = len(punctuations)
 
-            if relation == "equal to":
-                is_valid = count == num_marks
-            elif relation == "less than":
-                is_valid = count < num_marks
-            elif relation == "at least":
-                is_valid = count >= num_marks
-            else:
-                raise ValueError("Invalid relation.")
-
+            is_valid, err = check_relation(count, relation, num_marks)
+            if err:
+                return (False, err)
             return (is_valid, "No error" if is_valid else f"Found {count} marks, expected {relation} {num_marks}")
 
         if inst_type == "punctuation:no_period":
@@ -685,15 +705,9 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
             words = extract_clean_words(response)
             all_count = sum(1 for word in words if word.startswith(target_letter))
 
-            if relation == "equal to":
-                is_valid = all_count == num_alliteration
-            elif relation == "at least":
-                is_valid = all_count >= num_alliteration
-            elif relation == "less than":
-                is_valid = all_count < num_alliteration
-            else:
-                return (False, "Invalid relation.")
-
+            is_valid, err = check_relation(all_count, relation, num_alliteration)
+            if err:
+                return (False, err)
             return (is_valid, "No error" if is_valid else f"Found {all_count} alliteration words, expected {relation} {num_alliteration}")
 
         if inst_type == "keywords:palindrome_word":
@@ -792,15 +806,9 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
             num_sentences = kwargs["num_sentences"]
             sentence_count = len(extract_clean_sentences(response))
 
-            if relation == "equal to":
-                is_valid = sentence_count == num_sentences
-            elif relation == "at least":
-                is_valid = sentence_count >= num_sentences
-            elif relation == "less than":
-                is_valid = sentence_count < num_sentences
-            else:
-                return (False, "Invalid relation.")
-
+            is_valid, err = check_relation(sentence_count, relation, num_sentences)
+            if err:
+                return (False, err)
             return (is_valid, "No error" if is_valid else f"Found {sentence_count} sentences, expected {relation} {num_sentences}")
 
         if inst_type == "length_constraints:paragraph_length":
@@ -812,15 +820,9 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
                 words = extract_clean_words(p)
                 word_count = len([s for s in words if s.strip()])
 
-                if relation == "equal to":
-                    is_valid = word_count == words_per_paragraph
-                elif relation == "at least":
-                    is_valid = word_count >= words_per_paragraph
-                elif relation == "less than":
-                    is_valid = word_count < words_per_paragraph
-                else:
-                    return (False, "Invalid relation.")
-
+                is_valid, err = check_relation(word_count, relation, words_per_paragraph)
+                if err:
+                    return (False, err)
                 if not is_valid:
                     return (False, f"Found {word_count} words in paragraph, expected {relation} {words_per_paragraph}")
             return (True, "No error.")
@@ -830,15 +832,9 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
             relation = kwargs["relation"]
             num_count = sum(1 for ch in response if ch.isdigit())
 
-            if relation == "equal to":
-                is_valid = num_count == num_numbers
-            elif relation == "at least":
-                is_valid = num_count >= num_numbers
-            elif relation == "less than":
-                is_valid = num_count < num_numbers
-            else:
-                return (False, "Invalid relation.")
-
+            is_valid, err = check_relation(num_count, relation, num_numbers)
+            if err:
+                return (False, err)
             return (is_valid, "No error" if is_valid else f"Found {num_count} digits, expected {relation} {num_numbers}")
 
         if inst_type == "detectable_format:sentence_endings":
@@ -856,15 +852,9 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
             vowels = set("aeiouAEIOU")
             vowel_count = sum(1 for ch in response if ch in vowels)
 
-            if relation == "equal to":
-                is_valid = vowel_count == num_vowels
-            elif relation == "at least":
-                is_valid = vowel_count >= num_vowels
-            elif relation == "less than":
-                is_valid = vowel_count < num_vowels
-            else:
-                return (False, "Invalid relation.")
-
+            is_valid, err = check_relation(vowel_count, relation, num_vowels)
+            if err:
+                return (False, err)
             return (is_valid, "No error" if is_valid else f"Found {vowel_count} vowels, expected {relation} {num_vowels}")
 
         if inst_type == "keywords:consonant_count":
@@ -875,15 +865,9 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
             consonants = set(string.ascii_letters) - vowels
             consonant_count = sum(1 for ch in response if ch in consonants)
 
-            if relation == "equal to":
-                is_valid = consonant_count == num_consonants
-            elif relation == "at least":
-                is_valid = consonant_count >= num_consonants
-            elif relation == "less than":
-                is_valid = consonant_count < num_consonants
-            else:
-                return (False, "Invalid relation.")
-
+            is_valid, err = check_relation(consonant_count, relation, num_consonants)
+            if err:
+                return (False, err)
             return (is_valid, "No error" if is_valid else f"Found {consonant_count} consonants, expected {relation} {num_consonants}")
 
         # Unsupported instructions
