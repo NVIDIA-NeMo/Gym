@@ -35,7 +35,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
-import yaml
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 from nemo_skills.mcp.tool_manager import ToolManager
@@ -189,9 +188,9 @@ class NSToolsResourcesServer(SimpleResourcesServer):
             }
         }
         self._python_tool_config_file = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".yaml", delete=False, prefix="python_tool_config_"
+            mode="w", suffix=".json", delete=False, prefix="python_tool_config_"
         )
-        yaml.dump(config_content, self._python_tool_config_file)
+        json.dump(config_content, self._python_tool_config_file)
         self._python_tool_config_file.flush()
         logger.info(f"python_tool config file: {self._python_tool_config_file.name}")
         logger.info(f"python_tool config: {config_content}")

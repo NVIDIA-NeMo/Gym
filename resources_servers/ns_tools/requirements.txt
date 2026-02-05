@@ -1,2 +1,2 @@
 -e nemo-gym[dev] @ ../../
-nemo-skills @ git+https://github.com/NVIDIA-NeMo/Skills.git@georgea/debug-tool-timing-super-rl-01212026
+nemo-skills @ git+https://github.com/NVIDIA-NeMo/Skills.git@wedu/super-rl-01212026
