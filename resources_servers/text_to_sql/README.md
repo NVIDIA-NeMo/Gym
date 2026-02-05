@@ -41,7 +41,7 @@ Each data sample should include:
       },
       {
         "role": "user",
-        "content": "DIALECT: postgresql\n\nDATABASE CONTEXT:\nCREATE TABLE users (id SERIAL PRIMARY KEY, name VARCHAR(100));\nINSERT INTO users VALUES (1, 'Alice'), (2, 'Bob');\n\nQUESTION:\nList all user names ordered alphabetically"
+        "content": "<DIALECT>postgresql</DIALECT>\n\n<DATABASE_CONTEXT>\nCREATE TABLE users (id SERIAL PRIMARY KEY, name VARCHAR(100));\nINSERT INTO users VALUES (1, 'Alice'), (2, 'Bob');\n</DATABASE_CONTEXT>\n\n<QUESTION>\nList all user names ordered alphabetically\n</QUESTION>"
       }
     ]
   },
