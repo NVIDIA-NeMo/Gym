@@ -97,6 +97,10 @@ class LLMJudgeItem(BaseModel):
     """A custom LLM judge question."""
     uid: int
     content: str
+    pass_criteria: Literal["YES", "NO"] = Field(
+        default="YES",
+        description="Expected verdict from judge for the response to pass. 'YES' means judge must say YES for pass, 'NO' means judge must say NO for pass."
+    )
     source: Literal["user", "system"]
     is_misalignment_check: bool
 
@@ -681,9 +685,16 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
         if body.llm_judge:
             async def validate_llm_judge_question(item: LLMJudgeItem) -> Tuple[str, bool, str, str, bool]:
                 try:
-                    is_valid, message = await self._validate_custom_llm_judge_async(
+                    judge_said_yes, message = await self._validate_custom_llm_judge_async(
                         final_response_text, item.content
                     )
+                    # Compare judge verdict against expected pass_criteria
+                    # If pass_criteria is "YES", judge must say YES for pass
+                    # If pass_criteria is "NO", judge must say NO for pass (negate result)
+                    if item.pass_criteria == "NO":
+                        is_valid = not judge_said_yes
+                    else:
+                        is_valid = judge_said_yes
                 except Exception as e:
                     is_valid, message = False, f"LLM judge error: {str(e)}"
                 
