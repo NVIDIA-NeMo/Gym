@@ -37,6 +37,7 @@ try:
         JUDGE_SYSTEM_PROMPT,
         DEFINITION_GENERATOR_SYSTEM_PROMPT,
         LLM_JUDGE_QUESTION_PROMPT,
+        EXPECTED_ARGUMENTS,
         eval_modes,
         inst_def,
         subinst_def,
@@ -54,6 +55,7 @@ except ImportError:
         JUDGE_SYSTEM_PROMPT,
         DEFINITION_GENERATOR_SYSTEM_PROMPT,
         LLM_JUDGE_QUESTION_PROMPT,
+        EXPECTED_ARGUMENTS,
         eval_modes,
         inst_def,
         subinst_def,
@@ -95,6 +97,8 @@ class LLMJudgeItem(BaseModel):
     """A custom LLM judge question."""
     uid: int
     content: str
+    source: Literal["user", "system"]
+    is_misalignment_check: bool
 
 
 class TuringVIFRunRequest(BaseRunRequest):
@@ -132,6 +136,10 @@ class TuringVIFVerifyResponse(BaseVerifyResponse):
     follow_instruction_list: List[bool]
     validation_results: List[ValidationResult] = Field(default_factory=list)
 
+class ValidationError(BaseModel):
+    """Error in a single validation check."""
+    errors: List[str]
+
 
 # ============================================================================
 # Pydantic Models for LLM Judge Response Parsing
@@ -166,6 +174,20 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
     
     # GPT-5 and other reasoning models that require the Responses API
     REASONING_MODELS: ClassVar[List[str]] = ["gpt-5", "o1", "o3", "o4-mini"]
+
+    @staticmethod
+    def analyze_misalignment_check(is_valid: bool, message: str) -> Tuple[bool, str]:
+        """
+        Inverts validation result for misalignment checks.
+        
+        When source="user" and is_misalignment_check=True, a passing validation
+        means the response followed the user's misaligned instruction (bad),
+        so we invert the result.
+        """
+        if is_valid:
+            return (False, "Response misaligns with system instruction.")
+        else:
+            return (True, "No Error")
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -460,6 +482,86 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
     # Main Verify Endpoint
     # ========================================================================
 
+    async def validate_instructions_schema(self, instructions: List[Dict[str, Any]]) -> List[ValidationResult]:
+        errors = []
+        all_instructions = instructions.get("instructions", [])
+        llm_judge = instructions.get("llm_judge", [])
+
+        seen_uids: Dict[str, str] = {}
+        for idx, instruction in enumerate(all_instructions):
+            if not isinstance(instruction, dict):
+                errors.append(f"Instruction at index {idx}: must be an object")
+                continue
+            
+            # Validate instruction_id is present
+            inst_id = instruction.get("instruction_id")
+            if not inst_id:
+                errors.append(f"Instruction at index {idx}: must have an 'instruction_id' field")
+                continue
+            
+            # Validate expected arguments for the instruction
+            if inst_id in EXPECTED_ARGUMENTS:
+                expected_args = EXPECTED_ARGUMENTS[inst_id]
+                actual_args = set(k for k in instruction.keys() if k not in ("instruction_id", "uid", "source", "is_misalignment_check"))
+                missing_args = set(expected_args) - actual_args
+                if missing_args:
+                    errors.append(f"Instruction '{inst_id}' at index {idx}: missing required argument(s): {sorted(missing_args)}")
+            else:
+                errors.append(f"Instruction '{inst_id}' at index {idx}: unknown instruction_id")
+            
+            # Validate uid is present and unique
+            uid = instruction.get("uid")
+            if uid is None:
+                errors.append(f"Instruction '{inst_id}' at index {idx}: must have a 'uid' field")
+            else:
+                # Check for duplicate uid
+                if uid in seen_uids:
+                    errors.append(f"Instruction '{inst_id}' at index {idx}: duplicate 'uid' value '{uid}' (first seen at {seen_uids[uid]})")
+                else:
+                    seen_uids[uid] = f"instruction '{inst_id}' at index {idx}"
+            
+            # Validate required fields
+            if "source" not in instruction:
+                errors.append(f"Instruction '{inst_id}': must have a 'source' field")
+            elif instruction["source"] not in ("user", "system"):
+                errors.append(f"Instruction '{inst_id}': invalid 'source' value '{instruction['source']}'. Must be 'user' or 'system'.")
+            
+            if "is_misalignment_check" not in instruction:
+                errors.append(f"Instruction '{inst_id}': must have an 'is_misalignment_check' field")
+            elif not isinstance(instruction["is_misalignment_check"], bool):
+                errors.append(f"Instruction '{inst_id}': 'is_misalignment_check' must be a boolean, got '{instruction['is_misalignment_check']}'.")
+
+        for idx, item in enumerate(llm_judge):
+            if not isinstance(item, dict):
+                errors.append(f"llm_judge at index {idx}: must be an object")
+                continue
+            
+            # Validate uid is present and unique
+            uid = item.get("uid")
+            if uid is None:
+                errors.append(f"llm_judge at index {idx}: must have a 'uid' field")
+            else:
+                # Check for duplicate uid (across both instructions and llm_judge)
+                if uid in seen_uids:
+                    errors.append(f"llm_judge at index {idx}: duplicate 'uid' value '{uid}' (first seen at {seen_uids[uid]})")
+                else:
+                    seen_uids[uid] = f"llm_judge at index {idx}"
+            
+            if "content" not in item:
+                errors.append(f"llm_judge '{uid or idx}': must have a 'content' field")
+            
+            if "source" not in item:
+                errors.append(f"llm_judge '{uid or idx}': must have a 'source' field")
+            elif item.get("source") not in ("user", "system"):
+                errors.append(f"llm_judge '{uid or idx}': invalid 'source' value '{item.get('source')}'. Must be 'user' or 'system'.")
+            
+            if "is_misalignment_check" not in item:
+                errors.append(f"llm_judge '{uid or idx}': must have an 'is_misalignment_check' field")
+            elif not isinstance(item.get("is_misalignment_check"), bool):
+                errors.append(f"llm_judge '{uid or idx}': 'is_misalignment_check' must be a boolean, got '{item.get('is_misalignment_check')}'.")
+        
+        return errors
+
     async def verify(self, body: TuringVIFVerifyRequest) -> TuringVIFVerifyResponse:
         """
         Verify a response against all instructions.
@@ -483,6 +585,33 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
         is_following_list: List[bool] = []
         validation_results: List[ValidationResult] = []
 
+        # Validate schema first - if errors, skip this rollout
+        all_instructions = {"instructions": [], "llm_judge": []}
+        if body.instructions: 
+            all_instructions["instructions"] = body.instructions
+        if body.llm_judge:
+            # Convert LLMJudgeItem models to dicts for schema validation
+            all_instructions["llm_judge"] = [item.model_dump() for item in body.llm_judge]
+        
+        schema_errors = await self.validate_instructions_schema(all_instructions)
+        if schema_errors:
+            # Return early with schema errors - rollout will be skipped
+            for err in schema_errors:
+                validation_results.append(ValidationResult(
+                    instruction="schema_validation",
+                    status="Failed",
+                    message=str(err),
+                ))
+                is_following_list.append(False)
+            
+            return TuringVIFVerifyResponse(
+                **body.model_dump(),
+                reward=0.0,
+                follow_all_instructions=False,
+                follow_instruction_list=is_following_list,
+                validation_results=validation_results,
+            )
+        
         # Separate fast validators from LLM validators
         fast_instructions = []
         llm_instructions = []
@@ -497,12 +626,16 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
         # Run fast validators synchronously (they're CPU-bound)
         for instruction in fast_instructions:
             inst_id = instruction.get("instruction_id", "")
-            kwargs = {k: v for k, v in instruction.items() if k != "instruction_id"}
+            kwargs = {k: v for k, v in instruction.items() if k not in ("instruction_id", "uid", "source", "is_misalignment_check")}
             
             try:
                 is_valid, message = validate_instruction(final_response_text, inst_id, kwargs)
             except Exception as e:
                 is_valid, message = False, f"Validator error: {str(e)}"
+
+            # Apply misalignment check if source="user" and is_misalignment_check=True
+            if instruction.get("source") == "user" and instruction.get("is_misalignment_check") is True:
+                is_valid, message = self.analyze_misalignment_check(is_valid, message)
 
             is_following_list.append(is_valid)
             validation_results.append(ValidationResult(
@@ -513,9 +646,11 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
 
         # Run LLM validators in parallel using asyncio.gather
         if llm_instructions:
-            async def validate_llm_instruction(instruction: Dict[str, Any]) -> Tuple[str, bool, str]:
+            async def validate_llm_instruction(instruction: Dict[str, Any]) -> Tuple[str, bool, str, str, bool]:
                 inst_id = instruction.get("instruction_id", "")
-                kwargs = {k: v for k, v in instruction.items() if k != "instruction_id"}
+                source = instruction.get("source", "")
+                is_misalignment = instruction.get("is_misalignment_check", False)
+                kwargs = {k: v for k, v in instruction.items() if k not in ("instruction_id", "uid", "source", "is_misalignment_check")}
                 
                 try:
                     is_valid, message = await self._validate_llm_instruction_async(
@@ -524,13 +659,17 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
                 except Exception as e:
                     is_valid, message = False, f"LLM validator error: {str(e)}"
                 
-                return inst_id, is_valid, message
+                return inst_id, is_valid, message, source, is_misalignment
 
             llm_results = await asyncio.gather(
                 *[validate_llm_instruction(inst) for inst in llm_instructions]
             )
 
-            for inst_id, is_valid, message in llm_results:
+            for inst_id, is_valid, message, source, is_misalignment in llm_results:
+                # Apply misalignment check if source="user" and is_misalignment_check=True
+                if source == "user" and is_misalignment is True:
+                    is_valid, message = self.analyze_misalignment_check(is_valid, message)
+                
                 is_following_list.append(is_valid)
                 validation_results.append(ValidationResult(
                     instruction=inst_id,
@@ -540,7 +679,7 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
 
         # Process custom LLM judge questions
         if body.llm_judge:
-            async def validate_llm_judge_question(item: LLMJudgeItem) -> Tuple[str, bool, str]:
+            async def validate_llm_judge_question(item: LLMJudgeItem) -> Tuple[str, bool, str, str, bool]:
                 try:
                     is_valid, message = await self._validate_custom_llm_judge_async(
                         final_response_text, item.content
@@ -548,13 +687,17 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
                 except Exception as e:
                     is_valid, message = False, f"LLM judge error: {str(e)}"
                 
-                return f"llm_judge_{item.uid}", is_valid, message
+                return f"llm_judge_{item.uid}", is_valid, message, item.source, item.is_misalignment_check
 
             judge_results = await asyncio.gather(
                 *[validate_llm_judge_question(item) for item in body.llm_judge]
             )
 
-            for inst_id, is_valid, message in judge_results:
+            for inst_id, is_valid, message, source, is_misalignment in judge_results:
+                # Apply misalignment check if source="user" and is_misalignment_check=True
+                if source == "user" and is_misalignment is True:
+                    is_valid, message = self.analyze_misalignment_check(is_valid, message)
+                
                 is_following_list.append(is_valid)
                 validation_results.append(ValidationResult(
                     instruction=inst_id,
