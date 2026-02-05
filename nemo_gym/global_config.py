@@ -53,6 +53,8 @@ RAY_NUM_GPUS_PER_NODE_KEY_NAME = "ray_num_gpus_per_node"
 USE_ABSOLUTE_IP = "use_absolute_ip"
 UV_PIP_SET_PYTHON_KEY_NAME = "uv_pip_set_python"
 HF_TOKEN_KEY_NAME = "hf_token"
+RAY_HEAD_NODE_ADDRESS_KEY_NAME = "ray_head_node_address"
+TASK_INDEX_KEY_NAME = "_task_index"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -412,9 +414,7 @@ def find_open_port(
         disallowed_ports = []
 
     default_disallowed_ports = set(
-        list(range(53000, 53010+1)) +
-        list(range(54000, 60000+1)) +
-        [10001, 8265, 52365, 52365+1]
+        list(range(53000, 53010 + 1)) + list(range(54000, 60000 + 1)) + [10001, 8265, 52365, 52365 + 1]
     )
 
     disallowed_ports = default_disallowed_ports | set(disallowed_ports)
