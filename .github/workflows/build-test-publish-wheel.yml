@@ -20,6 +20,7 @@ on:
     branches:
       - main
       - "r**"
+      - chtruong/fix-build-wheel
 
 defaults:
   run:
