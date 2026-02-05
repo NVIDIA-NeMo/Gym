@@ -35,7 +35,7 @@
         "Max": 0.0,
         "Standard deviation": 0.0
     },
-    "expected_answer": {
+    "sql": {
         "unique_count": 5,
         "total_count": 5
     },

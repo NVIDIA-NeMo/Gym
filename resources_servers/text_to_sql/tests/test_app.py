@@ -117,7 +117,7 @@ class TestExtractLastAssistantText:
                 input=[NeMoGymEasyInputMessage(role="user", content="test")]
             ),
             response=response,
-            expected_answer="SELECT 1;",
+            sql="SELECT 1;",
             sql_dialect="postgresql",
             sql_context="CREATE TABLE test (id INT);",
             sql_prompt="Select one",
@@ -166,7 +166,7 @@ class TestTextToSqlResourcesServerVerify:
     def _create_verify_request(
         self,
         model_output: str,
-        expected_answer: str,
+        sql: str,
         sql_dialect: str = "postgresql",
         sql_context: str = "CREATE TABLE users (id INT, name VARCHAR(100));",
         sql_prompt: str = "List all users",
@@ -191,7 +191,7 @@ class TestTextToSqlResourcesServerVerify:
                 input=[NeMoGymEasyInputMessage(role="user", content=sql_prompt)]
             ),
             response=response,
-            expected_answer=expected_answer,
+            sql=sql,
             sql_dialect=sql_dialect,
             sql_context=sql_context,
             sql_prompt=sql_prompt,
@@ -202,7 +202,7 @@ class TestTextToSqlResourcesServerVerify:
         """Test verify returns reward=0.0 when no SQL is found."""
         request = self._create_verify_request(
             model_output="I don't know how to write SQL",
-            expected_answer="SELECT * FROM users;",
+            sql="SELECT * FROM users;",
         )
 
         response = await resources_server.verify(request)
@@ -218,7 +218,7 @@ class TestTextToSqlResourcesServerVerify:
 
         request = self._create_verify_request(
             model_output="```sql\nSELECT * FROM users;\n```",
-            expected_answer="SELECT * FROM users;",
+            sql="SELECT * FROM users;",
         )
 
         # Mock judge to return equal
@@ -256,7 +256,7 @@ class TestTextToSqlResourcesServerVerify:
         """Test verify returns reward=0.0 when judge fails."""
         request = self._create_verify_request(
             model_output="```sql\nSELECT id FROM users;\n```",
-            expected_answer="SELECT * FROM users;",
+            sql="SELECT * FROM users;",
         )
 
         # Mock judge to return not equal
@@ -295,7 +295,7 @@ class TestTextToSqlResourcesServerVerify:
 
         request = self._create_verify_request(
             model_output="```sql\nSELECT * FROM users;\n```",
-            expected_answer="SELECT * FROM users;",
+            sql="SELECT * FROM users;",
         )
 
         # Mock judge to return equal for both calls
@@ -334,7 +334,7 @@ class TestTextToSqlResourcesServerVerify:
 
         request = self._create_verify_request(
             model_output="<think>Let me think...</think>```sql\nSELECT * FROM users;\n```",
-            expected_answer="SELECT * FROM users;",
+            sql="SELECT * FROM users;",
         )
 
         # Mock judge to return equal
@@ -365,9 +365,10 @@ class TestTextToSqlResourcesServerVerify:
         assert response.reward == 1.0
         assert "SELECT * FROM users;" in response.extracted_sql
 
-    @pytest.mark.asyncio
-    async def test_verify_missing_expected_answer(self, resources_server: TextToSqlResourcesServer):
-        """Test verify raises error when expected answer is missing."""
+    def test_verify_missing_sql_field(self):
+        """Test that Pydantic raises ValidationError when sql field is missing."""
+        from pydantic import ValidationError
+
         output_message = NeMoGymResponseOutputMessage(
             id="msg_1",
             content=[NeMoGymResponseOutputText(annotations=[], text="SELECT 1;")],
@@ -382,26 +383,53 @@ class TestTextToSqlResourcesServerVerify:
             tool_choice="auto",
             tools=[],
         )
-        request = TextToSqlVerifyRequest(
-            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
-                input=[NeMoGymEasyInputMessage(role="user", content="test")]
-            ),
-            response=response,
+
+        with pytest.raises(ValidationError):
+            TextToSqlVerifyRequest(
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                    input=[NeMoGymEasyInputMessage(role="user", content="test")]
+                ),
+                response=response,
+                # Missing required fields: sql, sql_dialect
+            )
+
+    def test_verify_missing_sql_dialect_field(self):
+        """Test that Pydantic raises ValidationError when sql_dialect is missing."""
+        from pydantic import ValidationError
+
+        output_message = NeMoGymResponseOutputMessage(
+            id="msg_1",
+            content=[NeMoGymResponseOutputText(annotations=[], text="SELECT 1;")],
+        )
+        response = NeMoGymResponse(
+            id="test_response",
+            created_at=1000,
+            model="test_model",
+            object="response",
+            output=[output_message],
+            parallel_tool_calls=False,
+            tool_choice="auto",
+            tools=[],
         )
 
-        with pytest.raises(ValueError, match="Expected answer is required"):
-            await resources_server.verify(request)
+        with pytest.raises(ValidationError):
+            TextToSqlVerifyRequest(
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                    input=[NeMoGymEasyInputMessage(role="user", content="test")]
+                ),
+                response=response,
+                sql="SELECT * FROM users;",
+                # Missing required field: sql_dialect
+            )
 
     @pytest.mark.asyncio
-    async def test_verify_missing_sql_dialect(self, resources_server: TextToSqlResourcesServer):
-        """Test verify raises error when SQL dialect is missing."""
+    async def test_verify_empty_sql_dialect(self, resources_server: TextToSqlResourcesServer):
+        """Test verify raises error when SQL dialect is empty string."""
         request = self._create_verify_request(
             model_output="```sql\nSELECT * FROM users;\n```",
-            expected_answer="SELECT * FROM users;",
+            sql="SELECT * FROM users;",
             sql_dialect="",  # Empty dialect
         )
-        # Clear the dialect
-        request.sql_dialect = None
 
         with pytest.raises(ValueError, match="SQL dialect is required"):
             await resources_server.verify(request)
@@ -411,7 +439,7 @@ class TestTextToSqlResourcesServerVerify:
         """Test verify raises error for unsupported SQL dialect."""
         request = self._create_verify_request(
             model_output="```sql\nSELECT * FROM users;\n```",
-            expected_answer="SELECT * FROM users;",
+            sql="SELECT * FROM users;",
             sql_dialect="oracle",  # Unsupported dialect
         )
 
@@ -425,7 +453,7 @@ class TestTextToSqlResourcesServerVerify:
 
         request = self._create_verify_request(
             model_output="```sql\nSELECT * FROM users;\n```",
-            expected_answer="SELECT * FROM users;",
+            sql="SELECT * FROM users;",
             sql_context="",  # Empty context
         )
 

@@ -118,15 +118,6 @@ def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
     return ""
 
 
-def _extract_expected_answer(req: BaseRunRequest) -> Optional[str]:
-    """Extract expected answer from request."""
-    if hasattr(req, "expected_answer") and req.expected_answer:
-        return str(req.expected_answer)
-    md = getattr(req, "metadata", None) or {}
-    exp = md.get("expected_answer")
-    return str(exp) if exp is not None else None
-
-
 def _extract_question_text(params: NeMoGymResponseCreateParamsNonStreaming) -> str:
     """Extract the question text from the last user message."""
     last_text: Optional[str] = None
@@ -198,9 +189,9 @@ class TextToSqlRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
     uuid: Optional[str | int] = None
-    expected_answer: Optional[str] = None
-    sql_dialect: Optional[str] = None
-    sql_context: Optional[str] = None  # Database schema (CREATE/INSERT statements)
+    sql: str  # Ground truth SQL query (required)
+    sql_dialect: str  # SQL dialect: mysql, postgresql, sqlite (required)
+    sql_context: str = ""  # Database schema (CREATE/INSERT statements)
     sql_prompt: Optional[str] = None  # Natural language question (optional, extracted from input if not provided)
     metadata: Optional[dict[str, Any]] = None
 
@@ -221,12 +212,12 @@ class TextToSqlVerifyResponse(BaseVerifyResponse):
     """Verification response for text-to-SQL tasks."""
 
     uuid: Optional[str | int] = None
-    expected_answer: str
+    sql: str  # Ground truth SQL query
     model_output: str
     extracted_sql: Optional[str] = None
-    sql_dialect: Optional[str] = None
-    sql_context: Optional[str] = None
-    sql_prompt: Optional[str] = None
+    sql_dialect: str  # SQL dialect used
+    sql_context: str  # Database schema provided
+    sql_prompt: Optional[str] = None  # May be extracted from input
     judge_passed: bool = False
     failure_reason: Optional[FailureCode] = None
     judge_evaluations: list[JudgeEvaluation] = []
@@ -254,24 +245,23 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
 
     async def verify(self, body: TextToSqlVerifyRequest) -> TextToSqlVerifyResponse:
         """Verify model response by comparing generated SQL with expected using LLM judge."""
-        expected = _extract_expected_answer(body)
-        if not expected:
-            raise ValueError("Expected answer is required but was not provided")
+        # These are required fields, validated by Pydantic
+        expected_sql = body.sql
+        sql_context = body.sql_context
 
-        generated = _extract_last_assistant_text(body)
-        if not generated:
-            raise ValueError("No assistant response found/extracted to verify")
-
-        # Extract question from request field or from user message
-        sql_prompt = body.sql_prompt or _extract_question_text(body.responses_create_params)
-        sql_dialect = _normalize_dialect(body.sql_dialect) or _normalize_dialect(
-            _extract_dialect_from_prompt(sql_prompt)
-        )
+        # Normalize and validate dialect
+        sql_dialect = _normalize_dialect(body.sql_dialect)
         if not sql_dialect:
             raise ValueError("SQL dialect is required but was not provided")
         if sql_dialect not in SUPPORTED_DIALECTS:
             raise ValueError(f"Unsupported SQL dialect '{sql_dialect}'. Supported: {sorted(SUPPORTED_DIALECTS)}")
-        sql_context = body.sql_context or ""
+
+        # Extract question from request field or from user message
+        sql_prompt = body.sql_prompt or _extract_question_text(body.responses_create_params)
+
+        generated = _extract_last_assistant_text(body)
+        if not generated:
+            raise ValueError("No assistant response found/extracted to verify")
 
         reward = 0.0
         failure_reason = None
@@ -296,8 +286,8 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
                 first_equal, first_eval = await self._generate_judge_evaluation(
                     sql_prompt=sql_prompt,
                     sql_context=sql_context,
-                    expected_answer=expected,
-                    generated_answer=extracted_sql,
+                    expected_sql=expected_sql,
+                    generated_sql=extracted_sql,
                     sql_dialect=sql_dialect,
                 )
                 judge_evaluations.append(first_eval)
@@ -308,8 +298,8 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
                         second_equal, second_eval = await self._generate_judge_evaluation(
                             sql_prompt=sql_prompt,
                             sql_context=sql_context,
-                            expected_answer=extracted_sql,
-                            generated_answer=expected,
+                            expected_sql=extracted_sql,
+                            generated_sql=expected_sql,
                             sql_dialect=sql_dialect,
                         )
                         judge_evaluations.append(second_eval)
@@ -335,7 +325,7 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
             print(f"DEBUG: Unknown error in verify: {type(e).__name__} {e}", flush=True)
 
         payload = body.model_dump()
-        payload.pop("expected_answer", None)
+        payload.pop("sql", None)
         payload.pop("sql_dialect", None)
         payload.pop("sql_context", None)
         payload.pop("sql_prompt", None)
@@ -343,7 +333,7 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
         return TextToSqlVerifyResponse(
             **payload,
             reward=reward,
-            expected_answer=expected,
+            sql=expected_sql,
             model_output=text,
             extracted_sql=extracted_sql,
             sql_dialect=sql_dialect,
@@ -359,8 +349,8 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
         *,
         sql_prompt: str,
         sql_context: str,
-        expected_answer: str,
-        generated_answer: str,
+        expected_sql: str,
+        generated_sql: str,
         sql_dialect: str,
     ) -> tuple[bool, JudgeEvaluation]:
         """Run a single judge evaluation."""
@@ -373,8 +363,8 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
         user_prompt = self._judge_prompt_template.format(
             sql_prompt=sql_prompt,
             sql_context=sql_context,
-            first_answer=expected_answer,
-            second_answer=generated_answer,
+            first_answer=expected_sql,
+            second_answer=generated_sql,
             sql_dialect=sql_dialect,
         )
 

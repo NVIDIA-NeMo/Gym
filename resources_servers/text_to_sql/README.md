@@ -24,7 +24,7 @@ More dialects planned for future versions (TODO: Oracle, SQL Server, BigQuery, S
 
 Each data sample should include:
 - `responses_create_params.input`: User message containing the prompt for the model
-- `expected_answer`: The ground truth SQL query
+- `sql`: The ground truth SQL query
 - `sql_dialect`: SQL dialect (`mysql`, `postgresql`, or `sqlite`)
 - `sql_context`: Database schema and sample data (CREATE TABLE + INSERT statements)
 - `sql_prompt`: Natural language question describing the desired query
@@ -45,7 +45,7 @@ Each data sample should include:
       }
     ]
   },
-  "expected_answer": "SELECT name FROM users ORDER BY name;",
+  "sql": "SELECT name FROM users ORDER BY name;",
   "sql_dialect": "postgresql",
   "sql_context": "CREATE TABLE users (id SERIAL PRIMARY KEY, name VARCHAR(100));\nINSERT INTO users VALUES (1, 'Alice'), (2, 'Bob');",
   "sql_prompt": "List all user names ordered alphabetically"
@@ -56,7 +56,7 @@ Each data sample should include:
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `expected_answer` | Yes | Ground truth SQL query |
+| `sql` | Yes | Ground truth SQL query |
 | `sql_dialect` | Yes | SQL dialect: `mysql`, `postgresql`, or `sqlite` |
 | `sql_context` | Yes | Database schema (CREATE TABLE) and sample data (INSERT statements) |
 | `sql_prompt` | Yes | Natural language question describing the query |
@@ -111,7 +111,7 @@ The LLM judge considers queries equivalent if they:
 
 **Code**: Apache 2.0
 
-**Data**: Apache 2.0 (synthetic examples)
+**Data**: CC-BY-4.0 (synthetic examples)
 
 ## Dependencies
 
