@@ -12,8 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import pytest
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -28,8 +29,8 @@ from resources_servers.text_to_sql.app import (
     TextToSqlResourcesServer,
     TextToSqlResourcesServerConfig,
     TextToSqlVerifyRequest,
-    extract_sql_from_response,
     _extract_last_assistant_text,
+    extract_sql_from_response,
 )
 
 
