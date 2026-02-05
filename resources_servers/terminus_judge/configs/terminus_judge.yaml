@@ -18,6 +18,10 @@ terminus_judge_resources_server:
       # Reward when the second (swap) pass fails; default 0.0, can be -1.0
       reward_if_swap_fails: 0.0
 
+      # String similarity configuration (NEW)
+      enable_string_similarity: true
+      string_similarity_threshold: 0.9
+
       domain: agent
       verified: false
       description: single-step terminal based task
