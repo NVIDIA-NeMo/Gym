@@ -11,9 +11,25 @@ NeMo Gym provides scalable {term}`rollout <Rollout / Trajectory>` collection inf
 
 ## Training Framework Integrations
 
-NeMo Gym decouples environment development from training by outputting standardized JSONL rollout data. Training frameworks consume this data through their own integration code. The following table shows frameworks with documented integration patterns.
+NeMo Gym decouples environment development from training by outputting standardized JSONL rollout data. Training frameworks consume this data through their own integration code.
 
-### Frameworks with Integration Tutorials
+### The Interface Contract
+
+NeMo Gym outputs JSONL with OpenAI-compatible message format:
+
+```json
+{
+  "reward": 1.0,
+  "output": [
+    {"role": "user", "content": "What is 2 + 2?"},
+    {"role": "assistant", "content": "The answer is 4."}
+  ]
+}
+```
+
+Any framework that can read this format can use NeMo Gym rollouts—no native integration required. The following frameworks have documented patterns.
+
+### Supported Frameworks
 
 ```{list-table}
 :header-rows: 1
@@ -40,24 +56,8 @@ The following frameworks have planned integrations with documented patterns:
 
 | Framework | Description | Status |
 |-----------|-------------|--------|
-| [veRL](https://github.com/volcengine/verl) | Volcano Engine's scalable RL library with hybrid parallelism | 🔜 [Planned](https://github.com/NVIDIA-NeMo/Gym/issues/549) |
-| [TRL](https://github.com/huggingface/trl) | Hugging Face's Transformer Reinforcement Learning library | 🔜 [Planned](https://github.com/NVIDIA-NeMo/Gym/issues/548) |
-
-### Output Format
-
-NeMo Gym outputs JSONL with OpenAI-compatible message format:
-
-```json
-{
-  "reward": 1.0,
-  "output": [
-    {"role": "user", "content": "What is 2 + 2?"},
-    {"role": "assistant", "content": "The answer is 4."}
-  ]
-}
-```
-
-Any framework that can read this format can use NeMo Gym rollouts for training.
+| [veRL](https://github.com/volcengine/verl) | Volcano Engine's scalable RL library with hybrid parallelism | Planned |
+| [TRL](https://github.com/huggingface/trl) | Hugging Face's Transformer Reinforcement Learning library | Planned |
 
 :::{tip}
 **Integrate your framework**: Refer to the {doc}`Training Framework Integration Guide <../contribute/rl-framework-integration/index>` or [open an issue](https://github.com/NVIDIA-NeMo/Gym/issues) to discuss requirements.
@@ -93,9 +93,9 @@ NeMo Gym integrates with environment libraries to provide diverse training scena
 | [PRIME Intellect](https://github.com/PrimeIntellect-ai) | Distributed AI training environments | 🔜 Planned |
 | [BrowserGym](https://github.com/ServiceNow/BrowserGym) | Web browsing and automation environments | 🔜 Planned |
 
-### Resource Server Pattern
+### Building Custom Environments
 
-The {term}`Resource Server <Verifier>` pattern provides a native way to build LLM training environments with four components:
+Beyond external library integrations, NeMo Gym provides a native pattern for building LLM training environments—the {term}`Resource Server <Verifier>`. This pattern has four components:
 
 - **Tool definitions**: OpenAI function calling schema for model interactions
 - **Verification logic**: Computes reward scores (0.0-1.0) from rollout outcomes
