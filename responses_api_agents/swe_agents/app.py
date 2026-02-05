@@ -682,6 +682,9 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
 # START Ray worker logic
 ########################################
 
+# TODO move inside runner ray remote
+SWEBenchWrapperInstanceConfig.model_rebuild(force=True)
+
 
 @ray.remote(
     scheduling_strategy="SPREAD",
@@ -691,17 +694,7 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
     num_cpus=1,
 )
 def runner_ray_remote(params_dict: dict[str, Any]) -> Path:
-    SWEBenchWrapperInstanceConfig.model_rebuild(force=True)
-
     params = SWEBenchWrapperInstanceConfig.model_validate(params_dict)
-    # TODO remove
-    print(
-        SWEBenchWrapperInstanceConfig,
-        params_dict["problem_info"],
-        SWEBenchWrapperInstanceConfig.model_fields,
-        params_dict.keys(),
-        params,
-    )
     instance_id = params.instance_id
 
     if params.debug:
