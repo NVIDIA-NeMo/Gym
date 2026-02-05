@@ -19,27 +19,16 @@ Why NeMo Gym?
 
 ## 📋 Requirements
 
-### Hardware Requirements
-
 NeMo Gym is designed to run on standard development machines:
 
-- **GPU**: Not required for NeMo Gym library operation
-  - GPU may be needed for specific resource servers or model inference (see individual server documentation)
-- **CPU**: Any modern x86_64 or ARM64 processor (e.g., Intel, AMD, Apple Silicon)
-- **RAM**: Minimum 8 GB (16 GB+ recommended for larger environments)
-- **Storage**: Minimum 5 GB free disk space for installation and basic usage
+| Hardware Requirements | Software Requirements |
+| --------------------- | --------------------- |
+| **GPU**: Not required for NeMo Gym library operation<br>• GPU may be needed for specific resource servers or model inference (see individual server documentation) | **Operating System**:<br>• Linux (Ubuntu 20.04+, or equivalent)<br>• macOS (11.0+ for x86_64, 12.0+ for Apple Silicon)<br>• Windows (via WSL2) |
+| **CPU**: Any modern x86_64 or ARM64 processor (e.g., Intel, AMD, Apple Silicon) | **Python**: 3.12 or higher |
+| **RAM**: Minimum 8 GB (16 GB+ recommended for larger environments) | **Git**: For cloning the repository |
+| **Storage**: Minimum 5 GB free disk space for installation and basic usage | **Internet Connection**: Required for downloading dependencies and API access |
 
-### Software Requirements
-
-- **Operating System**: 
-  - Linux (Ubuntu 20.04+, or equivalent)
-  - macOS (11.0+ for x86_64, 12.0+ for Apple Silicon)
-  - Windows (via WSL2)
-- **Python**: 3.12 or higher
-- **Git**: For cloning the repository
-- **Internet Connection**: Required for downloading dependencies and API access
-
-### Additional Requirements
+**Additional Requirements**
 
 - **API Keys**: OpenAI API key with available credits (for the quickstart examples)
   - Other model providers supported (Azure OpenAI, self-hosted models via vLLM)
