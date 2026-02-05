@@ -741,7 +741,7 @@ class RunOpenHandsAgent(BaseModel):
                     )
                 source_output = output_candidates[-1]
 
-            dest_output_path = self.config.prediction_mounted_path
+            dest_output_path = self.config.prediction_path
             shutil.copy2(source_output, dest_output_path)
             dest_output = str(dest_output_path)
 
