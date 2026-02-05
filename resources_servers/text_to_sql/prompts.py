@@ -55,7 +55,7 @@ Two SQL queries are functionally equivalent if and only if they return the same 
 ## Dialect-Specific Considerations
 
 ### MySQL
-- Backtick quoting for identifiers: \`column\`
+- Backtick quoting for identifiers: `column`
 - LIMIT syntax: `LIMIT n` or `LIMIT offset, count`
 - String functions: `SUBSTRING_INDEX()`, `CONCAT()`, `GROUP_CONCAT()`
 - Auto-increment: `AUTO_INCREMENT`
