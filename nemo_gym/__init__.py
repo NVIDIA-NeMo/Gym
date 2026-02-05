@@ -41,6 +41,9 @@ environ["UV_CACHE_DIR"] = str(CACHE_DIR / "uv")
 # Turn off Gradio analytics
 environ["GRADIO_ANALYTICS_ENABLED"] = "False"
 
+# Turn off Ray management of UV virtual environments since we have separate venvs inside each server dir.
+environ["RAY_ENABLE_UV_RUN_RUNTIME_ENV"] = "0"
+
 from nemo_gym.package_info import (
     __contact_emails__,
     __contact_names__,
