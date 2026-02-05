@@ -693,7 +693,7 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
 def runner_ray_remote(params_dict: dict[str, Any]) -> Path:
     params = SWEBenchWrapperInstanceConfig.model_validate(params_dict)
     # TODO remove
-    print(SWEBenchWrapperInstanceConfig, params_dict.keys(), params)
+    print(SWEBenchWrapperInstanceConfig, SWEBenchWrapperInstanceConfig.model_fields, params_dict.keys(), params)
     instance_id = params.instance_id
 
     if params.debug:
