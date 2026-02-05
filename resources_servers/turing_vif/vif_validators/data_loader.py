@@ -13,6 +13,10 @@ import pandas as pd
 # Get the directory containing this file for relative CSV paths
 _CURRENT_DIR = Path(__file__).parent
 
+# Supported languages for multi-language validation
+# This is a reference constant - the authoritative list is in validator.py
+SUPPORTED_LANGS = {"en", "fre", "es", "it", "de", "pt-BR", "ja", "zh", "ko", "hi", "ar"}
+
 template_json = {
     "metadata": [
         "add", "modify", "remove"
