@@ -12,6 +12,7 @@ from fractions import Fraction
 import re
 import string
 import json
+import unicodedata
 from typing import Dict, List, Literal, Tuple, Any, Optional
 
 from collections import Counter, defaultdict
@@ -39,6 +40,304 @@ class DefinitionResponse(BaseModel):
     """Defines the expected JSON structure for the definition generator's response."""
     status: Literal["PASS", "FAIL"] = Field(..., description="The binary decision from the generator.")
     definition: str = Field(..., description="The definition of the term.")
+
+
+# ============================================================================
+# Language Strategy Classes for Multi-Language Support
+# ============================================================================
+
+class LanguageStrategy:
+    """Base strategy for language-specific text handling."""
+    code = "en"
+    has_case = True
+    supports_case_rules = True
+    supports_vowel_rules = True
+    sentence_delims = ".!?"
+    punctuation_marks = ".!?"
+    vowels = set("aeiouAEIOU")
+    word_script = "latin"  # latin | cjk
+
+    def normalize(self, text: str) -> str:
+        return unicodedata.normalize("NFKC", text)
+
+    def casefold(self, text: str) -> str:
+        return self.normalize(text).casefold()
+
+    def tokenize_words(self, text: str) -> List[str]:
+        text_without_lists = re.sub(r'^\s*\d+\.\s', '', text, flags=re.MULTILINE)
+        return re.findall(r"[^\W_]+(?:['-][^\W_]+)*", text_without_lists, flags=re.UNICODE)
+
+    def sentence_split(self, text: str) -> List[str]:
+        return re.split(f"[{re.escape(self.sentence_delims)}]+", text)
+
+    def punctuation_list(self, text: str) -> List[str]:
+        cleaned_text = re.sub(r'^\s*(?:[\-\*\+]\s+|\d+\.\s+|#+\s+)', '', text, flags=re.MULTILINE)
+        return re.findall(f"[{re.escape(self.punctuation_marks)}]+", cleaned_text)
+
+
+class EnglishStrategy(LanguageStrategy):
+    code = "en"
+
+
+class FrenchStrategy(LanguageStrategy):
+    code = "fre"
+    vowels = set("aàâäeéèêëiîïoôöuùûüAEÉÈÊËÀÂÄÎÏÔÖÙÛÜ")
+
+
+class SpanishStrategy(LanguageStrategy):
+    code = "es"
+    sentence_delims = ".!¿?"
+    punctuation_marks = ".!¿?"
+    vowels = set("aáeéiíoóuúüAÁEÉIÍOÓUÚÜ")
+
+
+class ItalianStrategy(LanguageStrategy):
+    code = "it"
+    vowels = set("aàeèéiìoòuùAÀEÈÉIÌOÒUÙ")
+    
+    # Common Italian abbreviations that end with period but don't end sentences
+    ABBREVIATIONS = {'sig.', 'dott.', 'prof.', 'avv.', 'pag.', 'fig.', 'tab.', 'ecc.', 'gen.', 
+                     'sig', 'dott', 'prof', 'avv', 'pag', 'fig', 'tab', 'ecc', 'gen',
+                     'Sig.', 'Dott.', 'Prof.', 'Avv.', 'Pag.', 'Fig.', 'Tab.', 'Ecc.', 'Gen.',
+                     'SIG.', 'DOTT.', 'PROF.', 'AVV.', 'PAG.', 'FIG.', 'TAB.', 'ECC.', 'GEN.'}
+    
+    def tokenize_words(self, text: str) -> List[str]:
+        """
+        Tokenize Italian text, treating apostrophes as word separators for elisions.
+        Example: "L'amico" -> ["L", "amico"]
+        """
+        text_without_lists = re.sub(r'^\s*\d+\.\s', '', text, flags=re.MULTILINE)
+        words = re.split(r"[\s']+", text_without_lists)
+        return [w for w in words if w and re.search(r'[a-zA-ZÀ-ÿ]', w)]
+    
+    def sentence_split(self, text: str) -> List[str]:
+        """
+        Split Italian text into sentences, avoiding splits at abbreviations.
+        """
+        protected_text = text
+        abbr_map = {}
+        for i, abbr in enumerate(self.ABBREVIATIONS):
+            placeholder = f"__ABBR_{i}__"
+            protected_text = protected_text.replace(abbr, placeholder)
+            abbr_map[placeholder] = abbr
+        
+        delims_escaped = re.escape(self.sentence_delims)
+        pattern = rf"([{delims_escaped}]+)\s*(?=[A-ZÀÈÉÌÒÙ]|$)"
+        
+        matches = list(re.finditer(pattern, protected_text))
+        if not matches:
+            restored = protected_text
+            for placeholder, abbr in abbr_map.items():
+                restored = restored.replace(placeholder, abbr)
+            return [restored.strip()] if restored.strip() else [text]
+        
+        sentences = []
+        last_pos = 0
+        for match in matches:
+            if match.start() > last_pos:
+                sentences.append(protected_text[last_pos:match.start()].strip())
+            end_pos = match.end()
+            if end_pos < len(protected_text):
+                next_char = protected_text[end_pos]
+                if next_char.isupper() or next_char in 'ÀÈÉÌÒÙ':
+                    last_pos = end_pos
+                else:
+                    last_pos = match.end()
+            else:
+                last_pos = match.end()
+        
+        if last_pos < len(protected_text):
+            sentences.append(protected_text[last_pos:].strip())
+        
+        restored_sentences = []
+        for sent in sentences:
+            for placeholder, abbr in abbr_map.items():
+                sent = sent.replace(placeholder, abbr)
+            if sent.strip():
+                restored_sentences.append(sent.strip())
+        
+        return restored_sentences if restored_sentences else [text]
+
+
+class GermanStrategy(LanguageStrategy):
+    code = "de"
+    vowels = set("aäeëiïoöuüyAÄEËIÏOÖUÜY")
+
+
+class PortugueseBRStrategy(LanguageStrategy):
+    code = "pt-BR"
+    vowels = set("aáàâãeéêiíoóõôuúüAÁÀÂÃEÉÊIÍOÓÕÔUÚÜ")
+
+
+class CJKStrategy(LanguageStrategy):
+    """Base strategy for CJK languages (Chinese, Japanese, Korean)."""
+    has_case = False
+    supports_case_rules = False
+    supports_vowel_rules = False
+    word_script = "cjk"
+
+    def tokenize_words(self, text: str) -> List[str]:
+        text = self.normalize(text)
+        return [ch for ch in text if ch.strip()]
+
+    def sentence_split(self, text: str) -> List[str]:
+        return re.split(f"[{re.escape(self.sentence_delims)}]+", text)
+
+
+class JapaneseStrategy(CJKStrategy):
+    code = "ja"
+    sentence_delims = "。！？.!?"
+    punctuation_marks = "。！？.!?"
+
+
+class ChineseStrategy(CJKStrategy):
+    code = "zh"
+    sentence_delims = "。！？.!?"
+    punctuation_marks = "。！？.!?"
+
+
+class KoreanStrategy(CJKStrategy):
+    code = "ko"
+    sentence_delims = "?!？.!"
+    punctuation_marks = "?!？.!"
+
+
+class HindiStrategy(LanguageStrategy):
+    code = "hi"
+    has_case = False
+    supports_case_rules = False
+    supports_vowel_rules = False
+    sentence_delims = "।.?!"
+    punctuation_marks = "।.?!"
+
+    def tokenize_words(self, text: str) -> List[str]:
+        text_without_lists = re.sub(r'^\s*\d+\.\s', '', text, flags=re.MULTILINE)
+        words = re.findall(r"[\u0900-\u097F]+", text_without_lists)
+        if not words:
+            words = re.findall(r"[^\W_]+", text_without_lists, flags=re.UNICODE)
+        return words
+
+
+class ArabicStrategy(LanguageStrategy):
+    code = "ar"
+    has_case = False
+    supports_case_rules = False
+    supports_vowel_rules = False
+    sentence_delims = "؟!.?"
+    punctuation_marks = "؟!.?"
+
+    def normalize(self, text: str) -> str:
+        text = super().normalize(text)
+        return re.sub(r"[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED]", "", text)
+
+
+# Language strategy registry
+LANG_STRATEGIES: Dict[str, LanguageStrategy] = {
+    cls.code: cls() for cls in [
+        EnglishStrategy,
+        FrenchStrategy,
+        SpanishStrategy,
+        ItalianStrategy,
+        GermanStrategy,
+        PortugueseBRStrategy,
+        JapaneseStrategy,
+        ChineseStrategy,
+        KoreanStrategy,
+        HindiStrategy,
+        ArabicStrategy
+    ]
+}
+
+SUPPORTED_LANGS = set(LANG_STRATEGIES.keys())
+
+
+def _get_strategy(language: str) -> LanguageStrategy:
+    """Get the language strategy for a given language code."""
+    return LANG_STRATEGIES.get(language, LANG_STRATEGIES["en"])
+
+
+def _supports_case(language: str) -> bool:
+    """Check if a language supports case-based rules."""
+    return _get_strategy(language).supports_case_rules
+
+
+def _get_vowels(language: str) -> set:
+    """Get the vowel set for a language."""
+    return _get_strategy(language).vowels
+
+
+# ============================================================================
+# Instruction Capability Sets for Multi-Language Support
+# ============================================================================
+
+# Instructions that require case support (not available for CJK, Hindi, Arabic)
+CASE_INSTRUCTIONS = {
+    "change_case:all_caps",
+    "change_case:lowercase",
+    "change_case:alternating",
+    "change_case:first_letter_cap",
+    "change_case:capital_word_frequency",
+    "change_case:lowercase_word_frequency",
+    "change_case:all_caps_target",
+    "change_case:lowercase_target",
+    "change_case:alternating_target",
+    "change_case:first_letter_cap_target",
+    "change_case:case_ratio",
+    "change_case:first_letter_sentence",
+    "change_case:last_letter",
+    "change_case:vowel_consonant_balance",
+    "keywords:letter_frequency",
+    "keywords:alliteration",
+}
+
+# Instructions that require vowel/consonant distinction (not available for CJK, Hindi, Arabic)
+VOWEL_INSTRUCTIONS = {
+    "change_case:vowel_consonant_balance",
+    "keywords:vowel_count",
+    "keywords:consonant_count",
+    "keywords:alliteration",
+}
+
+
+def is_instruction_supported(inst_type: str, language: str) -> bool:
+    """
+    Check if an instruction type is supported for a given language.
+    
+    Args:
+        inst_type: The instruction type ID (e.g., "change_case:all_caps")
+        language: The language code (e.g., "en", "ja", "hi")
+        
+    Returns:
+        True if the instruction is supported for the language, False otherwise.
+    """
+    # English supports all instructions
+    if language == "en":
+        return True
+    
+    strategy = _get_strategy(language)
+    
+    # Case-sensitive instructions are not supported for languages without case
+    if not strategy.supports_case_rules and inst_type in CASE_INSTRUCTIONS:
+        return False
+    
+    # Vowel/consonant instructions are not supported for languages without vowel rules
+    if not strategy.supports_vowel_rules and inst_type in VOWEL_INSTRUCTIONS:
+        return False
+    
+    return True
+
+
+def get_supported_instructions(language: str) -> List[str]:
+    """
+    Get list of instruction IDs supported for a given language.
+    
+    Args:
+        language: The language code
+        
+    Returns:
+        List of supported instruction IDs for the language.
+    """
+    return [iid for iid in EXPECTED_ARGUMENTS.keys() if is_instruction_supported(iid, language)]
 
 
 # ============================================================================
@@ -127,19 +426,21 @@ def word_frequency(response: str, word: str) -> int:
     return words.count(word.lower())
 
 
-def keyword_frequency(response: str, keyword: str) -> int:
-    """Count frequency of a keyword in response, ensuring it's a full word or phrase."""
-    _TOKEN_VALID_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9'-]*[A-Za-z0-9])?$")
-    
-    keyword = keyword.strip()
-    for token in keyword.split():
-        if not _TOKEN_VALID_RE.fullmatch(token):
-            raise ValueError(f"Invalid token '{token}'.")
+def keyword_frequency(response: str, keyword: str, language: str = "en") -> int:
+    """Count frequency of a keyword in response, using Unicode-aware boundaries."""
+    strategy = _get_strategy(language)
+    keyword = strategy.casefold(keyword.strip())
 
+    # For CJK scripts, fall back to substring counting with non-letter/digit guards
+    if strategy.word_script == "cjk":
+        pattern = rf"(?<![\w]){re.escape(keyword)}(?![\w])"
+        return len(re.findall(pattern, strategy.casefold(response), flags=re.UNICODE))
+
+    # For Latin scripts, use word boundary matching
     escaped_tokens = [re.escape(part) for part in keyword.split()]
     phrase_pattern = r"\s+".join(escaped_tokens)
-    pattern = rf"(?<![\w\'\-]){phrase_pattern}(?![\w\'\-])"
-    return len(re.findall(pattern, response, flags=re.IGNORECASE))
+    pattern = rf"(?<![\w]){phrase_pattern}(?![\w])"
+    return len(re.findall(pattern, strategy.casefold(response), flags=re.UNICODE))
 
 
 def is_first_letter_cap(token: str) -> bool:
@@ -184,10 +485,16 @@ def parse_fraction_or_inf(input_str: str):
         raise ValueError(f"Invalid input: '{input_str}'. Not a valid fraction or 'inf'.")
 
 
-def extract_clean_sentences(text: str) -> List[str]:
+def extract_clean_sentences(text: str, language: str = "en") -> List[str]:
     """Takes a raw text string and returns a clean list of sentences."""
+    strategy = _get_strategy(language)
+    delims = strategy.sentence_delims
+
+    # Remove markdown tables
     table_pattern = r'(?:^\s*\|.*\|.*\n){2,}'
     cleaned_text = re.sub(table_pattern, '', text, flags=re.MULTILINE)
+
+    # Remove horizontal rules
     rule_pattern = r'^\s*([*_-])\s*\1\s*\1+\s*$'
     text = re.sub(rule_pattern, '', cleaned_text, flags=re.MULTILINE)
     
@@ -197,7 +504,8 @@ def extract_clean_sentences(text: str) -> List[str]:
         cleaned_line = re.sub(r'^\s*(?:[\-\*\+]\s+|\d+\.\s+|#+\s+)', '', line)
         if not cleaned_line:
             continue
-        line_parts = re.split(r'[.!?]+', cleaned_line)
+        # Split by language-specific delimiters
+        line_parts = re.split(f"[{re.escape(delims)}]+", cleaned_line)
         for sentence in line_parts:
             stripped_sentence = sentence.strip()
             if stripped_sentence:
@@ -205,9 +513,11 @@ def extract_clean_sentences(text: str) -> List[str]:
     return all_sentences
 
 
-def extract_clean_words(response: str) -> List[str]:
+def extract_clean_words(response: str, language: str = "en") -> List[str]:
+    """Extract clean words from text using language-specific tokenization."""
+    strategy = _get_strategy(language)
     text_without_lists = re.sub(r'^\s*\d+\.\s', '', response, flags=re.MULTILINE)
-    return re.findall(r"\b(?:[a-zA-Z0-9'-]+(?:\.[a-zA-Z0-9'-]+)?)\b", text_without_lists.lower())
+    return strategy.tokenize_words(text_without_lists)
 
 
 def analyze_lists(text: str, pattern: str) -> list:
@@ -278,10 +588,11 @@ def find_markdown_tables(text: str) -> list:
     return tables_found
 
 
-def find_punctuations(text: str) -> list:
+def find_punctuations(text: str, language: str = "en") -> List[str]:
+    """Find punctuation marks using language-specific patterns."""
+    strategy = _get_strategy(language)
     cleaned_text = re.sub(r'^\s*(?:[\-\*\+]\s+|\d+\.\s+|#+\s+)', '', text, flags=re.MULTILINE)
-    punctuations = re.findall(r'[.!?]+', cleaned_text)
-    return punctuations
+    return strategy.punctuation_list(cleaned_text)
 
 
 def extract_clean_paragraphs(text: str) -> List[str]:
@@ -306,10 +617,26 @@ def extract_clean_paragraphs(text: str) -> List[str]:
 # Fast Rule-Based Validators (Synchronous)
 # ============================================================================
 
-def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], all_instructions: Dict = None) -> Tuple[bool, str]:
-    """Validate a response against a specific instruction type and its kwargs."""
+def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], all_instructions: Dict = None, language: str = "en") -> Tuple[bool, str]:
+    """
+    Validate a response against a specific instruction type and its kwargs.
+    
+    Args:
+        response: The text response to validate
+        inst_type: The instruction type ID (e.g., "change_case:all_caps")
+        kwargs: Dictionary of instruction arguments
+        all_instructions: Optional dictionary of all instructions for context
+        language: Language code for multi-language support (default: "en")
+        
+    Returns:
+        Tuple of (is_valid, error_message)
+    """
     try:
         response = response.strip()
+        strategy = _get_strategy(language)
+        
+        # Note: Language compatibility is pre-validated at the app level.
+        # Unsupported instructions should never reach here as the rollout is skipped.
         
         if inst_type == "change_case:all_caps":
             return (response.isupper(), "No error" if response.isupper() else "Response is not all uppercase.")
@@ -435,12 +762,12 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
             return (found_title, "No error" if found_title else "Title not wrapped in << >> on first line.")
 
         if inst_type == "keywords:existence":
-            missing = [kw for kw in kwargs["keywords"] if keyword_frequency(response, kw) == 0]
+            missing = [kw for kw in kwargs["keywords"] if keyword_frequency(response, kw, language) == 0]
             return (not missing, "No error" if not missing else f"Missing keyword(s): {missing}")
 
         if inst_type == "keywords:frequency":
-            keyword = kwargs["keyword"].strip().lower()
-            count = keyword_frequency(response, keyword)
+            keyword = strategy.casefold(kwargs["keyword"].strip())
+            count = keyword_frequency(response, keyword, language)
             rel = kwargs["relation"]
             val = kwargs["frequency"]
             valid, err = check_relation(count, rel, val)
@@ -449,7 +776,7 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
             return (valid, "No error" if valid else f"Expected {rel} {val} of '{keyword}', found {count}.")
 
         if inst_type == "keywords:forbidden_words":
-            present = [w for w in kwargs["forbidden_words"] if keyword_frequency(response, w)]
+            present = [w for w in kwargs["forbidden_words"] if keyword_frequency(response, w, language)]
             return (not present, "No error" if not present else f"Forbidden words found: {present}")
 
         if inst_type == "keywords:letter_frequency":
@@ -473,7 +800,8 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
             return (valid, "No error" if valid else f"Expected {rel} {val} characters, found {count}.")
 
         if inst_type == "length_constraints:number_words":
-            count = len(re.compile(r'\b(?=\S*[A-Za-z0-9])\S+\b').findall(response))
+            words = extract_clean_words(response, language)
+            count = len(words)
             rel, val = kwargs["relation"], kwargs["num_words"]
             valid, err = check_relation(count, rel, val)
             if err:
@@ -536,7 +864,7 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
             return (valid, "No error" if valid else f"Case ratio out of range.")
 
         if inst_type == "change_case:first_letter_sentence":
-            sentences = extract_clean_sentences(response)
+            sentences = extract_clean_sentences(response, language)
             if not sentences:
                 return (True, "No sentences found to validate.")
 
@@ -581,7 +909,7 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
             if minR > maxR:
                 return (False, "Minimum ratio greater than maximum ratio.")
             
-            vowels = set("aeiouAEIOU")
+            vowels = _get_vowels(language)
             vowel_count = sum(1 for ch in response if ch.isalpha() and ch in vowels)
             consonant_count = sum(1 for ch in response if ch.isalpha() and ch not in vowels)
 
@@ -628,7 +956,7 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
             paragraphs = extract_clean_paragraphs(response)
 
             for p in paragraphs:
-                sentences = extract_clean_sentences(p)
+                sentences = extract_clean_sentences(p, language)
                 sentence_count = len([s for s in sentences if s.strip()])
                 if sentence_count == 0 and p.strip():
                     sentence_count = 1
@@ -641,22 +969,22 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
             return (True, "No error.")
 
         if inst_type == "length_constraints:sentence_length":
-            sentences = extract_clean_sentences(response)
+            sentences = extract_clean_sentences(response, language)
             max_words = kwargs["max_words"]
             
             if not sentences:
                 return (True, "No sentences found to validate.")
             
             for s in sentences:
-                word_count = len(s.split())
+                word_count = len(strategy.tokenize_words(s))
                 if word_count > max_words:
                     return (False, f"Found sentence with {word_count} words (max: {max_words})")
             return (True, "No error.")
 
         if inst_type == "length_constraints:word_repetition":
             max_repeats = kwargs["max_repeats"]
-            words = extract_clean_words(response)
-            word_counts = Counter(words)
+            words = extract_clean_words(response, language)
+            word_counts = Counter([strategy.casefold(w) for w in words])
 
             for word, count in word_counts.items():
                 if count > max_repeats:
@@ -666,8 +994,8 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
         if inst_type == "length_constraints:unique_words":
             relation = kwargs["relation"]
             num_unique = kwargs["num_unique"]
-            words = extract_clean_words(response)
-            unique_words_count = len(set(words))
+            words = extract_clean_words(response, language)
+            unique_words_count = len(set(strategy.casefold(w) for w in words))
 
             is_valid, err = check_relation(unique_words_count, relation, num_unique)
             if err:
@@ -690,7 +1018,7 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
 
         if inst_type == "punctuation:end_rule":
             allowed = kwargs["allowed"]
-            punctuations = set(find_punctuations(response))
+            punctuations = set(find_punctuations(response, language))
 
             for p in punctuations:
                 if p not in allowed:
@@ -700,10 +1028,10 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
         if inst_type == "keywords:alliteration":
             relation = kwargs["relation"]
             num_alliteration = kwargs["num_alliteration"]
-            target_letter = kwargs["target_letter"]
+            target_letter = strategy.casefold(kwargs["target_letter"])
             
-            words = extract_clean_words(response)
-            all_count = sum(1 for word in words if word.startswith(target_letter))
+            words = extract_clean_words(response, language)
+            all_count = sum(1 for word in words if strategy.casefold(word).startswith(target_letter))
 
             is_valid, err = check_relation(all_count, relation, num_alliteration)
             if err:
@@ -712,20 +1040,24 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
 
         if inst_type == "keywords:palindrome_word":
             min_length = kwargs["min_length"]
-            words = extract_clean_words(response)
+            words = extract_clean_words(response, language)
             for word in words:
-                if word == word[::-1] and len(word) >= min_length:
+                normalized_word = strategy.casefold(word)
+                if normalized_word == normalized_word[::-1] and len(word) >= min_length:
                     return (True, f"No error. Word: {word}")
             return (False, "No valid palindrome words found.")
 
         if inst_type == "keywords:positioning":
-            keyword = kwargs["keyword"]
+            keyword = strategy.casefold(kwargs["keyword"])
             position = kwargs["position"]
-            words = extract_clean_words(response)
+            words = extract_clean_words(response, language)
             
-            if words[position] == keyword:
+            if position >= len(words):
+                return (False, f"Position {position} is out of range (only {len(words)} words found).")
+            
+            if strategy.casefold(words[position]) == keyword:
                 return (True, "No error.")
-            return (False, f"'{words[position]}' found at position {position} instead of '{keyword}'.")
+            return (False, f"'{words[position]}' found at position {position} instead of '{kwargs['keyword']}'.")
 
         if inst_type == "detectable_format:nested_list":
             min_depth = kwargs["min_depth"]
@@ -772,7 +1104,7 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
             if min_length > max_length:
                 return (False, "Minimum length greater than maximum length.")
 
-            words = set(extract_clean_words(response))
+            words = set(extract_clean_words(response, language))
             if not words:
                 return (True, "No words found to validate.")
 
@@ -792,7 +1124,7 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
             if min_ratio > max_ratio:
                 return (False, "Minimum ratio greater than maximum ratio.")
 
-            words = extract_clean_words(response)
+            words = extract_clean_words(response, language)
             if not words:
                 is_valid = min_ratio == 0
                 return (is_valid, "No words found to validate.")
@@ -804,7 +1136,7 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
         if inst_type == "detectable_format:sentence_count":
             relation = kwargs["relation"]
             num_sentences = kwargs["num_sentences"]
-            sentence_count = len(extract_clean_sentences(response))
+            sentence_count = len(extract_clean_sentences(response, language))
 
             is_valid, err = check_relation(sentence_count, relation, num_sentences)
             if err:
@@ -817,7 +1149,7 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
             paragraphs = extract_clean_paragraphs(response)
 
             for p in paragraphs:
-                words = extract_clean_words(p)
+                words = extract_clean_words(p, language)
                 word_count = len([s for s in words if s.strip()])
 
                 is_valid, err = check_relation(word_count, relation, words_per_paragraph)
@@ -839,7 +1171,7 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
 
         if inst_type == "detectable_format:sentence_endings":
             min_variants = kwargs["min_variants"]
-            punctuations = set(find_punctuations(response))
+            punctuations = set(find_punctuations(response, language))
 
             if len(punctuations) < min_variants:
                 return (False, f"Found {len(punctuations)} types of punctuations, expected at least {min_variants}")
@@ -849,7 +1181,7 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
             num_vowels = kwargs["num_vowels"]
             relation = kwargs["relation"]
             
-            vowels = set("aeiouAEIOU")
+            vowels = _get_vowels(language)
             vowel_count = sum(1 for ch in response if ch in vowels)
 
             is_valid, err = check_relation(vowel_count, relation, num_vowels)
@@ -861,9 +1193,14 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
             num_consonants = kwargs["num_consonants"]
             relation = kwargs["relation"]
             
-            vowels = set("aeiouAEIOU")
-            consonants = set(string.ascii_letters) - vowels
-            consonant_count = sum(1 for ch in response if ch in consonants)
+            vowels = _get_vowels(language)
+            # For languages with case, use ascii letters minus vowels
+            # For caseless languages, just count alphabetic chars that aren't vowels
+            if strategy.has_case:
+                consonants = set(string.ascii_letters) - vowels
+                consonant_count = sum(1 for ch in response if ch in consonants)
+            else:
+                consonant_count = sum(1 for ch in response if ch.isalpha() and ch not in vowels)
 
             is_valid, err = check_relation(consonant_count, relation, num_consonants)
             if err:

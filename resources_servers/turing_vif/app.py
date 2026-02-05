@@ -31,6 +31,8 @@ try:
         validate_instruction,
         validate_instruction_schema,
         check_contradicting_instructions,
+        SUPPORTED_LANGS,
+        is_instruction_supported,
     )
     from .vif_validators.data_loader import (
         LLM_INSTRUCTIONS,
@@ -49,6 +51,8 @@ except ImportError:
         validate_instruction,
         validate_instruction_schema,
         check_contradicting_instructions,
+        SUPPORTED_LANGS,
+        is_instruction_supported,
     )
     from vif_validators.data_loader import (
         LLM_INSTRUCTIONS,
@@ -97,6 +101,10 @@ class LLMJudgeItem(BaseModel):
     """A custom LLM judge question."""
     uid: int
     content: str
+    pass_criteria: Literal["YES", "NO"] = Field(
+        default="YES",
+        description="Expected verdict from judge for the response to pass. 'YES' means judge must say YES for pass, 'NO' means judge must say NO for pass."
+    )
     source: Literal["user", "system"]
     is_misalignment_check: bool
 
@@ -116,6 +124,10 @@ class TuringVIFRunRequest(BaseRunRequest):
         default=None,
         description="The original user prompt"
     )
+    language: str = Field(
+        default="en",
+        description="Language code for multi-language validation (e.g., 'en', 'es', 'ja', 'zh', 'hi', 'ar')"
+    )
 
 
 class TuringVIFVerifyRequest(TuringVIFRunRequest, BaseVerifyRequest):
@@ -126,7 +138,7 @@ class TuringVIFVerifyRequest(TuringVIFRunRequest, BaseVerifyRequest):
 class ValidationResult(BaseModel):
     """Result of a single validation check."""
     instruction: str
-    status: Literal["Passed", "Failed"]
+    status: Literal["Passed", "Failed", "Skipped"]
     message: str
 
 
@@ -612,6 +624,33 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
                 validation_results=validation_results,
             )
         
+        # Get language from request (defaults to "en")
+        language = body.language if body.language in SUPPORTED_LANGS else "en"
+        
+        # Pre-validate: Check if all instructions are supported for this language
+        unsupported_instructions = []
+        for instruction in body.instructions:
+            inst_id = instruction.get("instruction_id", "")
+            if not is_instruction_supported(inst_id, language):
+                unsupported_instructions.append(inst_id)
+        
+        if unsupported_instructions:
+            # Return early - skip this rollout due to language incompatibility
+            validation_results.append(ValidationResult(
+                instruction="language_compatibility",
+                status="Skipped",
+                message=f"Instructions not supported for language '{language}': {unsupported_instructions}",
+            ))
+            is_following_list.append(False)
+            
+            return TuringVIFVerifyResponse(
+                **body.model_dump(),
+                reward=0.0,
+                follow_all_instructions=False,
+                follow_instruction_list=is_following_list,
+                validation_results=validation_results,
+            )
+        
         # Separate fast validators from LLM validators
         fast_instructions = []
         llm_instructions = []
@@ -622,14 +661,14 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
                 llm_instructions.append(instruction)
             else:
                 fast_instructions.append(instruction)
-
+        
         # Run fast validators synchronously (they're CPU-bound)
         for instruction in fast_instructions:
             inst_id = instruction.get("instruction_id", "")
             kwargs = {k: v for k, v in instruction.items() if k not in ("instruction_id", "uid", "source", "is_misalignment_check")}
             
             try:
-                is_valid, message = validate_instruction(final_response_text, inst_id, kwargs)
+                is_valid, message = validate_instruction(final_response_text, inst_id, kwargs, language=language)
             except Exception as e:
                 is_valid, message = False, f"Validator error: {str(e)}"
 
@@ -681,9 +720,16 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
         if body.llm_judge:
             async def validate_llm_judge_question(item: LLMJudgeItem) -> Tuple[str, bool, str, str, bool]:
                 try:
-                    is_valid, message = await self._validate_custom_llm_judge_async(
+                    judge_said_yes, message = await self._validate_custom_llm_judge_async(
                         final_response_text, item.content
                     )
+                    # Compare judge verdict against expected pass_criteria
+                    # If pass_criteria is "YES", judge must say YES for pass
+                    # If pass_criteria is "NO", judge must say NO for pass (negate result)
+                    if item.pass_criteria == "NO":
+                        is_valid = not judge_said_yes
+                    else:
+                        is_valid = judge_said_yes
                 except Exception as e:
                     is_valid, message = False, f"LLM judge error: {str(e)}"
                 
