@@ -194,8 +194,19 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         ]
         logger.info(f"python_tool command: {' '.join(cmd)}")
 
+        # Ensure /nemo_run/code is FIRST in PYTHONPATH so mounted nemo_skills takes precedence
+        env = os.environ.copy()
+        current_pythonpath = env.get("PYTHONPATH", "")
+        if "/nemo_run/code" in current_pythonpath:
+            # Move /nemo_run/code to the front
+            paths = [p for p in current_pythonpath.split(":") if p and p != "/nemo_run/code"]
+            env["PYTHONPATH"] = "/nemo_run/code:" + ":".join(paths)
+        else:
+            env["PYTHONPATH"] = "/nemo_run/code" + (":" + current_pythonpath if current_pythonpath else "")
+        logger.info(f"python_tool PYTHONPATH: {env['PYTHONPATH']}")
+
         # Don't pipe stdout/stderr so we can see output directly in logs
-        self._python_tool_process = subprocess.Popen(cmd)
+        self._python_tool_process = subprocess.Popen(cmd, env=env)
 
         # Wait for server to be ready
         self._wait_for_server_ready()
