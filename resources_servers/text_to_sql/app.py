@@ -18,6 +18,7 @@ Text-to-SQL LLM-as-judge resources server.
 Compares a model's generated SQL query to an expected query using an LLM judge.
 Supports multiple SQL dialects: MySQL, PostgreSQL, SQLite (more to come - TODO).
 """
+
 import asyncio
 import re
 from contextlib import nullcontext
@@ -269,9 +270,7 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
         if not sql_dialect:
             raise ValueError("SQL dialect is required but was not provided")
         if sql_dialect not in SUPPORTED_DIALECTS:
-            raise ValueError(
-                f"Unsupported SQL dialect '{sql_dialect}'. Supported: {sorted(SUPPORTED_DIALECTS)}"
-            )
+            raise ValueError(f"Unsupported SQL dialect '{sql_dialect}'. Supported: {sorted(SUPPORTED_DIALECTS)}")
         sql_context = body.sql_context or ""
 
         reward = 0.0

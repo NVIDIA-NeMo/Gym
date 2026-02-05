@@ -82,7 +82,7 @@ class TestExtractSqlFromResponse:
     def test_extract_multiline_sql(self):
         """Test extracting multiline SQL query."""
         text = """```sql
-SELECT 
+SELECT
     u.name,
     COUNT(o.id) as order_count
 FROM users u
