@@ -18,7 +18,7 @@
 ################################################
 
 [project]
-name = "NeMo-Gym"
+name = "nemo-gym"
 dynamic = [
     "version",
     "readme",
