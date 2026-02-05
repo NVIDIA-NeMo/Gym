@@ -12,292 +12,574 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from copy import deepcopy
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+import json
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from pytest import approx, fixture
+import pytest
+from pytest import fixture
 
-from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
+    NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NeMoGymResponseReasoningItem,
+    NeMoGymSummary,
 )
 from nemo_gym.server_utils import ServerClient
 from resources_servers.terminus_judge.app import (
+    FailureCode,
     TerminusJudgeResourcesServer,
     TerminusJudgeResourcesServerConfig,
     TerminusJudgeVerifyRequest,
+    _extract_last_assistant_text,
+    check_task_complete,
+    command_similarity,
+    extract_keystrokes,
+    text_similarity,
 )
 
 
-class TestApp:
-    @fixture
-    def config(self) -> TerminusJudgeResourcesServerConfig:
-        cfg = TerminusJudgeResourcesServerConfig(
-            host="0.0.0.0",
-            port=8080,
-            entrypoint="",
-            judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
-            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
-            judge_prompt_template_fpath="prompt_templates/terminus_prompt.txt",
-        )
-        cfg.judge_equal_label = "[[A=B]]"
-        cfg.judge_not_equal_label = "[[A!=B]]"
-        return cfg
+def create_terminus_1_response(commands: list, is_task_complete: bool = False) -> dict:
+    """Create a valid terminus_1 schema response."""
+    return {
+        "state_analysis": "Analyzing the current state",
+        "explanation": "Explanation of the commands",
+        "commands": [
+            {
+                "keystrokes": cmd["keystrokes"],
+                "is_blocking": cmd.get("is_blocking", True),
+                "timeout_sec": cmd.get("timeout_sec", 5.0),
+            }
+            for cmd in commands
+        ],
+        "is_task_complete": is_task_complete,
+    }
 
-    def _create_response(self, id: str, output_item: NeMoGymResponseOutputItem) -> dict[str, Any]:
-        return NeMoGymResponse(
-            id=id,
-            created_at=123.0,
-            model="judge_model",
+
+def create_terminus_2_response(commands: list, task_complete: bool = False) -> dict:
+    """Create a valid terminus_2 schema response."""
+    return {
+        "analysis": "Analyzing the current state",
+        "plan": "Plan for the next steps",
+        "commands": [
+            {
+                "keystrokes": cmd["keystrokes"],
+                "duration": cmd.get("duration", 1.0),
+            }
+            for cmd in commands
+        ],
+        "task_complete": task_complete,
+    }
+
+
+class TestExtractKeystrokes:
+    """Tests for the extract_keystrokes helper function."""
+
+    def test_extract_single_keystroke(self):
+        """Test extracting keystrokes from a single command."""
+        data = {"commands": [{"keystrokes": "ls -la"}]}
+        result = extract_keystrokes(data)
+        assert result == ["ls -la"]
+
+    def test_extract_multiple_keystrokes(self):
+        """Test extracting keystrokes from multiple commands."""
+        data = {"commands": [{"keystrokes": "cd /home"}, {"keystrokes": "ls"}]}
+        result = extract_keystrokes(data)
+        assert result == ["cd /home", "ls"]
+
+    def test_extract_empty_commands(self):
+        """Test extracting from empty commands list."""
+        data = {"commands": []}
+        result = extract_keystrokes(data)
+        assert result == []
+
+    def test_extract_missing_keystrokes(self):
+        """Test extracting when some commands lack keystrokes."""
+        data = {"commands": [{"keystrokes": "ls"}, {"other": "field"}]}
+        result = extract_keystrokes(data)
+        assert result == ["ls"]
+
+
+class TestTextSimilarity:
+    """Tests for the text_similarity function."""
+
+    def test_identical_strings(self):
+        """Test similarity of identical strings."""
+        assert text_similarity("hello", "hello") == 1.0
+
+    def test_completely_different_strings(self):
+        """Test similarity of completely different strings."""
+        result = text_similarity("abc", "xyz")
+        assert 0.0 <= result < 0.5
+
+    def test_similar_strings(self):
+        """Test similarity of similar strings."""
+        result = text_similarity("hello world", "hello world!")
+        assert 0.9 < result < 1.0
+
+    def test_empty_strings(self):
+        """Test similarity of empty strings."""
+        assert text_similarity("", "") == 1.0
+
+
+class TestCommandSimilarity:
+    """Tests for the command_similarity function."""
+
+    def test_identical_commands(self):
+        """Test similarity of identical commands."""
+        gt = {"commands": [{"keystrokes": "ls -la"}]}
+        pred = {"commands": [{"keystrokes": "ls -la"}]}
+        assert command_similarity(gt, pred) == 1.0
+
+    def test_different_commands(self):
+        """Test similarity of different commands."""
+        gt = {"commands": [{"keystrokes": "ls"}]}
+        pred = {"commands": [{"keystrokes": "pwd"}]}
+        result = command_similarity(gt, pred)
+        assert result < 0.5
+
+    def test_both_empty(self):
+        """Test similarity when both have empty commands."""
+        gt = {"commands": []}
+        pred = {"commands": []}
+        assert command_similarity(gt, pred) == 1.0
+
+    def test_one_empty(self):
+        """Test similarity when one is empty."""
+        gt = {"commands": [{"keystrokes": "ls"}]}
+        pred = {"commands": []}
+        assert command_similarity(gt, pred) == 0.0
+
+    def test_multiple_commands_concatenation(self):
+        """Test concatenation of multiple commands."""
+        gt = {"commands": [{"keystrokes": "cd /home"}, {"keystrokes": "ls"}]}
+        pred = {"commands": [{"keystrokes": "cd /home"}, {"keystrokes": "ls"}]}
+        assert command_similarity(gt, pred) == 1.0
+
+    def test_command_order_matters(self):
+        """Test that command order affects similarity."""
+        gt = {"commands": [{"keystrokes": "ls"}, {"keystrokes": "pwd"}]}
+        pred = {"commands": [{"keystrokes": "pwd"}, {"keystrokes": "ls"}]}
+        result = command_similarity(gt, pred)
+        assert result < 1.0
+
+
+class TestCheckTaskComplete:
+    """Tests for the check_task_complete function."""
+
+    def test_task_complete_true_when_both_true(self):
+        """Test when both pred and expected have task_complete=True."""
+        pred = {"task_complete": True}
+        expected = {"task_complete": True}
+        assert check_task_complete(pred, expected) is True
+
+    def test_task_complete_false_when_pred_missing(self):
+        """Test when pred is missing task_complete but expected has it."""
+        pred = {}
+        expected = {"task_complete": True}
+        assert check_task_complete(pred, expected) is False
+
+    def test_task_complete_false_when_pred_false(self):
+        """Test when pred has task_complete=False but expected has True."""
+        pred = {"task_complete": False}
+        expected = {"task_complete": True}
+        assert check_task_complete(pred, expected) is False
+
+    def test_is_task_complete_true_when_both_true(self):
+        """Test when both pred and expected have is_task_complete=True."""
+        pred = {"is_task_complete": True}
+        expected = {"is_task_complete": True}
+        assert check_task_complete(pred, expected) is True
+
+    def test_is_task_complete_false_when_pred_missing(self):
+        """Test when pred is missing is_task_complete but expected has it."""
+        pred = {}
+        expected = {"is_task_complete": True}
+        assert check_task_complete(pred, expected) is False
+
+    def test_task_complete_true_when_expected_false(self):
+        """Test passes when expected task_complete is False."""
+        pred = {}
+        expected = {"task_complete": False}
+        assert check_task_complete(pred, expected) is True
+
+    def test_task_complete_true_when_not_in_expected(self):
+        """Test passes when task_complete is not in expected answer."""
+        pred = {}
+        expected = {}
+        assert check_task_complete(pred, expected) is True
+
+
+class TestExtractLastAssistantText:
+    """Tests for the _extract_last_assistant_text helper function."""
+
+    def _create_verify_request_with_output(self, output_items: list) -> TerminusJudgeVerifyRequest:
+        """Helper to create a TerminusJudgeVerifyRequest with specified output items."""
+        response = NeMoGymResponse(
+            id="test_response",
+            created_at=1000,
+            model="test_model",
             object="response",
-            output=[output_item],
+            output=output_items,
             parallel_tool_calls=False,
-            tool_choice="none",
-            tools=[],
-        ).model_dump()
-
-    def _msg(self, text: str) -> NeMoGymResponseOutputMessage:
-        return NeMoGymResponseOutputMessage(
-            id="msg_id",
-            content=[NeMoGymResponseOutputText(annotations=[], text=text, type="output_text")],
-            role="assistant",
-            status="completed",
-            type="message",
-        )
-
-    async def test_verify_equal_simple(self, config: TerminusJudgeResourcesServerConfig) -> None:
-        """Test basic equal verdict without swap check."""
-        server_mock = MagicMock(spec=ServerClient)
-        rs = TerminusJudgeResourcesServer(config=config, server_client=server_mock)
-
-        post_mock = MagicMock()
-        # Use return_value instead of side_effect for single response
-        post_mock.json = AsyncMock(
-            return_value=self._create_response("first", self._msg("some text [[A=B]] trailing"))
-        )
-        server_mock.post = AsyncMock(return_value=post_mock)
-
-        model_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Q: 1+1?"}])
-        model_response = NeMoGymResponse(
-            id="resp",
-            created_at=0.0,
-            model="m",
-            object="response",
-            output=[self._msg("It is 2.")],
-            parallel_tool_calls=False,
-            tool_choice="none",
+            tool_choice="auto",
             tools=[],
         )
-
-        req = TerminusJudgeVerifyRequest(
-            responses_create_params=deepcopy(model_create_params),
-            response=model_response.model_copy(deep=True),
-            expected_answer="2",
-        )
-        res = await rs.verify(req)
-        assert res.reward == approx(1.0)
-        assert res.expected_answer == "2"
-        assert len(res.judge_evaluations) == 1
-        assert res.judge_evaluations[0].verdict_label == "[[A=B]]"
-
-    async def test_verify_equal_with_swap_check_both_equal(self, config: TerminusJudgeResourcesServerConfig) -> None:
-        """Test swap check when both evaluations return equal."""
-        config_twice = config.model_copy(deep=True)
-        config_twice.check_twice_swap = True
-
-        server_mock = MagicMock(spec=ServerClient)
-        rs = TerminusJudgeResourcesServer(config=config_twice, server_client=server_mock)
-
-        # Create two separate response mocks for two separate POST calls
-        post_mock_1 = MagicMock()
-        post_mock_1.json = AsyncMock(return_value=self._create_response("first", self._msg("[[A=B]]")))
-
-        post_mock_2 = MagicMock()
-        post_mock_2.json = AsyncMock(return_value=self._create_response("second", self._msg("[[A=B]]")))
-
-        # Use side_effect on server_mock.post to return different response mocks
-        server_mock.post = AsyncMock(side_effect=[post_mock_1, post_mock_2])
-
-        model_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Q: 1+1?"}])
-        model_response = NeMoGymResponse(
-            id="resp",
-            created_at=0.0,
-            model="m",
-            object="response",
-            output=[self._msg("It is 2.")],
-            parallel_tool_calls=False,
-            tool_choice="none",
-            tools=[],
-        )
-
-        req = TerminusJudgeVerifyRequest(
-            responses_create_params=deepcopy(model_create_params),
-            response=model_response.model_copy(deep=True),
-            expected_answer="2",
-        )
-        res = await rs.verify(req)
-        assert res.reward == approx(1.0)
-        assert len(res.judge_evaluations) == 2
-        assert res.judge_evaluations[0].verdict_label == "[[A=B]]"
-        assert res.judge_evaluations[1].verdict_label == "[[A=B]]"
-
-    async def test_verify_not_equal_first(self, config: TerminusJudgeResourcesServerConfig) -> None:
-        """Test when first evaluation returns not equal."""
-        server_mock = MagicMock(spec=ServerClient)
-        rs = TerminusJudgeResourcesServer(config=config, server_client=server_mock)
-
-        post_mock = MagicMock()
-        post_mock.json = AsyncMock(return_value=self._create_response("f", self._msg("[[A!=B]]")))
-        server_mock.post = AsyncMock(return_value=post_mock)
-
-        model_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Q: 1+1?"}])
-        model_response = NeMoGymResponse(
-            id="resp",
-            created_at=0.0,
-            model="m",
-            object="response",
-            output=[self._msg("It is 3.")],
-            parallel_tool_calls=False,
-            tool_choice="none",
-            tools=[],
-        )
-
-        req = TerminusJudgeVerifyRequest(
-            responses_create_params=deepcopy(model_create_params),
-            response=model_response.model_copy(deep=True),
-            expected_answer="2",
-        )
-        res = await rs.verify(req)
-        assert res.reward == approx(0.0)
-        assert len(res.judge_evaluations) == 1
-        assert res.judge_evaluations[0].verdict_label == "[[A!=B]]"
-
-    async def test_unexpected_judge_output_defaults_to_not_equal(
-        self, config: TerminusJudgeResourcesServerConfig
-    ) -> None:
-        """Test that missing verdict labels default to not equal."""
-        server_mock = MagicMock(spec=ServerClient)
-        rs = TerminusJudgeResourcesServer(config=config, server_client=server_mock)
-
-        post_mock = MagicMock()
-        post_mock.json = AsyncMock(return_value=self._create_response("f", self._msg("no label present")))
-        server_mock.post = AsyncMock(return_value=post_mock)
-
-        req = TerminusJudgeVerifyRequest(
-            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
-            response=NeMoGymResponse(
-                id="r",
-                created_at=0.0,
-                model="m",
-                object="response",
-                output=[self._msg("text")],
-                parallel_tool_calls=False,
-                tool_choice="none",
-                tools=[],
+        return TerminusJudgeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[NeMoGymEasyInputMessage(role="user", content="test")]
             ),
-            expected_answer="x",
+            response=response,
+            expected_answer='{"commands": []}',
+            metadata={"harness": "terminus_1"},
         )
-        res = await rs.verify(req)
-        assert res.reward == approx(0.0)
-        assert res.judge_evaluations[0].verdict_label is None
 
-    async def test_swap_fails_uses_configured_reward(self, config: TerminusJudgeResourcesServerConfig) -> None:
-        """Test that swap failure uses configured reward_if_swap_fails."""
-        server_mock = MagicMock(spec=ServerClient)
-        cfg = config.model_copy(deep=True)
-        cfg.check_twice_swap = True
-        cfg.reward_if_swap_fails = -1.0
-        rs = TerminusJudgeResourcesServer(config=cfg, server_client=server_mock)
+    def test_extract_single_assistant_message(self):
+        """Test extracting text from a single assistant message."""
+        output_message = NeMoGymResponseOutputMessage(
+            id="msg_1",
+            content=[NeMoGymResponseOutputText(annotations=[], text="Hello response.")],
+        )
+        body = self._create_verify_request_with_output([output_message])
+        result = _extract_last_assistant_text(body)
+        assert result == "Hello response."
 
-        # Create two separate response mocks for two separate POST calls
-        post_mock_1 = MagicMock()
-        post_mock_1.json = AsyncMock(return_value=self._create_response("first", self._msg("[[A=B]]")))
+    def test_extract_multiple_content_parts(self):
+        """Test extracting text from message with multiple content parts."""
+        output_message = NeMoGymResponseOutputMessage(
+            id="msg_1",
+            content=[
+                NeMoGymResponseOutputText(annotations=[], text="Part 1."),
+                NeMoGymResponseOutputText(annotations=[], text="Part 2."),
+            ],
+        )
+        body = self._create_verify_request_with_output([output_message])
+        result = _extract_last_assistant_text(body)
+        assert result == "Part 1.\nPart 2."
 
-        post_mock_2 = MagicMock()
-        post_mock_2.json = AsyncMock(return_value=self._create_response("second", self._msg("[[A!=B]]")))
+    def test_extract_ignores_reasoning_items(self):
+        """Test that reasoning items are ignored."""
+        output_items = [
+            NeMoGymResponseReasoningItem(
+                id="reasoning_1",
+                summary=[NeMoGymSummary(type="summary_text", text="thinking...")],
+            ),
+            NeMoGymResponseOutputMessage(
+                id="msg_1",
+                content=[NeMoGymResponseOutputText(annotations=[], text="Actual response.")],
+            ),
+        ]
+        body = self._create_verify_request_with_output(output_items)
+        result = _extract_last_assistant_text(body)
+        assert result == "Actual response."
 
-        # Use side_effect on server_mock.post to return different response mocks
-        server_mock.post = AsyncMock(side_effect=[post_mock_1, post_mock_2])
+    def test_extract_empty_output(self):
+        """Test extracting from empty output."""
+        body = self._create_verify_request_with_output([])
+        result = _extract_last_assistant_text(body)
+        assert result == ""
 
-        model_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Q?"}])
-        model_response = NeMoGymResponse(
-            id="resp",
-            created_at=0.0,
-            model="m",
+
+class TestTerminusJudgeResourcesServerVerify:
+    """Tests for the TerminusJudgeResourcesServer.verify method."""
+
+    @fixture
+    def resources_server(self) -> TerminusJudgeResourcesServer:
+        """Create a TerminusJudgeResourcesServer instance for testing."""
+        config = TerminusJudgeResourcesServerConfig(
+            host="127.0.0.1",
+            port=20002,
+            entrypoint="",
+            name="terminus_judge_test_server",
+            judge_model_server={"name": "test_judge", "type": "responses_api_models"},
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[NeMoGymEasyInputMessage(role="user", content="test")]
+            ),
+            string_similarity_threshold=0.8,
+        )
+
+        with patch("builtins.open", MagicMock()):
+            server = TerminusJudgeResourcesServer(
+                config=config,
+                server_client=MagicMock(spec=ServerClient),
+            )
+            server._judge_prompt_template = "Expected: {expected_answer}\nGenerated: {generated_answer}"
+            return server
+
+    def _create_verify_request(
+        self,
+        model_output: str,
+        expected_answer: dict,
+        harness: str = "terminus_1",
+        threshold: float = None,
+    ) -> TerminusJudgeVerifyRequest:
+        """Helper to create a TerminusJudgeVerifyRequest."""
+        output_message = NeMoGymResponseOutputMessage(
+            id="msg_1",
+            content=[NeMoGymResponseOutputText(annotations=[], text=model_output)],
+        )
+        response = NeMoGymResponse(
+            id="test_response",
+            created_at=1000,
+            model="test_model",
             object="response",
-            output=[self._msg("A")],
+            output=[output_message],
             parallel_tool_calls=False,
-            tool_choice="none",
+            tool_choice="auto",
             tools=[],
         )
-        req = TerminusJudgeVerifyRequest(
-            responses_create_params=deepcopy(model_create_params),
-            response=model_response.model_copy(deep=True),
-            expected_answer="B",
+        return TerminusJudgeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[NeMoGymEasyInputMessage(role="user", content="test")]
+            ),
+            response=response,
+            expected_answer=json.dumps(expected_answer),
+            metadata={"harness": harness},
+            threshold=threshold,
         )
-        res = await rs.verify(req)
-        assert res.reward == approx(-1.0)
-        assert len(res.judge_evaluations) == 2
 
-    async def test_equal_label_appears_first(self, config: TerminusJudgeResourcesServerConfig) -> None:
-        """Test that when both labels appear, the first one wins."""
-        server_mock = MagicMock(spec=ServerClient)
-        rs = TerminusJudgeResourcesServer(config=config, server_client=server_mock)
+    @pytest.mark.asyncio
+    async def test_verify_correct_prediction_terminus_1(self, resources_server: TerminusJudgeResourcesServer):
+        """Test verify returns reward=1.0 for correct terminus_1 prediction."""
+        expected_answer = create_terminus_1_response([{"keystrokes": "ls -la"}])
+        model_output = json.dumps(expected_answer)
+        request = self._create_verify_request(model_output, expected_answer, "terminus_1")
 
-        post_mock = MagicMock()
-        post_mock.json = AsyncMock(return_value=self._create_response("f", self._msg("[[A=B]] some text [[A!=B]]")))
-        server_mock.post = AsyncMock(return_value=post_mock)
+        response = await resources_server.verify(request)
 
-        model_response = NeMoGymResponse(
-            id="resp",
-            created_at=0.0,
-            model="m",
+        assert response.reward == 1.0
+        assert response.failure_reason == FailureCode.NONE
+        assert response.schema_check_passed is True
+        assert response.task_complete_check_passed is True
+        assert response.string_similarity_passed is True
+
+    @pytest.mark.asyncio
+    async def test_verify_correct_prediction_terminus_2(self, resources_server: TerminusJudgeResourcesServer):
+        """Test verify returns reward=1.0 for correct terminus_2 prediction."""
+        expected_answer = create_terminus_2_response([{"keystrokes": "ls -la\n"}])
+        model_output = json.dumps(expected_answer)
+        request = self._create_verify_request(model_output, expected_answer, "terminus_2")
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 1.0
+        assert response.failure_reason == FailureCode.NONE
+
+    @pytest.mark.asyncio
+    async def test_verify_with_think_tag(self, resources_server: TerminusJudgeResourcesServer):
+        """Test verify handles </think> tag correctly."""
+        expected_answer = create_terminus_1_response([{"keystrokes": "pwd"}])
+        model_output = "<think>Let me think...</think>" + json.dumps(expected_answer)
+        request = self._create_verify_request(model_output, expected_answer, "terminus_1")
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 1.0
+        assert response.model_output == json.dumps(expected_answer)
+
+    @pytest.mark.asyncio
+    async def test_verify_json_parsing_failed(self, resources_server: TerminusJudgeResourcesServer):
+        """Test verify returns reward=0.0 for invalid JSON."""
+        expected_answer = create_terminus_1_response([{"keystrokes": "ls"}])
+        model_output = "not valid json"
+        request = self._create_verify_request(model_output, expected_answer, "terminus_1")
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 0.0
+        assert response.failure_reason == FailureCode.JSON_PARSING_FAILED
+
+    @pytest.mark.asyncio
+    async def test_verify_unknown_harness(self, resources_server: TerminusJudgeResourcesServer):
+        """Test verify returns reward=0.0 for unknown harness."""
+        expected_answer = create_terminus_1_response([{"keystrokes": "ls"}])
+        model_output = json.dumps(expected_answer)
+        request = self._create_verify_request(model_output, expected_answer, harness="unknown")
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 0.0
+        assert response.failure_reason == FailureCode.UNKNOWN_HARNESS
+
+    @pytest.mark.asyncio
+    async def test_verify_schema_check_failed_terminus_1(self, resources_server: TerminusJudgeResourcesServer):
+        """Test verify returns reward=0.0 for schema validation failure."""
+        expected_answer = create_terminus_1_response([{"keystrokes": "ls"}])
+        invalid_output = json.dumps({"commands": [{"keystrokes": "ls"}]})
+        request = self._create_verify_request(invalid_output, expected_answer, "terminus_1")
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 0.0
+        assert response.failure_reason == FailureCode.SCHEMA_CHECK_FAILED
+        assert response.schema_check_passed is False
+
+    @pytest.mark.asyncio
+    async def test_verify_task_complete_check_failed(self, resources_server: TerminusJudgeResourcesServer):
+        """Test verify returns reward=0.0 when task_complete check fails."""
+        expected_answer = create_terminus_1_response([{"keystrokes": "ls"}], is_task_complete=True)
+        pred_answer = create_terminus_1_response([{"keystrokes": "ls"}], is_task_complete=False)
+        model_output = json.dumps(pred_answer)
+        request = self._create_verify_request(model_output, expected_answer, "terminus_1")
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 0.0
+        assert response.failure_reason == FailureCode.TASK_COMPLETE_CHECK_FAILED
+        assert response.task_complete_check_passed is False
+
+    @pytest.mark.asyncio
+    async def test_verify_string_similarity_below_threshold(self, resources_server: TerminusJudgeResourcesServer):
+        """Test verify invokes judge when string similarity is below threshold."""
+        expected_answer = create_terminus_1_response([{"keystrokes": "ls -la"}])
+        pred_answer = create_terminus_1_response([{"keystrokes": "pwd"}])
+        model_output = json.dumps(pred_answer)
+        request = self._create_verify_request(model_output, expected_answer, "terminus_1")
+
+        # Mock judge to return not equal
+        mock_response = MagicMock()
+        mock_response.json = AsyncMock(
+            return_value={
+                "id": "judge_resp",
+                "created_at": 1000,
+                "model": "judge",
+                "object": "response",
+                "output": [
+                    {
+                        "id": "msg_judge",
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "[[A!=B]]", "annotations": []}],
+                    }
+                ],
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        )
+        resources_server.server_client.post = AsyncMock(return_value=mock_response)
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 0.0
+        assert response.failure_reason == FailureCode.JUDGE_EVALUATION_FAILED
+        assert response.string_similarity_passed is False
+        assert len(response.judge_evaluations) == 1
+
+    @pytest.mark.asyncio
+    async def test_verify_judge_passes_without_swap(self, resources_server: TerminusJudgeResourcesServer):
+        """Test verify succeeds when judge passes without swap check."""
+        expected_answer = create_terminus_1_response([{"keystrokes": "ls -la"}])
+        pred_answer = create_terminus_1_response([{"keystrokes": "completely different command"}])
+        model_output = json.dumps(pred_answer)
+        request = self._create_verify_request(model_output, expected_answer, "terminus_1")
+
+        # Mock judge to return equal
+        mock_response = MagicMock()
+        mock_response.json = AsyncMock(
+            return_value={
+                "id": "judge_resp",
+                "created_at": 1000,
+                "model": "judge",
+                "object": "response",
+                "output": [
+                    {
+                        "id": "msg_judge",
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "[[A=B]]", "annotations": []}],
+                    }
+                ],
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        )
+        resources_server.server_client.post = AsyncMock(return_value=mock_response)
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 1.0
+        assert response.failure_reason == FailureCode.NONE
+        assert response.judge_passed is True
+        assert len(response.judge_evaluations) == 1
+
+    @pytest.mark.asyncio
+    async def test_verify_judge_with_swap_check(self, resources_server: TerminusJudgeResourcesServer):
+        """Test verify with swap check enabled."""
+        resources_server.config.check_twice_swap = True
+
+        expected_answer = create_terminus_1_response([{"keystrokes": "ls -la"}])
+        pred_answer = create_terminus_1_response([{"keystrokes": "completely different command"}])
+        model_output = json.dumps(pred_answer)
+        request = self._create_verify_request(model_output, expected_answer, "terminus_1")
+
+        # Mock judge to return equal for both calls
+        mock_response = MagicMock()
+        mock_response.json = AsyncMock(
+            return_value={
+                "id": "judge_resp",
+                "created_at": 1000,
+                "model": "judge",
+                "object": "response",
+                "output": [
+                    {
+                        "id": "msg_judge",
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "[[A=B]]", "annotations": []}],
+                    }
+                ],
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        )
+        resources_server.server_client.post = AsyncMock(return_value=mock_response)
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 1.0
+        assert response.judge_passed is True
+        assert len(response.judge_evaluations) == 2
+
+    @pytest.mark.asyncio
+    async def test_verify_custom_threshold(self, resources_server: TerminusJudgeResourcesServer):
+        """Test verify uses custom threshold from request."""
+        expected_answer = create_terminus_1_response([{"keystrokes": "ls"}])
+        model_output = json.dumps(expected_answer)
+        request = self._create_verify_request(model_output, expected_answer, "terminus_1", threshold=0.9)
+
+        response = await resources_server.verify(request)
+
+        assert response.threshold == 0.9
+        assert response.reward == 1.0
+
+    @pytest.mark.asyncio
+    async def test_verify_missing_expected_answer(self, resources_server: TerminusJudgeResourcesServer):
+        """Test verify raises error when expected answer is missing."""
+        output_message = NeMoGymResponseOutputMessage(
+            id="msg_1",
+            content=[NeMoGymResponseOutputText(annotations=[], text="test")],
+        )
+        response = NeMoGymResponse(
+            id="test_response",
+            created_at=1000,
+            model="test_model",
             object="response",
-            output=[self._msg("answer")],
+            output=[output_message],
             parallel_tool_calls=False,
-            tool_choice="none",
+            tool_choice="auto",
             tools=[],
         )
-
-        req = TerminusJudgeVerifyRequest(
-            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
-            response=model_response,
-            expected_answer="expected",
-        )
-        res = await rs.verify(req)
-        assert res.reward == approx(1.0)
-        assert res.judge_evaluations[0].verdict_label == "[[A=B]]"
-
-    async def test_not_equal_label_appears_first(self, config: TerminusJudgeResourcesServerConfig) -> None:
-        """Test that when not-equal appears first, it wins."""
-        server_mock = MagicMock(spec=ServerClient)
-        rs = TerminusJudgeResourcesServer(config=config, server_client=server_mock)
-
-        post_mock = MagicMock()
-        post_mock.json = AsyncMock(return_value=self._create_response("f", self._msg("[[A!=B]] some text [[A=B]]")))
-        server_mock.post = AsyncMock(return_value=post_mock)
-
-        model_response = NeMoGymResponse(
-            id="resp",
-            created_at=0.0,
-            model="m",
-            object="response",
-            output=[self._msg("answer")],
-            parallel_tool_calls=False,
-            tool_choice="none",
-            tools=[],
+        request = TerminusJudgeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[NeMoGymEasyInputMessage(role="user", content="test")]
+            ),
+            response=response,
         )
 
-        req = TerminusJudgeVerifyRequest(
-            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
-            response=model_response,
-            expected_answer="expected",
-        )
-        res = await rs.verify(req)
-        assert res.reward == approx(0.0)
-        assert res.judge_evaluations[0].verdict_label == "[[A!=B]]"
+        with pytest.raises(ValueError, match="Expected answer is required"):
+            await resources_server.verify(request)

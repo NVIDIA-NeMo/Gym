@@ -1,11 +1,11 @@
 {
     "name": "example",
     "type": "example",
-    "jsonl_fpath": "resources_servers/terminus_judge/data/example.jsonl",
+    "jsonl_fpath": "resources_servers/text_to_sql/data/example.jsonl",
     "num_repeats": 1,
     "gitlab_identifier": null,
     "huggingface_identifier": null,
-    "license": null,
+    "license": "Creative Commons Attribution 4.0 International",
     "Number of examples": 5,
     "Number of tools": {
         "Total # non-null values": 0,
@@ -16,10 +16,10 @@
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 5,
-        "Average": 604.0,
-        "Min": 551.0,
-        "Max": 642.0,
-        "Standard deviation": 35.4
+        "Average": 256.4,
+        "Min": 179.0,
+        "Max": 375.0,
+        "Standard deviation": 76.37
     },
     "Number of turns": {
         "Total # non-null values": 5,
@@ -35,7 +35,19 @@
         "Max": 0.0,
         "Standard deviation": 0.0
     },
-    "expected_answer": {
+    "sql": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "sql_dialect": {
+        "unique_count": 3,
+        "total_count": 5
+    },
+    "sql_prompt": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "sql_context": {
         "unique_count": 5,
         "total_count": 5
     },
