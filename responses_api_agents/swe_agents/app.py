@@ -783,7 +783,9 @@ class RunOpenHandsAgent(BaseModel):
         finally:
             log_file.close()
 
-        assert process.returncode == 0, f"Command failed with return code {process.returncode}"
+        assert process.returncode == 0, (
+            f"Command failed with return code {process.returncode}. Logs:\n{log_file_path.read_text()}"
+        )
 
         # Look for the expected file
         pred_files = glob.glob(command.expected_file_pattern, recursive=True)
