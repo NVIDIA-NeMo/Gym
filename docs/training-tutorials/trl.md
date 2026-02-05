@@ -6,7 +6,7 @@ This tutorial demonstrates how to use [Hugging Face TRL](https://github.com/hugg
 
 **TRL (Transformer Reinforcement Learning)** is Hugging Face's library for post-training foundation models. It provides implementations of algorithms like SFT, GRPO, and DPO, with support for distributed training with vLLM inference.
 
-TRL integrates with NeMo Gym to support both single-step and multi-step verifiable environments including math tasks, tool calling, reasoning, coding, and more.
+The integration supports multi-step and multi-turn rollouts, multi-environment training, and any NeMo Gym environment (thoroughly tested: workplace assistant, reasoning gym, MCQA, and math with judge).
 
 :::{card}
 
@@ -32,29 +32,36 @@ The TRL integration with NeMo Gym enables:
 - **Production-scale training**: Multi-node distributed training with DeepSpeed
 - **Flexible verification**: Algorithmic verification, LLM-as-a-judge, and custom reward functions
 
-## Before You Start
 
-1. Install TRL with vLLM support:
+---
+
+## Steps to get started
+
+### Install TRL and NeMo Gym
+
+1. **Install TRL with vLLM support**
 
    ```bash
-   pip install trl[vllm]
+   cd trl/
+   uv venv
+   source .venv/bin/activate
+   uv sync --extra vllm
    ```
 
-2. Install NeMo Gym:
+2. **Install NeMo Gym in a separate virtual environment**
 
    ```bash
+   # deactivate trl venv
+   deactivate
    git clone https://github.com/NVIDIA-NeMo/Gym.git
    cd Gym
    uv venv --python 3.12
    source .venv/bin/activate
-   uv sync --extra dev
+   uv sync
    ```
 
----
 
-## Tutorial Steps
-
-### Set Up
+### Download a Dataset
 
 1. **Prepare Dataset**
 
@@ -78,54 +85,58 @@ The TRL integration with NeMo Gym enables:
        +data_source=huggingface
    ```
 
-2. **Configure Training**
+#### Dataset Format
 
-   Create a `config.yaml` file:
+NeMo Gym datasets are stored as JSONL. Each line contains a task with input messages, tool definitions, metadata such as ground truth for verification, and an agent server reference. The following example shows the workplace dataset structure. Metadata fields can differ between datasets, as long as the corresponding resources server uses the fields appropriately.
+
+```json
+{
+  "responses_create_params": {
+    "input": [
+      {"role": "system", "content": "..."},
+      {"role": "user", "content": "Move any of jinsoo's tasks that are in review to completed"}
+    ],
+    "tools": [...],
+    "parallel_tool_calls": false,
+    "temperature": 1
+  },
+  "ground_truth": [
+    {"name": "project_management_update_task", "arguments": "{...}"},
+    ...
+  ],
+  "category": "workbench_project_management",
+  "environment_name": "workbench",
+  "agent_ref": {
+    "type": "responses_api_agents",
+    "name": "workplace_assistant_simple_agent"
+  }
+}
+```
+
+2. **Update Environment Config**
+
+   Update `env.yaml` in `Gym/` to include model information:
 
    ```yaml
-   model_name: "Qwen/Qwen2.5-1.5B-Instruct"
-
-   dataset_path: "data/workplace_assistant/train.jsonl"
-   eval_dataset_path: "data/workplace_assistant/validation.jsonl"
-
-   output_dir: "outputs/trl_nemo_gym"
-   report_to: "wandb"
-   project_name: "trl-nemo-gym"
-
-   learning_rate: 1.0e-5
-   max_steps: 1000
-   num_generations: 8
-   per_device_train_batch_size: 1
-   gradient_accumulation_steps: 4
-   max_seq_length: 16384
-
-   temperature: 1.0
-   top_p: 0.999
-
-   save_steps: 100
-   eval_strategy: "steps"
-   eval_steps: 50
-   ```
-
-### Start Servers and Run
-
-The following steps run in three separate terminals concurrently.
-
-1. **Start NeMo Gym Servers**
-
-   In Terminal 1:
-
-   ```bash
-   cd Gym
-   source .venv/bin/activate
-
-   # Update env.yaml with vLLM endpoint
-   cat > env.yaml << EOF
    policy_base_url: http://127.0.0.1:8000/v1
    policy_api_key: EMPTY
    policy_model_name: Qwen/Qwen2.5-1.5B-Instruct
-   hf_token: your_token_here
-   EOF
+   hf_token: ...
+   ```
+
+3. **Update Training Config**
+
+   Update `examples/scripts/nemo_gym/config.yaml` to point to the dataset generated above, and any other optional modifications.
+
+### Start vLLM and NeMo Gym Servers and Run Training
+
+The following steps run in 3 terminals. It can also be ran with processes in the background, or using tmux.
+
+1. **Start NeMo Gym Servers** (Terminal 1)
+
+   ```bash
+   cd Gym/
+   source .venv/bin/activate
 
    config_paths="resources_servers/workplace_assistant/configs/workplace_assistant.yaml,\
    responses_api_models/vllm_model/configs/vllm_model_for_training.yaml"
@@ -133,14 +144,17 @@ The following steps run in three separate terminals concurrently.
    ng_run "+config_paths=[${config_paths}]"
    ```
 
-2. **Start vLLM Server**
+   This starts:
+   - **Agent server**: Orchestrates rollouts using resource servers and model servers
+   - **Resources server**: Supports environment logic such as state-management, tool implementations, and task verification
+   - **Model server**: Adapts vLLM server requests to support NeMo Gym agents and on-policy RL training while ensuring OpenAI API compatibility
+   - **Head server**: Manages servers used in training enabling their discovery
 
-   In Terminal 2:
+2. **Start TRL vLLM Server on GPU 0** (Terminal 2)
 
    ```bash
-   cd trl
+   cd trl/
    source .venv/bin/activate
-
    CUDA_VISIBLE_DEVICES=0 trl vllm-serve \
      --model Qwen/Qwen2.5-1.5B-Instruct \
      --max-model-len 16384 \
@@ -148,18 +162,15 @@ The following steps run in three separate terminals concurrently.
      --port 8000
    ```
 
-3. **Run Training**
-
-   In Terminal 3:
+3. **Run Training on GPU 1** (Terminal 3)
 
    ```bash
-   cd trl
-   source .venv/bin/activate
+   source trl/.venv/bin/activate
+   cd trl/examples/scripts/nemo_gym
+   export WANDB_API_KEY=...
+   uv add omegaconf
 
-   CUDA_VISIBLE_DEVICES=1 python examples/scripts/nemo_gym/run_grpo_nemo_gym.py \
-     --config config.yaml \
-     --vllm_server_host 127.0.0.1 \
-     --head_server_host 127.0.0.1
+   CUDA_VISIBLE_DEVICES=1 python train_multi_environment.py --config config.yaml
    ```
 
 ## Multi-Environment Training
@@ -206,15 +217,36 @@ Train on multiple environments simultaneously. This example combines the workpla
 
 4. **Run Training**
 
+Update the config to point at the new dataset, then run training:
+
    ```bash
-   python run_grpo_nemo_gym.py --config config_multi_env.yaml
+   python train_multi_environment.py --config config.yaml
    ```
 
 The training script automatically routes each example to the correct environment based on the `agent_ref` field in the dataset.
 
-## Multi-Node Training
+## Multi-Node Training with Slurm
 
-For training at scale, TRL supports multi-node distributed training with Slurm. Refer to the [Hugging Face example Slurm script](https://github.com/huggingface/trl/blob/7669c006aa39199dda58d7bb9d166d2c411d7cac/examples/scripts/nemo_gym/submit.sh), which serves vLLM on one node and runs the training backend on four nodes.
+An example five-node training script is provided in `submit.sh`. Nodes one through four run the training algorithm, while node five runs vLLM inference for NeMo Gym agent rollouts.
+
+1. **Configure the Script**
+
+   Update `submit.sh` with your Slurm account, partition, paths to your project directory, and updated training configs.
+
+1. **Submit the Job**
+
+   ```bash
+   sbatch submit.sh
+   ```
+
+1. **Monitor Training**
+
+   ```bash
+   tail -f logs/<job_id>/*
+   ```
+
+> **Tip**: Set up wandb logging for detailed training metrics. For more details on TRL's vLLM integration, refer to the vLLM integration page.
+
 
 ## Documentation
 
