@@ -141,7 +141,9 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
 
     # Set later
     eval_command: Optional[ExecuteContainerCommandArgs] = None
+    eval_apptainer_command_str: Optional[str] = None
     agent_command: Optional[ExecuteContainerCommandArgs] = None
+    agent_apptainer_command_str: Optional[str] = None
     agent_script: Optional[str] = None
 
     @property
@@ -759,114 +761,17 @@ class RunOpenHandsAgent(BaseModel):
 
         return dest_output
 
-    async def _execute_container_command(self, command: ExecuteContainerCommandArgs):
-        # TODO @bxyu-nvidia refactor majority of this into the config
-        dataset_path_to_mount = str(self.config.instance_dataset_path)
+    async def _execute_container_command(self, command: ExecuteContainerCommandArgs, apptainer_cmd: str):
         data_point = self.config.problem_info
 
+        # Stream output to log file as it appears
         logs_dir = self.config.persistent_dir / "apptainer_logs"
         logs_dir.mkdir(exist_ok=True)
         log_file_path = logs_dir / f"{self.config.instance_id}_{command.mode}.log"
-
-        # Fix localhost URLs not working sometimes
-        container_commands = []
-        container_commands.append("echo '127.0.0.1 localhost' >/etc/hosts")
-
-        # Build mount arguments
-        mount_args = [
-            f"--mount type=bind,src={self.config.persistent_dir},dst=/trajectories_mount",
-        ]
-
-        # Add OpenHands setup directory mount if available (for OpenHands)
-        # Mount the entire setup directory at both /openhands_setup and its original absolute path
-        # This is needed because poetry and other tools have hardcoded absolute paths
-        mount_args.append(f"--mount type=bind,src={self.config.openhands_setup_dir},dst=/openhands_setup,ro")
-        mount_args.append(
-            f"--mount type=bind,src={self.config.openhands_setup_dir},dst={self.config.openhands_setup_dir},ro"
-        )
-        # Mount only the venv and miniforge as read-only to prevent mutation while keeping the rest writable
-        venv_path = Path(self.config.openhands_setup_dir) / "OpenHands/.venv"
-        mount_args.append(f"--mount type=bind,src={venv_path},dst=/openhands_setup/OpenHands/.venv,ro")
-        mount_args.append(f"--mount type=bind,src={venv_path},dst={venv_path},ro")
-
-        mount_args.extend(
-            [
-                # make everything in OpenHands read-only
-                f"--mount type=bind,src={self.config.openhands_setup_dir}/OpenHands,dst=/openhands_setup/OpenHands,ro",
-                f"--mount type=bind,src={self.config.openhands_setup_dir}/OpenHands/.eval_sessions,dst=/openhands_setup/OpenHands/.eval_sessions",
-                f"--mount type=bind,src={self.config.openhands_setup_dir}/OpenHands/.eval_sessions,dst={self.config.openhands_setup_dir}/OpenHands/.eval_sessions",
-                f"--mount type=bind,src={self.config.openhands_setup_dir}/OpenHands/logs,dst=/openhands_setup/OpenHands/logs",
-                f"--mount type=bind,src={self.config.openhands_setup_dir}/OpenHands/logs,dst={self.config.openhands_setup_dir}/OpenHands/logs",
-                f"--mount type=bind,src={self.config.openhands_setup_dir}/OpenHands/evaluation/oh,dst=/openhands_setup/OpenHands/evaluation/oh",
-                f"--mount type=bind,src={self.config.openhands_setup_dir}/OpenHands/evaluation/oh,dst={self.config.openhands_setup_dir}/OpenHands/evaluation/oh",
-                # Data
-                f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl",
-            ]
-        )
-
-        miniforge3_path = Path(self.config.openhands_setup_dir) / "miniforge3"
-        mount_args.append(f"--mount type=bind,src={miniforge3_path},dst=/openhands_setup/miniforge3,ro")
-        mount_args.append(f"--mount type=bind,src={miniforge3_path},dst={miniforge3_path},ro")
-
-        # Add SWE-bench setup directory mount if available (for evaluation)
-        if command.mode == "eval" and data_point["dataset_name"] != "nv-internal-1":
-            # Mount the entire setup directory at both /swebench_setup and its original absolute path
-            # This is needed because uv venv has hardcoded absolute paths
-            # print(
-            #     f"Mounting pre-built SWE-bench from: {self.swebench_setup_dir}",
-            #     flush=True,
-            # )
-            mount_args.append(f"--mount type=bind,src={self.swebench_setup_dir},dst=/swebench_setup")
-            mount_args.append(f"--mount type=bind,src={self.swebench_setup_dir},dst={self.swebench_setup_dir}")
-            mount_args.append(f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl")
-
-        if command.mode == "eval" and data_point["dataset_name"] == "nv-internal-1":
-            run_script_path = self.config.persistent_dir / "run_script.sh"
-            parsing_script_path = self.config.persistent_dir / "parsing_script.py"
-            model_patch_path = self.config.persistent_dir / "patch.diff"
-
-            mount_args.append(f"--mount type=bind,src={run_script_path},dst=/root/run_script.sh")
-            mount_args.append(f"--mount type=bind,src={parsing_script_path},dst=/root/parsing_script.py")
-            mount_args.append(f"--mount type=bind,src={model_patch_path},dst=/root/patch.diff")
-
-        if command.mode == "eval" and "R2E-Gym" in data_point["dataset_name"]:
-            # Mount the entire setup directory at both /r2egym_setup and its original absolute path
-            # This is needed because uv venv has hardcoded absolute paths in its wrappers
-            # print(f"Mounting R2E-Gym setup directory from: {self.r2e_gym_setup_dir}", flush=True)
-            mount_args.append(f"--mount type=bind,src={self.r2e_gym_setup_dir},dst=/r2egym_setup")
-            mount_args.append(f"--mount type=bind,src={self.r2e_gym_setup_dir},dst={self.r2e_gym_setup_dir}")
-            mount_args.append(f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl")
-
-        if command.mode == "agent" and "R2E-Gym" in data_point["dataset_name"]:
-            # Remove R2E-Gym test-related files.
-            for root_dir in ["", "/root", "/testbed"]:
-                container_commands.append(
-                    # /r2e_tests contains evaluation tests that the agent should not see.
-                    f"rm -rf {root_dir}/r2e_tests && "
-                    # run_tests.sh launches the tests in /r2e_tests, so the agent should not see this either.
-                    # We check that it contains the substring "r2e_tests"
-                    # to avoid accidentally deleting an unrelated file with that name.
-                    f"if grep -qs r2e_tests {root_dir}/run_tests.sh; then rm -rf {root_dir}/run_tests.sh; fi"
-                )
-        container_commands.append(command.command)
-        combined_command = " && ".join(container_commands)
-
-        mount_str = " ".join(mount_args)
-
-        # Launch Apptainer container and execute the command
-        apptainer_cmd = (
-            f"apptainer exec --writable-tmpfs --cleanenv --pid --no-mount home,tmp,bind-paths "
-            f"{mount_str} "
-            f" {self.config.container} bash -c {shlex.quote(combined_command)}"
-        )
-        memory_limit_mb = self.config.apptainer_memory_limit_mb
-        if memory_limit_mb is not None and memory_limit_mb > 0:
-            memory_limit_kb = int(memory_limit_mb) * 1024
-            apptainer_cmd = f"ulimit -v {memory_limit_kb} && {apptainer_cmd}"
-
-        # Stream output to log file as it appears
         log_file = open(log_file_path, "w")
+
         process = await asyncio.create_subprocess_shell(apptainer_cmd, stdout=log_file, stderr=log_file)
+
         try:
             # Wait for completion with timeout
             await asyncio.wait_for(process.communicate(), timeout=command.timeout)
@@ -900,7 +805,9 @@ class RunOpenHandsAgent(BaseModel):
             )
 
     async def process_single_datapoint(self) -> Path:
-        out_file_in_eval = await self._execute_container_command(self.config.agent_command)
+        out_file_in_eval = await self._execute_container_command(
+            self.config.agent_command, self.config.agent_apptainer_command_str
+        )
         out_file = self._openhands_dir_copy_from_host(output_file_path=out_file_in_eval)
 
         with open(out_file, "r") as f:
@@ -957,7 +864,9 @@ class RunOpenHandsAgent(BaseModel):
             model_patch = model_patch + "\n" if not model_patch.endswith("\n") else model_patch
             f.write(model_patch)
 
-        report_file = await self._execute_container_command(self.config.eval_command)
+        report_file = await self._execute_container_command(
+            self.config.eval_command, self.config.eval_apptainer_command_str
+        )
         return report_file
 
 
@@ -1119,6 +1028,108 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             f"Searched in paths: {tried_paths}."
         )
 
+    def _build_apptainer_command(
+        self, params: SWEBenchWrapperInstanceConfig, command: ExecuteContainerCommandArgs
+    ) -> str:
+        dataset_path_to_mount = str(params.instance_dataset_path)
+        data_point = params.problem_info
+
+        # Fix localhost URLs not working sometimes
+        container_commands = []
+        container_commands.append("echo '127.0.0.1 localhost' >/etc/hosts")
+
+        # Build mount arguments
+        mount_args = [
+            f"--mount type=bind,src={params.persistent_dir},dst=/trajectories_mount",
+        ]
+
+        # Add OpenHands setup directory mount if available (for OpenHands)
+        # Mount the entire setup directory at both /openhands_setup and its original absolute path
+        # This is needed because poetry and other tools have hardcoded absolute paths
+        mount_args.append(f"--mount type=bind,src={params.openhands_setup_dir},dst=/openhands_setup,ro")
+        mount_args.append(f"--mount type=bind,src={params.openhands_setup_dir},dst={params.openhands_setup_dir},ro")
+        # Mount only the venv and miniforge as read-only to prevent mutation while keeping the rest writable
+        venv_path = Path(params.openhands_setup_dir) / "OpenHands/.venv"
+        mount_args.append(f"--mount type=bind,src={venv_path},dst=/openhands_setup/OpenHands/.venv,ro")
+        mount_args.append(f"--mount type=bind,src={venv_path},dst={venv_path},ro")
+
+        mount_args.extend(
+            [
+                # make everything in OpenHands read-only
+                f"--mount type=bind,src={params.openhands_setup_dir}/OpenHands,dst=/openhands_setup/OpenHands,ro",
+                f"--mount type=bind,src={params.openhands_setup_dir}/OpenHands/.eval_sessions,dst=/openhands_setup/OpenHands/.eval_sessions",
+                f"--mount type=bind,src={params.openhands_setup_dir}/OpenHands/.eval_sessions,dst={params.openhands_setup_dir}/OpenHands/.eval_sessions",
+                f"--mount type=bind,src={params.openhands_setup_dir}/OpenHands/logs,dst=/openhands_setup/OpenHands/logs",
+                f"--mount type=bind,src={params.openhands_setup_dir}/OpenHands/logs,dst={params.openhands_setup_dir}/OpenHands/logs",
+                f"--mount type=bind,src={params.openhands_setup_dir}/OpenHands/evaluation/oh,dst=/openhands_setup/OpenHands/evaluation/oh",
+                f"--mount type=bind,src={params.openhands_setup_dir}/OpenHands/evaluation/oh,dst={params.openhands_setup_dir}/OpenHands/evaluation/oh",
+                # Data
+                f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl",
+            ]
+        )
+
+        miniforge3_path = Path(params.openhands_setup_dir) / "miniforge3"
+        mount_args.append(f"--mount type=bind,src={miniforge3_path},dst=/openhands_setup/miniforge3,ro")
+        mount_args.append(f"--mount type=bind,src={miniforge3_path},dst={miniforge3_path},ro")
+
+        # Add SWE-bench setup directory mount if available (for evaluation)
+        if command.mode == "eval" and data_point["dataset_name"] != "nv-internal-1":
+            # Mount the entire setup directory at both /swebench_setup and its original absolute path
+            # This is needed because uv venv has hardcoded absolute paths
+            # print(
+            #     f"Mounting pre-built SWE-bench from: {self.swebench_setup_dir}",
+            #     flush=True,
+            # )
+            mount_args.append(f"--mount type=bind,src={self.swebench_setup_dir},dst=/swebench_setup")
+            mount_args.append(f"--mount type=bind,src={self.swebench_setup_dir},dst={self.swebench_setup_dir}")
+            mount_args.append(f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl")
+
+        if command.mode == "eval" and data_point["dataset_name"] == "nv-internal-1":
+            run_script_path = params.persistent_dir / "run_script.sh"
+            parsing_script_path = params.persistent_dir / "parsing_script.py"
+            model_patch_path = params.persistent_dir / "patch.diff"
+
+            mount_args.append(f"--mount type=bind,src={run_script_path},dst=/root/run_script.sh")
+            mount_args.append(f"--mount type=bind,src={parsing_script_path},dst=/root/parsing_script.py")
+            mount_args.append(f"--mount type=bind,src={model_patch_path},dst=/root/patch.diff")
+
+        if command.mode == "eval" and "R2E-Gym" in data_point["dataset_name"]:
+            # Mount the entire setup directory at both /r2egym_setup and its original absolute path
+            # This is needed because uv venv has hardcoded absolute paths in its wrappers
+            # print(f"Mounting R2E-Gym setup directory from: {self.r2e_gym_setup_dir}", flush=True)
+            mount_args.append(f"--mount type=bind,src={self.r2e_gym_setup_dir},dst=/r2egym_setup")
+            mount_args.append(f"--mount type=bind,src={self.r2e_gym_setup_dir},dst={self.r2e_gym_setup_dir}")
+            mount_args.append(f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl")
+
+        if command.mode == "agent" and "R2E-Gym" in data_point["dataset_name"]:
+            # Remove R2E-Gym test-related files.
+            for root_dir in ["", "/root", "/testbed"]:
+                container_commands.append(
+                    # /r2e_tests contains evaluation tests that the agent should not see.
+                    f"rm -rf {root_dir}/r2e_tests && "
+                    # run_tests.sh launches the tests in /r2e_tests, so the agent should not see this either.
+                    # We check that it contains the substring "r2e_tests"
+                    # to avoid accidentally deleting an unrelated file with that name.
+                    f"if grep -qs r2e_tests {root_dir}/run_tests.sh; then rm -rf {root_dir}/run_tests.sh; fi"
+                )
+        container_commands.append(command.command)
+        combined_command = " && ".join(container_commands)
+
+        mount_str = " ".join(mount_args)
+
+        # Launch Apptainer container and execute the command
+        apptainer_cmd = (
+            f"apptainer exec --writable-tmpfs --cleanenv --pid --no-mount home,tmp,bind-paths "
+            f"{mount_str} "
+            f" {params.container} bash -c {shlex.quote(combined_command)}"
+        )
+        memory_limit_mb = params.apptainer_memory_limit_mb
+        if memory_limit_mb is not None and memory_limit_mb > 0:
+            memory_limit_kb = int(memory_limit_mb) * 1024
+            apptainer_cmd = f"ulimit -v {memory_limit_kb} && {apptainer_cmd}"
+
+        return apptainer_cmd
+
     def _setup_params(
         self, body: NeMoGymResponseCreateParamsNonStreaming
     ) -> Tuple[SWEBenchWrapperInstanceConfig, BaseDatasetHarnessProcessor]:
@@ -1194,8 +1205,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             dataset_processor = SweBenchDatasetProcessor(config=params)
 
         params.eval_command = dataset_processor.get_run_command()
+        params.eval_apptainer_command_str = self._build_apptainer_command(params, params.eval_command)
 
         params.agent_command = OpenHandsHarnessProcessor(config=params).get_run_command()
+        params.agent_apptainer_command_str = self._build_apptainer_command(params, params.agent_command)
         params.agent_script = params.agent_script_path.read_text()
 
         return params, dataset_processor
