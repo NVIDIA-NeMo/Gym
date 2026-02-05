@@ -126,7 +126,6 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     problem_info: Dict[str, Any]
     body: NeMoGymResponseCreateParamsNonStreaming
     persistent_dir: Path
-    metrics_fpath: Path
     ray_queue_timestamp: float
     inference_params: Dict[str, Any]
     agent_run_id: str
@@ -694,7 +693,7 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
 def runner_ray_remote(params_dict: dict[str, Any]) -> Path:
     params = SWEBenchWrapperInstanceConfig.model_validate(params_dict)
     # TODO remove
-    print(SWEBenchWrapperInstanceConfig, params)
+    print(SWEBenchWrapperInstanceConfig, params_dict.keys(), params)
     instance_id = params.instance_id
 
     if params.debug:
