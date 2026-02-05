@@ -757,28 +757,13 @@ class RunOpenHandsAgent(BaseModel):
 
         return dest_output
 
-    async def _execute_container_command(
-        self,
-        data_point: dict[str, Any],
-        command: str,
-        expected_file_pattern: str,
-        mode: str,
-        max_retries: int = 2,
-        timeout: int = 45 * 60,  # 45 minutes
-        dataset_mount_path: Optional[str] = None,
-    ):
-        """Execute a command in an Apptainer container with retry logic."""
-        dataset_path_to_mount = dataset_mount_path or self.dataset_path
-        if dataset_path_to_mount is None:
-            raise ValueError("Dataset path is not set")
-        dataset_path_to_mount = str(dataset_path_to_mount)
+    async def _execute_container_command(self, command: ExecuteContainerCommandArgs):
+        dataset_path_to_mount = str(self.config.instance_dataset_path)
+        data_point = self.config.problem_info
 
         logs_dir = self.config.persistent_dir / "apptainer_logs"
         logs_dir.mkdir(exist_ok=True)
-        log_file_path = logs_dir / f"{data_point['instance_id']}_{mode}.log"
-        # print(
-        #     f"Starting execution of an apptainer command. Logs are available at {log_file_path}",
-        # )
+        log_file_path = logs_dir / f"{self.config.instance_id}_{command.mode}.log"
 
         # Fix localhost URLs not working sometimes
         container_commands = []
@@ -792,10 +777,6 @@ class RunOpenHandsAgent(BaseModel):
         # Add OpenHands setup directory mount if available (for OpenHands)
         # Mount the entire setup directory at both /openhands_setup and its original absolute path
         # This is needed because poetry and other tools have hardcoded absolute paths
-        # print(
-        #     f"Mounting pre-built OpenHands from: {self.openhands_setup_dir}",
-        #     flush=True,
-        # )
         mount_args.append(f"--mount type=bind,src={self.openhands_setup_dir},dst=/openhands_setup,ro")
         mount_args.append(f"--mount type=bind,src={self.openhands_setup_dir},dst={self.openhands_setup_dir},ro")
         # Mount only the venv and miniforge as read-only to prevent mutation while keeping the rest writable
@@ -823,7 +804,7 @@ class RunOpenHandsAgent(BaseModel):
         mount_args.append(f"--mount type=bind,src={miniforge3_path},dst={miniforge3_path},ro")
 
         # Add SWE-bench setup directory mount if available (for evaluation)
-        if mode == "eval" and data_point["dataset_name"] != "nv-internal-1":
+        if command.mode == "eval" and data_point["dataset_name"] != "nv-internal-1":
             # Mount the entire setup directory at both /swebench_setup and its original absolute path
             # This is needed because uv venv has hardcoded absolute paths
             # print(
@@ -834,7 +815,7 @@ class RunOpenHandsAgent(BaseModel):
             mount_args.append(f"--mount type=bind,src={self.swebench_setup_dir},dst={self.swebench_setup_dir}")
             mount_args.append(f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl")
 
-        if mode == "eval" and data_point["dataset_name"] == "nv-internal-1":
+        if command.mode == "eval" and data_point["dataset_name"] == "nv-internal-1":
             run_script_path = self.config.persistent_dir / "run_script.sh"
             parsing_script_path = self.config.persistent_dir / "parsing_script.py"
             model_patch_path = self.config.persistent_dir / "patch.diff"
@@ -843,7 +824,7 @@ class RunOpenHandsAgent(BaseModel):
             mount_args.append(f"--mount type=bind,src={parsing_script_path},dst=/root/parsing_script.py")
             mount_args.append(f"--mount type=bind,src={model_patch_path},dst=/root/patch.diff")
 
-        if mode == "eval" and "R2E-Gym" in data_point["dataset_name"]:
+        if command.mode == "eval" and "R2E-Gym" in data_point["dataset_name"]:
             # Mount the entire setup directory at both /r2egym_setup and its original absolute path
             # This is needed because uv venv has hardcoded absolute paths in its wrappers
             # print(f"Mounting R2E-Gym setup directory from: {self.r2e_gym_setup_dir}", flush=True)
@@ -851,7 +832,7 @@ class RunOpenHandsAgent(BaseModel):
             mount_args.append(f"--mount type=bind,src={self.r2e_gym_setup_dir},dst={self.r2e_gym_setup_dir}")
             mount_args.append(f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl")
 
-        if mode == "agent" and "R2E-Gym" in data_point["dataset_name"]:
+        if command.mode == "agent" and "R2E-Gym" in data_point["dataset_name"]:
             # Remove R2E-Gym test-related files.
             for root_dir in ["", "/root", "/testbed"]:
                 container_commands.append(
@@ -878,73 +859,40 @@ class RunOpenHandsAgent(BaseModel):
             memory_limit_kb = int(memory_limit_mb) * 1024
             apptainer_cmd = f"ulimit -v {memory_limit_kb} && {apptainer_cmd}"
 
-        # Retry apptainer command up to max_retries times
-        for attempt in range(max_retries):
-            try:
-                # Stream output to log file as it appears
-                with open(log_file_path, "w") as log_file:
-                    try:
-                        # Create async subprocess
-                        process = await asyncio.create_subprocess_shell(
-                            apptainer_cmd, stdout=log_file, stderr=log_file
-                        )
-                        # Wait for completion with timeout
-                        await asyncio.wait_for(process.communicate(), timeout=timeout)
+        # Stream output to log file as it appears
+        log_file = open(log_file_path, "w")
+        process = await asyncio.create_subprocess_shell(apptainer_cmd, stdout=log_file, stderr=log_file)
+        try:
+            # Wait for completion with timeout
+            await asyncio.wait_for(process.communicate(), timeout=command.timeout)
+        except asyncio.TimeoutError:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+            raise ValueError("Command timed out")
+        finally:
+            log_file.close()
 
-                        if process.returncode != 0:
-                            raise ValueError(f"Command failed with return code {process.returncode}")
+        assert process.returncode == 0, f"Command failed with return code {process.returncode}"
 
-                    except asyncio.TimeoutError:
-                        if process.returncode is None:
-                            process.terminate()
-                            try:
-                                await asyncio.wait_for(process.wait(), timeout=10)
-                            except asyncio.TimeoutError:
-                                # Force kill if still running
-                                process.kill()
-                                await process.wait()
-                        attempt = max_retries  # Force exit the loop on timeout
-                        raise ValueError("Command timed out")
+        # Look for the expected file
+        pred_files = glob.glob(command.expected_file_pattern, recursive=True)
 
-                # Look for the expected file
-                pred_files = glob.glob(expected_file_pattern, recursive=True)
-
-                if len(pred_files) == 1:
-                    return pred_files[0]
-                elif len(pred_files) > 1:
-                    latest_file = max(pred_files, key=os.path.getmtime)
-                    print(
-                        f"Multiple outputs found for {data_point['instance_id']} "
-                        f"({len(pred_files)}). Using latest: {latest_file}",
-                        flush=True,
-                    )
-                    return latest_file
-                else:
-                    raise ValueError(
-                        f"Expected exactly one file matching {expected_file_pattern} for {data_point['instance_id']}, "
-                        f"found {len(pred_files)}."
-                    )
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    print(
-                        f"Attempt {attempt + 1} failed for instance {data_point['instance_id']}. Retrying... Error: {repr(e)}",
-                        flush=True,
-                    )
-                    continue
-                else:
-                    print(
-                        f"All {max_retries} attempts failed for instance {data_point['instance_id']}. Error: {repr(e)}",
-                        flush=True,
-                    )
-                    print(
-                        f"Apptainer command failed. Check logs at: {log_file_path}. Error: {repr(e)}",
-                        flush=True,
-                    )
-                    raise ValueError(
-                        f"Job failed for {data_point['instance_id']}. Check logs at: {log_file_path}. Error: {repr(e)}. "
-                        f"Expected exactly one file matching {expected_file_pattern}, "
-                        f"found {len(pred_files) if 'pred_files' in locals() else 'unknown'}."
-                    )
+        if len(pred_files) == 1:
+            return pred_files[0]
+        elif len(pred_files) > 1:
+            latest_file = max(pred_files, key=os.path.getmtime)
+            print(
+                f"Multiple outputs found for {data_point['instance_id']} "
+                f"({len(pred_files)}). Using latest: {latest_file}",
+                flush=True,
+            )
+            return latest_file
+        else:
+            raise ValueError(
+                f"Expected exactly one file matching {command.expected_file_pattern} for {data_point['instance_id']}, "
+                f"found {len(pred_files)}."
+            )
 
     async def process_single_datapoint(self) -> Path:
         out_file_in_eval = await self._execute_container_command(self.config.agent_command)
