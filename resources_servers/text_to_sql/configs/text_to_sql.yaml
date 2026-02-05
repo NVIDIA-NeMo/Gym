@@ -43,4 +43,4 @@ text_to_sql_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/text_to_sql/data/example.jsonl
-        license: Apache 2.0
+        license: Creative Commons Attribution 4.0 International
