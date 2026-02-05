@@ -349,7 +349,7 @@ EVAL_HARNESS_COMMIT={eval_harness_commit} \\
             f"env -u VIRTUAL_ENV {self.config.r2e_gym_setup_dir}/R2E-Gym/venv/bin/python src/r2egym/agenthub/run/run_local_evaluation.py "
             f"    --predictions_path {self.config.prediction_mounted_path} "
             f"    --instance_id {self.config.instance_id} "
-            f"    --timeout {self.cfg.swebench_tests_timeout} "
+            f"    --timeout {self.config.swebench_tests_timeout} "
             f"    --dataset /root/dataset/data.jsonl "
             f"    --output_dir /trajectories_mount/eval-outputs/{self.config.agent_run_id}"
         )
@@ -758,6 +758,7 @@ class RunOpenHandsAgent(BaseModel):
         return dest_output
 
     async def _execute_container_command(self, command: ExecuteContainerCommandArgs):
+        # TODO @bxyu-nvidia refactor majority of this into the config
         dataset_path_to_mount = str(self.config.instance_dataset_path)
         data_point = self.config.problem_info
 
@@ -777,29 +778,31 @@ class RunOpenHandsAgent(BaseModel):
         # Add OpenHands setup directory mount if available (for OpenHands)
         # Mount the entire setup directory at both /openhands_setup and its original absolute path
         # This is needed because poetry and other tools have hardcoded absolute paths
-        mount_args.append(f"--mount type=bind,src={self.openhands_setup_dir},dst=/openhands_setup,ro")
-        mount_args.append(f"--mount type=bind,src={self.openhands_setup_dir},dst={self.openhands_setup_dir},ro")
+        mount_args.append(f"--mount type=bind,src={self.config.openhands_setup_dir},dst=/openhands_setup,ro")
+        mount_args.append(
+            f"--mount type=bind,src={self.config.openhands_setup_dir},dst={self.config.openhands_setup_dir},ro"
+        )
         # Mount only the venv and miniforge as read-only to prevent mutation while keeping the rest writable
-        venv_path = Path(self.openhands_setup_dir) / "OpenHands/.venv"
+        venv_path = Path(self.config.openhands_setup_dir) / "OpenHands/.venv"
         mount_args.append(f"--mount type=bind,src={venv_path},dst=/openhands_setup/OpenHands/.venv,ro")
         mount_args.append(f"--mount type=bind,src={venv_path},dst={venv_path},ro")
 
         mount_args.extend(
             [
                 # make everything in OpenHands read-only
-                f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands,dst=/openhands_setup/OpenHands,ro",
-                f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/.eval_sessions,dst=/openhands_setup/OpenHands/.eval_sessions",
-                f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/.eval_sessions,dst={self.openhands_setup_dir}/OpenHands/.eval_sessions",
-                f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/logs,dst=/openhands_setup/OpenHands/logs",
-                f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/logs,dst={self.openhands_setup_dir}/OpenHands/logs",
-                f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/evaluation/oh,dst=/openhands_setup/OpenHands/evaluation/oh",
-                f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/evaluation/oh,dst={self.openhands_setup_dir}/OpenHands/evaluation/oh",
+                f"--mount type=bind,src={self.config.openhands_setup_dir}/OpenHands,dst=/openhands_setup/OpenHands,ro",
+                f"--mount type=bind,src={self.config.openhands_setup_dir}/OpenHands/.eval_sessions,dst=/openhands_setup/OpenHands/.eval_sessions",
+                f"--mount type=bind,src={self.config.openhands_setup_dir}/OpenHands/.eval_sessions,dst={self.config.openhands_setup_dir}/OpenHands/.eval_sessions",
+                f"--mount type=bind,src={self.config.openhands_setup_dir}/OpenHands/logs,dst=/openhands_setup/OpenHands/logs",
+                f"--mount type=bind,src={self.config.openhands_setup_dir}/OpenHands/logs,dst={self.config.openhands_setup_dir}/OpenHands/logs",
+                f"--mount type=bind,src={self.config.openhands_setup_dir}/OpenHands/evaluation/oh,dst=/openhands_setup/OpenHands/evaluation/oh",
+                f"--mount type=bind,src={self.config.openhands_setup_dir}/OpenHands/evaluation/oh,dst={self.config.openhands_setup_dir}/OpenHands/evaluation/oh",
                 # Data
                 f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl",
             ]
         )
 
-        miniforge3_path = Path(self.openhands_setup_dir) / "miniforge3"
+        miniforge3_path = Path(self.config.openhands_setup_dir) / "miniforge3"
         mount_args.append(f"--mount type=bind,src={miniforge3_path},dst=/openhands_setup/miniforge3,ro")
         mount_args.append(f"--mount type=bind,src={miniforge3_path},dst={miniforge3_path},ro")
 
@@ -843,7 +846,7 @@ class RunOpenHandsAgent(BaseModel):
                     # to avoid accidentally deleting an unrelated file with that name.
                     f"if grep -qs r2e_tests {root_dir}/run_tests.sh; then rm -rf {root_dir}/run_tests.sh; fi"
                 )
-        container_commands.append(command)
+        container_commands.append(command.command)
         combined_command = " && ".join(container_commands)
 
         mount_str = " ".join(mount_args)
@@ -854,7 +857,7 @@ class RunOpenHandsAgent(BaseModel):
             f"{mount_str} "
             f" {self.config.container} bash -c {shlex.quote(combined_command)}"
         )
-        memory_limit_mb = self.cfg.apptainer_memory_limit_mb
+        memory_limit_mb = self.config.apptainer_memory_limit_mb
         if memory_limit_mb is not None and memory_limit_mb > 0:
             memory_limit_kb = int(memory_limit_mb) * 1024
             apptainer_cmd = f"ulimit -v {memory_limit_kb} && {apptainer_cmd}"
