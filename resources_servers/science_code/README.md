@@ -66,17 +66,17 @@ Each data sample should include:
 ### Running Servers
 
 ```bash
-config_paths="resources_servers/science_code/configs/science_code.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/science_code/configs/science_code.yaml"
 
-ng_run "+config_paths=[${config_paths}]" \
+uv run ng_run "+config_paths=[${config_paths}]" \
   +science_code_resources_server.resources_servers.science_code.judge_responses_create_params.max_output_tokens=1024
 ```
 
 ### Collecting Rollouts
 
 ```bash
-ng_collect_rollouts +agent_name=science_code_simple_agent \
+uv run ng_collect_rollouts +agent_name=science_code_simple_agent \
     +input_jsonl_fpath=resources_servers/science_code/data/example.jsonl \
     +output_jsonl_fpath=resources_servers/science_code/data/example_rollouts.jsonl
 ```
