@@ -29,23 +29,6 @@ For a detailed technical explanation of these problems and their solutions, refe
 
 Models like Qwen3 that produce reasoning traces present a specific challenge. Some chat templates remove reasoning from previous turns during inference, but training sees the full trajectory. This creates a logprob mismatch because the model computes probabilities against different context.
 
-## Configuration
-
-By default, NeMo-Gym and NeMo-RL enforce monotonicity (strictly increasing trajectories) in multi-turn scenarios. This prevents dropping previous thinking blocks or other forms of context management that would cause train-generation mismatch.
-
-:::{warning}
-Disabling on-policy enforcement may lead to training instability. Use only when necessary and monitor training metrics closely.
-:::
-
-To disable enforcement, use the NeMo-RL training config parameter:
-
-```yaml
-# Disable monotonicity enforcement and on-policy token ID correction
-generation:
-  vllm_cfg:
-    enforce_monotonicity: false
-```
-
 ## Recommended Approaches
 
 ### For Models with Reasoning Traces
