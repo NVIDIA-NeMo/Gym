@@ -1237,7 +1237,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         if maybe_report_file:
             dataset_processor.postprocess_after_eval_run(maybe_report_file)
 
-            report = json.loads(maybe_report_file.read_text())
+            report = json.loads(Path(maybe_report_file).read_text())
             update_metrics(self.config.metrics_fpath, {"resolved": report["resolved"]})
         else:
             update_metrics(self.config.metrics_fpath, {"resolved": False})
