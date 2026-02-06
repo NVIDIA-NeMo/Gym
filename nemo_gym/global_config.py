@@ -215,7 +215,6 @@ class GlobalConfigDictParser(BaseModel):
         global_config_dict: DictConfig = OmegaConf.merge(initial_global_config_dict, global_config_dict)
 
         # Load the env.yaml config. We load it early so that people can use it to conveniently store config paths.
-        # Check cwd first for user's local env.yaml, then fall back to PARENT_DIR
         if parse_config.dotenv_path:
             dotenv_path = parse_config.dotenv_path
         else:
