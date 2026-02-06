@@ -236,7 +236,7 @@ class BaseDatasetHarnessProcessor(BaseModel):
         pass
 
     def _get_command_sleep_until_predictions_file(self) -> str:
-        return f"apt install -y inotify-tools && inotifywait -e close_write --include {self.config.output_for_eval_mounted_path.name} -qq {self.config.output_for_eval_mounted_path.parent}"
+        return f"apt update && apt install -y inotify-tools && inotifywait -e close_write --include {self.config.output_for_eval_mounted_path.name} -qq {self.config.output_for_eval_mounted_path.parent}"
 
 
 class SweBenchDatasetProcessor(BaseDatasetHarnessProcessor):
