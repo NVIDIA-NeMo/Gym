@@ -1238,6 +1238,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             dataset_processor.postprocess_after_eval_run(maybe_report_file)
 
             report = json.loads(Path(maybe_report_file).read_text())
+            # TODO remove
+            print(report, file=sys.stderr)
             update_metrics(params.metrics_fpath, {"resolved": report["resolved"]})
         else:
             update_metrics(params.metrics_fpath, {"resolved": False})
