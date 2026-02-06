@@ -745,7 +745,7 @@ def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
 
 
 class ActiveContainerCommand(BaseModel):
-    model_config: ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     process: Process
     log_file: Any
