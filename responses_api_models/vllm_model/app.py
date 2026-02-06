@@ -44,9 +44,9 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionToolParam,
     NeMoGymChatCompletionUserMessageParam,
     NeMoGymChoice,
+    NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymFunctionDefinition,
-    NeMoGymMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
@@ -647,7 +647,7 @@ class VLLMConverter(BaseModel):
         for message in messages:
             role = message["role"]
             if role in ("user", "system", "developer"):
-                output_items.append(NeMoGymMessage.model_validate(message))
+                output_items.append(NeMoGymEasyInputMessage.model_validate(message))
             elif role == "assistant":
                 output_items.extend(self.postprocess_assistant_message_dict(message))
             elif role == "tool":
