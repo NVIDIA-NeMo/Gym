@@ -153,13 +153,13 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
 
 
 class SWEBenchMetrics(BaseModel):
-    resolved: bool
-    patch_exists: bool
-    patch_successfully_applied: bool
+    resolved: Optional[bool] = None
+    patch_exists: Optional[bool] = None
+    patch_successfully_applied: Optional[bool] = None
 
     # Profiling time metrics to report
-    ray_queue_time: float
-    openhands_run_time: float
+    ray_queue_time: Optional[float] = None
+    openhands_run_time: Optional[float] = None
     # generation_apptainer_spinup_time: float
     # create_runtime_time: float
     # container_initialization_time: float
@@ -168,7 +168,7 @@ class SWEBenchMetrics(BaseModel):
     # total_command_exec_time: float
     # total_model_call_time: float
     # final_eval_apptainer_spinup_time: float
-    final_eval_time: float
+    final_eval_time: Optional[float] = None
 
     # Exit condition metrics to report
     # TODO add more exit conditions
@@ -855,6 +855,10 @@ class RunOpenHandsAgent(BaseModel):
         report_file = await self._execute_container_command(
             self.config.eval_command, self.config.eval_apptainer_command_str
         )
+
+        with self.config.metrics_fpath.open("w") as f:
+            f.write()
+
         return report_file
 
 
