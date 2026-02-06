@@ -153,15 +153,13 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
 
 
 class SWEBenchMetrics(BaseModel):
-    instance_id: str
-    instance_dir: str
-
     resolved: bool
     patch_exists: bool
     patch_successfully_applied: bool
 
     # Profiling time metrics to report
     ray_queue_time: float
+    openhands_run_time: float
     # generation_apptainer_spinup_time: float
     # create_runtime_time: float
     # container_initialization_time: float
@@ -177,9 +175,9 @@ class SWEBenchMetrics(BaseModel):
     # hit_sample_timeout: bool
     # hit_trajectory_command_exec_timeout: bool
     # hit_eval_timeout: bool
-    hit_empty_trajectory: bool
-    hit_success: bool
-    hit_responses_exception: bool
+    # hit_empty_trajectory: bool
+    # hit_success: bool
+    # hit_responses_exception: bool
 
 
 class SWEBenchVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
