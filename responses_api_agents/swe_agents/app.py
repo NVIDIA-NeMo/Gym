@@ -693,7 +693,7 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
     },
     num_cpus=1,
 )
-def runner_ray_remote(params_dict: dict[str, Any]) -> Path:
+def runner_ray_remote(params_dict: dict[str, Any]) -> Optional[Path]:
     # For some reason Ray may not pick up the proper model fields if we don't rebuild the model here. Very strange.
     SWEBenchWrapperInstanceConfig.model_rebuild(force=True)
     RunOpenHandsAgent.model_rebuild(force=True)
@@ -807,7 +807,7 @@ class RunOpenHandsAgent(BaseModel):
                 f"found {len(pred_files)}."
             )
 
-    async def process_single_datapoint(self) -> Path:
+    async def process_single_datapoint(self) -> Optional[Path]:
         out_file_in_eval = await self._execute_container_command(
             self.config.agent_command, self.config.agent_apptainer_command_str
         )
@@ -1212,9 +1212,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         with open("temp.json", "w") as f:
             f.write(params.model_dump_json(indent=4))
 
-        report_file = await runner_ray_remote.remote(params.model_dump())
+        maybe_report_file = await runner_ray_remote.remote(params.model_dump())
 
-        dataset_processor.postprocess_after_eval_run(report_file)
+        if maybe_report_file:
+            dataset_processor.postprocess_after_eval_run(maybe_report_file)
 
         trajectories_dir = params.persistent_dir / "trajectories"
         chat_completions_trajectory, chat_completions_tools = self.get_openhands_trajectory_from_completions(
