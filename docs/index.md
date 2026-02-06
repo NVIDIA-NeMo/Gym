@@ -311,6 +311,7 @@ Rollout Collection <get-started/rollout-collection.md>
 :maxdepth: 1
 
 🟡 Overview <agent-server/index>
+🟡 OpenAI Agents SDK <agent-server/integrate-agents/openai-agents-sdk>
 ```
 
 ```{toctree}

@@ -453,18 +453,6 @@ python examples/nemo_gym/run_grpo_nemo_gym.py --config my_training_config.yaml
 ::::{grid} 1 2 2 2
 :gutter: 3
 
-:::{grid-item-card} {octicon}`law;1.5em;sd-mr-1` LLM-as-a-Judge
-:link: llm-as-judge
-:link-type: doc
-Use LLMs for flexible verification of open-ended tasks.
-:::
-
-:::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` Multi-Step Environments
-:link: multi-step
-:link-type: doc
-Build sequential tool-calling workflows.
-:::
-
 :::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` Train with NeMo RL
 :link: training-nemo-rl-grpo-index
 :link-type: ref
