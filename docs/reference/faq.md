@@ -655,6 +655,11 @@ You may need to reformat some of your docstrings to Napoleon format docstrings h
 
 
 # FAQ: NeMo Gym, training frameworks, and token IDs
+
+:::{seealso}
+For conceptual background on why token ID alignment matters, see {doc}`/about/concepts/on-policy-training`.
+:::
+
 One of the goals of NeMo Gym is to act as a rollout tool for LLM post-training, either as synthetic data generation for SFT or as training environments for RL.
 
 RL training frameworks don't typically operate in OpenAI schema; they operate in tokens IDs. It is especially critical to always have the correct token IDs during training so that we stay on-policy and to make sure that what we think the model sees is what the model actually sees. However, when providing this OpenAI schema compatible interface to training environment developers, we lose track of the token IDs in Gym.
