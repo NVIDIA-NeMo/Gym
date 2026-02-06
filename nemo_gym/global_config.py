@@ -117,7 +117,7 @@ class GlobalConfigDictParser(BaseModel):
         extra_configs: List[DictConfig] = []
         for config_path in config_paths:
             config_path = Path(config_path)
-            # Check cwd first for user's local configs, then fall back to installed package
+            # Check cwd first for user's local configs, then install location
             if not config_path.is_absolute():
                 cwd_path = Path.cwd() / config_path
                 config_path = cwd_path if cwd_path.exists() else PARENT_DIR / config_path
