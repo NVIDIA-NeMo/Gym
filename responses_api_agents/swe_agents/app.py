@@ -819,8 +819,7 @@ class RunOpenHandsAgent(BaseModel):
         patch = patch + "\n" if patch and not patch.endswith("\n") else patch
 
         # Create file in the SWE-bench evaluation format
-        pred_file = out_file.replace("output.jsonl", "output_for_eval.jsonl")
-        with open(pred_file, "w") as f:
+        with self.config.prediction_mounted_path.open("w") as f:
             f.write(
                 json.dumps(
                     {
