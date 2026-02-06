@@ -19,7 +19,6 @@ import uuid
 from asyncio import Semaphore
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
-
 import ray
 from pydantic import ConfigDict, Field
 
@@ -39,6 +38,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseOutputMessageForTraining,
 )
 from responses_api_agents.swe_agents.utils import (
     convert_tools_to_function_format,
@@ -60,6 +61,8 @@ from responses_api_agents.swe_agents.utils import (
     },
 )
 def runner_ray_remote(runner: Callable, params: dict[str, Any]) -> Any:
+    ray_submit_time = time.time()
+    params["ray_submit_time"] = ray_submit_time
     return asyncio.run(runner(**params))
 
 
@@ -91,6 +94,12 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
     swebench_tests_timeout: int = Field(default=30 * 60, description="Timeout for running tests (seconds)")
 
     swebench_agent_timeout: int = Field(default=45 * 60, description="Timeout for running the agent (seconds)")
+
+    apptainer_memory_limit_mb: int = Field(
+        default=32 * 1024, description="Memory limit for the apptainer container (MB)"
+    )
+
+    command_exec_timeout: int = Field(default=5 * 60, description="Timeout for executing the command (seconds)")
 
     # Concurrency control
     concurrency: int = Field(default=256, description="Maximum number of concurrent SWE-bench runs")
@@ -149,6 +158,10 @@ class SWEBenchVerifyResponse(BaseVerifyResponse):
     resolved: Optional[float] = None  # 1.0 if resolved, 0.0 otherwise
     patch_exists: Optional[float] = None  # 1.0 if patch exists, 0.0 otherwise
     patch_successfully_applied: Optional[float] = None  # 1.0 if patch applied, 0.0 otherwise
+    is_nemo_gym_in_assistant_message: Optional[float] = (
+        None  # 1.0 if nemo-gym is in the assistant message, 0.0 otherwise
+    )
+    is_finish_tool_call: Optional[float] = None  # 1.0 if finish tool call is detected, 0.0 otherwise
 
 
 class SWEBenchWrapper(SimpleResponsesAPIAgent):
@@ -173,6 +186,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         print("Dependencies repositories set up complete", flush=True)
 
         self.config.run_session_id = f"{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
+        print(f"Run session ID: {self.config.run_session_id}", flush=True)
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         # Extract problem information from request
@@ -189,6 +203,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             f"{problem_info.get('instance_id', 'unknown')}_{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
         )
         try:
+            ray_queue_time = time.time()
             params = {
                 "problem_info": problem_info,
                 "model_endpoint": model_endpoint,
@@ -207,6 +222,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "r2e_gym_setup_dir": self.config.r2e_gym_setup_dir,
                 "dataset_path": self.config.dataset_path,
                 "instance_dir": instance_dir,
+                "ray_queue_time": ray_queue_time,
+                "apptainer_memory_limit_mb": self.config.apptainer_memory_limit_mb,
+                "command_exec_timeout": self.config.command_exec_timeout,
             }
 
             future = runner_ray_remote.remote(run_swebench_evaluation, params)
@@ -299,6 +317,32 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 metadata={"error": str(e)},
             )
 
+    def check_finish_tool_call(self, response: NeMoGymResponse) -> bool:
+        if not response.output:
+            return False
+
+        last_message = response.output[-1]
+        if isinstance(last_message, NeMoGymResponseFunctionToolCall) and last_message.name == "finish":
+            print(f"[REWARD] Finish tool call: {last_message.name} detected", flush=True)
+            return True
+
+        return False
+
+    def check_nemo_gym_in_assistant_message(self, response: NeMoGymResponse) -> bool:
+        if not response.output:
+            return False
+
+        for message in response.output:
+            if (
+                isinstance(message, NeMoGymResponseOutputMessageForTraining)
+                and message.role == "assistant"
+                and ("nemogym" in message.content[0].text.lower() or "litellm" in message.content[0].text.lower())
+            ):
+                print(f"[REWARD] Nemo-Gym in assistant message: {message.content[0].text}", flush=True)
+                return True
+
+        return False
+
     async def run(self, body: SWEBenchRunRequest) -> SWEBenchVerifyResponse:
         """Run and verify SWE-bench solution."""
         async with self.sem:
@@ -342,8 +386,18 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # Parse metrics from JSON string if present
             metrics = json.loads(metadata.get("swe-bench-metrics", "{}")) if "swe-bench-metrics" in metadata else {}
 
+            # Only consider the response resolved if the finish tool call is present and the resolved metric is True
+            is_finish_tool_call = self.check_finish_tool_call(response)
+            if is_finish_tool_call:
+                resolved = metrics.get("resolved") or (metadata.get("resolved") == "True")
+            else:
+                resolved = False
+
+            # TODO: remove this check after behavior fix
+            is_nemo_gym_in_assistant_message = self.check_nemo_gym_in_assistant_message(response)
+            resolved = resolved and not is_nemo_gym_in_assistant_message
+
             # Extract individual metrics with proper type conversion
-            resolved = metrics.get("resolved") or (metadata.get("resolved") == "True")
             patch_exists = metrics.get("patch_exists") or (metadata.get("patch_exists") == "True")
             patch_applied = metrics.get("patch_successfully_applied") or (
                 metadata.get("patch_successfully_applied") == "True"
@@ -359,6 +413,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 resolved=1.0 if resolved else 0.0,
                 patch_exists=1.0 if patch_exists else 0.0,
                 patch_successfully_applied=1.0 if patch_applied else 0.0,
+                is_nemo_gym_in_assistant_message=1.0 if is_nemo_gym_in_assistant_message else 0.0,
+                is_finish_tool_call=1.0 if is_finish_tool_call else 0.0,
                 swebench_metrics=metrics,
                 metadata={
                     "instance_id": metadata.get("instance_id", "unknown"),
@@ -366,6 +422,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     "patch_exists": patch_exists,
                     "patch_successfully_applied": patch_applied,
                     "resolved": resolved,
+                    "is_nemo_gym_in_assistant_message": is_nemo_gym_in_assistant_message,
+                    "is_finish_tool_call": is_finish_tool_call,
                 },
             )
 

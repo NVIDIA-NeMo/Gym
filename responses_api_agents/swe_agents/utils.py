@@ -639,6 +639,10 @@ async def run_swebench_evaluation(
     r2e_gym_setup_dir: Optional[Path] = None,
     dataset_path: Optional[str] = None,
     instance_dir: Optional[str] = None,
+    ray_queue_time: Optional[float] = None,
+    ray_submit_time: Optional[float] = None,
+    apptainer_memory_limit_mb: Optional[int] = None,
+    command_exec_timeout: Optional[int] = None,
 ) -> Dict:
     # Create persistent directory for I/O and logs in local workspace
     workspace_root = Path(os.path.dirname(os.path.abspath(__file__)))
@@ -673,6 +677,8 @@ async def run_swebench_evaluation(
         agent_max_turns=agent_max_turns,
         swebench_tests_timeout=swebench_tests_timeout,
         swebench_agent_timeout=swebench_agent_timeout,
+        apptainer_memory_limit_mb=apptainer_memory_limit_mb,
+        command_exec_timeout=command_exec_timeout,
         inference=inference_config,
         server=server,
     )
@@ -686,6 +692,8 @@ async def run_swebench_evaluation(
     )
     result = await run_oh.process_single_datapoint(problem_info)
     print(f"Process completed for {instance_id}", flush=True)
+
+    result["oh_time_metrics"]["ray_time_in_queue"] = ray_submit_time - ray_queue_time
 
     try:
         with open(output_file, "w") as f:
@@ -706,8 +714,6 @@ async def run_swebench_evaluation(
         agent_framework,
         agent_tools_file if agent_framework == "swe_agent" else None,
     )
-
-    # tools = convert_tools_to_function_format(tools) if tools else []
 
     result["tools"] = tools
     result["trajectory"] = trajectory_data
