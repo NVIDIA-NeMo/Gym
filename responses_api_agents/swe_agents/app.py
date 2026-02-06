@@ -1238,9 +1238,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             dataset_processor.postprocess_after_eval_run(maybe_report_file)
 
             report = json.loads(Path(maybe_report_file).read_text())
-            update_metrics(self.config.metrics_fpath, {"resolved": report["resolved"]})
+            update_metrics(params.metrics_fpath, {"resolved": report["resolved"]})
         else:
-            update_metrics(self.config.metrics_fpath, {"resolved": False})
+            update_metrics(params.metrics_fpath, {"resolved": False})
 
         trajectories_dir = params.persistent_dir / "trajectories"
         chat_completions_trajectory, chat_completions_tools = self.get_openhands_trajectory_from_completions(
