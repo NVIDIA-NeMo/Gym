@@ -22,6 +22,7 @@ import sys
 import time
 import uuid
 from asyncio import Semaphore
+from asyncio.subprocess import Process
 from contextlib import contextmanager
 from fcntl import LOCK_EX, LOCK_UN, flock
 from pathlib import Path
@@ -234,6 +235,9 @@ class BaseDatasetHarnessProcessor(BaseModel):
     def postprocess_after_eval_run(self, report_file: Path) -> None:
         pass
 
+    def _get_command_sleep_until_predictions_file(self) -> str:
+        return f"apt install -y inotify-tools && inotifywait -e close_write --include {self.config.output_for_eval_mounted_path.name} -qq {self.config.output_for_eval_mounted_path.parent}"
+
 
 class SweBenchDatasetProcessor(BaseDatasetHarnessProcessor):
     def setup(self) -> Path:
@@ -268,6 +272,7 @@ SWEBENCH_COMMIT={swebench_commit} \\
     def get_run_command(self) -> ExecuteContainerCommandArgs:
         swebench_cmd = (
             f"date +%s > {self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath} && "
+            f"{self._get_command_sleep_until_predictions_file()} && "
             # Use pre-built SWE-bench
             "cd /swebench_setup/SWE-bench && "
             # Set UV environment variables to use the mounted portable directories
@@ -345,6 +350,7 @@ EVAL_HARNESS_COMMIT={eval_harness_commit} \\
     def get_run_command(self) -> ExecuteContainerCommandArgs:
         r2e_gym_cmd = (
             f"date +%s > {self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath} && "
+            f"{self._get_command_sleep_until_predictions_file()} && "
             # Use mounted directory path for cd
             "cd /r2egym_setup/R2E-Gym && "
             # Set UV environment variables to use the mounted portable directories
@@ -432,6 +438,8 @@ set -e
 
 date +%s > {self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath}
 
+{self._get_command_sleep_until_predictions_file()}
+
 {env_exports}
 
 # Apply patch
@@ -466,7 +474,7 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
             command=cmd,
             expected_file_pattern=search_path,
             mode="eval",
-            timeout=self.config.swebench_tests_timeout + 120,
+            timeout=self.config.swebench_tests_timeout,
         )
 
     def postprocess_after_run(self, report_file: Path) -> None:
@@ -736,6 +744,14 @@ def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
         json.dump(existing_dict | update_dict, f)
 
 
+class ActiveContainerCommand(BaseModel):
+    model_config: ConfigDict(arbitrary_types_allowed=True)
+
+    process: Process
+    log_file: Any
+    log_file_path: Path
+
+
 class RunOpenHandsAgent(BaseModel):
     config: SWEBenchWrapperInstanceConfig
 
@@ -783,9 +799,9 @@ class RunOpenHandsAgent(BaseModel):
 
         return dest_output
 
-    async def _execute_container_command(self, command: ExecuteContainerCommandArgs, apptainer_cmd: str):
-        data_point = self.config.problem_info
-
+    async def _start_container_command(
+        self, command: ExecuteContainerCommandArgs, apptainer_cmd: str
+    ) -> ActiveContainerCommand:
         # Stream output to log file as it appears
         logs_dir = self.config.persistent_dir / "apptainer_logs"
         logs_dir.mkdir(exist_ok=True)
@@ -794,19 +810,26 @@ class RunOpenHandsAgent(BaseModel):
 
         process = await asyncio.create_subprocess_shell(apptainer_cmd, stdout=log_file, stderr=log_file)
 
+        return ActiveContainerCommand(process=process, log_file=log_file, log_file_path=log_file_path)
+
+    async def _finish_container_command(
+        self, active_command: ActiveContainerCommand, command: ExecuteContainerCommandArgs
+    ) -> str:
+        data_point = self.config.problem_info
+
         try:
             # Wait for completion with timeout
-            await asyncio.wait_for(process.communicate(), timeout=command.timeout)
+            await asyncio.wait_for(active_command.process.communicate(), timeout=command.timeout)
         except asyncio.TimeoutError:
-            if process.returncode is None:
-                process.kill()
-                await process.wait()
+            if active_command.process.returncode is None:
+                active_command.process.kill()
+                await active_command.process.wait()
             raise ValueError("Command timed out")
         finally:
-            log_file.close()
+            active_command.log_file.close()
 
-        assert process.returncode == 0, (
-            f"Command failed with return code {process.returncode}. Logs:\n{log_file_path.read_text()}"
+        assert active_command.process.returncode == 0, (
+            f"Command failed with return code {active_command.process.returncode}. Logs:\n{active_command.log_file_path.read_text()}"
         )
 
         # Look for the expected file
@@ -832,9 +855,14 @@ class RunOpenHandsAgent(BaseModel):
         metrics = SWEBenchMetrics()
 
         metrics.openhands_run_time = -time.time()
-        out_file_in_eval = await self._execute_container_command(
+        openhands_active_command = await self._start_container_command(
             self.config.agent_command, self.config.agent_apptainer_command_str
         )
+        eval_active_command = await self._start_container_command(
+            self.config.eval_command, self.config.eval_apptainer_command_str
+        )
+
+        out_file_in_eval = await self._finish_container_command(openhands_active_command, self.config.agent_command)
         out_file = self._openhands_dir_copy_from_host(output_file_path=out_file_in_eval)
 
         generation_apptainer_spinup_timestamp = float(
@@ -887,9 +915,7 @@ class RunOpenHandsAgent(BaseModel):
             f.write(patch)
 
         metrics.final_eval_time = -time.time()
-        report_file = await self._execute_container_command(
-            self.config.eval_command, self.config.eval_apptainer_command_str
-        )
+        report_file = await self._finish_container_command(eval_active_command, self.config.eval_command)
 
         final_eval_apptainer_spinup_timestamp = float(
             self.config.final_eval_apptainer_spinup_timestamp_fpath.read_text()
