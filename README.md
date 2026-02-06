@@ -34,6 +34,8 @@ NeMo Gym is designed to run on standard development machines:
 
 ## 🚀 Quick Start
 
+Install NeMo Gym, start the servers, and collect your first verified rollouts for RL training.
+
 ### Setup
 ```bash
 # Clone the repository
