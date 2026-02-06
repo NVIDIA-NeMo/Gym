@@ -67,6 +67,9 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     uses_reasoning_parser: bool
     replace_developer_role_with_system: bool = False
 
+    # Whether or not the model can generate a reasoning output, and called again to produce additional reasoning output.
+    sequential_reasoning_allowed: bool = True
+
     chat_template_kwargs: Optional[Dict[str, Any]] = None
 
     # Corresponds to the extra_body of OpenAI Client.
@@ -208,6 +211,11 @@ class VLLMModel(SimpleResponsesAPIModel):
                 else:
                     raise NotImplementedError
 
+        if not self.config.sequential_reasoning_allowed:
+            last_message = body_dict["messages"][-1]
+            if last_message["role"] == "assistant" and not (last_message["content"] or last_message["tool_calls"]):
+                return self._create_empty_chat_completion()
+
         if self.config.extra_body:
             create_params = self.config.extra_body | create_params
 
@@ -231,23 +239,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 "context length" in result_content_str or "max_tokens" in result_content_str
             )
             if is_out_of_context_length:
-                return NeMoGymChatCompletion(
-                    id="chtcmpl-123",
-                    object="chat.completion",
-                    created=int(time()),
-                    model=self.config.model,
-                    choices=[
-                        NeMoGymChoice(
-                            index=0,
-                            finish_reason="stop",
-                            message=NeMoGymChatCompletionMessage(
-                                role="assistant",
-                                content=None,
-                                tool_calls=None,
-                            ),
-                        )
-                    ],
-                )
+                return self._create_empty_chat_completion()
             else:
                 raise e
 
@@ -313,6 +305,25 @@ class VLLMModel(SimpleResponsesAPIModel):
             # choice_dict.pop("token_ids")
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
+
+    def _create_empty_chat_completion(self) -> NeMoGymChatCompletion:
+        return NeMoGymChatCompletion(
+            id="chtcmpl-123",
+            object="chat.completion",
+            created=int(time()),
+            model=self.config.model,
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="stop",
+                    message=NeMoGymChatCompletionMessage(
+                        role="assistant",
+                        content=None,
+                        tool_calls=None,
+                    ),
+                )
+            ],
+        )
 
 
 class VLLMConverterResponsesToChatCompletionsState(BaseModel):
