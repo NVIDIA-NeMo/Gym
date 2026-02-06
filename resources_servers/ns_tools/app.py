@@ -89,6 +89,10 @@ class NSToolsConfig(BaseResourcesServerConfig):
     # Supports environment variable expansion (e.g., /lustre/.../traces/${SLURM_JOB_ID}/tool_calls.jsonl)
     trace_file_path: str = ""
 
+    # When True, skip replaying session history after sandbox worker restarts.
+    # The model receives a warning in stderr instead of restored state.
+    disable_session_restore: bool = False
+
 
 # ============================================================
 # Run/Verify Request/Response Models
@@ -204,6 +208,8 @@ class NSToolsResourcesServer(SimpleResourcesServer):
             "--config",
             self._python_tool_config_file.name,
         ]
+        if self.config.disable_session_restore:
+            cmd.append("--disable-session-restore")
         logger.info(f"python_tool command: {' '.join(cmd)}")
 
         # Set environment for subprocess
