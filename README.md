@@ -1,6 +1,6 @@
 # NeMo Gym
 
-**[Requirements](#-requirements)** • **[Quick Start](#-quick-start)** • **[Available Resource Servers](#-available-resource-servers)** • **[Documentation](#-documentation)** • **[Community & Support](#-community--support)** • **[Citations](#-citations)**
+**[Requirements](#-requirements)** • **[Quick Start](#-quick-start)** • **[Available Resource Servers](#-available-resource-servers)** • **[Documentation & Resources](#-documentation--resources)** • **[Community & Support](#-community--support)** • **[Citations](#-citations)**
 
 NeMo Gym is a library for building reinforcement learning (RL) training environments for large language models (LLMs). It provides infrastructure to develop environments, scale rollout collection, and integrate seamlessly with your preferred training framework. 
 
@@ -156,7 +156,7 @@ Purpose: Training-ready environments with curated datasets.
 | Math With Judge            | math                  | <a href='https://huggingface.co/datasets/nvidia/Nemotron-RL-math-stack_overflow'>Nemotron-RL-math-stack_overflow</a>                                           | -                                                                                                    | -                                                                        | <a href='resources_servers/math_with_judge/configs/math_stack_overflow.yaml'>config</a>                   | ✓     | ✓          | Creative Commons Attribution-ShareAlike 4.0 International |
 <!-- END_TRAINING_SERVERS_TABLE -->
 
-## 📖 Documentation
+## 📖 Documentation & Resources
 
 - **[Documentation](https://docs.nvidia.com/nemo/gym/latest/index.html)** - Technical reference docs
 - **[Tutorials](https://docs.nvidia.com/nemo/gym/latest/tutorials/index.html)** - Hands-on tutorials and practical examples
