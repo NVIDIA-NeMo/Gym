@@ -819,6 +819,7 @@ class RunOpenHandsAgent(BaseModel):
         patch = patch + "\n" if patch and not patch.endswith("\n") else patch
 
         # Create file in the SWE-bench evaluation format
+        self.config.prediction_mounted_path.parent.mkdir(parents=True, exist_ok=True)
         with self.config.prediction_mounted_path.open("w") as f:
             f.write(
                 json.dumps(
