@@ -271,7 +271,7 @@ SWEBENCH_COMMIT={swebench_commit} \\
 
     def get_run_command(self) -> ExecuteContainerCommandArgs:
         swebench_cmd = (
-            f"date +%s > {self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath} && "
+            f'date +"%s.%N" > {self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath} && '
             f"{self._get_command_sleep_until_predictions_file()} && "
             # Use pre-built SWE-bench
             "cd /swebench_setup/SWE-bench && "
@@ -349,7 +349,7 @@ EVAL_HARNESS_COMMIT={eval_harness_commit} \\
 
     def get_run_command(self) -> ExecuteContainerCommandArgs:
         r2e_gym_cmd = (
-            f"date +%s > {self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath} && "
+            f'date +"%s.%N" > {self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath} && '
             f"{self._get_command_sleep_until_predictions_file()} && "
             # Use mounted directory path for cd
             "cd /r2egym_setup/R2E-Gym && "
@@ -436,7 +436,7 @@ class NVInternalDatasetProcessor(BaseDatasetHarnessProcessor):
         cmd = f"""#!/bin/bash
 set -e
 
-date +%s > {self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath}
+date +\"%s.%N\" > {self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath}
 
 {self._get_command_sleep_until_predictions_file()}
 
@@ -623,7 +623,7 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
             # Use pre-built OpenHands
             "cd /openhands_setup/OpenHands && "
             "export RUNTIME=local && "
-            f"date +%s > {self.config.generation_apptainer_spinup_timestamp_mounted_fpath} && "
+            f'date +"%s.%N" > {self.config.generation_apptainer_spinup_timestamp_mounted_fpath} && '
             f"{log_cmd}"
             f"{profiling_cmd}"
             f"export NEMO_GYM_METRICS_FPATH={self.config.metrics_fpath} && "
