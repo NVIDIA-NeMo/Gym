@@ -717,13 +717,13 @@ def runner_ray_remote(params_dict: dict[str, Any]) -> Optional[Path]:
 
 
 def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
-    with metrics_fpath.open("rw") as f:
+    with metrics_fpath.open() as f:
         existing_dict = json.loads(f.read())
 
-        existing_dict = {k: v for k, v in existing_dict.items() if v is not None}
-        update_dict = {k: v for k, v in update_dict.items() if v is not None}
+    existing_dict = {k: v for k, v in existing_dict.items() if v is not None}
+    update_dict = {k: v for k, v in update_dict.items() if v is not None}
 
-        f.seek(0)
+    with metrics_fpath.open("w") as f:
         json.dump(existing_dict | update_dict, f)
 
 
