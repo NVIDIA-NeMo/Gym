@@ -20,7 +20,7 @@ import shlex
 import sys
 import tomllib
 from glob import glob
-from importlib.metadata import version as md_version
+from importlib.metadata import entry_points, version as md_version
 from os import environ, makedirs
 from os.path import exists
 from pathlib import Path
@@ -798,11 +798,8 @@ def display_help():  # pragma: no cover
     # Just here for help
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
-    pyproject_path = PARENT_DIR / "pyproject.toml"
-    with pyproject_path.open("rb") as f:
-        pyproject_data = tomllib.load(f)
-
-    project_scripts = pyproject_data["project"]["scripts"]
+    eps = entry_points().select(group='console_scripts') if hasattr(entry_points(), 'select') else entry_points().get('console_scripts', [])
+    project_scripts = {ep.name: ep.value for ep in eps if ep.name.startswith(('nemo_gym_', 'ng_'))}
     rich.print("""Run a command with `+h=true` or `+help=true` to see more detailed information!
 
 [bold]Available CLI scripts[/bold]
