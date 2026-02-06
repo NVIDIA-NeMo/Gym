@@ -853,6 +853,10 @@ class RunOpenHandsAgent(BaseModel):
         with open(self.config.model_patch_path, "w") as f:
             f.write(patch)
 
+        # TODO remove
+        with open(self.config.prediction_mounted_path) as f:
+            print("PREDICTION_MOUNTED_PATH_CONTENT", f.read(), file=sys.stderr)
+
         report_file = await self._execute_container_command(
             self.config.eval_command, self.config.eval_apptainer_command_str
         )
