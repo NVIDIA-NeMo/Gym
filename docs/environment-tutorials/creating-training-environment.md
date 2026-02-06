@@ -7,6 +7,8 @@ Implement verification logic, prepare training data, and connect to NeMo RL.
 
 **Goal**: Build a complete training environment with verification, data preparation, and NeMo RL integration.
 
+**Time**: ~45-90 minutes
+
 ^^^
 
 **In this tutorial, you will**:
@@ -24,6 +26,14 @@ Implement verification logic, prepare training data, and connect to NeMo RL.
 
 ← Previous: Creating a Resource Server
 :::
+
+## Prerequisites
+
+- Completed {doc}`/tutorials/creating-resource-server`
+- NeMo Gym installed and virtual environment activated
+- `env.yaml` configured with your API key
+
+---
 
 ```{mermaid}
 flowchart LR

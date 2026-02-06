@@ -7,6 +7,8 @@ Build training environments where models make sequential tool calls, using resul
 
 **Goal**: Build a multi-step environment where models make sequential tool calls.
 
+**Time**: ~30-45 minutes
+
 ^^^
 
 **In this tutorial, you will**:
@@ -25,6 +27,12 @@ Build training environments where models make sequential tool calls, using resul
 
 ← Previous: LLM-as-a-Judge Verification
 :::
+
+## Prerequisites
+
+- Completed {doc}`Creating a Training Environment <creating-training-environment>`
+- NeMo Gym installed and virtual environment activated
+- Familiarity with resource server basics ({doc}`/tutorials/creating-resource-server`)
 
 ---
 

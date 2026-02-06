@@ -7,6 +7,8 @@ Train models on extended conversations where context accumulates across user/ass
 
 **Goal**: Build a multi-turn environment for conversational RL training.
 
+**Time**: ~30-45 minutes
+
 ^^^
 
 **In this tutorial, you will**:
@@ -25,6 +27,12 @@ Train models on extended conversations where context accumulates across user/ass
 
 ← Previous: Multi-Step Environments
 :::
+
+## Prerequisites
+
+- Completed {doc}`Creating a Training Environment <creating-training-environment>`
+- NeMo Gym installed and virtual environment activated
+- Familiarity with resource server basics ({doc}`/tutorials/creating-resource-server`)
 
 ---
 

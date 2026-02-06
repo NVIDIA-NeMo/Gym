@@ -7,6 +7,8 @@ Generate multi-turn training data by simulating user behavior with LLM-driven pe
 
 **Goal**: Generate synthetic multi-turn training data using LLM-driven personas.
 
+**Time**: ~45-60 minutes
+
 ^^^
 
 **In this tutorial, you will**:
@@ -27,7 +29,7 @@ Generate multi-turn training data by simulating user behavior with LLM-driven pe
 
 ---
 
-## What You'll Need
+## Prerequisites
 
 Install required packages:
 

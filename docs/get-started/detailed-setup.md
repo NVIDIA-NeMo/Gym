@@ -79,7 +79,7 @@ While NeMo Gym itself does not require a GPU, some resource servers (particularl
 
 ---
 
-## Before You Start
+## Prerequisites
 
 Make sure you have these prerequisites ready before beginning:
 

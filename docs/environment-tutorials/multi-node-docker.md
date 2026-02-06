@@ -7,6 +7,8 @@ Scale NeMo Gym environments across multiple machines using container orchestrati
 
 **Goal**: Deploy NeMo Gym across multiple nodes using Docker containers.
 
+**Time**: ~20-40 minutes
+
 ^^^
 
 **In this tutorial, you will**:
@@ -24,6 +26,12 @@ Scale NeMo Gym environments across multiple machines using container orchestrati
 
 ← Previous: User Modeling
 :::
+
+## Prerequisites
+
+- Completed {doc}`/get-started/detailed-setup`
+- Docker installed on all target machines
+- Network connectivity between coordinator and worker nodes
 
 ---
 

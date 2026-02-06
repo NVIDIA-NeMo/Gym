@@ -7,6 +7,8 @@ Format and validate JSONL datasets for NeMo Gym training using `ng_prepare_data`
 
 **Goal**: Validate data format and prepare datasets for training.
 
+**Time**: ~15 minutes
+
 ^^^
 
 **In this guide, you will**:

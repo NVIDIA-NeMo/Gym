@@ -87,31 +87,33 @@ Install and run NeMo Gym to start collecting rollouts.
 :::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` Quickstart
 :link: get-started/index
 :link-type: doc
-Run a training environment and start collecting rollouts in under 5 minutes.
+Install, start servers, and collect your first rollouts in one page.
++++
+{bdg-primary}`start here` {bdg-secondary}`5 min`
 :::
 
 :::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Detailed Setup Guide
 :link: get-started/detailed-setup
 :link-type: doc
-Detailed walkthrough of running your first training environment.
+Step-by-step installation with requirements, configuration, and troubleshooting.
 +++
-{bdg-secondary}`environment` {bdg-secondary}`configuration`
+{bdg-secondary}`15 min` {bdg-secondary}`environment` {bdg-secondary}`configuration`
 :::
 
 :::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` Rollout Collection
 :link: get-started/rollout-collection
 :link-type: doc
-Collect and view rollouts.
+Generate batches of scored interactions and view them with the rollout viewer.
 +++
-{bdg-secondary}`rollouts` {bdg-secondary}`training-data`
+{bdg-secondary}`10 min` {bdg-secondary}`rollouts` {bdg-secondary}`training-data`
 :::
 
 :::{grid-item-card} {octicon}`play;1.5em;sd-mr-1` First Training Run
 :link: get-started/first-training-run
 :link-type: doc
-Train your first model using collected rollouts.
+Train a Sudoku-solving model with GRPO using a self-contained Colab notebook.
 +++
-{bdg-secondary}`training` {bdg-secondary}`grpo`
+{bdg-secondary}`30 min` {bdg-secondary}`training` {bdg-secondary}`colab`
 :::
 
 ::::

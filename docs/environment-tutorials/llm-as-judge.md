@@ -8,6 +8,8 @@ Use an LLM to compare model-generated answers against expected answers when exac
 
 **Goal**: Use an LLM judge to verify semantic equivalence when exact matching isn't enough.
 
+**Time**: ~20-30 minutes
+
 ^^^
 
 **In this tutorial, you will**:
@@ -25,6 +27,12 @@ Use an LLM to compare model-generated answers against expected answers when exac
 
 ← Previous: Creating a Training Environment
 :::
+
+## Prerequisites
+
+- Completed {doc}`Creating a Training Environment <creating-training-environment>`
+- NeMo Gym installed and virtual environment activated
+- OpenAI API key configured (used for the judge model)
 
 ---
 

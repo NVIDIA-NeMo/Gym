@@ -7,6 +7,8 @@ Combine multiple verification strategies for more robust reward signals during G
 
 **Goal**: Configure NeMo Gym to use multiple resource servers or reward functions in a single training run.
 
+**Time**: ~20 minutes
+
 ^^^
 
 **In this tutorial, you will**:
@@ -280,6 +282,27 @@ Combined: (1.0, True)
 ```
 
 ---
+
+## Next Steps
+
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build Custom Environments
+:link: /environment-tutorials/index
+:link-type: doc
+
+Explore advanced environment patterns: multi-step, multi-turn, LLM-as-judge, and more.
+:::
+
+:::{grid-item-card} {octicon}`book;1.5em;sd-mr-1` Resources Server Reference
+:link: /resources-server/index
+:link-type: doc
+
+Deep dive into resource server concepts, profiling, and containerization.
+:::
+
+::::
 
 ## Related Topics
 

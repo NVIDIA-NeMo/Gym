@@ -13,6 +13,8 @@ Train large language models at production scale using the Llama-3.3-Nemotron-Sup
 
 **Goal**: Configure and launch production-scale training on a multi-node cluster.
 
+**Time**: ~5-12 hours
+
 ^^^
 
 **In this tutorial, you will**:
@@ -34,7 +36,7 @@ Train large language models at production scale using the Llama-3.3-Nemotron-Sup
 
 ---
 
-## Before You Begin
+## Prerequisites
 
 ### When to Use This vs. Nano
 

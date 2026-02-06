@@ -7,6 +7,8 @@ This tutorial guides you through your first RL training run using NeMo Gym for t
 
 **Goal**: Train your first RL model using NeMo Gym verification and Unsloth.
 
+**Time**: ~30 minutes (Colab)
+
 ^^^
 
 **In this tutorial, you will**:
@@ -25,9 +27,11 @@ This tutorial guides you through your first RL training run using NeMo Gym for t
 ← Previous: Rollout Collection
 :::
 
-:::{tip}
-**No prior NeMo Gym setup required.** The Colab notebook is self-contained. For local training, see [Local Training](#local-training-advanced) below.
-:::
+## Prerequisites
+
+- **For Colab**: No prior NeMo Gym setup required — the notebook is self-contained
+- **For local training**: Completed {doc}`Detailed Setup Guide <detailed-setup>` and {doc}`Rollout Collection <rollout-collection>`
+- A Google account (for Colab) or a local GPU with 16GB+ VRAM
 
 ---
 

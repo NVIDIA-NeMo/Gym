@@ -24,17 +24,17 @@ Pre-configured training recipes for specific models:
 :::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` Nemotron 3 Nano
 :link: nemotron-nano
 :link-type: doc
-Efficient small model training.
+Single-node training recipe for Nemotron Nano 9B using GRPO on Workplace Assistant tasks.
 +++
-{bdg-secondary}`nemotron` {bdg-secondary}`nano`
+{bdg-primary}`validated` {bdg-secondary}`1-4 hours` {bdg-secondary}`single-node`
 :::
 
 :::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Nemotron 3 Super
 :link: nemotron-super
 :link-type: doc
-High-performance training.
+Multi-node production training for Nemotron Super 49B. Requires 64-128 H100 GPUs.
 +++
-{bdg-secondary}`nemotron` {bdg-secondary}`super`
+{bdg-secondary}`experimental` {bdg-secondary}`5-12 hours` {bdg-secondary}`multi-node`
 :::
 
 ::::
@@ -47,23 +47,23 @@ High-performance training.
 :::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` NeMo RL with GRPO
 :link: ../tutorials/nemo-rl-grpo/index
 :link-type: doc
-Multi-step tool calling with GRPO.
+Multi-page series: train Nemotron Nano 9B for multi-step tool calling on single and multi-node clusters.
 +++
-{bdg-primary}`recommended` {bdg-secondary}`grpo`
+{bdg-primary}`recommended` {bdg-secondary}`3-5 hours` {bdg-secondary}`grpo`
 :::
 
 :::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Unsloth Training
 :link: ../tutorials/unsloth-training
 :link-type: doc
-Fast, memory-efficient fine-tuning.
+Fine-tune on single GPU using Colab. Supports math, structured outputs, and reasoning tasks.
 +++
-{bdg-secondary}`unsloth` {bdg-secondary}`efficient`
+{bdg-secondary}`30 min` {bdg-secondary}`unsloth` {bdg-secondary}`single-gpu`
 :::
 
 :::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` TRL Training
 :link: trl
 :link-type: doc
-HuggingFace TRL integration.
+PPO, DPO, and GRPO training with HuggingFace Transformers ecosystem integration.
 +++
 {bdg-secondary}`trl` {bdg-secondary}`huggingface`
 :::
@@ -71,25 +71,25 @@ HuggingFace TRL integration.
 :::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` VeRL Training
 :link: verl
 :link-type: doc
-VeRL framework integration.
+Distributed RL training for research workflows with flexible algorithm support.
 +++
-{bdg-secondary}`verl`
+{bdg-secondary}`verl` {bdg-secondary}`research`
 :::
 
 :::{grid-item-card} {octicon}`gear;1.5em;sd-mr-1` NeMo Customizer
 :link: nemo-customizer
 :link-type: doc
-NeMo Customizer integration.
+Enterprise training and deployment with NeMo Customizer managed service.
 +++
-{bdg-secondary}`nemo-customizer`
+{bdg-secondary}`nemo-customizer` {bdg-secondary}`enterprise`
 :::
 
 :::{grid-item-card} {octicon}`file;1.5em;sd-mr-1` Offline Training
 :link: ../tutorials/offline-training-w-rollouts
 :link-type: doc
-SFT and DPO from rollouts.
+Transform collected rollouts into SFT and DPO training datasets without online exploration.
 +++
-{bdg-secondary}`sft` {bdg-secondary}`dpo`
+{bdg-secondary}`20 min` {bdg-secondary}`sft` {bdg-secondary}`dpo`
 :::
 
 ::::

@@ -8,6 +8,8 @@ Use trained reward models as environments for GRPO training to optimize against 
 
 **Goal**: Train with reward models instead of rule-based verification.
 
+**Time**: ~30-45 minutes
+
 ^^^
 
 **In this tutorial, you will**:
@@ -25,6 +27,12 @@ Use trained reward models as environments for GRPO training to optimize against 
 
 ← Previous: Multi-Turn Environments
 :::
+
+## Prerequisites
+
+- Completed {doc}`Creating a Training Environment <creating-training-environment>`
+- NeMo Gym installed and virtual environment activated
+- Access to a GPU for reward model inference
 
 :::{tip}
 **When to use reward models vs. LLM-as-judge:**

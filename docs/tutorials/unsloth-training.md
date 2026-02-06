@@ -12,6 +12,8 @@ Unsloth can be used with NeMo Gym single-step verifiers including math tasks, st
 
 **Goal**: Fine-tune a model for single-step tasks using Unsloth with NeMo Gym verifiers.
 
+**Time**: ~30 minutes (Colab)
+
 ^^^
 
 **In this tutorial, you will**:
@@ -22,6 +24,13 @@ Unsloth can be used with NeMo Gym single-step verifiers including math tasks, st
 4. Evaluate trained model performance 
 
 :::
+
+## Prerequisites
+
+- A Google account (for Colab) or a local GPU with 16GB+ VRAM
+- Familiarity with NeMo Gym concepts ({doc}`/get-started/index`)
+
+---
 
 ## Getting Started
 
