@@ -17,12 +17,14 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from openai.types.responses.function_tool import FunctionTool
 
+from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -33,7 +35,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient, get_first_server_config_dict
+from nemo_gym.server_utils import get_first_server_config_dict
 from responses_api_agents.swe_agents.run_openhands import (
     RunOpenHandsAgent,
     SupportedAgentFrameworks,
@@ -610,7 +612,7 @@ def extract_problem_info(
 
 
 def get_model_endpoint(model_server_name: str) -> str:
-    global_config_dict = ServerClient.load_from_global_config().global_config_dict
+    global_config_dict = get_global_config_dict()
 
     model_server_config = get_first_server_config_dict(
         global_config_dict,
@@ -625,26 +627,30 @@ async def run_swebench_evaluation(
     problem_info: Dict,
     model_endpoint: str,
     body: NeMoGymResponseCreateParamsNonStreaming,
-    run_session_id: str,
     agent_framework: str,
     agent_config: Optional[str],
     agent_tools_file: Optional[str],
     agent_max_turns: int,
     swebench_tests_timeout: int,
     swebench_agent_timeout: int,
+    persistent_dir: Path,
+    metrics_fpath: Path,
+    ng_global_config_dict_str: str,
+    model_server_name: str,
     agent_framework_repo: Optional[str] = None,
     agent_framework_commit: str = "HEAD",
     openhands_setup_dir: Optional[Path] = None,
     swebench_setup_dir: Optional[Path] = None,
     r2e_gym_setup_dir: Optional[Path] = None,
     dataset_path: Optional[str] = None,
-    instance_dir: Optional[str] = None,
+    ray_queue_time: Optional[float] = None,
+    ray_submit_time: Optional[float] = None,
+    openhands_should_log: bool = False,
+    debug: bool = False,
+    apptainer_memory_limit_mb: Optional[int] = None,
+    command_exec_timeout: Optional[int] = None,
 ) -> Dict:
-    # Create persistent directory for I/O and logs in local workspace
-    workspace_root = Path(os.path.dirname(os.path.abspath(__file__)))
     instance_id = problem_info.get("instance_id", "unknown")
-    persistent_dir = workspace_root / f"swebench_results_{run_session_id}" / instance_dir
-    persistent_dir.mkdir(parents=True, exist_ok=True)
     output_file = persistent_dir / "output.jsonl"
 
     inference_params = {}
@@ -673,6 +679,8 @@ async def run_swebench_evaluation(
         agent_max_turns=agent_max_turns,
         swebench_tests_timeout=swebench_tests_timeout,
         swebench_agent_timeout=swebench_agent_timeout,
+        apptainer_memory_limit_mb=apptainer_memory_limit_mb,
+        command_exec_timeout=command_exec_timeout,
         inference=inference_config,
         server=server,
     )
@@ -683,9 +691,17 @@ async def run_swebench_evaluation(
         swebench_setup_dir=swebench_setup_dir,
         r2e_gym_setup_dir=r2e_gym_setup_dir,
         dataset_path=dataset_path,
+        ng_global_config_dict_str=ng_global_config_dict_str,
+        openhands_should_log=openhands_should_log,
+        debug=debug,
+        model_server_name=model_server_name,
+        metrics_fpath=metrics_fpath,
     )
-    result = await run_oh.process_single_datapoint(problem_info)
+
+    result = await run_oh.process_single_datapoint(problem_info, persistent_dir)
     print(f"Process completed for {instance_id}", flush=True)
+
+    result["oh_time_metrics"]["ray_time_in_queue"] = ray_submit_time - ray_queue_time
 
     try:
         with open(output_file, "w") as f:
@@ -706,8 +722,6 @@ async def run_swebench_evaluation(
         agent_framework,
         agent_tools_file if agent_framework == "swe_agent" else None,
     )
-
-    # tools = convert_tools_to_function_format(tools) if tools else []
 
     result["tools"] = tools
     result["trajectory"] = trajectory_data
@@ -750,6 +764,7 @@ def _run_setup_shell_script(
     timeout_seconds: int,
     label: str,
     timeout_error_message: Optional[str] = None,
+    debug: bool = False,
 ) -> None:
     script_path = setup_dir / script_name
 
@@ -774,8 +789,9 @@ def _run_setup_shell_script(
         if process.stdout is None:
             raise RuntimeError("Failed to capture script output")
 
+        target_file = sys.stderr if debug else sys.stdout
         for line in process.stdout:
-            print(line, end="", flush=True)
+            print(line, end="", file=target_file)
             output_lines.append(line)
 
         process.wait(timeout=timeout_seconds)
@@ -1039,6 +1055,7 @@ def setup_openhands_environment(
     agent_framework_repo: Optional[str] = "https://github.com/sdevare-nv/nv-OpenHands.git",
     agent_framework_commit: str = "gym",
     setup_dir: Optional[Path] = None,
+    debug: bool = False,
 ) -> Path:
     setup_dir = _resolve_setup_directory(setup_dir, "swe_openhands_setup")
 
@@ -1207,6 +1224,7 @@ echo "OpenHands setup complete!"
             timeout_seconds=1800,
             label="OpenHands",
             timeout_error_message="OpenHands setup timed out after 30 minutes",
+            debug=debug,
         )
 
         print(f"Setup directory: {setup_dir}", flush=True)

@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -25,6 +26,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 import tomlkit
+from gprof2dot import main as gprof2dot_main
+from pydot import graph_from_dot_file
 
 
 class SupportedAgentFrameworks(str, Enum):
@@ -62,6 +65,8 @@ class SweBenchGenerationConfig:
     agent_max_turns: int = 100
     swebench_tests_timeout: int = 30 * 60
     swebench_agent_timeout: int = 45 * 60
+    apptainer_memory_limit_mb: int = 32 * 1024
+    command_exec_timeout: int = 5 * 60
     inference: SweBenchInferenceConfig = field(default_factory=SweBenchInferenceConfig)
     server: dict = field(default_factory=dict)
 
@@ -92,11 +97,16 @@ NS_TO_OPENHANDS_PARAM = {
 @dataclass
 class RunOpenHandsAgent:
     cfg: SweBenchGenerationConfig
+    ng_global_config_dict_str: str
+    model_server_name: str
     output_dir: str = None
     openhands_setup_dir: Path | None = None
     swebench_setup_dir: Path | None = None
     r2e_gym_setup_dir: Path | None = None
     dataset_path: str | None = None
+    openhands_should_log: bool = False
+    debug: bool = False
+    metrics_fpath: Path
 
     async def _run_swe_agent(self, data_point, api_base):
         """
@@ -222,12 +232,23 @@ class RunOpenHandsAgent:
         assert self.openhands_setup_dir is not None, "OpenHands setup directory is not set"
 
         agent_script_name = f"agent_script_{agent_run_id}.sh"
-        cleanup_commands = (
-            f"cd /openhands_setup/OpenHands && "
-            f"mkdir -p /trajectories_mount/trajectories && "
-            f"cp -r {eval_dir_in_openhands}/*/*/* /trajectories_mount/trajectories/{data_point['instance_id']}/ &&"
-            f"rm -rf {eval_dir_in_openhands} && rm -rf {config_file_path}"
-        )
+
+        if self.debug:
+            profiling_cmd = "export NG_PROFILING_DIR=/trajectories_mount/profiling && "
+        else:
+            profiling_cmd = ""
+
+        if self.openhands_should_log:
+            log_cmd = "export LOG_LEVEL=DEBUG && export LOG_TO_FILE=true && export NG_OPENHANDS_SHOULD_LOG=true && "
+        else:
+            log_cmd = (
+                "export LOG_LEVEL=CRITICAL && "
+                "export DEBUG=False && "
+                "export DEBUG_LLM=False && "
+                "export LOG_TO_FILE=False && "
+                "export LOG_ALL_EVENTS=False && "
+                "export DEBUG_RUNTIME=False && "
+            )
 
         agent_main_cmd = (
             "if [ -d /workspace ]; then "
@@ -250,20 +271,19 @@ class RunOpenHandsAgent:
             # Use pre-built OpenHands
             "cd /openhands_setup/OpenHands && "
             "export RUNTIME=local && "
-            # "export LOG_LEVEL=DEBUG && "
-            # "export LOG_TO_FILE=true && "
-            "export LOG_LEVEL=CRITICAL && "
-            "export DEBUG=False && "
-            "export DEBUG_LLM=False && "
-            "export LOG_TO_FILE=False && "
-            "export LOG_ALL_EVENTS=False && "
-            "export DEBUG_RUNTIME=False && "
+            f"{log_cmd}"
+            f"{profiling_cmd}"
+            f"export NEMO_GYM_METRICS_FPATH={self.metrics_fpath} && "
+            f"export NEMO_GYM_CONFIG_DICT={self.ng_global_config_dict_str} && "
+            f"export NEMO_GYM_MODEL_SERVER_NAME={self.model_server_name} &&"
             "export VIRTUAL_ENV=/openhands_setup/OpenHands/.venv && "
             "export PATH=$PATH:/openhands_setup/OpenHands/.venv/bin && "
             # CRITICAL: Configure poetry to only use the OpenHands venv (ignore external venvs)
             "export POETRY_VIRTUALENVS_IN_PROJECT=true && "
             "export POETRY_VIRTUALENVS_CREATE=false && "
             "export POETRY_VIRTUALENVS_PATH=/openhands_setup/OpenHands && "
+            f"export TMUX_MEMORY_LIMIT={self.cfg.apptainer_memory_limit_mb} && "
+            f"export COMMAND_EXEC_TIMEOUT={self.cfg.command_exec_timeout} && "
             # TODO (sugam): fix cryptography issue
             # "override_dir=$(mktemp -d /tmp/cryptography_override.XXXX) && "
             # # Reinstall cryptography inside the container (via poetry's venv) using a compatible wheel
@@ -312,22 +332,18 @@ class RunOpenHandsAgent:
         agent_timeout_seconds = self.cfg.swebench_agent_timeout
         openhands_cmd = (
             f"timeout --signal=TERM --kill-after=30 {agent_timeout_seconds} "
-            f"bash /trajectories_mount/{agent_script_name}; "
-            f"echo 'Cleaning up...'; "
-            f"{cleanup_commands}"
+            f"bash /trajectories_mount/{agent_script_name}"
         )
 
         search_path = os.path.join(
-            self.output_dir / "trajectories",
-            "**",
-            data_point["instance_id"],
+            self.openhands_setup_dir / "OpenHands" / eval_dir_in_openhands,
             "**",
             "output.jsonl",
         )
 
         try:
             # Execute OpenHands command
-            out_file = await self._execute_container_command(
+            out_file_in_eval = await self._execute_container_command(
                 data_point=data_point,
                 command=openhands_cmd,
                 expected_file_pattern=search_path,
@@ -335,6 +351,12 @@ class RunOpenHandsAgent:
                 max_retries=1,
                 timeout=self.cfg.swebench_agent_timeout + 60,
                 dataset_mount_path=dataset_mount_path,
+            )
+            out_file = self._openhands_dir_copy_from_host(
+                data_point=data_point,
+                eval_dir_in_openhands=eval_dir_in_openhands,
+                config_file_path=config_file_path,
+                output_file_path=out_file_in_eval,
             )
 
             with open(out_file, "r") as f:
@@ -353,13 +375,81 @@ class RunOpenHandsAgent:
                             "model_name_or_path": out_dict["metadata"]["llm_config"]["model"],
                             "instance_id": out_dict["instance_id"],
                             "model_patch": patch + "\n" if patch and not patch.endswith("\n") else patch,
+                            "oh_time_metrics": out_dict["metrics"],
                         }
                     )
                 )
+
+            # Dump out dot and png files from profiling on OpenHands level
+            if self.debug:
+                base_profile_dir = Path(self.output_dir) / "profiling"
+                profiling_name = "openhands"
+                callgrind_path = base_profile_dir / f"{profiling_name}.callgrind"
+                callgrind_dotfile_path = base_profile_dir / f"{profiling_name}.dot"
+                callgrind_graph_path = base_profile_dir / f"{profiling_name}.png"
+
+                gprof2dot_main(
+                    argv=f"--format=callgrind --output={callgrind_dotfile_path} -e 5 -n 5 {callgrind_path}".split()
+                )
+
+                (graph,) = graph_from_dot_file(callgrind_dotfile_path)
+                graph.write_png(callgrind_graph_path)
         except Exception as e:
-            print(f"oh run_infer.sh output parsing failed: {e}", flush=True)
+            self._openhands_dir_copy_from_host(
+                data_point=data_point,
+                eval_dir_in_openhands=eval_dir_in_openhands,
+                config_file_path=config_file_path,
+                output_file_path=None,
+            )
+            print(f"Running OpenHands failed: {e}", flush=True)
             return None
         return pred_file
+
+    def _openhands_dir_copy_from_host(
+        self,
+        data_point: dict[str, Any],
+        eval_dir_in_openhands: str,
+        config_file_path: str,
+        output_file_path: Optional[str],
+    ) -> Optional[str]:
+        eval_dir_on_host = Path(self.openhands_setup_dir) / "OpenHands" / eval_dir_in_openhands
+        trajectories_root = Path(self.output_dir) / "trajectories" / data_point["instance_id"]
+        llm_completions_dir = trajectories_root / "llm_completions" / data_point["instance_id"]
+        trajectories_root.mkdir(parents=True, exist_ok=True)
+        llm_completions_dir.mkdir(parents=True, exist_ok=True)
+
+        dest_output: Optional[str] = None
+        if output_file_path:
+            source_output = Path(output_file_path)
+            if not source_output.is_absolute():
+                source_output = eval_dir_on_host / source_output
+            if not source_output.exists():
+                output_candidates = sorted(eval_dir_on_host.glob("*/*/*/output.jsonl"), key=os.path.getmtime)
+                if not output_candidates:
+                    raise FileNotFoundError(
+                        f"No output.jsonl found under {eval_dir_on_host} for {data_point['instance_id']}."
+                    )
+                source_output = output_candidates[-1]
+
+            dest_output_path = trajectories_root / "output.jsonl"
+            shutil.copy2(source_output, dest_output_path)
+            dest_output = str(dest_output_path)
+
+        completion_candidates = glob.glob(str(eval_dir_on_host / "*/*/*/llm_completions/*/*.json"))
+        if completion_candidates:
+            latest_completion = max(completion_candidates, key=os.path.getmtime)
+            shutil.copy2(
+                latest_completion,
+                llm_completions_dir / Path(latest_completion).name,
+            )
+
+        shutil.rmtree(eval_dir_on_host, ignore_errors=True)
+        try:
+            Path(config_file_path).unlink()
+        except OSError:
+            pass
+
+        return dest_output
 
     def _write_instance_dataset(self, data_point: dict[str, Any], agent_run_id: str) -> Path:
         """
@@ -518,30 +608,20 @@ class RunOpenHandsAgent:
             mount_args.append(f"--mount type=bind,src={venv_path},dst=/openhands_setup/OpenHands/.venv,ro")
             mount_args.append(f"--mount type=bind,src={venv_path},dst={venv_path},ro")
 
-            # make everything in OpenHands read-only
-            mount_args.append(
-                f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands,dst=/openhands_setup/OpenHands,ro"
+            mount_args.extend(
+                [
+                    # make everything in OpenHands read-only
+                    f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands,dst=/openhands_setup/OpenHands,ro",
+                    f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/.eval_sessions,dst=/openhands_setup/OpenHands/.eval_sessions",
+                    f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/.eval_sessions,dst={self.openhands_setup_dir}/OpenHands/.eval_sessions",
+                    f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/logs,dst=/openhands_setup/OpenHands/logs",
+                    f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/logs,dst={self.openhands_setup_dir}/OpenHands/logs",
+                    f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/evaluation/oh,dst=/openhands_setup/OpenHands/evaluation/oh",
+                    f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/evaluation/oh,dst={self.openhands_setup_dir}/OpenHands/evaluation/oh",
+                    # Data
+                    f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl",
+                ]
             )
-            mount_args.append(
-                f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/.eval_sessions,dst=/openhands_setup/OpenHands/.eval_sessions"
-            )
-            mount_args.append(
-                f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/.eval_sessions,dst={self.openhands_setup_dir}/OpenHands/.eval_sessions"
-            )
-            mount_args.append(
-                f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/logs,dst=/openhands_setup/OpenHands/logs"
-            )
-            mount_args.append(
-                f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/logs,dst={self.openhands_setup_dir}/OpenHands/logs"
-            )
-            mount_args.append(
-                f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/evaluation/oh,dst=/openhands_setup/OpenHands/evaluation/oh"
-            )
-            mount_args.append(
-                f"--mount type=bind,src={self.openhands_setup_dir}/OpenHands/evaluation/oh,dst={self.openhands_setup_dir}/OpenHands/evaluation/oh"
-            )
-
-            mount_args.append(f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl")
 
             miniforge3_path = Path(self.openhands_setup_dir) / "miniforge3"
             mount_args.append(f"--mount type=bind,src={miniforge3_path},dst=/openhands_setup/miniforge3,ro")
@@ -594,10 +674,14 @@ class RunOpenHandsAgent:
 
         # Launch Apptainer container and execute the command
         apptainer_cmd = (
-            f"apptainer exec --writable-tmpfs --cleanenv --no-mount home,tmp,bind-paths "
+            f"apptainer exec --writable-tmpfs --cleanenv --pid --no-mount home,tmp,bind-paths "
             f"{mount_str} "
             f" {container_name} bash -c {shlex.quote(combined_command)}"
         )
+        memory_limit_mb = self.cfg.apptainer_memory_limit_mb
+        if memory_limit_mb is not None and memory_limit_mb > 0:
+            memory_limit_kb = int(memory_limit_mb) * 1024
+            apptainer_cmd = f"ulimit -v {memory_limit_kb} && {apptainer_cmd}"
 
         # Retry apptainer command up to max_retries times
         for attempt in range(max_retries):
@@ -632,6 +716,14 @@ class RunOpenHandsAgent:
 
                 if len(pred_files) == 1:
                     return pred_files[0]
+                elif len(pred_files) > 1:
+                    latest_file = max(pred_files, key=os.path.getmtime)
+                    print(
+                        f"Multiple outputs found for {data_point['instance_id']} "
+                        f"({len(pred_files)}). Using latest: {latest_file}",
+                        flush=True,
+                    )
+                    return latest_file
                 else:
                     raise ValueError(
                         f"Expected exactly one file matching {expected_file_pattern} for {data_point['instance_id']}, "
@@ -908,7 +1000,7 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
 
         return required_tests <= passed_tests
 
-    async def process_single_datapoint(self, data_point: dict[str, Any]):
+    async def process_single_datapoint(self, data_point: dict[str, Any], persistent_dir: Path):
         self.output_dir = Path(self.cfg.output_file).parent
 
         agent_run_id = f"{data_point['instance_id']}_{int(time.time())}_{str(uuid.uuid4())[:8]}"
@@ -1018,11 +1110,15 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
 
             output_dict = {
                 "swe-bench-metrics": report_json[data_point["instance_id"]],
-                "swe-bench-outputs": trajectory_dict,
+                "oh_time_metrics": trajectory_dict.get("oh_time_metrics", None) if trajectory_dict else {},
                 "generation": "",  # required TODO: we should fix this
                 "generation_time": generation_time,
                 "evaluation_time": evaluation_time,
             }
+
+            nemo_gym_metrics = json.loads(self.metrics_fpath.read_text())
+            with self.metrics_fpath.open("w") as f:
+                json.dump(nemo_gym_metrics | {"final_eval_time": evaluation_time}, f)
 
             return output_dict
         finally:

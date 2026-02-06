@@ -8,12 +8,14 @@ swe_agents_train:
       agent_config: responses_api_agents/swe_agents/configs/oh_config.toml
       agent_max_turns: 100
       agent_framework_repo: https://github.com/sdevare-nv/nv-OpenHands.git
-      agent_framework_commit: 7af10584eb623e6d50a616d3c3c967d7d4fb3690  # pragma: allowlist secret
+      agent_framework_commit: bxyu/profiling
       # Container configuration
       container_formatter: ???
       container_folder_path: null
-      swebench_agent_timeout: 2700 # 45 minutes
-      swebench_tests_timeout: 900  # 15 minutes
+      swebench_agent_timeout: 1800
+      swebench_tests_timeout: 900
+      apptainer_memory_limit_mb: 32768
+      command_exec_timeout: 300
       dataset_path: ???
       model_server:
         name: policy_model # openai_model
@@ -39,12 +41,14 @@ swe_agents_val:
       agent_config: responses_api_agents/swe_agents/configs/oh_config.toml
       agent_max_turns: 100
       agent_framework_repo: https://github.com/sdevare-nv/nv-OpenHands.git
-      agent_framework_commit: 7af10584eb623e6d50a616d3c3c967d7d4fb3690  # pragma: allowlist secret
+      agent_framework_commit: bxyu/profiling
       # Container configuration
       container_formatter: ???
       container_folder_path: null
-      swebench_agent_timeout: 2700 # 45 minutes
-      swebench_tests_timeout: 1800  # 30 minutes
+      swebench_agent_timeout: 1800
+      swebench_tests_timeout: 900
+      apptainer_memory_limit_mb: 32768
+      command_exec_timeout: 300
       dataset_path: ???
       # Optional model server reference
       model_server:

@@ -13,9 +13,12 @@
 # limitations under the License.
 import asyncio
 import json
+import os
+import shlex
 import sys
 import time
 import uuid
+import warnings
 from asyncio import Semaphore
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -34,12 +37,14 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.global_config import OmegaConf, get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.profiling import Profiler
 from responses_api_agents.swe_agents.utils import (
     convert_tools_to_function_format,
     convert_trajectory_to_output_items,
@@ -53,14 +58,59 @@ from responses_api_agents.swe_agents.utils import (
 )
 
 
+# There are some mysterious Pydantic serialization warnings related to FunctionTool that are not fatal that clutter up logs.
+# At some point we can try continue chasing this one down. Example:
+# (NemoGym pid=3160799) (swe_agents_val)   PydanticSerializationUnexpectedValue(Expected `general-fields` - serialized value may not be as expected [field_name='tools', input_value=FunctionTool(name='str_re... a single call each.\n'), input_type=FunctionTool])
+warnings.filterwarnings("ignore", message="FunctionTool")
+
+
+@ray.remote
+class ConcurrentContainerCounter:
+    def __init__(self):
+        self.concurrent_containers = 0
+
+    def increment(self):
+        self.concurrent_containers += 1
+        return self.concurrent_containers
+
+    def decrement(self):
+        self.concurrent_containers -= 1
+        return self.concurrent_containers
+
+
 @ray.remote(
     scheduling_strategy="SPREAD",
     runtime_env={
         "py_executable": sys.executable,
     },
+    num_cpus=1,
 )
-def runner_ray_remote(runner: Callable, params: dict[str, Any]) -> Any:
-    return asyncio.run(runner(**params))
+def runner_ray_remote(
+    concurrent_container_counter: ConcurrentContainerCounter, runner: Callable, params: dict[str, Any]
+) -> Any:
+    ray_submit_time = time.time()
+    params["ray_submit_time"] = ray_submit_time
+
+    # This is the first instance so we don't need to load anything
+    with params["metrics_fpath"].open("w") as f:
+        json.dump({"ray_queue_time": ray_submit_time - params["ray_queue_time"]}, f)
+
+    if params["debug"]:
+        concurrent_containers = ray.get(concurrent_container_counter.increment.remote())
+        print(f"Concurrent container #{concurrent_containers}", file=sys.stderr)
+
+        instance_id = params["problem_info"].get("instance_id", "unknown")
+        profiler = Profiler(name=instance_id, base_profile_dir=params["persistent_dir"] / "profiling")
+        profiler.start()
+
+    result = asyncio.run(runner(**params))
+
+    if params["debug"]:
+        profiler.stop()
+
+        ray.get(concurrent_container_counter.decrement.remote())
+
+    return result
 
 
 class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
@@ -91,6 +141,12 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
     swebench_tests_timeout: int = Field(default=30 * 60, description="Timeout for running tests (seconds)")
 
     swebench_agent_timeout: int = Field(default=45 * 60, description="Timeout for running the agent (seconds)")
+
+    apptainer_memory_limit_mb: int = Field(
+        default=32 * 1024, description="Memory limit for the apptainer container (MB)"
+    )
+
+    command_exec_timeout: int = Field(default=5 * 60, description="Timeout for executing the command (seconds)")
 
     # Concurrency control
     concurrency: int = Field(default=256, description="Maximum number of concurrent SWE-bench runs")
@@ -124,6 +180,9 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         description="Session ID for the run",
     )
 
+    openhands_should_log: bool = False
+    debug: bool = False
+
 
 class SWEBenchRunRequest(BaseRunRequest):
     """Request format for SWE-bench runs."""
@@ -150,22 +209,47 @@ class SWEBenchVerifyResponse(BaseVerifyResponse):
     patch_exists: Optional[float] = None  # 1.0 if patch exists, 0.0 otherwise
     patch_successfully_applied: Optional[float] = None  # 1.0 if patch applied, 0.0 otherwise
 
+    # Profiling time metrics to report
+    ray_queue_time: float
+    # generation_apptainer_spinup_time: float
+    # create_runtime_time: float
+    # container_initialization_time: float
+    # connect_to_runtime_time: float
+    # runtime_initialization_fn_time: float
+    # total_command_exec_time: float
+    # total_model_call_time: float
+    # final_eval_apptainer_spinup_time: float
+    final_eval_time: float
+
+    # Exit condition metrics to report
+    # TODO add more exit conditions
+    # hit_sample_timeout: bool
+    # hit_trajectory_command_exec_timeout: bool
+    # hit_eval_timeout: bool
+    hit_empty_trajectory: bool
+    hit_success: bool
+    hit_responses_exception: bool
+
 
 class SWEBenchWrapper(SimpleResponsesAPIAgent):
     """Wrapper for NeMo-Skills SWE-bench evaluation in NeMo-Gym."""
 
     config: SWEBenchWrapperConfig
     sem: Semaphore = None
+    _container_counter: ConcurrentContainerCounter = None
+    _global_config_dict_str: str = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
+        self._container_counter = ConcurrentContainerCounter.remote()
 
         # Pre-build OpenHands environment if using openhands framework
         if self.config.agent_framework == "openhands":
             self.config.openhands_setup_dir = setup_openhands_environment(
                 agent_framework_repo=self.config.agent_framework_repo,
                 agent_framework_commit=self.config.agent_framework_commit,
+                debug=self.config.debug,
             )
         self.config.swebench_setup_dir = setup_swebench_environment()
         self.config.r2e_gym_setup_dir = setup_r2e_gym_environment()
@@ -173,6 +257,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         print("Dependencies repositories set up complete", flush=True)
 
         self.config.run_session_id = f"{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
+        print(f"Run session ID: {self.config.run_session_id}", flush=True)
+
+        self._global_config_dict_str = shlex.quote(OmegaConf.to_yaml(get_global_config_dict()))
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         # Extract problem information from request
@@ -184,32 +271,45 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # Get model endpoint
         model_endpoint = get_model_endpoint(self.config.model_server.name)
 
-        # Run SWE-bench evaluation
+        # Create persistent directory for I/O and logs in local workspace
         instance_dir = (
             f"{problem_info.get('instance_id', 'unknown')}_{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
         )
+        workspace_root = Path(os.path.dirname(os.path.abspath(__file__)))
+        persistent_dir = workspace_root / f"swebench_results_{self.config.run_session_id}" / instance_dir
+        persistent_dir.mkdir(parents=True, exist_ok=True)
+        metrics_fpath = persistent_dir / "nemo_gym_metrics.json"
         try:
+            ray_queue_time = time.time()
             params = {
                 "problem_info": problem_info,
                 "model_endpoint": model_endpoint,
                 "body": body,
-                "run_session_id": self.config.run_session_id,
                 "agent_framework": self.config.agent_framework,
                 "agent_config": self.config.agent_config,
                 "agent_tools_file": self.config.agent_tools_file,
                 "agent_max_turns": self.config.agent_max_turns,
                 "swebench_tests_timeout": self.config.swebench_tests_timeout,
                 "swebench_agent_timeout": self.config.swebench_agent_timeout,
+                "persistent_dir": persistent_dir,
+                "metrics_fpath": metrics_fpath,
                 "agent_framework_repo": self.config.agent_framework_repo,
                 "agent_framework_commit": self.config.agent_framework_commit,
                 "openhands_setup_dir": self.config.openhands_setup_dir,
                 "swebench_setup_dir": self.config.swebench_setup_dir,
                 "r2e_gym_setup_dir": self.config.r2e_gym_setup_dir,
                 "dataset_path": self.config.dataset_path,
-                "instance_dir": instance_dir,
+                "ray_queue_time": ray_queue_time,
+                "openhands_should_log": self.config.openhands_should_log,
+                "debug": self.config.debug,
+                "model_server_name": self.config.model_server.name,
+                "ng_global_config_dict_str": self._global_config_dict_str,
+                "apptainer_memory_limit_mb": self.config.apptainer_memory_limit_mb,
+                "command_exec_timeout": self.config.command_exec_timeout,
             }
 
-            future = runner_ray_remote.remote(run_swebench_evaluation, params)
+            # Run SWE-bench evaluation
+            future = runner_ray_remote.remote(self._container_counter, run_swebench_evaluation, params)
             result = await future
 
             # Extract trajectory and convert to proper NeMoGym format
@@ -253,6 +353,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "agent_framework": self.config.agent_framework,
                 "has_trajectory": str(trajectory is not None),
                 "instance_id": result.get("instance_id", problem_info.get("instance_id", "unknown")),
+                "instance_dir": instance_dir,
+                "hit_success_str": json.dumps(bool(output_items)),
+                "hit_empty_trajectory_str": json.dumps(not trajectory),
+                "hit_responses_exception_str": json.dumps(False),
             }
 
             # Add evaluation results to metadata (convert to strings)
@@ -263,6 +367,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # For complex metrics, store as JSON string
             if "swe-bench-metrics" in result:
                 metadata["swe-bench-metrics"] = json.dumps(result["swe-bench-metrics"])
+
+            metadata["timing_metrics"] = metrics_fpath.read_text()
 
             return NeMoGymResponse(
                 id=f"swebench-{problem_info.get('instance_id', 'unknown')}",
@@ -296,12 +402,25 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 parallel_tool_calls=False,
                 tool_choice="none",
                 tools=[],
-                metadata={"error": str(e)},
+                metadata={
+                    "error": str(e),
+                    "hit_success_str": json.dumps(False),
+                    "hit_empty_trajectory_str": json.dumps((not trajectory) if "trajectory" in dir() else False),
+                    "hit_responses_exception_str": json.dumps(True),
+                },
             )
 
     async def run(self, body: SWEBenchRunRequest) -> SWEBenchVerifyResponse:
         """Run and verify SWE-bench solution."""
         async with self.sem:
+            if self.config.debug:
+                print(
+                    f"Semaphore: {self.config.concurrency - self.sem._value} / {self.config.concurrency}", flush=True
+                )
+            body.responses_create_params.metadata["container_concurrency"] = str(
+                self.config.concurrency - self.sem._value
+            )
+
             # Fix None values in responses_create_params to use defaults
             # This is needed because the pydantic model has non-Optional fields with defaults
 
@@ -331,7 +450,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # Add the extracted input messages and tools to the params
             # Note: tools should already be in the correct format from the response
             params_with_input = fixed_params.model_copy(
-                update={"input": input_messages, "tools": response.tools if response.tools else []}
+                update={
+                    "input": input_messages,
+                    "tools": [t.model_dump() for t in response.tools] if response.tools else [],
+                }
             )
 
             # Extract metrics from response metadata
@@ -351,6 +473,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
             reward = 1.0 if resolved else 0.0
 
+            hit_metrics = {k.removesuffix("_str"): json.loads(v) for k, v in metadata.items() if k.startswith("hit_")}
+
             # Build verification response with top-level numeric fields for statistics
             return SWEBenchVerifyResponse(
                 responses_create_params=params_with_input,
@@ -367,6 +491,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     "patch_successfully_applied": patch_applied,
                     "resolved": resolved,
                 },
+                **json.loads(metadata["timing_metrics"]),
+                **hit_metrics,
             )
 
 

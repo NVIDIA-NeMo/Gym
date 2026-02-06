@@ -19,7 +19,6 @@ import resource
 import sys
 from abc import abstractmethod
 from contextlib import asynccontextmanager
-from io import StringIO
 from logging import Filter as LoggingFilter
 from logging import LogRecord, getLogger
 from os import environ, getenv
@@ -33,7 +32,6 @@ import orjson
 import ray
 import requests
 import uvicorn
-import yappi
 from aiohttp import (
     ClientResponse,
     ClientResponseError,
@@ -67,6 +65,7 @@ from nemo_gym.global_config import (
     get_first_server_config_dict,
     get_global_config_dict,
 )
+from nemo_gym.profiling import Profiler
 
 
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
@@ -433,6 +432,9 @@ class SimpleServer(BaseServer):
                 )
 
                 response_content = f"Hit an exception in {self.get_session_middleware_key()} calling an inner server: {e.response_content}"
+                if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
+                    print(response_content)
+
                 return JSONResponse(content=response_content, status_code=500)
             except Exception as e:
                 print(
@@ -449,58 +451,26 @@ repr(e): {repr(e)}"""
                 return JSONResponse(content="An unknown error occurred", status_code=500)
 
     def setup_profiling(self, app: FastAPI, profiling_config: ProfilingMiddlewareConfig) -> None:  # pragma: no cover
-        base_profile_dir = PARENT_DIR / profiling_config.profiling_results_dirpath
-        server_profile_path = (base_profile_dir / self.get_session_middleware_key()).with_suffix(".log")
-
-        base_profile_dir.mkdir(parents=True, exist_ok=True)
+        base_profile_dir = PARENT_DIR / profiling_config.profiling_results_dirpath / self.get_session_middleware_key()
+        profiler = Profiler(name=self.config.name, base_profile_dir=base_profile_dir)
 
         main_app_lifespan = app.router.lifespan_context
 
-        def _dump_yappi_stats() -> str:
-            buffer = StringIO()
-            yappi.get_func_stats().print_all(
-                out=buffer,
-                columns={
-                    0: ("name", 200),
-                    1: ("ncall", 10),
-                    2: ("tsub", 8),
-                    3: ("ttot", 8),
-                    4: ("tavg", 8),
-                },
-            )
-
-            buffer.seek(0)
-            res = ""
-            past_header = False
-            for line in buffer:
-                if not past_header or self.config.entrypoint in line:
-                    res += line
-
-                if line.startswith("name"):
-                    past_header = True
-
-            return res
-
         @asynccontextmanager
         async def lifespan_wrapper(app):
-            yappi.set_clock_type("CPU")
-            yappi.start()
-            print(f"🔍 Enabled profiling for {self.config.name}")
+            profiler.start()
 
             async with main_app_lifespan(app) as maybe_state:
                 yield maybe_state
 
-            print(f"🛑 Stopping profiler for {self.config.name}. Check {server_profile_path} for the metrics!")
-            yappi.stop()
-
-            with open(server_profile_path, "w") as f:
-                f.write(_dump_yappi_stats())
+            profiler.stop()
 
         app.router.lifespan_context = lifespan_wrapper
 
         @app.get("/stats")
         def stats():
-            return Response(_dump_yappi_stats())
+            profiler.dump()
+            return Response()
 
     def set_ulimit(self, target_soft_limit: int = 65535):  # pragma: no cover
         # From https://github.com/vllm-project/vllm/blob/fed8a9b107df3e27d57728c6911c7d308b871477/vllm/utils/__init__.py#L2790
