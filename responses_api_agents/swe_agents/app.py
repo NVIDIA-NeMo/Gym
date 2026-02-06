@@ -1261,7 +1261,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             created_at=int(time.time()),
             model=body.model,
             object="response",
-            output=[i.model_dump() for i in output_items],
+            output=output_items,
             parallel_tool_calls=body.parallel_tool_calls,
             tool_choice=body.tool_choice,
             tools=tools,
