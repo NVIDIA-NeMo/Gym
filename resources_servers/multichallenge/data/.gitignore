@@ -13,3 +13,4 @@ vanilla.jsonl
 !.gitignore
 !README.md
 !example.jsonl
+!example_rollouts.jsonl
