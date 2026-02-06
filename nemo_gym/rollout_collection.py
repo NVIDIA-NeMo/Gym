@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+import logging
 from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
@@ -35,6 +36,9 @@ from nemo_gym.server_utils import (
     raise_for_status,
     set_global_aiohttp_client,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class RolloutCollectionConfig(BaseNeMoGymCLIConfig):
@@ -129,9 +133,22 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
                 row["responses_create_params"] = row["responses_create_params"] | config.responses_create_params
                 # Use config.agent_name if specified, otherwise use agent_ref from the row
                 agent_name = config.agent_name or row.get("agent_ref", {}).get("name")
+                max_retries = 3
                 async with semaphore:
-                    response = await server_client.post(server_name=agent_name, url_path="/run", json=row)
-                    await raise_for_status(response)
+                    for attempt in range(1, max_retries + 1):
+                        response = await server_client.post(server_name=agent_name, url_path="/run", json=row)
+                        if response.ok:
+                            break
+                        if response.status >= 500 and attempt < max_retries:
+                            content = await response.content.read()
+                            delay = 1.0 * (2 ** (attempt - 1))
+                            logger.warning(
+                                f"Rollout /run returned {response.status} (attempt {attempt}/{max_retries}). "
+                                f"Retrying in {delay}s... Response: {content[:200]}"
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        await raise_for_status(response)
                     result = await get_response_json(response)
                     metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
                     # For ng_profile to match rollouts to tasks
@@ -154,9 +171,22 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
         server_client = self.setup_server_client(head_server_config)
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
-            res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
+            max_retries = 3
+            for attempt in range(1, max_retries + 1):
+                res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
+                if res.ok:
+                    return row, await get_response_json(res)
+                if res.status >= 500 and attempt < max_retries:
+                    content = await res.content.read()
+                    delay = 1.0 * (2 ** (attempt - 1))
+                    logger.warning(
+                        f"Rollout /run returned {res.status} (attempt {attempt}/{max_retries}). "
+                        f"Retrying in {delay}s... Response: {content[:200]}"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                await raise_for_status(res)
             await raise_for_status(res)
-            return row, await get_response_json(res)
 
         return tqdm.as_completed(
             map(_post_subroutine, examples), desc="Collecting rollouts", miniters=10, total=len(examples)

@@ -12,6 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
+import logging
 import re
 from copy import deepcopy
 from time import time
@@ -19,6 +21,9 @@ from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
 from aiohttp.client_exceptions import ClientResponseError
+
+
+logger = logging.getLogger(__name__)
 from fastapi import Request
 from pydantic import BaseModel, Field
 
@@ -211,45 +216,57 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.extra_body:
             create_params = self.config.extra_body | create_params
 
-        try:
-            chat_completion_dict = await client.create_chat_completion(**create_params)
-        except ClientResponseError as e:
-            """
-            Example messages for out of context length:
+        max_retries = 5
+        for attempt in range(1, max_retries + 1):
+            try:
+                chat_completion_dict = await client.create_chat_completion(**create_params)
+                break
+            except ClientResponseError as e:
+                """
+                Example messages for out of context length:
 
-            1. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L914
-            ```json
-            {"object":"error","message":"This model\'s maximum context length is 32768 tokens. However, you requested 32818 tokens in the messages, Please reduce the length of the messages. None","type":"BadRequestError","param":null,"code":400}
-            ```
-            2. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L940
-            3. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L948
-            4. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/sampling_params.py#L463
-            """
-            result_content_str = e.response_content.decode()
+                1. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L914
+                ```json
+                {"object":"error","message":"This model\'s maximum context length is 32768 tokens. However, you requested 32818 tokens in the messages, Please reduce the length of the messages. None","type":"BadRequestError","param":null,"code":400}
+                ```
+                2. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L940
+                3. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L948
+                4. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/sampling_params.py#L463
+                """
+                result_content_str = e.response_content.decode()
 
-            is_out_of_context_length = e.status == 400 and (
-                "context length" in result_content_str or "max_tokens" in result_content_str
-            )
-            if is_out_of_context_length:
-                return NeMoGymChatCompletion(
-                    id="chtcmpl-123",
-                    object="chat.completion",
-                    created=int(time()),
-                    model=self.config.model,
-                    choices=[
-                        NeMoGymChoice(
-                            index=0,
-                            finish_reason="stop",
-                            message=NeMoGymChatCompletionMessage(
-                                role="assistant",
-                                content=None,
-                                tool_calls=None,
-                            ),
-                        )
-                    ],
+                is_out_of_context_length = e.status == 400 and (
+                    "context length" in result_content_str or "max_tokens" in result_content_str
                 )
-            else:
-                raise e
+                if is_out_of_context_length:
+                    return NeMoGymChatCompletion(
+                        id="chtcmpl-123",
+                        object="chat.completion",
+                        created=int(time()),
+                        model=self.config.model,
+                        choices=[
+                            NeMoGymChoice(
+                                index=0,
+                                finish_reason="stop",
+                                message=NeMoGymChatCompletionMessage(
+                                    role="assistant",
+                                    content=None,
+                                    tool_calls=None,
+                                ),
+                            )
+                        ],
+                    )
+                else:
+                    raise e
+            except OSError as e:
+                if attempt >= max_retries:
+                    logger.error(f"vLLM connection failed after {max_retries} attempts: {e}")
+                    raise
+                delay = 0.5 * (2 ** (attempt - 1))
+                logger.warning(
+                    f"vLLM connection error (attempt {attempt}/{max_retries}): {e}. Retrying in {delay}s..."
+                )
+                await asyncio.sleep(delay)
 
         choice_dict = chat_completion_dict["choices"][0]
         if self.config.uses_reasoning_parser:
