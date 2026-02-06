@@ -155,7 +155,7 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
 class SWEBenchMetrics(BaseModel):
     resolved: Optional[bool] = None
     patch_exists: Optional[bool] = None
-    patch_successfully_applied: Optional[bool] = None
+    # patch_successfully_applied: Optional[bool] = None
 
     # Profiling time metrics to report
     ray_queue_time: Optional[float] = None
@@ -699,6 +699,9 @@ def runner_ray_remote(params_dict: dict[str, Any]) -> Optional[Path]:
     params = SWEBenchWrapperInstanceConfig.model_validate(params_dict)
     instance_id = params.instance_id
 
+    params.metrics_fpath.write_text("{}")
+    update_metrics(params.metrics_fpath, {"ray_queue_time": time.time() - params.ray_queue_timestamp})
+
     if params.debug:
         profiler = Profiler(name=instance_id, base_profile_dir=params.persistent_dir / "profiling")
         profiler.start()
@@ -711,6 +714,17 @@ def runner_ray_remote(params_dict: dict[str, Any]) -> Optional[Path]:
         profiler.stop()
 
     return report_file
+
+
+def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
+    with metrics_fpath.open("rw") as f:
+        existing_dict = json.loads(f.read())
+
+        existing_dict = {k: v for k, v in existing_dict.items() if v is not None}
+        update_dict = {k: v for k, v in update_dict.items() if v is not None}
+
+        f.seek(0)
+        json.dump(existing_dict | update_dict, f)
 
 
 class RunOpenHandsAgent(BaseModel):
@@ -806,10 +820,14 @@ class RunOpenHandsAgent(BaseModel):
             )
 
     async def process_single_datapoint(self) -> Optional[Path]:
+        metrics = SWEBenchMetrics()
+
+        metrics.openhands_run_time = -time.time()
         out_file_in_eval = await self._execute_container_command(
             self.config.agent_command, self.config.agent_apptainer_command_str
         )
         out_file = self._openhands_dir_copy_from_host(output_file_path=out_file_in_eval)
+        metrics.openhands_run_time += time.time()
 
         with open(out_file, "r") as f:
             out_dict = json.loads(f.read().strip())
@@ -847,17 +865,21 @@ class RunOpenHandsAgent(BaseModel):
             graph.write_png(callgrind_graph_path)
 
         if not patch:
+            metrics.patch_exists = False
+            update_metrics(self.config.metrics_fpath, metrics.model_dump())
             return
 
         with open(self.config.model_patch_path, "w") as f:
             f.write(patch)
 
+        metrics.final_eval_time = -time.time()
         report_file = await self._execute_container_command(
             self.config.eval_command, self.config.eval_apptainer_command_str
         )
+        metrics.final_eval_time += time.time()
 
-        with self.config.metrics_fpath.open("w") as f:
-            f.write()
+        metrics.patch_exists = True
+        update_metrics(self.config.metrics_fpath, metrics.model_dump())
 
         return report_file
 
@@ -1214,6 +1236,11 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         if maybe_report_file:
             dataset_processor.postprocess_after_eval_run(maybe_report_file)
+
+            report = json.loads(maybe_report_file.read_text())
+            update_metrics(self.config.metrics_fpath, {"resolved": report["resolved"]})
+        else:
+            update_metrics(self.config.metrics_fpath, {"resolved": False})
 
         trajectories_dir = params.persistent_dir / "trajectories"
         chat_completions_trajectory, chat_completions_tools = self.get_openhands_trajectory_from_completions(
