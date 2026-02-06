@@ -29,7 +29,6 @@ Combine multiple verification strategies for more robust reward signals during G
 
 **Prerequisites**:
 - Completed {doc}`/get-started/detailed-setup`
-- Familiar with {doc}`/resources-server/index`
 
 ---
 
@@ -79,9 +78,6 @@ NeMo Gym supports two complementary approaches:
 
 Combine resource servers by adding their YAML configs together. Each server independently verifies responses for its domain.
 
-:::{seealso}
-{doc}`/resources-server/index` explains resource server concepts.
-:::
 
 ### Configuration
 
@@ -137,7 +133,6 @@ The collated training data includes samples from all configured environments.
 ### Scaling Considerations
 
 - Each resource server runs as a separate process
-- For high-throughput training, profile servers using {doc}`/resources-server/profile`
 - If one server fails, training stops—ensure all servers are reliable before production runs
 
 ---
@@ -295,18 +290,10 @@ Combined: (1.0, True)
 Explore advanced environment patterns: multi-step, multi-turn, LLM-as-judge, and more.
 :::
 
-:::{grid-item-card} {octicon}`book;1.5em;sd-mr-1` Resources Server Reference
-:link: /resources-server/index
-:link-type: doc
-
-Deep dive into resource server concepts, profiling, and containerization.
-:::
 
 ::::
 
 ## Related Topics
 
 - {doc}`/about/concepts/task-verification` — How verification drives training
-- {doc}`/resources-server/index` — Resource server concepts
-- {doc}`/resources-server/profile` — Profile server performance
 - [NeMo RL GRPO Guide](https://github.com/NVIDIA-NeMo/RL/blob/main/docs/guides/grpo.md) — GRPO training configuration

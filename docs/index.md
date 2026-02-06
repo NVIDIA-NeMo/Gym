@@ -128,17 +128,9 @@ Configure and customize the three server components of a training environment.
 :::{grid-item-card} {octicon}`cpu;1.5em;sd-mr-1` Model Server
 :link: model-server/index
 :link-type: doc
-Configure LLM inference backends: vLLM, OpenAI, Azure.
+Configure LLM inference backends including vLLM.
 +++
-{bdg-secondary}`inference` {bdg-secondary}`vllm` {bdg-secondary}`openai`
-:::
-
-:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Resources Server
-:link: resources-server/index
-:link-type: doc
-Define tasks, tools, and verification logic.
-+++
-{bdg-secondary}`tools` {bdg-secondary}`verification`
+{bdg-secondary}`inference` {bdg-secondary}`vllm`
 :::
 
 :::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` Agent Server
@@ -172,30 +164,6 @@ Learn how to build custom training environments for various RL scenarios.
 Build a complete training environment from scratch.
 +++
 {bdg-primary}`beginner` {bdg-secondary}`foundational`
-:::
-
-:::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` Multi-Step
-:link: environment-tutorials/multi-step
-:link-type: doc
-Sequential tool calling workflows.
-+++
-{bdg-secondary}`multi-step` {bdg-secondary}`tools`
-:::
-
-:::{grid-item-card} {octicon}`comment-discussion;1.5em;sd-mr-1` Multi-Turn
-:link: environment-tutorials/multi-turn
-:link-type: doc
-Conversational training environments.
-+++
-{bdg-secondary}`multi-turn` {bdg-secondary}`dialogue`
-:::
-
-:::{grid-item-card} {octicon}`law;1.5em;sd-mr-1` LLM-as-a-Judge
-:link: environment-tutorials/llm-as-judge
-:link-type: doc
-LLM-based response verification.
-+++
-{bdg-secondary}`verification` {bdg-secondary}`llm-judge`
 :::
 
 ::::
@@ -239,22 +207,6 @@ HuggingFace TRL integration for PPO and DPO.
 {bdg-secondary}`trl` {bdg-secondary}`huggingface`
 :::
 
-:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` VeRL
-:link: training-tutorials/verl
-:link-type: doc
-VeRL framework for research workflows.
-+++
-{bdg-secondary}`verl` {bdg-secondary}`research`
-:::
-
-:::{grid-item-card} {octicon}`gear;1.5em;sd-mr-1` NeMo Customizer
-:link: training-tutorials/nemo-customizer
-:link-type: doc
-Enterprise training with NeMo Customizer.
-+++
-{bdg-secondary}`nemo-customizer` {bdg-secondary}`enterprise`
-:::
-
 :::{grid-item-card} {octicon}`file;1.5em;sd-mr-1` Offline Training
 :link: offline-training-w-rollouts
 :link-type: ref
@@ -286,14 +238,6 @@ Deploy and scale NeMo Gym for production workloads.
 Production deployment patterns and configurations.
 +++
 {bdg-secondary}`deployment` {bdg-secondary}`topology`
-:::
-
-:::{grid-item-card} {octicon}`broadcast;1.5em;sd-mr-1` Distributed Computing with Ray
-:link: infrastructure/ray-distributed
-:link-type: doc
-Scale with Ray clusters for high-throughput rollout collection.
-+++
-{bdg-secondary}`ray` {bdg-secondary}`distributed`
 :::
 
 ::::
@@ -338,7 +282,6 @@ Home <self>
 Overview <about/index.md>
 Concepts <about/concepts/index>
 🟡 Architecture <about/architecture>
-🟡 Performance <about/performance>
 Ecosystem <about/ecosystem>
 ```
 
@@ -360,21 +303,6 @@ Rollout Collection <get-started/rollout-collection.md>
 
 🟡 Overview <model-server/index>
 🟡 vLLM <model-server/vllm>
-🟡 OpenAI <model-server/openai>
-🟡 Azure OpenAI <model-server/azure-openai>
-🟡 Responses API <model-server/responses-native>
-```
-
-```{toctree}
-:caption: Resources Server
-:hidden:
-:maxdepth: 1
-
-🟡 Overview <resources-server/index>
-🟡 Integrate Python Tools <resources-server/integrate-python-tools>
-🟡 Integrate APIs <resources-server/integrate-apis>
-🟡 Containerize <resources-server/containerize>
-🟡 Profile <resources-server/profile>
 ```
 
 ```{toctree}
@@ -383,7 +311,6 @@ Rollout Collection <get-started/rollout-collection.md>
 :maxdepth: 1
 
 🟡 Overview <agent-server/index>
-🟡 Integrate Agents <agent-server/integrate-agents/index>
 ```
 
 ```{toctree}
@@ -403,12 +330,6 @@ Rollout Collection <get-started/rollout-collection.md>
 
 🟡 Overview <environment-tutorials/index>
 🟡 Creating Training Environment <environment-tutorials/creating-training-environment>
-🟡 Multi-Step <environment-tutorials/multi-step>
-🟡 Multi-Turn <environment-tutorials/multi-turn>
-🟡 User Modeling <environment-tutorials/user-modeling>
-🟡 Multi-Node Docker <environment-tutorials/multi-node-docker>
-🟡 LLM as Judge <environment-tutorials/llm-as-judge>
-🟡 RLHF Reward Models <environment-tutorials/rlhf-reward-models>
 ```
 
 ```{toctree}
@@ -418,12 +339,9 @@ Rollout Collection <get-started/rollout-collection.md>
 
 🟡 Overview <training-tutorials/index>
 🟡 Nemotron Nano <training-tutorials/nemotron-nano>
-🟡 Nemotron Super <training-tutorials/nemotron-super>
 NeMo RL GRPO <tutorials/nemo-rl-grpo/index.md>
 Unsloth Training <tutorials/unsloth-training>
 🟡 TRL <training-tutorials/trl>
-🟡 VERL <training-tutorials/verl>
-🟡 NeMo Customizer <training-tutorials/nemo-customizer>
 Offline Training <tutorials/offline-training-w-rollouts>
 ```
 
@@ -434,7 +352,6 @@ Offline Training <tutorials/offline-training-w-rollouts>
 
 🟡 Overview <infrastructure/index>
 🟡 Deployment Topology <infrastructure/deployment-topology>
-🟡 Ray Distributed <infrastructure/ray-distributed>
 ```
 
 ```{toctree}
