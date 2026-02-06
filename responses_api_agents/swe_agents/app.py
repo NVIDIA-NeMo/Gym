@@ -815,9 +815,8 @@ class RunOpenHandsAgent(BaseModel):
         with open(out_file, "r") as f:
             out_dict = json.loads(f.read().strip())
 
-        patch = out_dict["test_result"]["git_patch"]
-        if not patch:
-            patch = None
+        patch = out_dict["test_result"]["git_patch"] or None
+        patch = patch + "\n" if patch and not patch.endswith("\n") else patch
 
         # Create file in the SWE-bench evaluation format
         pred_file = out_file.replace("output.jsonl", "output_for_eval.jsonl")
@@ -827,7 +826,7 @@ class RunOpenHandsAgent(BaseModel):
                     {
                         "model_name_or_path": out_dict["metadata"]["llm_config"]["model"],
                         "instance_id": out_dict["instance_id"],
-                        "model_patch": patch + "\n" if patch and not patch.endswith("\n") else patch,
+                        "model_patch": patch,
                         "oh_time_metrics": out_dict["metrics"],
                     }
                 )
@@ -848,23 +847,11 @@ class RunOpenHandsAgent(BaseModel):
             (graph,) = graph_from_dot_file(callgrind_dotfile_path)
             graph.write_png(callgrind_graph_path)
 
-        if pred_file is None:
-            return
-
-        with open(pred_file, "r") as f:
-            trajectory_dict = json.loads(f.read())
-
-        # Check if the trajectory has an empty patch before running evaluation
-        has_patch = trajectory_dict["model_patch"] is not None
-        if not has_patch:
+        if not patch:
             return
 
         with open(self.config.model_patch_path, "w") as f:
-            model_patch = trajectory_dict["model_patch"]
-
-            # Add a newline to the end of the patch if it doesn't have one
-            model_patch = model_patch + "\n" if not model_patch.endswith("\n") else model_patch
-            f.write(model_patch)
+            f.write(patch)
 
         report_file = await self._execute_container_command(
             self.config.eval_command, self.config.eval_apptainer_command_str
