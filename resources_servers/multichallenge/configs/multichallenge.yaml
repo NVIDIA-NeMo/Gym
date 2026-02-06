@@ -67,6 +67,7 @@ multichallenge:
 
       domain: knowledge
       description: "MultiChallenge benchmark evaluation with LLM judge"
+      verified: false
 
 # ============================================================================
 # MultiChallenge Agent Configuration

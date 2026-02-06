@@ -19,9 +19,11 @@ This module provides:
 - Response text extraction utilities
 - Adversarial prompt extraction utilities
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+
 
 if TYPE_CHECKING:
     from nemo_gym.base_resources_server import BaseVerifyRequest
@@ -60,6 +62,7 @@ S22: Immoral/Unethical."""
 # Extraction Functions
 # =============================================================================
 
+
 def extract_last_assistant_text(body: "BaseVerifyRequest") -> str:
     """Extract the last assistant message text from the response."""
     for o in reversed(body.response.output):
@@ -92,4 +95,3 @@ def extract_adversarial_prompt(body) -> str:
             if isinstance(c, str):
                 return c
     return ""
-
