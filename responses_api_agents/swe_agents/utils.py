@@ -1106,7 +1106,7 @@ echo "Installing conda packages (this may take 5-10 minutes)..."
 mamba install -y --override-channels conda-forge::python=3.12 conda-forge::nodejs conda-forge::poetry conda-forge::tmux
 
 # Upgrade packaging to ensure packaging.licenses is available (required by poetry)
-pip install -q 'packaging>=24.2'
+{miniforge_dir}/bin/python -m pip install -q 'packaging==26.0'
 
 # Verify installations
 echo "Verifying package installations..."
