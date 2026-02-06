@@ -927,7 +927,7 @@ def setup_r2e_gym_environment(
         RuntimeError: If setup fails
     """
     if eval_harness_repo is None:
-        eval_harness_repo = "https://github.com/ludwig-n/R2E-Gym.git"
+        eval_harness_repo = "https://github.com/sdevare-nv/nv-R2E-Gym.git"
 
     setup_dir = _resolve_setup_directory(setup_dir, "swe_r2e_gym_setup")
 
@@ -1104,6 +1104,9 @@ mamba --version
 # Install required packages
 echo "Installing conda packages (this may take 5-10 minutes)..."
 mamba install -y --override-channels conda-forge::python=3.12 conda-forge::nodejs conda-forge::poetry conda-forge::tmux
+
+# Upgrade packaging to ensure packaging.licenses is available (required by poetry)
+pip install -q 'packaging>=24.2'
 
 # Verify installations
 echo "Verifying package installations..."
