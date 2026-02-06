@@ -139,7 +139,9 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     eval_dir_in_openhands: str
     openhands_config_file_path: str
     agent_script_path: Path
+    final_eval_apptainer_spinup_timestamp_fpath: Path
     final_eval_apptainer_spinup_timestamp_mounted_fpath: Path
+    generation_apptainer_spinup_timestamp_fpath: Path
     generation_apptainer_spinup_timestamp_mounted_fpath: Path
 
     # Set later
@@ -836,7 +838,7 @@ class RunOpenHandsAgent(BaseModel):
         out_file = self._openhands_dir_copy_from_host(output_file_path=out_file_in_eval)
 
         generation_apptainer_spinup_timestamp = float(
-            self.config.generation_apptainer_spinup_timestamp_mounted_fpath.read_text()
+            self.config.generation_apptainer_spinup_timestamp_fpath.read_text()
         )
         metrics.generation_apptainer_spinup_time = metrics.openhands_run_time + generation_apptainer_spinup_timestamp
         metrics.openhands_run_time += time.time()
@@ -890,7 +892,7 @@ class RunOpenHandsAgent(BaseModel):
         )
 
         final_eval_apptainer_spinup_timestamp = float(
-            self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath.read_text()
+            self.config.final_eval_apptainer_spinup_timestamp_fpath.read_text()
         )
         metrics.final_eval_apptainer_spinup_time = metrics.final_eval_time + final_eval_apptainer_spinup_timestamp
         metrics.final_eval_time += time.time()
@@ -1228,8 +1230,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             eval_dir_in_openhands=eval_dir_in_openhands,
             openhands_config_file_path=openhands_config_file_path,
             agent_script_path=agent_script_path,
+            final_eval_apptainer_spinup_timestamp_fpath=persistent_dir / "final_eval_apptainer_spinup_timestamp",
             final_eval_apptainer_spinup_timestamp_mounted_fpath=Path("/trajectories_mount")
             / "final_eval_apptainer_spinup_timestamp",
+            generation_apptainer_spinup_timestamp_fpath=persistent_dir / "generation_apptainer_spinup_timestamp",
             generation_apptainer_spinup_timestamp_mounted_fpath=Path("/trajectories_mount")
             / "generation_apptainer_spinup_timestamp",
         )
