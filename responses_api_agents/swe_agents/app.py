@@ -835,13 +835,10 @@ class RunOpenHandsAgent(BaseModel):
         )
         out_file = self._openhands_dir_copy_from_host(output_file_path=out_file_in_eval)
 
-        if self.config.generation_apptainer_spinup_timestamp_mounted_fpath.exists():
-            generation_apptainer_spinup_timestamp = float(
-                self.config.generation_apptainer_spinup_timestamp_mounted_fpath.read_text()
-            )
-            metrics.generation_apptainer_spinup_time = (
-                metrics.openhands_run_time + generation_apptainer_spinup_timestamp
-            )
+        generation_apptainer_spinup_timestamp = float(
+            self.config.generation_apptainer_spinup_timestamp_mounted_fpath.read_text()
+        )
+        metrics.generation_apptainer_spinup_time = metrics.openhands_run_time + generation_apptainer_spinup_timestamp
         metrics.openhands_run_time += time.time()
 
         with open(out_file, "r") as f:
@@ -892,11 +889,10 @@ class RunOpenHandsAgent(BaseModel):
             self.config.eval_command, self.config.eval_apptainer_command_str
         )
 
-        if self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath.exists():
-            final_eval_apptainer_spinup_timestamp = float(
-                self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath.read_text()
-            )
-            metrics.final_eval_apptainer_spinup_time = metrics.final_eval_time + final_eval_apptainer_spinup_timestamp
+        final_eval_apptainer_spinup_timestamp = float(
+            self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath.read_text()
+        )
+        metrics.final_eval_apptainer_spinup_time = metrics.final_eval_time + final_eval_apptainer_spinup_timestamp
         metrics.final_eval_time += time.time()
 
         metrics.patch_exists = True
