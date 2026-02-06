@@ -113,7 +113,7 @@ class TestApp:
             expected_answer="4",
         )
 
-        result = await server.verify(verify_request)
+        result = await server.verify(None, verify_request)
 
         assert result.reward == 1.0
         assert result.delegated_response is not None
@@ -179,7 +179,7 @@ class TestApp:
             expected_answer="4",
         )
 
-        result = await server.verify(verify_request)
+        result = await server.verify(None, verify_request)
 
         assert result.reward == 0.0
         call_args = server.server_client.post.call_args
@@ -232,7 +232,7 @@ class TestApp:
             expected_answer="4",
         )
 
-        await server.verify(verify_request)
+        await server.verify(None, verify_request)
 
         call_args = server.server_client.post.call_args
         json_data = call_args.kwargs["json"]
