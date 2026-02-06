@@ -132,7 +132,8 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     instance_dataset_path: Path
     trajectories_root: Path
     prediction_path: Path
-    prediction_mounted_path: Path
+    output_for_eval_mounted_path: Path
+    output_for_eval_path: Path
     model_patch_path: Path
     container: str
     eval_dir_in_openhands: str
@@ -274,7 +275,7 @@ SWEBENCH_COMMIT={swebench_commit} \\
             # Run with clean environment to avoid venv contamination
             # Use the pre-built venv directly with its absolute path
             f"env -u VIRTUAL_ENV {self.config.swebench_setup_dir}/SWE-bench/venv/bin/python -m swebench.harness.run_local_evaluation "
-            f"    --predictions_path {self.config.prediction_mounted_path} "
+            f"    --predictions_path {self.config.output_for_eval_mounted_path} "
             f"    --instance_ids {self.config.instance_id} "
             f"    --timeout {self.config.swebench_tests_timeout} "
             f"    --dataset_name /root/dataset/data.jsonl "
@@ -349,7 +350,7 @@ EVAL_HARNESS_COMMIT={eval_harness_commit} \\
             # Run with clean environment to avoid venv contamination
             # Use the pre-built venv directly with its absolute path
             f"env -u VIRTUAL_ENV {self.config.r2e_gym_setup_dir}/R2E-Gym/venv/bin/python src/r2egym/agenthub/run/run_local_evaluation.py "
-            f"    --predictions_path {self.config.prediction_mounted_path} "
+            f"    --predictions_path {self.config.output_for_eval_mounted_path} "
             f"    --instance_id {self.config.instance_id} "
             f"    --timeout {self.config.swebench_tests_timeout} "
             f"    --dataset /root/dataset/data.jsonl "
@@ -819,8 +820,8 @@ class RunOpenHandsAgent(BaseModel):
         patch = patch + "\n" if patch and not patch.endswith("\n") else patch
 
         # Create file in the SWE-bench evaluation format
-        self.config.prediction_mounted_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.config.prediction_mounted_path.open("w") as f:
+        self.config.output_for_eval_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.config.output_for_eval_path.open("w") as f:
             f.write(
                 json.dumps(
                     {
@@ -852,10 +853,6 @@ class RunOpenHandsAgent(BaseModel):
 
         with open(self.config.model_patch_path, "w") as f:
             f.write(patch)
-
-        # TODO remove
-        with open(self.config.prediction_mounted_path) as f:
-            print("PREDICTION_MOUNTED_PATH_CONTENT", f.read(), file=sys.stderr)
 
         report_file = await self._execute_container_command(
             self.config.eval_command, self.config.eval_apptainer_command_str
@@ -1145,7 +1142,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             f.write(json.dumps(instance_dict) + "\n")
 
         trajectories_root = persistent_dir / "trajectories" / instance_id
-        prediction_mounted_path = Path("/trajectories_mount") / "trajectories" / instance_id / "output_for_eval.jsonl"
+        output_for_eval_mounted_path = (
+            Path("/trajectories_mount") / "trajectories" / instance_id / "output_for_eval.jsonl"
+        )
+        output_for_eval_path = trajectories_root / "output_for_eval.jsonl"
         prediction_path = trajectories_root / "output.jsonl"
 
         # Map from Responses to OpenHands
@@ -1179,8 +1179,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             agent_run_id=agent_run_id,
             instance_dataset_path=instance_dataset_path,
             trajectories_root=trajectories_root,
+            output_for_eval_mounted_path=output_for_eval_mounted_path,
+            output_for_eval_path=output_for_eval_path,
             prediction_path=prediction_path,
-            prediction_mounted_path=prediction_mounted_path,
             model_patch_path=persistent_dir / "patch.diff",
             container=container,
             eval_dir_in_openhands=eval_dir_in_openhands,
