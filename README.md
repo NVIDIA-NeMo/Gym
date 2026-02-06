@@ -1,6 +1,6 @@
 # NeMo Gym
 
-**[Requirements](#-requirements)** • **[Quick Start](#-quick-start)** • **[Available Resource Servers](#-available-resource-servers)** • **[Documentation & Resources](#-documentation--resources)** • **[Community & Support](#-community--support)** • **[Citations](#-citations)**
+**[Requirements](#-requirements)** • **[Quick Start](#-quick-start)** • **[Available Resource Servers](#-available-resource-servers)** • **[Documentation & Resources](#-documentation--resources)** • **[Community & Support](#-community--support)** • **[Latest News & Publications](#-latest-news--publications)** • **[Citations](#-citations)**
 
 NeMo Gym is a library for building reinforcement learning (RL) training environments for large language models (LLMs). It provides infrastructure to develop environments, scale rollout collection, and integrate seamlessly with your preferred training framework. [Learn more about the NeMo Gym ecosystem.](https://docs.nvidia.com/nemo/gym/latest/about/ecosystem.html)
 
@@ -158,6 +158,7 @@ Purpose: Training-ready environments with curated datasets.
 
 - **[Documentation](https://docs.nvidia.com/nemo/gym/latest/index.html)** - Technical reference docs
 - **[Tutorials](https://docs.nvidia.com/nemo/gym/latest/tutorials/index.html)** - Hands-on tutorials and practical examples
+- **[API Reference](https://docs.nvidia.com/nemo/gym/latest/apidocs/index.html)** - Complete class and function reference
  
 
 ## 🤝 Community & Support
@@ -166,6 +167,10 @@ We'd love your contributions! Here's how to get involved:
 
 - **[Report Issues](https://github.com/NVIDIA-NeMo/Gym/issues)** - Bug reports and feature requests
 - **[Contributing Guide](https://docs.nvidia.com/nemo/gym/latest/contribute/index.html)** - How to contribute code, docs, new environments, or training framework integrations
+
+## 📰 Latest News & Publications
+
+Coming soon!
 
 ## 📚 Citations
 
