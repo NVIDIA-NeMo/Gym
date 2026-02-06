@@ -25,7 +25,6 @@ from contextlib import nullcontext
 from enum import Enum
 from typing import Any, Optional
 
-from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.base_resources_server import (
@@ -185,17 +184,11 @@ class ScienceCodeResourcesServer(SimpleResourcesServer):
         super().__init__(*args, **kwargs)
 
         if self.config.judge_endpoint_max_concurrency is not None:
-            self._judge_endpoint_max_concurrency = asyncio.Semaphore(
-                value=self.config.judge_endpoint_max_concurrency
-            )
+            self._judge_endpoint_max_concurrency = asyncio.Semaphore(value=self.config.judge_endpoint_max_concurrency)
         else:
             self._judge_endpoint_max_concurrency = None
 
         self._judge_prompt_template = SCIENCE_CODE_JUDGE_PROMPT_TEMPLATE
-
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-        return app
 
     async def verify(self, body: ScienceCodeVerifyRequest) -> ScienceCodeVerifyResponse:
         """Verify model response by comparing generated code with reference using LLM judge."""
