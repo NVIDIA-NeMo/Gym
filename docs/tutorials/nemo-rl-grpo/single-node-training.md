@@ -64,7 +64,7 @@ The Nemotron Nano 9B v2 model uses a custom chat template that must be modified 
 ```bash
 tokenizer_config_path=$(find $PWD/.cache/hub/models--nvidia--NVIDIA-Nemotron-Nano-9B-v2 -name tokenizer_config.json)
 sed -i 's/enable_thinking=true/enable_thinking=false/g' $tokenizer_config_path
-sed -i 's/{%- if messages\[-1\]\['\''role'\''\] == '\''assistant'\'' -%}{%- set ns.last_turn_assistant_content = messages\[-1\]\['\''content'\''\].strip() -%}{%- set messages = messages\[:-1\] -%}{%- endif -%}//g' $tokenizer_config_path
+sed -i 's/{%- if messages\[-1\]\['\''role'\'\'] == '\''assistant'\'' -%}{%- set ns.last_turn_assistant_content = messages\[-1\]\['\''content'\'\'].strip() -%}{%- set messages = messages\[:-1\] -%}{%- endif -%}//g' $tokenizer_config_path
 ```
 
 **✅ Success Check**: The `sed` commands complete without errors.
@@ -74,6 +74,10 @@ sed -i 's/{%- if messages\[-1\]\['\''role'\''\] == '\''assistant'\'' -%}{%- set 
 ## 3. Run Training
 
 **Estimated time**: ~15-30 minutes
+
+:::{note}
+The configuration file and training script referenced below are located in the NeMo RL repository that you cloned during {doc}`Setup <setup>`. Make sure you're in the `RL/` directory before running the training command.
+:::
 
 By default, this runs only 3 training steps (`grpo.max_num_steps=3`) as a small test run in preparation for multi-node training. If you are using a single node for the full training run, you can remove this value. The full training will take several hours.
 
