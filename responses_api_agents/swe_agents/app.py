@@ -139,6 +139,8 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     eval_dir_in_openhands: str
     openhands_config_file_path: str
     agent_script_path: Path
+    final_eval_apptainer_spinup_timestamp_mounted_fpath: Path
+    generation_apptainer_spinup_timestamp_mounted_fpath: Path
 
     # Set later
     eval_command: Optional[ExecuteContainerCommandArgs] = None
@@ -160,14 +162,14 @@ class SWEBenchMetrics(BaseModel):
     # Profiling time metrics to report
     ray_queue_time: Optional[float] = None
     openhands_run_time: Optional[float] = None
-    # generation_apptainer_spinup_time: float
+    generation_apptainer_spinup_time: float
     # create_runtime_time: float
     # container_initialization_time: float
     # connect_to_runtime_time: float
     # runtime_initialization_fn_time: float
     # total_command_exec_time: float
     # total_model_call_time: float
-    # final_eval_apptainer_spinup_time: float
+    final_eval_apptainer_spinup_time: float
     final_eval_time: Optional[float] = None
 
     # Exit condition metrics to report
@@ -263,6 +265,7 @@ SWEBENCH_COMMIT={swebench_commit} \\
 
     def get_run_command(self) -> ExecuteContainerCommandArgs:
         swebench_cmd = (
+            f"date +%s > {self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath} && "
             # Use pre-built SWE-bench
             "cd /swebench_setup/SWE-bench && "
             # Set UV environment variables to use the mounted portable directories
@@ -339,6 +342,7 @@ EVAL_HARNESS_COMMIT={eval_harness_commit} \\
 
     def get_run_command(self) -> ExecuteContainerCommandArgs:
         r2e_gym_cmd = (
+            f"date +%s > {self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath} && "
             # Use mounted directory path for cd
             "cd /r2egym_setup/R2E-Gym && "
             # Set UV environment variables to use the mounted portable directories
@@ -423,6 +427,8 @@ class NVInternalDatasetProcessor(BaseDatasetHarnessProcessor):
 
         cmd = f"""#!/bin/bash
 set -e
+
+date +%s > {self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath}
 
 {env_exports}
 
@@ -607,6 +613,7 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
             # Use pre-built OpenHands
             "cd /openhands_setup/OpenHands && "
             "export RUNTIME=local && "
+            f"date +%s > {self.config.generation_apptainer_spinup_timestamp_mounted_fpath} && "
             f"{log_cmd}"
             f"{profiling_cmd}"
             f"export NEMO_GYM_METRICS_FPATH={self.config.metrics_fpath} && "
@@ -827,6 +834,14 @@ class RunOpenHandsAgent(BaseModel):
             self.config.agent_command, self.config.agent_apptainer_command_str
         )
         out_file = self._openhands_dir_copy_from_host(output_file_path=out_file_in_eval)
+
+        if self.config.generation_apptainer_spinup_timestamp_mounted_fpath.exists():
+            generation_apptainer_spinup_timestamp = float(
+                self.config.generation_apptainer_spinup_timestamp_mounted_fpath.read_text()
+            )
+            metrics.generation_apptainer_spinup_time = (
+                metrics.openhands_run_time + generation_apptainer_spinup_timestamp
+            )
         metrics.openhands_run_time += time.time()
 
         with open(out_file, "r") as f:
@@ -876,6 +891,12 @@ class RunOpenHandsAgent(BaseModel):
         report_file = await self._execute_container_command(
             self.config.eval_command, self.config.eval_apptainer_command_str
         )
+
+        if self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath.exists():
+            final_eval_apptainer_spinup_timestamp = float(
+                self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath.read_text()
+            )
+            metrics.final_eval_apptainer_spinup_time = metrics.final_eval_time + final_eval_apptainer_spinup_timestamp
         metrics.final_eval_time += time.time()
 
         metrics.patch_exists = True
@@ -1211,6 +1232,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             eval_dir_in_openhands=eval_dir_in_openhands,
             openhands_config_file_path=openhands_config_file_path,
             agent_script_path=agent_script_path,
+            final_eval_apptainer_spinup_timestamp_mounted_fpath=Path("/trajectories_mount")
+            / "final_eval_apptainer_spinup_timestamp",
+            generation_apptainer_spinup_timestamp_mounted_fpath=Path("/trajectories_mount")
+            / "generation_apptainer_spinup_timestamp",
         )
 
         if params.problem_info["dataset_name"] == "nv-internal-1":
@@ -1233,15 +1258,16 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         params, dataset_processor = self._setup_params(body)
 
         maybe_report_file = await runner_ray_remote.remote(params.model_dump())
+        metrics_to_update = dict()
 
         if maybe_report_file:
             dataset_processor.postprocess_after_eval_run(maybe_report_file)
 
             report = json.loads(Path(maybe_report_file).read_text())
             resolved = report[params.instance_id]["resolved"]
-            update_metrics(params.metrics_fpath, {"resolved": resolved})
+            metrics_to_update["resolved"] = resolved
         else:
-            update_metrics(params.metrics_fpath, {"resolved": False})
+            metrics_to_update["resolved"] = False
 
         trajectories_dir = params.persistent_dir / "trajectories"
         chat_completions_trajectory, chat_completions_tools = self.get_openhands_trajectory_from_completions(
@@ -1255,6 +1281,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             chat_completions_trajectory
         )
         input_items, output_items = split_responses_input_output_items(responses_items)
+
+        update_metrics(params.metrics_fpath, metrics_to_update)
 
         return NeMoGymResponse(
             id=f"swebench-{params.instance_id}",
