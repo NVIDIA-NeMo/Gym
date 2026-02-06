@@ -1280,16 +1280,14 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             response = await self.responses(body.responses_create_params)
 
             metadata, response.metadata = response.metadata, None
-            params_with_input = body.responses_create_params.model_copy(
-                update={
-                    "input": json.loads(metadata["input"]),
-                    "tools": [t.model_dump() for t in response.tools] if response.tools else [],
-                }
-            )
+            responses_create_params = body.responses_create_params.model_dump() | {
+                "input": json.loads(metadata["input"]),
+                "tools": [t.model_dump() for t in response.tools] if response.tools else [],
+            }
             metrics = SWEBenchMetrics.model_validate_json(metadata["metrics"])
 
             return SWEBenchVerifyResponse(
-                responses_create_params=params_with_input,
+                responses_create_params=responses_create_params,
                 response=response,
                 reward=1.0 if metrics.resolved else 0.0,
                 **metrics.model_dump(),
