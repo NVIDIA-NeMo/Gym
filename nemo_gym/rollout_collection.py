@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,7 +17,7 @@ import json
 from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
-from itertools import chain, repeat
+from itertools import repeat
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
 
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig
+from nemo_gym.global_config import TASK_INDEX_KEY_NAME
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
@@ -90,7 +91,11 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
 
         if config.num_repeats:
             previous_length = len(rows)
-            rows = list(chain.from_iterable(repeat(row, config.num_repeats) for row in rows))
+            expanded = []
+            for task_idx, row in enumerate(rows):
+                for _ in range(config.num_repeats):
+                    expanded.append({**row, TASK_INDEX_KEY_NAME: task_idx})
+            rows = expanded
             print(f"Repeating rows (in a pattern of abc to aabbcc) from {previous_length} to {len(rows)}!")
 
         semaphore = nullcontext()
@@ -128,8 +133,11 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
                     response = await server_client.post(server_name=agent_name, url_path="/run", json=row)
                     await raise_for_status(response)
                     result = await get_response_json(response)
-                    f.write(json.dumps(result) + "\n")
                     metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
+                    # For ng_profile to match rollouts to tasks
+                    if TASK_INDEX_KEY_NAME in row:
+                        result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
+                    f.write(json.dumps(result) + "\n")
 
             await tqdm.gather(*map(_post_coroutine, rows), desc="Collecting rollouts", miniters=tqdm_miniters)
 
