@@ -3,7 +3,27 @@
 
 Combine multiple verification strategies for more robust reward signals during GRPO training.
 
+:::{card}
+
 **Goal**: Configure NeMo Gym to use multiple resource servers or reward functions in a single training run.
+
+^^^
+
+**In this tutorial, you will**:
+
+1. Combine multiple resource servers for training
+2. Configure weighted reward aggregation
+3. Run GRPO training with composite verification
+
+:::
+
+:::{button-ref} training-nemo-rl-grpo-multi-node-training
+:color: secondary
+:outline:
+:ref-type: ref
+
+← Previous: Multi-Node Training
+:::
 
 **Prerequisites**:
 - Completed {doc}`/get-started/detailed-setup`

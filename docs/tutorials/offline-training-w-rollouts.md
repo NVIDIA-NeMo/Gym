@@ -6,7 +6,19 @@
 This tutorial is **experimental** and may contain bugs. Proceed with caution.
 :::
 
+:::{card}
+
 **Goal**: Transform your generated rollouts into high-quality training data for {term}`supervised fine-tuning (SFT) <SFT (Supervised Fine-Tuning)>` and {term}`direct preference optimization (DPO) <DPO (Direct Preference Optimization)>`.
+
+^^^
+
+**In this tutorial, you will**:
+
+1. Filter and process collected rollouts
+2. Generate SFT and DPO training datasets
+3. Train models using offline training pipelines
+
+:::
 
 ## Why Offline Training?
 

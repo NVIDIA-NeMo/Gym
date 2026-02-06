@@ -19,6 +19,14 @@
 
 :::
 
+:::{button-ref} index
+:color: secondary
+:outline:
+:ref-type: doc
+
+← Previous: Quickstart
+:::
+
 ## Requirements
 
 ### Hardware Requirements
@@ -390,4 +398,21 @@ Gym/
 ├── responses_api_agents/       # Agent implementations
 └── docs/                       # Documentation files
 ```
+
+---
+
+## Next Steps
+
+You've confirmed that NeMo Gym is working — the agent can call tools and return results. But a single interaction isn't enough for RL training. **The next step is to collect batches of scored interactions (rollouts) that become your training data.**
+
+:::{button-ref} rollout-collection
+:color: primary
+:ref-type: doc
+
+Continue to Rollout Collection →
+:::
+
+:::{note}
+Rollout collection is required before proceeding to tutorials like {doc}`/tutorials/creating-resource-server` or training workflows. Complete it next.
+:::
 

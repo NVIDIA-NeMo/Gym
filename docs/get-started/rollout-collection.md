@@ -188,7 +188,7 @@ ng_collect_rollouts \
 
 ---
 
-## What's Next?
+## Next Steps
 
 Congratulations! You now have a working NeMo Gym installation and understand how to generate rollouts. Choose your path based on your goals:
 

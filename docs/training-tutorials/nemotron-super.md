@@ -403,7 +403,7 @@ Before running production training:
 
 ---
 
-## What's Next?
+## Next Steps
 
 After completing this tutorial, explore these options:
 

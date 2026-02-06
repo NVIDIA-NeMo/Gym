@@ -121,7 +121,7 @@ You can run BFCL v3 evaluations using [NeMo Evaluator](https://github.com/NVIDIA
 
 ---
 
-## What's Next?
+## Next Steps
 
 Congratulations! You've trained Nemotron Nano 9B v2 for multi-step tool calling using GRPO on the Workplace Assistant environment.
 

@@ -219,7 +219,7 @@ To add VeRL integration, follow the {doc}`Training Framework Integration Guide <
 
 ---
 
-## What's Next?
+## Next Steps
 
 ::::{grid} 1 1 2 2
 :gutter: 3

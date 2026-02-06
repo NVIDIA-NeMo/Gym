@@ -115,7 +115,7 @@ Scale to multi-node GRPO training for production.
 
 ---
 
-## What's Next?
+## Next Steps
 
 After completing this tutorial, explore these options:
 

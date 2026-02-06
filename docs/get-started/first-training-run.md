@@ -17,6 +17,14 @@ This tutorial guides you through your first RL training run using NeMo Gym for t
 
 :::
 
+:::{button-ref} rollout-collection
+:color: secondary
+:outline:
+:ref-type: doc
+
+← Previous: Rollout Collection
+:::
+
 :::{tip}
 **No prior NeMo Gym setup required.** The Colab notebook is self-contained. For local training, see [Local Training](#local-training-advanced) below.
 :::
@@ -124,7 +132,7 @@ jupyter notebook nemo_gym_sudoku.ipynb
 
 ---
 
-## What's Next?
+## Next Steps
 
 After completing your first training run:
 
