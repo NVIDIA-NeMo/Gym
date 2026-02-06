@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import time
 from typing import List
 
 from fastapi import Request, Response
@@ -140,6 +141,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         return model_response
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
+        run_start = time.perf_counter()
         cookies = request.cookies
 
         seed_session_response = await self.server_client.post(
@@ -171,7 +173,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             cookies=cookies,
         )
         await raise_for_status(verify_response)
-        return SimpleAgentVerifyResponse.model_validate(await get_response_json(verify_response))
+        result = SimpleAgentVerifyResponse.model_validate(await get_response_json(verify_response))
+        result.total_run_time_seconds = time.perf_counter() - run_start
+        return result
 
 
 if __name__ == "__main__":
