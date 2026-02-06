@@ -1145,7 +1145,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             f.write(json.dumps(instance_dict) + "\n")
 
         trajectories_root = persistent_dir / "trajectories" / instance_id
-        prediction_mounted_path = Path("/trajectories_mount") / "trajectories" / instance_id / "output.jsonl"
+        prediction_mounted_path = Path("/trajectories_mount") / "trajectories" / instance_id / "output_for_eval.jsonl"
         prediction_path = trajectories_root / "output.jsonl"
 
         # Map from Responses to OpenHands
