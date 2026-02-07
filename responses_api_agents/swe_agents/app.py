@@ -855,6 +855,9 @@ class RunOpenHandsAgent(BaseModel):
         metrics = SWEBenchMetrics()
 
         metrics.openhands_run_time = -time.time()
+        metrics.generation_apptainer_spinup_time = metrics.openhands_run_time
+        metrics.final_eval_apptainer_spinup_time = metrics.openhands_run_time
+
         openhands_active_command = await self._start_container_command(
             self.config.agent_command, self.config.agent_apptainer_command_str
         )
@@ -868,7 +871,7 @@ class RunOpenHandsAgent(BaseModel):
         generation_apptainer_spinup_timestamp = float(
             self.config.generation_apptainer_spinup_timestamp_fpath.read_text()
         )
-        metrics.generation_apptainer_spinup_time = metrics.openhands_run_time + generation_apptainer_spinup_timestamp
+        metrics.generation_apptainer_spinup_time += generation_apptainer_spinup_timestamp
         metrics.openhands_run_time += time.time()
 
         with open(out_file, "r") as f:
@@ -920,7 +923,7 @@ class RunOpenHandsAgent(BaseModel):
         final_eval_apptainer_spinup_timestamp = float(
             self.config.final_eval_apptainer_spinup_timestamp_fpath.read_text()
         )
-        metrics.final_eval_apptainer_spinup_time = metrics.final_eval_time + final_eval_apptainer_spinup_timestamp
+        metrics.final_eval_apptainer_spinup_time += final_eval_apptainer_spinup_timestamp
         metrics.final_eval_time += time.time()
 
         metrics.patch_exists = True
