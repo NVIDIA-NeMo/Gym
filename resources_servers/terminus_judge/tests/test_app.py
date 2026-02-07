@@ -41,11 +41,59 @@ from resources_servers.terminus_judge.app import (
 )
 
 
-def create_terminus_1_response(commands: list, is_task_complete: bool = False) -> dict:
-    """Create a valid terminus_1 schema response."""
+# Sample rubrics v4 structured output for testing (5-step format, task_complete checked in code)
+RUBRICS_V4_EQUAL_RESPONSE = """1. **EXECUTION STAGE**: GOLD=Stage 3 (Execute) vs CANDIDATE=Stage 3 (Execute) - Match
+2. **ACTION TYPE**: GOLD=Execute vs CANDIDATE=Execute - Match
+3. **SCOPE**: GOLD=runs single script vs CANDIDATE=runs single script - Comparable
+4. **FUNCTIONAL EQUIVALENCE**: E1=TRUE, E2=TRUE, E3=TRUE
+5. **Final verdict**: [[A=B]]"""
+
+RUBRICS_V4_NOT_EQUAL_RESPONSE = """1. **EXECUTION STAGE**: GOLD=Stage 4 (Verify) vs CANDIDATE=Stage 3 (Execute) - Mismatch
+2. **ACTION TYPE**: GOLD=Verify vs CANDIDATE=Execute - Mismatch
+3. **SCOPE**: GOLD=verifies 3 outputs vs CANDIDATE=runs script once - Different
+4. **FUNCTIONAL EQUIVALENCE**: Not evaluated due to earlier failures
+5. **Final verdict**: [[A!=B]]"""
+
+RUBRICS_V4_MULTILINE_REASONING = """Let me analyze these two responses step by step.
+
+1. **EXECUTION STAGE**:
+   - GOLD: Stage 3 (Execute) - runs `python reproduce_issue.py`
+   - CANDIDATE: Stage 3 (Execute) - also runs `python reproduce_issue.py`
+   - Result: Match
+
+2. **ACTION TYPE**:
+   - GOLD: Execute/Run script
+   - CANDIDATE: Execute/Run script
+   - Result: Match
+
+3. **SCOPE**:
+   - GOLD: Runs single script with timeout_sec=3
+   - CANDIDATE: Runs single script with timeout_sec=5
+   - Result: Comparable (timeout difference doesn't affect functional outcome)
+
+4. **FUNCTIONAL EQUIVALENCE**:
+   - E1: Same operation type performed? TRUE - both execute the same Python script
+   - E2: Same functional outcome achieved? TRUE - both will trigger the NameError
+   - E3: Same purpose in task workflow? TRUE - both aim to reproduce the issue
+
+All checks pass.
+
+5. **Final verdict**: [[A=B]]"""
+
+
+def create_terminus_1_response(
+    commands: list,
+    is_task_complete: bool = False,
+    state_analysis: str = "The terminal shows the current working directory. Previous command completed successfully.",
+    explanation: str = "Running the next command to progress the task.",
+) -> dict:
+    """Create a valid terminus_1 schema response.
+
+    Schema: state_analysis, explanation, commands [{keystrokes, is_blocking, timeout_sec}], is_task_complete
+    """
     return {
-        "state_analysis": "Analyzing the current state",
-        "explanation": "Explanation of the commands",
+        "state_analysis": state_analysis,
+        "explanation": explanation,
         "commands": [
             {
                 "keystrokes": cmd["keystrokes"],
@@ -58,11 +106,19 @@ def create_terminus_1_response(commands: list, is_task_complete: bool = False) -
     }
 
 
-def create_terminus_2_response(commands: list, task_complete: bool = False) -> dict:
-    """Create a valid terminus_2 schema response."""
+def create_terminus_2_response(
+    commands: list,
+    task_complete: bool = False,
+    analysis: str = "The terminal output shows the command executed successfully. Current directory contains the expected files.",
+    plan: str = "1. Execute the next command. 2. Verify the output. 3. Complete the task if successful.",
+) -> dict:
+    """Create a valid terminus_2 schema response.
+
+    Schema: analysis, plan, commands [{keystrokes, duration (optional)}], task_complete (optional)
+    """
     return {
-        "analysis": "Analyzing the current state",
-        "plan": "Plan for the next steps",
+        "analysis": analysis,
+        "plan": plan,
         "commands": [
             {
                 "keystrokes": cmd["keystrokes"],
@@ -287,7 +343,10 @@ class TestTerminusJudgeResourcesServerVerify:
 
     @fixture
     def resources_server(self) -> TerminusJudgeResourcesServer:
-        """Create a TerminusJudgeResourcesServer instance for testing."""
+        """Create a TerminusJudgeResourcesServer instance for testing.
+
+        Uses string similarity + LLM judge fallback configuration.
+        """
         config = TerminusJudgeResourcesServerConfig(
             host="127.0.0.1",
             port=20002,
@@ -297,7 +356,10 @@ class TestTerminusJudgeResourcesServerVerify:
             judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
                 input=[NeMoGymEasyInputMessage(role="user", content="test")]
             ),
+            # Verification options: string sim as fast-path, LLM judge as fallback
+            enable_string_similarity=True,
             string_similarity_threshold=0.8,
+            enable_llm_judge=True,
         )
 
         with patch("builtins.open", MagicMock()):
@@ -389,7 +451,7 @@ class TestTerminusJudgeResourcesServerVerify:
         response = await resources_server.verify(request)
 
         assert response.reward == 0.0
-        assert response.failure_reason == FailureCode.JSON_PARSING_FAILED
+        assert response.failure_reason == FailureCode.MODEL_OUTPUT_INVALID
 
     @pytest.mark.asyncio
     async def test_verify_unknown_harness(self, resources_server: TerminusJudgeResourcesServer):
@@ -464,7 +526,7 @@ class TestTerminusJudgeResourcesServerVerify:
         response = await resources_server.verify(request)
 
         assert response.reward == 0.0
-        assert response.failure_reason == FailureCode.JUDGE_EVALUATION_FAILED
+        assert response.failure_reason == FailureCode.JUDGE_NOT_EQUIVALENT
         assert response.string_similarity_passed is False
         assert len(response.judge_evaluations) == 1
 
@@ -559,7 +621,7 @@ class TestTerminusJudgeResourcesServerVerify:
 
     @pytest.mark.asyncio
     async def test_verify_missing_expected_answer(self, resources_server: TerminusJudgeResourcesServer):
-        """Test verify raises error when expected answer is missing."""
+        """Test verify returns failure code when expected answer is missing."""
         output_message = NeMoGymResponseOutputMessage(
             id="msg_1",
             content=[NeMoGymResponseOutputText(annotations=[], text="test")],
@@ -581,5 +643,738 @@ class TestTerminusJudgeResourcesServerVerify:
             response=response,
         )
 
-        with pytest.raises(ValueError, match="Expected answer is required"):
-            await resources_server.verify(request)
+        result = await resources_server.verify(request)
+        assert result.reward == 0.0
+        assert result.failure_reason == FailureCode.EXPECTED_ANSWER_INVALID
+
+
+class TestParseVerdictFromText:
+    """Tests for the _parse_verdict_from_text method."""
+
+    @fixture
+    def resources_server(self) -> TerminusJudgeResourcesServer:
+        """Create a TerminusJudgeResourcesServer instance for testing."""
+        config = TerminusJudgeResourcesServerConfig(
+            host="127.0.0.1",
+            port=20002,
+            entrypoint="",
+            name="terminus_judge_test_server",
+            judge_model_server={"name": "test_judge", "type": "responses_api_models"},
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[NeMoGymEasyInputMessage(role="user", content="test")]
+            ),
+            # Verification options (not used in these tests, just for config validity)
+            enable_string_similarity=False,
+            string_similarity_threshold=0.8,
+            enable_llm_judge=True,
+        )
+
+        with patch("builtins.open", MagicMock()):
+            server = TerminusJudgeResourcesServer(
+                config=config,
+                server_client=MagicMock(spec=ServerClient),
+            )
+            server._judge_prompt_template = "Expected: {expected_answer}\nGenerated: {generated_answer}"
+            return server
+
+    def test_parse_simple_equal(self, resources_server: TerminusJudgeResourcesServer):
+        """Test parsing simple [[A=B]] verdict."""
+        text = "The commands are equivalent. [[A=B]]"
+        is_equal, verdict = resources_server._parse_verdict_from_text(text, "[[A=B]]", "[[A!=B]]")
+        assert is_equal is True
+        assert verdict == "[[A=B]]"
+
+    def test_parse_simple_not_equal(self, resources_server: TerminusJudgeResourcesServer):
+        """Test parsing simple [[A!=B]] verdict."""
+        text = "The commands are not equivalent. [[A!=B]]"
+        is_equal, verdict = resources_server._parse_verdict_from_text(text, "[[A=B]]", "[[A!=B]]")
+        assert is_equal is False
+        assert verdict == "[[A!=B]]"
+
+    def test_parse_rubrics_v4_equal_structured(self, resources_server: TerminusJudgeResourcesServer):
+        """Test parsing rubrics v4 structured output with [[A=B]] verdict."""
+        is_equal, verdict = resources_server._parse_verdict_from_text(
+            RUBRICS_V4_EQUAL_RESPONSE, "[[A=B]]", "[[A!=B]]"
+        )
+        assert is_equal is True
+        assert verdict == "[[A=B]]"
+
+    def test_parse_rubrics_v4_not_equal_structured(self, resources_server: TerminusJudgeResourcesServer):
+        """Test parsing rubrics v4 structured output with [[A!=B]] verdict."""
+        is_equal, verdict = resources_server._parse_verdict_from_text(
+            RUBRICS_V4_NOT_EQUAL_RESPONSE, "[[A=B]]", "[[A!=B]]"
+        )
+        assert is_equal is False
+        assert verdict == "[[A!=B]]"
+
+    def test_parse_rubrics_v4_multiline_reasoning(self, resources_server: TerminusJudgeResourcesServer):
+        """Test parsing rubrics v4 with extensive multi-line reasoning."""
+        is_equal, verdict = resources_server._parse_verdict_from_text(
+            RUBRICS_V4_MULTILINE_REASONING, "[[A=B]]", "[[A!=B]]"
+        )
+        assert is_equal is True
+        assert verdict == "[[A=B]]"
+
+    def test_parse_verdict_at_very_end(self, resources_server: TerminusJudgeResourcesServer):
+        """Test parsing when verdict is at the very end after long reasoning."""
+        long_reasoning = "A" * 500 + "\n\nFinal verdict: [[A=B]]"
+        is_equal, verdict = resources_server._parse_verdict_from_text(long_reasoning, "[[A=B]]", "[[A!=B]]")
+        assert is_equal is True
+        assert verdict == "[[A=B]]"
+
+    def test_parse_no_verdict_found(self, resources_server: TerminusJudgeResourcesServer):
+        """Test handling when no verdict is found in text."""
+        text = "The judge failed to provide a clear verdict."
+        is_equal, verdict = resources_server._parse_verdict_from_text(text, "[[A=B]]", "[[A!=B]]")
+        assert is_equal is False
+        assert verdict is None
+
+    def test_parse_both_markers_last_wins(self, resources_server: TerminusJudgeResourcesServer):
+        """Test that when both markers appear, the last one (in final section) wins."""
+        # This could happen if the judge mentions a previous example
+        text = "In some cases [[A!=B]] but in this case [[A=B]]"
+        is_equal, verdict = resources_server._parse_verdict_from_text(text, "[[A=B]]", "[[A!=B]]")
+        assert is_equal is True
+        assert verdict == "[[A=B]]"
+
+    def test_parse_verdict_in_middle_not_end(self, resources_server: TerminusJudgeResourcesServer):
+        """Test parsing when verdict appears in the middle, not at end."""
+        text = "The verdict is [[A=B]] because the commands match. Additional notes follow."
+        is_equal, verdict = resources_server._parse_verdict_from_text(text, "[[A=B]]", "[[A!=B]]")
+        assert is_equal is True
+        assert verdict == "[[A=B]]"
+
+    def test_parse_empty_text(self, resources_server: TerminusJudgeResourcesServer):
+        """Test parsing empty text returns no verdict."""
+        is_equal, verdict = resources_server._parse_verdict_from_text("", "[[A=B]]", "[[A!=B]]")
+        assert is_equal is False
+        assert verdict is None
+
+
+class TestVerifyWithRubricsV4JudgeResponse:
+    """Tests for verify method with rubrics v4 style judge responses."""
+
+    @fixture
+    def resources_server(self) -> TerminusJudgeResourcesServer:
+        """Create a TerminusJudgeResourcesServer instance for testing.
+
+        Uses LLM judge only (no string similarity) to test judge behavior.
+        """
+        config = TerminusJudgeResourcesServerConfig(
+            host="127.0.0.1",
+            port=20002,
+            entrypoint="",
+            name="terminus_judge_test_server",
+            judge_model_server={"name": "test_judge", "type": "responses_api_models"},
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[NeMoGymEasyInputMessage(role="user", content="test")]
+            ),
+            # LLM judge only - no string similarity fast-path
+            enable_string_similarity=False,
+            string_similarity_threshold=0.8,
+            enable_llm_judge=True,
+        )
+
+        with patch("builtins.open", MagicMock()):
+            server = TerminusJudgeResourcesServer(
+                config=config,
+                server_client=MagicMock(spec=ServerClient),
+            )
+            server._judge_prompt_template = "Expected: {expected_answer}\nGenerated: {generated_answer}"
+            return server
+
+    def _create_verify_request(
+        self,
+        model_output: str,
+        expected_answer: dict,
+        harness: str = "terminus_1",
+    ) -> TerminusJudgeVerifyRequest:
+        """Helper to create a TerminusJudgeVerifyRequest."""
+        output_message = NeMoGymResponseOutputMessage(
+            id="msg_1",
+            content=[NeMoGymResponseOutputText(annotations=[], text=model_output)],
+        )
+        response = NeMoGymResponse(
+            id="test_response",
+            created_at=1000,
+            model="test_model",
+            object="response",
+            output=[output_message],
+            parallel_tool_calls=False,
+            tool_choice="auto",
+            tools=[],
+        )
+        return TerminusJudgeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[NeMoGymEasyInputMessage(role="user", content="test")]
+            ),
+            response=response,
+            expected_answer=json.dumps(expected_answer),
+            metadata={"harness": harness},
+        )
+
+    @pytest.mark.asyncio
+    async def test_verify_with_rubrics_v4_equal_response(self, resources_server: TerminusJudgeResourcesServer):
+        """Test verify succeeds with rubrics v4 structured [[A=B]] response."""
+        # Use very different keystrokes to ensure similarity is below threshold and judge is called
+        expected_answer = create_terminus_1_response([{"keystrokes": "python reproduce_issue.py --verbose\n"}])
+        pred_answer = create_terminus_1_response([{"keystrokes": "python3 reproduce.py -v\n"}])
+        model_output = json.dumps(pred_answer)
+        request = self._create_verify_request(model_output, expected_answer, "terminus_1")
+
+        # Mock judge to return rubrics v4 structured response
+        mock_response = MagicMock()
+        mock_response.json = AsyncMock(
+            return_value={
+                "id": "judge_resp",
+                "created_at": 1000,
+                "model": "judge",
+                "object": "response",
+                "output": [
+                    {
+                        "id": "msg_judge",
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": RUBRICS_V4_EQUAL_RESPONSE, "annotations": []}],
+                    }
+                ],
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        )
+        resources_server.server_client.post = AsyncMock(return_value=mock_response)
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 1.0
+        assert response.failure_reason == FailureCode.NONE
+        assert response.judge_passed is True
+        assert len(response.judge_evaluations) == 1
+        assert response.judge_evaluations[0].verdict_label == "[[A=B]]"
+
+    @pytest.mark.asyncio
+    async def test_verify_with_rubrics_v4_not_equal_response(self, resources_server: TerminusJudgeResourcesServer):
+        """Test verify fails with rubrics v4 structured [[A!=B]] response."""
+        expected_answer = create_terminus_1_response([{"keystrokes": "ls -la\n"}])
+        pred_answer = create_terminus_1_response([{"keystrokes": "pwd\n"}])
+        model_output = json.dumps(pred_answer)
+        request = self._create_verify_request(model_output, expected_answer, "terminus_1")
+
+        # Mock judge to return rubrics v4 structured not-equal response
+        mock_response = MagicMock()
+        mock_response.json = AsyncMock(
+            return_value={
+                "id": "judge_resp",
+                "created_at": 1000,
+                "model": "judge",
+                "object": "response",
+                "output": [
+                    {
+                        "id": "msg_judge",
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": RUBRICS_V4_NOT_EQUAL_RESPONSE, "annotations": []}],
+                    }
+                ],
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        )
+        resources_server.server_client.post = AsyncMock(return_value=mock_response)
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 0.0
+        assert response.failure_reason == FailureCode.JUDGE_NOT_EQUIVALENT
+        assert response.judge_passed is False
+        assert len(response.judge_evaluations) == 1
+        assert response.judge_evaluations[0].verdict_label == "[[A!=B]]"
+
+    @pytest.mark.asyncio
+    async def test_verify_with_rubrics_v4_multiline_response(self, resources_server: TerminusJudgeResourcesServer):
+        """Test verify handles rubrics v4 multi-line reasoning response."""
+        # Use very different keystrokes to ensure similarity is below threshold and judge is called
+        expected_answer = create_terminus_1_response([{"keystrokes": "python reproduce_issue.py --timeout 30\n"}])
+        pred_answer = create_terminus_1_response([{"keystrokes": "python3 repro.py -t 30\n"}])
+        model_output = json.dumps(pred_answer)
+        request = self._create_verify_request(model_output, expected_answer, "terminus_1")
+
+        # Mock judge to return rubrics v4 multiline reasoning response
+        mock_response = MagicMock()
+        mock_response.json = AsyncMock(
+            return_value={
+                "id": "judge_resp",
+                "created_at": 1000,
+                "model": "judge",
+                "object": "response",
+                "output": [
+                    {
+                        "id": "msg_judge",
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": RUBRICS_V4_MULTILINE_REASONING, "annotations": []}],
+                    }
+                ],
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        )
+        resources_server.server_client.post = AsyncMock(return_value=mock_response)
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 1.0
+        assert response.judge_passed is True
+        assert response.judge_evaluations[0].verdict_label == "[[A=B]]"
+
+    @pytest.mark.asyncio
+    async def test_verify_with_no_verdict_in_judge_response(self, resources_server: TerminusJudgeResourcesServer):
+        """Test verify handles judge response with no verdict (judge parsing failed)."""
+        expected_answer = create_terminus_1_response([{"keystrokes": "ls\n"}])
+        pred_answer = create_terminus_1_response([{"keystrokes": "pwd\n"}])
+        model_output = json.dumps(pred_answer)
+        request = self._create_verify_request(model_output, expected_answer, "terminus_1")
+
+        # Mock judge to return response without verdict markers
+        mock_response = MagicMock()
+        mock_response.json = AsyncMock(
+            return_value={
+                "id": "judge_resp",
+                "created_at": 1000,
+                "model": "judge",
+                "object": "response",
+                "output": [
+                    {
+                        "id": "msg_judge",
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "I cannot determine equivalence.", "annotations": []}],
+                    }
+                ],
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        )
+        resources_server.server_client.post = AsyncMock(return_value=mock_response)
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 0.0
+        assert response.failure_reason == FailureCode.JUDGE_PARSING_FAILED
+        assert response.judge_passed is None  # None because judge didn't return meaningful result
+        assert response.judge_evaluations[0].verdict_label is None
+
+
+class TestVerifyAdditionalScenarios:
+    """Additional test scenarios for full coverage."""
+
+    @fixture
+    def resources_server_string_sim_only(self) -> TerminusJudgeResourcesServer:
+        """Create server with string similarity only (no LLM judge)."""
+        config = TerminusJudgeResourcesServerConfig(
+            host="127.0.0.1",
+            port=20002,
+            entrypoint="",
+            name="terminus_judge_test_server",
+            judge_model_server={"name": "test_judge", "type": "responses_api_models"},
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[NeMoGymEasyInputMessage(role="user", content="test")]
+            ),
+            enable_string_similarity=True,
+            string_similarity_threshold=0.8,
+            enable_llm_judge=False,
+        )
+
+        with patch("builtins.open", MagicMock()):
+            server = TerminusJudgeResourcesServer(
+                config=config,
+                server_client=MagicMock(spec=ServerClient),
+            )
+            server._judge_prompt_template = "Expected: {expected_answer}\nGenerated: {generated_answer}"
+            return server
+
+    @fixture
+    def resources_server_neither_enabled(self) -> TerminusJudgeResourcesServer:
+        """Create server with neither string sim nor LLM judge enabled."""
+        config = TerminusJudgeResourcesServerConfig(
+            host="127.0.0.1",
+            port=20002,
+            entrypoint="",
+            name="terminus_judge_test_server",
+            judge_model_server={"name": "test_judge", "type": "responses_api_models"},
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[NeMoGymEasyInputMessage(role="user", content="test")]
+            ),
+            enable_string_similarity=False,
+            string_similarity_threshold=0.8,
+            enable_llm_judge=False,
+        )
+
+        with patch("builtins.open", MagicMock()):
+            server = TerminusJudgeResourcesServer(
+                config=config,
+                server_client=MagicMock(spec=ServerClient),
+            )
+            server._judge_prompt_template = "Expected: {expected_answer}\nGenerated: {generated_answer}"
+            return server
+
+    @fixture
+    def resources_server_with_swap(self) -> TerminusJudgeResourcesServer:
+        """Create server with LLM judge and swap check enabled."""
+        config = TerminusJudgeResourcesServerConfig(
+            host="127.0.0.1",
+            port=20002,
+            entrypoint="",
+            name="terminus_judge_test_server",
+            judge_model_server={"name": "test_judge", "type": "responses_api_models"},
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[NeMoGymEasyInputMessage(role="user", content="test")]
+            ),
+            enable_string_similarity=False,
+            string_similarity_threshold=0.8,
+            enable_llm_judge=True,
+            check_twice_swap=True,
+            reward_if_swap_fails=0.0,
+        )
+
+        with patch("builtins.open", MagicMock()):
+            server = TerminusJudgeResourcesServer(
+                config=config,
+                server_client=MagicMock(spec=ServerClient),
+            )
+            server._judge_prompt_template = "Expected: {expected_answer}\nGenerated: {generated_answer}"
+            return server
+
+    def _create_verify_request(
+        self,
+        model_output: str,
+        expected_answer: dict,
+        harness: str = "terminus_1",
+    ) -> TerminusJudgeVerifyRequest:
+        """Helper to create a TerminusJudgeVerifyRequest."""
+        output_message = NeMoGymResponseOutputMessage(
+            id="msg_1",
+            content=[NeMoGymResponseOutputText(annotations=[], text=model_output)],
+        )
+        response = NeMoGymResponse(
+            id="test_response",
+            created_at=1000,
+            model="test_model",
+            object="response",
+            output=[output_message],
+            parallel_tool_calls=False,
+            tool_choice="auto",
+            tools=[],
+        )
+        return TerminusJudgeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[NeMoGymEasyInputMessage(role="user", content="test")]
+            ),
+            response=response,
+            expected_answer=json.dumps(expected_answer),
+            metadata={"harness": harness},
+        )
+
+    def _create_verify_request_raw_expected(
+        self,
+        model_output: str,
+        expected_answer_str: str,
+        harness: str = "terminus_1",
+    ) -> TerminusJudgeVerifyRequest:
+        """Helper to create request with raw expected answer string."""
+        output_message = NeMoGymResponseOutputMessage(
+            id="msg_1",
+            content=[NeMoGymResponseOutputText(annotations=[], text=model_output)],
+        )
+        response = NeMoGymResponse(
+            id="test_response",
+            created_at=1000,
+            model="test_model",
+            object="response",
+            output=[output_message],
+            parallel_tool_calls=False,
+            tool_choice="auto",
+            tools=[],
+        )
+        return TerminusJudgeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[NeMoGymEasyInputMessage(role="user", content="test")]
+            ),
+            response=response,
+            expected_answer=expected_answer_str,
+            metadata={"harness": harness},
+        )
+
+    # --- String Similarity Only Mode Tests ---
+
+    @pytest.mark.asyncio
+    async def test_string_sim_only_passes(self, resources_server_string_sim_only: TerminusJudgeResourcesServer):
+        """Test string similarity only mode passes when commands match."""
+        expected_answer = create_terminus_1_response([{"keystrokes": "ls -la\n"}])
+        model_output = json.dumps(expected_answer)
+        request = self._create_verify_request(model_output, expected_answer, "terminus_1")
+
+        response = await resources_server_string_sim_only.verify(request)
+
+        assert response.reward == 1.0
+        assert response.failure_reason == FailureCode.NONE
+        assert response.string_similarity_passed is True
+        assert response.judge_passed is None  # Judge not called
+        assert len(response.judge_evaluations) == 0
+
+    @pytest.mark.asyncio
+    async def test_string_sim_only_fails(self, resources_server_string_sim_only: TerminusJudgeResourcesServer):
+        """Test string similarity only mode fails when commands differ (no judge fallback)."""
+        expected_answer = create_terminus_1_response([{"keystrokes": "ls -la\n"}])
+        pred_answer = create_terminus_1_response([{"keystrokes": "pwd\n"}])
+        model_output = json.dumps(pred_answer)
+        request = self._create_verify_request(model_output, expected_answer, "terminus_1")
+
+        response = await resources_server_string_sim_only.verify(request)
+
+        assert response.reward == 0.0
+        assert response.failure_reason == FailureCode.STRING_SIMILARITY_BELOW_THRESHOLD
+        assert response.string_similarity_passed is False
+        assert response.judge_passed is None  # Judge not called
+        assert len(response.judge_evaluations) == 0
+
+    # --- Neither Enabled Mode Tests ---
+
+    @pytest.mark.asyncio
+    async def test_neither_enabled_passes_on_schema_task_complete(
+        self, resources_server_neither_enabled: TerminusJudgeResourcesServer
+    ):
+        """Test neither enabled mode passes if schema and task_complete pass."""
+        expected_answer = create_terminus_1_response([{"keystrokes": "ls -la\n"}])
+        pred_answer = create_terminus_1_response([{"keystrokes": "completely different command\n"}])
+        model_output = json.dumps(pred_answer)
+        request = self._create_verify_request(model_output, expected_answer, "terminus_1")
+
+        response = await resources_server_neither_enabled.verify(request)
+
+        assert response.reward == 1.0
+        assert response.failure_reason == FailureCode.NONE
+        assert response.string_similarity_passed is None  # Not attempted
+        assert response.judge_passed is None  # Not attempted
+
+    # --- terminus_2 Schema Tests ---
+
+    @pytest.mark.asyncio
+    async def test_verify_schema_check_failed_terminus_2(
+        self, resources_server_string_sim_only: TerminusJudgeResourcesServer
+    ):
+        """Test verify returns failure for terminus_2 schema validation failure."""
+        expected_answer = create_terminus_2_response([{"keystrokes": "ls\n"}])
+        # Missing required 'analysis' field
+        invalid_output = json.dumps({"plan": "test", "commands": [{"keystrokes": "ls\n"}]})
+        request = self._create_verify_request(invalid_output, expected_answer, "terminus_2")
+
+        response = await resources_server_string_sim_only.verify(request)
+
+        assert response.reward == 0.0
+        assert response.failure_reason == FailureCode.SCHEMA_CHECK_FAILED
+        assert response.schema_check_passed is False
+
+    @pytest.mark.asyncio
+    async def test_verify_terminus_2_task_complete_optional(
+        self, resources_server_string_sim_only: TerminusJudgeResourcesServer
+    ):
+        """Test terminus_2 works without task_complete field (it's optional)."""
+        expected_answer = {
+            "analysis": "Test analysis",
+            "plan": "Test plan",
+            "commands": [{"keystrokes": "ls\n"}],
+            # No task_complete field
+        }
+        model_output = json.dumps(expected_answer)
+        request = self._create_verify_request(model_output, expected_answer, "terminus_2")
+
+        response = await resources_server_string_sim_only.verify(request)
+
+        assert response.reward == 1.0
+        assert response.failure_reason == FailureCode.NONE
+
+    # --- Swap Check Failure Tests ---
+
+    @pytest.mark.asyncio
+    async def test_swap_check_first_passes_second_fails(
+        self, resources_server_with_swap: TerminusJudgeResourcesServer
+    ):
+        """Test swap check: first judge passes, second (swap) fails."""
+        expected_answer = create_terminus_1_response([{"keystrokes": "ls -la\n"}])
+        pred_answer = create_terminus_1_response([{"keystrokes": "different command\n"}])
+        model_output = json.dumps(pred_answer)
+        request = self._create_verify_request(model_output, expected_answer, "terminus_1")
+
+        # First call returns equal, second returns not equal
+        call_count = [0]
+
+        async def mock_json():
+            call_count[0] += 1
+            verdict = "[[A=B]]" if call_count[0] == 1 else "[[A!=B]]"
+            return {
+                "id": "judge_resp",
+                "created_at": 1000,
+                "model": "judge",
+                "object": "response",
+                "output": [
+                    {
+                        "id": "msg_judge",
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": verdict, "annotations": []}],
+                    }
+                ],
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+
+        mock_response = MagicMock()
+        mock_response.json = mock_json
+        resources_server_with_swap.server_client.post = AsyncMock(return_value=mock_response)
+
+        response = await resources_server_with_swap.verify(request)
+
+        assert response.reward == 0.0  # reward_if_swap_fails = 0.0
+        assert response.failure_reason == FailureCode.JUDGE_NOT_EQUIVALENT
+        assert response.judge_passed is False
+        assert len(response.judge_evaluations) == 2
+
+    @pytest.mark.asyncio
+    async def test_swap_check_second_parsing_fails(
+        self, resources_server_with_swap: TerminusJudgeResourcesServer
+    ):
+        """Test swap check: first judge passes, second judge parsing fails."""
+        expected_answer = create_terminus_1_response([{"keystrokes": "ls -la\n"}])
+        pred_answer = create_terminus_1_response([{"keystrokes": "different command\n"}])
+        model_output = json.dumps(pred_answer)
+        request = self._create_verify_request(model_output, expected_answer, "terminus_1")
+
+        # First call returns equal, second returns no verdict
+        call_count = [0]
+
+        async def mock_json():
+            call_count[0] += 1
+            text = "[[A=B]]" if call_count[0] == 1 else "No clear verdict here."
+            return {
+                "id": "judge_resp",
+                "created_at": 1000,
+                "model": "judge",
+                "object": "response",
+                "output": [
+                    {
+                        "id": "msg_judge",
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": text, "annotations": []}],
+                    }
+                ],
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+
+        mock_response = MagicMock()
+        mock_response.json = mock_json
+        resources_server_with_swap.server_client.post = AsyncMock(return_value=mock_response)
+
+        response = await resources_server_with_swap.verify(request)
+
+        assert response.reward == 0.0
+        assert response.failure_reason == FailureCode.JUDGE_SWAP_PARSING_FAILED
+        assert response.judge_passed is None  # Second judge didn't return meaningful result
+        assert len(response.judge_evaluations) == 2
+
+    # --- Invalid Expected Answer Tests ---
+
+    @pytest.mark.asyncio
+    async def test_expected_answer_invalid_json(
+        self, resources_server_string_sim_only: TerminusJudgeResourcesServer
+    ):
+        """Test verify fails gracefully when expected_answer is invalid JSON."""
+        pred_answer = create_terminus_1_response([{"keystrokes": "ls\n"}])
+        model_output = json.dumps(pred_answer)
+        request = self._create_verify_request_raw_expected(
+            model_output, "not valid json {{{", "terminus_1"
+        )
+
+        response = await resources_server_string_sim_only.verify(request)
+
+        assert response.reward == 0.0
+        assert response.failure_reason == FailureCode.EXPECTED_ANSWER_INVALID
+
+    # --- Empty Model Output Tests ---
+
+    @pytest.mark.asyncio
+    async def test_model_output_empty(self, resources_server_string_sim_only: TerminusJudgeResourcesServer):
+        """Test verify fails when model output is empty."""
+        expected_answer = create_terminus_1_response([{"keystrokes": "ls\n"}])
+
+        output_message = NeMoGymResponseOutputMessage(
+            id="msg_1",
+            content=[NeMoGymResponseOutputText(annotations=[], text="")],
+        )
+        response = NeMoGymResponse(
+            id="test_response",
+            created_at=1000,
+            model="test_model",
+            object="response",
+            output=[output_message],
+            parallel_tool_calls=False,
+            tool_choice="auto",
+            tools=[],
+        )
+        request = TerminusJudgeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[NeMoGymEasyInputMessage(role="user", content="test")]
+            ),
+            response=response,
+            expected_answer=json.dumps(expected_answer),
+            metadata={"harness": "terminus_1"},
+        )
+
+        result = await resources_server_string_sim_only.verify(request)
+
+        assert result.reward == 0.0
+        assert result.failure_reason == FailureCode.MODEL_OUTPUT_INVALID
+
+    # --- Multiple Commands Tests ---
+
+    @pytest.mark.asyncio
+    async def test_multiple_commands_match(self, resources_server_string_sim_only: TerminusJudgeResourcesServer):
+        """Test verify with multiple commands that match."""
+        commands = [
+            {"keystrokes": "cd /app\n"},
+            {"keystrokes": "ls -la\n"},
+            {"keystrokes": "cat README.md\n"},
+        ]
+        expected_answer = create_terminus_1_response(commands)
+        model_output = json.dumps(expected_answer)
+        request = self._create_verify_request(model_output, expected_answer, "terminus_1")
+
+        response = await resources_server_string_sim_only.verify(request)
+
+        assert response.reward == 1.0
+        assert response.failure_reason == FailureCode.NONE
+
+    @pytest.mark.asyncio
+    async def test_multiple_commands_terminus_2(self, resources_server_string_sim_only: TerminusJudgeResourcesServer):
+        """Test verify with multiple terminus_2 commands."""
+        commands = [
+            {"keystrokes": "cd /app\n", "duration": 0.1},
+            {"keystrokes": "python3 script.py\n", "duration": 5.0},
+            {"keystrokes": "echo 'done'\n", "duration": 0.1},
+        ]
+        expected_answer = create_terminus_2_response(commands, task_complete=True)
+        model_output = json.dumps(expected_answer)
+        request = self._create_verify_request(model_output, expected_answer, "terminus_2")
+
+        response = await resources_server_string_sim_only.verify(request)
+
+        assert response.reward == 1.0
+        assert response.failure_reason == FailureCode.NONE

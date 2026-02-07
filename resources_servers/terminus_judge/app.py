@@ -49,12 +49,15 @@ class FailureCode(str, Enum):
     """Enumeration of possible failure reasons."""
 
     NONE = "none"
-    JSON_PARSING_FAILED = "json_parsing_failed"
+    EXPECTED_ANSWER_INVALID = "expected_answer_invalid"  # Ground truth missing or not valid JSON (data issue)
+    MODEL_OUTPUT_INVALID = "model_output_invalid"  # Model output empty or not valid JSON
     SCHEMA_CHECK_FAILED = "schema_check_failed"
     TASK_COMPLETE_CHECK_FAILED = "task_complete_check_failed"
-    COMMAND_CORRECTNESS_FAILED = "command_correctness_failed"
+    STRING_SIMILARITY_BELOW_THRESHOLD = "string_similarity_below_threshold"  # Similarity score < threshold
     UNKNOWN_HARNESS = "unknown_harness"
-    JUDGE_EVALUATION_FAILED = "judge_evaluation_failed"
+    JUDGE_NOT_EQUIVALENT = "judge_not_equivalent"  # Judge returned [[A!=B]]
+    JUDGE_PARSING_FAILED = "judge_parsing_failed"  # First judge output invalid (no verdict)
+    JUDGE_SWAP_PARSING_FAILED = "judge_swap_parsing_failed"  # Second (swap) judge output invalid
     UNKNOWN_ERROR = "unknown_error"
 
 
@@ -156,9 +159,14 @@ class TerminusJudgeResourcesServerConfig(BaseResourcesServerConfig):
     check_twice_swap: bool = False
     reward_if_swap_fails: float = 0.0
 
-    # String similarity config
-    enable_string_similarity: bool = True
-    string_similarity_threshold: float = None
+    # Verification options (independent, can enable any combination)
+    # - Both off: Only schema + task_complete check, reward=1.0 if pass
+    # - String sim only: Fast string comparison, reward=1.0 if similarity >= threshold
+    # - LLM judge only: Always call LLM judge for semantic equivalence
+    # - Both on: String sim as fast-path, LLM judge as fallback when sim fails
+    enable_string_similarity: bool = False
+    string_similarity_threshold: float = 0.95
+    enable_llm_judge: bool = True
 
 
 class TerminusJudgeRunRequest(BaseRunRequest):
@@ -187,11 +195,11 @@ class TerminusJudgeVerifyResponse(BaseVerifyResponse):
     expected_answer: str
     model_output: str
     parsed_output: Optional[dict] = None
-    similarity_score: float = -1.0
-    schema_check_passed: bool = False
-    task_complete_check_passed: bool = False
-    string_similarity_passed: bool = False
-    judge_passed: bool = False
+    similarity_score: Optional[float] = None  # None if string similarity disabled
+    schema_check_passed: Optional[bool] = None  # None if not attempted (e.g., JSON parse failed)
+    task_complete_check_passed: Optional[bool] = None  # None if schema check failed/skipped
+    string_similarity_passed: Optional[bool] = None  # None if string similarity disabled
+    judge_passed: Optional[bool] = None  # None if LLM judge disabled
     failure_reason: Optional[FailureCode] = None
     judge_evaluations: list[JudgeEvaluation] = []
     metadata: Optional[dict[str, Any]] = None
@@ -217,123 +225,169 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
         return app
 
     async def verify(self, body: TerminusJudgeVerifyRequest) -> TerminusJudgeVerifyResponse:
-        expected = _extract_expected_answer(body)
-        if not expected:
-            raise ValueError("Expected answer is required but was not provided")
-
-        generated = _extract_last_assistant_text(body)
-        if not generated:
-            raise ValueError("No assistant response found/extracted to verify")
-
+        # Initialize response fields
         reward = 0.0
         failure_reason = None
-        schema_passed = False
-        task_complete_passed = False
-        string_similarity_passed = False
-        judge_passed = False
-        similarity_score = -1.0
+        schema_passed = None
+        task_complete_passed = None
+        string_similarity_passed = None
+        judge_passed = None
+        similarity_score = None
         parsed_output = None
         judge_evaluations = []
+
+        # Helper to build response
+        def _build_response(expected_str: str, model_output_str: str) -> TerminusJudgeVerifyResponse:
+            payload = body.model_dump()
+            payload.pop("expected_answer", None)
+            return TerminusJudgeVerifyResponse(
+                **payload,
+                reward=reward,
+                expected_answer=expected_str,
+                model_output=model_output_str,
+                parsed_output=parsed_output,
+                similarity_score=similarity_score,
+                schema_check_passed=schema_passed,
+                task_complete_check_passed=task_complete_passed,
+                string_similarity_passed=string_similarity_passed,
+                judge_passed=judge_passed,
+                failure_reason=failure_reason,
+                judge_evaluations=judge_evaluations,
+            )
+
+        # Extract expected answer (ground truth)
+        expected = _extract_expected_answer(body)
+        if not expected:
+            failure_reason = FailureCode.EXPECTED_ANSWER_INVALID
+            return _build_response(expected_str="", model_output_str="")
+
+        # Extract model output
+        generated = _extract_last_assistant_text(body)
+        if not generated:
+            failure_reason = FailureCode.MODEL_OUTPUT_INVALID
+            return _build_response(expected_str=expected, model_output_str="")
 
         # Extract thinking tags if present
         text = generated
         if "</think>" in text:
             text = text.split("</think>")[-1].strip()
 
-        # Schema and Task Completion Checks
+        # Parse expected answer (ground truth) - failure here is a data issue
         try:
             expected_dict = json.loads(expected)
+        except json.JSONDecodeError:
+            failure_reason = FailureCode.EXPECTED_ANSWER_INVALID
+            return _build_response(expected_str=expected, model_output_str=text)
+
+        # Parse model prediction
+        try:
             pred = json.loads(text)
             parsed_output = pred
+        except json.JSONDecodeError:
+            failure_reason = FailureCode.MODEL_OUTPUT_INVALID
+            return _build_response(expected_str=expected, model_output_str=text)
 
-            # Check harness type
-            harness = body.metadata.get("harness", None) if body.metadata else None
-            if harness is None or harness not in ["terminus_1", "terminus_2"]:
-                failure_reason = FailureCode.UNKNOWN_HARNESS
+        # Check harness type
+        harness = body.metadata.get("harness", None) if body.metadata else None
+        if harness is None or harness not in ["terminus_1", "terminus_2"]:
+            failure_reason = FailureCode.UNKNOWN_HARNESS
+            return _build_response(expected_str=expected, model_output_str=text)
+
+        # Schema validation (must pass)
+        try:
+            validate_against_schema_openapi(pred, SCHEMA_MAP[harness])
+            schema_passed = True
+        except Exception:
+            schema_passed = False
+            failure_reason = FailureCode.SCHEMA_CHECK_FAILED
+            return _build_response(expected_str=expected, model_output_str=text)
+
+        # Task completion check (must pass)
+        if check_task_complete(pred, expected_dict):
+            task_complete_passed = True
+        else:
+            task_complete_passed = False
+            failure_reason = FailureCode.TASK_COMPLETE_CHECK_FAILED
+            return _build_response(expected_str=expected, model_output_str=text)
+
+        # Verification logic (string similarity and LLM judge are independent)
+        try:
+            need_judge = False
+
+            # Step 1: String similarity check (if enabled)
+            if self.config.enable_string_similarity:
+                similarity_score = command_similarity(expected_dict, pred)
+                threshold = (
+                    body.threshold if body.threshold is not None else self.config.string_similarity_threshold
+                )
+
+                if similarity_score >= threshold:
+                    # String similarity passed - reward 1.0, skip judge
+                    string_similarity_passed = True
+                    reward = 1.0
+                    failure_reason = FailureCode.NONE
+                else:
+                    # String similarity failed - may need judge
+                    string_similarity_passed = False
+                    need_judge = self.config.enable_llm_judge
+                    if not need_judge:
+                        failure_reason = FailureCode.STRING_SIMILARITY_BELOW_THRESHOLD
             else:
-                # Schema validation (must pass)
-                try:
-                    validate_against_schema_openapi(pred, SCHEMA_MAP[harness])
-                    schema_passed = True
-                except Exception:
-                    failure_reason = FailureCode.SCHEMA_CHECK_FAILED
+                # String similarity disabled (remains None) - need judge if enabled
+                need_judge = self.config.enable_llm_judge
 
-                # Task completion check (must pass)
-                if schema_passed:
-                    if check_task_complete(pred, expected_dict):
-                        task_complete_passed = True
+            # Step 2: LLM judge evaluation (if needed and enabled)
+            if need_judge:
+                first_equal, first_eval = await self._generate_judge_evaluation(
+                    expected_answer=expected, generated_answer=text
+                )
+                judge_evaluations.append(first_eval)
+
+                # Check if judge output was valid (has verdict label)
+                if first_eval.verdict_label is None:
+                    # Judge output invalid - no verdict found (judge_passed stays None)
+                    failure_reason = FailureCode.JUDGE_PARSING_FAILED
+                    reward = 0.0
+                elif first_equal:
+                    if self.config.check_twice_swap:
+                        second_equal, second_eval = await self._generate_judge_evaluation(
+                            expected_answer=text, generated_answer=expected
+                        )
+                        judge_evaluations.append(second_eval)
+
+                        # Check if second judge output was valid
+                        if second_eval.verdict_label is None:
+                            # Second (swap) judge output invalid (judge_passed stays None)
+                            failure_reason = FailureCode.JUDGE_SWAP_PARSING_FAILED
+                            reward = 0.0
+                        elif second_equal:
+                            judge_passed = True
+                            reward = 1.0
+                            failure_reason = FailureCode.NONE
+                        else:
+                            judge_passed = False
+                            reward = self.config.reward_if_swap_fails
+                            failure_reason = FailureCode.JUDGE_NOT_EQUIVALENT
                     else:
-                        failure_reason = FailureCode.TASK_COMPLETE_CHECK_FAILED
-
-                # String Similarity Check
-                if schema_passed and task_complete_passed and self.config.enable_string_similarity:
-                    similarity_score = command_similarity(expected_dict, pred)
-                    threshold = (
-                        body.threshold if body.threshold is not None else self.config.string_similarity_threshold
-                    )
-
-                    if similarity_score >= threshold:
-                        # String similarity passed - binary reward of 1.0
-                        string_similarity_passed = True
+                        judge_passed = True
                         reward = 1.0
                         failure_reason = FailureCode.NONE
-                    else:
-                        # String similarity failed - invoke judge
-                        failure_reason = FailureCode.COMMAND_CORRECTNESS_FAILED
+                else:
+                    # Judge said not equal
+                    judge_passed = False
+                    failure_reason = FailureCode.JUDGE_NOT_EQUIVALENT
+                    reward = 0.0
 
-                        # Judge Evaluation
-                        first_equal, first_eval = await self._generate_judge_evaluation(
-                            expected_answer=expected, generated_answer=text
-                        )
-                        judge_evaluations.append(first_eval)
+            # Step 3: If both disabled, schema + task_complete pass = reward 1.0
+            if not self.config.enable_string_similarity and not self.config.enable_llm_judge:
+                reward = 1.0
+                failure_reason = FailureCode.NONE
 
-                        if first_equal:
-                            if self.config.check_twice_swap:
-                                second_equal, second_eval = await self._generate_judge_evaluation(
-                                    expected_answer=text, generated_answer=expected
-                                )
-                                judge_evaluations.append(second_eval)
-
-                                if second_equal:
-                                    judge_passed = True
-                                    reward = 1.0
-                                    failure_reason = FailureCode.NONE
-                                else:
-                                    reward = self.config.reward_if_swap_fails
-                                    failure_reason = FailureCode.JUDGE_EVALUATION_FAILED
-                            else:
-                                judge_passed = True
-                                reward = 1.0
-                                failure_reason = FailureCode.NONE
-                        else:
-                            failure_reason = FailureCode.JUDGE_EVALUATION_FAILED
-                            reward = 0.0
-
-        except json.JSONDecodeError:
-            failure_reason = FailureCode.JSON_PARSING_FAILED
-            reward = 0.0
         except Exception as e:
             failure_reason = FailureCode.UNKNOWN_ERROR
-            reward = 0.0
             print(f"DEBUG: Unknown error in verify: {type(e).__name__} {e}", flush=True)
 
-        payload = body.model_dump()
-        payload.pop("expected_answer", None)
-
-        return TerminusJudgeVerifyResponse(
-            **payload,
-            reward=reward,
-            expected_answer=expected,
-            model_output=text,
-            parsed_output=parsed_output,
-            similarity_score=similarity_score,
-            schema_check_passed=schema_passed,
-            task_complete_check_passed=task_complete_passed,
-            string_similarity_passed=string_similarity_passed,
-            judge_passed=judge_passed,
-            failure_reason=failure_reason,
-            judge_evaluations=judge_evaluations,
-        )
+        return _build_response(expected_str=expected, model_output_str=text)
 
     async def _generate_judge_evaluation(
         self, *, expected_answer: str, generated_answer: str
@@ -399,19 +453,52 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
         except Exception:
             text = ""
 
-        # check text for verdict labels
+        # check text for verdict labels using improved parsing
         if text:
-            eq_pos = text.find(equal_label)
-            neq_pos = text.find(not_equal_label)
-
-            if eq_pos >= 0 and (neq_pos < 0 or eq_pos < neq_pos):
-                verdict_label = equal_label
-                is_equal = True
-            elif neq_pos >= 0:
-                verdict_label = not_equal_label
+            is_equal, verdict_label = self._parse_verdict_from_text(text, equal_label, not_equal_label)
 
         eval_record.verdict_label = verdict_label
         return is_equal, eval_record
+
+    def _parse_verdict_from_text(
+        self, text: str, equal_label: str, not_equal_label: str
+    ) -> tuple[bool, str | None]:
+        """Parse verdict from judge response text.
+
+        Uses a two-stage strategy:
+        1. First look in the last 200 chars (rubrics v4 puts verdict at end after "Final verdict:")
+        2. Fall back to full text search if not found
+
+        For the last-part search, we want the LAST occurrence since rubrics format
+        puts the final verdict at the very end.
+
+        Returns (is_equal, verdict_label)
+        """
+        # Strategy 1: Look for verdict in last 200 chars (rubrics puts it at end)
+        last_part = text[-200:] if len(text) > 200 else text
+
+        eq_pos = last_part.rfind(equal_label)
+        neq_pos = last_part.rfind(not_equal_label)
+
+        if eq_pos >= 0 or neq_pos >= 0:
+            # Found at least one verdict in the last part
+            # Use the one that appears later (rightmost)
+            if eq_pos >= 0 and (neq_pos < 0 or eq_pos > neq_pos):
+                return True, equal_label
+            elif neq_pos >= 0:
+                return False, not_equal_label
+
+        # Strategy 2: Fallback to full text search (first occurrence)
+        eq_pos = text.find(equal_label)
+        neq_pos = text.find(not_equal_label)
+
+        if eq_pos >= 0 and (neq_pos < 0 or eq_pos < neq_pos):
+            return True, equal_label
+        elif neq_pos >= 0:
+            return False, not_equal_label
+
+        # No verdict found
+        return False, None
 
 
 if __name__ == "__main__":
