@@ -176,6 +176,7 @@ class LocalVLLMModelActor:
 
             def new_available_resources_per_node(*args, **kwargs):
                 result = original_available_resources_per_node(*args, **kwargs)
+                print(f"ORIGINAL available resources: {result}", file=sys.stderr)
 
                 for node_hex_id, node_resources in list(result.items()):
                     result[node_hex_id] = {
@@ -183,6 +184,7 @@ class LocalVLLMModelActor:
                         for resource_id, resource in node_resources.items()
                         if "_group_" not in resource_id
                     }
+                print(f"MODIFIED available resources: {result}", file=sys.stderr)
 
                 return result
 
