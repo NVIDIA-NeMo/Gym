@@ -56,7 +56,7 @@ Resource servers are the backbone of tool-based interactions in NeMo Gym. They p
 - **Verification logic**: Functions to evaluate model performance and compute rewards
 - **Business logic abstraction**: Clean separation between model logic and domain-specific functionality
 
-Each resource server must implement a `verify` function that evaluates the model's interactions and returns a reward signal for reinforcement learning.
+Each resource server must implement a `verify` function that evaluates the model's interactions and returns a reward signal for reinforcement learning. See {doc}`/about/concepts/task-verification` for common verification patterns.
 
 **Key term**: A **rollout** is a complete interaction trace—the model's inputs, tool calls, and final outputs—used for training and evaluation.
 
@@ -424,6 +424,8 @@ Your PR will not be merged unless licensing information is present and accurate!
 ---
 
 ## Advanced: Verification Patterns
+
+If you are new to verifiers, we recommend you first check out our conceptual overview, see {doc}`/about/concepts/task-verification`.
 
 :::{dropdown} Multi-step verification with output parsing
 :icon: code
