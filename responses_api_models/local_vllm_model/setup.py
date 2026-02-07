@@ -39,7 +39,7 @@ dependencies = [
 if platform == "darwin":
     dependencies.append("vllm==0.11.0")
 else:
-    dependencies.append("vllm==0.15.1")
+    dependencies.append("vllm==0.11.2")
 
 
 setuptools.setup(install_requires=dependencies)
