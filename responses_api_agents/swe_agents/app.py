@@ -1176,7 +1176,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         # Launch Apptainer container and execute the command
         apptainer_cmd = (
-            f"apptainer exec --writable-tmpfs --cleanenv --fakeroot --pid --no-mount home,tmp,bind-paths "
+            f"apptainer exec --writable-tmpfs --cleanenv --pid --no-mount home,tmp,bind-paths "
             f"{mount_str} "
             f" {params.container} bash -c {shlex.quote(combined_command)}"
         )
