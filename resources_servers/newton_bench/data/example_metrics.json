@@ -1,0 +1,74 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/newton_bench/data/example.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": "Apache 2.0",
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 653.4,
+        "Min": 571.0,
+        "Max": 788.0,
+        "Median": 668.5,
+        "Standard deviation": 113.1
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Median": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "id": {
+        "Total # non-null values": 5,
+        "Average": 2.0,
+        "Min": 0.0,
+        "Max": 4.0,
+        "Median": 2.0,
+        "Standard deviation": 1.58
+    },
+    "module_name": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "difficulty": {
+        "unique_count": 3,
+        "total_count": 5
+    },
+    "system": {
+        "unique_count": 3,
+        "total_count": 5
+    },
+    "noise_level": {
+        "Total # non-null values": 5,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Median": 0.0,
+        "Standard deviation": 0.0
+    },
+    "law_version": {
+        "unique_count": 1,
+        "total_count": 5
+    }
+}
