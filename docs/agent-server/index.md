@@ -6,7 +6,7 @@ Agent servers orchestrate the **rollout** lifecycle—a rollout is one complete 
 Agent servers coordinate three components:
 
 - **[Model Server](../model-server/index)** — Generates model responses
-- **[Resources Server](../resources-server/index)** — Executes tools and computes rewards
+- **Resources Server** — Executes tools and computes rewards
 
 They expose two HTTP endpoints:
 
@@ -23,7 +23,7 @@ Before using agent servers:
 
 1. **Install NeMo Gym** — See [Installation](../get-started/detailed-setup)
 2. **Set up a model server** — See [Model Server](../model-server/index)
-3. **Set up a resources server** — See [Resources Server](../resources-server/index)
+3. **Set up a resources server**
 
 ---
 
@@ -467,14 +467,6 @@ Integrate agents from external frameworks by implementing the `SimpleResponsesAP
 Integrate agents built with OpenAI's Agents SDK.
 +++
 {bdg-secondary}`openai` {bdg-secondary}`agents-sdk`
-:::
-
-:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` NeMo Agent Toolkit
-:link: integrate-agents/nemo-agent-toolkit
-:link-type: doc
-Use agents from NeMo Agent Toolkit.
-+++
-{bdg-secondary}`nemo` {bdg-secondary}`agent-toolkit`
 :::
 
 ::::

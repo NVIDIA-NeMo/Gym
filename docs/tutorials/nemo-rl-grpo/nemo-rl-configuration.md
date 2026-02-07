@@ -8,6 +8,8 @@ With the Gym configuration in place, the next step is understanding the core tra
 
 **Goal**: Understand the GRPO and model hyperparameters for RL training.
 
+**Time**: ~10 minutes (read)
+
 ^^^
 
 **In this section, you will learn**:
@@ -25,6 +27,10 @@ With the Gym configuration in place, the next step is understanding the core tra
 
 ← Previous: Gym Configuration
 :::
+
+## Prerequisites
+
+- Read {doc}`Gym Configuration <gym-configuration>` to understand the Gym-specific parameters
 
 ---
 
@@ -74,9 +80,13 @@ examples/nemo_gym/grpo_workplace_assistant_nemotron_nano_v2_9b.yaml
 
 ---
 
+## Next Steps
+
+With the configuration parameters understood, set up your training environment:
+
 :::{button-ref} training-nemo-rl-grpo-setup
 :color: primary
 :ref-type: ref
 
-Next: Setup →
+Continue to Setup →
 :::
