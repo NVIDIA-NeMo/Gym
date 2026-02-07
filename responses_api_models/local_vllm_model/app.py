@@ -91,6 +91,7 @@ class LocalVLLMModelActor:
         self._patch_signal_handler()
         self._patch_uvicorn_logger()
         self._maybe_patch_engine_stats()
+        self._patch_colocated_placement_group_logic()
 
         for k, v in self.env_vars.items():
             environ[k] = v
@@ -149,6 +150,49 @@ class LocalVLLMModelActor:
                 f"Setting vLLM metrics logger for {self.server_name} to ERROR which will not print engine stats. This helps declutter the logs. Use `debug` for LocalVLLMModel to see them."
             )
             metrics_logger.setLevel(ERROR)
+
+    def _patch_colocated_placement_group_logic(self) -> None:
+        """
+        When running multiple local vLLM model instances on the same node, the placement group logic will error with the following since multiple placement groups are now on the same node.
+
+        (LocalVLLMModelActor pid=504531) (APIServer pid=504531)   File "responses_api_models/local_vllm_model/.venv/lib/python3.12/site-packages/vllm/v1/engine/utils.py", line 858, in launch_core_engines
+        (LocalVLLMModelActor pid=504531) (APIServer pid=504531)     engine_actor_manager = CoreEngineActorManager(
+        (LocalVLLMModelActor pid=504531) (APIServer pid=504531)                            ^^^^^^^^^^^^^^^^^^^^^^^
+        (LocalVLLMModelActor pid=504531) (APIServer pid=504531)   File "responses_api_models/local_vllm_model/.venv/lib/python3.12/site-packages/vllm/v1/engine/utils.py", line 300, in __init__
+        (LocalVLLMModelActor pid=504531) (APIServer pid=504531)     CoreEngineActorManager.create_dp_placement_groups(vllm_config)
+        (LocalVLLMModelActor pid=504531) (APIServer pid=504531)   File "responses_api_models/local_vllm_model/.venv/lib/python3.12/site-packages/vllm/v1/engine/utils.py", line 467, in create_dp_placement_groups
+        (LocalVLLMModelActor pid=504531) (APIServer pid=504531)     assert len(node_ip_keys) == 1, (
+        (LocalVLLMModelActor pid=504531) (APIServer pid=504531)            ^^^^^^^^^^^^^^^^^^^^^^
+        (LocalVLLMModelActor pid=504531) (APIServer pid=504531) AssertionError: Zero or multiple node IP keys found in node resources: ['node:10.65.9.15_group_a036a448bf98d155cd0d6a8991f902000000', 'node:10.65.9.15_group_1_8786b4bfb840f7ba7af007e7e41602000000', 'node:10.65.9.15', 'node:10.65.9.15_group_8786b4bfb840f7ba7af007e7e41602000000', 'node:10.65.9.15_group_1_a036a448bf98d155cd0d6a8991f902000000', 'node:10.65.9.15_group_0_8786b4bfb840f7ba7af007e7e41602000000', 'node:10.65.9.15_group_0_a036a448bf98d155cd0d6a8991f902000000']
+        """
+        from vllm.v1.engine.utils import CoreEngineActorManager
+
+        original_create_dp_placement_groups = CoreEngineActorManager.create_dp_placement_groups
+
+        def new_create_dp_placement_groups(*args, **kwargs):
+            from ray._private import state
+
+            original_available_resources_per_node = state.available_resources_per_node
+
+            def new_available_resources_per_node(*args, **kwargs):
+                result = original_available_resources_per_node(*args, **kwargs)
+
+                for node_hex_id, node_resources in list(result.items()):
+                    result[node_hex_id] = {
+                        resource_id: resource
+                        for resource_id, resource in node_resources.items()
+                        if "_group_" not in resource_id
+                    }
+
+                return result
+
+            state.available_resources_per_node = new_available_resources_per_node
+
+            result = original_create_dp_placement_groups(*args, **kwargs)
+
+            return result
+
+        CoreEngineActorManager.create_dp_placement_groups = new_create_dp_placement_groups
 
     def base_url(self) -> str:
         return self._base_url
