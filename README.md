@@ -1,11 +1,10 @@
 # NeMo Gym
 
-NeMo Gym is a library for building reinforcement learning (RL) training environments for large language models (LLMs). It provides infrastructure to develop environments, scale rollout collection, and integrate seamlessly with your preferred training framework. 
+**[Requirements](#-requirements)** • **[Quick Start](#-quick-start)** • **[Available Resource Servers](#-available-resource-servers)** • **[Documentation & Resources](#-documentation--resources)** • **[Community & Support](#-community--support)** • **[Latest News & Publications](#-latest-news--publications)** • **[Citations](#-citations)**
 
-NeMo Gym is a component of the [NVIDIA NeMo Framework](https://docs.nvidia.com/nemo-framework/), NVIDIA’s GPU-accelerated platform for building and training generative AI models.
+NeMo Gym is a library for building reinforcement learning (RL) training environments for large language models (LLMs). It provides infrastructure to develop environments, scale rollout collection, and integrate seamlessly with your preferred training framework. [Learn more about the NeMo Gym ecosystem.](https://docs.nvidia.com/nemo/gym/latest/about/ecosystem.html)
 
-
-## 🏆 Why NeMo Gym?
+Why NeMo Gym?
 
 - Scaffolding and patterns to accelerate environment development: multi-step, multi-turn, and user modeling scenarios
 - Contribute environments without expert knowledge of the entire RL training loop
@@ -18,33 +17,24 @@ NeMo Gym is a component of the [NVIDIA NeMo Framework](https://docs.nvidia.com/n
 
 ## 📋 Requirements
 
-### Hardware Requirements
-
 NeMo Gym is designed to run on standard development machines:
 
-- **GPU**: Not required for NeMo Gym library operation
-  - GPU may be needed for specific resource servers or model inference (see individual server documentation)
-- **CPU**: Any modern x86_64 or ARM64 processor (e.g., Intel, AMD, Apple Silicon)
-- **RAM**: Minimum 8 GB (16 GB+ recommended for larger environments)
-- **Storage**: Minimum 5 GB free disk space for installation and basic usage
+| Hardware Requirements | Software Requirements |
+| --------------------- | --------------------- |
+| **GPU**: Not required for NeMo Gym library operation<br>• GPU may be needed for specific resource servers or model inference (see individual server documentation) | **Operating System**:<br>• Linux (Ubuntu 20.04+, or equivalent)<br>• macOS (11.0+ for x86_64, 12.0+ for Apple Silicon)<br>• Windows (via WSL2) |
+| **CPU**: Any modern x86_64 or ARM64 processor (e.g., Intel, AMD, Apple Silicon) | **Python**: 3.12 or higher |
+| **RAM**: Minimum 8 GB (16 GB+ recommended for larger environments) | **Git**: For cloning the repository |
+| **Storage**: Minimum 5 GB free disk space for installation and basic usage | **Internet Connection**: Required for downloading dependencies and API access |
 
-### Software Requirements
-
-- **Operating System**: 
-  - Linux (Ubuntu 20.04+, or equivalent)
-  - macOS (11.0+ for x86_64, 12.0+ for Apple Silicon)
-  - Windows (via WSL2)
-- **Python**: 3.12 or higher
-- **Git**: For cloning the repository
-- **Internet Connection**: Required for downloading dependencies and API access
-
-### Additional Requirements
+**Additional Requirements**
 
 - **API Keys**: OpenAI API key with available credits (for the quickstart examples)
   - Other model providers supported (Azure OpenAI, self-hosted models via vLLM)
 - **Ray**: Automatically installed as a dependency (no separate setup required)
 
 ## 🚀 Quick Start
+
+Install NeMo Gym, start the servers, and collect your first verified rollouts for RL training.
 
 ### Setup
 ```bash
@@ -165,10 +155,11 @@ Purpose: Training-ready environments with curated datasets.
 | Math With Judge            | math                  | <a href='https://huggingface.co/datasets/nvidia/Nemotron-RL-math-stack_overflow'>Nemotron-RL-math-stack_overflow</a>                                           | -                                                                                                    | -                                                                        | <a href='resources_servers/math_with_judge/configs/math_stack_overflow.yaml'>config</a>                   | ✓     | ✓          | Creative Commons Attribution-ShareAlike 4.0 International |
 <!-- END_TRAINING_SERVERS_TABLE -->
 
-## 📖 Documentation
+## 📖 Documentation & Resources
 
 - **[Documentation](https://docs.nvidia.com/nemo/gym/latest/index.html)** - Technical reference docs
 - **[Tutorials](https://docs.nvidia.com/nemo/gym/latest/tutorials/index.html)** - Hands-on tutorials and practical examples
+- **[API Reference](https://docs.nvidia.com/nemo/gym/latest/apidocs/index.html)** - Complete class and function reference
  
 
 ## 🤝 Community & Support
@@ -177,6 +168,10 @@ We'd love your contributions! Here's how to get involved:
 
 - **[Report Issues](https://github.com/NVIDIA-NeMo/Gym/issues)** - Bug reports and feature requests
 - **[Contributing Guide](https://docs.nvidia.com/nemo/gym/latest/contribute/index.html)** - How to contribute code, docs, new environments, or training framework integrations
+
+## 📰 Latest News & Publications
+
+Coming soon!
 
 ## 📚 Citations
 
