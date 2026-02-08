@@ -1286,6 +1286,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             dataset_processor.postprocess_after_eval_run(maybe_report_file)
 
             report = json.loads(Path(maybe_report_file).read_text())
+            assert params.instance_id in report, (
+                f"Report is malformatted. Expected instance ID key: {params.instance_id}. Report: {report}"
+            )
             resolved = report[params.instance_id]["resolved"]
             metrics_to_update["resolved"] = resolved
         else:
