@@ -1278,7 +1278,15 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         params, dataset_processor = self._setup_params(body)
+        try:
+            return await self._inner_responses(params, dataset_processor)
+        except Exception as e:
+            print(f"Hit an exception with params: {params.model_dump_json()}", file=sys.stderr)
+            raise e
 
+    async def _inner_responses(
+        self, params: SWEBenchWrapperInstanceConfig, dataset_processor: BaseDatasetHarnessProcessor
+    ) -> NeMoGymResponse:
         maybe_report_file = await runner_ray_remote.remote(params.model_dump())
         metrics_to_update = dict()
 
@@ -1312,11 +1320,11 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         return NeMoGymResponse(
             id=f"swebench-{params.instance_id}",
             created_at=int(time.time()),
-            model=body.model,
+            model=params.body.model,
             object="response",
             output=output_items,
-            parallel_tool_calls=body.parallel_tool_calls,
-            tool_choice=body.tool_choice,
+            parallel_tool_calls=params.body.parallel_tool_calls,
+            tool_choice=params.body.tool_choice,
             tools=tools,
             metadata={
                 "input": json.dumps([i.model_dump() for i in input_items]),
