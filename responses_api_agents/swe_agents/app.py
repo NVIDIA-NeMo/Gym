@@ -169,7 +169,7 @@ class SWEBenchMetrics(BaseModel):
     create_runtime_time: Optional[float] = None
     connect_to_runtime_time: Optional[float] = None
     initialize_runtime_time: Optional[float] = None
-    # total_command_exec_time: float
+    total_command_exec_time: Optional[float] = None
     total_model_call_time: Optional[float] = None
     final_eval_apptainer_spinup_time: Optional[float] = None
     final_eval_time: Optional[float] = None
