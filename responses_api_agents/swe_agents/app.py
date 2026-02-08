@@ -29,6 +29,7 @@ from pathlib import Path
 from shutil import rmtree
 from subprocess import Popen
 from subprocess import run as subprocess_run
+from traceback import format_exc
 from typing import Any, Dict, Literal, Optional, Tuple, Union
 
 import ray
@@ -1273,10 +1274,19 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         params, dataset_processor = self._setup_params(body)
+
+        with (params.persistent_dir / "params.json").open("w") as f:
+            f.write(params.model_dump_json(indent=4))
+
         try:
             return await self._inner_responses(params, dataset_processor)
         except Exception as e:
-            print(f"Hit an exception with params: {params.model_dump_json()}", file=sys.stderr)
+            traceback_file = params.persistent_dir / "traceback.err"
+            with traceback_file.open("w") as f:
+                f.write(format_exc())
+
+            print(f"Hit an exception in {self.config.name}! See {traceback_file} for more details", file=sys.stderr)
+
             raise e
 
     async def _inner_responses(
