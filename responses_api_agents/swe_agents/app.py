@@ -160,7 +160,6 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
 class SWEBenchMetrics(BaseModel):
     resolved: Optional[bool] = None
     patch_exists: Optional[bool] = None
-    # patch_successfully_applied: Optional[bool] = None
 
     # Profiling time metrics to report
     ray_queue_time: Optional[float] = None
@@ -173,15 +172,6 @@ class SWEBenchMetrics(BaseModel):
     total_model_call_time: Optional[float] = None
     final_eval_apptainer_spinup_time: Optional[float] = None
     final_eval_time: Optional[float] = None
-
-    # Exit condition metrics to report
-    # TODO add more exit conditions
-    # hit_sample_timeout: bool
-    # hit_trajectory_command_exec_timeout: bool
-    # hit_eval_timeout: bool
-    # hit_empty_trajectory: bool
-    # hit_success: bool
-    # hit_responses_exception: bool
 
 
 class SWEBenchVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
