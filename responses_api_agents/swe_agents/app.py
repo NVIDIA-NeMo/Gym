@@ -166,11 +166,11 @@ class SWEBenchMetrics(BaseModel):
     ray_queue_time: Optional[float] = None
     openhands_run_time: Optional[float] = None
     generation_apptainer_spinup_time: Optional[float] = None
-    create_runtime_time: float
-    connect_to_runtime_time: float
-    initialize_runtime_time: float
+    create_runtime_time: Optional[float] = None
+    connect_to_runtime_time: Optional[float] = None
+    initialize_runtime_time: Optional[float] = None
     # total_command_exec_time: float
-    total_model_call_time: float
+    total_model_call_time: Optional[float] = None
     final_eval_apptainer_spinup_time: Optional[float] = None
     final_eval_time: Optional[float] = None
 
