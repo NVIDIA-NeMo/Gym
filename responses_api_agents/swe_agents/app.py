@@ -703,21 +703,8 @@ def runner_ray_remote(params_dict: dict[str, Any]) -> Optional[Path]:
     RunOpenHandsAgent.model_rebuild(force=True)
 
     params = SWEBenchWrapperInstanceConfig.model_validate(params_dict)
-    instance_id = params.instance_id
-
-    params.metrics_fpath.write_text("{}")
-    update_metrics(params.metrics_fpath, {"ray_queue_time": time.time() - params.ray_queue_timestamp})
-
-    if params.debug:
-        profiler = Profiler(name=instance_id, base_profile_dir=params.persistent_dir / "profiling")
-        profiler.start()
-
     run_oh = RunOpenHandsAgent(config=params)
-
     report_file = asyncio.run(run_oh.process_single_datapoint())
-
-    if params.debug:
-        profiler.stop()
 
     return report_file
 
@@ -841,7 +828,12 @@ class RunOpenHandsAgent(BaseModel):
             )
 
     async def process_single_datapoint(self) -> Optional[Path]:
-        metrics = SWEBenchMetrics()
+        instance_id = self.config.instance_id
+        if self.config.debug:
+            profiler = Profiler(name=instance_id, base_profile_dir=self.config.persistent_dir / "profiling")
+            profiler.start()
+
+        metrics = SWEBenchMetrics(ray_queue_time=time.time() - self.config.ray_queue_timestamp)
 
         metrics.openhands_run_time = -time.time()
         metrics.generation_apptainer_spinup_time = metrics.openhands_run_time
@@ -917,6 +909,9 @@ class RunOpenHandsAgent(BaseModel):
 
         metrics.patch_exists = True
         update_metrics(self.config.metrics_fpath, metrics.model_dump())
+
+        if self.config.debug:
+            profiler.stop()
 
         return report_file
 
