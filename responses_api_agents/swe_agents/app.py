@@ -1256,6 +1256,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             / "generation_apptainer_spinup_timestamp",
         )
 
+        params.metrics_fpath.write_text("{}")
+
         if params.problem_info["dataset_name"] == "nv-internal-1":
             dataset_processor = NVInternalDatasetProcessor(config=params)
         elif "R2E-Gym" in params.problem_info["dataset_name"]:
