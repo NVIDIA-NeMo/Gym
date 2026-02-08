@@ -223,7 +223,7 @@ class BaseDatasetHarnessProcessor(BaseModel):
     def get_run_command(self) -> ExecuteContainerCommandArgs:
         pass
 
-    def postprocess_after_eval_run(self, report_file: Path) -> None:
+    def postprocess_after_run(self, report_file: Path) -> None:
         pass
 
     def _get_command_sleep_until_predictions_file(self) -> str:
@@ -1299,7 +1299,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         metrics_to_update = dict()
 
         if maybe_report_file:
-            dataset_processor.postprocess_after_eval_run(maybe_report_file)
+            dataset_processor.postprocess_after_run(maybe_report_file)
 
             report = json.loads(Path(maybe_report_file).read_text())
             assert params.instance_id in report, (
