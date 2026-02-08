@@ -1139,6 +1139,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             parsing_script_path = params.persistent_dir / "parsing_script.py"
             model_patch_path = params.persistent_dir / "patch.diff"
 
+            # Write here since we are mounting it
+            model_patch_path.write_text("")
+
             mount_args.append(f"--mount type=bind,src={run_script_path},dst=/root/run_script.sh")
             mount_args.append(f"--mount type=bind,src={parsing_script_path},dst=/root/parsing_script.py")
             mount_args.append(f"--mount type=bind,src={model_patch_path},dst=/root/patch.diff")
