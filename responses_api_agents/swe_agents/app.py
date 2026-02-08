@@ -1063,7 +1063,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     if matches:
                         return matches[0]
             else:
-                print(f"Container directory {container_dir} does not exist", flush=True)
+                if self.config.debug:
+                    print(f"Container directory {container_dir} does not exist", flush=True)
 
         # Phase 3: Fallback
         tried_paths = []
