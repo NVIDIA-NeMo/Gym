@@ -208,7 +208,8 @@ class BaseDatasetHarnessProcessor(BaseModel):
         lock_path = lock_dir / f".{setup_dir.name}.lock"
 
         with open(lock_path, "w") as lock_file:
-            print(f"Acquiring {label} setup lock at {lock_path}", flush=True)
+            if self.config.debug:
+                print(f"Acquiring {label} setup lock at {lock_path}", flush=True)
             flock(lock_file, LOCK_EX)
             try:
                 yield
