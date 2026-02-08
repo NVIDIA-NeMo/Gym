@@ -44,6 +44,8 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionToolParam,
     NeMoGymChatCompletionUserMessageParam,
     NeMoGymChoice,
+    NeMoGymEasyInputMessage,
+    NeMoGymFunctionCallOutput,
     NeMoGymFunctionDefinition,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -565,10 +567,12 @@ class VLLMConverter(BaseModel):
     # =======================================================
 
     def postprocess_chat_response(self, choice: NeMoGymChoice) -> List[NeMoGymResponseOutputItem]:
-        raw_message = choice.message.model_dump()
+        return self.postprocess_assistant_message_dict(choice.message.model_dump())
+
+    def postprocess_assistant_message_dict(self, message_dict: Dict[str, Any]) -> List[NeMoGymResponseOutputItem]:
         response_output = []
 
-        content = raw_message.get("content") or ""
+        content = message_dict.get("content") or ""
         reasoning_matches, content = self._extract_reasoning_from_content(content)
         if reasoning_matches:
             reasoning_item = NeMoGymResponseReasoningItem(
@@ -581,7 +585,7 @@ class VLLMConverter(BaseModel):
             )
             response_output.append(reasoning_item)
 
-        tool_calls_raw = raw_message.get("tool_calls", []) or []
+        tool_calls_raw = message_dict.get("tool_calls", []) or []
         # We need to return at least one output item. When the model decides to just stop with no chat or tool calls
         # We just add an output item with empty or null content here. This is prevalent e.g. in the case of base models that may not be the most reliable since they have not been instruction tuned.
         has_empty_output = not (response_output or tool_calls_raw)
@@ -590,7 +594,7 @@ class VLLMConverter(BaseModel):
             response_output.append(
                 NeMoGymResponseOutputMessage(
                     id=f"msg_{uuid4().hex}",
-                    role=raw_message.get("role"),
+                    role=message_dict.get("role"),
                     content=[
                         NeMoGymResponseOutputText(
                             type="output_text",
@@ -618,14 +622,14 @@ class VLLMConverter(BaseModel):
 
         # `"prompt_token_ids" in raw_message`: sometimes the model endpoint may go out of context length, in which case we return an empty response
         # In these cases, there are no token id information provided.
-        if self.return_token_id_information and "prompt_token_ids" in raw_message:
+        if self.return_token_id_information and "prompt_token_ids" in message_dict:
             last_response_output_item = response_output[-1]
             train_cls = RESPONSES_TO_TRAIN[last_response_output_item.__class__]
             response_output[-1] = train_cls(
                 **last_response_output_item.model_dump(),
-                prompt_token_ids=raw_message["prompt_token_ids"],
-                generation_token_ids=raw_message["generation_token_ids"],
-                generation_log_probs=raw_message["generation_log_probs"],
+                prompt_token_ids=message_dict["prompt_token_ids"],
+                generation_token_ids=message_dict["generation_token_ids"],
+                generation_log_probs=message_dict["generation_log_probs"],
             )
 
         return response_output
@@ -634,6 +638,43 @@ class VLLMConverter(BaseModel):
         # TODO: Currently only parses reasoning wrapped in <think>...</think> tags.
         # Maybe parameterize to support other model formats in the future.
         return self._parse_think_tags(content)
+
+    def chat_completions_messages_to_responses_items(
+        self, messages: List[Dict[str, Any]]
+    ) -> List[NeMoGymResponseOutputItem]:
+        output_items = []
+
+        for message in messages:
+            role = message["role"]
+            if role in ("user", "system", "developer"):
+                output_items.append(NeMoGymEasyInputMessage.model_validate(message))
+            elif role == "assistant":
+                output_items.extend(self.postprocess_assistant_message_dict(message))
+            elif role == "tool":
+                output_items.append(
+                    NeMoGymFunctionCallOutput(
+                        call_id=message["tool_call_id"],
+                        output=message["content"],
+                        status="completed",
+                    )
+                )
+            else:
+                raise NotImplementedError(f"Unrecognized role: {role}!")
+
+        return output_items
+
+
+def split_responses_input_output_items(
+    items: List[NeMoGymResponseOutputItem],
+) -> Tuple[List[NeMoGymResponseOutputItem], List[NeMoGymResponseOutputItem]]:
+    if not items:
+        return [], []
+
+    for i, item in enumerate(items):
+        if getattr(item, "role", None) == "assistant":
+            break
+
+    return items[:i], items[i:]
 
 
 if __name__ == "__main__":
