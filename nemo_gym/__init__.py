@@ -36,7 +36,9 @@ environ["TRANSFORMERS_CACHE"] = environ["HF_DATASETS_CACHE"]
 # environ["HF_HOME"] = join(CACHE_DIR, "huggingface")
 
 # UV caching directory overrides to local folders.
-environ["UV_CACHE_DIR"] = str(CACHE_DIR / "uv")
+# Use setdefault so a pre-warmed cache (e.g., in a container) is not overridden.
+environ.setdefault("UV_CACHE_DIR", str(CACHE_DIR / "uv"))
+environ.setdefault("UV_LINK_MODE", "symlink")
 
 # Turn off Gradio analytics
 environ["GRADIO_ANALYTICS_ENABLED"] = "False"
