@@ -238,11 +238,11 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
 
         # Helper to build response
         def _build_response(expected_str: str, model_output_str: str) -> TerminusJudgeVerifyResponse:
-            payload = body.model_dump()
-            payload.pop("expected_answer", None)
             return TerminusJudgeVerifyResponse(
-                **payload,
+                responses_create_params=body.responses_create_params,
+                response=body.response,
                 reward=reward,
+                uuid=body.uuid,
                 expected_answer=expected_str,
                 model_output=model_output_str,
                 parsed_output=parsed_output,
@@ -253,6 +253,8 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
                 judge_passed=judge_passed,
                 failure_reason=failure_reason,
                 judge_evaluations=judge_evaluations,
+                metadata=body.metadata,
+                threshold=body.threshold,
             )
 
         # Extract expected answer (ground truth)
