@@ -14,7 +14,7 @@ lc_judge:
       judge_not_equal_label: INCORRECT
       check_twice_swap: false
       reward_if_swap_fails: 0.0
-      question_extract_regex: ^QUESTION:\s*(.*)$
+      question_extract_regex: ^QUESTION:\s*(.*)$|</text>\n\n(.*)$
       response_extract_regex: null
       domain: knowledge
       verified: false
