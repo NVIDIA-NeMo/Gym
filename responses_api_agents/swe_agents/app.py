@@ -146,6 +146,7 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     generation_apptainer_spinup_timestamp_fpath: Path
     generation_apptainer_spinup_timestamp_mounted_fpath: Path
     base_mounted_dir: Path
+    profiling_dir: Path
     profiling_mounted_dir: Path
 
     # Set later
@@ -882,9 +883,9 @@ class RunOpenHandsAgent(BaseModel):
         # Dump out dot and png files from profiling on OpenHands level
         if self.config.debug:
             profiling_name = "openhands"
-            callgrind_path = self.config.profiling_mounted_dir / f"{profiling_name}.callgrind"
-            callgrind_dotfile_path = self.config.profiling_mounted_dir / f"{profiling_name}.dot"
-            callgrind_graph_path = self.config.profiling_mounted_dir / f"{profiling_name}.png"
+            callgrind_path = self.config.profiling_dir / f"{profiling_name}.callgrind"
+            callgrind_dotfile_path = self.config.profiling_dir / f"{profiling_name}.dot"
+            callgrind_graph_path = self.config.profiling_dir / f"{profiling_name}.png"
 
             gprof2dot_main(
                 argv=f"--format=callgrind --output={callgrind_dotfile_path} -e 5 -n 5 {callgrind_path}".split()
@@ -1245,6 +1246,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             persistent_dir=persistent_dir,
             metrics_fpath=persistent_dir / "nemo_gym_metrics.json",
             base_mounted_dir=base_mounted_dir,
+            profiling_dir=persistent_dir / "profiling",
             profiling_mounted_dir=base_mounted_dir / "profiling",
             ray_queue_timestamp=time.time(),
             inference_params=inference_params,
