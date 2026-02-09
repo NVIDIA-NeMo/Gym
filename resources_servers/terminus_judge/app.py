@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+import logging
 from contextlib import nullcontext
 from difflib import SequenceMatcher
 from enum import Enum
@@ -37,6 +38,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from resources_servers.terminus_judge.schemas import TERMINUS_1_SCHEMA, TERMINUS_2_SCHEMA
+
+logger = logging.getLogger(__name__)
 
 
 SCHEMA_MAP = {
@@ -227,7 +230,7 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
     async def verify(self, body: TerminusJudgeVerifyRequest) -> TerminusJudgeVerifyResponse:
         # Initialize response fields
         reward = 0.0
-        failure_reason = None
+        failure_reason = FailureCode.NONE
         schema_passed = None
         task_complete_passed = None
         string_similarity_passed = None
@@ -238,6 +241,15 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
 
         # Helper to build response
         def _build_response(expected_str: str, model_output_str: str) -> TerminusJudgeVerifyResponse:
+            logger.info(
+                f"terminus_judge _build_response | uuid={body.uuid} reward={reward} "
+                f"failure_reason={failure_reason} schema_check_passed={schema_passed} "
+                f"task_complete_check_passed={task_complete_passed} "
+                f"string_similarity_passed={string_similarity_passed} judge_passed={judge_passed} "
+                f"similarity_score={similarity_score} parsed_output_type={type(parsed_output).__name__} "
+                f"threshold={body.threshold} "
+                f"expected_answer_len={len(expected_str)} model_output_len={len(model_output_str)}"
+            )
             return TerminusJudgeVerifyResponse(
                 responses_create_params=body.responses_create_params,
                 response=body.response,
@@ -259,13 +271,17 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
 
         # Extract expected answer (ground truth)
         expected = _extract_expected_answer(body)
+        logger.info(f"terminus_judge verify | uuid={body.uuid} expected={expected}")
         if not expected:
+            logger.info(f"terminus_judge verify | uuid={body.uuid} expected_answer is empty or missing")
             failure_reason = FailureCode.EXPECTED_ANSWER_INVALID
             return _build_response(expected_str="", model_output_str="")
 
         # Extract model output
         generated = _extract_last_assistant_text(body)
+        logger.info(f"terminus_judge verify | uuid={body.uuid} generated={generated}")
         if not generated:
+            logger.info(f"terminus_judge verify | uuid={body.uuid} model output is empty")
             failure_reason = FailureCode.MODEL_OUTPUT_INVALID
             return _build_response(expected_str=expected, model_output_str="")
 
@@ -273,34 +289,66 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
         text = generated
         if "</think>" in text:
             text = text.split("</think>")[-1].strip()
+        logger.info(f"terminus_judge verify | uuid={body.uuid} text={text}")
 
         # Parse expected answer (ground truth) - failure here is a data issue
         try:
             expected_dict = json.loads(expected)
         except json.JSONDecodeError:
+            logger.info(f"terminus_judge verify | uuid={body.uuid} expected_answer is not valid JSON")
+            failure_reason = FailureCode.EXPECTED_ANSWER_INVALID
+            return _build_response(expected_str=expected, model_output_str=text)
+
+        if not isinstance(expected_dict, dict):
+            logger.info(
+                f"terminus_judge verify | uuid={body.uuid} "
+                f"expected_answer parsed to {type(expected_dict).__name__}, not dict"
+            )
             failure_reason = FailureCode.EXPECTED_ANSWER_INVALID
             return _build_response(expected_str=expected, model_output_str=text)
 
         # Parse model prediction
         try:
             pred = json.loads(text)
-            parsed_output = pred
         except json.JSONDecodeError:
+            logger.info(f"terminus_judge verify | uuid={body.uuid} model output is not valid JSON")
             failure_reason = FailureCode.MODEL_OUTPUT_INVALID
             return _build_response(expected_str=expected, model_output_str=text)
+
+        if not isinstance(pred, dict):
+            logger.info(
+                f"terminus_judge verify | uuid={body.uuid} "
+                f"model output parsed to {type(pred).__name__}, not dict"
+            )
+            failure_reason = FailureCode.MODEL_OUTPUT_INVALID
+            return _build_response(expected_str=expected, model_output_str=text)
+
+        parsed_output = pred
 
         # Check harness type
         harness = body.metadata.get("harness", None) if body.metadata else None
         if harness is None or harness not in ["terminus_1", "terminus_2"]:
+            logger.info(f"terminus_judge verify | uuid={body.uuid} unknown harness={harness}")
             failure_reason = FailureCode.UNKNOWN_HARNESS
+            return _build_response(expected_str=expected, model_output_str=text)
+
+        logger.info(f"terminus_judge verify | uuid={body.uuid} harness={harness} pred_keys={list(pred.keys())}")
+
+        # Schema validation for expected answer (must pass)
+        try:
+            validate_against_schema_openapi(expected_dict, SCHEMA_MAP[harness])
+        except Exception as e:
+            logger.info(f"terminus_judge verify | uuid={body.uuid} expected answer schema check failed: {e}")
+            failure_reason = FailureCode.EXPECTED_ANSWER_INVALID
             return _build_response(expected_str=expected, model_output_str=text)
 
         # Schema validation (must pass)
         try:
             validate_against_schema_openapi(pred, SCHEMA_MAP[harness])
             schema_passed = True
-        except Exception:
+        except Exception as e:
             schema_passed = False
+            logger.info(f"terminus_judge verify | uuid={body.uuid} schema check failed: {e}")
             failure_reason = FailureCode.SCHEMA_CHECK_FAILED
             return _build_response(expected_str=expected, model_output_str=text)
 
@@ -309,6 +357,7 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
             task_complete_passed = True
         else:
             task_complete_passed = False
+            logger.info(f"terminus_judge verify | uuid={body.uuid} task_complete check failed")
             failure_reason = FailureCode.TASK_COMPLETE_CHECK_FAILED
             return _build_response(expected_str=expected, model_output_str=text)
 
@@ -321,6 +370,10 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
                 similarity_score = command_similarity(expected_dict, pred)
                 threshold = (
                     body.threshold if body.threshold is not None else self.config.string_similarity_threshold
+                )
+                logger.info(
+                    f"terminus_judge verify | uuid={body.uuid} "
+                    f"string_similarity={similarity_score:.4f} threshold={threshold}"
                 )
 
                 if similarity_score >= threshold:
@@ -344,6 +397,10 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
                     expected_answer=expected, generated_answer=text
                 )
                 judge_evaluations.append(first_eval)
+                logger.info(
+                    f"terminus_judge verify | uuid={body.uuid} "
+                    f"judge_first: equal={first_equal} verdict={first_eval.verdict_label}"
+                )
 
                 # Check if judge output was valid (has verdict label)
                 if first_eval.verdict_label is None:
@@ -356,6 +413,10 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
                             expected_answer=text, generated_answer=expected
                         )
                         judge_evaluations.append(second_eval)
+                        logger.info(
+                            f"terminus_judge verify | uuid={body.uuid} "
+                            f"judge_swap: equal={second_equal} verdict={second_eval.verdict_label}"
+                        )
 
                         # Check if second judge output was valid
                         if second_eval.verdict_label is None:
@@ -387,7 +448,7 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
 
         except Exception as e:
             failure_reason = FailureCode.UNKNOWN_ERROR
-            print(f"DEBUG: Unknown error in verify: {type(e).__name__} {e}", flush=True)
+            logger.error(f"terminus_judge verify | uuid={body.uuid} unknown error: {type(e).__name__} {e}")
 
         return _build_response(expected_str=expected, model_output_str=text)
 

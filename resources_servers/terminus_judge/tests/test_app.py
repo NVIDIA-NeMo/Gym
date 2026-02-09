@@ -1378,3 +1378,267 @@ class TestVerifyAdditionalScenarios:
 
         assert response.reward == 1.0
         assert response.failure_reason == FailureCode.NONE
+
+
+class TestNonDictJsonParsing:
+    """Tests for the bug where json.loads succeeds but returns a non-dict value.
+
+    Policy models can output weird things like just "True", "123", "[1,2,3]",
+    or '"hello"'. These are all valid JSON, so json.loads won't raise
+    JSONDecodeError, but the result is not a dict. Without the isinstance check,
+    the code would proceed and crash at pydantic validation or .get() calls.
+
+    Same issue applies to expected_answer (ground truth) — if the data has a
+    non-dict JSON value, we should fail gracefully with EXPECTED_ANSWER_INVALID.
+    """
+
+    @fixture
+    def resources_server(self) -> TerminusJudgeResourcesServer:
+        """Create a TerminusJudgeResourcesServer instance for testing."""
+        config = TerminusJudgeResourcesServerConfig(
+            host="127.0.0.1",
+            port=20002,
+            entrypoint="",
+            name="terminus_judge_test_server",
+            judge_model_server={"name": "test_judge", "type": "responses_api_models"},
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[NeMoGymEasyInputMessage(role="user", content="test")]
+            ),
+            enable_string_similarity=True,
+            string_similarity_threshold=0.8,
+            enable_llm_judge=False,
+        )
+
+        with patch("builtins.open", MagicMock()):
+            server = TerminusJudgeResourcesServer(
+                config=config,
+                server_client=MagicMock(spec=ServerClient),
+            )
+            server._judge_prompt_template = "Expected: {expected_answer}\nGenerated: {generated_answer}"
+            return server
+
+    def _create_verify_request_raw(
+        self,
+        model_output: str,
+        expected_answer_str: str,
+        harness: str = "terminus_1",
+    ) -> TerminusJudgeVerifyRequest:
+        """Helper to create request with raw strings for both model output and expected answer."""
+        output_message = NeMoGymResponseOutputMessage(
+            id="msg_1",
+            content=[NeMoGymResponseOutputText(annotations=[], text=model_output)],
+        )
+        response = NeMoGymResponse(
+            id="test_response",
+            created_at=1000,
+            model="test_model",
+            object="response",
+            output=[output_message],
+            parallel_tool_calls=False,
+            tool_choice="auto",
+            tools=[],
+        )
+        return TerminusJudgeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[NeMoGymEasyInputMessage(role="user", content="test")]
+            ),
+            response=response,
+            expected_answer=expected_answer_str,
+            metadata={"harness": harness},
+        )
+
+    # --- Model output is valid JSON but not a dict ---
+
+    @pytest.mark.asyncio
+    async def test_model_output_json_bool_true(self, resources_server: TerminusJudgeResourcesServer):
+        """json.loads('true') -> True (bool). This is the most common policy failure."""
+        expected = create_terminus_1_response([{"keystrokes": "ls\n"}])
+        request = self._create_verify_request_raw("true", json.dumps(expected))
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 0.0
+        assert response.failure_reason == FailureCode.MODEL_OUTPUT_INVALID
+        assert response.parsed_output is None
+
+    @pytest.mark.asyncio
+    async def test_model_output_json_bool_false(self, resources_server: TerminusJudgeResourcesServer):
+        """json.loads('false') -> False (bool)."""
+        expected = create_terminus_1_response([{"keystrokes": "ls\n"}])
+        request = self._create_verify_request_raw("false", json.dumps(expected))
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 0.0
+        assert response.failure_reason == FailureCode.MODEL_OUTPUT_INVALID
+        assert response.parsed_output is None
+
+    @pytest.mark.asyncio
+    async def test_model_output_json_null(self, resources_server: TerminusJudgeResourcesServer):
+        """json.loads('null') -> None (NoneType)."""
+        expected = create_terminus_1_response([{"keystrokes": "ls\n"}])
+        request = self._create_verify_request_raw("null", json.dumps(expected))
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 0.0
+        assert response.failure_reason == FailureCode.MODEL_OUTPUT_INVALID
+        assert response.parsed_output is None
+
+    @pytest.mark.asyncio
+    async def test_model_output_json_number_int(self, resources_server: TerminusJudgeResourcesServer):
+        """json.loads('42') -> 42 (int)."""
+        expected = create_terminus_1_response([{"keystrokes": "ls\n"}])
+        request = self._create_verify_request_raw("42", json.dumps(expected))
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 0.0
+        assert response.failure_reason == FailureCode.MODEL_OUTPUT_INVALID
+        assert response.parsed_output is None
+
+    @pytest.mark.asyncio
+    async def test_model_output_json_number_float(self, resources_server: TerminusJudgeResourcesServer):
+        """json.loads('1.5') -> 1.5 (float)."""
+        expected = create_terminus_1_response([{"keystrokes": "ls\n"}])
+        request = self._create_verify_request_raw("1.5", json.dumps(expected))
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 0.0
+        assert response.failure_reason == FailureCode.MODEL_OUTPUT_INVALID
+        assert response.parsed_output is None
+
+    @pytest.mark.asyncio
+    async def test_model_output_json_string(self, resources_server: TerminusJudgeResourcesServer):
+        """json.loads('"hello"') -> 'hello' (str). Model just wraps output in quotes."""
+        expected = create_terminus_1_response([{"keystrokes": "ls\n"}])
+        request = self._create_verify_request_raw('"hello"', json.dumps(expected))
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 0.0
+        assert response.failure_reason == FailureCode.MODEL_OUTPUT_INVALID
+        assert response.parsed_output is None
+
+    @pytest.mark.asyncio
+    async def test_model_output_json_array(self, resources_server: TerminusJudgeResourcesServer):
+        """json.loads('[1, 2, 3]') -> [1, 2, 3] (list). Model outputs a JSON array instead of object."""
+        expected = create_terminus_1_response([{"keystrokes": "ls\n"}])
+        request = self._create_verify_request_raw("[1, 2, 3]", json.dumps(expected))
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 0.0
+        assert response.failure_reason == FailureCode.MODEL_OUTPUT_INVALID
+        assert response.parsed_output is None
+
+    @pytest.mark.asyncio
+    async def test_model_output_json_array_of_dicts(self, resources_server: TerminusJudgeResourcesServer):
+        """Model outputs a JSON array of dicts — still not a dict at top level."""
+        expected = create_terminus_1_response([{"keystrokes": "ls\n"}])
+        request = self._create_verify_request_raw('[{"keystrokes": "ls"}]', json.dumps(expected))
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 0.0
+        assert response.failure_reason == FailureCode.MODEL_OUTPUT_INVALID
+        assert response.parsed_output is None
+
+    @pytest.mark.asyncio
+    async def test_model_output_bool_after_think_tags(self, resources_server: TerminusJudgeResourcesServer):
+        """Model outputs <think>...</think>true — after stripping think tags, 'true' parses to bool."""
+        expected = create_terminus_1_response([{"keystrokes": "ls\n"}])
+        request = self._create_verify_request_raw(
+            "<think>Let me think about this...</think>true", json.dumps(expected)
+        )
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 0.0
+        assert response.failure_reason == FailureCode.MODEL_OUTPUT_INVALID
+        assert response.parsed_output is None
+
+    @pytest.mark.asyncio
+    async def test_model_output_number_after_think_tags(self, resources_server: TerminusJudgeResourcesServer):
+        """Model outputs <think>reasoning</think>42 — bare number after think tags."""
+        expected = create_terminus_1_response([{"keystrokes": "ls\n"}])
+        request = self._create_verify_request_raw(
+            "<think>The answer is 42</think>42", json.dumps(expected)
+        )
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 0.0
+        assert response.failure_reason == FailureCode.MODEL_OUTPUT_INVALID
+        assert response.parsed_output is None
+
+    # --- Expected answer is valid JSON but not a dict ---
+
+    @pytest.mark.asyncio
+    async def test_expected_answer_json_bool(self, resources_server: TerminusJudgeResourcesServer):
+        """Expected answer is 'true' — valid JSON, not a dict (data issue)."""
+        pred = create_terminus_1_response([{"keystrokes": "ls\n"}])
+        request = self._create_verify_request_raw(json.dumps(pred), "true")
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 0.0
+        assert response.failure_reason == FailureCode.EXPECTED_ANSWER_INVALID
+
+    @pytest.mark.asyncio
+    async def test_expected_answer_json_null(self, resources_server: TerminusJudgeResourcesServer):
+        """Expected answer is 'null' — valid JSON, not a dict (data issue)."""
+        pred = create_terminus_1_response([{"keystrokes": "ls\n"}])
+        request = self._create_verify_request_raw(json.dumps(pred), "null")
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 0.0
+        assert response.failure_reason == FailureCode.EXPECTED_ANSWER_INVALID
+
+    @pytest.mark.asyncio
+    async def test_expected_answer_json_number(self, resources_server: TerminusJudgeResourcesServer):
+        """Expected answer is '42' — valid JSON, not a dict (data issue)."""
+        pred = create_terminus_1_response([{"keystrokes": "ls\n"}])
+        request = self._create_verify_request_raw(json.dumps(pred), "42")
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 0.0
+        assert response.failure_reason == FailureCode.EXPECTED_ANSWER_INVALID
+
+    @pytest.mark.asyncio
+    async def test_expected_answer_json_string(self, resources_server: TerminusJudgeResourcesServer):
+        """Expected answer is '"hello"' — valid JSON string, not a dict (data issue)."""
+        pred = create_terminus_1_response([{"keystrokes": "ls\n"}])
+        request = self._create_verify_request_raw(json.dumps(pred), '"hello"')
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 0.0
+        assert response.failure_reason == FailureCode.EXPECTED_ANSWER_INVALID
+
+    @pytest.mark.asyncio
+    async def test_expected_answer_json_array(self, resources_server: TerminusJudgeResourcesServer):
+        """Expected answer is '[1, 2, 3]' — valid JSON array, not a dict (data issue)."""
+        pred = create_terminus_1_response([{"keystrokes": "ls\n"}])
+        request = self._create_verify_request_raw(json.dumps(pred), "[1, 2, 3]")
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == 0.0
+        assert response.failure_reason == FailureCode.EXPECTED_ANSWER_INVALID
+
+    # --- Both non-dict: model output AND expected answer ---
+
+    @pytest.mark.asyncio
+    async def test_both_non_dict_expected_fails_first(self, resources_server: TerminusJudgeResourcesServer):
+        """When both are non-dict JSON, expected_answer check fails first."""
+        request = self._create_verify_request_raw("true", "true")
+
+        response = await resources_server.verify(request)
+
+        # Expected answer is checked before model output
+        assert response.reward == 0.0
+        assert response.failure_reason == FailureCode.EXPECTED_ANSWER_INVALID
