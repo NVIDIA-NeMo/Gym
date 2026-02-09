@@ -7,6 +7,7 @@ terminus_judge_resources_server:
         name: policy_model
       judge_responses_create_params:
         input: []
+        max_output_tokens: 1024
       judge_prompt_template_fpath: prompt_templates/terminus_prompt.txt
       judge_endpoint_max_concurrency: null
       judge_system_message: null
@@ -37,6 +38,7 @@ terminus_judge_simple_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py
+      max_steps: 1
       resources_server:
         type: resources_servers
         name: terminus_judge_resources_server
