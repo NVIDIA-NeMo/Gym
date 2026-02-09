@@ -62,10 +62,21 @@ from nemo_gym.server_utils import (
 )
 
 
-def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  # pragma: no cover
+def _setup_env_command(dir_path: Path, server_name: str, global_config_dict: DictConfig) -> str:  # pragma: no cover
     head_server_deps = global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]
 
-    uv_venv_cmd = f"uv venv --seed --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} .venv"
+    # Use centralized venv directory if NEMO_GYM_VENV_DIR is set, otherwise fall back to per-directory .venv
+    venv_dir = environ.get("NEMO_GYM_VENV_DIR")
+    if venv_dir:
+        venv_path = f"{venv_dir}/{server_name}"
+    else:
+        venv_path = ".venv"
+
+    # Force rebuild: remove the existing venv before recreating it
+    force_rebuild = environ.get("NEMO_GYM_FORCE_REBUILD_VENVS", "false").lower() == "true"
+    force_rebuild_cmd = f"rm -rf {venv_path} && " if force_rebuild else ""
+
+    uv_venv_cmd = f"{force_rebuild_cmd}uv venv --seed --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} {venv_path}"
 
     has_pyproject_toml = exists(f"{dir_path / 'pyproject.toml'}")
     has_requirements_txt = exists(f"{dir_path / 'requirements.txt'}")
@@ -74,7 +85,7 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
     # not needed for most clusters. should be safe in all scenarios, but only minimally tested outside of colab.
     # see discussion and examples here: https://github.com/NVIDIA-NeMo/Gym/pull/526#issuecomment-3676230383
     uv_pip_set_python = global_config_dict.get(UV_PIP_SET_PYTHON_KEY_NAME, False)
-    uv_pip_python_flag = "--python .venv/bin/python " if uv_pip_set_python else ""
+    uv_pip_python_flag = f"--python {venv_path}/bin/python " if uv_pip_set_python else ""
 
     verbose_flag = "-v " if global_config_dict.get(PIP_INSTALL_VERBOSE_KEY_NAME) else ""
 
@@ -93,7 +104,7 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
 
     cmd = f"""cd {dir_path} \\
     && {uv_venv_cmd} \\
-    && source .venv/bin/activate \\
+    && source {venv_path}/bin/activate \\
     && {install_cmd} \\
     """
 
@@ -213,7 +224,7 @@ class RunHelper:  # pragma: no cover
 
             dir_path = PARENT_DIR / Path(first_key, second_key)
 
-            command = f"""{_setup_env_command(dir_path, global_config_dict)} \\
+            command = f"""{_setup_env_command(dir_path, second_key, global_config_dict)} \\
     && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
     {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(top_level_path)} \\
     python {str(entrypoint_fpath)}"""
@@ -496,7 +507,9 @@ ng_viewer +jsonl_fpath=resources_servers/example_multi_step/data/example_rollout
 
 def _test_single(test_config: TestConfig, global_config_dict: DictConfig) -> Popen:  # pragma: no cover
     # Eventually we may want more sophisticated testing here, but this is sufficient for now.
-    command = f"""{_setup_env_command(test_config.dir_path, global_config_dict)} && pytest"""
+    command = (
+        f"""{_setup_env_command(test_config.dir_path, test_config.dir_path.name, global_config_dict)} && pytest"""
+    )
     return _run_command(command, test_config.dir_path)
 
 
