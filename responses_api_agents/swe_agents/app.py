@@ -145,6 +145,8 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     final_eval_apptainer_spinup_timestamp_mounted_fpath: Path
     generation_apptainer_spinup_timestamp_fpath: Path
     generation_apptainer_spinup_timestamp_mounted_fpath: Path
+    base_mounted_dir: Path
+    profiling_mounted_dir: Path
 
     # Set later
     eval_command: Optional[ExecuteContainerCommandArgs] = None
@@ -577,7 +579,7 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
         assert self.config.openhands_setup_dir is not None, "OpenHands setup directory is not set"
 
         if self.config.debug:
-            profiling_cmd = "export NG_PROFILING_DIR=/trajectories_mount/profiling && "
+            profiling_cmd = f"export NG_PROFILING_DIR={self.config.profiling_mounted_dir} && "
         else:
             profiling_cmd = ""
 
@@ -832,7 +834,7 @@ class RunOpenHandsAgent(BaseModel):
     async def process_single_datapoint(self) -> Optional[Path]:
         instance_id = self.config.instance_id
         if self.config.debug:
-            profiler = Profiler(name=instance_id, base_profile_dir=self.config.persistent_dir / "profiling")
+            profiler = Profiler(name=instance_id, base_profile_dir=self.config.profiling_mounted_dir)
             profiler.start()
 
         metrics = SWEBenchMetrics(ray_queue_time=time.time() - self.config.ray_queue_timestamp)
@@ -879,11 +881,10 @@ class RunOpenHandsAgent(BaseModel):
 
         # Dump out dot and png files from profiling on OpenHands level
         if self.config.debug:
-            base_profile_dir = self.config.persistent_dir / "profiling"
             profiling_name = "openhands"
-            callgrind_path = base_profile_dir / f"{profiling_name}.callgrind"
-            callgrind_dotfile_path = base_profile_dir / f"{profiling_name}.dot"
-            callgrind_graph_path = base_profile_dir / f"{profiling_name}.png"
+            callgrind_path = self.config.profiling_mounted_dir / f"{profiling_name}.callgrind"
+            callgrind_dotfile_path = self.config.profiling_mounted_dir / f"{profiling_name}.dot"
+            callgrind_graph_path = self.config.profiling_mounted_dir / f"{profiling_name}.png"
 
             gprof2dot_main(
                 argv=f"--format=callgrind --output={callgrind_dotfile_path} -e 5 -n 5 {callgrind_path}".split()
@@ -1233,6 +1234,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         agent_script_name = f"agent_script_{agent_run_id}.sh"
         agent_script_path = persistent_dir / agent_script_name
 
+        # persistent_dir is mounted here in each container
+        base_mounted_dir = Path("/trajectories_mount")
+
         params: SWEBenchWrapperInstanceConfig = SWEBenchWrapperInstanceConfig(
             **self.config.model_dump(),
             **self._swe_bench_wrapper_server_config.model_dump(),
@@ -1240,6 +1244,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             body=body,
             persistent_dir=persistent_dir,
             metrics_fpath=persistent_dir / "nemo_gym_metrics.json",
+            base_mounted_dir=base_mounted_dir,
+            profiling_mounted_dir=base_mounted_dir / "profiling",
             ray_queue_timestamp=time.time(),
             inference_params=inference_params,
             agent_run_id=agent_run_id,
@@ -1254,10 +1260,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             openhands_config_file_path=openhands_config_file_path,
             agent_script_path=agent_script_path,
             final_eval_apptainer_spinup_timestamp_fpath=persistent_dir / "final_eval_apptainer_spinup_timestamp",
-            final_eval_apptainer_spinup_timestamp_mounted_fpath=Path("/trajectories_mount")
+            final_eval_apptainer_spinup_timestamp_mounted_fpath=base_mounted_dir
             / "final_eval_apptainer_spinup_timestamp",
             generation_apptainer_spinup_timestamp_fpath=persistent_dir / "generation_apptainer_spinup_timestamp",
-            generation_apptainer_spinup_timestamp_mounted_fpath=Path("/trajectories_mount")
+            generation_apptainer_spinup_timestamp_mounted_fpath=base_mounted_dir
             / "generation_apptainer_spinup_timestamp",
         )
 
