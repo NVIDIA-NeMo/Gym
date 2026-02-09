@@ -388,10 +388,11 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
             # Only consider the response resolved if the finish tool call is present and the resolved metric is True
             is_finish_tool_call = self.check_finish_tool_call(response)
-            if is_finish_tool_call:
-                resolved = metrics.get("resolved") or (metadata.get("resolved") == "True")
-            else:
-                resolved = False
+            # if is_finish_tool_call:
+            #     resolved = metrics.get("resolved") or (metadata.get("resolved") == "True")
+            # else:
+            #     resolved = False
+            resolved = metrics.get("resolved") or (metadata.get("resolved") == "True")
 
             # TODO: remove this check after behavior fix
             is_nemo_gym_in_assistant_message = self.check_nemo_gym_in_assistant_message(response)
