@@ -894,6 +894,10 @@ class RunOpenHandsAgent(BaseModel):
 
         if not patch:
             metrics.patch_exists = False
+            metrics.final_eval_apptainer_spinup_time = None
+
+            eval_active_command.process.kill()
+
             update_metrics(self.config.metrics_fpath, metrics.model_dump())
             return
 
