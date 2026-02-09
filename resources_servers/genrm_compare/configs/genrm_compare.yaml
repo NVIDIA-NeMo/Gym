@@ -50,6 +50,8 @@ genrm_compare:
       # Group-relative style penalty coefficient
       # Lower formatting density (headers, lists, bold, emoji) gets bonus
       group_style_penalty_coeff: 0.0
+      # Set reward to 1.0 (genrm gives 1 to 5 scores) when reasoning content matches final answer
+      reasoning_answer_repeat_penalty: true
       
       # Default scores when parsing fails
       default_score: 3.0

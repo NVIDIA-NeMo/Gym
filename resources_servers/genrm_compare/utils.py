@@ -444,6 +444,63 @@ def apply_style_penalties(
 
 
 # =============================================================================
+# Reasoning-Answer Repeat Penalty
+# =============================================================================
+
+def apply_reasoning_answer_repeat_penalty(
+    scores: List[float],
+    response_objs: List[Dict[str, Any]],
+    reasoning_answer_repeat_penalty: bool,
+) -> Tuple[List[float], List[float]]:
+    """Set reward to 1.0 when a response's reasoning content is the same as its final answer.
+
+    This handles degenerate behaviour where the model simply copies its
+    chain-of-thought into the final answer field (or vice-versa) instead of
+    producing a distinct, concise answer.  When detected, the response's
+    reward is directly set to 1.0 rather than subtracting a fixed penalty.
+
+    The comparison is done on stripped, whitespace-normalised text so that
+    trivial formatting differences are ignored.
+
+    Args:
+        scores: Base scores to adjust (modified in place).
+        response_objs: Response API objects to extract reasoning / answer from.
+        reasoning_answer_repeat_penalty: If True, enables the check.
+            If reasoning matches the answer, the reward is set to 1.0.
+
+    Returns:
+        Tuple of (adjusted_scores, adjustments_per_response).
+    """
+    num_responses = len(response_objs)
+
+    if num_responses == 0 or not reasoning_answer_repeat_penalty:
+        return scores, [0.0] * len(scores)
+
+    adjustments = [0.0] * num_responses
+
+    for idx, obj in enumerate(response_objs):
+        reasoning, answer = extract_from_response_obj(obj)
+        reasoning_norm = " ".join(reasoning.strip().split())
+        answer_norm = " ".join(answer.strip().split())
+
+        # Skip if either field is empty – nothing to compare
+        if not reasoning_norm or not answer_norm:
+            continue
+
+        if reasoning_norm == answer_norm:
+            target_reward = 1.0
+            adjustment = target_reward - scores[idx]
+            scores[idx] = target_reward
+            adjustments[idx] = adjustment
+            logger.info(
+                f"[ReasoningRepeat] Response {idx}: reasoning == answer "
+                f"(len={len(answer_norm)}), reward set to {target_reward}"
+            )
+
+    return scores, adjustments
+
+
+# =============================================================================
 # Length-Based Bonuses
 # =============================================================================
 
@@ -576,6 +633,7 @@ def aggregate_scores(
     group_reasoning_length_penalty_coeff: float,
     group_answer_length_penalty_coeff: float,
     group_style_penalty_coeff: float = 0.0,
+    reasoning_answer_repeat_penalty: bool = False,
 ) -> Tuple[List[float], Dict[str, float], List[float], List[float]]:
     """Aggregate pairwise comparison results into per-response rewards.
     
@@ -598,6 +656,8 @@ def aggregate_scores(
         group_style_penalty_coeff: Coefficient for style density penalty.
             Penalizes responses with higher density of formatting elements
             (headers, lists, bold, emojis) relative to text length.
+        reasoning_answer_repeat_penalty: If True, sets reward to 1.0 for
+            responses whose reasoning content is identical to their final answer.
     
     Returns:
         Tuple of:
@@ -681,6 +741,15 @@ def aggregate_scores(
             group_style_penalty_coeff=group_style_penalty_coeff,
         )
         bonuses = [b + sa for b, sa in zip(bonuses, style_adjustments)]
+
+    # Apply reasoning-answer repeat penalty if configured
+    if reasoning_answer_repeat_penalty:
+        final_scores, repeat_adjustments = apply_reasoning_answer_repeat_penalty(
+            scores=final_scores,
+            response_objs=response_objs,
+            reasoning_answer_repeat_penalty=reasoning_answer_repeat_penalty,
+        )
+        bonuses = [b + ra for b, ra in zip(bonuses, repeat_adjustments)]
 
     # Compute metrics
     metrics: Dict[str, float] = {}
