@@ -658,3 +658,14 @@ class ServerInstanceDisplayConfig(BaseModel):
     status: Optional[ServerStatus] = None
     uptime_seconds: Optional[float] = None
     url: Optional[str] = None
+
+
+def get_server_url(server_name: str) -> str:
+    global_config_dict = get_global_config_dict()
+
+    model_server_config = get_first_server_config_dict(
+        global_config_dict,
+        server_name,
+    )
+
+    return f"http://{model_server_config['host']}:{model_server_config['port']}"
