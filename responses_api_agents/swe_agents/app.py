@@ -697,7 +697,7 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
     runtime_env={
         "py_executable": sys.executable,
     },
-    num_cpus=0.5,
+    num_cpus=0.1,
 )
 def runner_ray_remote(params_dict: dict[str, Any]) -> Optional[Path]:
     # For some reason Ray may not pick up the proper model fields if we don't rebuild the model here. Very strange.
