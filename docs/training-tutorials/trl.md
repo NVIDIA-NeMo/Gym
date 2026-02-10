@@ -127,7 +127,7 @@ Production-ready multi-node training with GRPO algorithm.
 {bdg-success}`available` {bdg-primary}`recommended`
 :::
 
-:::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Unsloth Training
+:::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Unsloth
 :link: ../tutorials/unsloth-training
 :link-type: doc
 

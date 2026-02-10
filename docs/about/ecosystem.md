@@ -11,51 +11,14 @@ We would love your contribution! Open a PR to add an integration, or [file an is
 
 NeMo Gym decouples environment development from training by outputting standardized JSONL rollout data. Training frameworks consume this data through their own integration code.
 
-### The Interface Contract
+- **[NeMo RL](https://github.com/NVIDIA/NeMo-RL)** — {doc}`Tutorial <../tutorials/nemo-rl-grpo/index>`
+- **[OpenRLHF](https://github.com/OpenRLHF/OpenRLHF)** — [Integration](https://github.com/OpenRLHF/OpenRLHF/blob/main/examples/python/agent_func_nemogym_executor.py)
+- **[TRL](https://github.com/huggingface/trl)** — {doc}`Tutorial <../training-tutorials/trl>`
+- **[Unsloth](https://github.com/unslothai/unsloth)** — {doc}`Tutorial <../tutorials/unsloth-training>`
+- **NeMo Customizer** — *(In progress)*
+- **[veRL](https://github.com/volcengine/verl)** — *(In progress)*
 
-NeMo Gym outputs JSONL with OpenAI-compatible message format:
 
-```json
-{
-  "reward": 1.0,
-  "output": [
-    {"role": "user", "content": "What is 2 + 2?"},
-    {"role": "assistant", "content": "The answer is 4."}
-  ]
-}
-```
-
-Any framework that can read this format can use NeMo Gym rollouts—no native integration required. The following frameworks have documented patterns.
-
-### Supported Frameworks
-
-```{list-table}
-:header-rows: 1
-:widths: 20 15 65
-
-* - Framework
-  - Integration
-  - Description
-* - [NeMo RL](https://github.com/NVIDIA-NeMo/RL)
-  - ✅ Native
-  - NVIDIA's scalable post-training library. NeMo RL includes built-in NeMo Gym support for {term}`multi-turn` rollout collection with GRPO, DPO, and SFT algorithms. Refer to the {doc}`NeMo RL tutorial <../tutorials/nemo-rl-grpo/index>`.
-* - [Unsloth](https://github.com/unslothai/unsloth)
-  - ✅ Compatible
-  - Fast fine-tuning framework with 2-5x speedup and 80% memory reduction. Consumes NeMo Gym JSONL output for LoRA and QLoRA training. Refer to the {doc}`Unsloth tutorial <../tutorials/unsloth-training>`.
-```
-
-:::{note}
-**Integration model**: NeMo Gym produces rollout data; training frameworks consume it. NeMo RL includes native integration code. Other frameworks use NeMo Gym's JSONL output format.
-:::
-
-### In-Progress Integrations
-
-The following frameworks have planned integrations with documented patterns:
-
-| Framework | Description | Status |
-|-----------|-------------|--------|
-| [veRL](https://github.com/volcengine/verl) | Volcano Engine's scalable RL library with hybrid parallelism | Planned |
-| [TRL](https://github.com/huggingface/trl) | Hugging Face's Transformer Reinforcement Learning library | Planned |
 
 :::{tip}
 **Integrate your framework**: Refer to the {doc}`Training Framework Integration Guide <../contribute/rl-framework-integration/index>` or [open an issue](https://github.com/NVIDIA-NeMo/Gym/issues) to discuss requirements.

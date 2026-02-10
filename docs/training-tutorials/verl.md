@@ -241,7 +241,7 @@ Find resource servers on GitHub.
 {bdg-secondary}`github`
 :::
 
-:::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Unsloth Training
+:::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Unsloth
 :link: ../tutorials/unsloth-training
 :link-type: doc
 

@@ -415,14 +415,21 @@ Rollout Collection <get-started/rollout-collection.md>
 :maxdepth: 1
 
 🟡 Overview <training-tutorials/index>
-🟡 Nemotron Nano <training-tutorials/nemotron-nano>
-🟡 Nemotron Super <training-tutorials/nemotron-super>
-NeMo RL GRPO <tutorials/nemo-rl-grpo/index.md>
-Unsloth Training <tutorials/unsloth-training>
+NeMo RL <tutorials/nemo-rl-grpo/index.md>
 🟡 TRL <training-tutorials/trl>
+Unsloth <tutorials/unsloth-training>
 🟡 VERL <training-tutorials/verl>
-🟡 NeMo Customizer <training-tutorials/nemo-customizer>
-Offline Training <tutorials/offline-training-w-rollouts>
+Offline Training (SFT/DPO) <tutorials/offline-training-w-rollouts>
+```
+
+```{toctree}
+:caption: Model Recipes
+:hidden:
+:maxdepth: 1
+
+🟡 Overview <model-recipes/index>
+🟡 Nemotron Nano <model-recipes/nemotron-nano>
+🟡 Nemotron Super <model-recipes/nemotron-super>
 ```
 
 ```{toctree}

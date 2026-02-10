@@ -5,42 +5,6 @@ Hands-on tutorials for training models with NeMo Gym across different frameworks
 
 ## Training Frameworks
 
-NeMo Gym integrates with various RL training frameworks:
-
-| Framework | Algorithm | GPU Support | Best For |
-|-----------|-----------|-------------|----------|
-| [NeMo RL](../tutorials/nemo-rl-grpo/index) | GRPO | Multi-node | Production training |
-| [Unsloth](../tutorials/unsloth-training) | Various | Single GPU | Fast iteration |
-| [TRL](trl) | PPO, DPO | Multi-GPU | HuggingFace ecosystem |
-| [VeRL](verl) | Various | Multi-node | Research |
-
-## Recipe Tutorials
-
-Pre-configured training recipes for specific models:
-
-::::{grid} 1 2 2 2
-:gutter: 1 1 1 2
-
-:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` Nemotron 3 Nano
-:link: nemotron-nano
-:link-type: doc
-Efficient small model training.
-+++
-{bdg-secondary}`nemotron` {bdg-secondary}`nano`
-:::
-
-:::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Nemotron 3 Super
-:link: nemotron-super
-:link-type: doc
-High-performance training.
-+++
-{bdg-secondary}`nemotron` {bdg-secondary}`super`
-:::
-
-::::
-
-## Framework Tutorials
-
 ::::{grid} 1 2 2 2
 :gutter: 1 1 1 2
 
@@ -93,10 +57,3 @@ SFT and DPO from rollouts.
 :::
 
 ::::
-
-## Choosing a Framework
-
-- **Production training**: Use NeMo RL for multi-node GRPO training
-- **Rapid prototyping**: Use Unsloth for fast single-GPU iteration
-- **HuggingFace models**: Use TRL for seamless ecosystem integration
-- **Offline training**: Use SFT/DPO when you have high-quality rollouts
