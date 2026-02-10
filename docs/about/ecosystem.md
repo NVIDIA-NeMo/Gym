@@ -1,15 +1,13 @@
 (about-ecosystem)=
 # NeMo Gym in the Ecosystem
 
-NeMo Gym provides scalable {term}`rollout <Rollout / Trajectory>` collection infrastructure that works with multiple RL training frameworks and environment libraries. This page describes how NeMo Gym fits into both the NVIDIA NeMo Framework and the wider RL community.
+We're building NeMo Gym to integrate with a broad set of RL training frameworks and environment libraries.
 
-:::{tip}
-**New to NeMo Gym?** Refer to the {ref}`Overview <about-overview>` for capabilities and the {ref}`Key Terminology <key-terminology>` glossary for definitions of rollout, multi-turn, and other terms.
-:::
+We would love your contribution! Open a PR to add an integration, or [file an issue](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose) to share what would be valuable for you.
 
 ---
 
-## Training Framework Integrations
+## Supported Training Framework Integrations
 
 NeMo Gym decouples environment development from training by outputting standardized JSONL rollout data. Training frameworks consume this data through their own integration code.
 
