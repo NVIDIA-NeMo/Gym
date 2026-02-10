@@ -237,22 +237,6 @@ HuggingFace TRL integration for PPO and DPO.
 {bdg-secondary}`trl` {bdg-secondary}`huggingface`
 :::
 
-:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` VeRL
-:link: training-tutorials/verl
-:link-type: doc
-VeRL framework for research workflows.
-+++
-{bdg-secondary}`verl` {bdg-secondary}`research`
-:::
-
-:::{grid-item-card} {octicon}`gear;1.5em;sd-mr-1` NeMo Customizer
-:link: training-tutorials/nemo-customizer
-:link-type: doc
-Enterprise training with NeMo Customizer.
-+++
-{bdg-secondary}`nemo-customizer` {bdg-secondary}`enterprise`
-:::
-
 :::{grid-item-card} {octicon}`file;1.5em;sd-mr-1` Offline Training
 :link: offline-training-w-rollouts
 :link-type: ref
@@ -418,7 +402,6 @@ Rollout Collection <get-started/rollout-collection.md>
 NeMo RL <tutorials/nemo-rl-grpo/index.md>
 🟡 TRL <training-tutorials/trl>
 Unsloth <tutorials/unsloth-training>
-🟡 VERL <training-tutorials/verl>
 Offline Training (SFT/DPO) <tutorials/offline-training-w-rollouts>
 ```
 

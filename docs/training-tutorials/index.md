@@ -1,59 +1,60 @@
 (training-tutorials-index)=
 # Training Tutorials
 
-Hands-on tutorials for training models with NeMo Gym across different frameworks and configurations.
+Hands-on tutorials for training models using NeMo Gym with various training frameworks.
 
-## Training Frameworks
-
+## Supported Training Frameworks
 ::::{grid} 1 2 2 2
 :gutter: 1 1 1 2
 
-:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` NeMo RL with GRPO
+:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` NeMo RL
 :link: ../tutorials/nemo-rl-grpo/index
 :link-type: doc
-Multi-step tool calling with GRPO.
 +++
-{bdg-primary}`recommended` {bdg-secondary}`grpo`
+{bdg-primary}`nemo rl`
 :::
 
-:::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Unsloth Training
-:link: ../tutorials/unsloth-training
-:link-type: doc
-Fast, memory-efficient fine-tuning.
+:::{grid-item-card} {octicon}`link-external;1.5em;sd-mr-1` OpenRLHF
+:link: https://github.com/OpenRLHF/OpenRLHF/blob/main/examples/python/agent_func_nemogym_executor.py
+:link-type: url
 +++
-{bdg-secondary}`unsloth` {bdg-secondary}`efficient`
+{bdg-secondary}`openrlhf`
 :::
 
-:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` TRL Training
+:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` TRL
 :link: trl
 :link-type: doc
-HuggingFace TRL integration.
 +++
-{bdg-secondary}`trl` {bdg-secondary}`huggingface`
+{bdg-secondary}`trl`
 :::
 
-:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` VeRL Training
-:link: verl
+:::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Unsloth
+:link: ../tutorials/unsloth-training
 :link-type: doc
-VeRL framework integration.
 +++
-{bdg-secondary}`verl`
+{bdg-secondary}`unsloth`
 :::
 
 :::{grid-item-card} {octicon}`gear;1.5em;sd-mr-1` NeMo Customizer
-:link: nemo-customizer
-:link-type: doc
-NeMo Customizer integration.
+*Coming soon*
 +++
-{bdg-secondary}`nemo-customizer`
+{bdg-secondary}`nemo customizer` {bdg-warning}`in progress`
 :::
 
-:::{grid-item-card} {octicon}`file;1.5em;sd-mr-1` Offline Training
-:link: ../tutorials/offline-training-w-rollouts
-:link-type: doc
-SFT and DPO from rollouts.
+:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` VeRL
+*Coming soon*
 +++
-{bdg-secondary}`sft` {bdg-secondary}`dpo`
+{bdg-secondary}`verl` {bdg-warning}`in progress`
 :::
 
 ::::
+
+## SFT & DPO
+
+:::{grid-item-card} {octicon}`file;1.5em;sd-mr-1` Offline Training with Rollouts
+:link: ../tutorials/offline-training-w-rollouts
+:link-type: doc
+Transform rollouts into training data for supervised fine-tuning (SFT) and direct preference optimization (DPO).
++++
+{bdg-secondary}`sft` {bdg-secondary}`dpo`
+:::
