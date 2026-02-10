@@ -20,6 +20,8 @@ on:
     branches:
       - main
       - "r**"
+      - cmunley1/pypi-compat
+  workflow_dispatch:
 
 defaults:
   run:
