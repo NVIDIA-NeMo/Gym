@@ -82,7 +82,11 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
 
     # TEMPORARY: need to specify test-pypi index until its published to pypi.org
     # DELETE BEFORE MERGING
-    pypi_index_flags = "--index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ " if not is_editable_install else ""
+    pypi_index_flags = (
+        "--index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ "
+        if not is_editable_install
+        else ""
+    )
 
     if has_pyproject_toml and has_requirements_txt:
         raise RuntimeError(
@@ -99,16 +103,14 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
             )
     elif has_requirements_txt:
         if is_editable_install:
-            install_cmd = (
-                f"""uv pip install {verbose_flag}{uv_pip_python_flag}-r requirements.txt {" ".join(head_server_deps)}"""
-            )
+            install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}-r requirements.txt {" ".join(head_server_deps)}"""
         else:
             # install nemo-gym from pypi instead of relative path in requirements.txt
             install_cmd = (
                 f"""(echo 'nemo-gym' && grep -v -F '../..' requirements.txt) | """
                 f"""uv pip install {verbose_flag}{uv_pip_python_flag}{pypi_index_flags}-r /dev/stdin {" ".join(head_server_deps)}"""
             )
-    else:i
+    else:
         raise RuntimeError(f"Missing pyproject.toml or requirements.txt for uv venv setup in server dir: {dir_path}")
 
     cmd = f"""cd {dir_path} \\
