@@ -70,6 +70,8 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
     has_pyproject_toml = exists(f"{dir_path / 'pyproject.toml'}")
     has_requirements_txt = exists(f"{dir_path / 'requirements.txt'}")
 
+    is_editable_install = exists(f"{dir_path / '../../pyproject.toml'}")
+
     # explicitly set python path if specified. In Google colab, ng_run fails due to uv pip install falls back to system python (/usr) without this and errors.
     # not needed for most clusters. should be safe in all scenarios, but only minimally tested outside of colab.
     # see discussion and examples here: https://github.com/NVIDIA-NeMo/Gym/pull/526#issuecomment-3676230383
@@ -78,17 +80,35 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
 
     verbose_flag = "-v " if global_config_dict.get(PIP_INSTALL_VERBOSE_KEY_NAME) else ""
 
+    # TEMPORARY: need to specify test-pypi index until its published to pypi.org
+    # DELETE BEFORE MERGING
+    pypi_index_flags = "--index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ " if not is_editable_install else ""
+
     if has_pyproject_toml and has_requirements_txt:
         raise RuntimeError(
             f"Found both pyproject.toml and requirements.txt for uv venv setup in server dir: {dir_path}. Please only use one or the other!"
         )
     elif has_pyproject_toml:
-        install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
+        if is_editable_install:
+            install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
+        else:
+            # install nemo-gym from pypi instead of relative path in pyproject.toml
+            install_cmd = (
+                f"""uv pip install {verbose_flag}{uv_pip_python_flag}{pypi_index_flags}nemo-gym && """
+                f"""uv pip install {verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
+            )
     elif has_requirements_txt:
-        install_cmd = (
-            f"""uv pip install {verbose_flag}{uv_pip_python_flag}-r requirements.txt {" ".join(head_server_deps)}"""
-        )
-    else:
+        if is_editable_install:
+            install_cmd = (
+                f"""uv pip install {verbose_flag}{uv_pip_python_flag}-r requirements.txt {" ".join(head_server_deps)}"""
+            )
+        else:
+            # install nemo-gym from pypi instead of relative path in requirements.txt
+            install_cmd = (
+                f"""uv pip install {verbose_flag}{uv_pip_python_flag}{pypi_index_flags}nemo-gym && """
+                f"""grep -v 'nemo-gym.*@.*\\.\\./\\.\\./' requirements.txt | uv pip install {verbose_flag}{uv_pip_python_flag}-r /dev/stdin {" ".join(head_server_deps)}"""
+            )
+    else:i
         raise RuntimeError(f"Missing pyproject.toml or requirements.txt for uv venv setup in server dir: {dir_path}")
 
     cmd = f"""cd {dir_path} \\
