@@ -22,7 +22,57 @@ from app import (
 
 from nemo_gym.config_types import ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+
+
+def _make_mock_request(session_id="test-session-123"):
+    """Create a mock FastAPI Request with a session dict."""
+    mock_request = MagicMock()
+    mock_request.session = {SESSION_ID_KEY: session_id}
+    return mock_request
+
+
+def _make_verify_fixtures(*, reward=1.0, answer_text="\\boxed{4}"):
+    """Create common verify test fixtures (verifiers, config, response, request body)."""
+    verifiers = {
+        "math_with_judge": ResourcesServerRef(type="resources_servers", name="math_with_judge"),
+    }
+    config = NSToolsConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="ns_tools",
+        verifiers=verifiers,
+        default_verifier="math_with_judge",
+        verbose_tool_logging=False,
+    )
+    response = NeMoGymResponse(
+        id="resp_test",
+        created_at=0.0,
+        model="dummy",
+        object="response",
+        output=[
+            {
+                "id": "msg_test",
+                "content": [{"annotations": [], "text": answer_text, "type": "output_text"}],
+                "role": "assistant",
+                "status": "completed",
+                "type": "message",
+            }
+        ],
+        parallel_tool_calls=True,
+        tool_choice="auto",
+        tools=[],
+    )
+    verify_request = NSToolsVerifyRequest(
+        responses_create_params={
+            "input": [{"role": "user", "content": "What is 2 + 2?"}],
+        },
+        response=response,
+        question="What is 2 + 2?",
+        expected_answer="4",
+    )
+    return verifiers, config, response, verify_request
 
 
 class TestApp:
@@ -242,3 +292,84 @@ class TestApp:
         assert "expected_answer" in json_data
         assert "responses_create_params" in json_data
         assert "response" in json_data
+
+    async def test_verify_returns_timing_metrics_without_verbose_logging(self) -> None:
+        """Timing metrics must be populated even when verbose_tool_logging=False."""
+        _, config, _, verify_request = _make_verify_fixtures()
+        assert config.verbose_tool_logging is False
+
+        server = NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+        mock_response = AsyncMock()
+        mock_response.json = AsyncMock(return_value={"reward": 1.0})
+        server.server_client.post = AsyncMock(return_value=mock_response)
+
+        # Pre-populate timing data for the session (simulating tool calls that happened)
+        session_id = "test-session-timing"
+        server._timing_by_session[session_id] = [
+            {
+                "tool_name": "python_tool",
+                "execution_time_seconds": 1.5,
+                "is_internal_timeout": False,
+                "is_request_timeout": False,
+            },
+            {
+                "tool_name": "python_tool",
+                "execution_time_seconds": 2.5,
+                "is_internal_timeout": True,
+                "is_request_timeout": False,
+            },
+        ]
+
+        mock_request = _make_mock_request(session_id)
+        result = await server.verify(mock_request, verify_request)
+
+        assert result.reward == 1.0
+        assert result.num_tool_calls == 2
+        assert result.total_tool_execution_time_seconds == 4.0
+        assert result.avg_tool_call_time_seconds == 2.0
+        assert result.tool_timeout_count == 1
+        assert result.tool_request_timeout_count == 0
+
+    async def test_verify_returns_zero_metrics_with_no_tool_calls(self) -> None:
+        """When no tool calls occurred, metrics should be zero (not absent)."""
+        _, config, _, verify_request = _make_verify_fixtures()
+        server = NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+        mock_response = AsyncMock()
+        mock_response.json = AsyncMock(return_value={"reward": 0.0})
+        server.server_client.post = AsyncMock(return_value=mock_response)
+
+        mock_request = _make_mock_request("session-no-tools")
+        result = await server.verify(mock_request, verify_request)
+
+        assert result.num_tool_calls == 0
+        assert result.total_tool_execution_time_seconds == 0.0
+        assert result.avg_tool_call_time_seconds == 0.0
+        assert result.tool_timeout_count == 0
+        assert result.tool_request_timeout_count == 0
+
+    async def test_timing_session_cleaned_up_after_verify(self) -> None:
+        """Verify that _timing_by_session is cleaned up (popped) after verify."""
+        _, config, _, verify_request = _make_verify_fixtures()
+        server = NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+        mock_response = AsyncMock()
+        mock_response.json = AsyncMock(return_value={"reward": 1.0})
+        server.server_client.post = AsyncMock(return_value=mock_response)
+
+        session_id = "session-cleanup-test"
+        server._timing_by_session[session_id] = [
+            {
+                "tool_name": "python_tool",
+                "execution_time_seconds": 0.5,
+                "is_internal_timeout": False,
+                "is_request_timeout": False,
+            },
+        ]
+
+        mock_request = _make_mock_request(session_id)
+        await server.verify(mock_request, verify_request)
+
+        # Session timing data should be removed after verify
+        assert session_id not in server._timing_by_session
