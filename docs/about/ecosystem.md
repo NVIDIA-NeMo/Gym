@@ -1,5 +1,5 @@
 (about-ecosystem)=
-# NeMo Gym in the Ecosystem
+# Agentic RL Ecosystem
 
 We're building NeMo Gym to integrate with a broad set of RL training frameworks and environment libraries.
 
@@ -7,75 +7,36 @@ We would love your contribution! Open a PR to add an integration, or [file an is
 
 ---
 
-## Supported Training Framework Integrations
+## Training Framework Integrations
 
-NeMo Gym decouples environment development from training by outputting standardized JSONL rollout data. Training frameworks consume this data through their own integration code.
+- **{doc}`NeMo RL <../tutorials/nemo-rl-grpo/index>`** - GRPO training to improve multi-step tool calling on the Workplace Assistant environment
+- **[OpenRLHF](https://github.com/OpenRLHF/OpenRLHF/blob/main/examples/python/agent_func_nemogym_executor.py)** - example agent executor for RL training
+- **{doc}`TRL <../training-tutorials/trl>`** - GRPO training on Workplace Assistant and Reasoning Gym environments
+- **{doc}`Unsloth <../tutorials/unsloth-training>`** - GRPO training on Sudoku environment
+- **NeMo Customizer** - *(In progress)*
+- **VeRL** - *(In progress)*
 
-- **[NeMo RL](https://github.com/NVIDIA/NeMo-RL)** — {doc}`Tutorial <../tutorials/nemo-rl-grpo/index>`
-- **[OpenRLHF](https://github.com/OpenRLHF/OpenRLHF)** — [Integration](https://github.com/OpenRLHF/OpenRLHF/blob/main/examples/python/agent_func_nemogym_executor.py)
-- **[TRL](https://github.com/huggingface/trl)** — {doc}`Tutorial <../training-tutorials/trl>`
-- **[Unsloth](https://github.com/unslothai/unsloth)** — {doc}`Tutorial <../tutorials/unsloth-training>`
-- **NeMo Customizer** — *(In progress)*
-- **[veRL](https://github.com/volcengine/verl)** — *(In progress)*
-
-
-
-:::{tip}
-**Integrate your framework**: Refer to the {doc}`Training Framework Integration Guide <../contribute/rl-framework-integration/index>` or [open an issue](https://github.com/NVIDIA-NeMo/Gym/issues) to discuss requirements.
-:::
+To integrate another training framework, see the {doc}`Training Framework Integration Guide <../contribute/rl-framework-integration/index>`.
 
 ---
 
 ## Environment Library Integrations
 
-NeMo Gym integrates with environment libraries to provide diverse training scenarios, from reasoning tasks to tool-using agents.
+NeMo Gym integrates with external environment libraries and benchmarks. See the [README](https://github.com/NVIDIA-NeMo/Gym?tab=readme-ov-file#table-2-resource-servers-for-training) for the full list—here are a few examples:
 
-### Supported Libraries
+- **[Reasoning Gym](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/reasoning_gym)** - reasoning environments spanning computation, cognition, logic and more
+- **[Aviary](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/aviary)** - environments spanning math, knowledge, biological sequences, scientific literature search, and protein stability
+- **[Verifiers](https://github.com/PrimeIntellect-ai/verifiers)** - *(In progress)* - environments spanning coding, data & ML, science & reasoning, tool use and more
+- **[BrowserGym](https://github.com/ServiceNow/BrowserGym)** - *(In progress)* - environments for web task automation
 
-```{list-table}
-:header-rows: 1
-:widths: 25 15 60
-
-* - Library
-  - Status
-  - Description
-* - [reasoning-gym](https://github.com/open-thought/reasoning-gym)
-  - ✅ Code
-  - Procedurally generated reasoning tasks. Integration: [`resources_servers/reasoning_gym/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/reasoning_gym)
-* - [Aviary](https://github.com/Future-House/aviary)
-  - ✅ Code
-  - Multi-environment framework for tool-using agents (GSM8K, HotPotQA, BixBench). Integration: [`resources_servers/aviary/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/aviary)
-```
-
-### In-Progress Integrations
-
-| Library | Description | Status |
-|---------|-------------|--------|
-| [PRIME Intellect](https://github.com/PrimeIntellect-ai) | Distributed AI training environments | 🔜 Planned |
-| [BrowserGym](https://github.com/ServiceNow/BrowserGym) | Web browsing and automation environments | 🔜 Planned |
-
-### Building Custom Environments
-
-Beyond external library integrations, NeMo Gym provides a native pattern for building LLM training environments—the {term}`Resource Server <Verifier>`. This pattern has four components:
-
-- **Tool definitions**: OpenAI function calling schema for model interactions
-- **Verification logic**: Computes reward scores (0.0-1.0) from rollout outcomes
-- **State management**: Tracks context across {term}`multi-step` and {term}`multi-turn` interactions
-- **Curated datasets**: Task prompts paired with expected outcomes
-
-This pattern supports LLM-specific capabilities like tool use, instruction following, and complex reasoning that traditional RL environments were not designed for.
-
-:::{seealso}
-Refer to the {doc}`Creating a Resource Server <../tutorials/creating-resource-server>` tutorial to build custom environments.
-:::
 
 ---
 
-## NeMo Gym Within the NeMo Framework
+## Related NeMo Libraries
 
-NeMo Gym is a component of the [NVIDIA NeMo Framework](https://docs.nvidia.com/nemo-framework/), a GPU-accelerated platform for building and training generative AI models.
+NeMo Gym is a component of NVIDIA NeMo, a GPU-accelerated platform for building and training generative AI models.
 
-The NeMo Framework includes modular libraries for end-to-end model development:
+Depending on your workflow, you may also find these libraries useful:
 
 | Library | Purpose |
 |---------|---------|
@@ -87,20 +48,3 @@ The NeMo Framework includes modular libraries for end-to-end model development:
 | [NeMo Data Designer](https://github.com/NVIDIA-NeMo/DataDesigner) | Synthetic data generation |
 | [NeMo Evaluator](https://github.com/NVIDIA-NeMo/Evaluator) | Model evaluation and benchmarking |
 | [NeMo Guardrails](https://github.com/NVIDIA-NeMo/Guardrails) | Programmable safety guardrails |
-
-**NeMo Gym's role**: Gym standardizes rollout collection for RL training. It provides unified interfaces to heterogeneous RL environments and resource servers with verification logic, enabling large-scale training data generation for NeMo RL and other frameworks.
-
----
-
-## Community and Contributions
-
-NeMo Gym welcomes community contributions in the following areas:
-
-- **Training framework integration**: Connect NeMo Gym with additional RL training libraries
-- **Resource server contributions**: Share environments for domains like coding, math, tool use, or instruction following
-- **Documentation improvements**: Improve guides and examples for new users
-- **Issue reporting**: Report bugs and suggest features to shape the roadmap
-
-:::{tip}
-Refer to the {doc}`Contributing Guide <../contribute/index>` or browse [open issues](https://github.com/NVIDIA-NeMo/Gym/issues) to get started.
-:::
