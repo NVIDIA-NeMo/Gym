@@ -185,6 +185,13 @@ def _extract_text_from_response(response: NeMoGymResponse, exclude_thinking: boo
                 full_text = re.sub(r"<think>.*?</think>", "", full_text, flags=re.DOTALL)
                 # Also remove <thinking>...</thinking> blocks
                 full_text = re.sub(r"<thinking>.*?</thinking>", "", full_text, flags=re.DOTALL)
+                # Fallback: the opening <think>/<thinking> tag may have been part of
+                # the prompt template rather than the model's generation, so
+                # generated_response starts with CoT reasoning followed by </think>
+                # without a matching opening tag. Strip everything up to and
+                # including the unpaired closing tag.
+                full_text = re.sub(r"^.*?</think>", "", full_text, flags=re.DOTALL)
+                full_text = re.sub(r"^.*?</thinking>", "", full_text, flags=re.DOTALL)
 
             return full_text.strip()
     return ""
