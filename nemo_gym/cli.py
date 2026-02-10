@@ -99,8 +99,7 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
             # install nemo-gym from pypi instead of relative path in pyproject.toml
             install_cmd = (
                 f"""uv pip install {verbose_flag}{uv_pip_python_flag}{pypi_index_flags}nemo-gym && """
-                f"""sed -i '/\\[tool.uv.sources\\]/,/^$/d' pyproject.toml && """
-                f"""uv pip install {verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
+                f"""uv pip install {verbose_flag}{uv_pip_python_flag}--no-sources '-e .' {" ".join(head_server_deps)}"""
             )
     elif has_requirements_txt:
         if is_editable_install:
