@@ -36,7 +36,7 @@ NeMo Gym supports two deployment approaches for scaling beyond a single machine:
 | **Standalone containers** | Running environments at scale without training | Manual or Docker Compose |
 | **NeMo RL integration** | Production training with GRPO, DPO, etc. | Slurm + Ray (automatic) |
 
-This guide covers standalone container deployment. For training workflows, see the {doc}`/tutorials/nemo-rl-grpo/index` tutorial.
+This guide covers standalone container deployment. For training workflows, see the {doc}`/training-tutorials/nemo-rl-grpo/index` tutorial.
 
 :::{dropdown} Terminology
 :icon: book

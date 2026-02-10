@@ -4,7 +4,7 @@
 ```{warning}
 **Experimental Configuration**: This tutorial uses configurations marked `.disabled` in NeMo RL, indicating they are not yet fully validated. Known issues include [GitHub #1571](https://github.com/NVIDIA-NeMo/RL/issues/1571).
 
-**Recommended alternative**: The {doc}`NeMo RL GRPO tutorial <../tutorials/nemo-rl-grpo/index>` provides a validated single-node workflow with Nemotron Nano 9B.
+**Recommended alternative**: The {doc}`NeMo RL GRPO tutorial <../training-tutorials/nemo-rl-grpo/index>` provides a validated single-node workflow with Nemotron Nano 9B.
 ```
 
 Train large language models at production scale using the Llama-3.3-Nemotron-Super-49B model on multi-node clusters with NeMo RL.
@@ -24,7 +24,7 @@ Train large language models at production scale using the Llama-3.3-Nemotron-Sup
 
 :::
 
-:::{button-ref} ../tutorials/nemo-rl-grpo/index
+:::{button-ref} ../training-tutorials/nemo-rl-grpo/index
 :color: secondary
 :outline:
 :ref-type: doc
@@ -395,7 +395,7 @@ Before running production training:
 
 - [ ] **Budget approved**: 64-128× H100 for 4-12 hours (~$5,000-$15,000 cloud cost)
 - [ ] **Storage allocated**: 500GB+ for checkpoints
-- [ ] **Tested on Nano first**: Validated approach with {doc}`Nano tutorial <../tutorials/nemo-rl-grpo/index>`
+- [ ] **Tested on Nano first**: Validated approach with {doc}`Nano tutorial <../training-tutorials/nemo-rl-grpo/index>`
 - [ ] **HF_TOKEN set**: Model access configured
 - [ ] **W&B configured**: Experiment tracking (optional but recommended)
 - [ ] **Checkpoint path writable**: All nodes can write to checkpoint directory
@@ -411,7 +411,7 @@ After completing this tutorial, explore these options:
 :gutter: 3
 
 :::{grid-item-card} {octicon}`book;1.5em;sd-mr-1` NeMo RL GRPO Tutorial
-:link: ../tutorials/nemo-rl-grpo/index
+:link: ../training-tutorials/nemo-rl-grpo/index
 :link-type: doc
 
 Complete, validated tutorial for single-node training with Nemotron Nano 9B.

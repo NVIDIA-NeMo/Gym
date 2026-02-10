@@ -5,7 +5,7 @@
 ```{warning}
 **Status: In Development** — TRL integration is planned but not yet implemented. Track progress at [GitHub Issue #548](https://github.com/NVIDIA-NeMo/Gym/issues/548).
 
-Looking to train now? Use {doc}`NeMo RL <../tutorials/nemo-rl-grpo/index>` (production-ready) or {doc}`Unsloth <../tutorials/unsloth-training>` (single GPU).
+Looking to train now? Use {doc}`NeMo RL <nemo-rl-grpo/index>` (production-ready) or {doc}`Unsloth <unsloth-training>` (single GPU).
 ```
 
 Train models using [Hugging Face TRL](https://huggingface.co/docs/trl) with NeMo Gym verifiers as reward functions.
@@ -89,7 +89,7 @@ trainer.train()
 | PPO | ✅ Stable | 🔜 Planned |
 | DPO | ✅ Stable | 🔜 Planned |
 | ORPO | ✅ Stable | 🔜 Planned |
-| GRPO | ❌ Not in TRL | ✅ Use {doc}`NeMo RL <../tutorials/nemo-rl-grpo/index>` |
+| GRPO | ❌ Not in TRL | ✅ Use {doc}`NeMo RL <nemo-rl-grpo/index>` |
 
 ## Architecture Considerations
 
@@ -119,7 +119,7 @@ Ready to train today? These integrations work now:
 :gutter: 3
 
 :::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` NeMo RL with GRPO
-:link: ../tutorials/nemo-rl-grpo/index
+:link: nemo-rl-grpo/index
 :link-type: doc
 
 Production-ready multi-node training with GRPO algorithm.
@@ -128,7 +128,7 @@ Production-ready multi-node training with GRPO algorithm.
 :::
 
 :::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Unsloth
-:link: ../tutorials/unsloth-training
+:link: unsloth-training
 :link-type: doc
 
 Fast, memory-efficient fine-tuning on a single GPU.

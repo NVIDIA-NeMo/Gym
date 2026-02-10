@@ -381,7 +381,7 @@ Generate training examples by running your agent on prepared data.
 :::
 
 :::{card} {octicon}`book;1.5em;sd-mr-1` NeMo RL Integration
-:link: /tutorials/nemo-rl-grpo/index
+:link: /training-tutorials/nemo-rl-grpo/index
 :link-type: doc
 
 Use validated data with NeMo RL for GRPO training.

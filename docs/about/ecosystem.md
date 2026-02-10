@@ -9,10 +9,10 @@ We would love your contribution! Open a PR to add an integration, or [file an is
 
 ## Training Framework Integrations
 
-- **{doc}`NeMo RL <../tutorials/nemo-rl-grpo/index>`** - GRPO training to improve multi-step tool calling on the Workplace Assistant environment
+- **{doc}`NeMo RL <../training-tutorials/nemo-rl-grpo/index>`** - GRPO training to improve multi-step tool calling on the Workplace Assistant environment
 - **[OpenRLHF](https://github.com/OpenRLHF/OpenRLHF/blob/main/examples/python/agent_func_nemogym_executor.py)** - example agent executor for RL training
 - **{doc}`TRL <../training-tutorials/trl>`** - GRPO training on Workplace Assistant and Reasoning Gym environments
-- **{doc}`Unsloth <../tutorials/unsloth-training>`** - GRPO training on Sudoku environment
+- **{doc}`Unsloth <../training-tutorials/unsloth-training>`** - GRPO training on Sudoku environment
 - **NeMo Customizer** - *(In progress)*
 - **VeRL** - *(In progress)*
 

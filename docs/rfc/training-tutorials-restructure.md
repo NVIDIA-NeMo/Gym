@@ -24,7 +24,7 @@ training-tutorials/
 
 ### Problems Identified
 
-1. **Redundancy with existing content**: The comprehensive [NeMo RL GRPO tutorial](../tutorials/nemo-rl-grpo/index.md) already covers training Nemotron Nano 9B v2 on Workplace Assistant.
+1. **Redundancy with existing content**: The comprehensive [NeMo RL GRPO tutorial](../training-tutorials/nemo-rl-grpo/index.md) already covers training Nemotron Nano 9B v2 on Workplace Assistant.
 
 2. **Unclear differentiation**: "Nemotron 3 Nano Recipe" and "Nemotron 3 Super Recipe" don't explain what makes them distinct from the GRPO tutorial.
 
@@ -365,8 +365,8 @@ Train on competitive programming tasks.
 
 - [NeMo RL Recipes](https://github.com/NVIDIA/NeMo-RL/tree/main/examples/configs/recipes/llm)
 - [Resource Servers](../../resources_servers/)
-- [Current GRPO Tutorial](../tutorials/nemo-rl-grpo/index.md)
-- [Offline Training Tutorial](../tutorials/offline-training-w-rollouts.md)
+- [Current GRPO Tutorial](../training-tutorials/nemo-rl-grpo/index.md)
+- [Offline Training Tutorial](../training-tutorials/offline-training-w-rollouts.md)
 
 ---
 

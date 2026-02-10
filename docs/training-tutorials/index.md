@@ -8,7 +8,7 @@ Hands-on tutorials for training models using NeMo Gym with various training fram
 :gutter: 1 1 1 2
 
 :::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` NeMo RL
-:link: ../tutorials/nemo-rl-grpo/index
+:link: nemo-rl-grpo/index
 :link-type: doc
 +++
 {bdg-primary}`nemo rl`
@@ -29,7 +29,7 @@ Hands-on tutorials for training models using NeMo Gym with various training fram
 :::
 
 :::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Unsloth
-:link: ../tutorials/unsloth-training
+:link: unsloth-training
 :link-type: doc
 +++
 {bdg-secondary}`unsloth`
@@ -52,7 +52,7 @@ Hands-on tutorials for training models using NeMo Gym with various training fram
 ## SFT & DPO
 
 :::{grid-item-card} {octicon}`file;1.5em;sd-mr-1` Offline Training with Rollouts
-:link: ../tutorials/offline-training-w-rollouts
+:link: offline-training-w-rollouts
 :link-type: doc
 Transform rollouts into training data for supervised fine-tuning (SFT) and direct preference optimization (DPO).
 +++

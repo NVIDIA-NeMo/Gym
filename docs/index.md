@@ -399,10 +399,10 @@ Rollout Collection <get-started/rollout-collection.md>
 :maxdepth: 1
 
 🟡 Overview <training-tutorials/index>
-NeMo RL <tutorials/nemo-rl-grpo/index.md>
+NeMo RL <training-tutorials/nemo-rl-grpo/index.md>
 🟡 TRL <training-tutorials/trl>
-Unsloth <tutorials/unsloth-training>
-Offline Training (SFT/DPO) <tutorials/offline-training-w-rollouts>
+Unsloth <training-tutorials/unsloth-training>
+Offline Training (SFT/DPO) <training-tutorials/offline-training-w-rollouts>
 ```
 
 ```{toctree}

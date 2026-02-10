@@ -34,7 +34,7 @@ This tutorial guides you through your first RL training run using NeMo Gym for t
 | **Algorithm** | GRPO (Group Relative Policy Optimization) |
 
 :::{tip}
-**Why Unsloth?** Unsloth provides optimized memory usage, making it possible to train on free Colab T4 GPUs. For production multi-node training, see {doc}`/tutorials/nemo-rl-grpo/index`.
+**Why Unsloth?** Unsloth provides optimized memory usage, making it possible to train on free Colab T4 GPUs. For production multi-node training, see {doc}`/training-tutorials/nemo-rl-grpo/index`.
 :::
 
 ---
@@ -132,7 +132,7 @@ After completing your first training run:
 :gutter: 3
 
 :::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` Scale to Production
-:link: /tutorials/nemo-rl-grpo/index
+:link: /training-tutorials/nemo-rl-grpo/index
 :link-type: doc
 
 Multi-node GRPO training with NeMo RL for production workloads.
@@ -158,7 +158,7 @@ Create your own training environment with custom tools and verification.
 :::
 
 :::{grid-item-card} {octicon}`book;1.5em;sd-mr-1` Offline Training
-:link: /tutorials/offline-training-w-rollouts
+:link: /training-tutorials/offline-training-w-rollouts
 :link-type: doc
 
 Use collected rollouts for SFT or DPO training.
