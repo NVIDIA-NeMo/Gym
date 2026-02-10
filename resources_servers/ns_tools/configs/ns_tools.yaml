@@ -30,12 +30,15 @@ ns_tools:
       # Per-tool configuration overrides
       nemo_skills_tool_overrides:
         PythonTool:
-          exec_timeout_s: 30
-      
+          exec_timeout_s: 10
+
       # Sandbox configuration
       # Respects NEMO_SKILLS_SANDBOX_HOST/PORT env vars if set, else defaults
       sandbox_host: ${oc.env:NEMO_SKILLS_SANDBOX_HOST,127.0.0.1}
       sandbox_port: ${oc.env:NEMO_SKILLS_SANDBOX_PORT,6000}
+
+      # Disable session replay after sandbox worker restarts (improves stability)
+      disable_session_restore: true
       
       domain: agent
       verified: false
