@@ -45,8 +45,12 @@ HEAD_SERVER_KEY_NAME = "head_server"
 DISALLOWED_PORTS_KEY_NAME = "disallowed_ports"
 HEAD_SERVER_DEPS_KEY_NAME = "head_server_deps"
 PYTHON_VERSION_KEY_NAME = "python_version"
+PIP_INSTALL_VERBOSE_KEY_NAME = "pip_install_verbose"
 USE_ABSOLUTE_IP = "use_absolute_ip"
 UV_PIP_SET_PYTHON_KEY_NAME = "uv_pip_set_python"
+HF_TOKEN_KEY_NAME = "hf_token"
+RAY_HEAD_NODE_ADDRESS_KEY_NAME = "ray_head_node_address"
+TASK_INDEX_KEY_NAME = "_task_index"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -55,8 +59,11 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     DISALLOWED_PORTS_KEY_NAME,
     HEAD_SERVER_DEPS_KEY_NAME,
     PYTHON_VERSION_KEY_NAME,
+    PIP_INSTALL_VERBOSE_KEY_NAME,
     USE_ABSOLUTE_IP,
     UV_PIP_SET_PYTHON_KEY_NAME,
+    HF_TOKEN_KEY_NAME,
+    RAY_HEAD_NODE_ADDRESS_KEY_NAME,
 ]
 
 POLICY_BASE_URL_KEY_NAME = "policy_base_url"
@@ -73,6 +80,8 @@ class GlobalConfigDictParserConfig(BaseModel):
     initial_global_config_dict: Optional[DictConfig] = None
     skip_load_from_cli: bool = False
     skip_load_from_dotenv: bool = False
+
+    hide_secrets: bool = False
 
     NO_MODEL_GLOBAL_CONFIG_DICT: ClassVar[DictConfig] = DictConfig(
         {
@@ -176,6 +185,22 @@ class GlobalConfigDictParser(BaseModel):
 
         return disallowed_ports
 
+    def _recursively_hide_secrets(self, dict_config: DictConfig) -> None:
+        with open_dict(dict_config):
+            self._recursively_hide_secrets_helper(dict_config)
+
+    def _recursively_hide_secrets_helper(self, dict_config: DictConfig) -> None:
+        for k, v in list(dict_config.items()):
+            if isinstance(v, (DictConfig, dict)):
+                self._recursively_hide_secrets_helper(v)
+            elif isinstance(v, list):
+                for inner_v in v:
+                    if isinstance(v, (DictConfig, dict)):
+                        self._recursively_hide_secrets_helper(inner_v)
+            else:
+                if "token" in k or "key" in k:
+                    dict_config[k] = "****"
+
     def parse(self, parse_config: Optional[GlobalConfigDictParserConfig] = None) -> DictConfig:
         if parse_config is None:
             parse_config = GlobalConfigDictParserConfig()
@@ -189,7 +214,7 @@ class GlobalConfigDictParser(BaseModel):
         global_config_dict: DictConfig = OmegaConf.merge(initial_global_config_dict, global_config_dict)
 
         # Load the env.yaml config. We load it early so that people can use it to conveniently store config paths.
-        dotenv_path = parse_config.dotenv_path or Path(PARENT_DIR) / "env.yaml"
+        dotenv_path = parse_config.dotenv_path or PARENT_DIR / "env.yaml"
         dotenv_extra_config = DictConfig({})
         if dotenv_path.exists() and not parse_config.skip_load_from_dotenv:
             dotenv_extra_config = OmegaConf.load(dotenv_path)
@@ -271,6 +296,9 @@ class GlobalConfigDictParser(BaseModel):
 
             # Constrain python version since ray is sensitive to this.
             global_config_dict[PYTHON_VERSION_KEY_NAME] = python_version()
+
+        if parse_config.hide_secrets:
+            self._recursively_hide_secrets(global_config_dict)
 
         return global_config_dict
 

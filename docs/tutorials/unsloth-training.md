@@ -18,7 +18,7 @@ Unsloth can be used with NeMo Gym single-step verifiers including math tasks, st
 
 1. Set up Unsloth for efficient fine-tuning
 2. Use NeMo Gym for tasks and verification
-3. Train a model using GRPO on a single gpu 
+3. Train a model using GRPO on a single GPU
 4. Evaluate trained model performance 
 
 :::
@@ -36,7 +36,7 @@ Unsloth GRPO notebook
 
 Check out [Unsloth's documentation](https://docs.unsloth.ai/models/nemotron-3#reinforcement-learning--nemo-gym) for more details.
 
-> **Note:** This notebook supports **single-step tasks** including math, structured outputs, instruction following, reasoning gym, and more. For multi-step tool calling scenarios, see the {doc}`GRPO with NeMo RL <nemo-rl-grpo/index>` tutorial. A multi-step integration with Unsloth is under construction! 
+> **Note:** This notebook supports **single-step tasks** including math, structured outputs, instruction following, reasoning gym, and more. For multi-step tool calling scenarios, see the {doc}`GRPO with NeMo RL <nemo-rl-grpo/index>` tutorial.
 
 ---
 

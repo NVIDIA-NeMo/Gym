@@ -55,7 +55,7 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
     TokenIDLogProbMixin,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_worker
 
 
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
@@ -278,8 +278,13 @@ class VLLMModel(SimpleResponsesAPIModel):
 
             # The tokenize endpoint doesn't accept any sampling parameters
             # The only relevant params are model, messages, and tools.
+            #
+            # IMPORTANT: pass through chat-template knobs (e.g. enable_thinking)
+            # when tokenizing, otherwise `prompt_token_ids` (and therefore logged
+            # `prompt_str`) can be built with different chat template settings than
+            # the actual generation request.
             tokenize_body_dict = dict()
-            for key in ("model", "messages", "tools"):
+            for key in ("model", "messages", "tools", "chat_template_kwargs"):
                 if key in body_dict:
                     tokenize_body_dict[key] = body_dict[key]
 
@@ -638,3 +643,5 @@ class VLLMConverter(BaseModel):
 
 if __name__ == "__main__":
     VLLMModel.run_webserver()
+elif is_nemo_gym_fastapi_worker():
+    app = VLLMModel.run_webserver()  # noqa: F401

@@ -45,6 +45,7 @@ from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
+    PIP_INSTALL_VERBOSE_KEY_NAME,
     PYTHON_VERSION_KEY_NAME,
     UV_PIP_SET_PYTHON_KEY_NAME,
     GlobalConfigDictParserConfig,
@@ -73,16 +74,20 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
     # not needed for most clusters. should be safe in all scenarios, but only minimally tested outside of colab.
     # see discussion and examples here: https://github.com/NVIDIA-NeMo/Gym/pull/526#issuecomment-3676230383
     uv_pip_set_python = global_config_dict.get(UV_PIP_SET_PYTHON_KEY_NAME, False)
-    uv_pip_python_flag = "--python .venv/bin/python" if uv_pip_set_python else ""
+    uv_pip_python_flag = "--python .venv/bin/python " if uv_pip_set_python else ""
+
+    verbose_flag = "-v " if global_config_dict.get(PIP_INSTALL_VERBOSE_KEY_NAME) else ""
 
     if has_pyproject_toml and has_requirements_txt:
         raise RuntimeError(
             f"Found both pyproject.toml and requirements.txt for uv venv setup in server dir: {dir_path}. Please only use one or the other!"
         )
     elif has_pyproject_toml:
-        install_cmd = f"""uv pip install {uv_pip_python_flag} '-e .' {" ".join(head_server_deps)}"""
+        install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
     elif has_requirements_txt:
-        install_cmd = f"""uv pip install {uv_pip_python_flag} -r requirements.txt {" ".join(head_server_deps)}"""
+        install_cmd = (
+            f"""uv pip install {verbose_flag}{uv_pip_python_flag}-r requirements.txt {" ".join(head_server_deps)}"""
+        )
     else:
         raise RuntimeError(f"Missing pyproject.toml or requirements.txt for uv venv setup in server dir: {dir_path}")
 
@@ -245,12 +250,16 @@ class RunHelper:  # pragma: no cover
         )
 
         print("Waiting for head server to spin up")
+        poll_count = 0
         while True:
             status = self._server_client.poll_for_status(HEAD_SERVER_KEY_NAME)
             if status == "success":
                 break
 
-            print(f"Head server is not up yet (status `{status}`). Sleeping 3s")
+            if poll_count % 10 == 0:  # Print every 30s
+                print(f"Head server is not up yet (status `{status}`). Sleeping...")
+
+            poll_count += 1
             sleep(3)
 
         print("Waiting for servers to spin up")
@@ -299,27 +308,30 @@ Process `{process_name}` stderr:
 
     def wait_for_spinup(self) -> None:
         sleep_interval = 3
+        poll_count = 0
+        successful_servers = []
+        total_servers = len(self._server_instance_display_configs)
 
         # Until we spin up or error out.
         while True:
             self.poll()
-            statuses = self.check_http_server_statuses()
+            statuses = self.check_http_server_statuses(successful_servers)
+            successful_servers.extend(s for s, status in statuses if status == "success")
 
-            num_spun_up = 0
             waiting = []
             for name, status in statuses:
-                if status == "success":
-                    num_spun_up += 1
-                else:
+                if status != "success":
                     waiting.append(name)
-            if len(statuses) != num_spun_up:
-                print(
-                    f"""{num_spun_up} / {len(statuses)} servers ready ({statuses.count("timeout")} timed out, {statuses.count("connection_error")} connection errored, {statuses.count("unknown_error")} had unknown errors).
-Waiting for servers to spin up: {waiting}
-Sleeping {sleep_interval}s..."""
-                )
+
+            if len(successful_servers) != total_servers:
+                if poll_count % 10 == 0:  # Print every sleep_interval * poll_count = 3 * 10 = 30s
+                    print(
+                        f"""Checking for HTTP server statuses (you should see some HTTP requests to `/` that may 404. This is expected.
+{len(successful_servers)} / {total_servers} servers ready. Waiting for servers to spin up: {waiting}"""
+                    )
+                poll_count += 1
             else:
-                print(f"All {num_spun_up} / {len(statuses)} servers ready! Polling every 60s")
+                print(f"All {len(successful_servers)} / {total_servers} servers ready! Polling every 60s")
                 self.display_server_instance_info()
                 return
 
@@ -358,13 +370,15 @@ Sleeping {sleep_interval}s..."""
         finally:
             self.shutdown()
 
-    def check_http_server_statuses(self) -> List[Tuple[str, ServerStatus]]:
-        print(
-            "Checking for HTTP server statuses (you should see some HTTP requests to `/` that may 404. This is expected.)"
-        )
+    def check_http_server_statuses(self, successful_servers: List[str]) -> List[Tuple[str, ServerStatus]]:
         statuses = []
         for server_instance_display_config in self._server_instance_display_configs:
             name = server_instance_display_config.config_path
+
+            # No need to re-poll successfully spun up servers.
+            if name in successful_servers:
+                continue
+
             status = self._server_client.poll_for_status(name)
             statuses.append((name, status))
 
@@ -758,7 +772,12 @@ def dump_config():  # pragma: no cover
     ng_dump_config "+config_paths=[<config1>,<config2>]"
     ```
     """
-    global_config_dict = get_global_config_dict()
+    global_config_dict = get_global_config_dict(
+        global_config_dict_parser_config=GlobalConfigDictParserConfig(
+            hide_secrets=True,
+        ),
+    )
+
     # Just here for help
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
@@ -779,7 +798,7 @@ def display_help():  # pragma: no cover
     # Just here for help
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
-    pyproject_path = Path(PARENT_DIR) / "pyproject.toml"
+    pyproject_path = PARENT_DIR / "pyproject.toml"
     with pyproject_path.open("rb") as f:
         pyproject_data = tomllib.load(f)
 

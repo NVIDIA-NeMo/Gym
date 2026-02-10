@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 (tutorials-index)=
 
 # NeMo Gym Tutorials
