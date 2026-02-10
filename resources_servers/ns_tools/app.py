@@ -281,9 +281,8 @@ class NSToolsResourcesServer(SimpleResourcesServer):
             session_id = str(uuid.uuid4())
             logger.warning(f"No session ID found, using fallback: {session_id}")
 
-        if self.config.verbose_tool_logging:
-            if session_id not in self._timing_by_session:
-                self._timing_by_session[session_id] = []
+        if session_id not in self._timing_by_session:
+            self._timing_by_session[session_id] = []
 
         start_time = time.perf_counter()
         is_internal_timeout = False
@@ -321,16 +320,16 @@ class NSToolsResourcesServer(SimpleResourcesServer):
             logger.exception(f"Error executing tool {tool_name}: {e}")
             result = {"error": str(e)}
 
+        elapsed = time.perf_counter() - start_time
+        self._timing_by_session[session_id].append(
+            {
+                "tool_name": tool_name,
+                "execution_time_seconds": elapsed,
+                "is_internal_timeout": is_internal_timeout,
+                "is_request_timeout": is_request_timeout,
+            }
+        )
         if self.config.verbose_tool_logging:
-            elapsed = time.perf_counter() - start_time
-            self._timing_by_session[session_id].append(
-                {
-                    "tool_name": tool_name,
-                    "execution_time_seconds": elapsed,
-                    "is_internal_timeout": is_internal_timeout,
-                    "is_request_timeout": is_request_timeout,
-                }
-            )
             timeout_info = ""
             if is_internal_timeout:
                 timeout_info = " [INTERNAL_TIMEOUT]"
@@ -373,13 +372,12 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         1. Per-sample `verifier_type` field (if present)
         2. Config `default_verifier` (fallback)
 
-        Also aggregates and returns tool execution timing metrics for this session
-        when verbose_tool_logging is enabled.
+        Always aggregates and returns tool execution timing metrics for this session.
+        Detailed per-call and summary logging is controlled by verbose_tool_logging.
         """
-        metrics = {}
+        session_id = request.session.get(SESSION_ID_KEY) if request else None
+        metrics = self._aggregate_timing_metrics(session_id)
         if self.config.verbose_tool_logging:
-            session_id = request.session.get(SESSION_ID_KEY)
-            metrics = self._aggregate_timing_metrics(session_id)
             logger.info(
                 f"Session {session_id[:8] if session_id else 'unknown'}... metrics: "
                 f"{metrics['num_tool_calls']} tool calls, total={metrics['total_tool_execution_time_seconds']:.3f}s, "
