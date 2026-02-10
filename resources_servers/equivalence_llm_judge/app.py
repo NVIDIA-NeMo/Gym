@@ -107,6 +107,14 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     # [NEW] Reward when full generation check succeeds after first pass fails.
     # Default is 0.5 (partial credit).
     reward_if_full_generation_succeeds: float = 0.5
+    # Prevent exceeding context length for the judge model.
+    # Maximum number of tokens allowed for the judge prompt input.
+    # If the assembled judge prompt would exceed this, the generated_answer
+    # is truncated to fit. Set to None to disable truncation.
+    max_judge_input_tokens: Optional[int] = None
+    # Approximate characters-per-token ratio used for truncation estimation.
+    # Default 3.5 is conservative for most tokenizers (actual is ~3.5-4.0).
+    chars_per_token_estimate: float = 3.5
 
 
 class LLMJudgeRunRequest(BaseRunRequest):
@@ -438,6 +446,47 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         responses_create_params = cfg.judge_responses_create_params.model_copy(deep=True)
         prompt_template = self._judge_prompt_template
         system_message = cfg.judge_system_message
+
+        ### Truncation logic to prevent exceeding context length ###
+        if cfg.max_judge_input_tokens is not None:
+            cpt = cfg.chars_per_token_estimate
+            # Estimate token count of the non-answer portions of the prompt
+            # by rendering the template with an empty generated_answer
+            scaffold = prompt_template.format(
+                question=question, expected_answer=expected_answer, generated_answer=""
+            )
+            system_chars = len(system_message) if system_message else 0
+            overhead_chars = len(scaffold) + system_chars
+            overhead_tokens_est = overhead_chars / cpt
+
+            # Budget remaining for the generated_answer
+            max_answer_tokens = cfg.max_judge_input_tokens - overhead_tokens_est
+            if max_answer_tokens < 100:
+                # Not enough room even for a minimal answer -- skip this judge call
+                # Return not-equal with a dummy evaluation
+                user_prompt = prompt_template.format(
+                    question=question,
+                    expected_answer=expected_answer,
+                    generated_answer="[TRUNCATED - answer too long for judge context]",
+                )
+                msgs: list[NeMoGymEasyInputMessage] = []
+                if system_message:
+                    msgs.append(NeMoGymEasyInputMessage(role="system", content=system_message))
+                msgs.append(NeMoGymEasyInputMessage(role="user", content=user_prompt))
+                responses_create_params.input = msgs
+                eval_record = JudgeEvaluation(
+                    responses_create_params=responses_create_params,
+                    response=NeMoGymResponse(
+                        id="truncated", created_at=0, model="", object="response", output=[]
+                    ),
+                    verdict_label=None,
+                )
+                return False, eval_record
+
+            max_answer_chars = int(max_answer_tokens * cpt)
+            if len(generated_answer) > max_answer_chars:
+                generated_answer = generated_answer[:max_answer_chars] + "\n... [truncated for judge context limit]"
+        ### End truncation logic ###        
 
         user_prompt = prompt_template.format(
             question=question, expected_answer=expected_answer, generated_answer=generated_answer
