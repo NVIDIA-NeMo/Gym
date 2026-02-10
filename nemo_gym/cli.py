@@ -105,8 +105,8 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
         else:
             # install nemo-gym from pypi instead of relative path in requirements.txt
             install_cmd = (
-                f"""uv pip install {verbose_flag}{uv_pip_python_flag}{pypi_index_flags}nemo-gym && """
-                f"""grep -v 'nemo-gym.*@.*\\.\\./\\.\\./' requirements.txt | uv pip install {verbose_flag}{uv_pip_python_flag}-r /dev/stdin {" ".join(head_server_deps)}"""
+                f"""(echo 'nemo-gym' && grep -v -F '../..' requirements.txt) | """
+                f"""uv pip install {verbose_flag}{uv_pip_python_flag}{pypi_index_flags}-r /dev/stdin {" ".join(head_server_deps)}"""
             )
     else:i
         raise RuntimeError(f"Missing pyproject.toml or requirements.txt for uv venv setup in server dir: {dir_path}")
