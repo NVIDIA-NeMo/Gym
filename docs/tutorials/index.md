@@ -44,7 +44,7 @@ Implement rollout generation and training data preparation for RL, SFT, and DPO.
 :link-type: doc
 Transform rollouts into training data for {term}`supervised fine-tuning (SFT) <SFT (Supervised Fine-Tuning)>` and {term}`direct preference optimization (DPO) <DPO (Direct Preference Optimization)>`.
 +++
-{bdg-secondary}`sft` {bdg-secondary}`dpo`
+{bdg-secondary}`20 min` {bdg-secondary}`sft` {bdg-secondary}`dpo`
 :::
 
 ::::
@@ -59,9 +59,9 @@ Transform rollouts into training data for {term}`supervised fine-tuning (SFT) <S
 :::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` GRPO with NeMo RL
 :link: training-nemo-rl-grpo-index
 :link-type: ref
-Learn how to set up NeMo Gym and NeMo RL training environments, run tests, prepare data, and launch single-node and multi-node training runs.
+Multi-page series: configure environments, prepare data, and launch single-node and multi-node GRPO training on Nemotron Nano 9B.
 +++
-{bdg-primary}`training` {bdg-secondary}`rl` {bdg-secondary}`grpo` {bdg-secondary}`multi-step`
+{bdg-primary}`training` {bdg-secondary}`3-5 hours` {bdg-secondary}`grpo` {bdg-secondary}`multi-step`
 :::
 
 :::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Unsloth
@@ -69,7 +69,7 @@ Learn how to set up NeMo Gym and NeMo RL training environments, run tests, prepa
 :link-type: ref
 Fast, memory-efficient fine-tuning for single-step tasks: math, structured outputs, instruction following, reasoning gym and more.
 +++
-{bdg-primary}`training` {bdg-secondary}`unsloth` {bdg-secondary}`single-step`
+{bdg-primary}`training` {bdg-secondary}`30 min` {bdg-secondary}`unsloth` {bdg-secondary}`single-step`
 :::
 
 ::::
