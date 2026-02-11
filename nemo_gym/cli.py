@@ -38,12 +38,13 @@ from omegaconf import DictConfig, OmegaConf
 from pydantic import Field
 from tqdm.auto import tqdm
 
-from nemo_gym import PARENT_DIR, __version__
+from nemo_gym import PARENT_DIR, RESULTS_DIR, __version__
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
     HEAD_SERVER_DEPS_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
+    NEMO_GYM_LOG_DIR_KEY_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
     PIP_INSTALL_VERBOSE_KEY_NAME,
     PYTHON_VERSION_KEY_NAME,
@@ -100,7 +101,36 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
     return cmd
 
 
-def _run_command(command: str, working_dir_path: Path) -> Popen:  # pragma: no cover
+_STDOUT_LOG: str = "stdout.log"
+_STDERR_LOG: str = "stderr.log"
+
+
+def _server_log_dir(log_dir: Path, server_name: str) -> Path:
+    """Return the log directory for a given server: ``{log_dir}/{server_name}``."""
+    return log_dir / server_name
+
+
+def _server_stdout_log(log_dir: Path, server_name: str) -> Path:
+    """Return the stdout log path for a given server."""
+    return _server_log_dir(log_dir, server_name) / _STDOUT_LOG
+
+
+def _server_stderr_log(log_dir: Path, server_name: str) -> Path:
+    """Return the stderr log path for a given server."""
+    return _server_log_dir(log_dir, server_name) / _STDERR_LOG
+
+
+def _tail_file(path: Path, max_lines: int = 20) -> Optional[str]:
+    """Read the last ``max_lines`` lines from a file, or return None if missing/empty."""
+    if not path.exists():
+        return None
+    lines = path.read_text().splitlines()[-max_lines:]
+    return "\n".join(lines) if lines else None
+
+
+def _run_command(
+    command: str, working_dir_path: Path, server_log_dir: Optional[Path] = None
+) -> Popen:  # pragma: no cover
     work_dir = f"{working_dir_path.absolute()}"
     custom_env = environ.copy()
     py_path = custom_env.get("PYTHONPATH", None)
@@ -108,7 +138,22 @@ def _run_command(command: str, working_dir_path: Path) -> Popen:  # pragma: no c
         custom_env["PYTHONPATH"] = f"{work_dir}:{py_path}"
     else:
         custom_env["PYTHONPATH"] = work_dir
-    return Popen(command, executable="/bin/bash", shell=True, env=custom_env)
+
+    popen_kwargs: dict = {}
+    if server_log_dir:
+        server_log_dir.mkdir(parents=True, exist_ok=True)
+        stdout_f = open(server_log_dir / _STDOUT_LOG, "a")
+        stderr_f = open(server_log_dir / _STDERR_LOG, "a")
+        popen_kwargs["stdout"] = stdout_f
+        popen_kwargs["stderr"] = stderr_f
+
+    proc = Popen(command, executable="/bin/bash", shell=True, env=custom_env, **popen_kwargs)
+
+    if server_log_dir:
+        stdout_f.close()
+        stderr_f.close()
+
+    return proc
 
 
 class RunConfig(BaseNeMoGymCLIConfig):
@@ -168,9 +213,20 @@ class RunHelper:  # pragma: no cover
     _processes: Dict[str, Popen]
     _server_instance_display_configs: List[ServerInstanceDisplayConfig]
     _server_client: ServerClient
+    _log_dir: Optional[Path]
 
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
         global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
+
+        # Set up log directory. Layout: {log_dir}/{server_name}/stdout.log and stderr.log
+        # Overwritten each run. If log rotation is needed later, add timestamped subdirectories.
+        self._log_dir = Path(global_config_dict.get(NEMO_GYM_LOG_DIR_KEY_NAME, str(RESULTS_DIR / "logs")))
+        if self._log_dir.exists():
+            import shutil
+
+            shutil.rmtree(self._log_dir)
+        self._log_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Server logs directory: {self._log_dir}")
 
         # Initialize Ray cluster in the main process
         # Note: This function will modify the global config dict - update `ray_head_node_address`
@@ -218,12 +274,12 @@ class RunHelper:  # pragma: no cover
     {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(top_level_path)} \\
     python {str(entrypoint_fpath)}"""
 
-            process = _run_command(command, dir_path)
+            log_dir_for_server = _server_log_dir(self._log_dir, top_level_path) if self._log_dir else None
+            process = _run_command(command, dir_path, server_log_dir=log_dir_for_server)
             self._processes[top_level_path] = process
 
             host = server_config_dict.get("host")
             port = server_config_dict.get("port")
-
             self._server_instance_display_configs.append(
                 ServerInstanceDisplayConfig(
                     process_name=top_level_path,
@@ -237,6 +293,8 @@ class RunHelper:  # pragma: no cover
                     pid=process.pid,
                     config_path=top_level_path,
                     start_time=start_time,
+                    stdout_log=str(_server_stdout_log(self._log_dir, top_level_path)) if self._log_dir else None,
+                    stderr_log=str(_server_stderr_log(self._log_dir, top_level_path)) if self._log_dir else None,
                 )
             )
 
@@ -289,20 +347,28 @@ class RunHelper:  # pragma: no cover
 
         for process_name, process in self._processes.items():
             if process.poll() is not None:
-                proc_out, proc_err = process.communicate()
                 print_str = f"Process `{process_name}` finished unexpectedly!"
 
-                if isinstance(proc_out, bytes):
-                    proc_out = proc_out.decode("utf-8")
-                    print_str = f"""{print_str}
-Process `{process_name}` stdout:
-{proc_out}
-"""
-                if isinstance(proc_err, bytes):
-                    proc_err = proc_err.decode("utf-8")
-                    print_str = f"""{print_str}
-Process `{process_name}` stderr:
-{proc_err}"""
+                if self._log_dir:
+                    print_str += f"\nSee full logs at: {_server_log_dir(self._log_dir, process_name)}"
+
+                    # Read log files so users always see stdout/stderr on crash
+                    # regardless of whether logging to files is configured.
+                    stdout_tail = _tail_file(_server_stdout_log(self._log_dir, process_name))
+                    stderr_tail = _tail_file(_server_stderr_log(self._log_dir, process_name))
+                    if stdout_tail:
+                        print_str += f"\n\nProcess `{process_name}` stdout (last lines):\n{stdout_tail}"
+                    if stderr_tail:
+                        print_str += f"\n\nProcess `{process_name}` stderr (last lines):\n{stderr_tail}"
+                else:
+                    # Fallback: read from pipes when stdout/stderr were not redirected to files.
+                    proc_out, proc_err = process.communicate()
+                    if isinstance(proc_out, bytes):
+                        proc_out = proc_out.decode("utf-8")
+                        print_str += f"\nProcess `{process_name}` stdout:\n{proc_out}\n"
+                    if isinstance(proc_err, bytes):
+                        proc_err = proc_err.decode("utf-8")
+                        print_str += f"\nProcess `{process_name}` stderr:\n{proc_err}"
 
                 raise RuntimeError(print_str)
 

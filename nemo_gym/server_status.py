@@ -64,6 +64,8 @@ class StatusCommand:
                     url=inst.get("url"),
                     entrypoint=inst.get("entrypoint"),
                     pid=inst.get("pid"),
+                    stdout_log=inst.get("stdout_log"),
+                    stderr_log=inst.get("stderr_log"),
                     uptime_seconds=uptime,
                     status="unknown_error",
                 )
@@ -104,6 +106,8 @@ Is the head server running? Start it with: `ng_run`
                 "port": server.port,
                 "pid": server.pid,
                 "uptime_seconds": format_uptime(server.uptime_seconds),
+                "stdout_log": server.stdout_log,
+                "stderr_log": server.stderr_log,
             }
             pprint(display_dict)
 
