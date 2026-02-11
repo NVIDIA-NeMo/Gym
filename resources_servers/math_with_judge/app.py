@@ -13,16 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import contextlib
+import json
 import logging
+import os
 from io import StringIO
 from typing import Any, ClassVar, Optional
 
 from fastapi import FastAPI
 from math_verify import grader
+from openai import AsyncOpenAI
 from math_verify.errors import TimeoutException
 from math_verify.metric import math_metric
 from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
-from pydantic import BaseModel
+from pydantic import BaseModel, PrivateAttr
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -36,8 +39,115 @@ from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
 )
 from nemo_gym.server_utils import get_response_json
+
+
+def _get_judge_client_config() -> Optional[tuple[str, str, int, list[str]]]:
+    """Read judge server address from env (set by pipeline when using heterogeneous job with judge).
+
+    Returns:
+        (model, server_type, port, master_nodes) or None if JUDGE_SERVER_ARGS not set.
+    """
+    server_args_str = os.environ.get("JUDGE_SERVER_ARGS")
+    if not server_args_str:
+        return None
+    server_config = json.loads(server_args_str)
+    server_type = server_config["server_type"]
+    model = server_config["model"]
+    n_servers = server_config.get("n_servers", 1)
+    port = server_config["port"]
+    # Judge is het group 0 in grpo_gym pipeline.
+    master_nodes = []
+    for i in range(n_servers):
+        het_group = i
+        env_var = f"SLURM_MASTER_NODE_HET_GROUP_{het_group}"
+        master_node = os.environ.get(env_var)
+        if not master_node:
+            raise RuntimeError(f"Missing {env_var} for judge server (heterogeneous job).")
+        master_nodes.append(master_node)
+    return model, server_type, port, master_nodes
+
+
+# Hard-coded user prompt for NL math judge (from nemo_skills prompt/config/judge/math.yaml).
+# Uses problem, predicted_answer, expected_answer; output format: "Reasoning: ..." and "Judgement: Yes" or "Judgement: No".
+JUDGE_USER_PROMPT_NL_MATH: str = """You will be asked to look at the two answers (predicted and expected) to a math problem and to judge whether they are equivalent within the context of the problem.
+
+Please first explain your reasoning in a couple of sentences. Then respond with only Yes or No as your judgement on whether the two answers are the same.
+When comparing answers only perform trivial simplifications.
+
+Here are a few examples. Please include both "Reasoning" and "Judgement" in your final response in the same format as below.
+
+
+Example 1:
+Problem: Factor $7x^3 - 21x^2 + 14x$.
+Predicted answer: $7x(x - 2)(x - 1)$
+Expected answer: $7x(x-1)(x-2)$
+
+Reasoning: The order of the factors does not matter, so the answers are the same.
+Judgement: Yes
+
+
+Example 2:
+Problem: A rectangle has a length of 6 meters and a width of 2 meters. If the length is reduced by 3 meters and the width is halved, what is the new area of the rectangle in square meters?
+Predicted answer: 3/2
+Expected answer: 1.5
+
+Reasoning: 3/2 is the same as 1.5
+Judgement: Yes
+
+
+Example 3:
+Problem: Simplify the expression $\\sqrt{{7!}}$, where $n!$ stands for $n\\cdot(n-1)\\cdot(n-2)\\cdots \\cdot 2\\cdot 1$.
+Predicted answer: 71
+Expected answer: 12\\sqrt{{35}}.
+
+Reasoning: This is non-trivial to simplify, so the answers are different.
+Judgement: No
+
+
+Example 4:
+Problem: What is the simplified form of the expression $\\sqrt{{98 x^{{3}} y^{{5}} z}} ?
+\\begin{{align*}}
+\\text{{A)}} & 2 x y z \\sqrt{{7 x y z}} &
+\\text{{B)}} &  7 x^{{2}} y^{{2}} \\sqrt{{2 y z}}
+\\\\
+\\text{{C)}} & 7 x y^{{2}} \\sqrt{{2 x y z}}  &
+\\text{{D)}} &49 x y^{{2}} \\sqrt{{2 x y z}}
+\\\\
+\\end{{align*}}
+Predicted answer: 7 x y^{{2}} \\sqrt{{2 x y z}}
+Expected answer: C
+
+Reasoning: Predicted answer is the same as the expected answer choice C.
+Judgement: Yes
+
+
+Example 5:
+Problem: A line segment of length $5$ has one endpoint at $(1, 2)$ and the other endpoint at $(4, b)$. Find all possible values of $b$, separated by commas.
+Predicted answer:  -2, 6
+Expected answer: 6, -2
+
+Reasoning: The order doesn't matter in the context of the problem.
+Judgement: Yes
+
+
+Example 6:
+Problem: Solve $\\tan x = \\sin x$ for $0 \\le x \\le 2 \\pi.$  Enter all the solutions, separated by commas.
+Predicted answer: 0, \\pi
+Expected answer: 0,\\pi,2\\pi.
+
+Reasoning: Number of solutions is different.
+Judgement: No
+
+
+YOUR TASK
+
+Problem: {problem}
+Predicted answer: {predicted_answer}
+Expected answer: {expected_answer}"""
 
 
 class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
@@ -93,6 +203,10 @@ Example output: "My final verdict is different [[A!=B]]"."""
     JUDGE_NOT_EQUAL_LABEL: ClassVar[str] = "[[A!=B]]"
 
     config: LibraryJudgeMathResourcesServerConfig
+
+    # Lazy-initialized when JUDGE_SERVER_ARGS is set (OpenAI-compatible judge).
+    _judge_openai_client: Optional[AsyncOpenAI] = PrivateAttr(default=None)
+    _judge_model: Optional[str] = PrivateAttr(default=None)
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
@@ -210,6 +324,11 @@ Example output: "My final verdict is different [[A!=B]]"."""
     async def _verify_answer_with_judge(
         self, question: str, expected_answer: str, generated_answer: str
     ) -> tuple[float, list[JudgeEvaluation]]:
+        if os.environ.get("JUDGE_SERVER_ARGS"):
+            return await self._verify_answer_with_judge_openai(
+                question, expected_answer, generated_answer
+            )
+        # Original path: /v1/responses judge.
         # The judge is asked to evaluate whether the answers are equal using both
         # orders of the answers, in case there is any positional bias in terms of
         # the order in which the answers are presented to the judge model.
@@ -229,6 +348,50 @@ Example output: "My final verdict is different [[A!=B]]"."""
         else:
             reward = 0.0
         return reward, [first_judge_evaluation, second_judge_evaluation]
+
+    async def _verify_answer_with_judge_openai(
+        self, question: str, expected_answer: str, generated_answer: str
+    ) -> tuple[float, list[JudgeEvaluation]]:
+        """Use OpenAI-compatible judge (vLLM /v1/chat/completions) when JUDGE_SERVER_ARGS is set."""
+        cfg = _get_judge_client_config()
+        if not cfg:
+            return 0.0, []
+        model, _server_type, port, master_nodes = cfg
+        if self._judge_openai_client is None:
+            base_url = f"http://{master_nodes[0]}:{port}/v1"
+            self._judge_openai_client = AsyncOpenAI(base_url=base_url, api_key="EMPTY")
+            self._judge_model = model
+        user_content = JUDGE_USER_PROMPT_NL_MATH.format(
+            problem=question,
+            predicted_answer=generated_answer,
+            expected_answer=expected_answer,
+        )
+        completion = await self._judge_openai_client.chat.completions.create(
+            model=self._judge_model,
+            messages=[{"role": "user", "content": user_content}],
+        )
+        judge_text = (
+            completion.choices[0].message.content or ""
+        ).strip()
+        # Parse "Judgement: Yes" or "Judgement: No" (case-insensitive); last occurrence wins.
+        reward = 0.0
+        if "judgement:" in judge_text.lower():
+            last_yes = judge_text.lower().rfind("judgement: yes")
+            last_no = judge_text.lower().rfind("judgement: no")
+            if last_yes >= 0 and (last_no < 0 or last_yes > last_no):
+                reward = 1.0
+        # Build one JudgeEvaluation with minimal NeMoGymResponse for consistency.
+        out_text = NeMoGymResponseOutputText(annotations=[], text=judge_text)
+        out_msg = NeMoGymResponseOutputMessage(
+            id="0", content=[out_text], role="assistant", status="completed", type="message"
+        )
+        judge_response = NeMoGymResponse.model_construct(output=[out_msg])
+        params = NeMoGymResponseCreateParamsNonStreaming(
+            input=[NeMoGymEasyInputMessage(role="user", content=user_content)],
+            model=self._judge_model,
+        )
+        judge_eval = JudgeEvaluation(responses_create_params=params, response=judge_response)
+        return reward, [judge_eval]
 
     async def _generate_judge_evaluation(
         self, question: str, first_answer: str, second_answer: str
