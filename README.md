@@ -2,7 +2,7 @@
 
 NeMo Gym is a library for building reinforcement learning (RL) training environments for large language models (LLMs). It provides infrastructure to develop environments, scale rollout collection, and integrate seamlessly with your preferred training framework. 
 
-NeMo Gym is a component of the [NVIDIA NeMo Framework](https://docs.nvidia.com/nemo-framework/), NVIDIA’s GPU-accelerated platform for building and training generative AI models.
+NeMo Gym is a component of the [NVIDIA NeMo Framework](https://docs.nvidia.com/nemo-framework/). For details on how NeMo Gym fits within the NeMo ecosystem and integrates with other RL frameworks, see the [Ecosystem](https://docs.nvidia.com/nemo/gym/latest/about/ecosystem.html) documentation.
 
 
 ## 🏆 Why NeMo Gym?
@@ -15,6 +15,34 @@ NeMo Gym is a component of the [NVIDIA NeMo Framework](https://docs.nvidia.com/n
 
 > [!IMPORTANT]
 > NeMo Gym is currently in early development. You should expect evolving APIs, incomplete documentation, and occasional bugs. We welcome contributions and feedback - for any changes, please open an issue first to kick off discussion!
+
+## 🔗 Ecosystem Integrations
+
+NeMo Gym is designed to integrate seamlessly with the broader RL ecosystem. For detailed documentation, see the [Ecosystem](https://docs.nvidia.com/nemo/gym/latest/about/ecosystem.html) page.
+
+### Training Frameworks
+
+NeMo Gym provides rollout collection infrastructure that integrates with various RL training frameworks:
+
+| Framework | Status | Description |
+|-----------|--------|-------------|
+| [NeMo RL](https://github.com/NVIDIA-NeMo/RL) | ✅ Supported | NVIDIA's scalable post-training library with GRPO, DPO, SFT |
+| [Unsloth](https://github.com/unslothai/unsloth) | ✅ Supported | Fast fine-tuning framework with memory optimization |
+| [TRL](https://github.com/huggingface/trl) | ✅ Supported | Hugging Face Transformer Reinforcement Learning |
+| [veRL](https://github.com/volcengine/verl) | 🔜 In Progress | Volcano Engine's scalable RL framework |
+
+### Environment Libraries
+
+NeMo Gym integrates with environment libraries for diverse training scenarios. All integrations are compatible with OpenAI Gymnasium standards.
+
+| Library | Status | Description |
+|---------|--------|-------------|
+| [reasoning-gym](https://github.com/open-thought/reasoning-gym) | ✅ Supported | Procedurally generated reasoning tasks (see `reasoning_gym` resource server) |
+| [Aviary](https://github.com/Future-House/aviary) | ✅ Supported | Multi-environment framework for tool-using agents (see `aviary` resource server) |
+| [Verifiers](https://github.com/PrimeIntellect-ai/verifiers) | 🔜 In Progress | Environment hub for coding, data & ML, science & reasoning, tool use and more |
+| [BrowserGym](https://github.com/ServiceNow/BrowserGym) | 🔜 In Progress | Web browsing and automation environments |
+
+> 💡 **Want to add an integration?** We welcome contributions! See our [Contributing Guide](https://docs.nvidia.com/nemo/gym/latest/contribute/index.html) or [open an issue](https://github.com/NVIDIA-NeMo/Gym/issues) to discuss.
 
 ## 📋 Requirements
 
