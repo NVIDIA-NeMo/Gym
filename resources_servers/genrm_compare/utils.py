@@ -762,4 +762,12 @@ def aggregate_scores(
     if comparison_results:
         metrics["tiebreak_usage_rate"] = tiebreak_count / len(comparison_results)
 
+    # Style density metrics
+    if num_responses > 0:
+        densities = [
+            compute_style_density(extract_from_response_obj(obj)[1])
+            for obj in response_objs
+        ]
+        metrics["mean_style_density"] = float(np.mean(densities))
+
     return final_scores, metrics, base_scores, bonuses
