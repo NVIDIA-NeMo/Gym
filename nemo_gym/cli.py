@@ -101,33 +101,6 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
     return cmd
 
 
-_STDOUT_LOG: str = "stdout.log"
-_STDERR_LOG: str = "stderr.log"
-
-
-def _server_log_dir(log_dir: Path, server_name: str) -> Path:
-    """Return the log directory for a given server: ``{log_dir}/{server_name}``."""
-    return log_dir / server_name
-
-
-def _server_stdout_log(log_dir: Path, server_name: str) -> Path:
-    """Return the stdout log path for a given server."""
-    return _server_log_dir(log_dir, server_name) / _STDOUT_LOG
-
-
-def _server_stderr_log(log_dir: Path, server_name: str) -> Path:
-    """Return the stderr log path for a given server."""
-    return _server_log_dir(log_dir, server_name) / _STDERR_LOG
-
-
-def _tail_file(path: Path, max_lines: int = 20) -> Optional[str]:
-    """Read the last ``max_lines`` lines from a file, or return None if missing/empty."""
-    if not path.exists():
-        return None
-    lines = path.read_text().splitlines()[-max_lines:]
-    return "\n".join(lines) if lines else None
-
-
 def _run_command(
     command: str, working_dir_path: Path, server_log_dir: Optional[Path] = None
 ) -> Popen:  # pragma: no cover
@@ -1013,3 +986,30 @@ System:
   Memory: {sys_info["memory_gb"]} GB"""
 
         print(output)
+
+
+_STDOUT_LOG: str = "stdout.log"
+_STDERR_LOG: str = "stderr.log"
+
+
+def _server_log_dir(log_dir: Path, server_name: str) -> Path:
+    """Return the log directory for a given server: ``{log_dir}/{server_name}``."""
+    return log_dir / server_name
+
+
+def _server_stdout_log(log_dir: Path, server_name: str) -> Path:
+    """Return the stdout log path for a given server."""
+    return _server_log_dir(log_dir, server_name) / _STDOUT_LOG
+
+
+def _server_stderr_log(log_dir: Path, server_name: str) -> Path:
+    """Return the stderr log path for a given server."""
+    return _server_log_dir(log_dir, server_name) / _STDERR_LOG
+
+
+def _tail_file(path: Path, max_lines: int = 20) -> Optional[str]:
+    """Read the last ``max_lines`` lines from a file, or return None if missing/empty."""
+    if not path.exists():
+        return None
+    lines = path.read_text().splitlines()[-max_lines:]
+    return "\n".join(lines) if lines else None
