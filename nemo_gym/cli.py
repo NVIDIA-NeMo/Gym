@@ -44,10 +44,10 @@ from nemo_gym.global_config import (
     HEAD_SERVER_DEPS_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
-    NEMO_GYM_LOG_DIR_KEY_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
     PIP_INSTALL_VERBOSE_KEY_NAME,
     PYTHON_VERSION_KEY_NAME,
+    SERVER_LOG_DIR_KEY_NAME,
     UV_PIP_SET_PYTHON_KEY_NAME,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
@@ -191,9 +191,7 @@ class RunHelper:  # pragma: no cover
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
         global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
 
-        # Set up log directory. Layout: {log_dir}/{server_name}/stdout.log and stderr.log
-        # Overwritten each run. If log rotation is needed later, add timestamped subdirectories.
-        self._log_dir = Path(global_config_dict.get(NEMO_GYM_LOG_DIR_KEY_NAME, str(RESULTS_DIR / "logs")))
+        self._log_dir = Path(global_config_dict.get(SERVER_LOG_DIR_KEY_NAME, str(RESULTS_DIR / "logs")))
         if self._log_dir.exists():
             import shutil
 
@@ -988,6 +986,7 @@ System:
         print(output)
 
 
+# Log path helpers for server log file redirection
 _STDOUT_LOG: str = "stdout.log"
 _STDERR_LOG: str = "stderr.log"
 
