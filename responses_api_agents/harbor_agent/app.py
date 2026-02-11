@@ -1,0 +1,399 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import asyncio
+import json
+import sys
+from asyncio import Semaphore
+from pathlib import Path
+from typing import Any, Callable, Optional
+from datetime import datetime, timezone
+
+import ray
+from fastapi import Body, FastAPI
+from pydantic import ConfigDict
+
+from nemo_gym.base_resources_server import (
+    BaseRunRequest,
+    BaseVerifyResponse,
+)
+from nemo_gym.base_responses_api_agent import (
+    BaseResponsesAPIAgentConfig,
+    SimpleResponsesAPIAgent,
+)
+from nemo_gym.openai_utils import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.server_utils import ServerClient
+from responses_api_agents.harbor_agent.utils import HarborAgentUtils
+
+
+class HarborAgentConfig(BaseResponsesAPIAgentConfig):
+    concurrency: int
+
+    # --- Harbor agent settings ---
+    # Name of a built-in Harbor agent (e.g. "terminus-2", "claude-code", "aider").
+    harbor_agent_name: Optional[str] = "terminus-2"
+    # Python import path for a custom agent class (e.g. "my_module:MyAgent").
+    # Overrides harbor_agent_name when set.
+    harbor_agent_import_path: Optional[str] = None
+    # Extra kwargs forwarded to the Harbor AgentConfig (e.g. collect_rollout_details,
+    # model_info). See harbor_agent.yaml for examples.
+    harbor_agent_kwargs: Optional[dict[str, Any]] = None
+
+    # --- Dataset ---
+    # Registry dataset identifier (e.g. "terminal-bench@2.0"). Mutually exclusive
+    # with harbor_local_dataset_path.
+    harbor_dataset_name: Optional[str] = None
+    harbor_dataset_version: Optional[str] = None
+    # Absolute path to a local task directory. Mutually exclusive with harbor_dataset_name.
+    harbor_local_dataset_path: Optional[str] = None
+
+    # --- Environment ---
+    # Harbor environment type: "singularity", "docker", "daytona", "modal", etc.
+    harbor_environment_type: Optional[str] = "singularity"
+    # Python import path for a custom environment class (e.g. "my_module:MyEnv").
+    # Overrides harbor_environment_type when set.
+    harbor_environment_import_path: Optional[str] = None
+    # Extra kwargs forwarded to the Harbor EnvironmentConfig (e.g.
+    # singularity_image_cache_dir, singularity_force_pull).
+    harbor_environment_kwargs: Optional[dict[str, Any]] = None
+
+    # --- Timeouts ---
+    # Per-agent timeout in seconds. None = use Harbor's default.
+    harbor_agent_timeout: Optional[int] = None
+    # Per-verifier timeout in seconds. None = use Harbor's default.
+    harbor_verifier_timeout: Optional[int] = None
+    # Multiplier applied to all Harbor timeouts. None = use Harbor's default (1.0).
+    harbor_timeout_multiplier: Optional[float] = None
+
+    # --- Job output ---
+    # Directory where Harbor writes job results and trial artifacts.
+    harbor_jobs_dir: str = "harbor_jobs"
+
+    # --- Model routing ---
+    # LiteLLM provider prefix prepended to the model name (e.g. "hosted_vllm",
+    # "openai", "anthropic"). Required for routing requests to the correct backend.
+    harbor_model_prefix: Optional[str] = None
+
+    # --- Caching ---
+    # Skip re-running a task if a result file already exists for this instance_id.
+    skip_if_exists: bool = False
+
+
+class HarborRunRequest(BaseRunRequest):
+    model_config = ConfigDict(extra="allow")
+    instance_id: str
+
+
+class HarborVerifyResponse(BaseVerifyResponse):
+    model_config = ConfigDict(extra="allow")
+
+
+async def run_harbor_job(job_config_dict: dict) -> str:
+    """Runs a single Harbor Job and returns the trial directory path.
+
+    The trial directory contains:
+    - result.json: Summary result with reward, agent_result, verifier_result, etc.
+    - agent/trajectory.json: Full ATIF trajectory with per-step messages, tool
+      calls, observations, and per-token logprobs.
+    """
+    from harbor.job import Job
+    from harbor.models.job.config import JobConfig
+
+    config = JobConfig(**job_config_dict)
+    job = Job(config)
+    await job.run()
+
+    # Find the trial directory from the job output directory
+    job_dir = config.jobs_dir / config.job_name
+    for trial_dir in job_dir.iterdir():
+        if not trial_dir.is_dir():
+            continue
+        result_path = trial_dir / "result.json"
+        if result_path.exists():
+            return str(trial_dir)
+
+    raise FileNotFoundError(f"No trial result found in {job_dir}")
+
+
+_RAY_WORKER_EVENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _run_harbor_job_sync(job_config_dict: dict) -> str:
+    """Synchronous wrapper for run_harbor_job for use in Ray remote.
+
+    Ray workers are long-lived processes. Reusing a single event loop per worker
+    avoids cross-loop issues with global async state (e.g., LiteLLM logging worker
+    queues) when multiple jobs execute sequentially in the same process.
+    """
+    global _RAY_WORKER_EVENT_LOOP
+    if _RAY_WORKER_EVENT_LOOP is None or _RAY_WORKER_EVENT_LOOP.is_closed():
+        _RAY_WORKER_EVENT_LOOP = asyncio.new_event_loop()
+        asyncio.set_event_loop(_RAY_WORKER_EVENT_LOOP)
+    return _RAY_WORKER_EVENT_LOOP.run_until_complete(run_harbor_job(job_config_dict))
+
+
+@ray.remote(
+    scheduling_strategy="SPREAD",
+    runtime_env={
+        "py_executable": sys.executable,
+    },
+)
+def runner_ray_remote(runner: Callable, params: dict[str, Any]) -> Any:
+    return runner(**params)
+
+
+class HarborAgent(SimpleResponsesAPIAgent):
+    config: HarborAgentConfig
+    sem: Semaphore = None
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def model_post_init(self, __context: Any) -> None:
+        self.sem = Semaphore(self.config.concurrency)
+
+    def setup_webserver(self) -> FastAPI:
+        app = FastAPI()
+        app.post("/v1/responses")(self.responses)
+        app.post("/run")(self.run)
+        return app
+
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        raise NotImplementedError
+
+    async def run(self, body: HarborRunRequest) -> HarborVerifyResponse:
+        async with self.sem:
+            global_config_dict = ServerClient.load_from_global_config().global_config_dict
+
+            policy_model_name = global_config_dict["policy_model_name"]
+            base_url = str(global_config_dict["policy_base_url"]).rstrip("/")
+            model_name = self._resolve_model_name(policy_model_name)
+
+            instance_id = body.instance_id
+
+            output_file_dir = f"{Path.cwd()}/results/harbor/{policy_model_name}"
+
+            # Check skip_if_exists — return cached result if available
+            if self.config.skip_if_exists:
+                cached_path = Path(f"{output_file_dir}/{instance_id}/{instance_id}.json")
+                if cached_path.exists():
+                    with open(cached_path, "r") as f:
+                        print(f"Skipping {instance_id} because it already exists")
+                        verify_response = HarborVerifyResponse.model_validate_json(f.read())
+                    return verify_response
+
+            temperature = body.responses_create_params.temperature
+            top_p = body.responses_create_params.top_p
+
+            # Build Harbor JobConfig, forwarding sampling params to the agent.
+            # temperature is supported by Terminus-2; top_p is not yet forwarded by Harbor agents.
+            job_config_dict = self._build_job_config(
+                instance_id, model_name, base_url,
+                temperature=temperature,
+            )
+
+            try:
+                params = dict(
+                    job_config_dict=job_config_dict,
+                )
+                future = runner_ray_remote.remote(_run_harbor_job_sync, params)
+                trial_dir_path = await asyncio.to_thread(ray.get, future)
+                trial_dir = Path(trial_dir_path)
+
+                # Read the trial result (summary: reward, agent_result, verifier_result)
+                with open(trial_dir / "result.json", "r") as f:
+                    trial_result = json.load(f)
+
+                # Read the ATIF trajectory (full conversation with per-token logprobs)
+                trajectory = None
+                trajectory_path = trial_dir / "agent" / "trajectory.json"
+                if trajectory_path.exists():
+                    with open(trajectory_path, "r") as f:
+                        trajectory = json.load(f)
+
+                # Extract reward from verifier result
+                verifier_result = trial_result.get("verifier_result")
+                reward = HarborAgentUtils.extract_reward(verifier_result)
+
+                # Convert Harbor outputs to NeMo Gym response items:
+                # keep rich trajectory details, then overlay rollout token details when present.
+                output_items = HarborAgentUtils.trial_result_to_responses(trial_result, trajectory)
+
+                # Extract the initial instruction from the trajectory as input messages
+                input_messages = HarborAgentUtils.extract_input_from_trajectory(trajectory)
+
+                # Populate usage from trajectory final_metrics or agent_result
+                usage = HarborAgentUtils.extract_usage(trial_result, trajectory)
+
+            except Exception as e:
+                print(f"Error running Harbor job: {e}")
+                trial_result = None
+                trajectory = None
+                output_items = []
+                input_messages = []
+                usage = None
+                reward = 0.0
+
+            response = HarborAgentUtils.get_default_response_object()
+            # Make response IDs traceable to the exact Harbor trial directory.
+            trial_name = (
+                trial_result.get("trial_name")
+                if isinstance(trial_result, dict)
+                else None
+            )
+            response["id"] = f"{trial_name or job_config_dict['job_name']}"
+            response["model"] = policy_model_name
+            response["temperature"] = temperature
+            response["top_p"] = top_p
+            response["output"] = output_items
+            if usage:
+                response["usage"] = usage
+
+            # Update responses_create_params with the actual input sent to the agent
+            updated_params = body.responses_create_params
+            if input_messages:
+                updated_params = body.responses_create_params.model_copy(
+                    update={"input": input_messages}
+                )
+
+            verify_response = HarborVerifyResponse(
+                responses_create_params=updated_params,
+                reward=reward,
+                response=response,
+                instance_id=instance_id,
+                metadata=trial_result if trial_result else {},
+            )
+
+            # Save result to disk
+            output_path = Path(f"{output_file_dir}/{instance_id}")
+            output_path.mkdir(parents=True, exist_ok=True)
+
+            with open(f"{output_file_dir}/{instance_id}/{instance_id}.json", "w") as f:
+                json.dump(verify_response.model_dump(), f, indent=2)
+
+            return verify_response
+
+    def _resolve_model_name(self, policy_model_name: str) -> str:
+        """Build Harbor/LiteLLM model name from explicit user-provided prefix."""
+        model_prefix = self.config.harbor_model_prefix
+        if not model_prefix:
+            raise ValueError(
+                "harbor_model_prefix is required (e.g. hosted_vllm, openai, anthropic). "
+                "Please set it in harbor_agent config."
+            )
+        return f"{model_prefix}/{policy_model_name}"
+
+    def _build_job_config(
+        self,
+        instance_id: str,
+        model_name: str,
+        api_base: str,
+        temperature: Optional[float] = None,
+    ) -> dict:
+        """Build a Harbor JobConfig dict for a single task."""
+        from harbor.models.job.config import (
+            JobConfig,
+            LocalDatasetConfig,
+            OrchestratorConfig,
+            RegistryDatasetConfig,
+        )
+        from harbor.models.registry import RemoteRegistryInfo
+        from harbor.models.trial.config import (
+            AgentConfig,
+            EnvironmentConfig,
+            VerifierConfig,
+        )
+
+        # Sampling params are forwarded to the agent constructor via kwargs.
+        # Terminus-2 accepts `temperature` directly; other agents may ignore it.
+        agent_kwargs: dict[str, Any] = {"api_base": api_base}
+        if temperature is not None:
+            agent_kwargs["temperature"] = temperature
+        if self.config.harbor_agent_kwargs:
+            agent_kwargs.update(self.config.harbor_agent_kwargs)
+
+        agent_config = AgentConfig(
+            name=self.config.harbor_agent_name if not self.config.harbor_agent_import_path else None,
+            import_path=self.config.harbor_agent_import_path,
+            model_name=model_name,
+            override_timeout_sec=(
+                float(self.config.harbor_agent_timeout)
+                if self.config.harbor_agent_timeout is not None
+                else None
+            ),
+            kwargs=agent_kwargs,
+        )
+
+        environment_kwargs = {}
+        if self.config.harbor_environment_kwargs:
+            environment_kwargs.update(self.config.harbor_environment_kwargs)
+
+        environment_config = EnvironmentConfig(
+            type=self.config.harbor_environment_type if not self.config.harbor_environment_import_path else None,
+            import_path=self.config.harbor_environment_import_path,
+            kwargs=environment_kwargs,
+        )
+
+        verifier_config = VerifierConfig(
+            override_timeout_sec=(
+                float(self.config.harbor_verifier_timeout)
+                if self.config.harbor_verifier_timeout is not None
+                else None
+            ),
+        )
+
+        orchestrator_config = OrchestratorConfig(
+            n_concurrent_trials=1,
+            quiet=True,
+        )
+
+        # Build dataset config — exactly one source must be configured
+        if self.config.harbor_dataset_name:
+            dataset_config = RegistryDatasetConfig(
+                registry=RemoteRegistryInfo(),
+                name=self.config.harbor_dataset_name,
+                version=self.config.harbor_dataset_version,
+                task_names=[instance_id],
+            )
+        elif self.config.harbor_local_dataset_path:
+            dataset_config = LocalDatasetConfig(
+                path=Path(self.config.harbor_local_dataset_path),
+                task_names=[instance_id],
+            )
+        else:
+            raise ValueError(
+                "Harbor agent requires a dataset. Set either harbor_dataset_name or harbor_local_dataset_path."
+            )
+
+        job_config = JobConfig(
+            job_name=f"ng_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{instance_id}",
+            jobs_dir=Path(self.config.harbor_jobs_dir),
+            timeout_multiplier=(
+                self.config.harbor_timeout_multiplier
+                if self.config.harbor_timeout_multiplier is not None
+                else 1.0
+            ),
+            orchestrator=orchestrator_config,
+            environment=environment_config,
+            verifier=verifier_config,
+            agents=[agent_config],
+            datasets=[dataset_config],
+        )
+
+        return job_config.model_dump(mode="json")
+
+
+if __name__ == "__main__":
+    HarborAgent.run_webserver()
