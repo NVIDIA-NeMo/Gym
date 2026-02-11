@@ -26,7 +26,7 @@ from huggingface_hub import snapshot_download
 from ray import available_resources, cluster_resources
 from ray._private.state import available_resources_per_node
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
-from ray.util.state import list_nodes
+from ray.util.state import list_nodes, list_placement_groups
 from requests.exceptions import ConnectionError
 from vllm.entrypoints.openai.api_server import (
     FlexibleArgumentParser,
@@ -91,6 +91,7 @@ class LocalVLLMModelActor:
         self._patch_signal_handler()
         self._patch_uvicorn_logger()
         self._maybe_patch_engine_stats()
+        self._patch_vllm_placement_group_filter()
 
         for k, v in self.env_vars.items():
             environ[k] = v
@@ -150,6 +151,155 @@ class LocalVLLMModelActor:
             )
             metrics_logger.setLevel(ERROR)
 
+    def _patch_vllm_placement_group_filter(self) -> None:
+        """
+        Patch vLLM's v1 engine to handle multiple node resource keys from placement groups.
+
+        vLLM's v1 engine expects exactly one node resource key per node, but when multiple
+        vLLM actors or other Ray actors use placement groups, additional node resource keys
+        are created (e.g., 'node:IP_group_N_hash'). This patch filters out placement group
+        keys to only use the base node IP key.
+        """
+        try:
+            from vllm.v1.engine import utils as vllm_utils
+
+            @staticmethod
+            def patched_create_dp_placement_groups(vllm_config):
+                """Patched version that filters out placement group node keys."""
+                import ray
+                from ray._private.state import available_resources_per_node
+                from vllm import envs
+                from vllm.logger import init_logger
+                from vllm.platforms import current_platform
+
+                logger = init_logger(__name__)
+
+                # Extract configuration - matching the original function's structure
+                logger.info("=== PATCHED create_dp_placement_groups called ===")
+                logger.info("Creating placement groups for data parallel")
+
+                # Generate unique suffix to avoid name conflicts with existing placement groups
+                import time
+
+                unique_suffix = int(time.time() * 1000) % 1000000  # Use timestamp for uniqueness
+
+                dp_master_ip = vllm_config.parallel_config.data_parallel_master_ip
+                dp_size = vllm_config.parallel_config.data_parallel_size
+                dp_size_local = vllm_config.parallel_config.data_parallel_size_local
+                world_size = vllm_config.parallel_config.world_size
+                device_str = current_platform.ray_device_key
+                pack_strategy = envs.VLLM_RAY_DP_PACK_STRATEGY
+
+                available_resources = available_resources_per_node()
+                placement_groups = []
+                local_dp_ranks = []
+
+                dp_master_ip_key = f"node:{dp_master_ip}"
+                nodes = sorted(available_resources.values(), key=lambda x: dp_master_ip_key not in x)
+
+                # Determine placement strategy
+                placement_strategy = "STRICT_PACK" if pack_strategy in ("strict", "fill") else "PACK"
+
+                # Patched collection logic
+                for node_resources in nodes:
+                    if len(placement_groups) == dp_size:
+                        break
+
+                    # PATCHED: Filter out placement group keys
+                    node_ip_keys = [
+                        key
+                        for key in node_resources
+                        if key != "node:__internal_head__"
+                        and key.startswith("node:")
+                        and "_group_" not in key  # Filter out placement group keys
+                    ]
+
+                    # Original assertion should now pass
+                    assert len(node_ip_keys) == 1, (
+                        "Zero or multiple node IP keys found in node resources after filtering: %s",
+                        node_ip_keys,
+                    )
+                    node_ip_key = node_ip_keys[0]
+                    node_ip = node_ip_key.split(":")[1]
+
+                    n_device_on_node = int(node_resources.get(device_str, 0))
+                    if pack_strategy == "span" and n_device_on_node != 0:
+                        dp_size_available = 1
+                    else:
+                        dp_size_available = n_device_on_node // world_size
+
+                    if node_ip == dp_master_ip:
+                        if dp_size_available < dp_size_local:
+                            raise ValueError(
+                                "Not enough resources to allocate %s DP ranks "
+                                "on DP master node %s, possible to fit %s DP ranks"
+                                % (dp_size_local, node_ip, dp_size_available)
+                            )
+                        dp_size_to_allocate = dp_size_local
+                    elif pack_strategy == "strict":
+                        if dp_size_available < dp_size_local:
+                            logger.info(
+                                "Skipping node %s as %s DP ranks could not fit, possible to fit %s DP ranks",
+                                node_ip,
+                                dp_size_local,
+                                dp_size_available,
+                            )
+                            continue
+                        dp_size_to_allocate = dp_size_local
+                    else:
+                        dp_size_to_allocate = dp_size_available
+
+                    for i in range(dp_size_to_allocate):
+                        device_bundle = [{device_str: 1.0, "node:" + node_ip: 0.001}]
+                        # Create placement group for each DP rank
+                        # Add an extra CPU bundle for the engine manager
+                        bundles = device_bundle * world_size + [{"CPU": 1.0}]
+
+                        pg_name = f"dp_rank_{len(placement_groups)}_{unique_suffix}"
+                        logger.info(
+                            f"Creating placement group {pg_name} with {len(bundles)} bundles (world_size={world_size})"
+                        )
+
+                        pg = ray.util.placement_group(
+                            name=pg_name,
+                            strategy=placement_strategy,
+                            bundles=bundles,
+                        )
+                        ray.get(pg.ready(), timeout=1800)
+
+                        # Verify the placement group was created with the right number of bundles
+                        pg_table = ray.util.placement_group_table(pg)
+                        actual_bundle_count = len(pg_table["bundles"])
+                        logger.info(
+                            f"Placement group {pg_name} created successfully with {actual_bundle_count} bundles"
+                        )
+
+                        placement_groups.append(pg)
+                        local_dp_ranks.append(i)
+                        if len(placement_groups) == dp_size:
+                            break
+
+                # Validate we created the right number of placement groups
+                if len(placement_groups) < dp_size:
+                    raise ValueError(
+                        f"Not enough resources to allocate {dp_size} "
+                        "placement groups, only created "
+                        f"{len(placement_groups)} placement groups. "
+                        f"Available resources: {available_resources}"
+                    )
+
+                return placement_groups, local_dp_ranks
+
+            # Apply the patch
+            vllm_utils.CoreEngineActorManager.create_dp_placement_groups = patched_create_dp_placement_groups
+
+            if self.debug:
+                print("Applied patch to vLLM v1 engine to handle multiple node resource keys from placement groups.")
+        except Exception as e:
+            print(
+                f"Warning: Could not patch vLLM placement group filtering: {e}. This may cause issues if there are existing placement groups."
+            )
+
     def base_url(self) -> str:
         return self._base_url
 
@@ -181,6 +331,12 @@ class LocalVLLMModel(VLLMModel):
         return str(Path(self.config.hf_home) / "hub")
 
     def download_model(self) -> None:
+        # Check if model is a local path
+        if Path(self.config.model).exists():
+            print(f"Model path {self.config.model} exists locally, skipping download.")
+            return
+
+        # Otherwise, download from HuggingFace
         maybe_hf_token = self.get_hf_token()
         cache_dir = self.get_cache_dir()
 
@@ -234,6 +390,28 @@ Environment variables: {env_vars_to_print}""")
 
         return final_args, env_vars
 
+    def _cleanup_stale_placement_groups(self) -> None:
+        """
+        Log information about existing placement groups for debugging.
+
+        With the vLLM patch in place, existing placement groups shouldn't cause issues,
+        but we log them for debugging purposes.
+        """
+        if not self.config.debug:
+            return
+
+        try:
+            placement_groups = list_placement_groups(filters=[("state", "=", "CREATED")])
+
+            if not placement_groups:
+                print("No existing placement groups found.")
+            else:
+                print(f"Found {len(placement_groups)} existing placement group(s):")
+                for pg in placement_groups:
+                    print(f"  - {pg.name or pg.placement_group_id} (state: {pg.state})")
+        except Exception as e:
+            print(f"Could not list placement groups: {e}")
+
     def _select_vllm_server_head_node(self) -> NodeAffinitySchedulingStrategy:
         """
         There are a few params vLLM has:
@@ -284,6 +462,9 @@ Environment variables: {env_vars_to_print}""")
         if self.config.debug:
             print(f"""Currently available Ray cluster resources: {available_resources()}
 Total Ray cluster resources: {cluster_resources()}""")
+
+        # Log existing placement groups for debugging (vLLM patch handles multiple PGs)
+        self._cleanup_stale_placement_groups()
 
         server_args, env_vars = self._configure_vllm_serve()
 
