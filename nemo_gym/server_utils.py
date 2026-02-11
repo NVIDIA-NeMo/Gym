@@ -686,5 +686,7 @@ class ServerInstanceDisplayConfig(BaseModel):
     server_type: Optional[str] = None
     start_time: Optional[float] = None
     status: Optional[ServerStatus] = None
+    stderr_log: Optional[str] = None
+    stdout_log: Optional[str] = None
     uptime_seconds: Optional[float] = None
     url: Optional[str] = None
