@@ -1,0 +1,44 @@
+harbor_agent:
+  responses_api_agents:
+    harbor_agent:
+      entrypoint: app.py
+      concurrency: 16
+
+      # Dataset — one of these MUST be set (task is selected per-request via instance_id)
+      harbor_dataset_name: null                # Registry dataset name (e.g., "terminal-bench")
+      harbor_dataset_version: null             # Registry dataset version (e.g., "2.0")
+      harbor_local_dataset_path: null          # Local dataset path (alternative to registry)
+
+      # Agent — which Harbor agent to run (set name OR import_path, not both)
+      harbor_agent_name: "terminus-2"          # terminus-2, oracle, nop, etc.
+      harbor_agent_import_path: null           # Custom agent import path (e.g., "my_package.MyAgent")
+      harbor_agent_kwargs: null                # Extra kwargs passed to the agent's __init__
+      # Example (Terminus-2 with hosted_vllm model_info):
+      # harbor_agent_kwargs:
+      #   collect_rollout_details: true
+      #   model_info:
+      #     max_input_tokens: 131072
+      #     max_output_tokens: 16384
+      #     input_cost_per_token: 0.0
+      #     output_cost_per_token: 0.0
+
+      # Environment — container backend (set type OR import_path, not both)
+      harbor_environment_type: "singularity"   # singularity, docker, e2b, modal, daytona, runloop
+      harbor_environment_import_path: null     # Custom environment import path (e.g., "my_package.MyEnv")
+      harbor_environment_kwargs: null          # Extra kwargs passed to the environment
+      # Example (Singularity):
+      # harbor_environment_kwargs:
+      #   singularity_image_cache_dir: /path/to/singularity_cache
+      #   singularity_force_pull: false
+
+      # Model routing
+      harbor_model_prefix: "hosted_vllm"       # e.g. hosted_vllm, openai, anthropic
+
+      # Timeouts
+      harbor_agent_timeout: null               # Agent timeout override in seconds (null = Harbor/task default)
+      harbor_verifier_timeout: null            # Verifier timeout override in seconds (null = Harbor/task default)
+      harbor_timeout_multiplier: null          # Scale factor for task-defined timeouts (null = 1.0)
+
+      # Output
+      harbor_jobs_dir: "harbor_jobs"           # Directory for Harbor job outputs
+      skip_if_exists: false                    # Skip tasks with cached NeMo Gym results
