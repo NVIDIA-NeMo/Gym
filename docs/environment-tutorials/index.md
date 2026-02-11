@@ -49,6 +49,15 @@ Build `verify()`, prepare data, connect to NeMo RL.
 {bdg-primary}`start here` {bdg-secondary}`45-90 min`
 :::
 
+:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Multi-verifier rollouts
+:link: multi-verifier-rollouts
+:link-type: doc
+
+Run multiple training environments (multi-verifier) rollout collection.
+
++++
+:::
+
 ::::
 
 ---
