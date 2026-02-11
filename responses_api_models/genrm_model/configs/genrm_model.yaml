@@ -1,0 +1,10 @@
+genrm_model:
+  responses_api_models:
+    genrm_model:
+      entrypoint: app.py
+      base_url: ${genrm_base_url}
+      api_key: ${genrm_api_key}
+      model: ${genrm_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: false  # GenRM outputs structured JSON, not reasoning
+      supports_principle_role: true  # Enable principle-based comparison

@@ -154,13 +154,13 @@ class NeMoGymResponseOutputMessage(BaseModel):
 
 class NeMoGymEasyInputMessage(BaseModel):
     content: Union[str, ResponseInputMessageContentListParam]
-    role: Literal["user", "assistant", "system", "developer"]
+    role: Literal["user", "assistant", "system", "developer", "response_1", "response_2", "principle"]
     type: Literal["message"] = "message"
 
 
 class NeMoGymMessage(BaseModel):
     content: ResponseInputMessageContentListParam
-    role: Literal["user", "system", "developer"]
+    role: Literal["user", "system", "developer", "response_1", "response_2", "principle"]
     status: Literal["in_progress", "completed", "incomplete"] = "completed"
     type: Literal["message"] = "message"
 
@@ -376,12 +376,24 @@ class NeMoGymFunctionToolParam(FunctionToolParam):
     pass
 
 
+class NeMoGymChatCompletionCustomRoleMessageParam(TypedDict):
+    """Message param for custom roles not in standard OpenAI API.
+
+    Used by specialized models like GenRM that need custom roles
+    (e.g., response_1, response_2, principle).
+    """
+
+    role: Required[str]
+    content: Required[str]
+
+
 NeMoGymChatCompletionMessageParam: TypeAlias = Union[
     NeMoGymChatCompletionDeveloperMessageParam,
     NeMoGymChatCompletionSystemMessageParam,
     NeMoGymChatCompletionUserMessageParam,
     NeMoGymChatCompletionAssistantMessageParam,
     NeMoGymChatCompletionToolMessageParam,
+    NeMoGymChatCompletionCustomRoleMessageParam,  # For GenRM and similar
     # Don't add deprecated.
     # NeMoGymChatCompletionFunctionMessageParam,
     # Training:
