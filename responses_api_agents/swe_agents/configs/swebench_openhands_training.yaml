@@ -16,6 +16,7 @@ swe_agents_train:
       swebench_tests_timeout: 900
       apptainer_memory_limit_mb: 32768
       command_exec_timeout: 300
+      concurrency: 768
       dataset_path: ???
       model_server:
         name: policy_model # openai_model
@@ -49,6 +50,7 @@ swe_agents_val:
       swebench_tests_timeout: 900
       apptainer_memory_limit_mb: 32768
       command_exec_timeout: 300
+      concurrency: 768
       dataset_path: ???
       # Optional model server reference
       model_server:
