@@ -3,11 +3,32 @@
 
 Combine multiple verification strategies for more robust reward signals during GRPO training.
 
+:::{card}
+
 **Goal**: Configure NeMo Gym to use multiple resource servers or reward functions in a single training run.
+
+**Time**: ~20 minutes
+
+^^^
+
+**In this tutorial, you will**:
+
+1. Combine multiple resource servers for training
+2. Configure weighted reward aggregation
+3. Run GRPO training with composite verification
+
+:::
+
+:::{button-ref} training-nemo-rl-grpo-multi-node-training
+:color: secondary
+:outline:
+:ref-type: ref
+
+← Previous: Multi-Node Training
+:::
 
 **Prerequisites**:
 - Completed {doc}`/get-started/detailed-setup`
-- Familiar with {doc}`/resources-server/index`
 
 ---
 
@@ -57,9 +78,6 @@ NeMo Gym supports two complementary approaches:
 
 Combine resource servers by adding their YAML configs together. Each server independently verifies responses for its domain.
 
-:::{seealso}
-{doc}`/resources-server/index` explains resource server concepts.
-:::
 
 ### Configuration
 
@@ -115,7 +133,6 @@ The collated training data includes samples from all configured environments.
 ### Scaling Considerations
 
 - Each resource server runs as a separate process
-- For high-throughput training, profile servers using {doc}`/resources-server/profile`
 - If one server fails, training stops—ensure all servers are reliable before production runs
 
 ---
@@ -261,9 +278,22 @@ Combined: (1.0, True)
 
 ---
 
+## Next Steps
+
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build Custom Environments
+:link: /environment-tutorials/index
+:link-type: doc
+
+Explore advanced environment patterns: multi-step, multi-turn, LLM-as-judge, and more.
+:::
+
+
+::::
+
 ## Related Topics
 
 - {doc}`/about/concepts/task-verification` — How verification drives training
-- {doc}`/resources-server/index` — Resource server concepts
-- {doc}`/resources-server/profile` — Profile server performance
 - [NeMo RL GRPO Guide](https://github.com/NVIDIA-NeMo/RL/blob/main/docs/guides/grpo.md) — GRPO training configuration
