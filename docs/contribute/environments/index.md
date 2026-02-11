@@ -17,18 +17,32 @@ Build novel training environments for coding, reasoning, tool use, games, and mo
 {bdg-secondary}`new-environment`
 :::
 
-:::{grid-item-card} {octicon}`repo;1.5em;sd-mr-1` Benchmark Integrations
-:link: https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/mini_swe_agent
-:link-type: url
-Integrate existing benchmarks (SWE-Bench, Tau Bench, and so on) into NeMo Gym.
+:::{grid-item-card} {octicon}`repo;1.5em;sd-mr-1` Integrate external libraries
+:link: integrate-external-environments
+:link-type: doc
+Best practices guidance on integrating external training environments, benchmarks, or agents into NeMo Gym.
 
-→ View mini-swe-agent with SWE-Bench as a reference implementation
-
-*More detailed guidance coming soon.*
 +++
 {bdg-secondary}`benchmark`
 :::
 
+:::{grid-item-card} {octicon}`repo;1.5em;sd-mr-1` Add a benchmark
+:link: adding-a-benchmark
+:link-type: doc
+Best practices guidance on integrating benchmarks into NeMo Gym.
+
++++
+{bdg-secondary}`benchmark`
+:::
+
+:::{grid-item-card} {octicon}`repo;1.5em;sd-mr-1` Design a customer evaluation
+:link: designing-customer-evaluation
+:link-type: doc
+Best practices guidance on designing a customer evaluation benchmark.
+
++++
+{bdg-secondary}`benchmark`
+:::
 ::::
 
 ```{toctree}
@@ -37,5 +51,8 @@ Integrate existing benchmarks (SWE-Bench, Tau Bench, and so on) into NeMo Gym.
 :maxdepth: 1
 
 New Environment <new-environment>
+Integrate external libraries <integrate-external-environments>
+Add a benchmark <adding-a-benchmark>
+Design a customer evaluation <designing-customer-evaluation>
 ```
 
