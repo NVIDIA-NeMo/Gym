@@ -7,6 +7,8 @@ Implement verification logic, prepare training data, and connect to NeMo RL.
 
 **Goal**: Build a complete training environment with verification, data preparation, and NeMo RL integration.
 
+**Time**: ~45-90 minutes
+
 ^^^
 
 **In this tutorial, you will**:
@@ -24,6 +26,14 @@ Implement verification logic, prepare training data, and connect to NeMo RL.
 
 ← Previous: Creating a Resource Server
 :::
+
+## Prerequisites
+
+- Completed {doc}`/tutorials/creating-resource-server`
+- NeMo Gym installed and virtual environment activated
+- `env.yaml` configured with your API key
+
+---
 
 ```{mermaid}
 flowchart LR
@@ -442,18 +452,6 @@ python examples/nemo_gym/run_grpo_nemo_gym.py --config my_training_config.yaml
 
 ::::{grid} 1 2 2 2
 :gutter: 3
-
-:::{grid-item-card} {octicon}`law;1.5em;sd-mr-1` LLM-as-a-Judge
-:link: llm-as-judge
-:link-type: doc
-Use LLMs for flexible verification of open-ended tasks.
-:::
-
-:::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` Multi-Step Environments
-:link: multi-step
-:link-type: doc
-Build sequential tool-calling workflows.
-:::
 
 :::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` Train with NeMo RL
 :link: training-nemo-rl-grpo-index

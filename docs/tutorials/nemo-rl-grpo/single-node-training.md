@@ -8,6 +8,8 @@ With your environment set up and data prepared, you're ready to run training. Bu
 
 **Goal**: Run a single-node GRPO training session to validate your environment.
 
+**Time**: ~45 minutes
+
 ^^^
 
 **In this section, you will**:
@@ -29,7 +31,7 @@ With your environment set up and data prepared, you're ready to run training. Bu
 
 ---
 
-## Before You Begin
+## Prerequisites
 
 Make sure you have:
 
@@ -117,3 +119,16 @@ The end of the command above does the following:
 :::
 
 **✅ Success Check**: Training completes 3 steps on single node without any issues. Check the logs for errors and verify that training steps are progressing.
+
+---
+
+## Next Steps
+
+Your single-node run validated the environment. Scale to multiple nodes for production training:
+
+:::{button-ref} training-nemo-rl-grpo-multi-node-training
+:color: primary
+:ref-type: ref
+
+Continue to Multi-Node Training →
+:::

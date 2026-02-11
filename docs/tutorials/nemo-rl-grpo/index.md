@@ -10,6 +10,8 @@ Workplace Assistant is a realistic office simulation (calendar, email, project m
 
 **Goal**: Train a model for multi-step tool calling using GRPO on the Workplace Assistant environment.
 
+**Time**: ~3-5 hours (full series)
+
 ^^^
 
 **In this tutorial, you will**:
@@ -25,7 +27,7 @@ Workplace Assistant is a realistic office simulation (calendar, email, project m
 
 ---
 
-## Before You Begin
+## Prerequisites
 
 Make sure you have these prerequisites ready:
 
@@ -115,7 +117,7 @@ Scale to multi-node GRPO training for production.
 
 ---
 
-## What's Next?
+## Next Steps
 
 After completing this tutorial, explore these options:
 
