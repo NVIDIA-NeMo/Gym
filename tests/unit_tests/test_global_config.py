@@ -44,6 +44,7 @@ class TestServerUtils:
         return {
             "head_server_deps": ["ray[default]==test ray version", "openai==test openai version"],
             "python_version": "test python version",
+            "skip_venv_if_present": False,
         }
 
     def test_get_global_config_dict_sanity(self, monkeypatch: MonkeyPatch) -> None:
