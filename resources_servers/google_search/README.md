@@ -26,12 +26,10 @@
 Reference documentation: [Link1](https://docs.google.com/spreadsheets/d/1VK4-ZonMSR-4Ulk161Au1f-nGhs4r9V9-beScboaR3I/edit?gid=235748913#gid=235748913&range=A7) | [Link2](https://docs.google.com/spreadsheets/d/1VK4-ZonMSR-4Ulk161Au1f-nGhs4r9V9-beScboaR3I/edit?gid=235748913#gid=235748913&range=A8)
 
 ### Dataset Description
-This environment is currently associated with two datasets:
 
-1. **Synthetic GPQA v1.2** - filtered for difficult prompts
-2. **Synthetic HLE_mcq_v0** - filtered for difficult samples
+You can find the example datast for this environment here: https://huggingface.co/datasets/nvidia/Nemotron-RL-knowledge-web_search-mcqa 
 
-Both datasets have been filtering using Qwen3-32B for difficulty, ensuring that samples are not easily answerable without external search assistance. The datasets consist of Multiple Choice Question Answering (MCQA) tasks in the STEM domain. 
+The dataset has been filtering using Qwen3-32B for difficulty, ensuring that samples are not easily answerable without external search assistance. The datasets consist of Multiple Choice Question Answering (MCQA) tasks in the STEM domain. 
 
 ### Environment Tools
 The environment provides two primary tools for information retrieval:
@@ -104,18 +102,12 @@ config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
 resources_servers/google_search/configs/google_search.yaml"
 ng_run "+config_paths=[$config_paths]"
 
-ng_download_dataset_from_gitlab \
-    +dataset_name=search_STEM_syn_gpqa_v1_2_difficulty_filtered \
-    +version=0.0.1 \
-    +artifact_fpath=MCQA_syn_gpqa_1_2_difficulty_filtered_responses_api.jsonl \
-    +output_fpath=data/MCQA_syn_gpqa_1_2_difficulty_filtered_responses_api.jsonl
-
 ng_collect_rollouts +agent_name=simple_agent \
-    +input_jsonl_fpath=data/MCQA_syn_gpqa_1_2_difficulty_filtered_responses_api.jsonl \
-    +output_jsonl_fpath=results/MCQA_syn_gpqa_1_2_difficulty_filtered_responses_api.jsonl \
+    +input_jsonl_fpath=data/Nemotron-RL-knowledge-web_search-mcqa.jsonl \
+    +output_jsonl_fpath=results/Nemotron-RL-knowledge-web_search-mcqa.jsonl \
     +limit=1
 
-ng_viewer +jsonl_fpath=results/MCQA_syn_gpqa_1_2_difficulty_filtered_responses_api.jsonl
+ng_viewer +jsonl_fpath=results/Nemotron-RL-knowledge-web_search-mcqa.jsonl
 
 ```
 

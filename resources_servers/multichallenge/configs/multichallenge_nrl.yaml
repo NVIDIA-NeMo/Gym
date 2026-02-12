@@ -1,0 +1,72 @@
+multichallenge:
+  resources_servers:
+    multichallenge:
+      entrypoint: app.py
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 512
+        temperature: 1.0
+        top_p: 1.0
+      aggregation_mode: mean
+      parallel_evaluation: true
+      judge_system_message: You are a precise evaluator. Assess responses objectively
+        based on the given criteria. Analyze the response carefully against the evaluation
+        question.
+      judge_prompt_template: 'You are evaluating whether a model''s response meets
+        a specific criterion.
+
+
+        CONVERSATION CONTEXT:
+
+        {context}
+
+
+        MODEL''S FINAL RESPONSE:
+
+        {response}
+
+
+        EVALUATION QUESTION:
+
+        {question}
+
+
+        EXPECTED ANSWER: {pass_criteria}
+
+
+        Does the model''s response satisfy the criterion described in the evaluation
+        question?
+
+        Think step by step, then respond with exactly [[YES]] or [[NO]] on the last
+        line.'
+      yes_label: '[[YES]]'
+      no_label: '[[NO]]'
+      domain: knowledge
+      description: MultiChallenge benchmark evaluation with LLM judge
+      verified: false
+multichallenge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: multichallenge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: multichallenge_example
+        type: example
+        license: Apache 2.0
+        jsonl_fpath: resources_servers/multichallenge/data/example.jsonl
+      - name: multichallenge_advanced
+        type: train
+        license: TBD
+        jsonl_fpath: resources_servers/multichallenge/data/advanced.jsonl
+      - name: multichallenge_vanilla
+        type: train
+        license: TBD
+        jsonl_fpath: resources_servers/multichallenge/data/vanilla.jsonl

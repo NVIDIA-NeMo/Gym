@@ -1,10 +1,11 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,46 +18,51 @@
 ################################################
 
 [project]
-name = "NeMo-Gym"
+name = "nemo-gym"
 dynamic = [
     "version",
     "readme",
 ]
-description = "NeMo Gym is a collection of verifiers."
+description = "NeMo Gym is a library for building reinforcement learning environments"
 license = {file = "LICENSE"}
 requires-python = ">=3.12"
-authors = [{ name = "NVIDIA", email = "nemo-toolkit@nvidia.com" }]
-maintainers = [{ name = "NVIDIA", email = "nemo-toolkit@nvidia.com" }]
+authors = [{ name = "NVIDIA" }]
+maintainers = [{ name = "NVIDIA" }]
+
 keywords = [
-    "NLP",
+    "reinforcement-learning",
+    "RL",
+    "agent",
+    "agentic",
+    "LLM",
+    "large-language-models",
+    "training-data",
+    "rollout",
+    "trajectory",
+    "verification",
+    "verifier",
+    "reward",
+    "tool-calling",
+    "function-calling",
+    "data-collection",
     "NeMo",
-    "deep",
-    "gpu",
-    "language",
-    "learning",
-    "machine",
-    "nvidia",
-    "pytorch",
-    "torch",
+    "NVIDIA",
 ]
 classifiers = [
-    "Development Status :: 5 - Production/Stable",
+    "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
-    "Intended Audience :: Information Technology",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
     "Natural Language :: English",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    "Topic :: Scientific/Engineering :: Image Recognition",
-    "Topic :: Scientific/Engineering :: Mathematics",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering",
-    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Mathematics",
     "Topic :: Software Development :: Libraries",
-    "Topic :: Utilities",
+    "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
     ########################################
@@ -65,18 +71,24 @@ dependencies = [
     # 2. When this dependency was last updated
     # 3. The license of the dependencies.
     #
-    # If you are adding or removing dependencies, please do your due diligience to update this information. PRs to main that modify dependencies will not be accepted unless this information is provided.
+    # If you are adding or removing dependencies, please do your due diligence to update this information. PRs to main that modify dependencies will not be accepted unless this information is provided.
     # The licenses of the below dependencies include: Apache 2.0, MIT, and BSD 3-Clause
     #
     # By design, most (if not all) dependencies are unfrozen here to be easier to consume. The core pieces we need are server infra like FastAPI, etc.
+    #
+    # Dependency management philosophy:
+    # - pyproject.toml: Specifies minimum version requirements (e.g., "mlflow>=3.5.0" means "we need at least 3.5.0 for security/features")
+    # - uv.lock: Locks exact versions for reproducibility (e.g., "mlflow==3.9.0" means "we're currently using exactly 3.9.0")
+    # This ensures both flexibility for consumers and reproducibility for developers.
     ########################################
 
     # OpenAI: We leverage OpenAI Responses, Chat Completions, and Completions schemas for Nemo Gym abstractions. It may also be used to directly query endpoints.
-    # Updated Fri Jul 25, 2025 with openai==1.97.1
+    # We specifically upper bound this OpenAI dependency since the version bumps so frequently.
+    # Updated Wed Oct 29, 2025 with openai==2.6.1
     # License: Apache 2.0 https://github.com/openai/openai-python/blob/a8258744cbecf51321587fc870e8920bd2c07809/LICENSE
-    "openai<=1.97.1",
+    "openai<=2.6.1",
 
-    # tqdm: Use for progress tracking on batch operations.
+    # tqdm: Used for progress tracking on batch operations.
     # Updated Fri Jul 25, 2025 with tqdm==4.67.1
     # License: MIT https://github.com/tqdm/tqdm/blob/0ed5d7f18fa3153834cbac0aa57e8092b217cc16/LICENCE
     "tqdm",
@@ -118,19 +130,69 @@ dependencies = [
     "gradio",
 
     # MLFlow: used for interacting with the Gitlab model registry
-    # Updated Tue Aug 05, 2025 with mlflow==3.2.0
+    # Updated Mon Feb 10, 2026 with mlflow>=3.5.0
     # License: Apache 2.0 https://github.com/mlflow/mlflow/blob/1510ed1bc92d3a4258973005d64f64a43136e251/LICENSE.txt
-    "mlflow",
+    "mlflow>=3.5.0",
+
+    # aiohttp: async http backend
+    # Updated Mon Feb 10, 2026 with aiohttp>=3.13.3
+    # License: Apache 2.0 https://github.com/aio-libs/aiohttp/blob/9a2f146a12e3525b43e96723ef41584bf9cf784e/LICENSE.txt
+    "aiohttp>=3.13.3",
+
+    # yappi: profiling tool
+    # Updated Mon Sep 22, 2025 with yappi==1.6.10
+    # License: MIT https://github.com/sumerc/yappi/blob/1d3f7501701e1f050b6dcd6a86fd36aec08185c7/LICENSE
+    "yappi",
+
+    # Ray: Used for distributed processing
+    # Updated Mon Feb 10, 2026 with ray[default]==2.52.1 in uv.lock
+    # Security: Requires ray>=2.52.0 (currently resolves to 2.52.1 naturally)
+    # License: Apache 2.0 https://github.com/ray-project/ray/blob/master/LICENSE
+    "ray[default]",
+
+    # psutil: Cross-platform process and system utilities
+    # Updated: Fri Nov 07, 2025 with psutil==6.1.1
+    # License: BSD 3-Clause https://github.com/giampaolo/psutil/blob/master/LICENSE
+    "psutil",
+
+    # HuggingFace datasets: for loading and converting parquet datasets
+    # Updated Thu Dec 04, 2025 with datasets==4.4.1
+    # License: Apache 2.0 https://github.com/huggingface/datasets/blob/main/LICENSE
+    "datasets",
+
+    # orjson: JSON library for faster serialization/deserialization
+    # Updated: Thu Jan 08, 2026 with orjson==3.11.3
+    # License: Apache 2.0 https://github.com/ijl/orjson/blob/fb3eb1f729c7e7b019f780af5695722c99c7c695/LICENSE-APACHE
+    "orjson",
+
+    # urllib3: HTTP client library (transitive dependency, pinned for security)
+    # Updated: Mon Feb 10, 2026 with urllib3>=2.6.3
+    # License: MIT https://github.com/urllib3/urllib3/blob/main/LICENSE.txt
+    "urllib3>=2.6.3",
+
+    # fonttools: Library to manipulate font files (transitive dependency, pinned for security)
+    # Updated: Mon Feb 10, 2026 with fonttools>=4.60.2
+    # License: MIT https://github.com/fonttools/fonttools/blob/main/LICENSE
+    "fonttools>=4.60.2",
+
+    # python-multipart: Streaming multipart parser (transitive dependency, pinned for security)
+    # Updated: Mon Feb 10, 2026 with python-multipart>=0.0.22
+    # License: Apache 2.0 https://github.com/andrew-d/python-multipart/blob/master/LICENSE.txt
+    "python-multipart>=0.0.22",
 ]
 
 [dependency-groups]
 docs = [
-    "myst-parser>=4.0.1",
-    "nvidia-sphinx-theme>=0.0.8",
-    "sphinx>=8.1.3",
-    "sphinx-autobuild>=2024.10.3",
-    "sphinx-autodoc2>=0.5.0",
-    "sphinx-copybutton>=0.5.2",
+    "sphinx>=8.2.3",
+    "sphinx-autobuild>=2025.8.25",    # For live doc serving while editing docs
+    "sphinx-autodoc2>=0.5.0",         # For documenting Python API
+    "sphinx-copybutton>=0.5.2",       # Adds a copy button for code blocks
+    "myst-parser>=4.0.1",             # For our markdown docs
+    "nvidia-sphinx-theme>=0.0.8",     # Our NVIDIA theme
+    "sphinxcontrib-mermaid>=1.0.0",   # For mermaid diagrams
+    "sphinx-design>=0.6.1",           # For our design elements
+    "swagger-plugin-for-sphinx>=6.0.0", # For Swagger API documentation
+    "sphinx-reredirects>=0.1.6",      # For URL redirects when pages move
 ]
 
 [project.optional-dependencies]
@@ -167,7 +229,7 @@ dev = [
     "pytest",
     "pytest-asyncio",
 
-    # Requests-mock: Used in pytest asyncio
+    # Requests-mock: Used for mocking HTTP requests in tests
     # Updated: Fri Jul 25, 2025 and requests-mock==1.12.1
     # License: Apache 2.0 https://github.com/jamielennox/requests-mock/blob/9742d02a8cad17276dbeba7b300b6d27ae1b6fb1/LICENSE
     "requests-mock",
@@ -177,6 +239,9 @@ dev = [
 requires = ["setuptools>=61", "setuptools-scm"]
 build-backend = "setuptools.build_meta"
 
+[tool.uv]
+managed = true
+
 [tool.setuptools.dynamic]
 version = {attr = "nemo_gym.__version__"}
 readme = {file = "README.md", content-type = "text/markdown"}
@@ -185,8 +250,8 @@ readme = {file = "README.md", content-type = "text/markdown"}
 egg_base = "cache"
 
 [project.urls]
-Download = "https://github.com/NVIDIA-NeMo/NeMo-Gym/releases"
-Homepage = "https://github.com/NVIDIA-NeMo/NeMo-Gym"
+Download = "https://github.com/NVIDIA-NeMo/Gym/releases"
+Homepage = "https://github.com/NVIDIA-NeMo/Gym"
 
 [project.scripts]
 # Run/test scripts for servers.
@@ -211,6 +276,10 @@ ng_init_resources_server = "nemo_gym.cli:init_resources_server"
 nemo_gym_collect_rollouts = "nemo_gym.rollout_collection:collect_rollouts"
 ng_collect_rollouts = "nemo_gym.rollout_collection:collect_rollouts"
 
+# Reward profiling
+nemo_gym_profile = "nemo_gym.profile:profile"
+ng_profile = "nemo_gym.profile:profile"
+
 # Dataset management
 nemo_gym_upload_dataset_to_gitlab = "nemo_gym.gitlab_utils:upload_jsonl_dataset_cli"
 ng_upload_dataset_to_gitlab = "nemo_gym.gitlab_utils:upload_jsonl_dataset_cli"
@@ -219,10 +288,39 @@ ng_download_dataset_from_gitlab = "nemo_gym.gitlab_utils:download_jsonl_dataset_
 nemo_gym_prepare_data = "nemo_gym.train_data_utils:prepare_data"
 ng_prepare_data = "nemo_gym.train_data_utils:prepare_data"
 
+# HF dataset upload and download
+nemo_gym_upload_dataset_to_hf = "nemo_gym.dataset_orchestrator:upload_jsonl_dataset_to_hf_cli"
+ng_upload_dataset_to_hf = "nemo_gym.dataset_orchestrator:upload_jsonl_dataset_to_hf_cli"
+nemo_gym_download_dataset_from_hf = "nemo_gym.dataset_orchestrator:download_jsonl_dataset_from_hf_cli"
+ng_download_dataset_from_hf = "nemo_gym.dataset_orchestrator:download_jsonl_dataset_from_hf_cli"
+
+# Gitlab -> HF (upload then delete)
+nemo_gym_gitlab_to_hf_dataset = "nemo_gym.dataset_orchestrator:upload_jsonl_dataset_to_hf_and_delete_gitlab_cli"
+ng_gitlab_to_hf_dataset = "nemo_gym.dataset_orchestrator:upload_jsonl_dataset_to_hf_and_delete_gitlab_cli"
+
+# Manually delete from Gitlab
+nemo_gym_delete_dataset_from_gitlab = "nemo_gym.dataset_orchestrator:delete_jsonl_dataset_from_gitlab_cli"
+ng_delete_dataset_from_gitlab = "nemo_gym.dataset_orchestrator:delete_jsonl_dataset_from_gitlab_cli"
+
 # Configuration utils
 nemo_gym_dump_config = "nemo_gym.cli:dump_config"
 ng_dump_config = "nemo_gym.cli:dump_config"
 
+# Display help
+nemo_gym_help = "nemo_gym.cli:display_help"
+ng_help = "nemo_gym.cli:display_help"
+
+# Server status
+nemo_gym_status = "nemo_gym.cli:status"
+ng_status = "nemo_gym.cli:status"
+
+# Environment-specific uv pip list
+nemo_gym_pip_list = "nemo_gym.cli:pip_list"
+ng_pip_list = "nemo_gym.cli:pip_list"
+
+# Display version
+nemo_gym_version = "nemo_gym.cli:version"
+ng_version = "nemo_gym.cli:version"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -233,8 +331,8 @@ include = ["resources_servers", "responses_api_agents", "responses_api_models", 
 ################################################
 
 [tool.pytest.ini_options]
-# durations=0 will display all tests execution time, sorted in ascending order starting from from the slowest one.
-# -vv will also display tests with durration = 0.00s
+# durations=0 will display all tests execution time, sorted in ascending order starting from the slowest one.
+# -vv will also display tests with duration = 0.00s
 addopts = "--verbose --pyargs --durations=0 --strict-markers"  # always add these arguments to pytest
 testpaths = ["tests"]
 # directories to ignore when discovering tests
@@ -267,7 +365,7 @@ markers = [
     "system: marks test working at the highest integration level (deselect with '-m \"not system\"')",
     "acceptance: marks test checking whether the developed product/model passes the user defined acceptance criteria (deselect with '-m \"not acceptance\"')",
     "docs: mark tests related to documentation (deselect with '-m \"not docs\"')",
-    "skipduringci: marks tests that are skipped ci as they are addressed by Jenkins jobs but should be run to test user setups",
+    "skipduringci: marks tests that are skipped during ci as they are addressed by Jenkins jobs but should be run to test user setups",
     "pleasefixme: marks tests that are broken and need fixing",
 ]
 
@@ -308,10 +406,10 @@ exclude_also = [
 omit = []
 
 ################################################
-# Linting, formatting, and QOL
+# Linting, formatting, and QOL (using ruff)
 ################################################
 [tool.ruff]
-# Match black's line length
+# Line length configuration
 line-length = 119
 target-version = "py312"
 
@@ -335,7 +433,7 @@ extend-exclude = [
     "*.ipynb",
 ]
 [tool.ruff.lint]
-# Configure imports sorting to match isort
+# Configure linting rules
 select = [
     "F541",  # f-string without any placeholders
     "F841",  # local variable assigned but never used
@@ -365,7 +463,7 @@ lines-after-imports = 2
 "tests/*.py" = ["D101", "D103"]
 
 [tool.ruff.format]
-# Match black configuration
+# Code formatting configuration
 quote-style = "double"
 skip-magic-trailing-comma = false
 line-ending = "auto"

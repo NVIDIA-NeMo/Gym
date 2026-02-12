@@ -1,10 +1,11 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -26,10 +27,10 @@ from resources_servers.instruction_following.app import (
 class TestApp:
     def _create_server(self):
         """Helper to create server instance."""
-        config = InstructionFollowingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="")
+        config = InstructionFollowingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
         return InstructionFollowingResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
-    def _create_real_request(self, instruction_ids, prompt, kwargs, response_content, request_id=1):
+    def _create_real_request(self, instruction_ids, prompt, kwargs, response_content, request_id=1, grading_mode=None):
         """Helper to create real request with NeMoGymResponse."""
         # Create real NeMoGymResponse object
         response = NeMoGymResponse(
@@ -58,7 +59,7 @@ class TestApp:
         )
 
         # Create real request object
-        return InstructionFollowingVerifyRequest(
+        req_kwargs = dict(
             id=request_id,
             instruction_id_list=instruction_ids,
             prompt=prompt,
@@ -66,6 +67,9 @@ class TestApp:
             responses_create_params={"input": []},
             response=response,
         )
+        if grading_mode is not None:
+            req_kwargs["grading_mode"] = grading_mode
+        return InstructionFollowingVerifyRequest(**req_kwargs)
 
     def _run_verify_test(self, real_request, expected_follow_all, expected_reward, expected_follow_list):
         """Helper to run verify method and check results."""
@@ -84,6 +88,7 @@ class TestApp:
             host="0.0.0.0",
             port=8080,
             entrypoint="",
+            name="",
         )
         InstructionFollowingResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
@@ -185,3 +190,15 @@ class TestApp:
             request_id=201,
         )
         self._run_verify_test(real_request, False, 0.0, [True, False])
+
+    def test_fractional_reward_half(self):
+        """Fractional grading: half of constraints satisfied -> reward 0.5."""
+        real_request = self._create_real_request(
+            instruction_ids=["detectable_format:title", "punctuation:no_comma"],
+            prompt="Write a response with a title and no commas.",
+            kwargs=[{}, {}],
+            response_content="<<My Great Title>>\n\n with a comma here, okay.",
+            request_id=300,
+            grading_mode="fraction",
+        )
+        self._run_verify_test(real_request, False, 0.5, [True, False])

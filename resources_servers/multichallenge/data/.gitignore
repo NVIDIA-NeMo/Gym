@@ -1,0 +1,17 @@
+# Ignore all data files in this directory
+# The MultiChallenge dataset should be copied here but not committed to git
+
+# Ignore raw data directories
+advanced/
+vanilla/
+
+# Ignore preprocessed JSONL files (generated from JSON files)
+advanced.jsonl
+vanilla.jsonl
+
+# Keep these files
+!.gitignore
+!README.md
+!example.jsonl
+!example_rollouts.jsonl
+!example_metrics.json

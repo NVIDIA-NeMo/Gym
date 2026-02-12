@@ -7,4 +7,4 @@ simple_agent:
         name: ???
       model_server:
         type: responses_api_models
-        name: openai_model
+        name: policy_model

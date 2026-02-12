@@ -1,0 +1,29 @@
+math_with_code:
+  resources_servers:
+    math_with_code:
+      entrypoint: app.py
+      max_execution_time: 10
+      domain: math
+      verified: false
+math_with_code_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: math_with_code
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: train
+          type: train
+          jsonl_fpath: resources_servers/math_with_code/data/train.jsonl
+          gitlab_identifier:
+            dataset_name: open_math_reasoning_problems_tool
+            version: 0.0.1
+            artifact_fpath: open_math_reasoning_problems_tool.jsonl
+          license: Apache 2.0
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/math_with_code/data/example.jsonl

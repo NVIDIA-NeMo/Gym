@@ -2,6 +2,10 @@ instruction_following:
   resources_servers:
     instruction_following:
       entrypoint: app.py
+      domain: instruction_following
+      verified: false
+      description: Instruction following datasets targeting IFEval and IFBench style instruction following capabilities
+      value: Improve IFEval and IFBench
 instruction_following_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -11,7 +15,7 @@ instruction_following_simple_agent:
         name: instruction_following
       model_server:
         type: responses_api_models
-        name: openai_model
+        name: policy_model
       datasets:
       - name: train
         type: train
@@ -19,6 +23,9 @@ instruction_following_simple_agent:
         gitlab_identifier:
           dataset_name: instruction_following
           version: 0.0.1
+          artifact_fpath: instruction_following.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-instruction_following
           artifact_fpath: instruction_following.jsonl
         license: Apache 2.0
       - name: example

@@ -2,6 +2,10 @@ mcqa:
   resources_servers:
     mcqa:
       entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: Multi-choice question answering problems
+      value: Improve benchmarks like MMLU / GPQA / HLE
 mcqa_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -11,7 +15,7 @@ mcqa_simple_agent:
         name: mcqa
       model_server:
         type: responses_api_models
-        name: openai_model
+        name: policy_model
       datasets:
       - name: train
         type: train
@@ -20,7 +24,12 @@ mcqa_simple_agent:
           dataset_name: syn_gpqa_v1.1
           version: 1.1.2
           artifact_fpath: filtered_decontaminated.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-knowledge-mcqa
         license: Apache 2.0
       - name: example
         type: example
         jsonl_fpath: resources_servers/mcqa/data/example.jsonl
+      - name: example_with_template_metadata
+        type: example
+        jsonl_fpath: resources_servers/mcqa/data/example_with_template_metadata.jsonl

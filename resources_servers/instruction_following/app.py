@@ -1,17 +1,18 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List
+from typing import List, Literal
 
 from fastapi import FastAPI
 from verifiable_instructions import instructions_registry
@@ -34,6 +35,10 @@ class InstructionFollowingRunRequest(BaseRunRequest):
     instruction_id_list: List
     prompt: str
     kwargs: List
+    grading_mode: Literal[
+        "binary",
+        "fraction",
+    ] = "binary"
 
 
 class InstructionFollowingVerifyRequest(InstructionFollowingRunRequest, BaseVerifyRequest):
@@ -46,6 +51,10 @@ class InstructionFollowingVerifyResponse(BaseVerifyResponse):
     kwargs: List
     instruction_id_list: List
     prompt: str
+    grading_mode: Literal[
+        "binary",
+        "fraction",
+    ] = "binary"
 
 
 class InstructionFollowingResourcesServer(SimpleResourcesServer):
@@ -114,12 +123,18 @@ class InstructionFollowingResourcesServer(SimpleResourcesServer):
                 is_following_list.append(False)
 
         # Calculate overall success
-        follow_all_instructions = all(is_following_list) if is_following_list else False
+        reward_mode = getattr(body, "grading_mode", "binary")
+        if reward_mode == "binary":
+            reward = float(all(is_following_list))
+        elif reward_mode == "fraction":
+            reward = float((sum(is_following_list) / len(is_following_list)) if is_following_list else 0.0)
+        else:
+            raise ValueError(f"Invalid reward mode: {reward_mode}")
 
         return InstructionFollowingVerifyResponse(
             **body.model_dump(),
-            reward=float(follow_all_instructions),
-            follow_all_instructions=follow_all_instructions,
+            reward=float(reward),
+            follow_all_instructions=all(is_following_list),
             follow_instruction_list=is_following_list,
         )
 

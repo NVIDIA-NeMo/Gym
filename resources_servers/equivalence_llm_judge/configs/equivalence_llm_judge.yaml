@@ -1,0 +1,87 @@
+equivalence_llm_judge:
+  resources_servers:
+    equivalence_llm_judge:
+      entrypoint: app.py
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_responses_create_params:
+        input: []
+      judge_prompt_template_fpath: prompt_templates/equivalence_llm_judge.txt
+      # Concurrency and rate limiting configuration
+      judge_endpoint_max_concurrency: 64 # Reduced from 64 to avoid rate limits
+      judge_system_message: null
+      judge_equal_label: "[[A=B]]"
+      judge_not_equal_label: "[[A!=B]]"
+      
+      # Optional regex to extract question from the last user message. The LAST
+      # match is used. If capture groups exist, the first non-empty group is
+      # returned; otherwise, the entire last match is used.
+      # Example: "^Question:\\s*(.*)$"
+      question_extract_regex: null
+      
+      # Optional regex to extract the generated response from the last assistant message.
+      # The LAST match is used. If capture groups exist, the first non-empty
+      # group is returned; otherwise, the entire last match is used.
+      # Example: "^Answer:\\s*(.*)$"
+      response_extract_regex: null
+      
+      # Swap check: Run second judge pass with swapped expected/generated to detect positional bias
+      check_twice_swap: true
+      # Reward when the second (swap) pass fails; default 0.0, can be -1.0
+      reward_if_swap_fails: 0.0
+      
+      # ========================================================================
+      # Per-Record Regex Features (OpenQA support)
+      # ========================================================================
+      # These features enable mixed datasets with different answer formats.
+      # They only activate when template_metadata.output_regex is present.
+      # Safe to enable by default - falls back to response_extract_regex when
+      # no per-record regex is present.
+      
+      # [NEW] Enable per-record regex override from template_metadata.output_regex
+      use_per_record_regex: true
+      
+      # --- The following features ONLY work when use_per_record_regex=true ---
+      
+      # [NEW] Skip regex extraction when expected_answer length exceeds this threshold.
+      # When skipped, the full generation is shown to judge instead of extracting.
+      # Only applies when per-record regex is present. Set to null to disable.
+      extraction_length_threshold: 120
+      
+      # [NEW] If true, when first pass fails, retry with full generation (no regex) for partial credit.
+      # Helps recover from regex extraction failures. Only activates when per-record regex exists.
+      check_full_generation_on_fail: true
+      
+      # [NEW] Reward when full generation check succeeds after first pass fails.
+      # Default 0.5 (partial credit). Set to 1.0 for full credit or 0.0 to ignore.
+      reward_if_full_generation_succeeds: 0.5
+      domain: knowledge
+      verified: false
+      description: Short answer questions with LLM-as-a-judge
+      value: Improve knowledge-related benchmarks like GPQA / HLE
+equivalence_llm_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: equivalence_llm_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        license: "TBD"
+        jsonl_fpath: resources_servers/equivalence_llm_judge/data/example.jsonl
+      - name: example_openqa
+        type: example
+        license: "TBD"
+        jsonl_fpath: resources_servers/equivalence_llm_judge/data/example_openqa.jsonl
+      - name: train
+        type: example
+        license: Apache 2.0
+        jsonl_fpath: resources_servers/equivalence_llm_judge/data/train.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-knowledge-openQA

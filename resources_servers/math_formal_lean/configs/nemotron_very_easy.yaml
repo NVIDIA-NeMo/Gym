@@ -1,0 +1,27 @@
+math_formal_lean:
+  resources_servers:
+    math_formal_lean:
+      entrypoint: app.py
+      sandbox_host: ${oc.env:NEMO_SKILLS_SANDBOX_HOST,127.0.0.1}
+      sandbox_port: ${oc.env:NEMO_SKILLS_SANDBOX_PORT,6000}
+      compilation_timeout: 30.0
+      domain: math
+      verified: false
+      description: Lean4 formal proof verification environment
+      value: Improve formal theorem proving capabilities
+
+math_formal_lean_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: math_formal_lean
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/math_formal_lean/data/nemotron_very_easy.jsonl
+        license: Apache 2.0

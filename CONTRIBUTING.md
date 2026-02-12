@@ -1,55 +1,49 @@
 # Contributing To NeMo-Gym
 
-## Signing Your Work
+Welcome to NeMo Gym! Help advance RL training for the community by contributing to NeMo Gym.
 
-* We require that all contributors "sign-off" on their commits. This certifies that the contribution is your original work, or you have rights to submit it under the same license, or a compatible license.
+## High Priority Contributions
 
-  * Any contribution which contains commits that are not Signed-Off will not be accepted.
+**New Environments**
+- Novel training environments (coding, reasoning, tool use, games, and so on)
+- Benchmark integrations (SWE-Bench, Tau Bench, and so on)
 
-* To sign off on a commit you simply use the `--signoff` (or `-s`) option when committing your changes:
-  ```bash
-  $ git commit -s -m "Add cool feature."
-  ```
-  This will append the following to your commit message:
-  ```
-  Signed-off-by: Your Name <your@email.com>
-  ```
+Refer to the [Environment Contribution Guide](https://docs.nvidia.com/nemo/gym/latest/contribute/environments) for detailed guidance.
 
-* Full text of the DCO:
+**RL Framework Integrations**
+- Integration for new RL training frameworks (TRL, SkyRL, and so on)
 
-  ```
-  Developer Certificate of Origin
-  Version 1.1
+Refer to the [RL Framework Integration Guide](https://docs.nvidia.com/nemo/gym/latest/contribute/rl-framework-integration) for detailed guidance.
 
-  Copyright (C) 2004, 2006 The Linux Foundation and its contributors.
+**Always Welcome**
+- Documentation and Tutorials
+- Bug Fixes
+- Features and Enhancements
 
-  Everyone is permitted to copy and distribute verbatim copies of this
-  license document, but changing it is not allowed.
+### Before Contributing
 
+- **Bug reports**: Include reproduction steps and environment details
+- **Features and breaking changes**: Open an issue to discuss before implementing
+- **Environment behavior changes**: Require careful consideration as they affect versioning and result comparability
 
-  Developer's Certificate of Origin 1.1
+**Not sure where to start?** Refer to our [open issues](https://github.com/NVIDIA-NeMo/Gym/issues) or create a new issue to discuss your idea.
 
-  By making a contribution to this project, I certify that:
+## Development Setup
 
-  (a) The contribution was created in whole or in part by me and I
-      have the right to submit it under the open source license
-      indicated in the file; or
+For complete development setup, CI/CD requirements, commit signing, and troubleshooting, refer to the [Development Setup Guide](https://docs.nvidia.com/nemo/gym/latest/contribute/development-setup.html).
 
-  (b) The contribution is based upon previous work that, to the best
-      of my knowledge, is covered under an appropriate open source
-      license and I have the right under that license to submit that
-      work with modifications, whether created in whole or in part
-      by me, under the same open source license (unless I am
-      permitted to submit under a different license), as indicated
-      in the file; or
+**Quick start:**
 
-  (c) The contribution was provided directly to me by some other
-      person who certified (a), (b) or (c) and I have not modified
-      it.
+```bash
+git clone git@github.com:NVIDIA-NeMo/Gym.git
+cd Gym
+uv venv --python 3.12 && source .venv/bin/activate
+uv sync --extra dev --group docs
+pre-commit install
+```
 
-  (d) I understand and agree that this project and the contribution
-      are public and that a record of the contribution (including all
-      personal information I submit with it, including my sign-off) is
-      maintained indefinitely and may be redistributed consistent with
-      this project or the open source license(s) involved.
-  ```
+**Important:** All commits must be signed with DCO sign-off (`-s`) and cryptographic signature (`-S`):
+
+```bash
+git commit -s -S -m "Your commit message"
+```
