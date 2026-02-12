@@ -47,6 +47,7 @@ from nemo_gym.global_config import (
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
     PIP_INSTALL_VERBOSE_KEY_NAME,
     PYTHON_VERSION_KEY_NAME,
+    SKIP_VENV_IF_PRESENT_KEY_NAME,
     UV_PIP_SET_PYTHON_KEY_NAME,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
@@ -67,8 +68,10 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
 
     uv_venv_cmd = f"uv venv --seed --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} .venv"
 
-    has_pyproject_toml = exists(f"{dir_path / 'pyproject.toml'}")
-    has_requirements_txt = exists(f"{dir_path / 'requirements.txt'}")
+    venv_python_fpath = dir_path / ".venv/bin/python"
+    venv_activate_fpath = dir_path / ".venv/bin/activate"
+    skip_venv_if_present = global_config_dict[SKIP_VENV_IF_PRESENT_KEY_NAME]
+    should_skip_venv_setup = bool(skip_venv_if_present) and venv_python_fpath.exists() and venv_activate_fpath.exists()
 
     # explicitly set python path if specified. In Google colab, ng_run fails due to uv pip install falls back to system python (/usr) without this and errors.
     # not needed for most clusters. should be safe in all scenarios, but only minimally tested outside of colab.
@@ -78,26 +81,41 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
 
     verbose_flag = "-v " if global_config_dict.get(PIP_INSTALL_VERBOSE_KEY_NAME) else ""
 
-    if has_pyproject_toml and has_requirements_txt:
-        raise RuntimeError(
-            f"Found both pyproject.toml and requirements.txt for uv venv setup in server dir: {dir_path}. Please only use one or the other!"
-        )
-    elif has_pyproject_toml:
-        install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
-    elif has_requirements_txt:
-        install_cmd = (
-            f"""uv pip install {verbose_flag}{uv_pip_python_flag}-r requirements.txt {" ".join(head_server_deps)}"""
+    if should_skip_venv_setup:
+        env_setup_cmd = _venv_install_or_skip(
+            should_skip=True,
+            uv_venv_cmd=uv_venv_cmd,
+            install_cmd="",
         )
     else:
-        raise RuntimeError(f"Missing pyproject.toml or requirements.txt for uv venv setup in server dir: {dir_path}")
+        has_pyproject_toml = exists(f"{dir_path / 'pyproject.toml'}")
+        has_requirements_txt = exists(f"{dir_path / 'requirements.txt'}")
+        if has_pyproject_toml and has_requirements_txt:
+            raise RuntimeError(
+                f"Found both pyproject.toml and requirements.txt for uv venv setup in server dir: {dir_path}. Please only use one or the other!"
+            )
+        elif has_pyproject_toml:
+            install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
+        elif has_requirements_txt:
+            install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}-r requirements.txt {" ".join(head_server_deps)}"""
+        else:
+            raise RuntimeError(
+                f"Missing pyproject.toml or requirements.txt for uv venv setup in server dir: {dir_path}"
+            )
+        env_setup_cmd = _venv_install_or_skip(
+            should_skip=False,
+            uv_venv_cmd=uv_venv_cmd,
+            install_cmd=install_cmd,
+        )
 
-    cmd = f"""cd {dir_path} \\
-    && {uv_venv_cmd} \\
-    && source .venv/bin/activate \\
-    && {install_cmd} \\
-    """
+    return f"cd {dir_path} && {env_setup_cmd}"
 
-    return cmd
+
+def _venv_install_or_skip(should_skip: bool, uv_venv_cmd: str, install_cmd: str) -> str:
+    if should_skip:
+        return "source .venv/bin/activate"
+
+    return f"{uv_venv_cmd} && source .venv/bin/activate && {install_cmd}"
 
 
 def _run_command(command: str, working_dir_path: Path) -> Popen:  # pragma: no cover

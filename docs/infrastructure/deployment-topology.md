@@ -12,8 +12,6 @@ responses_api_models/openai_model/configs/openai_model.yaml"
 ng_run "+config_paths=[$config_paths]"
 ```
 
-For multi-node deployment, see {doc}`/environment-tutorials/multi-node-docker`.
-
 ---
 
 ## Topology Patterns
@@ -190,8 +188,6 @@ ng_run "+config_paths=[coordinator-config.yaml]"
 ng_run "+config_paths=[worker-config.yaml]"
 ```
 
-See {doc}`/environment-tutorials/multi-node-docker` for complete examples including Docker Compose.
-
 ::::
 
 :::::
@@ -299,7 +295,7 @@ Benchmark your specific workload before capacity planning. Use {doc}`/get-starte
 ::::{dropdown} Testing → Production
 :icon: arrow-right
 
-1. Containerize each server type (see {doc}`/resources-server/containerize`)
+1. Containerize each server type
 2. Deploy head server on coordinator node
 3. Deploy workers with GPU resources
 4. Configure networking and service discovery
@@ -389,24 +385,6 @@ NeMo Gym servers have **no built-in authentication**. They are designed for trus
 
 ::::{grid} 1 2 2 2
 :gutter: 3
-
-:::{grid-item-card} {octicon}`container;1.5em;sd-mr-1` Multi-Node Docker
-:link: /environment-tutorials/multi-node-docker
-:link-type: doc
-Deploy with Docker Compose across multiple containers.
-:::
-
-:::{grid-item-card} {octicon}`broadcast;1.5em;sd-mr-1` Distributed Computing with Ray
-:link: ray-distributed
-:link-type: doc
-Scale rollout collection with Ray clusters.
-:::
-
-:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Containerize Resources Servers
-:link: /resources-server/containerize
-:link-type: doc
-Package custom servers for deployment.
-:::
 
 :::{grid-item-card} {octicon}`book;1.5em;sd-mr-1` Architecture Overview
 :link: /about/architecture

@@ -45,14 +45,6 @@ Production deployment patterns.
 {bdg-secondary}`deployment` {bdg-secondary}`topology`
 :::
 
-:::{grid-item-card} {octicon}`broadcast;1.5em;sd-mr-1` Distributed Computing with Ray
-:link: ray-distributed
-:link-type: doc
-Scale with Ray clusters.
-+++
-{bdg-secondary}`ray` {bdg-secondary}`distributed`
-:::
-
 ::::
 
 ## Key Concepts

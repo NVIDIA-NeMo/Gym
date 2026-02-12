@@ -8,6 +8,8 @@ Before running GRPO training, you need to configure how NeMo RL connects to NeMo
 
 **Goal**: Understand the Gym configuration parameters for RL training.
 
+**Time**: ~10 minutes (read)
+
 ^^^
 
 **In this section, you will learn**:
@@ -24,6 +26,10 @@ Before running GRPO training, you need to configure how NeMo RL connects to NeMo
 
 ← Previous: About Workplace Assistant
 :::
+
+## Prerequisites
+
+- Read {doc}`About Workplace Assistant <about-workplace-assistant>` to understand the training environment
 
 ---
 
@@ -82,9 +88,13 @@ The `vllm_model_for_training.yaml` config is required for NeMo RL training integ
 
 ---
 
+## Next Steps
+
+With the Gym configuration understood, learn about the GRPO training parameters:
+
 :::{button-ref} training-nemo-rl-grpo-nemo-rl-configuration
 :color: primary
 :ref-type: ref
 
-Next: NeMo RL Configuration →
+Continue to NeMo RL Configuration →
 :::

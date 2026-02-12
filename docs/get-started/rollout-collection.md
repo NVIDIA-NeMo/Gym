@@ -8,6 +8,8 @@ In the previous tutorial, you set up NeMo Gym and ran your first agent interacti
 
 **Goal**: Generate your first batch of rollouts and understand how they become training data.
 
+**Time**: ~10 minutes | **Cost**: ~$0.05 (OpenAI API)
+
 ^^^
 
 **In this tutorial, you will**:
@@ -28,7 +30,7 @@ In the previous tutorial, you set up NeMo Gym and ran your first agent interacti
 
 ---
 
-## Before You Begin
+## Prerequisites
 
 Make sure you have:
 
@@ -188,7 +190,7 @@ ng_collect_rollouts \
 
 ---
 
-## What's Next?
+## Next Steps
 
 Congratulations! You now have a working NeMo Gym installation and understand how to generate rollouts. Choose your path based on your goals:
 

@@ -109,7 +109,7 @@ This generates training data with verification scores!
 :::
 ::::
 
-## What's Next?
+## Next Steps
 
 Now that you can generate rollouts, choose your path:
 

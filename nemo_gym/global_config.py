@@ -48,6 +48,7 @@ PYTHON_VERSION_KEY_NAME = "python_version"
 PIP_INSTALL_VERBOSE_KEY_NAME = "pip_install_verbose"
 USE_ABSOLUTE_IP = "use_absolute_ip"
 UV_PIP_SET_PYTHON_KEY_NAME = "uv_pip_set_python"
+SKIP_VENV_IF_PRESENT_KEY_NAME = "skip_venv_if_present"
 HF_TOKEN_KEY_NAME = "hf_token"
 RAY_HEAD_NODE_ADDRESS_KEY_NAME = "ray_head_node_address"
 TASK_INDEX_KEY_NAME = "_task_index"
@@ -62,6 +63,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     PIP_INSTALL_VERBOSE_KEY_NAME,
     USE_ABSOLUTE_IP,
     UV_PIP_SET_PYTHON_KEY_NAME,
+    SKIP_VENV_IF_PRESENT_KEY_NAME,
     HF_TOKEN_KEY_NAME,
     RAY_HEAD_NODE_ADDRESS_KEY_NAME,
 ]
@@ -296,6 +298,10 @@ class GlobalConfigDictParser(BaseModel):
 
             # Constrain python version since ray is sensitive to this.
             global_config_dict[PYTHON_VERSION_KEY_NAME] = python_version()
+
+            # Skip venv setup is opt-in and defaults to False.
+            if SKIP_VENV_IF_PRESENT_KEY_NAME not in global_config_dict:
+                global_config_dict[SKIP_VENV_IF_PRESENT_KEY_NAME] = False
 
         if parse_config.hide_secrets:
             self._recursively_hide_secrets(global_config_dict)

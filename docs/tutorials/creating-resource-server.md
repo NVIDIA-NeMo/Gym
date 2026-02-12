@@ -12,6 +12,8 @@ Learn how to create a custom resource server to implement tools, verifiers, and 
 
 **Goal**: Build a custom resource server with tools and verification logic.
 
+**Time**: ~30 minutes | **Cost**: ~$0.05 (OpenAI API)
+
 ^^^
 
 **In this tutorial, you will**:
@@ -29,6 +31,17 @@ Learn how to create a custom resource server to implement tools, verifiers, and 
 :ref-type: doc
 
 ← Previous: Rollout Collection
+:::
+
+## Prerequisites
+
+Complete **both** of the following before starting this tutorial:
+
+1. **{doc}`../get-started/detailed-setup`** — Clone the repository, install dependencies, configure your API key, and verify servers start correctly.
+2. **{doc}`../get-started/rollout-collection`** — Collect and view your first batch of rollouts. This tutorial builds on rollout concepts and uses `ng_collect_rollouts` in later steps.
+
+:::{tip}
+If you followed the {doc}`Quickstart <../get-started/index>`, you've already completed both. You're ready to proceed.
 :::
 
 :::{important}
