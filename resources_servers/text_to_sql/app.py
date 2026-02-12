@@ -88,19 +88,37 @@ def extract_sql_from_response(text: str) -> Optional[str]:
             if re.match(r"^\s*(SELECT|INSERT|UPDATE|DELETE|WITH|CREATE|ALTER|DROP)\s", content, re.IGNORECASE):
                 return content
 
-    # Try to find raw SQL statement
-    sql_pattern = r"((?:SELECT|INSERT|UPDATE|DELETE|WITH)\s+[\s\S]*?(?:;|$))"
-    matches = re.findall(sql_pattern, text, re.IGNORECASE)
-    if matches:
-        return matches[-1].strip().rstrip(";") + ";"
+    # Try to find raw SQL statement.
+    # Find the first SQL keyword and extract from there to the last semicolon.
+    # A greedy approach is used instead of a lazy one ([\s\S]*?) to avoid
+    # prematurely breaking on semicolons that appear inside string literals
+    # (e.g., INSTR(text, ';')) or SQL comments (e.g., -- convert to number;).
+    sql_start = re.search(r"(?:SELECT|INSERT|UPDATE|DELETE|WITH)\s", text, re.IGNORECASE)
+    if sql_start:
+        last_semicolon = text.rfind(";")
+        if last_semicolon >= sql_start.start():
+            extracted = text[sql_start.start() : last_semicolon + 1].strip()
+        else:
+            # No semicolon after the keyword — take everything to end of string
+            extracted = text[sql_start.start() :].strip()
+        # Normalize: ensure exactly one trailing semicolon
+        return extracted.rstrip(";") + ";"
 
     return None
+
+
+_DIALECT_ALIASES: dict[str, str] = {
+    "postgres": "postgresql",
+    "pg": "postgresql",
+    "sqlite3": "sqlite",
+}
 
 
 def _normalize_dialect(dialect: Optional[str]) -> Optional[str]:
     if not dialect:
         return None
-    return dialect.strip().lower()
+    normalized = dialect.strip().lower()
+    return _DIALECT_ALIASES.get(normalized, normalized)
 
 
 def _extract_judge_response_text(response: NeMoGymResponse) -> str:
@@ -221,14 +239,33 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
 
         # Get model output text directly from response
         generated = body.response.output_text or ""
-        if not generated:
-            raise ValueError("No assistant response found/extracted to verify")
 
         reward = 0.0
         failure_reason = None
         judge_passed = False
         judge_evaluations = []
         extracted_sql = None
+
+        if not generated:
+            failure_reason = FailureCode.NO_SQL_EXTRACTED
+            payload = body.model_dump()
+            payload.pop("sql", None)
+            payload.pop("sql_dialect", None)
+            payload.pop("sql_context", None)
+            payload.pop("sql_prompt", None)
+            return TextToSqlVerifyResponse(
+                **payload,
+                reward=0.0,
+                sql=expected_sql,
+                model_output="",
+                extracted_sql=None,
+                sql_dialect=sql_dialect,
+                sql_context=sql_context,
+                sql_prompt=sql_prompt,
+                judge_passed=False,
+                failure_reason=failure_reason,
+                judge_evaluations=[],
+            )
 
         try:
             # Extract SQL from model output
