@@ -170,7 +170,7 @@ Create your own training environment with custom tools and verification.
 :::
 
 :::{grid-item-card} {octicon}`book;1.5em;sd-mr-1` Offline Training
-:link: /tutorials/offline-training-w-rollouts
+:link: /training-tutorials/offline-training-w-rollouts
 :link-type: doc
 
 Use collected rollouts for SFT or DPO training.
