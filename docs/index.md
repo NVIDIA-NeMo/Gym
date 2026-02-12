@@ -8,6 +8,7 @@ tags:
   - llm-training
   - rollout-collection
   - agent-environments
+  - rl-environments
 personas:
   - Data Scientists
   - Machine Learning Engineers
@@ -70,7 +71,7 @@ Core components, configuration, verification and RL terminology.
 :::{grid-item-card} {octicon}`globe;1.5em;sd-mr-1` Ecosystem
 :link: about/ecosystem
 :link-type: doc
-Understand how NeMo Gym fits within the NVIDIA NeMo Framework.
+Understand how NeMo Gym fits within the RL environment ecosystem.
 +++
 {bdg-secondary}`nemo-framework`
 :::
@@ -178,39 +179,23 @@ View all environment tutorials →
 
 ## Training Tutorials
 
-Train models using NeMo Gym with various RL frameworks.
+Train models using NeMo Gym with your preferred RL framework.
 
 ::::{grid} 1 2 2 2
 :gutter: 1 1 1 2
 
-:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` NeMo RL with GRPO
-:link: training-nemo-rl-grpo-index
-:link-type: ref
-Multi-node GRPO training for production workloads.
-+++
-{bdg-primary}`recommended` {bdg-secondary}`grpo` {bdg-secondary}`multi-node`
-:::
-
-:::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Unsloth
-:link: training-unsloth
-:link-type: ref
-Fast, memory-efficient fine-tuning on single GPU.
-+++
-{bdg-secondary}`unsloth` {bdg-secondary}`efficient`
-:::
-
-:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` TRL
-:link: training-tutorials/trl
+:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` RL (GRPO)
+:link: training-tutorials/index
 :link-type: doc
-HuggingFace TRL integration for PPO and DPO.
+Hands-on tutorials with NeMo RL, TRL, Unsloth, and more.
 +++
-{bdg-secondary}`trl` {bdg-secondary}`huggingface`
+{bdg-secondary}`grpo`
 :::
 
-:::{grid-item-card} {octicon}`file;1.5em;sd-mr-1` Offline Training
+:::{grid-item-card} {octicon}`file;1.5em;sd-mr-1` SFT & DPO
 :link: offline-training-w-rollouts
 :link-type: ref
-SFT and DPO from collected rollouts.
+Transform rollouts into SFT and DPO format.
 +++
 {bdg-secondary}`sft` {bdg-secondary}`dpo`
 :::
