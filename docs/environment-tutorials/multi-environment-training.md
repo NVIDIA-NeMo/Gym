@@ -1,8 +1,13 @@
-(multi-verifier-rollouts)=
+(multi-environment)=
 
-# Multi-verifier rollouts
-Gym is explicitly designed to support multi-verifier rollouts and training.
+# Multi-Environment Training
+NeMo Gym is explicitly designed to support training on multiple environments simultaneously. Note that multi-verifier training may also be colloquially used to refer to the same concept.
 
+## Why Train on Multiple Environments?
+This technique often results in more stable gains across multiple benchmarks, while single environment training may result in un-recoverable degredation of other benchmarks.
+
+
+## How to Configure
 Let's say you want to use both the example_single_tool_call and example_multi_step training environments. Normally how you spin up the servers individually is:
 
 For example_single_tool_call:
@@ -26,12 +31,14 @@ resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml
 resources_servers/example_multi_step/configs/example_multi_step.yaml"
 ng_run "+config_paths=[$config_paths]"
 ```
+## Dataset Preparation
 
 Build a dataset that contains data that hits both servers. Here, we add the agent ref used to route requests to the right agent server to the data.
 ```bash
 jq -c '. + {"agent_ref": {"name": "example_single_tool_call_simple_agent"}}' resources_servers/example_single_tool_call/data/example.jsonl >> results/test_multiverifier_input.jsonl
 jq -c '. + {"agent_ref": {"name": "example_multi_step_simple_agent"}}' resources_servers/example_multi_step/data/example.jsonl >> results/test_multiverifier_input.jsonl
 ```
+## Rollout Collection
 
 And then run rollout collection like normal!
 ```bash

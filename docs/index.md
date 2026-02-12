@@ -331,7 +331,7 @@ Rollout Collection <get-started/rollout-collection.md>
 
 Overview <environment-tutorials/index>
 🟡 Creating Training Environment <environment-tutorials/creating-training-environment>
-Multi-verifier rollouts <environment-tutorials/multi-verifier-rollouts>
+Multi-Environment Training <environment-tutorials/multi-environment-training>
 ```
 
 ```{toctree}
