@@ -107,6 +107,33 @@ uv run python examples/nemo_gym/run_grpo_nemo_gym.py \
 tail -f results/$EXP_NAME/output.log
 ```
 
+:::{note}
+**Single GPU Training**: If you only have 1 GPU available, use these modifications:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+TORCH_CUDA_ARCH_LIST="9.0 10.0" \
+HF_HOME=$PWD/.cache/ \
+WANDB_API_KEY={your W&B API key} \
+uv run python examples/nemo_gym/run_grpo_nemo_gym.py \
+    --config=$CONFIG_PATH \
+    ++logger.wandb.project="${Your Username}-nemo-gym-rl-integration" \
+    ++logger.wandb.name=$EXP_NAME \
+    ++logger.log_dir=results/$EXP_NAME \
+    ++policy.generation.vllm_cfg.tool_parser_plugin=$(find $PWD/.cache -name nemotron_toolcall_parser_no_streaming.py) \
+    ++grpo.max_num_steps=3 \
+    ++checkpointing.checkpoint_dir=results/$EXP_NAME \
+    cluster.gpus_per_node=1 \
+    policy.megatron_cfg.tensor_model_parallel_size=1 \
+    &> results/$EXP_NAME/output.log &
+```
+
+**Key differences:**
+- Added `CUDA_VISIBLE_DEVICES=0` to use only GPU 0
+- Set `cluster.gpus_per_node=1`
+- Set `policy.megatron_cfg.tensor_model_parallel_size=1`
+:::
+
 :::{tip}
 The end of the command above does the following:
 
