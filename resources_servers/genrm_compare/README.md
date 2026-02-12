@@ -204,15 +204,17 @@ Example principle:
 ```
 genrm_compare/
 ├── __init__.py
-├── app.py                    # Main Resource Server implementation
-├── utils.py                  # Utility functions (parsing, aggregation, etc.)
+├── app.py                         # Main Resource Server implementation
+├── comparison_strategies.py       # Comparison strategy infrastructure (GenRMStrategy)
+├── utils.py                       # Utility functions (parsing, aggregation, etc.)
 ├── configs/
-│   └── genrm_compare.yaml   # Default configuration
+│   └── genrm_compare.yaml        # Default configuration
 ├── tests/
 │   ├── __init__.py
-│   ├── test_app.py          # Server tests
-│   └── test_utils.py        # Utility function tests
-└── README.md                # This file
+│   ├── test_app.py               # Server tests
+│   ├── test_comparison_strategies.py  # Strategy tests
+│   └── test_utils.py             # Utility function tests
+└── README.md                     # This file
 ```
 
 ## API Endpoints
@@ -257,6 +259,36 @@ pytest tests/ -v
 ```bash
 python app.py --config configs/genrm_compare.yaml
 ```
+
+## Comparison Strategies Integration
+
+The `comparison_strategies.py` module provides the infrastructure for integrating this Resource Server with rollout collection workflows (e.g., GRPO training):
+
+**Key Components:**
+
+- **`ComparisonStrategy` Protocol**: Interface for comparison strategies
+- **`GenRMStrategy`**: Implementation that calls this Resource Server
+- **`GenRMStrategyConfig`**: Configuration for strategy behavior
+- **Utility functions**: For prompt grouping, text extraction, response generation
+
+**Integration with Rollout Collection:**
+
+When configured in `rollout_collection.py`, the strategy:
+1. Generates N responses per prompt using the policy model
+2. Buffers responses by prompt+principle
+3. Calls this Resource Server's `/compare` endpoint
+4. Attaches rewards and metrics to results
+
+See `examples/genrm_grpo_example.yaml` for complete configuration.
+
+## Related Components
+
+- **GenRM Model**: `responses_api_models/genrm_model/` - Handles GenRM inference with custom roles
+- **Comparison Strategies**: `comparison_strategies.py` (in this package) - Strategy infrastructure
+- **Base VLLM Model**: `responses_api_models/vllm_model/` - Generic model (unchanged)
+- **Type Definitions**: `nemo_gym/openai_utils.py` - Custom role type support
+- **Rollout Collection**: `nemo_gym/rollout_collection.py` - Integrates comparison strategies
+- **Design Doc**: `docs/design_notes/genrm_reward_model_refactoring.md`
 
 ## License
 
