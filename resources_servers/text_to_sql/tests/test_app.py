@@ -95,6 +95,73 @@ ORDER BY order_count DESC;
         assert "LEFT JOIN" in result
         assert "GROUP BY" in result
 
+    def test_raw_sql_with_semicolon_in_string_literal(self):
+        """Test that semicolons inside string literals don't break extraction."""
+        text = (
+            "WITH extracted AS (\n"
+            "    SELECT\n"
+            "        CASE\n"
+            "            WHEN INSTR(status_log, ';') > 0\n"
+            "            THEN SUBSTR(status_log, 1, INSTR(status_log, ';') - 1)\n"
+            "            ELSE status_log\n"
+            "        END AS clean_log\n"
+            "    FROM sensor_reading\n"
+            ")\n"
+            "SELECT clean_log FROM extracted ORDER BY clean_log;"
+        )
+        result = extract_sql_from_response(text)
+        assert result is not None
+        # Must contain the full CTE, not just the trailing SELECT
+        assert "WITH extracted" in result
+        assert "INSTR(status_log, ';')" in result
+        assert "ORDER BY clean_log;" in result
+
+    def test_raw_sql_with_semicolon_in_line_comment(self):
+        """Test that semicolons inside -- line comments don't break extraction."""
+        text = (
+            "WITH current_semester AS (\n"
+            "    SELECT semester_id,\n"
+            "        occupied_seats -- convert to number;\n"
+            "    FROM occupancy_log\n"
+            ")\n"
+            "SELECT building_id, AVG(occupied_seats) AS avg_occ\n"
+            "FROM current_semester\n"
+            "GROUP BY building_id\n"
+            "ORDER BY avg_occ DESC;"
+        )
+        result = extract_sql_from_response(text)
+        assert result is not None
+        assert "WITH current_semester" in result
+        assert "ORDER BY avg_occ DESC;" in result
+
+    def test_raw_sql_with_semicolon_in_block_comment(self):
+        """Test that semicolons inside /* */ block comments don't break extraction."""
+        text = (
+            "WITH logs AS (\n"
+            "    SELECT shift_id,\n"
+            "        /* Parse reads from processed_reads; uses comma-delimited format */\n"
+            "        processed_reads\n"
+            "    FROM rfid_log\n"
+            ")\n"
+            "SELECT shift_id, COUNT(*) AS total\n"
+            "FROM logs\n"
+            "GROUP BY shift_id;"
+        )
+        result = extract_sql_from_response(text)
+        assert result is not None
+        assert "WITH logs" in result
+        assert "GROUP BY shift_id;" in result
+
+    def test_raw_sql_without_semicolon(self):
+        """Test extracting raw SQL that has no trailing semicolon."""
+        text = "WITH t AS (SELECT 1 AS x) SELECT x FROM t"
+        result = extract_sql_from_response(text)
+        assert result is not None
+        assert "WITH t" in result
+        assert "SELECT x FROM t" in result
+        # Should normalize to have trailing semicolon
+        assert result.endswith(";")
+
 
 class TestTextToSqlResourcesServerVerify:
     """Tests for the TextToSqlResourcesServer.verify method."""
