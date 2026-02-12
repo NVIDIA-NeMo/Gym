@@ -65,7 +65,7 @@ Motivation and benefits of NeMo Gym.
 :link-type: doc
 Core components, configuration, verification and RL terminology.
 +++
-{bdg-secondary}`agents` {bdg-secondary}`models` {bdg-secondary}`resources`
+{bdg-secondary}`environments` {bdg-secondary}`agents` {bdg-secondary}`models` {bdg-secondary}`resources`
 :::
 
 :::{grid-item-card} {octicon}`globe;1.5em;sd-mr-1` Ecosystem
@@ -73,7 +73,7 @@ Core components, configuration, verification and RL terminology.
 :link-type: doc
 Understand how NeMo Gym fits within the RL environment ecosystem.
 +++
-{bdg-secondary}`nemo-framework`
+{bdg-secondary}`ecosystem` {bdg-secondary}`integrations`
 :::
 
 ::::

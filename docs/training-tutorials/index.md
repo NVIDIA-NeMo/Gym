@@ -11,7 +11,7 @@ We have hands-on tutorials with supported training frameworks to help you train 
 :::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` NeMo RL
 :link: nemo-rl-grpo/index
 :link-type: doc
-Tutorial-series: GRPO training to improve multi-step tool calling on the Workplace Assistant environment, scaling from single-node to mult-node training.
+Tutorial-series: GRPO training to improve multi-step tool calling on the Workplace Assistant environment, scaling from single-node to multi-node training.
 +++
 {bdg-secondary}`nemo rl` {bdg-secondary}`grpo` {bdg-secondary}`3-5 hours`
 :::
@@ -29,7 +29,7 @@ Review the agent executor for using NeMo Gym environments with OpenRLHF.
 :link-type: doc
 GRPO training on Workplace Assistant and Reasoning Gym environments
 +++
-{bdg-primary}`trl`
+{bdg-secondary}`trl`
 :::
 
 :::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Unsloth
