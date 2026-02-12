@@ -71,9 +71,7 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
     venv_python_fpath = dir_path / ".venv/bin/python"
     venv_activate_fpath = dir_path / ".venv/bin/activate"
     skip_venv_if_present = global_config_dict[SKIP_VENV_IF_PRESENT_KEY_NAME]
-    should_skip_venv_setup = (
-        bool(skip_venv_if_present) and venv_python_fpath.exists() and venv_activate_fpath.exists()
-    )
+    should_skip_venv_setup = bool(skip_venv_if_present) and venv_python_fpath.exists() and venv_activate_fpath.exists()
 
     # explicitly set python path if specified. In Google colab, ng_run fails due to uv pip install falls back to system python (/usr) without this and errors.
     # not needed for most clusters. should be safe in all scenarios, but only minimally tested outside of colab.
