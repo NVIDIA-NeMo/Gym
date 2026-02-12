@@ -87,31 +87,33 @@ Install and run NeMo Gym to start collecting rollouts.
 :::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` Quickstart
 :link: get-started/index
 :link-type: doc
-Run a training environment and start collecting rollouts in under 5 minutes.
+Install, start servers, and collect your first rollouts in one page.
++++
+{bdg-primary}`start here` {bdg-secondary}`5 min`
 :::
 
 :::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Detailed Setup Guide
 :link: get-started/detailed-setup
 :link-type: doc
-Detailed walkthrough of running your first training environment.
+Step-by-step installation with requirements, configuration, and troubleshooting.
 +++
-{bdg-secondary}`environment` {bdg-secondary}`configuration`
+{bdg-secondary}`15 min` {bdg-secondary}`environment` {bdg-secondary}`configuration`
 :::
 
 :::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` Rollout Collection
 :link: get-started/rollout-collection
 :link-type: doc
-Collect and view rollouts.
+Generate batches of scored interactions and view them with the rollout viewer.
 +++
-{bdg-secondary}`rollouts` {bdg-secondary}`training-data`
+{bdg-secondary}`10 min` {bdg-secondary}`rollouts` {bdg-secondary}`training-data`
 :::
 
 :::{grid-item-card} {octicon}`play;1.5em;sd-mr-1` First Training Run
 :link: get-started/first-training-run
 :link-type: doc
-Train your first model using collected rollouts.
+Train a Sudoku-solving model with GRPO using a self-contained Colab notebook.
 +++
-{bdg-secondary}`training` {bdg-secondary}`grpo`
+{bdg-secondary}`30 min` {bdg-secondary}`training` {bdg-secondary}`colab`
 :::
 
 ::::
@@ -126,17 +128,9 @@ Configure and customize the three server components of a training environment.
 :::{grid-item-card} {octicon}`cpu;1.5em;sd-mr-1` Model Server
 :link: model-server/index
 :link-type: doc
-Configure LLM inference backends: vLLM, OpenAI, Azure.
+Configure LLM inference backends including vLLM.
 +++
-{bdg-secondary}`inference` {bdg-secondary}`vllm` {bdg-secondary}`openai`
-:::
-
-:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Resources Server
-:link: resources-server/index
-:link-type: doc
-Define tasks, tools, and verification logic.
-+++
-{bdg-secondary}`tools` {bdg-secondary}`verification`
+{bdg-secondary}`inference` {bdg-secondary}`vllm`
 :::
 
 :::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` Agent Server
@@ -170,30 +164,6 @@ Learn how to build custom training environments for various RL scenarios.
 Build a complete training environment from scratch.
 +++
 {bdg-primary}`beginner` {bdg-secondary}`foundational`
-:::
-
-:::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` Multi-Step
-:link: environment-tutorials/multi-step
-:link-type: doc
-Sequential tool calling workflows.
-+++
-{bdg-secondary}`multi-step` {bdg-secondary}`tools`
-:::
-
-:::{grid-item-card} {octicon}`comment-discussion;1.5em;sd-mr-1` Multi-Turn
-:link: environment-tutorials/multi-turn
-:link-type: doc
-Conversational training environments.
-+++
-{bdg-secondary}`multi-turn` {bdg-secondary}`dialogue`
-:::
-
-:::{grid-item-card} {octicon}`law;1.5em;sd-mr-1` LLM-as-a-Judge
-:link: environment-tutorials/llm-as-judge
-:link-type: doc
-LLM-based response verification.
-+++
-{bdg-secondary}`verification` {bdg-secondary}`llm-judge`
 :::
 
 ::::
@@ -270,14 +240,6 @@ Production deployment patterns and configurations.
 {bdg-secondary}`deployment` {bdg-secondary}`topology`
 :::
 
-:::{grid-item-card} {octicon}`broadcast;1.5em;sd-mr-1` Distributed Computing with Ray
-:link: infrastructure/ray-distributed
-:link-type: doc
-Scale with Ray clusters for high-throughput rollout collection.
-+++
-{bdg-secondary}`ray` {bdg-secondary}`distributed`
-:::
-
 ::::
 
 ## Contribute
@@ -320,7 +282,6 @@ Home <self>
 Overview <about/index.md>
 Concepts <about/concepts/index>
 🟡 Architecture <about/architecture>
-🟡 Performance <about/performance>
 Ecosystem <about/ecosystem>
 ```
 
@@ -342,21 +303,6 @@ Rollout Collection <get-started/rollout-collection.md>
 
 🟡 Overview <model-server/index>
 🟡 vLLM <model-server/vllm>
-🟡 OpenAI <model-server/openai>
-🟡 Azure OpenAI <model-server/azure-openai>
-🟡 Responses API <model-server/responses-native>
-```
-
-```{toctree}
-:caption: Resources Server
-:hidden:
-:maxdepth: 1
-
-🟡 Overview <resources-server/index>
-🟡 Integrate Python Tools <resources-server/integrate-python-tools>
-🟡 Integrate APIs <resources-server/integrate-apis>
-🟡 Containerize <resources-server/containerize>
-🟡 Profile <resources-server/profile>
 ```
 
 ```{toctree}
@@ -385,12 +331,6 @@ Rollout Collection <get-started/rollout-collection.md>
 
 🟡 Overview <environment-tutorials/index>
 🟡 Creating Training Environment <environment-tutorials/creating-training-environment>
-🟡 Multi-Step <environment-tutorials/multi-step>
-🟡 Multi-Turn <environment-tutorials/multi-turn>
-🟡 User Modeling <environment-tutorials/user-modeling>
-🟡 Multi-Node Docker <environment-tutorials/multi-node-docker>
-🟡 LLM as Judge <environment-tutorials/llm-as-judge>
-🟡 RLHF Reward Models <environment-tutorials/rlhf-reward-models>
 ```
 
 ```{toctree}
@@ -398,7 +338,7 @@ Rollout Collection <get-started/rollout-collection.md>
 :hidden:
 :maxdepth: 1
 
-🟡 Overview <training-tutorials/index>
+Overview <training-tutorials/index>
 NeMo RL <training-tutorials/nemo-rl-grpo/index.md>
 🟡 TRL <training-tutorials/trl>
 Unsloth <training-tutorials/unsloth-training>
@@ -411,8 +351,7 @@ Offline Training (SFT/DPO) <training-tutorials/offline-training-w-rollouts>
 :maxdepth: 1
 
 🟡 Overview <model-recipes/index>
-🟡 Nemotron Nano <model-recipes/nemotron-nano>
-🟡 Nemotron Super <model-recipes/nemotron-super>
+🟡 Nemotron 3 Nano <model-recipes/nemotron-nano>
 ```
 
 ```{toctree}
@@ -422,7 +361,6 @@ Offline Training (SFT/DPO) <training-tutorials/offline-training-w-rollouts>
 
 🟡 Overview <infrastructure/index>
 🟡 Deployment Topology <infrastructure/deployment-topology>
-🟡 Ray Distributed <infrastructure/ray-distributed>
 ```
 
 ```{toctree}

@@ -1,5 +1,5 @@
 (about-ecosystem)=
-# Agentic RL Ecosystem
+# RL Environment Ecosystem
 
 We're building NeMo Gym to integrate with a broad set of RL training frameworks and environment libraries.
 
@@ -9,14 +9,14 @@ We would love your contribution! Open a PR to add an integration, or [file an is
 
 ## Training Framework Integrations
 
-- **{doc}`NeMo RL <../training-tutorials/nemo-rl-grpo/index>`** - GRPO training to improve multi-step tool calling on the Workplace Assistant environment
+We have hands-on tutorials with supported training frameworks to help you train with NeMo Gym environments. If you're interested in integrating another training framework, see the {doc}`Training Framework Integration Guide <../contribute/rl-framework-integration/index>`.
+
+- **{doc}`NeMo RL <../tutorials/nemo-rl-grpo/index>`** - GRPO training to improve multi-step tool calling on the Workplace Assistant environment
 - **[OpenRLHF](https://github.com/OpenRLHF/OpenRLHF/blob/main/examples/python/agent_func_nemogym_executor.py)** - example agent executor for RL training
 - **{doc}`TRL <../training-tutorials/trl>`** - GRPO training on Workplace Assistant and Reasoning Gym environments
-- **{doc}`Unsloth <../training-tutorials/unsloth-training>`** - GRPO training on Sudoku environment
+- **{doc}`Unsloth <../training-tutorials/unsloth-training>`** - GRPO training on instruction following and reasoning environments
 - **NeMo Customizer** - *(In progress)*
 - **VeRL** - *(In progress)*
-
-To integrate another training framework, see the {doc}`Training Framework Integration Guide <../contribute/rl-framework-integration/index>`.
 
 ---
 
@@ -48,3 +48,4 @@ Depending on your workflow, you may also find these libraries useful:
 | [NeMo Data Designer](https://github.com/NVIDIA-NeMo/DataDesigner) | Synthetic data generation |
 | [NeMo Evaluator](https://github.com/NVIDIA-NeMo/Evaluator) | Model evaluation and benchmarking |
 | [NeMo Guardrails](https://github.com/NVIDIA-NeMo/Guardrails) | Programmable safety guardrails |
+| [NeMo Skills](https://github.com/NVIDIA-NeMo/NeMo-Skills) | Convenience pipelines used by LLM researchers across SDG, evaluation and training |

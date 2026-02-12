@@ -44,7 +44,7 @@ Implement rollout generation and training data preparation for RL, SFT, and DPO.
 :link-type: doc
 Transform rollouts into training data for {term}`supervised fine-tuning (SFT) <SFT (Supervised Fine-Tuning)>` and {term}`direct preference optimization (DPO) <DPO (Direct Preference Optimization)>`.
 +++
-{bdg-secondary}`sft` {bdg-secondary}`dpo`
+{bdg-secondary}`20 min` {bdg-secondary}`sft` {bdg-secondary}`dpo`
 :::
 
 ::::

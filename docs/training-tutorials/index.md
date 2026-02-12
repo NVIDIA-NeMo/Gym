@@ -1,15 +1,16 @@
 (training-tutorials-index)=
 # Training Tutorials
 
-Hands-on tutorials for training models using NeMo Gym with various training frameworks.
+We have hands-on tutorials with supported training frameworks to help you train with NeMo Gym environments. If you're interested in integrating another training framework, see the {doc}`Training Framework Integration Guide <../contribute/rl-framework-integration/index>`.
 
-## Supported Training Frameworks
+## RL (GRPO)
 ::::{grid} 1 2 2 2
 :gutter: 1 1 1 2
 
 :::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` NeMo RL
 :link: nemo-rl-grpo/index
 :link-type: doc
+GRPO training to improve multi-step tool calling on the Workplace Assistant environment.
 +++
 {bdg-primary}`nemo rl`
 :::
@@ -17,6 +18,7 @@ Hands-on tutorials for training models using NeMo Gym with various training fram
 :::{grid-item-card} {octicon}`link-external;1.5em;sd-mr-1` OpenRLHF
 :link: https://github.com/OpenRLHF/OpenRLHF/blob/main/examples/python/agent_func_nemogym_executor.py
 :link-type: url
+Review the agent executor for using NeMo Gym environments with OpenRLHF.
 +++
 {bdg-secondary}`openrlhf`
 :::
@@ -24,6 +26,7 @@ Hands-on tutorials for training models using NeMo Gym with various training fram
 :::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` TRL
 :link: trl
 :link-type: doc
+GRPO training on Workplace Assistant and Reasoning Gym environments.
 +++
 {bdg-secondary}`trl`
 :::
@@ -31,17 +34,20 @@ Hands-on tutorials for training models using NeMo Gym with various training fram
 :::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Unsloth
 :link: unsloth-training
 :link-type: doc
+GRPO training on instruction following and reasoning environments.
 +++
 {bdg-secondary}`unsloth`
 :::
 
 :::{grid-item-card} {octicon}`gear;1.5em;sd-mr-1` NeMo Customizer
+:link-type: doc
 *Coming soon*
 +++
 {bdg-secondary}`nemo customizer` {bdg-warning}`in progress`
 :::
 
 :::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` VeRL
+:link-type: doc
 *Coming soon*
 +++
 {bdg-secondary}`verl` {bdg-warning}`in progress`

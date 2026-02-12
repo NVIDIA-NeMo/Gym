@@ -17,9 +17,19 @@ This tutorial guides you through your first RL training run using NeMo Gym for t
 
 :::
 
-:::{tip}
-**No prior NeMo Gym setup required.** The Colab notebook is self-contained. For local training, see [Local Training](#local-training-advanced) below.
+:::{button-ref} rollout-collection
+:color: secondary
+:outline:
+:ref-type: doc
+
+← Previous: Rollout Collection
 :::
+
+## Prerequisites
+
+- **For Colab**: No prior NeMo Gym setup required — the notebook is self-contained
+- **For local training**: Completed {doc}`Detailed Setup Guide <detailed-setup>` and {doc}`Rollout Collection <rollout-collection>`
+- A Google account (for Colab) or a local GPU with 16GB+ VRAM
 
 ---
 
@@ -34,7 +44,7 @@ This tutorial guides you through your first RL training run using NeMo Gym for t
 | **Algorithm** | GRPO (Group Relative Policy Optimization) |
 
 :::{tip}
-**Why Unsloth?** Unsloth provides optimized memory usage, making it possible to train on free Colab T4 GPUs. For production multi-node training, see {doc}`/training-tutorials/nemo-rl-grpo/index`.
+**Why Unsloth?** Unsloth provides optimized memory usage, making it possible to train on free Colab T4 GPUs. For production multi-node training, see {doc}`/tutorials/nemo-rl-grpo/index`.
 :::
 
 ---
@@ -124,7 +134,7 @@ jupyter notebook nemo_gym_sudoku.ipynb
 
 ---
 
-## What's Next?
+## Next Steps
 
 After completing your first training run:
 
@@ -132,7 +142,7 @@ After completing your first training run:
 :gutter: 3
 
 :::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` Scale to Production
-:link: /training-tutorials/nemo-rl-grpo/index
+:link: /tutorials/nemo-rl-grpo/index
 :link-type: doc
 
 Multi-node GRPO training with NeMo RL for production workloads.

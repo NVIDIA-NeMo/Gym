@@ -14,12 +14,4 @@ Efficient small model training.
 {bdg-secondary}`nemotron` {bdg-secondary}`nano`
 :::
 
-:::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Nemotron 3 Super
-:link: nemotron-super
-:link-type: doc
-High-performance training.
-+++
-{bdg-secondary}`nemotron` {bdg-secondary}`super`
-:::
-
 ::::
