@@ -1,2 +1,2 @@
 -e nemo-gym[dev] @ ../../
-harbor @ git+https://github.com/grace-lam/harbor.git@845a2442d347271258324f75e4380b365cb2304d
+harbor @ git+https://github.com/laude-institute/harbor.git@9dddd797b57ab8a0f9d6352a20fce73abbb29573

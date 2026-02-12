@@ -21,7 +21,8 @@ from uuid import uuid4
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
-    NeMoGymResponseFunctionToolCallForTraining,
+    NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
 )
@@ -39,7 +40,7 @@ class HarborAgentUtils:
             "instructions": None,
             "metadata": {},
             "object": "response",
-            "parallel_tool_calls": True,
+            "parallel_tool_calls": False,
             "tool_choice": "auto",
             "tools": [],
             "background": False,
@@ -196,15 +197,9 @@ class HarborAgentUtils:
 
         Each agent step in the trajectory is converted to:
         1. An assistant **message** containing the agent's analysis/plan text,
-           with per-token ``generation_log_probs`` from the step metrics.
+           preserving the original assistant content.
         2. One **function_call** item per tool call the agent made.
         3. One **function_call_output** item per observation result.
-
-        The logprobs on the assistant message cover the *entire* LLM completion
-        for that step (including the tool-call JSON that was parsed out), so
-        they are the authoritative training signal.  Tool-call and observation
-        items carry empty logprob fields — they are included for trajectory
-        fidelity, not for the RL loss.
         """
         output_items: List[Dict[str, Any]] = []
 
@@ -212,11 +207,7 @@ class HarborAgentUtils:
             if step.get("source") != "agent":
                 continue
 
-            metrics = step.get("metrics", {})
-            logprobs = metrics.get("logprobs", [])
-
-            # --- Assistant message (carries the logprobs for this turn) ---
-            message = NeMoGymResponseOutputMessageForTraining(
+            message = NeMoGymResponseOutputMessage(
                 id=f"cht_{uuid4().hex[:12]}",
                 content=[
                     NeMoGymResponseOutputText(
@@ -229,9 +220,6 @@ class HarborAgentUtils:
                 role="assistant",
                 status="completed",
                 type="message",
-                prompt_token_ids=[],
-                generation_token_ids=[],
-                generation_log_probs=logprobs,
             )
             output_items.append(message.model_dump())
 
@@ -242,17 +230,13 @@ class HarborAgentUtils:
             # --- Function calls ---
             for tc in tool_calls:
                 arguments = tc.get("arguments", {})
-                fc = NeMoGymResponseFunctionToolCallForTraining(
+                fc = NeMoGymResponseFunctionToolCall(
                     arguments=json.dumps(arguments) if isinstance(arguments, dict) else str(arguments),
                     call_id=tc.get("tool_call_id", f"call_{uuid4().hex[:8]}"),
                     name=tc.get("function_name", "unknown"),
                     type="function_call",
                     id=f"fc_{uuid4().hex[:8]}",
                     status="completed",
-                    # No separate logprobs — they are part of the message above.
-                    prompt_token_ids=[],
-                    generation_token_ids=[],
-                    generation_log_probs=[],
                 )
                 output_items.append(fc.model_dump())
 
@@ -310,11 +294,15 @@ class HarborAgentUtils:
         rollout_turns: List[Dict[str, Any]] = []
         if rollout_details:
             for rollout in rollout_details:
-                prompt_token_ids_list = rollout.get("prompt_token_ids", [])
-                completion_token_ids_list = rollout.get("completion_token_ids", [])
-                logprobs_list = rollout.get("logprobs", [])
+                prompt_token_ids_list = rollout.get("prompt_token_ids") or []
+                completion_token_ids_list = rollout.get("completion_token_ids") or []
+                logprobs_list = rollout.get("logprobs") or []
 
-                n_turns = len(completion_token_ids_list)
+                n_turns = max(
+                    len(prompt_token_ids_list),
+                    len(completion_token_ids_list),
+                    len(logprobs_list),
+                )
                 for turn_idx in range(n_turns):
                     rollout_turns.append(
                         {
@@ -323,7 +311,11 @@ class HarborAgentUtils:
                                 if turn_idx < len(prompt_token_ids_list)
                                 else []
                             ),
-                            "generation_token_ids": completion_token_ids_list[turn_idx],
+                            "generation_token_ids": (
+                                completion_token_ids_list[turn_idx]
+                                if turn_idx < len(completion_token_ids_list)
+                                else []
+                            ),
                             "generation_log_probs": (
                                 logprobs_list[turn_idx]
                                 if turn_idx < len(logprobs_list)

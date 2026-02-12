@@ -40,6 +40,32 @@ policy_model_name: meta-llama/Llama-3.1-8B-Instruct
 
 Modify `configs/harbor_agent.yaml`.
 
+To use local custom wrappers (and keep Harbor installed from upstream), set import
+paths under `responses_api_agents/harbor_agent/custom_agents` and
+`responses_api_agents/harbor_agent/custom_envs`:
+
+```yaml
+harbor_agent_name: null
+harbor_agent_import_path: "responses_api_agents.harbor_agent.custom_agents.terminus_2_nemo_gym:Terminus2NemoGym"
+harbor_environment_type: null
+harbor_environment_import_path: "responses_api_agents.harbor_agent.custom_envs.singularity.singularity:SingularityEnvironment"
+harbor_agent_kwargs:
+  collect_rollout_details: true
+  nemo_model_server_api_key: placeholder
+```
+
+To route Harbor through a configured NeMo Gym model server (same pattern as
+`swe_agents`/`mini_swe_agent`), add:
+
+```yaml
+model_server:
+  type: responses_api_models
+  name: policy_model
+```
+
+Harbor agent resolves the base URL from the configured `model_server` host/port.
+`model_server` is required.
+
 ### 4) Start NeMo Gym servers
 
 You only need the Harbor agent config path (no separate NeMo model-server config required).

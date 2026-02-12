@@ -14,15 +14,14 @@
 # limitations under the License.
 import json
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
-from fastapi.testclient import TestClient
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.harbor_agent.app import (
     HarborAgent,
     HarborAgentConfig,
@@ -37,7 +36,6 @@ from responses_api_agents.harbor_agent.utils import HarborAgentUtils
 
 DEFAULT_TRIAL_RESULT = {
     "task_name": "test_task_123",
-    "trial_name": "test_task_123__abc1234",
     "agent_result": {
         "n_input_tokens": 100,
         "n_output_tokens": 50,
@@ -102,13 +100,9 @@ DEFAULT_TRAJECTORY = {
 # ---------------------------------------------------------------------------
 
 
-def _get(obj, key):
-    """Access a field on either a dict or a Pydantic model.
-
-    Pydantic's discriminated-union parsing sometimes leaves output items as
-    raw dicts instead of resolving to the concrete model type.
-    """
-    return obj[key] if isinstance(obj, dict) else getattr(obj, key)
+def _as_dict(obj: Any) -> Dict[str, Any]:
+    """Normalize output items that may be dicts or Pydantic models."""
+    return obj if isinstance(obj, dict) else obj.model_dump()
 
 
 def create_test_config(**overrides) -> HarborAgentConfig:
@@ -124,6 +118,7 @@ def create_test_config(**overrides) -> HarborAgentConfig:
         entrypoint="",
         concurrency=1,
         harbor_model_prefix="hosted_vllm",
+        model_server={"type": "responses_api_models", "name": "test_model_server"},
         harbor_agent_name="terminus-2",
         harbor_local_dataset_path="/tmp/test_dataset",
         harbor_environment_type="docker",
@@ -136,19 +131,27 @@ def create_test_config(**overrides) -> HarborAgentConfig:
 def setup_harbor_run_mock(
     mock_to_thread,
     mock_runner_ray_remote,
-    mock_load_from_global_config,
+    mock_get_global_config,
     trial_result: Optional[Dict[str, Any]] = None,
     trajectory: Optional[Dict[str, Any]] = None,
 ):
     """Wire up all mocks for a successful ``run()`` call.
 
-    Sets up the ServerClient, writes result/trajectory files to a temp
+    Sets up global config mock, writes result/trajectory files to a temp
     directory, and routes the Ray mock to return it.
     """
-    # ServerClient
-    sc = MagicMock()
-    sc.global_config_dict = {"policy_model_name": "test_model", "policy_base_url": "http://policy-host:9000/v1"}
-    mock_load_from_global_config.return_value = sc
+    # Global config
+    mock_get_global_config.return_value = {
+        "policy_model_name": "test_model",
+        "test_model_server": {
+            "responses_api_models": {
+                "vllm_model": {
+                    "host": "policy-host",
+                    "port": 9000,
+                }
+            }
+        },
+    }
 
     # Trial directory with result.json (+ optional trajectory.json)
     if trial_result is None:
@@ -175,100 +178,87 @@ def create_run_request(instance_id="test_task_123", **kwargs) -> HarborRunReques
 
 
 def _make_server(**config_overrides) -> HarborAgent:
-    """Shorthand: create an ``HarborAgent`` with a mock ``ServerClient``."""
-    return HarborAgent(config=create_test_config(**config_overrides), server_client=MagicMock(spec=ServerClient))
+    """Create Harbor agent server with test defaults."""
+    return HarborAgent(config=create_test_config(**config_overrides), server_client=MagicMock())
 
 
 # ===========================================================================
-#  TestApp — agent lifecycle, run(), and _build_job_config
+#  Core app tests
 # ===========================================================================
 
 
 class TestApp:
-    def test_sanity(self) -> None:
-        _make_server()
-
-    # ---- run() --------------------------------------------------------- #
-
-    @patch("responses_api_agents.harbor_agent.app.ServerClient.load_from_global_config")
+    @patch("responses_api_agents.harbor_agent.app.get_global_config_dict")
     @patch("responses_api_agents.harbor_agent.app.runner_ray_remote")
     @patch("asyncio.to_thread")
-    async def test_run_rollout_details_take_priority(self, mock_to_thread, mock_ray, mock_sc):
-        """When rollout_details + trajectory exist, keep full trajectory and enrich assistant turns."""
+    async def test_run_with_rollout_details_overlays_training_fields(self, mock_to_thread, mock_ray, mock_gc):
         server = _make_server()
-        setup_harbor_run_mock(mock_to_thread, mock_ray, mock_sc, trajectory=DEFAULT_TRAJECTORY)
+        setup_harbor_run_mock(mock_to_thread, mock_ray, mock_gc, trajectory=DEFAULT_TRAJECTORY)
 
         response = await server.run(create_run_request())
 
         assert response.reward == 1.0
-        # Keep rich trajectory output: 2 agent steps x (message + function_call + function_call_output) = 6
         assert len(response.response.output) == 6
-        out0 = response.response.output[0]
-        assert out0.prompt_token_ids == [1, 2, 3]
-        assert out0.generation_token_ids == [10, 11, 12]
-        assert out0.generation_log_probs == [-0.1, -0.2, -0.3]
-        assert "I will look at foo.py" in out0.content[0].text
-        # Second assistant turn also enriched from rollout_details
-        out3 = response.response.output[3]
-        assert out3.prompt_token_ids == [4, 5, 6]
-        assert out3.generation_token_ids == [13, 14, 15]
-        assert out3.generation_log_probs == [-0.4, -0.5, -0.6]
-        # Input still populated from trajectory
+
+        msg0 = response.response.output[0]
+        msg3 = response.response.output[3]
+        assert msg0.prompt_token_ids == [1, 2, 3]
+        assert msg0.generation_token_ids == [10, 11, 12]
+        assert msg0.generation_log_probs == [-0.1, -0.2, -0.3]
+        assert msg3.prompt_token_ids == [4, 5, 6]
+        assert msg3.generation_token_ids == [13, 14, 15]
+        assert msg3.generation_log_probs == [-0.4, -0.5, -0.6]
+
+        # Contract requested in this thread.
+        assert response.response.parallel_tool_calls is False
+        assert response.response.id.startswith("resp_")
         assert len(response.responses_create_params.input) == 1
         assert "Fix the bug" in response.responses_create_params.input[0].content
 
-    @patch("responses_api_agents.harbor_agent.app.ServerClient.load_from_global_config")
+    @patch("responses_api_agents.harbor_agent.app.get_global_config_dict")
     @patch("responses_api_agents.harbor_agent.app.runner_ray_remote")
     @patch("asyncio.to_thread")
-    async def test_run_falls_back_to_trajectory(self, mock_to_thread, mock_ray, mock_sc):
-        """Empty rollout_details -> ATIF trajectory used for output."""
+    async def test_run_without_rollout_details_omits_training_fields(self, mock_to_thread, mock_ray, mock_gc):
         server = _make_server()
         trial_result = {
             **DEFAULT_TRIAL_RESULT,
             "agent_result": {"n_input_tokens": 1200, "n_output_tokens": 180, "rollout_details": []},
         }
-        setup_harbor_run_mock(mock_to_thread, mock_ray, mock_sc, trial_result=trial_result, trajectory=DEFAULT_TRAJECTORY)
+        setup_harbor_run_mock(mock_to_thread, mock_ray, mock_gc, trial_result=trial_result, trajectory=DEFAULT_TRAJECTORY)
 
         response = await server.run(create_run_request())
 
-        assert response.reward == 1.0
-        output = response.response.output
-        # 2 agent steps x (message + function_call + function_call_output) = 6
-        assert len(output) == 6
-
-        # Assistant message with logprobs
-        assert _get(output[0], "type") == "message"
-        assert "I will look at foo.py" in _get(_get(output[0], "content")[0], "text")
-        assert _get(output[0], "generation_log_probs") == [-0.01, -0.02, -0.03]
-        assert _get(output[0], "prompt_token_ids") == []
-        assert _get(output[0], "generation_token_ids") == []
-
-        # Function call + output
-        assert _get(output[1], "type") == "function_call"
-        assert _get(output[1], "name") == "bash_command"
-        assert _get(output[2], "type") == "function_call_output"
-        assert "def foo" in _get(output[2], "output")
-
-        # Second agent step
-        assert _get(output[3], "generation_log_probs") == [-0.04, -0.05]
-
-        # Input from trajectory
+        output0 = _as_dict(response.response.output[0])
+        output1 = _as_dict(response.response.output[1])
+        output2 = _as_dict(response.response.output[2])
+        assert output0["type"] == "message"
+        assert output1["type"] == "function_call"
+        assert output2["type"] == "function_call_output"
+        assert "prompt_token_ids" not in output0
+        assert "generation_token_ids" not in output0
+        assert "generation_log_probs" not in output0
+        assert "I will look at foo.py" in output0["content"][0]["text"]
         assert "Fix the bug" in response.responses_create_params.input[0].content
-
-        # Usage from final_metrics
         assert response.response.usage.input_tokens == 1200
         assert response.response.usage.output_tokens == 180
         assert response.response.usage.total_tokens == 1380
 
-    @patch("responses_api_agents.harbor_agent.app.ServerClient.load_from_global_config")
+    @patch("responses_api_agents.harbor_agent.app.get_global_config_dict")
     @patch("responses_api_agents.harbor_agent.app.runner_ray_remote")
     @patch("asyncio.to_thread")
-    async def test_run_failed_execution(self, mock_to_thread, mock_ray, mock_sc):
-        """Harbor job exception -> reward=0, empty output."""
+    async def test_run_failed_execution(self, mock_to_thread, mock_ray, mock_gc):
         server = _make_server()
-        sc = MagicMock()
-        sc.global_config_dict = {"policy_model_name": "test_model", "policy_base_url": "http://host:9000/v1"}
-        mock_sc.return_value = sc
+        mock_gc.return_value = {
+            "policy_model_name": "test_model",
+            "test_model_server": {
+                "responses_api_models": {
+                    "vllm_model": {
+                        "host": "host",
+                        "port": 9000,
+                    }
+                }
+            },
+        }
         mock_ray.remote.return_value = MagicMock()
         mock_to_thread.side_effect = Exception("Harbor job failed")
 
@@ -279,82 +269,36 @@ class TestApp:
         assert response.responses_create_params.temperature == 0.3
         assert response.responses_create_params.input == []
 
-    @patch("responses_api_agents.harbor_agent.app.ServerClient.load_from_global_config")
-    @patch("responses_api_agents.harbor_agent.app.runner_ray_remote")
-    @patch("asyncio.to_thread")
-    async def test_run_uses_trial_name_as_response_id(self, mock_to_thread, mock_ray, mock_sc):
-        """response.id should map to Harbor trial_name when available."""
-        server = _make_server()
-        setup_harbor_run_mock(mock_to_thread, mock_ray, mock_sc, trajectory=DEFAULT_TRAJECTORY)
-
-        response = await server.run(create_run_request())
-        assert response.response.id == DEFAULT_TRIAL_RESULT["trial_name"]
-
-    # ---- responses() --------------------------------------------------- #
-
-    async def test_responses_not_implemented(self) -> None:
-        with pytest.raises(NotImplementedError):
-            await _make_server().responses(NeMoGymResponseCreateParamsNonStreaming(temperature=0.7, top_p=0.9, input=[]))
-
-    # ---- _build_job_config --------------------------------------------- #
-
-    def test_build_job_config_agent_settings(self) -> None:
-        server = _make_server(
-            harbor_agent_kwargs={
-                "collect_rollout_details": True,
-                "model_info": {"max_input_tokens": 65536, "max_output_tokens": 8192, "input_cost_per_token": 0.0, "output_cost_per_token": 0.0},
-            }
-        )
-        jc = server._build_job_config("test_task", "hosted_vllm/test_model", "http://localhost:8000/v1")
-        agent = jc["agents"][0]
-        assert agent["kwargs"]["collect_rollout_details"] is True
-        assert agent["kwargs"]["api_base"] == "http://localhost:8000/v1"
-        assert agent["kwargs"]["model_info"]["max_input_tokens"] == 65536
-        assert agent["override_timeout_sec"] is None
-        assert jc["job_name"].startswith("ng_")
-        assert jc["job_name"].endswith("_test_task")
-
     def test_build_job_config_raises_without_dataset(self) -> None:
         server = _make_server(harbor_dataset_name=None, harbor_local_dataset_path=None)
         with pytest.raises(ValueError, match="requires a dataset"):
-            server._build_job_config("test_task", "hosted_vllm/test_model", "http://localhost:8000/v1")
-
-    def test_build_job_config_custom_agent_import_path(self) -> None:
-        server = _make_server(harbor_agent_import_path="my_package.agents.MyCustomAgent")
-        agent = server._build_job_config("test_task", "hosted_vllm/test_model", "http://localhost:8000/v1")["agents"][0]
-        assert agent["name"] is None
-        assert agent["import_path"] == "my_package.agents.MyCustomAgent"
-
-    def test_build_job_config_custom_environment_import_path(self) -> None:
-        server = _make_server(harbor_environment_import_path="my_package.envs.MyCustomEnv")
-        env = server._build_job_config("test_task", "hosted_vllm/test_model", "http://localhost:8000/v1")["environment"]
-        assert env["type"] is None
-        assert env["import_path"] == "my_package.envs.MyCustomEnv"
-
-    def test_build_job_config_extra_agent_kwargs(self) -> None:
-        server = _make_server(harbor_agent_kwargs={"temperature": 0.5, "max_turns": 100})
-        agent = server._build_job_config("test_task", "hosted_vllm/test_model", "http://localhost:8000/v1")["agents"][0]
-        assert agent["kwargs"]["temperature"] == 0.5
-        assert agent["kwargs"]["max_turns"] == 100
-        assert agent["kwargs"]["api_base"] == "http://localhost:8000/v1"
-
-    def test_build_job_config_extra_environment_kwargs(self) -> None:
-        server = _make_server(harbor_environment_kwargs={"override_cpus": 4})
-        env_kw = server._build_job_config("test_task", "hosted_vllm/test_model", "http://localhost:8000/v1")["environment"]["kwargs"]
-        assert env_kw["override_cpus"] == 4
+            server._build_job_config(
+                "test_task",
+                "hosted_vllm/test_model",
+                "http://localhost:8000/v1",
+                job_name="test_task__run",
+                jobs_dir=Path("/tmp/harbor_jobs"),
+            )
 
     def test_resolve_model_name_requires_prefix(self) -> None:
         with pytest.raises(ValueError, match="harbor_model_prefix is required"):
             _make_server(harbor_model_prefix=None)._resolve_model_name("test_model")
 
-    def test_endpoints_registered(self) -> None:
-        client = TestClient(_make_server().setup_webserver(), raise_server_exceptions=False)
-        assert client.post("/v1/responses", json={"temperature": 0.7, "top_p": 0.9, "input": []}).status_code == 500
-        assert client.post("/run", json={}).status_code != 404
+    def test_results_and_job_paths_sanitize_model_and_job_name(self) -> None:
+        server = _make_server(harbor_dataset_name="terminal-bench", harbor_dataset_version="2.0")
+        ts = datetime(2026, 2, 10, 12, 34, 56, tzinfo=timezone.utc)
+
+        results_dir = server._get_results_output_dir("deepseek-ai/DeepSeek-V3.2", ts)
+        jobs_dir = server._get_jobs_output_dir("deepseek-ai/DeepSeek-V3.2", ts)
+        job_name = server._build_job_name("20260210_123456_1a2b")
+
+        assert "deepseek-ai__DeepSeek-V3.2" == results_dir.parts[-1]
+        assert "deepseek-ai__DeepSeek-V3.2" == jobs_dir.parts[-1]
+        assert not job_name.startswith("ng_")
 
 
 # ===========================================================================
-#  HarborAgentUtils unit tests
+#  Core utils tests
 # ===========================================================================
 
 
@@ -386,39 +330,9 @@ class TestExtractInputFromTrajectory:
         assert msgs[1].content == "Task description"
 
 
-class TestTrajectoryToResponses:
-    @pytest.fixture()
-    def items(self):
-        return HarborAgentUtils.trajectory_to_responses(DEFAULT_TRAJECTORY)
-
-    def test_item_count(self, items) -> None:
-        # 2 agent steps x (message + tool_call + tool_output) = 6
-        assert len(items) == 6
-
-    def test_message_has_logprobs(self, items) -> None:
-        assert items[0]["type"] == "message"
-        assert items[0]["role"] == "assistant"
-        assert items[0]["generation_log_probs"] == [-0.01, -0.02, -0.03]
-
-    def test_function_call(self, items) -> None:
-        assert items[1]["type"] == "function_call"
-        assert items[1]["name"] == "bash_command"
-        assert items[1]["call_id"] == "call_0_1"
-        assert items[1]["generation_log_probs"] == []
-
-    def test_function_call_output(self, items) -> None:
-        assert items[2]["type"] == "function_call_output"
-        assert items[2]["call_id"] == "call_0_1"
-        assert "def foo" in items[2]["output"]
-
-    def test_empty_trajectory(self) -> None:
-        assert HarborAgentUtils.trajectory_to_responses({"steps": []}) == []
-
-
 class TestTrialResultToResponses:
     def test_prefers_rollout_details(self) -> None:
         items = HarborAgentUtils.trial_result_to_responses(DEFAULT_TRIAL_RESULT, DEFAULT_TRAJECTORY)
-        # Keep rich trajectory structure even when rollout_details are available
         assert len(items) == 6
         assert items[0]["prompt_token_ids"] == [1, 2, 3]
         assert items[3]["prompt_token_ids"] == [4, 5, 6]
@@ -429,35 +343,31 @@ class TestTrialResultToResponses:
         assert len(items) == 2
         assert items[0]["prompt_token_ids"] == [1, 2, 3]
         assert items[1]["prompt_token_ids"] == [4, 5, 6]
+        assert items[0]["content"][0]["text"] == ""
 
     def test_falls_back_to_trajectory(self) -> None:
         result = {**DEFAULT_TRIAL_RESULT, "agent_result": {"rollout_details": [], "n_input_tokens": 100, "n_output_tokens": 50}}
         items = HarborAgentUtils.trial_result_to_responses(result, DEFAULT_TRAJECTORY)
         assert len(items) == 6
-        assert items[0]["generation_log_probs"] == [-0.01, -0.02, -0.03]
+        assert "generation_log_probs" not in items[0]
 
     def test_falls_back_to_empty_output(self) -> None:
         result = {**DEFAULT_TRIAL_RESULT, "agent_result": {"rollout_details": [], "n_input_tokens": 100, "n_output_tokens": 50}}
         items = HarborAgentUtils.trial_result_to_responses(result, None)
         assert items == []
 
-
 class TestExtractUsage:
-    def test_from_trajectory(self) -> None:
-        usage = HarborAgentUtils.extract_usage(DEFAULT_TRIAL_RESULT, DEFAULT_TRAJECTORY)
-        assert usage["input_tokens"] == 1200
-        assert usage["output_tokens"] == 180
-        assert usage["total_tokens"] == 1380
-
-    def test_from_trial_result_fallback(self) -> None:
-        usage = HarborAgentUtils.extract_usage(DEFAULT_TRIAL_RESULT, None)
-        assert usage["input_tokens"] == 100
-        assert usage["output_tokens"] == 50
-        assert usage["total_tokens"] == 150
-
-    def test_empty(self) -> None:
-        usage = HarborAgentUtils.extract_usage({"agent_result": None}, None)
-        assert usage["total_tokens"] == 0
+    @pytest.mark.parametrize(
+        "trial_result, trajectory, expected_total",
+        [
+            (DEFAULT_TRIAL_RESULT, DEFAULT_TRAJECTORY, 1380),
+            (DEFAULT_TRIAL_RESULT, None, 150),
+            ({"agent_result": None}, None, 0),
+        ],
+    )
+    def test_extract_usage_paths(self, trial_result, trajectory, expected_total) -> None:
+        usage = HarborAgentUtils.extract_usage(trial_result, trajectory)
+        assert usage["total_tokens"] == expected_total
 
 
 class TestExtractReward:

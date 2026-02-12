@@ -11,7 +11,7 @@ harbor_agent:
 
       # Agent — which Harbor agent to run (set name OR import_path, not both)
       harbor_agent_name: "terminus-2"          # terminus-2, oracle, nop, etc.
-      harbor_agent_import_path: null           # Custom agent import path (e.g., "my_package.MyAgent")
+      harbor_agent_import_path: null           # Custom agent import path (e.g., "my_pkg.my_mod:MyAgent")
       harbor_agent_kwargs: null                # Extra kwargs passed to the agent's __init__
       # Example (Terminus-2 with hosted_vllm model_info):
       # harbor_agent_kwargs:
@@ -24,14 +24,22 @@ harbor_agent:
 
       # Environment — container backend (set type OR import_path, not both)
       harbor_environment_type: "singularity"   # singularity, docker, e2b, modal, daytona, runloop
-      harbor_environment_import_path: null     # Custom environment import path (e.g., "my_package.MyEnv")
+      harbor_environment_import_path: null     # Custom env import path (e.g., "my_pkg.my_mod:MyEnv")
       harbor_environment_kwargs: null          # Extra kwargs passed to the environment
       # Example (Singularity):
       # harbor_environment_kwargs:
       #   singularity_image_cache_dir: /path/to/singularity_cache
       #   singularity_force_pull: false
+      # Example (local wrappers):
+      # harbor_agent_name: null
+      # harbor_agent_import_path: "responses_api_agents.harbor_agent.custom_agents.terminus_2_nemo_gym:Terminus2NemoGym"
+      # harbor_environment_type: null
+      # harbor_environment_import_path: "responses_api_agents.harbor_agent.custom_envs.singularity.singularity:SingularityEnvironment"
 
       # Model routing
+      model_server:                            # Required NeMo Gym model server reference
+        type: responses_api_models
+        name: policy_model
       harbor_model_prefix: "hosted_vllm"       # e.g. hosted_vllm, openai, anthropic
 
       # Timeouts
@@ -40,5 +48,4 @@ harbor_agent:
       harbor_timeout_multiplier: null          # Scale factor for task-defined timeouts (null = 1.0)
 
       # Output
-      harbor_jobs_dir: "harbor_jobs"           # Directory for Harbor job outputs
-      skip_if_exists: false                    # Skip tasks with cached NeMo Gym results
+      harbor_jobs_dir: "jobs"           # Directory for Harbor job outputs
