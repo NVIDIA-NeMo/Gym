@@ -1,11 +1,5 @@
 (multi-verifier-rollouts)=
 
-TODOs
-1. Swap to use 2 example resources servers
-2. Explain why you combine environments
-3. Show how to collect rollouts using multi environments
-4. Show outputs of rollouts from using multi-environments
-
 # Multi-verifier rollouts
 Gym is explicitly designed to support multi-verifier rollouts and training.
 
