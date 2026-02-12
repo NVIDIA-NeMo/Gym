@@ -43,7 +43,8 @@ sys.path.insert(0, str(nemo_rl_root))
 
 # System prompt for Wordle
 # Note: Reasoning mode disabled due to compatibility issues with multi-turn tool calling
-SYSTEM_PROMPT = """You are playing Wordle, a word-guessing game. Your goal is to guess a secret 5-letter word in 6 attempts or fewer.
+SYSTEM_PROMPT = """/no_think
+You are playing Wordle, a word-guessing game. Your goal is to guess a secret 5-letter word in 6 attempts or fewer.
 
 After each guess, you'll receive feedback:
 - G (Green): Letter is correct and in the right position
@@ -203,7 +204,7 @@ def generate_validation_data(seed: int = 43) -> list[dict]:
     from resources_servers.wordle.wordle_words import VALIDATION_WORDS
 
     entries = []
-    for i, target_word in enumerate(VALIDATION_WORDS):
+    for i, target_word in enumerate(VALIDATION_WORDS[:100]):
         # Cycle through user prompts
         user_prompt = USER_PROMPTS[i % len(USER_PROMPTS)]
         entry = create_wordle_entry(user_prompt, custom_target=target_word)
