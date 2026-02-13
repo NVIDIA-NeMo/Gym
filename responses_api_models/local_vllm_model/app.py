@@ -92,6 +92,9 @@ class LocalVLLMModelActor:
         self._patch_signal_handler()
         self._patch_uvicorn_logger()
         self._maybe_patch_engine_stats()
+        from nemo_gym.vllm_patches import apply_vllm_dp_placement_groups_patch
+
+        apply_vllm_dp_placement_groups_patch()
 
         for k, v in self.env_vars.items():
             environ[k] = v
