@@ -59,6 +59,9 @@ GRPO training on instruction following and reasoning environments.
 
 ## SFT & DPO
 
+::::{grid} 1 1 2 2
+:gutter: 1 1 1 2
+
 :::{grid-item-card} {octicon}`file;1.5em;sd-mr-1` Offline Training with Rollouts
 :link: offline-training-w-rollouts
 :link-type: doc
@@ -66,3 +69,5 @@ Transform rollouts into training data for supervised fine-tuning (SFT) and direc
 +++
 {bdg-secondary}`sft` {bdg-secondary}`dpo`
 :::
+
+::::

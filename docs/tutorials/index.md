@@ -29,5 +29,3 @@ Implement or integrate existing tools and define task verification logic.
 :::
 
 ::::
-
----
