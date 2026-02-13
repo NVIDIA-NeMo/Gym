@@ -266,7 +266,7 @@ Home <self>
 
 Overview <about/index.md>
 Concepts <about/concepts/index>
-🟡 Architecture <about/architecture>
+Architecture <about/architecture>
 Ecosystem <about/ecosystem>
 ```
 
@@ -278,7 +278,7 @@ Ecosystem <about/ecosystem>
 Quickstart <get-started/index>
 Detailed Setup Guide <get-started/detailed-setup.md>
 Rollout Collection <get-started/rollout-collection.md>
-🟡 First Training Run <get-started/first-training-run.md>
+First Training Run <get-started/first-training-run.md>
 ```
 
 ```{toctree}
@@ -286,8 +286,8 @@ Rollout Collection <get-started/rollout-collection.md>
 :hidden:
 :maxdepth: 1
 
-🟡 Overview <model-server/index>
-🟡 vLLM <model-server/vllm>
+Overview <model-server/index>
+vLLM <model-server/vllm>
 ```
 
 ```{toctree}
@@ -295,8 +295,8 @@ Rollout Collection <get-started/rollout-collection.md>
 :hidden:
 :maxdepth: 1
 
-🟡 Overview <agent-server/index>
-🟡 OpenAI Agents SDK <agent-server/integrate-agents/openai-agents-sdk>
+Overview <agent-server/index>
+OpenAI Agents SDK <agent-server/integrate-agents/openai-agents-sdk>
 ```
 
 ```{toctree}
@@ -304,9 +304,9 @@ Rollout Collection <get-started/rollout-collection.md>
 :hidden:
 :maxdepth: 1
 
-🟡 Overview <data/index>
-🟡 Prepare and Validate <data/prepare-validate>
-🟡 Download from Hugging Face <data/download-huggingface>
+Overview <data/index>
+Prepare and Validate <data/prepare-validate>
+Download from Hugging Face <data/download-huggingface>
 ```
 
 ```{toctree}
@@ -315,7 +315,7 @@ Rollout Collection <get-started/rollout-collection.md>
 :maxdepth: 1
 
 Overview <environment-tutorials/index>
-🟡 Creating Training Environment <environment-tutorials/creating-training-environment>
+Creating Training Environment <environment-tutorials/creating-training-environment>
 Multi-Environment Training <environment-tutorials/multi-environment-training>
 ```
 
@@ -336,8 +336,8 @@ Offline Training (SFT/DPO) <training-tutorials/offline-training-w-rollouts>
 :hidden:
 :maxdepth: 1
 
-🟡 Overview <model-recipes/index>
-🟡 Nemotron 3 Nano <model-recipes/nemotron-nano>
+Overview <model-recipes/index>
+Nemotron 3 Nano <model-recipes/nemotron-nano>
 ```
 
 ```{toctree}
@@ -345,8 +345,8 @@ Offline Training (SFT/DPO) <training-tutorials/offline-training-w-rollouts>
 :hidden:
 :maxdepth: 1
 
-🟡 Overview <infrastructure/index>
-🟡 Deployment Topology <infrastructure/deployment-topology>
+Overview <infrastructure/index>
+Deployment Topology <infrastructure/deployment-topology>
 ```
 
 ```{toctree}

@@ -40,9 +40,9 @@ ng_run --worker --head-url=http://coordinator:11000
 :::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` Deployment Topology
 :link: deployment-topology
 :link-type: doc
-Production deployment patterns.
+Server deployment patterns and training framework integration.
 +++
-{bdg-secondary}`deployment` {bdg-secondary}`topology`
+{bdg-secondary}`deployment` {bdg-secondary}`topology` {bdg-secondary}`training-integration`
 :::
 
 ::::
@@ -71,14 +71,10 @@ await self.server_client.post(
 
 ## Resource Requirements
 
-### CPU-Only (NeMo Gym)
+### NeMo Gym
 
 - 8GB+ RAM
 - Standard x86_64 or ARM64 CPU
 - Network connectivity
 
-### GPU (Model Inference)
-
-- NVIDIA GPU with 16GB+ VRAM
-- CUDA 11.8+
-- GPU driver 450+
+Some resource servers may require GPUs (e.g., when running local reward or judge models via vLLM). See {ref}`infra-deployment-topology` for details on training framework co-location and resource requirements.
