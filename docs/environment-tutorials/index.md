@@ -49,6 +49,15 @@ Build `verify()`, prepare data, connect to NeMo RL.
 {bdg-primary}`start here` {bdg-secondary}`45-90 min`
 :::
 
+:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Multi-Environment Training
+:link: multi-environment-training
+:link-type: doc
+
+Run multiple training environments simultaneously for rollout collection.
+
++++
+:::
+
 ::::
 
 ---
