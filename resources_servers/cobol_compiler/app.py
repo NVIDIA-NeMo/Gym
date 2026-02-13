@@ -88,7 +88,7 @@ class CobolCompilerServer(SimpleResourcesServer):
                 reward=0.0,
             )
 
-        test_cases = body.verifier_metadata.get("test_cases", [])
+        test_cases = (body.verifier_metadata or {}).get("test_cases", [])
         if not test_cases:
             LOG.warning("No test cases in verifier_metadata")
             return CobolVerifyResponse(

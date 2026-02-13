@@ -11,6 +11,7 @@ cobol_compiler:
       - -free
       - -fdiagnostics-plain-output
       debug: false
+      verified: false
 cobol_compiler_simple_agent:
   responses_api_agents:
     simple_agent:

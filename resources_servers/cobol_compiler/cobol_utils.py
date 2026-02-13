@@ -37,7 +37,7 @@ LOG = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def extract_cobol_code(text: str) -> Optional[str]:
+def extract_cobol_code(text: Optional[str]) -> Optional[str]:
     """Extract COBOL source code from an LLM response.
 
     Strategy:
@@ -166,7 +166,6 @@ def compile_and_test(
             compile_result = subprocess.run(
                 [compiler_cmd] + compiler_flags + ["-o", str(exe), str(src)],
                 capture_output=True,
-                text=True,
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired:
@@ -189,7 +188,8 @@ def compile_and_test(
             }
 
         if compile_result.returncode != 0:
-            errors = [line for line in (compile_result.stderr or "").splitlines() if line.strip()]
+            stderr_text = compile_result.stderr.decode("utf-8", errors="replace") if compile_result.stderr else ""
+            errors = [line for line in stderr_text.splitlines() if line.strip()]
             return {
                 "all_passed": False,
                 "compilation_success": False,
@@ -220,28 +220,28 @@ def compile_and_test(
             try:
                 run_result = subprocess.run(
                     [str(exe)],
-                    input=tc["input"],
+                    input=tc["input"].encode("utf-8"),
                     capture_output=True,
-                    text=True,
                     timeout=timeout,
                 )
-                actual = run_result.stdout.strip()
+                actual = run_result.stdout.decode("utf-8", errors="replace").strip()
                 expected = tc["expected_output"].strip()
                 test_passed = actual == expected
 
                 if test_passed:
                     passed += 1
-                    consecutive_timeouts = 0
-                else:
-                    consecutive_timeouts = 0
+                consecutive_timeouts = 0
 
+                stderr_text = (
+                    run_result.stderr.decode("utf-8", errors="replace").strip() if run_result.stderr else None
+                )
                 test_results.append(
                     {
                         "test_id": tc.get("test_id", len(test_results)),
                         "passed": test_passed,
                         "expected": expected,
                         "actual": actual,
-                        "error": run_result.stderr.strip() if run_result.stderr else None,
+                        "error": stderr_text,
                     }
                 )
             except subprocess.TimeoutExpired:
