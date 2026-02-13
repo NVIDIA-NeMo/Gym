@@ -352,34 +352,6 @@ vllm serve \
 ```
 
 
-# How To: Multi-verifier usage
-Gym is explicitly designed to support multi-verifier training.
-
-Let's say you want to use both math and search verifiers. Normally how you spin up the servers individually is:
-For math:
-```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/math_with_judge/configs/bytedtsinghua_dapo17k.yaml"
-ng_run "+config_paths=[${config_paths}]"
-```
-For search:
-```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/google_search/configs/google_search.yaml"
-ng_run "+config_paths=[$config_paths]"
-```
-
-If you want to use them both you would just add the yamls together like:
-```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/math_with_judge/configs/bytedtsinghua_dapo17k.yaml,\
-resources_servers/google_search/configs/google_search.yaml"
-ng_run "+config_paths=[$config_paths]"
-```
-
-The same process goes for data preparation and downstream training framework Gym configuration, you would just add additional server configs.
-
-
 # How To: Profile your resources server
 For large scale verifier training, it's critical that your resources server is as efficient as possible. It can be slammed with 16k concurrent requests or more. Gym provides easy tools to profile and understand the efficiency of your servers.
 
