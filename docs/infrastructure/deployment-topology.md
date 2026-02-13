@@ -24,19 +24,17 @@ NeMo Gym supports three deployment patterns, each suited to different stages of 
 
 All servers run in a single process—ideal for local development and debugging:
 
-```{mermaid}
-%%{init: {'theme': 'default', 'themeVariables': { 'lineColor': '#5c6bc0', 'primaryTextColor': '#333'}}}%%
-flowchart TB
-    subgraph Machine["Single Machine"]
-        subgraph Head["Head Server"]
-            Model["Model Server"]
-            Resources["Resources Server"]
-            Agent["Agent Server"]
-        end
-    end
-
-    style Machine fill:#f5f5f5,stroke:#999,stroke-width:2px
-    style Head fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
+```
+┌─────────────────────────────────┐
+│         Single Machine          │
+│                                 │
+│  ┌─────────────────────────┐   │
+│  │      Head Server        │   │
+│  │   ├── Model Server      │   │
+│  │   ├── Resources Server  │   │
+│  │   └── Agent Server      │   │
+│  └─────────────────────────┘   │
+└─────────────────────────────────┘
 ```
 
 **Best for:** Local development, debugging, quick iteration
@@ -47,20 +45,19 @@ flowchart TB
 
 Services run as separate processes on a single machine:
 
-```{mermaid}
-%%{init: {'theme': 'default', 'themeVariables': { 'lineColor': '#5c6bc0', 'primaryTextColor': '#333'}}}%%
-flowchart LR
-    subgraph Machine["Single Machine"]
-        Head["Head Server"]
-        Model["Model Server"]
-        Resources["Resources Server"]
-        Agent["Agent Server"]
-    end
-
-    Head ~~~ Model
-    Resources ~~~ Agent
-
-    style Machine fill:#f5f5f5,stroke:#999,stroke-width:2px
+```
+┌─────────────────────────────────┐
+│         Single Machine          │
+│                                 │
+│  ┌───────────┐ ┌────────────┐  │
+│  │   Head    │ │   Model    │  │
+│  │  Server   │ │   Server   │  │
+│  └───────────┘ └────────────┘  │
+│  ┌───────────┐ ┌────────────┐  │
+│  │ Resources │ │   Agent    │  │
+│  │  Server   │ │   Server   │  │
+│  └───────────┘ └────────────┘  │
+└─────────────────────────────────┘
 ```
 
 **Best for:** Integration testing, validating service communication, Docker Compose setups
@@ -71,25 +68,24 @@ flowchart LR
 
 Services distributed across multiple nodes for horizontal scaling:
 
-```{mermaid}
-%%{init: {'theme': 'default', 'themeVariables': { 'lineColor': '#5c6bc0', 'primaryTextColor': '#333'}}}%%
-flowchart LR
-    subgraph Coordinator["Coordinator Node"]
-        Head["Head Server"]
-    end
-    subgraph GPU["GPU Node"]
-        Model["Model Server"]
-    end
-    subgraph CPU["CPU Node"]
-        Resources["Resources Server"]
-    end
-
-    Head --> Model
-    Head --> Resources
-
-    style Coordinator fill:#f5f5f5,stroke:#999,stroke-width:2px
-    style GPU fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
-    style CPU fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
+```
+┌─────────────┐     ┌─────────────┐
+│ Coordinator │     │  GPU Node   │
+│             │     │             │
+│ ┌─────────┐ │     │ ┌─────────┐ │
+│ │  Head   │ │────▶│ │ Model   │ │
+│ │ Server  │ │     │ │ Server  │ │
+│ └─────────┘ │     │ └─────────┘ │
+└─────────────┘     └─────────────┘
+        │
+        │           ┌─────────────┐
+        │           │ CPU Node    │
+        └──────────▶│             │
+                    │ ┌─────────┐ │
+                    │ │Resources│ │
+                    │ │ Server  │ │
+                    │ └─────────┘ │
+                    └─────────────┘
 ```
 
 **Best for:** Production workloads, large-scale rollout collection, multi-GPU training

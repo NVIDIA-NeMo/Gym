@@ -71,10 +71,14 @@ await self.server_client.post(
 
 ## Resource Requirements
 
-### NeMo Gym
+### CPU-Only (NeMo Gym)
 
 - 8GB+ RAM
 - Standard x86_64 or ARM64 CPU
 - Network connectivity
 
-Some resource servers may require GPUs (e.g., when running local reward or judge models via vLLM). See {ref}`infra-deployment-topology` for details on training framework co-location and resource requirements.
+### GPU (Model Inference)
+
+- NVIDIA GPU with 16GB+ VRAM
+- CUDA 11.8+
+- GPU driver 450+
