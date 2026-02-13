@@ -27,8 +27,8 @@ Understand the three server components that make up a training environment.
 :::
 
 :::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` Architecture
-:link: about/architecture
-:link-type: doc
+:link: about-architecture
+:link-type: ref
 How components interact during startup and rollout collection.
 :::
 

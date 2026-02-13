@@ -1,0 +1,16 @@
+{
+  "id": "ca0b80a7",
+  "type": "docs_staged",
+  "timestamp": "2026-02-13T20:53:19.290241Z",
+  "message": "3 doc(s) staged for commit",
+  "suggested_action": "::a",
+  "acknowledged": false,
+  "metadata": {
+    "file_count": 3
+  },
+  "files": [
+    "docs/about/architecture.md",
+    "docs/about/concepts/index.md",
+    "docs/index.md"
+  ]
+}

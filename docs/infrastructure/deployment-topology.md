@@ -387,8 +387,8 @@ NeMo Gym servers have **no built-in authentication**. They are designed for trus
 :gutter: 3
 
 :::{grid-item-card} {octicon}`book;1.5em;sd-mr-1` Architecture Overview
-:link: /about/architecture
-:link-type: doc
+:link: about-architecture
+:link-type: ref
 Understand the server-based architecture.
 :::
 
