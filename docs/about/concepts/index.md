@@ -27,8 +27,8 @@ Understand the three server components that make up a training environment.
 :::
 
 :::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` Architecture
-:link: architecture
-:link-type: ref
+:link: about/architecture
+:link-type: doc
 How components interact during startup and rollout collection.
 :::
 
@@ -59,7 +59,6 @@ Essential vocabulary for agent training, RL workflows, and NeMo Gym.
 :maxdepth: 1
 
 Core Components <core-components>
-Architecture <architecture>
 Configuration System <configuration>
 Task Verification <task-verification>
 Key Terminology <key-terminology>

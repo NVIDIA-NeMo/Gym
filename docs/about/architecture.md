@@ -1,85 +1,184 @@
 (about-architecture)=
+(architecture)=
+
 # Architecture
 
-NeMo Gym runs a set of HTTP servers that coordinate rollout execution (see {doc}`concepts/key-terminology`). The main server roles are model servers for inference, resources servers for environment logic and verification, agent servers for orchestration, and a head server that publishes resolved configuration.
+This section describes how NeMo Gym components interact during startup and execution. For an overview of the three server types (Model, Resources, Agent), see {ref}`core-components`.
 
-## TL;DR
+## Control Plane: Server Startup
 
-- **Agent servers** orchestrate rollout execution by calling **model** and **resources** servers.
-- **Resources servers** manage environment state and compute verification rewards.
-- **Model servers** expose OpenAI-compatible inference endpoints.
-- **The head server** publishes the resolved configuration for service discovery.
+When you run `ng_run`, the system starts up in four phases:
 
-## High-Level Architecture
-
-```{note}
-Architecture diagram not yet available. This section describes the runtime interactions and endpoints defined in the server implementations.
+```{mermaid}
+%%{init: {'theme': 'default', 'themeVariables': { 'lineColor': '#5c6bc0', 'primaryTextColor': '#333', 'primaryColor': '#e3f2fd', 'secondaryColor': '#f5f5f5'}}}%%
+flowchart LR
+    A[Parse CLI] --> B[Load Configs]
+    B --> C[Init Ray]
+    C --> D[Start Servers]
 ```
 
-## Components and Responsibilities
+### Phase 1: Parse CLI
 
-### Model servers (Responses API)
+The `ng_run` command uses Hydra to parse command-line arguments. Users specify configuration files via `+config_paths`:
 
-Model servers expose OpenAI-compatible inference endpoints for chat and responses:
+```bash
+ng_run "+config_paths=[resources_servers/math/configs/math.yaml, responses_api_models/openai_model/configs/openai_model.yaml]"
+```
 
-- `POST /v1/chat/completions`
-- `POST /v1/responses`
+### Phase 2: Load and Merge Configs
 
-The base model server class defines these endpoints. Concrete model servers implement them (for example, the OpenAI-backed model server). Agents call these endpoints through the shared server client.
+Configuration is loaded from multiple sources in order of priority (later sources override earlier):
 
-### Resources servers (environment + verification)
+1. YAML files specified in `config_paths`
+2. Local `env.yaml` file (for sensitive values like API keys)
+3. Command-line arguments (highest priority)
 
-Resources servers expose environment lifecycle endpoints:
+**Port allocation**: Users can explicitly specify `host` and `port` in their config. If not provided, the framework automatically allocates ports from available system ports, tracking used ports to prevent conflicts.
 
-- `POST /seed_session` to initialize session state
-- `POST /verify` to compute rewards from a rollout response
+### Phase 3: Initialize Ray
 
-Individual resources servers can add domain-specific endpoints for tools or environment steps. For example:
+The system initializes a Ray cluster for distributed coordination. If `ray_head_node_address` is specified in the config, it connects to an existing cluster; otherwise, it starts a new one.
 
-- A resources server can register a catch-all tool route like `POST /{path}` for tool execution.
-- Aviary-based resources servers add `POST /step` and `POST /close` for multi-step environments.
+### Phase 4: Start Servers
 
-### Agent servers (rollout orchestration)
+Servers are started in two stages:
 
-Agent servers expose two primary endpoints:
+```{mermaid}
+%%{init: {'theme': 'default', 'themeVariables': { 'lineColor': '#5c6bc0', 'primaryTextColor': '#333'}}}%%
+flowchart TB
+    Main["Main Process<br/>ng_run"]
+    Head["Head Server<br/>Port 11000"]
+    Model["Model Server<br/>Own venv + port"]
+    Agent["Agent Server<br/>Own venv + port"]
+    Resources["Resources Server<br/>Own venv + port"]
+    
+    Main --> Head
+    Main -->|spawn| Model
+    Main -->|spawn| Agent
+    Main -->|spawn| Resources
+```
 
-- `POST /v1/responses` for multi-step interaction
-- `POST /run` for full rollout execution and verification
+1. **Head Server**: Started as a background thread in the main process. Provides endpoints for config discovery (`/global_config_dict_yaml`) and server instance listing (`/server_instances`).
 
-The base agent server class wires these routes, while each agent implementation defines how to call model and resources servers.
+2. **Server Subprocesses**: Each configured server is spawned as an independent OS process:
+   - Each server has its own Python virtual environment in order to isolate dependencies.
+   - Each runs uvicorn with a FastAPI application listening on `http://{host}:{port}`.
+   - The global config is passed via environment variable `NEMO_GYM_CONFIG_DICT`.
+   - The specific server identity is passed via `NEMO_GYM_CONFIG_PATH`.
+   - Server URLs are registered in the global config, allowing other servers to discover and call them.
 
-### Head server (configuration discovery)
+3. **Health Check**: The main process polls each server's HTTP endpoint until all return 200, then reports "All servers ready!"
 
-The head server exposes:
+## Running State
 
-- `GET /global_config_dict_yaml` to return the resolved global configuration
-- `GET /server_instances` to list server instances started by the CLI
+Once all servers are healthy, the system enters steady state:
 
-The shared server client fetches the resolved configuration from the head server and uses server names to resolve host/port for inter-server requests.
+- The main process sleeps and periodically polls subprocess health
+- Each server process runs its own uvicorn event loop, handling requests asynchronously
+- Servers communicate with each other only via HTTP (no shared memory)
+- Session state is maintained via cookies for multi-step rollouts
 
-## Request Flow
+## Shutdown
 
-### Rollout via `POST /run` (SimpleAgent)
+When the user presses Ctrl+C (or the process receives SIGINT):
 
-The `SimpleAgent` implementation orchestrates a complete rollout and verification sequence:
+1. SIGINT is forwarded to all server subprocesses
+2. Main process waits for subprocesses to terminate (with timeout)
+3. Head server thread is stopped
+4. Process exits cleanly
 
-1. Call the resources server `POST /seed_session` to initialize session state.
-2. Call the agent `POST /v1/responses`. The agent calls the model server `POST /v1/responses` and issues tool calls to the resources server via `POST /{tool_name}`.
-3. Call the resources server `POST /verify` and return the verified rollout response.
+---
 
-The rollout collection flow uses the agent `POST /run` endpoint and writes the returned metrics to JSONL output.
+## HTTP Request Flow: Example
 
-### Multi-step environments (Aviary example)
+During a single rollout, servers communicate via HTTP. This example shows a math problem with tool use:
 
-Some resources servers model environments with explicit step and close endpoints. Aviary-based resources servers accept `POST /step` for environment transitions and `POST /close` to release an environment instance.
+```{mermaid}
+%%{init: {'theme': 'default', 'themeVariables': { 'lineColor': '#5c6bc0', 'primaryTextColor': '#333'}}}%%
+sequenceDiagram
+    autonumber
+    participant Agent as Agent
+    participant Model as Model
+    participant Resources as Resources
+    
+    Note over Agent,Resources: Initialize
+    Agent->>Resources: POST /seed_session
+    Resources-->>Agent: OK
+    
+    Note over Agent,Resources: First generation
+    Agent->>Model: POST /v1/responses
+    Model-->>Agent: function_call: calculate
+    
+    Note over Agent,Resources: Tool execution
+    Agent->>Resources: POST /calculate
+    Resources-->>Agent: "4"
+    
+    Note over Agent,Resources: Second generation
+    Agent->>Model: POST /v1/responses
+    Model-->>Agent: message: "The answer is 4"
+    
+    Note over Agent,Resources: Verification
+    Agent->>Resources: POST /verify
+    Resources-->>Agent: reward: 1.0
+```
 
-## Session and State
+**Key Design Points:**
 
-All servers add session handling that assigns a session ID when one is not present. Agents propagate cookies between model and resources servers, which lets resources servers store per-session state. Several resources servers keep in-memory maps keyed by session ID (for example, counters or tool environments) to track environment state across steps.
+- **HTTP-only communication**: All servers communicate via HTTP, enabling language-agnostic implementations and deployment flexibility
+- **Stateless model servers**: Model servers perform single-call generation without memory; the agent maintains conversation state
+- **Session state in resources**: Resources servers use session cookies to maintain per-rollout state across multiple tool calls
+- **OpenAI API compatibility**: Model servers expose `/v1/responses` endpoints compatible with the OpenAI Responses API
+- **uvicorn + FastAPI**: All servers use [uvicorn](https://uvicorn.dev/) as the ASGI server with [FastAPI](https://fastapi.tiangolo.com/) for HTTP routing and request handling
 
-## Configuration and Port Resolution
+---
 
-The global configuration dict configures server instances. During parsing, servers without explicit host/port values receive defaults (host defaults to `127.0.0.1`, and the system assigns ports from available ports). The head server uses port `11000` by default and publishes the resolved configuration used by the server client.
+## Data Plane: Rollout Collection
+
+When you run `ng_collect_rollouts`, the system collects training data by executing rollouts in parallel:
+
+```{mermaid}
+%%{init: {'theme': 'default', 'themeVariables': { 'lineColor': '#5c6bc0', 'primaryTextColor': '#333'}}}%%
+sequenceDiagram
+    autonumber
+    participant Client as Client
+    participant Head as Head Server
+    participant Agent as Agent
+    participant Model as Model
+    participant Resources as Resources
+    
+    Client->>Head: GET /global_config_dict_yaml
+    Head-->>Client: Server addresses
+    
+    Client->>Agent: POST /run
+    
+    loop Each prompt in parallel
+        Agent->>Resources: Seed session
+        Resources-->>Agent: OK
+        
+        loop Generation loop
+            Agent->>Model: Generate response
+            Model-->>Agent: Output
+            
+            opt Tool calls
+                Agent->>Resources: Execute tool
+                Resources-->>Agent: Result
+            end
+        end
+        
+        Agent->>Resources: Verify and score
+        Resources-->>Agent: Reward
+    end
+    
+    Agent-->>Client: Results with rewards
+```
+
+The client first queries the Head Server to discover server addresses from the global config, then reads input JSONL and dispatches prompts to the Agent. Completed rollouts are written to output JSONL.
+
+**Concurrency behavior differs by use case:**
+- **Standalone rollout collection** (`ng_collect_rollouts`): A semaphore gates concurrency via `num_samples_in_parallel` to control load.
+- **Training framework integration** (e.g., NeMo RL): All requests are sent without gating; the training framework manages concurrency externally.
+
+---
 
 ## Related
 

@@ -225,23 +225,6 @@ SFT and DPO from collected rollouts.
 View all training tutorials →
 ```
 
-## Infrastructure
-
-Deploy and scale NeMo Gym for production workloads.
-
-::::{grid} 1 2 2 2
-:gutter: 1 1 1 2
-
-:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` Deployment Topology
-:link: infrastructure/deployment-topology
-:link-type: doc
-Production deployment patterns and configurations.
-+++
-{bdg-secondary}`deployment` {bdg-secondary}`topology`
-:::
-
-::::
-
 ## Contribute
 
 Contribute to NeMo Gym development.
@@ -281,7 +264,7 @@ Home <self>
 
 Overview <about/index.md>
 Concepts <about/concepts/index>
-🟡 Architecture <about/architecture>
+Architecture <about/architecture>
 Ecosystem <about/ecosystem>
 ```
 
@@ -306,22 +289,13 @@ Rollout Collection <get-started/rollout-collection.md>
 ```
 
 ```{toctree}
-:caption: Agent Server
-:hidden:
-:maxdepth: 1
-
-🟡 Overview <agent-server/index>
-🟡 OpenAI Agents SDK <agent-server/integrate-agents/openai-agents-sdk>
-```
-
-```{toctree}
 :caption: Data
 :hidden:
 :maxdepth: 1
 
-🟡 Overview <data/index>
-🟡 Prepare and Validate <data/prepare-validate>
-🟡 Download from Hugging Face <data/download-huggingface>
+Overview <data/index>
+Prepare and Validate <data/prepare-validate>
+Download from Hugging Face <data/download-huggingface>
 ```
 
 ```{toctree}
@@ -339,20 +313,10 @@ Rollout Collection <get-started/rollout-collection.md>
 :maxdepth: 1
 
 🟡 Overview <training-tutorials/index>
-🟡 Nemotron Nano <training-tutorials/nemotron-nano>
 NeMo RL GRPO <tutorials/nemo-rl-grpo/index.md>
 Unsloth Training <tutorials/unsloth-training>
 🟡 TRL <training-tutorials/trl>
 Offline Training <tutorials/offline-training-w-rollouts>
-```
-
-```{toctree}
-:caption: Infrastructure
-:hidden:
-:maxdepth: 1
-
-🟡 Overview <infrastructure/index>
-🟡 Deployment Topology <infrastructure/deployment-topology>
 ```
 
 ```{toctree}
