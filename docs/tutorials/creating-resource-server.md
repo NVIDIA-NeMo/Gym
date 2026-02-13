@@ -508,7 +508,7 @@ Now that you have a working resource server:
 :gutter: 3
 
 :::{grid-item-card} {octicon}`database;1.5em;sd-mr-1` Collect Rollouts
-:link: offline-training-w-rollouts
+:link: /training-tutorials/offline-training-w-rollouts
 :link-type: doc
 Learn how to collect and process rollouts for training data.
 :::

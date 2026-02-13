@@ -133,7 +133,7 @@ Browse available resource servers on GitHub to find other training environments.
 :::
 
 :::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build a Custom Training Environment
-:link: ../creating-resource-server
+:link: /environment-tutorials/creating-training-environment
 :link-type: doc
 
 Create your own resource server with custom tools and verification logic.
@@ -144,7 +144,7 @@ Create your own resource server with custom tools and verification logic.
 ::::
 
 ```{toctree}
-:caption: NeMo RL GRPO
+:caption: NeMo RL
 :hidden:
 :maxdepth: 1
 
@@ -154,5 +154,4 @@ nemo-rl-configuration.md
 setup.md
 single-node-training.md
 multi-node-training.md
-🟡 Multi-Verifier Training <multi-verifier-training.md>
 ```
