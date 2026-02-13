@@ -314,8 +314,9 @@ Rollout Collection <get-started/rollout-collection.md>
 :hidden:
 :maxdepth: 1
 
-🟡 Overview <environment-tutorials/index>
+Overview <environment-tutorials/index>
 🟡 Creating Training Environment <environment-tutorials/creating-training-environment>
+Multi-Environment Training <environment-tutorials/multi-environment-training>
 ```
 
 ```{toctree}
