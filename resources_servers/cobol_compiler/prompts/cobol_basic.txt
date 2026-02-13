@@ -1,0 +1,71 @@
+Write complete, compilable COBOL code for GnuCOBOL 3.2+. Output ONLY the COBOL program with no explanations or commentary.
+
+## Program Structure (Required Order)
+```cobol
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. [PROGRAM-NAME].
+
+       ENVIRONMENT DIVISION.
+
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       [Variable declarations with PIC clauses]
+
+       PROCEDURE DIVISION.
+       [Program logic using paragraphs]
+       STOP RUN.
+```
+
+## Coding Standards
+- **Variable Names**: Use WS- prefix, descriptive names with hyphens (WS-COUNTER, WS-INPUT-VALUE, WS-RESULT)
+- **PIC Clauses**: Required for all elementary items
+  - Integers: `PIC 9(n)` (e.g., `PIC 9(5)` for 5-digit number)
+  - Decimals: `PIC 9(n)V9(m)` (e.g., `PIC 9(3)V99` for 3.2 format)
+  - Text/Mixed: `PIC X(n)` (e.g., `PIC X(50)` for 50-character string)
+  - Signed Numbers: `PIC S9(n)` (e.g., `PIC S9(5)` for signed integer)
+- **Level Numbers**: Use 01 for main items, 05 for sub-items
+- **Format**: Use free format (-free). Indentation is stylistic; columns are not enforced
+- **Initialization**: Use VALUE clauses where appropriate
+
+## Essential COBOL Constructs
+
+### Input/Output
+- **Input**: Use ACCEPT for reading from stdin: `ACCEPT WS-INPUT-VALUE`
+  - **IMPORTANT**: Do NOT display prompts before ACCEPT (no "Enter input:" messages)
+  - Tests provide input via stdin - just read silently
+- **Output**: Use DISPLAY for output: `DISPLAY WS-RESULT`
+  - Only display the final result/answer
+  - Do NOT display intermediate messages or debugging output
+
+### Parsing stdin patterns
+```cobol
+*> Single integer (robust)
+ACCEPT WS-LINE
+MOVE FUNCTION NUMVAL(FUNCTION TRIM(WS-LINE)) TO WS-N
+
+*> Space-separated list of integers
+ACCEPT WS-LINE
+MOVE 1 TO WS-PTR
+PERFORM UNTIL WS-PTR > FUNCTION LENGTH(WS-LINE)
+    UNSTRING WS-LINE DELIMITED BY SPACE
+        INTO WS-TOKEN
+        WITH POINTER WS-PTR
+        TALLYING WS-TALLY
+    IF WS-TALLY > 0 AND WS-TOKEN NOT = SPACES
+        ADD 1 TO WS-COUNT
+        MOVE FUNCTION NUMVAL(WS-TOKEN) TO WS-ARR(WS-COUNT)
+    END-IF
+END-PERFORM
+```
+
+## Requirements (must all be true)
+1. Compiles with GnuCOBOL (free format)
+2. Reads input silently from stdin (no prompts)
+3. Displays only the required final output (no labels/extra text)
+4. Uses NUMVAL/NUMVAL-C when parsing numeric text
+5. Handles empty/edge-case inputs sensibly
+6. Follows proper COBOL-85+ syntax and structured programming (PERFORM, avoid GO TO)
+7. Declares variables with appropriate PIC clauses
+8. Implements all specified test case logic correctly
+
+IMPORTANT: Output ONLY the COBOL code without any markdown formatting, explanations, or commentary. Do not use ``` blocks, ** formatting, or any other markdown. Start with IDENTIFICATION DIVISION.

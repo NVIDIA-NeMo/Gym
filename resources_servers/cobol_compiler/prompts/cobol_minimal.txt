@@ -1,0 +1,1 @@
+Write a COBOL program that solves the following problem. The program must compile with GnuCOBOL (free format), read input from stdin using ACCEPT, and write output to stdout using DISPLAY. Output ONLY the complete COBOL code starting with IDENTIFICATION DIVISION.

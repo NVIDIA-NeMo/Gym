@@ -19,6 +19,7 @@ Usage:
     python convert_dataset.py \
         --input ~/projects/domainforge/datasets/cobol_multipl_eval.json \
         --output ../data/cobol_multipl_eval.jsonl \
+        --system-prompt ../prompts/cobol_basic.txt \
         --example-output ../data/example.jsonl \
         --example-count 5
 """
@@ -29,81 +30,7 @@ import sys
 from pathlib import Path
 
 
-SYSTEM_PROMPT = """\
-Write complete, compilable COBOL code for GnuCOBOL 3.2+. Output ONLY the COBOL program with no explanations or commentary.
-
-## Program Structure (Required Order)
-```cobol
-       IDENTIFICATION DIVISION.
-       PROGRAM-ID. [PROGRAM-NAME].
-
-       ENVIRONMENT DIVISION.
-
-       DATA DIVISION.
-       WORKING-STORAGE SECTION.
-       [Variable declarations with PIC clauses]
-
-       PROCEDURE DIVISION.
-       [Program logic using paragraphs]
-       STOP RUN.
-```
-
-## Coding Standards
-- **Variable Names**: Use WS- prefix, descriptive names with hyphens (WS-COUNTER, WS-INPUT-VALUE, WS-RESULT)
-- **PIC Clauses**: Required for all elementary items
-  - Integers: `PIC 9(n)` (e.g., `PIC 9(5)` for 5-digit number)
-  - Decimals: `PIC 9(n)V9(m)` (e.g., `PIC 9(3)V99` for 3.2 format)
-  - Text/Mixed: `PIC X(n)` (e.g., `PIC X(50)` for 50-character string)
-  - Signed Numbers: `PIC S9(n)` (e.g., `PIC S9(5)` for signed integer)
-- **Level Numbers**: Use 01 for main items, 05 for sub-items
-- **Format**: Use free format (-free). Indentation is stylistic; columns are not enforced
-- **Initialization**: Use VALUE clauses where appropriate
-
-## Essential COBOL Constructs
-
-### Input/Output
-- **Input**: Use ACCEPT for reading from stdin: `ACCEPT WS-INPUT-VALUE`
-  - **IMPORTANT**: Do NOT display prompts before ACCEPT (no "Enter input:" messages)
-  - Tests provide input via stdin - just read silently
-- **Output**: Use DISPLAY for output: `DISPLAY WS-RESULT`
-  - Only display the final result/answer
-  - Do NOT display intermediate messages or debugging output
-
-### Parsing stdin patterns
-```cobol
-*> Single integer (robust)
-ACCEPT WS-LINE
-MOVE FUNCTION NUMVAL(FUNCTION TRIM(WS-LINE)) TO WS-N
-
-*> Space-separated list of integers
-ACCEPT WS-LINE
-MOVE 1 TO WS-PTR
-PERFORM UNTIL WS-PTR > FUNCTION LENGTH(WS-LINE)
-    UNSTRING WS-LINE DELIMITED BY SPACE
-        INTO WS-TOKEN
-        WITH POINTER WS-PTR
-        TALLYING WS-TALLY
-    IF WS-TALLY > 0 AND WS-TOKEN NOT = SPACES
-        ADD 1 TO WS-COUNT
-        MOVE FUNCTION NUMVAL(WS-TOKEN) TO WS-ARR(WS-COUNT)
-    END-IF
-END-PERFORM
-```
-
-## Requirements (must all be true)
-1. Compiles with GnuCOBOL (free format)
-2. Reads input silently from stdin (no prompts)
-3. Displays only the required final output (no labels/extra text)
-4. Uses NUMVAL/NUMVAL-C when parsing numeric text
-5. Handles empty/edge-case inputs sensibly
-6. Follows proper COBOL-85+ syntax and structured programming (PERFORM, avoid GO TO)
-7. Declares variables with appropriate PIC clauses
-8. Implements all specified test case logic correctly
-
-IMPORTANT: Output ONLY the COBOL code without any markdown formatting, explanations, or commentary. Do not use ``` blocks, ** formatting, or any other markdown. Start with IDENTIFICATION DIVISION."""
-
-
-def convert_problem(problem: dict) -> dict:
+def convert_problem(problem: dict, system_prompt: str) -> dict:
     """Convert a single DomainForge problem to NeMo-Gym JSONL format."""
     # Build user prompt from problem description + I/O format spec
     user_content = problem["prompt"]
@@ -118,7 +45,7 @@ def convert_problem(problem: dict) -> dict:
     return {
         "responses_create_params": {
             "input": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
         },
@@ -135,9 +62,16 @@ def main():
     parser = argparse.ArgumentParser(description="Convert DomainForge COBOL dataset to NeMo-Gym JSONL")
     parser.add_argument("--input", required=True, help="Path to cobol_multipl_eval.json")
     parser.add_argument("--output", required=True, help="Output JSONL path")
+    parser.add_argument("--system-prompt", required=True, help="Path to system prompt text file")
     parser.add_argument("--example-output", default=None, help="Path for example.jsonl subset")
     parser.add_argument("--example-count", type=int, default=5, help="Number of examples to include")
     args = parser.parse_args()
+
+    prompt_path = Path(args.system_prompt).expanduser()
+    if not prompt_path.exists():
+        print(f"Error: system prompt file not found: {prompt_path}", file=sys.stderr)
+        sys.exit(1)
+    system_prompt = prompt_path.read_text().strip()
 
     input_path = Path(args.input).expanduser()
     if not input_path.exists():
@@ -154,7 +88,7 @@ def main():
 
     converted = []
     for problem in problems:
-        converted.append(convert_problem(problem))
+        converted.append(convert_problem(problem, system_prompt))
 
     with open(output_path, "w") as f:
         for entry in converted:

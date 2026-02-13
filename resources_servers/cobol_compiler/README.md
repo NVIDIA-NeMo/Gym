@@ -62,6 +62,26 @@ ng_viewer +jsonl_fpath=results/cobol_rollouts_full.jsonl
 
 Use `openai_model` instead of `vllm_model` if your endpoint supports the OpenAI Responses API (`/v1/responses`).
 
+## System Prompts
+
+Three system prompt tiers are provided in `prompts/` for different evaluation needs:
+
+| Prompt | Description |
+|--------|-------------|
+| `cobol_minimal.txt` | HumanEval-style baseline — no hand-holding, most comparable to published benchmarks |
+| `cobol_basic.txt` | Coding standards, program structure, I/O patterns |
+| `cobol_comprehensive.txt` | Full reference with output formatting, error avoidance, pre-submission checklist |
+
+The included JSONL data uses `cobol_basic.txt`. To regenerate with a different prompt:
+
+```bash
+python scripts/convert_dataset.py \
+    --input /path/to/cobol_multipl_eval.json \
+    --output data/cobol_multipl_eval.jsonl \
+    --system-prompt prompts/cobol_minimal.txt \
+    --example-output data/example.jsonl
+```
+
 ## Unit Tests
 
 ```bash
