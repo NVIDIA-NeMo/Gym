@@ -22,4 +22,12 @@ Infrastructure challenges regarding SoftWare Engineering (SWE) task RL as a case
 {bdg-secondary}`swe-rl` {bdg-secondary}`case-study`
 :::
 
+:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` Aiohttp vs httpx HTTP backends
+:link: deployment-topology
+:link-type: doc
+Why use aiohttp backend instead of httpx/httpcore for async http?
++++
+{bdg-secondary}`server-infra`
+:::
+
 ::::
