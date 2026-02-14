@@ -1,6 +1,122 @@
 (model-server-vllm)=
 # vLLM Model Server
 
+# How To: Use NeMo Gym with a non-Responses compatible API endpoint like vLLM
+Most models use Chat Completions format rather than the OpenAI Responses API schema that NeMo Gym uses natively. To bridge this gap, NeMo Gym provides a conversion layer.
+
+As a result, we provide a Responses API to Chat Completions mapping middleware layer in the form of `responses_api_models/vllm_model`. VLLMModel assumes that you are pointing to a vLLM instance (since it relies on vLLM-specific endpoints like `/tokenize` and vLLM-specific arguments like `return_tokens_as_token_ids`).
+
+**To use VLLMModel, just change the `responses_api_models/openai_model/configs/openai_model.yaml` in your config paths to `responses_api_models/vllm_model/configs/vllm_model.yaml`!**
+```bash
+config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\
+responses_api_models/vllm_model/configs/vllm_model.yaml"
+ng_run "+config_paths=[$config_paths]"
+```
+
+Here is an e2e example of how to spin up a NeMo Gym compatible vLLM Chat Completions OpenAI server.
+- If you want to use tools, find the appropriate vLLM arguments regarding the tool call parser to use. In this example, we use Qwen3-30B-A3B, which is suggested to use the `hermes` tool call parser.
+- If you are using a reasoning model, find the appropriate vLLM arguments regarding reasoning parser to use. In this example, we use Qwen3-30B-A3B, which is suggested to use the `qwen3` reasoning parser.
+
+```bash
+uv venv --python 3.12 --seed 
+source .venv/bin/activate
+# hf_transfer for faster model download. datasets for downloading data from HF
+uv pip install hf_transfer datasets vllm --torch-backend=auto
+
+# Qwen/Qwen3-30B-A3B, usable in Nemo RL!
+HF_HOME=.cache/ \
+HF_HUB_ENABLE_HF_TRANSFER=1 \
+    hf download Qwen/Qwen3-30B-A3B
+
+HF_HOME=.cache/ \
+HOME=. \
+vllm serve \
+    Qwen/Qwen3-30B-A3B \
+    --dtype auto \
+    --tensor-parallel-size 4 \
+    --gpu-memory-utilization 0.9 \
+    --enable-auto-tool-choice --tool-call-parser hermes \
+    --reasoning-parser qwen3 \
+    --host 0.0.0.0 \
+    --port 10240
+```
+
+
+# FAQ: OpenAI Responses vs Chat Completions API
+Agents and verifiers work with responses in a standardized format based on the OpenAI Responses API schema. The verifier receives an object where the `output` field conforms to the Response object output [documented here](https://platform.openai.com/docs/api-reference/responses/object#responses/object-output).
+
+The `output` list can contain multiple item types, such as:
+- `ResponseOutputMessage` - The main user-facing message content returned by the model.
+- `ResponseOutputItemReasoning` - Internal reasoning or "thinking" traces that explain the model’s thought process.
+- `ResponseFunctionToolCall` - A request from the model to invoke an external function or tool.
+
+**Example**
+If a chat completion contains both thinking traces and user-facing text:
+```python
+ChatCompletion(
+    Choices=[
+        Choice(
+            message=ChatCompletionMessage(
+                content="<think>I'm thinking</think>Hi there!",
+                tool_calls=[{...}, {...}],
+                ...
+            )
+        )
+    ],
+    ...
+)
+```
+In the Responses schema, this would be represented as:
+```python
+Response(
+    output=[
+        ResponseOutputItemReasoning(
+            type="reasoning",
+            summary=[
+                Summary(
+                    type="summary_text",
+                    text="I'm thinking",
+                )
+            ]
+        ),
+        ResponseOutputMessage(
+            role="assistant",
+            type="message",
+            content=[
+                ResponseOutputText(
+                    type="output_text",
+                    text="Hi there!",
+                )
+            ]
+        ),
+        ResponseFunctionToolCall(
+            type="function_call",
+            ...
+
+        ),
+        ResponseFunctionToolCall(
+            type="function_call",
+            ...
+
+        ),
+        ...
+    ]
+)
+```
+
+Reasoning traces (`Reasoning` items) are parsed before the verifier processes the output. The parsing is **model-specific**, and the verifier does not need to worry about the extracting or interpreting reasoning traces. The verifier receives these items already separated and clearly typed.
+
+
+
+
+
+
+
+
+# Below is the stub
+
+
+
 [vLLM](https://docs.vllm.ai/) provides high-throughput, low-latency LLM inference. The NeMo Gym vLLM model server wraps vLLM's Chat Completions endpoint and converts requests/responses to OpenAI's [Responses API](https://platform.openai.com/docs/api-reference/responses) format, enabling self-hosted models to work with NeMo Gym's agentic workflows.
 
 **Goal**: Connect NeMo Gym to a self-hosted vLLM server for inference and training.
