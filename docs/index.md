@@ -286,7 +286,7 @@ Rollout Collection <get-started/rollout-collection.md>
 :hidden:
 :maxdepth: 1
 
-🟡 Overview <model-server/index>
+Overview <model-server/index>
 🟡 vLLM <model-server/vllm>
 ```
 
