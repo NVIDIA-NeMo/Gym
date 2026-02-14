@@ -123,6 +123,21 @@ You can run BFCL v3 evaluations using [NeMo Evaluator](https://github.com/NVIDIA
 
 ---
 
+
+## Advanced: Scaling to Larger Models
+
+The setup above works for Nemotron Nano 9B v2. If you want to train larger models like **Nemotron 3 Nano 30B** on many nodes (2-32), continue to the advanced tutorial for additional configuration:
+
+:::{button-ref} training-nemo-rl-grpo-nemotron-3-nano-30b
+:color: primary
+:ref-type: ref
+
+Continue to Nemotron 3 Nano 30B Multi-Node Training →
+:::
+
+---
+
+
 ## Next Steps
 
 Congratulations! You've trained Nemotron Nano 9B v2 for multi-step tool calling using GRPO on the Workplace Assistant environment.
