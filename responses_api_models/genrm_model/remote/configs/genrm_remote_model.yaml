@@ -1,6 +1,6 @@
-genrm_model:
+genrm_remote_model:
   responses_api_models:
-    genrm_model:
+    genrm_model.remote:
       entrypoint: app.py
       base_url: ${genrm_base_url}
       api_key: ${genrm_api_key}

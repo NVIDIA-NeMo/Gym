@@ -1,10 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for GenRM Model message formatting."""
+"""Tests for GenRM remote model message formatting."""
 
-# Import using proper module paths
-from responses_api_models.genrm_model.app import GenRMConverter, GenRMModelConfig
+from responses_api_models.genrm_model.remote.app import GenRMConverter, GenRMModelConfig
 from responses_api_models.vllm_model.app import VLLMConverterResponsesToChatCompletionsState
 
 
@@ -23,7 +22,6 @@ class TestGenRMConverter:
 
         self.converter._format_message(message, state)
 
-        # Should have one message with custom role
         assert len(state.messages) == 1
         assert state.messages[0]["role"] == "response_1"
         assert state.messages[0]["content"] == "The capital of France is Paris."
@@ -56,23 +54,18 @@ class TestGenRMConverter:
         """Test that standard roles still work alongside custom roles."""
         state = VLLMConverterResponsesToChatCompletionsState(return_token_id_information=False)
 
-        # User message (standard)
         user_msg = {"role": "user", "content": "What is the capital of France?", "type": "message"}
         self.converter._format_message(user_msg, state)
 
-        # Principle (custom)
         principle_msg = {"role": "principle", "content": "Be concise", "type": "message"}
         self.converter._format_message(principle_msg, state)
 
-        # Response 1 (custom)
         resp1_msg = {"role": "response_1", "content": "Paris", "type": "message"}
         self.converter._format_message(resp1_msg, state)
 
-        # Response 2 (custom)
         resp2_msg = {"role": "response_2", "content": "The answer is Paris.", "type": "message"}
         self.converter._format_message(resp2_msg, state)
 
-        # Should have 4 messages
         assert len(state.messages) == 4
         assert state.messages[0]["role"] == "user"
         assert state.messages[1]["role"] == "principle"
@@ -93,24 +86,19 @@ class TestGenRMConverter:
 
         assert len(state.messages) == 1
         assert state.messages[0]["role"] == "response_1"
-        # Content should be concatenated
         assert state.messages[0]["content"] == "Part 1 Part 2"
 
 
 class TestGenRMModelConfig:
-    """Test GenRM model configuration."""
+    """Test GenRM remote model configuration."""
 
     def test_config_defaults(self):
         """Test that GenRMModelConfig has correct defaults."""
         config = GenRMModelConfig(
-            # Required fields from BaseServerConfig
             host="localhost",
             port=8000,
-            # Required fields from BaseRunServerConfig
             entrypoint="app.py",
-            # Required fields from BaseRunServerInstanceConfig
-            name="test_genrm_model",
-            # VLLMModelConfig fields
+            name="test_genrm_remote_model",
             base_url="http://localhost:8000",
             api_key="test",
             model="test-model",
@@ -118,26 +106,20 @@ class TestGenRMModelConfig:
             uses_reasoning_parser=False,
         )
 
-        # Check GenRM-specific defaults
         assert config.supports_principle_role is True
 
     def test_config_custom_values(self):
         """Test custom configuration values."""
         config = GenRMModelConfig(
-            # Required fields from BaseServerConfig
             host="localhost",
             port=8000,
-            # Required fields from BaseRunServerConfig
             entrypoint="app.py",
-            # Required fields from BaseRunServerInstanceConfig
-            name="test_genrm_model",
-            # VLLMModelConfig fields
+            name="test_genrm_remote_model",
             base_url="http://localhost:8000",
             api_key="test",
             model="test-model",
             return_token_id_information=False,
             uses_reasoning_parser=False,
-            # GenRM-specific field
             supports_principle_role=False,
         )
 

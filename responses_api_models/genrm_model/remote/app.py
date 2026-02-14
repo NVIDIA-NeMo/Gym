@@ -14,7 +14,7 @@
 # limitations under the License.
 
 """
-GenRM Response API Model.
+GenRM Response API Model (remote vLLM endpoint).
 
 A specialized Response API Model for GenRM (Generative Reward Model) that supports
 custom roles for pairwise comparison:
@@ -22,14 +22,12 @@ custom roles for pairwise comparison:
 - response_2: Second candidate response
 - principle: Judging principle (optional, for principle-based comparison)
 
-Inherits from VLLMModel for code reuse, with specialized message formatting via GenRMConverter.
+Extends VLLMModel via GenRMModelMixin. For a local vLLM server with GenRM use
+genrm_model.local (same app.py/configs/tests/README structure).
+Message formatting is handled by GenRMConverter.
 """
 
-from typing import Dict
-
 from nemo_gym.server_utils import is_nemo_gym_fastapi_worker
-
-# Import from vllm_model using proper imports
 from responses_api_models.vllm_model.app import (
     VLLMConverter,
     VLLMConverterResponsesToChatCompletionsState,
@@ -84,7 +82,6 @@ class GenRMConverter(VLLMConverter):
             if isinstance(content, list):
                 content = "".join([part.get("text", "") for part in content])
 
-            # Import custom role type
             from nemo_gym.openai_utils import NeMoGymChatCompletionCustomRoleMessageParam
 
             converted = [NeMoGymChatCompletionCustomRoleMessageParam(role=m["role"], content=content)]
@@ -96,48 +93,38 @@ class GenRMConverter(VLLMConverter):
         super()._format_message(m, state)
 
 
-class GenRMModel(VLLMModel):
-    """GenRM Response API Model.
+class GenRMModelMixin:
+    """Mixin that provides GenRM converter for both remote and local vLLM backends.
+
+    Use with VLLMModel for remote endpoints (GenRMModel) or with LocalVLLMModel
+    for a locally managed vLLM server (LocalGenRMModel in genrm_model.local).
+    Expects config to have return_token_id_information and supports_principle_role.
+    """
+
+    def get_converter(self) -> GenRMConverter:
+        return GenRMConverter(
+            return_token_id_information=self.config.return_token_id_information,
+            supports_principle_role=self.config.supports_principle_role,
+        )
+
+
+class GenRMModel(GenRMModelMixin, VLLMModel):
+    """GenRM Response API Model (remote vLLM endpoint).
 
     Specialized Response API Model for GenRM (Generative Reward Model) inference.
     Inherits from VLLMModel for code reuse while specializing message formatting
     to support GenRM's custom roles for pairwise comparison.
 
     Use this model for:
-    - Pairwise response comparison with GenRM models
+    - Pairwise response comparison with GenRM models (remote endpoint)
     - Principle-based reward modeling
     - Any task requiring response_1/response_2 custom roles
 
-    Configuration is handled via GenRMModelConfig, which extends VLLMModelConfig.
+    Configuration is handled via GenRMModelConfig. For a locally managed vLLM
+    server with GenRM, use genrm_model.local instead.
     """
 
     config: GenRMModelConfig
-
-    def model_post_init(self, context):
-        """Initialize with GenRMConverter instead of VLLMConverter."""
-        from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
-
-        # Initialize clients (same as parent VLLMModel)
-        self._clients = [
-            NeMoGymAsyncOpenAI(
-                base_url=base_url,
-                api_key=self.config.api_key,
-            )
-            for base_url in self.config.base_url
-        ]
-
-        self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
-
-        # Use GenRMConverter instead of VLLMConverter
-        self._converter = GenRMConverter(
-            return_token_id_information=self.config.return_token_id_information,
-            supports_principle_role=self.config.supports_principle_role,
-        )
-
-        # Call grandparent's model_post_init (SimpleResponsesAPIModel)
-        from pydantic import BaseModel as PydanticBaseModel
-
-        return PydanticBaseModel.model_post_init(self, context)
 
 
 if __name__ == "__main__":
