@@ -43,8 +43,7 @@ sys.path.insert(0, str(nemo_rl_root))
 
 # System prompt for Wordle
 # Note: Reasoning mode disabled due to compatibility issues with multi-turn tool calling
-SYSTEM_PROMPT = """/no_think
-You are playing Wordle, a word-guessing game. Your goal is to guess a secret 5-letter word in 6 attempts or fewer.
+SYSTEM_PROMPT = """You are playing Wordle, a word-guessing game. Your goal is to guess a secret 5-letter word in 6 attempts or fewer.
 
 After each guess, you'll receive feedback:
 - G (Green): Letter is correct and in the right position
@@ -59,20 +58,11 @@ Strategy tips:
 - Include yellow letters in different positions
 - Avoid gray (eliminated) letters
 
-IMPORTANT: Always respond with a tool call. Never reply with plain text. After receiving feedback, immediately make your next move by calling a tool."""
+IMPORTANT: Always respond with a tool call. Never reply with plain text. After receiving feedback, immediately call submit_guess with your next guess. When you see "won": true or "game_over": true in a response, the game is over — do not make any more tool calls."""
 
-# User prompt variations
+# Single clear user prompt
 USER_PROMPTS = [
-    "Let's play Wordle! Guess the secret 5-letter word.",
-    "Time to play Wordle! Can you guess the mystery word in 6 tries or less?",
-    "I'm thinking of a 5-letter word. Use your best strategy to guess it!",
-    "Wordle time! Start guessing - you have 6 attempts.",
-    "Let's see how quickly you can solve this Wordle puzzle!",
-    "Ready to play Wordle? Make your first guess!",
-    "I have a secret 5-letter word for you to guess. Good luck!",
-    "Wordle challenge: Find the hidden word in as few guesses as possible.",
-    "Let's play! Guess the 5-letter word I'm thinking of.",
-    "Your Wordle game is ready. What's your opening guess?",
+    "Make your first guess.",
 ]
 
 # Tool definitions
@@ -260,7 +250,7 @@ Examples:
 
     # Generate example data (small subset of validation for quick testing)
     print(f"\nGenerating example samples...")
-    example_data = val_data[:5]
+    example_data = val_data[:20]
     save_jsonl(example_data, output_dir / "example.jsonl")
 
     print("\nDone!")

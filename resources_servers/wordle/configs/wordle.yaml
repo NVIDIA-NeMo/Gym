@@ -9,7 +9,7 @@ wordle:
 
 wordle_simple_agent:
   responses_api_agents:
-    simple_agent:
+    wordle:
       entrypoint: app.py
       resources_server:
         type: resources_servers
@@ -30,4 +30,4 @@ wordle_simple_agent:
           type: example
           jsonl_fpath: resources_servers/wordle/data/example.jsonl
           license: Apache 2.0
-      max_steps: 18  # 6 turns × 3 tool calls max per turn
+      max_steps: 12  # 6 turns × 2 tool calls max per turn
