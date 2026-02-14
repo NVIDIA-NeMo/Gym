@@ -347,6 +347,7 @@ Offline Training (SFT/DPO) <training-tutorials/offline-training-w-rollouts>
 
 Overview <infrastructure/index>
 Deployment Topology <infrastructure/deployment-topology>
+SWE RL Case Study <infrastructure/swe-rl-case-study>
 ```
 
 ```{toctree}

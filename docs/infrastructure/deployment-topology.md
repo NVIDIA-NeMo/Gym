@@ -156,7 +156,7 @@ Implement NeMo Gym integration into a new training framework.
 :::
 
 :::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` NeMo RL GRPO Training
-:link: /tutorials/nemo-rl-grpo/index
+:link: /training-tutorials/nemo-rl-grpo/index
 :link-type: doc
 End-to-end GRPO training tutorial with NeMo RL.
 :::
