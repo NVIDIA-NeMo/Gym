@@ -345,8 +345,8 @@ Offline Training (SFT/DPO) <training-tutorials/offline-training-w-rollouts>
 :hidden:
 :maxdepth: 1
 
-🟡 Overview <infrastructure/index>
-🟡 Deployment Topology <infrastructure/deployment-topology>
+Overview <infrastructure/index>
+Deployment Topology <infrastructure/deployment-topology>
 ```
 
 ```{toctree}
