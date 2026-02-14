@@ -5,23 +5,6 @@
 This page provides quick answers to commonly asked questions. Over time, these topics will be integrated into the structured product documentation (tutorials, guides, and reference sections) as we expand coverage. We've documented them here to provide immediate help while more comprehensive documentation is in progress.
 :::
 
-## Key Terms
-
-Before diving in, here are some NeMo Gym-specific terms:
-
-- **Resources server**: A server that provides task environments, tools, and verification logic for RL training. Examples include math verifiers, code execution sandboxes, and tool-calling environments.
-- **Agent server**: Orchestrates interactions between the model and resources server, managing conversation flow and tool calls.
-- **Model server**: Wraps an LLM endpoint (vLLM, OpenAI, etc.) to provide a consistent API for NeMo Gym.
-- **Responses API**: OpenAI's structured output format that separates reasoning, messages, and tool calls. NeMo Gym uses this as its native schema.
-
-# How To: Run tests for simple agent
-Run the Simple Chat Agent tests. `ng_test` or `nemo_gym_test` stands for `Nemo Gym Test`.
-```bash
-ng_test +entrypoint=responses_api_agents/simple_agent
-```
-
-Tests are strongly encouraged and you must have at least one test for every server you make. Test coverage is not explicitly required which means that **YOU ARE RESPONSIBLE FOR YOUR OWN SERVER CORRECTNESS AND FUNCTION**.
-
 
 # How To: Upload and download a dataset from HuggingFace
 The huggingface client requires that your credentials are in `env.yaml`, along with some other pertinent details needed to upload to the designated place.
@@ -298,19 +281,6 @@ ng_prepare_data "+config_paths=[$config_paths]" \
 ```
 
 
-# How To: ng_dump_config - Dump a YAML config as exactly as NeMo Gym sees it
-```bash
-# Example ng_run command
-config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
-ng_run "+config_paths=[$config_paths]"
-
-
-# Dump the exact yaml config that NeMo gym sees, just by swapping ng_run -> ng_dump_config
-ng_dump_config "+config_paths=[$config_paths]"
-```
-
-
 # How To: Profile your resources server
 For large scale verifier training, it's critical that your resources server is as efficient as possible. It can be slammed with 16k concurrent requests or more. Gym provides easy tools to profile and understand the efficiency of your servers.
 
@@ -356,34 +326,6 @@ name                                                                            
   - The `LibraryJudgeMathResourcesServer.verify` function and all functions it called including `_verify_answer`, etc accounted for a total of 17.98387s.
 - `tavg`: average time per call (often ttot / ncall).
   - The `LibraryJudgeMathResourcesServer.verify` function took 0.017562s per call on average.
-
-
-# How To: Use a custom client to call Gym Responses API model endpoints during training
-During training time, Gym keeps track of the ground truth prompt token ids, generation token ids, and generation log probs for downstream consumption by the RL framework. As a result, we need to add a few fields to request and response schemas in order to properly facilitate this. This usually doesn't matter if you are using 100% Gym, but in certain situations you may need or want to use a separate client (such as LiteLLM, your own OpenAI client, and so on) to call model endpoints.
-
-For Chat Completions, outside of training, an Assistant message will look like:
-```python
-ChatCompletionMessage(
-    content="<think>I'm thinking</think>Hi there!",
-    tool_calls=[{...}, {...}],
-    ...
-)
-```
-During training, a Chat Completions Assistant message will look like:
-```python
-ChatCompletionMessage(
-    content="<think>I'm thinking</think>Hi there!",
-    tool_calls=[{...}, {...}],
-    prompt_token_ids=[...],  # List[int]
-    generation_token_ids=[...],  # List[int]
-    generation_log_probs=[...],  # List[float]
-    ...
-)
-```
-And you have to ensure that when you make a request with your custom client that these three extra fields (prompt_token_ids, generation_token_ids, and generation_log_probs) are passed through correctly on a message level. And this also applies to the response i.e. you need to ensure that your custom client will correctly return these three extra fields.
-
-
-It's an analogous story for Responses-compatible APIs.
 
 
 # How To: Use Ray for parallelizing CPU-intensive tasks
@@ -518,18 +460,6 @@ pickling environment... done
 checking consistency... done
 ```
 You may need to reformat some of your docstrings to Napoleon format docstrings https://sphinxcontrib-napoleon.readthedocs.io/en/latest/
-
-
-# FAQ: NeMo Gym, training frameworks, and token IDs
-One of the goals of NeMo Gym is to act as a rollout tool for LLM post-training, either as synthetic data generation for SFT or as training environments for RL.
-
-RL training frameworks don't typically operate in OpenAI schema; they operate in tokens IDs. It is especially critical to always have the correct token IDs during training so that we stay on-policy and to make sure that what we think the model sees is what the model actually sees. However, when providing this OpenAI schema compatible interface to training environment developers, we lose track of the token IDs in Gym.
-
-For example, say we are training a Qwen 3 family model. During rollouts, the model can sample from the entire token distribution. The token IDs are then decoded into text and subsequently converted to OpenAI schema and returned to the training environment developer. At some point for multi-step and multi-turn scenarios, the training environment developer will call the model again with the previously output OpenAI schema. This re-tokenization causes problems since a single string can map to multiple possible sequences of token IDs. So if the model generations token ID sequence 1 and the re-tokenization outputs token ID sequence 2, suddenly things can become off policy when the Gym result is consumed by the RL training framework.
-
-So, the OpenAI compatible model server in a training framework needs to be able to handle this discrepancy. In order to do that, Gym needs a handle on the ground truth token IDs and it needs to provide that information back to the training frameworks' OpenAI compatible server.
-
-See the "How To: Use a custom client to call Gym Responses API model endpoints during training" section above for related details on token ID handling.
 
 
 # FAQ: Why use aiohttp backend instead of httpx/httpcore for async http?

@@ -39,3 +39,31 @@ Integrating external training environments, benchmarks, or agents into a Gym env
    1. Errors popping up due to failure in tool execution by the environment or due to the model issuing incorrect tool calls / arguments need to be propagated back to the model \- i.e. should not throw errors and crash the env and training.  
    2. We plan to do large-scale training with these environments. As such we need it to support anywhere from 4k to 65k concurrent requests without crashing. Usually just slamming the endpoint with 2k concurrent requests is enough to test the efficiency scaling of the environment.  
    3. You should be able to run an entire training run without any crashes.
+
+
+## Ensuring proper token ID handling in custom client calls
+During training time, Gym keeps track of the ground truth prompt token ids, generation token ids, and generation log probs for downstream consumption by the RL framework. As a result, we need to add a few fields to request and response schemas in order to properly facilitate this. This usually doesn't matter if you are using 100% Gym, but in certain situations you may need or want to use a separate client (such as LiteLLM, your own OpenAI client, and so on) to call model endpoints.
+
+For Chat Completions, outside of training, an Assistant message will look like:
+```python
+ChatCompletionMessage(
+    content="<think>I'm thinking</think>Hi there!",
+    tool_calls=[{...}, {...}],
+    ...
+)
+```
+During training, a Chat Completions Assistant message will look like:
+```python
+ChatCompletionMessage(
+    content="<think>I'm thinking</think>Hi there!",
+    tool_calls=[{...}, {...}],
+    prompt_token_ids=[...],  # List[int]
+    generation_token_ids=[...],  # List[int]
+    generation_log_probs=[...],  # List[float]
+    ...
+)
+```
+And you have to ensure that when you make a request with your custom client that these three extra fields (prompt_token_ids, generation_token_ids, and generation_log_probs) are passed through correctly on a message level. And this also applies to the response i.e. you need to ensure that your custom client will correctly return these three extra fields.
+
+It's an analogous story for Responses-compatible APIs.
+
