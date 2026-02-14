@@ -3,6 +3,9 @@
 # This server compares multiple candidate responses using a GenRM model.
 # The GenRM model uses a special chat template with roles 'response_1' and 'response_2'.
 #
+# Uses genrm_model.local by default (local vLLM server). The genrm_model_local server
+# is defined below; override genrm_model_server.name to use genrm_model.remote instead.
+#
 # Expected GenRM output format (JSON):
 # {
 #     "score_1": <1-5>,  # Individual helpfulness score for response 1
@@ -10,16 +13,36 @@
 #     "ranking": <1-6>   # 1=R1 much better, 6=R2 much better
 # }
 
+# GenRM model server: local vLLM (download + start vLLM). Uses ${genrm_model_name} from env.
+genrm_model_local:
+  responses_api_models:
+    genrm_model.local:
+      entrypoint: app.py
+      model: ${genrm_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: false
+      supports_principle_role: true
+      hf_home: null
+      vllm_serve_env_vars:
+        VLLM_RAY_DP_PACK_STRATEGY: strict
+      vllm_serve_kwargs:
+        data_parallel_size: 2
+        data_parallel_size_local: 2
+        tensor_parallel_size: 4
+        pipeline_parallel_size: 1
+        trust_remote_code: true
+        gpu_memory_utilization: 0.9
+      debug: false
+
 genrm_compare:
   resources_servers:
     genrm_compare:
       entrypoint: app.py
       
-      # GenRM model server reference
-      # KEY CHANGE FROM PR #523: Points to genrm_model (not vllm_model)
+      # GenRM model server: points to genrm_model.local (see genrm_model_local above)
       genrm_model_server:
         type: responses_api_models
-        name: genrm_model  # This is our new GenRMModel
+        name: genrm_model_local
       
       # Generation params for GenRM calls
       genrm_responses_create_params:

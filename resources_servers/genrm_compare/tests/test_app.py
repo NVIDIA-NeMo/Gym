@@ -44,7 +44,7 @@ class TestGenRMCompareConfig:
             domain="rlhf",
             # GenRMCompareConfig fields
             name="genrm_compare",
-            genrm_model_server=ModelServerRef(type="responses_api_models", name="genrm_model"),
+            genrm_model_server=ModelServerRef(type="responses_api_models", name="genrm_model_local"),
             genrm_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[], max_output_tokens=1024),
         )
 
@@ -100,7 +100,7 @@ class TestGenRMCompareResourcesServer:
             entrypoint="app.py",
             domain="rlhf",
             name="genrm_compare",
-            genrm_model_server=ModelServerRef(type="responses_api_models", name="genrm_model"),
+            genrm_model_server=ModelServerRef(type="responses_api_models", name="genrm_model_local"),
             genrm_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[], max_output_tokens=1024),
             comparison_strategy="circular",
             num_judges_per_comparison=1,

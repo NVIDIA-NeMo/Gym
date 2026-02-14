@@ -63,7 +63,7 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
     """Configuration for the GenRM compare server.
 
     Attributes:
-        genrm_model_server: Target GenRM model server (uses genrm_model, not vllm_model)
+        genrm_model_server: Target GenRM model server (default: genrm_model.local via genrm_model_local)
         genrm_responses_create_params: Base create params for GenRM calls
         comparison_strategy: "all_pairs" or "circular"
         num_judges_per_comparison: Number of judge passes per pair (majority voting)
@@ -83,7 +83,7 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
     """
 
     name: str = "genrm_compare"
-    genrm_model_server: ModelServerRef  # Points to genrm_model (not vllm_model)
+    genrm_model_server: ModelServerRef  # Default: genrm_model_local (genrm_model.local)
     genrm_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
 
     # Comparison strategy
@@ -311,8 +311,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             max_attempts = max(1, int(cfg.genrm_parse_retries) + 1)
 
             for attempt_idx in range(max_attempts):
-                # Call the GenRM model via /v1/responses endpoint
-                # KEY CHANGE: This now calls genrm_model (not vllm_model)
+                # Call the GenRM model via /v1/responses endpoint (genrm_model.local by default)
                 response = await self.server_client.post(
                     server_name=cfg.genrm_model_server.name,
                     url_path="/v1/responses",

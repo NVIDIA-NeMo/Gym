@@ -22,7 +22,7 @@ GenRM Compare Resource Server
     └── Aggregate into per-response rewards
 ```
 
-**Key Design:** Uses the `genrm_model` Response API Model (not `vllm_model`) which properly handles custom roles through `GenRMConverter`.
+**Key Design:** Uses the GenRM Response API Model (`genrm_model.local` by default) which properly handles custom roles through `GenRMConverter`. The default config points to `genrm_model_local`, a locally managed vLLM server; set `genrm_model_server.name` to a server running `genrm_model.remote` to use a remote endpoint instead.
 
 ### Expected GenRM Output Format
 
@@ -69,7 +69,7 @@ genrm_compare:
       
       genrm_model_server:
         type: responses_api_models
-        name: your_genrm_model  # Point to your GenRM model server
+        name: genrm_model_local  # Default: genrm_model.local. Use a server running genrm_model.remote for remote.
       
       genrm_responses_create_params:
         input: []
@@ -125,7 +125,7 @@ Send a POST request to the `/compare` endpoint:
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `genrm_model_server` | ModelServerRef | *required* | Reference to the GenRM model server (use `genrm_model`) |
+| `genrm_model_server` | ModelServerRef | *required* | Reference to the GenRM model server (default: `genrm_model_local` = genrm_model.local) |
 | `genrm_responses_create_params` | object | *required* | Generation parameters for GenRM calls |
 | `comparison_strategy` | string | `"circular"` | Pair generation strategy: `"circular"` or `"all_pairs"` |
 | `num_judges_per_comparison` | int | `1` | Number of judge passes per pair (for majority voting) |
@@ -283,7 +283,7 @@ See `examples/genrm_grpo_example.yaml` for complete configuration.
 
 ## Related Components
 
-- **GenRM Model**: `responses_api_models/genrm_model/` - Handles GenRM inference with custom roles
+- **GenRM Model**: `responses_api_models/genrm_model/` - `genrm_model.remote` (remote vLLM) and `genrm_model.local` (local vLLM); default config uses local
 - **Comparison Strategies**: `comparison_strategies.py` (in this package) - Strategy infrastructure
 - **Base VLLM Model**: `responses_api_models/vllm_model/` - Generic model (unchanged)
 - **Type Definitions**: `nemo_gym/openai_utils.py` - Custom role type support
