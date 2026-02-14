@@ -305,9 +305,19 @@ Agent-level metrics: {agent_level_metrics_fpath}""")
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
-                res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
-                await raise_for_status(res)
-                return row, await get_response_json(res)
+                try:
+                    res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
+                    await raise_for_status(res)
+                    return row, await get_response_json(res)
+                except Exception as e:
+                    print(
+                        f"[WARNING] Rollout failed for row {row.get('_rowidx', '?')}: {e}.\n"
+                        f"  Returning zero-reward result."
+                    )
+                    return row, {
+                        "response": {"output": []},
+                        "reward": 0.0,
+                    }
 
         return tqdm.as_completed(
             map(_post_subroutine, examples), desc="Collecting rollouts", miniters=10, total=len(examples)
