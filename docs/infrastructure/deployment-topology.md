@@ -144,7 +144,7 @@ flowchart LR
 :gutter: 3
 
 :::{grid-item-card} {octicon}`book;1.5em;sd-mr-1` Architecture Overview
-:link: /about/architecture
+:link: /about/concepts/architecture
 :link-type: doc
 Understand the server-based architecture.
 :::

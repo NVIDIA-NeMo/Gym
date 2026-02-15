@@ -266,7 +266,6 @@ Home <self>
 
 Overview <about/index.md>
 Concepts <about/concepts/index>
-🟡 Architecture <about/architecture>
 Ecosystem <about/ecosystem>
 ```
 
