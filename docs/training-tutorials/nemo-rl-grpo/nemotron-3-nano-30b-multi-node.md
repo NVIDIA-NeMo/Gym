@@ -50,7 +50,7 @@ Choose a location with sufficient space (~110GB minimum):
 ```bash
 # Set workspace directory (adjust to your cluster's large storage)
 # Examples: /scratch/$USER, /work/$USER, /data/$USER, /lustre/.../users/$USER
-export WORKSPACE=/path/to/large/storage/$USER
+WORKSPACE=/path/to/large/storage/$USER
 
 # Verify space available
 df -h $WORKSPACE
