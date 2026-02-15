@@ -281,10 +281,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                     message_dict["prompt_token_ids"] = chat_completion_dict.pop("prompt_token_ids")
                     message_dict["generation_token_ids"] = choice_dict.pop("token_ids")
                 else:
-                    # Otherwise fetch prompt token IDs via tokenize endpoint,
-                    # parse generation token IDs from logprob token strings
+                    # If not available, fetch prompt token IDs via tokenize endpoint
                     log_probs = choice_dict["logprobs"]["content"]
-
                     # Looks like `"token_id:151667"`
                     message_dict["generation_token_ids"] = [
                         log_prob["token"].removeprefix("token_id:") for log_prob in log_probs
