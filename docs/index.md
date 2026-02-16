@@ -277,8 +277,8 @@ Rollout Collection <get-started/rollout-collection.md>
 :hidden:
 :maxdepth: 1
 
-🟡 Overview <model-server/index>
-🟡 vLLM <model-server/vllm>
+Overview <model-server/index>
+vLLM <model-server/vllm>
 ```
 
 ```{toctree}
@@ -329,7 +329,7 @@ Offline Training (SFT/DPO) <training-tutorials/offline-training-w-rollouts>
 
 Overview <infrastructure/index>
 Deployment Topology <infrastructure/deployment-topology>
-SWE RL Case Study <infrastructure/swe-rl-case-study>
+Engineering Notes <infrastructure/engineering-notes/index>
 ```
 
 ```{toctree}
