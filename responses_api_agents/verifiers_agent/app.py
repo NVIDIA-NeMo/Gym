@@ -163,11 +163,13 @@ class VerifiersAgentConfig(BaseResponsesAPIAgentConfig):
     vf_env_id: str = Field(default="", description="Verifiers environment ID")
     vf_env_args: dict = Field(default_factory=dict, description="Verifiers environment arguments")
 
-    max_concurrent_generation: int = Field(default=-1, description="Max concurrent generation requests (-1 = unlimited)")
+    max_concurrent_generation: int = Field(
+        default=-1, description="Max concurrent generation requests (-1 = unlimited)"
+    )
     max_concurrent_scoring: int = Field(default=-1, description="Max concurrent scoring requests (-1 = unlimited)")
 
     max_tokens: int = Field(default=8192, description="Max tokens for generation")
-    
+
     # nemo rl generation_config overrides these
     temperature: float = Field(default=1.0)
     top_p: float = Field(default=1.0)
