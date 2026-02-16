@@ -1,4 +1,4 @@
 -e nemo-gym[dev] @ ../../
-verifiers>=0.1.9
+verifiers==0.1.9.post3
 --extra-index-url https://hub.primeintellect.ai/primeintellect/simple/
 acereason-math
