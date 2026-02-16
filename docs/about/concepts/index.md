@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 (about-concepts)=
 # Understanding Concepts for {{product_name}}
 
@@ -40,12 +44,6 @@ How components interact during startup and rollout collection.
 Understand the importance of verification and common implementation patterns.
 :::
 
-:::{grid-item-card} {octicon}`sync;1.5em;sd-mr-1` On-Policy Training
-:link: on-policy-training
-:link-type: ref
-Understand on-policy vs off-policy training and why token/logprob mismatches cause instability.
-:::
-
 :::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` Key Terminology
 :link: key-terminology
 :link-type: ref
@@ -64,6 +62,5 @@ Core Components <core-components>
 Configuration System <configuration>
 Architecture <architecture>
 Task Verification <task-verification>
-On-Policy Training <on-policy-training>
 Key Terminology <key-terminology>
 ```

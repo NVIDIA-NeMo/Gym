@@ -462,59 +462,62 @@ checking consistency... done
 You may need to reformat some of your docstrings to Napoleon format docstrings https://sphinxcontrib-napoleon.readthedocs.io/en/latest/
 
 
+# FAQ: On-Policy Training
 
-# FAQ: NeMo Gym, training frameworks, and token IDs
+During RL training, the model generates rollouts (inference) and then learns from them (training). **On-policy** means the exact same token IDs and logprobs are used in both steps. In practice, generation often uses an optimized inference server (e.g., vLLM) while training uses a different framework (e.g., Megatron). If the two produce different token IDs or logprobs for the same input, training becomes **off-policy**.
 
-:::{seealso}
-For conceptual background on why token ID alignment matters, see {doc}`/about/concepts/on-policy-training`.
+## Why On-Policy Matters
+
+Policy optimization algorithms compute gradients from the ratio of training logprobs to generation logprobs. When these diverge, gradients become unreliable. Small mismatches are tolerable, but large ones cause training to crash, for example. 
+
+### Common Causes of Mismatch
+
+Several scenarios lead to train-generation mismatch, including differences in training and inference algorithm implementations or kernel implementations (e.g., vLLM vs Megatron-core):
+
+**Re-tokenization of prompts across multiple steps**
+: When generated tokens are de-tokenized to strings and then re-tokenized for the next model call, the token IDs can change. For example, tokens that de-tokenize to `"_Ski" + "nny"` might re-tokenize as a single `"_Skinny"` token.
+
+**Re-chat templating**
+: When the model's output is parsed into structured objects (like tool calls) and then re-rendered through a chat template, the formatting can differ from the original generation.
+
+:::{tip}
+For a detailed technical explanation of these problems and their solutions, refer to {doc}`/contribute/rl-framework-integration/openai-compatible-http-server-on-policy-correction`.
 :::
 
-One of the goals of NeMo Gym is to act as a rollout tool for LLM post-training, either as synthetic data generation for SFT or as training environments for RL.
 
-RL training frameworks don't typically operate in OpenAI schema; they operate in tokens IDs. It is especially critical to always have the correct token IDs during training so that we stay on-policy and to make sure that what we think the model sees is what the model actually sees. However, when providing this OpenAI schema compatible interface to training environment developers, we lose track of the token IDs in Gym.
+# FAQ: Monotonic (Strictly-Increasing) Trajectories
 
-For example, say we are training a Qwen 3 family model. During rollouts, the model can sample from the entire token distribution. The token IDs are then decoded into text and subsequently converted to OpenAI schema and returned to the training environment developer. At some point for multi-step and multi-turn scenarios, the training environment developer will call the model again with the previously output OpenAI schema. This re-tokenization causes problems since a single string can map to multiple possible sequences of token IDs. So if the model generations token ID sequence 1 and the re-tokenization outputs token ID sequence 2, suddenly things can become off policy when the Gym result is consumed by the RL training framework.
+**Monotonicity** means the token sequence in a multi-step rollout only grows, so previous tokens are never modified or dropped between turns. NeMo Gym and NeMo RL currently require this property for training.
 
-So, the OpenAI compatible model server in a training framework needs to be able to handle this discrepancy. In order to do that, Gym needs a handle on the ground truth token IDs and it needs to provide that information back to the training frameworks' OpenAI compatible server.
+NeMo RL enforces monotonicity in two places:
 
-See the "How To: Use a custom client to call Gym Responses API model endpoints during training" section above for related details on token ID handling.
+1. **vLLM worker**: Replaces re-tokenized prompt prefixes with the original token IDs from prior turns (the on-policy token ID fix)
+2. **NeMo Gym postprocessing**: Asserts that token IDs across turns form a contiguous, strictly-increasing sequence
 
+## When to Disable Monotonicity
 
-# FAQ: Why use aiohttp backend instead of httpx/httpcore for async http?
+Some use cases intentionally break monotonicity. Examples include:
 
-TL;DR: httpx is O(n^2) runtime where n is the number of queued requests (i.e. for each request, we check all other queued requests). This is terribly inefficient and results in major slowdowns.
+- **Reasoning trace removal**: Models like Qwen3 whose chat templates strip reasoning from previous turns
+- **Agent context management**: Agentic harnesses that summarize or truncate prior history as rollouts grow
+- **Sliding window**: Dropping older turns to fit within a context length budget
+- **Environment state pruning**: Dropping past environment observations that are no longer relevant
 
-On Wed Sep 17, 2025, inspired by the Deepseek R1 Nature paper, we tried launching a larger rollout batch run with up to 16 off policy steps in NeMo RL. Our setting resulted in Gym being slammed with 16k concurrent requests. At the time, we were using a single Gym instance with multiple data-parallel vLLM workers, and that setup hung for 40 minutes before the first request was processed. Something was wrong.
+## Recommended Approaches
 
-Before that time, we had also gotten reports that the rollout collection in Gym couldn't be used with high concurrency i.e. in some cases people had to set the concurrency to 32 requests in parallel. Putting these two data points together, we figured something was wrong with the concurrency setup in Gym.
+For models with a chat template that drops previous reasoning traces: modify the chat template to retain all thinking, or use the non-thinking model.
 
-For some context, Gym is a set of servers that end up calling a model endpoint server at some point. And it's really important that we never artificially restrict the concurrency in the Gym side since technically we are always clients of that model endpoint server, since the model endpoint server could handle many more requests than we're restricting the concurrency to. So we always want Gym to be as efficient as possible and not have e.g. max parallel requests or smth parameter in Gym.
+For agents with non-monotonic trajectoires, the asserts may need to be disabled. This is not currently supported. 
 
-Eventually, we isolated the issue to our async http backend -- httpx and httpcore. We originally decided to use httpx for the async http backend in Gym because the OpenAI client uses it by default so we can share the same backend http client. Unfortunately, the httpcore connection pool subroutine for pooling connections over requests is O(n^2) where n is the number of queued requests.
+In general, when disabling the asserts, monitor NeMo RL's metrics such as gen_kl_error as described in [NeMo RL docs](https://github.com/NVIDIA-NeMo/RL/blob/main/docs/guides/grpo.md#metrics). Also monitor token ids across transitions and training stability. 
 
-Networking mental model:
-1. A request is sent by Gym to the model endpoint server.
-2. This request requires a connection from our client side to the server side.
-   1. This connection is a socket (identified by a port) and a socket is an open file (managed by the operating system).
-   2. If we are sending 100 requests, in the worst case we could open 100 connections == 100 open files. This quickly becomes very expensive.
-   3. So, async http backends will pool requests across connections to a single endpoint, where multiple requests can leverage the same file if they are going to the same endpoint origin.
-   4. This is called connection pooling. And it's possible that all 100 requests share a single connection.
-3. But this connection pooling now needs some management logic. When the client sends a new request, it needs to determine if that request can reuse an existing connection.
-   1. And this is where the httpcore connection pool logic is very inefficient.
+### For Models with Reasoning Traces
 
-Here are the key calls in the stack trace:
-1. OpenAI client at some point calls httpx client
-2. httpx client calls into the transport [here](https://github.com/encode/httpx/blob/4b23574cf83307ce27d3b14b4a425dc58c57d28d/httpx/_client.py#L1014)
-3. Transport calls into httpcore connection pool [here](https://github.com/encode/httpx/blob/4b23574cf83307ce27d3b14b4a425dc58c57d28d/httpx/_transports/default.py#L250)
-4. For each request, the httpcore connection pool calls this `_assign_requests_to_connections` subroutine [here](https://github.com/encode/httpcore/blob/5974b03c7df89d3ee4e23779900d5349d550753c/httpcore/_async/connection_pool.py#L228)
-   1. This subroutine loops through connections [here](https://github.com/encode/httpcore/blob/5974b03c7df89d3ee4e23779900d5349d550753c/httpcore/_async/connection_pool.py#L284)
-   2. and loops through queued requests [here](https://github.com/encode/httpcore/blob/5974b03c7df89d3ee4e23779900d5349d550753c/httpcore/_async/connection_pool.py#L303)
-   3. Which results in a total of O(n^2) runtime if the number of queued requests is large. Which is always the case if we slam with some larger number of requests.
+1. **Preferred**: Disable reasoning truncation and keep reasoning across all turns (preserves monotonicity and on-policy)
+2. **Alternative**: Disable monotonicity enforcement and accept off-policy training
 
-In the end, we decided to swap our http backend from httpx to aiohttp since we had good prior experience working with aiohttp in production infra.
+### For Agents with Context Management
 
-Here are some Github issues related to this problem. They didn't help too much, but they did validate our solution (kind of) to use aiohttp as as async http backend instead.
-- https://github.com/openai/openai-python/issues/1596
-- https://github.com/encode/httpx/issues/3215#issuecomment-2220795088
-
-If you are using AsyncOpenAI client with a parallelism > 32, you may also want to check if this kind of inefficiency also affects your setup.
+- Evaluate whether history modification is necessary for your use case
+- If you must modify history, disable monotonicity enforcement and monitor training stability closely
+- Leverage importance sampling to account for the off-policy distribution shift
