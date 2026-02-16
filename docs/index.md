@@ -287,7 +287,7 @@ Rollout Collection <get-started/rollout-collection.md>
 :maxdepth: 1
 
 Overview <model-server/index>
-🟡 vLLM <model-server/vllm>
+vLLM <model-server/vllm>
 ```
 
 ```{toctree}
@@ -347,8 +347,7 @@ Offline Training (SFT/DPO) <training-tutorials/offline-training-w-rollouts>
 
 Overview <infrastructure/index>
 Deployment Topology <infrastructure/deployment-topology>
-SWE RL Case Study <infrastructure/swe-rl-case-study>
-Aiohttp vs httpx <infrastructure/aiohttp-vs-httpx>
+Engineering Notes <infrastructure/engineering-notes/index>
 ```
 
 ```{toctree}
