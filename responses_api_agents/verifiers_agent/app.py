@@ -163,13 +163,14 @@ class VerifiersAgentConfig(BaseResponsesAPIAgentConfig):
     vf_env_id: str = Field(default="", description="Verifiers environment ID")
     vf_env_args: dict = Field(default_factory=dict, description="Verifiers environment arguments")
 
-    group_size: int = Field(default=1, description="Number of rollouts per example")
-    max_concurrent_generation: int = Field(default=-1, description="Max concurrent generation requests")
-    max_concurrent_scoring: int = Field(default=-1, description="Max concurrent scoring requests")
+    max_concurrent_generation: int = Field(default=-1, description="Max concurrent generation requests (-1 = unlimited)")
+    max_concurrent_scoring: int = Field(default=-1, description="Max concurrent scoring requests (-1 = unlimited)")
 
-    max_tokens: int = Field(default=512, description="Max tokens for generation")
-    temperature: float = Field(default=1.0, description="Sampling temperature")
-    top_p: float = Field(default=1.0, description="Top-p sampling")
+    max_tokens: int = Field(default=8192, description="Max tokens for generation")
+    
+    # nemo rl generation_config overrides these
+    temperature: float = Field(default=1.0)
+    top_p: float = Field(default=1.0)
 
 
 class VerifiersAgentRunRequest(BaseRunRequest):
@@ -280,10 +281,11 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             gen_sem = await maybe_semaphore(self.config.max_concurrent_generation)
             score_sem = await maybe_semaphore(self.config.max_concurrent_scoring)
 
+            # prefer NeMo RL generation config set in responses_create_params https://github.com/NVIDIA-NeMo/RL/blob/main/nemo_rl/experience/rollouts.py#L1045-L1046
             sampling_args = {
                 "max_tokens": self.config.max_tokens,
-                "temperature": self.config.temperature,
-                "top_p": self.config.top_p,
+                "temperature": getattr(body.responses_create_params, "temperature", None) or self.config.temperature,
+                "top_p": getattr(body.responses_create_params, "top_p", None) or self.config.top_p,
             }
             states = await vf_env.run_group(
                 group_inputs=[rollout_input],
