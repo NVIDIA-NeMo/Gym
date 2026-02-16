@@ -14,7 +14,7 @@ We have hands-on tutorials with supported training frameworks to help you train 
 - **{doc}`NeMo RL <../training-tutorials/nemo-rl-grpo/index>`** - GRPO training to improve multi-step tool calling on the Workplace Assistant environment
 - **[OpenRLHF](https://github.com/OpenRLHF/OpenRLHF/blob/main/examples/python/agent_func_nemogym_executor.py)** - example agent executor for RL training
 - **{doc}`TRL <../training-tutorials/trl>`** - GRPO training on Workplace Assistant and Reasoning Gym environments
-- **{doc}`Unsloth <../training-tutorials/unsloth-training>`** - GRPO training on instruction following and reasoning environments
+- **{doc}`Unsloth <../training-tutorials/unsloth>`** - GRPO training on instruction following and reasoning environments
 - **NeMo Customizer** - *(In progress)*
 - **VeRL** - *(In progress)*
 
