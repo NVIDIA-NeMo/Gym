@@ -77,6 +77,9 @@ def _get_judge_client_config() -> Optional[tuple[str, str, int, list[str]]]:
         "Judge client config: model=%s, server_type=%s, port=%s, judge_het_group=%s, master_nodes[0]=%s (n_servers=%s).",
         model, server_type, port, judge_het_group, master_nodes[0] if master_nodes else None, n_servers,
     )
+    print(
+        f"[math_with_judge] Judge config: model={model}, port={port}, master_nodes[0]={master_nodes[0] if master_nodes else None} (n_servers={n_servers})."
+    )
     return model, server_type, port, master_nodes
 
 
@@ -216,6 +219,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
     # Lazy-initialized when JUDGE_SERVER_ARGS is set (OpenAI-compatible judge).
     _judge_openai_client: Optional[AsyncOpenAI] = PrivateAttr(default=None)
     _judge_model: Optional[str] = PrivateAttr(default=None)
+    _judge_first_success_logged: bool = PrivateAttr(default=False)
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
@@ -335,10 +339,12 @@ Example output: "My final verdict is different [[A!=B]]"."""
     ) -> tuple[float, list[JudgeEvaluation]]:
         if os.environ.get("JUDGE_SERVER_ARGS"):
             LOG.debug("Using judge path: openai (JUDGE_SERVER_ARGS set, separate judge vLLM).")
+            print("[math_with_judge] Using separate judge server (JUDGE_SERVER_ARGS set).")
             return await self._verify_answer_with_judge_openai(
                 question, expected_answer, generated_answer
             )
         LOG.debug("Using judge path: policy_model (/v1/responses).")
+        print("[math_with_judge] Using policy_model for judge (/v1/responses, JUDGE_SERVER_ARGS not set).")
         # Original path: /v1/responses judge.
         # The judge is asked to evaluate whether the answers are equal using both
         # orders of the answers, in case there is any positional bias in terms of
@@ -372,6 +378,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
         if self._judge_openai_client is None:
             base_url = f"http://{master_nodes[0]}:{port}/v1"
             LOG.info("Initializing OpenAI judge client: base_url=%s, model=%s.", base_url, model)
+            print(f"[math_with_judge] Judge client connected: base_url={base_url}, model={model}")
             self._judge_openai_client = AsyncOpenAI(base_url=base_url, api_key="EMPTY")
             self._judge_model = model
         user_content = JUDGE_USER_PROMPT_NL_MATH.format(
@@ -396,6 +403,9 @@ Example output: "My final verdict is different [[A!=B]]"."""
         judge_text = (
             completion.choices[0].message.content or ""
         ).strip()
+        if not self._judge_first_success_logged:
+            print("[math_with_judge] First judge request succeeded (using judge server).")
+            self._judge_first_success_logged = True
         # Parse "Judgement: Yes" or "Judgement: No" (case-insensitive); last occurrence wins.
         reward = 0.0
         if "judgement:" in judge_text.lower():
