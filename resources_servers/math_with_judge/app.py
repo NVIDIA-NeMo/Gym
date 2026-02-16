@@ -44,6 +44,8 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import get_response_json
 
+LOG = logging.getLogger(__name__)
+
 
 def _get_judge_client_config() -> Optional[tuple[str, str, int, list[str]]]:
     """Read judge server address from env (set by pipeline when using heterogeneous job with judge).
@@ -53,21 +55,28 @@ def _get_judge_client_config() -> Optional[tuple[str, str, int, list[str]]]:
     """
     server_args_str = os.environ.get("JUDGE_SERVER_ARGS")
     if not server_args_str:
+        LOG.debug("JUDGE_SERVER_ARGS not set; judge will use policy_model (/v1/responses) path.")
         return None
     server_config = json.loads(server_args_str)
     server_type = server_config["server_type"]
     model = server_config["model"]
     n_servers = server_config.get("n_servers", 1)
     port = server_config["port"]
-    # Judge is het group 0 in grpo_gym pipeline.
+    # When main first: judge is het group 1. When judge first: judge is het group 0. Pipeline injects judge_het_group.
+    judge_het_group = server_config.get("judge_het_group", 0)
     master_nodes = []
     for i in range(n_servers):
-        het_group = i
+        het_group = judge_het_group + i
         env_var = f"SLURM_MASTER_NODE_HET_GROUP_{het_group}"
         master_node = os.environ.get(env_var)
         if not master_node:
+            LOG.error("Missing env %s for judge server (JUDGE_SERVER_ARGS has judge_het_group=%s, n_servers=%s).", env_var, judge_het_group, n_servers)
             raise RuntimeError(f"Missing {env_var} for judge server (heterogeneous job).")
         master_nodes.append(master_node)
+    LOG.info(
+        "Judge client config: model=%s, server_type=%s, port=%s, judge_het_group=%s, master_nodes[0]=%s (n_servers=%s).",
+        model, server_type, port, judge_het_group, master_nodes[0] if master_nodes else None, n_servers,
+    )
     return model, server_type, port, master_nodes
 
 
@@ -325,9 +334,11 @@ Example output: "My final verdict is different [[A!=B]]"."""
         self, question: str, expected_answer: str, generated_answer: str
     ) -> tuple[float, list[JudgeEvaluation]]:
         if os.environ.get("JUDGE_SERVER_ARGS"):
+            LOG.debug("Using judge path: openai (JUDGE_SERVER_ARGS set, separate judge vLLM).")
             return await self._verify_answer_with_judge_openai(
                 question, expected_answer, generated_answer
             )
+        LOG.debug("Using judge path: policy_model (/v1/responses).")
         # Original path: /v1/responses judge.
         # The judge is asked to evaluate whether the answers are equal using both
         # orders of the answers, in case there is any positional bias in terms of
@@ -355,10 +366,12 @@ Example output: "My final verdict is different [[A!=B]]"."""
         """Use OpenAI-compatible judge (vLLM /v1/chat/completions) when JUDGE_SERVER_ARGS is set."""
         cfg = _get_judge_client_config()
         if not cfg:
+            LOG.warning("_verify_answer_with_judge_openai: JUDGE_SERVER_ARGS was set but _get_judge_client_config() returned None; returning reward 0.")
             return 0.0, []
         model, _server_type, port, master_nodes = cfg
         if self._judge_openai_client is None:
             base_url = f"http://{master_nodes[0]}:{port}/v1"
+            LOG.info("Initializing OpenAI judge client: base_url=%s, model=%s.", base_url, model)
             self._judge_openai_client = AsyncOpenAI(base_url=base_url, api_key="EMPTY")
             self._judge_model = model
         user_content = JUDGE_USER_PROMPT_NL_MATH.format(
@@ -366,10 +379,20 @@ Example output: "My final verdict is different [[A!=B]]"."""
             predicted_answer=generated_answer,
             expected_answer=expected_answer,
         )
-        completion = await self._judge_openai_client.chat.completions.create(
-            model=self._judge_model,
-            messages=[{"role": "user", "content": user_content}],
-        )
+        try:
+            completion = await self._judge_openai_client.chat.completions.create(
+                model=self._judge_model,
+                messages=[{"role": "user", "content": user_content}],
+                temperature=0.0,
+            )
+        except Exception as e:  # noqa: BLE001
+            LOG.exception(
+                "Judge request failed (base_url=%s, model=%s): %s",
+                self._judge_openai_client.base_url if self._judge_openai_client else "?",
+                self._judge_model,
+                e,
+            )
+            raise
         judge_text = (
             completion.choices[0].message.content or ""
         ).strip()
@@ -380,6 +403,11 @@ Example output: "My final verdict is different [[A!=B]]"."""
             last_no = judge_text.lower().rfind("judgement: no")
             if last_yes >= 0 and (last_no < 0 or last_yes > last_no):
                 reward = 1.0
+        else:
+            LOG.warning(
+                "Judge response had no 'Judgement:' line (reward=0). Snippet: %s",
+                (judge_text[:500] + "..." if len(judge_text) > 500 else judge_text) or "(empty)",
+            )
         # Build one JudgeEvaluation with minimal NeMoGymResponse for consistency.
         out_text = NeMoGymResponseOutputText(annotations=[], text=judge_text)
         out_msg = NeMoGymResponseOutputMessage(
