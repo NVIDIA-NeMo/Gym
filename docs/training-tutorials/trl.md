@@ -2,57 +2,23 @@
 
 # RL Training with TRL
 
-This tutorial demonstrates how to use [Hugging Face TRL](https://github.com/huggingface/trl) to train models in NeMo Gym environments using GRPO.
-
-**TRL (Transformer Reinforcement Learning)** is Hugging Face's library for post-training foundation models. It provides implementations of algorithms like SFT, GRPO, and DPO, with support for distributed training with vLLM inference.
-
-The integration supports multi-step and multi-turn rollouts, multi-environment training, and any NeMo Gym environment (thoroughly tested: workplace assistant, reasoning gym, MCQA, and math with judge).
-
-:::{card}
-
-**Goal**: Train models on NeMo Gym environments using TRL's GRPO trainer.
-
-^^^
-
-**In this tutorial, you will**:
-
-1. Set up TRL with NeMo Gym environments
-2. Prepare NeMo-Gym datasets and configure training
-3. Train models using GRPO with vLLM for optimized inference
-4. Scale to multi-node training with Slurm
-
-:::
-
-## Overview
-
-The TRL integration with NeMo Gym enables:
-
-- **Multi-step and multi-turn environments**: Full support for tool calling and complex agentic tasks
-- **Multi-environment training**: Train on multiple environments simultaneously
-- **Production-scale training**: Multi-node distributed training with DeepSpeed
-- **Flexible verification**: Algorithmic verification, LLM-as-a-judge, and custom reward functions
-
-
----
-
-## Steps to get started
+[TRL (Transformer Reinforcement Learning)](https://github.com/huggingface/trl) is Hugging Face's library for post-training foundation models. This integration enables training models in NeMo Gym environments using TRL's GRPOTrainer with vLLM server mode.
 
 ### Install TRL and NeMo Gym
 
-1. **Install TRL with vLLM support**
+1. **Install TRL venv with vLLM and some extras**
 
    ```bash
    cd trl/
    uv venv
    source .venv/bin/activate
    uv sync --extra vllm
+   uv pip install fastapi uvicorn accelerate deepspeed wandb omegaconf
    ```
 
-2. **Install NeMo Gym in a separate virtual environment**
+1. **Install NeMo Gym in a separate venv**
 
    ```bash
-   # deactivate trl venv
-   deactivate
    git clone https://github.com/NVIDIA-NeMo/Gym.git
    cd Gym
    uv venv --python 3.12
@@ -60,60 +26,37 @@ The TRL integration with NeMo Gym enables:
    uv sync
    ```
 
+### Prepare a Dataset
 
-### Download a Dataset
+In this example we use the reasoning gym resources server in NeMo Gym to train a model in sudoku:
 
-1. **Prepare Dataset**
+```bash
+cd Gym
+source .venv/bin/activate
+uv pip install reasoning-gym
+cd resources_servers/reasoning_gym
+python scripts/create_dataset.py \
+    --task mini_sudoku \
+    --size 2000 \
+    --seed 42 \
+    --output data/reasoning_gym/train_mini_sudoku.jsonl
 
-   Download and prepare a NeMo Gym dataset:
-
-   ```bash
-   cd Gym
-   source .venv/bin/activate
-
-   # Set HuggingFace token in env.yaml
-   echo "hf_token: your_token_here" >> env.yaml
-
-   # Prepare workplace assistant dataset
-   config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
-   resources_servers/workplace_assistant/configs/workplace_assistant.yaml"
-
-   ng_prepare_data "+config_paths=[${config_paths}]" \
-       +output_dirpath=data/workplace_assistant \
-       +mode=train_preparation \
-       +should_download=true \
-       +data_source=huggingface
-   ```
-
-#### Dataset Format
-
-NeMo Gym datasets are stored as JSONL. Each line contains a task with input messages, tool definitions, metadata such as ground truth for verification, and an agent server reference. The following example shows the workplace dataset structure. Metadata fields can differ between datasets, as long as the corresponding resources server uses the fields appropriately.
-
-```json
-{
-  "responses_create_params": {
-    "input": [
-      {"role": "system", "content": "..."},
-      {"role": "user", "content": "Move any of jinsoo's tasks that are in review to completed"}
-    ],
-    "tools": [...],
-    "parallel_tool_calls": false,
-    "temperature": 1
-  },
-  "ground_truth": [
-    {"name": "project_management_update_task", "arguments": "{...}"},
-    ...
-  ],
-  "category": "workbench_project_management",
-  "environment_name": "workbench",
-  "agent_ref": {
-    "type": "responses_api_agents",
-    "name": "workplace_assistant_simple_agent"
-  }
-}
+python scripts/create_dataset.py \
+    --task mini_sudoku \
+    --size 50 \
+    --seed 24 \
+    --output data/reasoning_gym/val_mini_sudoku.jsonl
 ```
 
-2. **Update Environment Config**
+## Interactive Training
+
+Training requires 2+ GPUs, one for the vLLM server, and one for training. The NeMo Gym TRL integration currently depends on vLLM server mode.
+
+To run training on a single node, launch the NeMo Gym servers, vLLM server, then run training:
+
+### Setup
+
+1. **Update Environment Config**
 
    Update `env.yaml` in `Gym/` to include model information:
 
@@ -121,36 +64,48 @@ NeMo Gym datasets are stored as JSONL. Each line contains a task with input mess
    policy_base_url: http://127.0.0.1:8000/v1
    policy_api_key: EMPTY
    policy_model_name: Qwen/Qwen2.5-1.5B-Instruct
-   hf_token: ...
    ```
 
-3. **Update Training Config**
+2. **Update Training Config**
 
-   Update `examples/scripts/nemo_gym/config.yaml` to point to the dataset generated above, and any other optional modifications.
+   Update `examples/scripts/nemo_gym/config.yaml` to point to the mini sudoku dataset:
 
-### Start vLLM and NeMo Gym Servers and Run Training
+   ```yaml
+   model_name: "Qwen/Qwen2.5-1.5B-Instruct"
 
-The following steps run in 3 terminals. It can also be ran with processes in the background, or using tmux.
+   dataset_path: "/path/to/Gym/resources_servers/reasoning_gym/data/reasoning_gym/train_mini_sudoku.jsonl"
+   eval_dataset_path: "/path/to/Gym/resources_servers/reasoning_gym/data/reasoning_gym/val_mini_sudoku.jsonl"
 
-1. **Start NeMo Gym Servers** (Terminal 1)
+   task: "mini-sudoku"
+   output_dir: "outputs/nemo_gym_sudoku"
+
+   learning_rate: 1.0e-5
+   num_generations: 16
+   per_device_train_batch_size: 8
+   gradient_accumulation_steps: 1
+   max_completion_length: 10000
+   vllm_importance_sampling_correction: true
+
+   temperature: 1.0
+   top_p: 0.999
+   ```
+
+### Run Training
+
+
+1. **Start NeMo Gym Servers**
 
    ```bash
    cd Gym/
    source .venv/bin/activate
 
-   config_paths="resources_servers/workplace_assistant/configs/workplace_assistant.yaml,\
+   config_paths="resources_servers/reasoning_gym/configs/reasoning_gym.yaml,\
    responses_api_models/vllm_model/configs/vllm_model_for_training.yaml"
 
    ng_run "+config_paths=[${config_paths}]"
    ```
 
-   This starts:
-   - **Agent server**: Orchestrates rollouts using resource servers and model servers
-   - **Resources server**: Supports environment logic such as state-management, tool implementations, and task verification
-   - **Model server**: Adapts vLLM server requests to support NeMo Gym agents and on-policy RL training while ensuring OpenAI API compatibility
-   - **Head server**: Manages servers used in training enabling their discovery
-
-2. **Start TRL vLLM Server on GPU 0** (Terminal 2)
+1. **Start TRL vLLM Server on GPU 0**
 
    ```bash
    cd trl/
@@ -162,72 +117,21 @@ The following steps run in 3 terminals. It can also be ran with processes in the
      --port 8000
    ```
 
-3. **Run Training on GPU 1** (Terminal 3)
+1. **Run Training on GPU 1**
 
    ```bash
-   source trl/.venv/bin/activate
-   cd trl/examples/scripts/nemo_gym
-   export WANDB_API_KEY=...
-   uv add omegaconf
+   cd trl/
+   source .venv/bin/activate
+   cd examples/scripts/nemo_gym
 
    CUDA_VISIBLE_DEVICES=1 python train_multi_environment.py --config config.yaml
    ```
 
-## Multi-Environment Training
-
-Train on multiple environments simultaneously. This example combines the workplace assistant dataset from the previous section with a reasoning gym dataset.
-
-1. **Generate Reasoning Gym Dataset**
-
-   ```bash
-   cd Gym
-   source .venv/bin/activate
-   uv add reasoning-gym
-   cd resources_servers/reasoning_gym
-   python scripts/create_dataset.py \
-       --task mini_sudoku \
-       --size 2000 \
-       --seed 42 \
-       --output data/reasoning_gym/train_mini_sudoku.jsonl
-
-   python scripts/create_dataset.py \
-       --task mini_sudoku \
-       --size 50 \
-       --seed 24 \
-       --output data/reasoning_gym/val_mini_sudoku.jsonl
-   ```
-
-2. **Shuffle Datasets**
-
-   Combine datasets into one file for training:
-
-   ```bash
-   cat data/workplace_assistant/train.jsonl data/reasoning_gym/train_mini_sudoku.jsonl | shuf > train_multi_env.jsonl
-   ```
-
-3. **Start NeMo Gym Servers**
-
-   ```bash
-   config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
-   resources_servers/workplace_assistant/configs/workplace_assistant.yaml,\
-   resources_servers/reasoning_gym/configs/reasoning_gym.yaml"
-
-   ng_run "+config_paths=[${config_paths}]"
-   ```
-
-4. **Run Training**
-
-Update the config to point at the new dataset, then run training:
-
-   ```bash
-   python train_multi_environment.py --config config.yaml
-   ```
-
-The training script automatically routes each example to the correct environment based on the `agent_ref` field in the dataset.
-
 ## Multi-Node Training with Slurm
 
-An example five-node training script is provided in `submit.sh`. Nodes one through four run the training algorithm, while node five runs vLLM inference for NeMo Gym agent rollouts.
+An example five-node training script is provided in `submit.sh`. Nodes one through four run the training backend, while node five runs vLLM inference for NeMo Gym agent rollouts.
+
+Before running the Slurm script, ensure you have completed the TRL and NeMo Gym installation steps above. The script assumes `.venv` directories exist for both TRL and Gym. If you use a container in the Slurm script, you should also create the virtual environments from the container in an interactive session or with a separate sbatch script.
 
 1. **Configure the Script**
 
@@ -245,52 +149,92 @@ An example five-node training script is provided in `submit.sh`. Nodes one throu
    tail -f logs/<job_id>/*
    ```
 
-> **Tip**: Set up wandb logging for detailed training metrics. For more details on TRL's vLLM integration, refer to the vLLM integration page.
+## Multi-Environment Training
 
+NeMo Gym is designed to enable training on many environments simultaneously and at scale. This allows learning diverse capabilities, such as tool calling and reasoning, in a single training run. In this example, we add the workplace assistant environment to the mini sudoku setup above, which is a multi-step tool use environment for office tasks.
 
-## Documentation
+1. **Prepare Workplace Assistant Dataset**
 
-Visit the Hugging Face integration docs for more details:
+   Many NeMo Gym datasets used to train Nemotron models are available on Hugging Face. Use `ng_prepare_data` to download and prepare datasets. This command:
 
-:::{button-link} https://huggingface.co/docs/trl/main/nemo_gym_integration
-:color: primary
-:class: sd-rounded-pill
+   - Downloads the dataset from Hugging Face
+   - Validates the format and computes metrics
+   - Adds an `agent_ref` field to each example that tells NeMo Gym which agent server should handle that example
 
-TRL NeMo-Gym Integration Guide
-:::
+   First, create `env.yaml` in `Gym/` with your HF token:
 
----
+   ```yaml
+   hf_token: <your_hf_token>
+   ```
 
-## Next Steps
+   Then prepare the dataset:
 
-After completing this tutorial, explore these options:
+   ```bash
+   cd Gym
+   source .venv/bin/activate
 
-::::{grid} 1 1 2 2
-:gutter: 3
+   config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
+   resources_servers/workplace_assistant/configs/workplace_assistant.yaml"
 
-:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Use Other Training Environments
-:link: https://github.com/NVIDIA-NeMo/Gym#-available-resource-servers
+   ng_prepare_data "+config_paths=[${config_paths}]" \
+       +output_dirpath=data/workplace_assistant \
+       +mode=train_preparation \
+       +should_download=true \
+       +data_source=huggingface
+   ```
 
-Browse available resource servers on GitHub to find other training environments.
-+++
-{bdg-secondary}`github` {bdg-secondary}`resource-servers`
-:::
+   This creates `train.jsonl` and `validation.jsonl` files in `data/workplace_assistant/`.
 
-:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build a Custom Training Environment
-:link: creating-resource-server
-:link-type: doc
+1. **Create Combined Dataset**
 
-Create your own resource server with custom tools and verification logic.
-+++
-{bdg-secondary}`tutorial` {bdg-secondary}`custom-tools`
-:::
+   Combine datasets into a single file with tasks from both environments:
 
-::::
+   ```bash
+   cat data/workplace_assistant/train_workplace.jsonl data/reasoning_gym/train_mini_sudoku.jsonl | shuf > train_multi_env.jsonl
+   ```
+
+   > **Tip**: Ensure datasets are the same size before shuffling for an even blend of tasks. Repeat for the validation dataset.
+
+1. **Update Training Config**
+
+   Update the config to point to the combined dataset:
+
+   ```yaml
+   model_name: "Qwen/Qwen3-4B-Instruct-2507"
+
+   dataset_path: "/path/to/data/train_multi_env.jsonl"
+   eval_dataset_path: "/path/to/data/val_multi_env.jsonl"
+
+   task: "workplace-sudoku"                    # used in wandb run name
+   output_dir: "outputs/nemo_gym_multi_env"
+
+   # ... rest of config same
+   ```
+
+1. **Update ng_run**
+
+   Whether training interactively or via Slurm, update the `ng_run` command to include config files from each resources server:
+
+   ```bash
+   cd Gym
+   source .venv/bin/activate
+
+   config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
+   resources_servers/workplace_assistant/configs/workplace_assistant.yaml,\
+   resources_servers/reasoning_gym/configs/reasoning_gym.yaml"
+
+   ng_run "+config_paths=[${config_paths}]"
+   ```
+
+   This starts servers for both environments. The training script automatically routes each example to the correct agent server based on its `agent_ref` field.
+
+1. **Run Training**
+
+   Update the Slurm submission script to use the new training config and both `ng_run` resources server configs, then submit the job as before.
+
+   The training script reads `agent_ref` from each example's metadata, routes requests to the correct NeMo Gym agent server, and handles different agents and environments in the same batch.
 
 ## Resources
 
-- [TRL GitHub Repository](https://github.com/huggingface/trl)
-- [TRL Documentation](https://huggingface.co/docs/trl)
-- [TRL NeMo-Gym Integration](https://huggingface.co/docs/trl/main/nemo_gym_integration)
-- [Training Script](https://github.com/huggingface/trl/blob/main/examples/scripts/nemo_gym/run_grpo_nemo_gym.py)
-- [GRPO Trainer Documentation](https://huggingface.co/docs/trl/main/grpo_trainer)
+- [TRL GitHub](https://github.com/huggingface/trl)
+- [TRL Documentation](https://huggingface.co/docs/trl/en/index)
