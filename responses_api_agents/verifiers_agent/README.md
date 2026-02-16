@@ -1,6 +1,6 @@
 # Description
 
-This integration of Prime Intellect [verifiers](https://github.com/PrimeIntellect-ai/verifiers) enables running [Environments Hub](https://app.primeintellect.ai/dashboard/environments?ex_sort=by_sections) environments through the verifiers repo. 
+This agent enables running Prime Intellect [verifiers](https://github.com/PrimeIntellect-ai/verifiers) and [Environments Hub](https://app.primeintellect.ai/dashboard/environments?ex_sort=by_sections) in NeMo Gym and its training framework integrations. 
 
 No resources server is needed, as state, verification, tool logic, and typical roles of the resources server is handled already by verifiers environments.
 
@@ -134,7 +134,6 @@ Note we only change the env_id for each config so far, but environments can acce
 ## Training 
 
 Training with prime environments works like any other environment. However, using multiple prime environments may work best with separate agent servers for each environment for dependency isolation.
-
 
 # Licensing information
 Code: Apache 2.0

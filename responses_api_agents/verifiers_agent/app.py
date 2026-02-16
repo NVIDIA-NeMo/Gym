@@ -43,6 +43,8 @@ from nemo_gym.server_utils import get_global_aiohttp_client
 logger = logging.getLogger(__name__)
 
 
+# patch verifiers to include prompt and generation token ids and logprobs for
+# re-tokenization correction in replace_prefix_tokens (https://github.com/NVIDIA-NeMo/RL/blob/main/nemo_rl/models/generation/vllm/vllm_worker_async.py#L40)
 async def _patched_parse_response_messages(response, message_type):
     messages = await _original_parse_response_messages(response, message_type)
     if message_type == "chat" and isinstance(messages, list):
@@ -156,10 +158,10 @@ class VLLMOpenAIClient:
 
 class VerifiersAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
-    model_name: str = Field(default="", description="Model name for the vLLM server")
+    model_name: str = Field(default="", description="Model name")
 
-    vf_env_id: str = Field(default="", description="Default verifiers environment ID")
-    vf_env_args: dict = Field(default_factory=dict, description="Environment arguments")
+    vf_env_id: str = Field(default="", description="Verifiers environment ID")
+    vf_env_args: dict = Field(default_factory=dict, description="Verifiers environment arguments")
 
     group_size: int = Field(default=1, description="Number of rollouts per example")
     max_concurrent_generation: int = Field(default=-1, description="Max concurrent generation requests")
