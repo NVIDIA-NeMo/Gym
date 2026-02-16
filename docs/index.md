@@ -34,7 +34,7 @@ A training environment consists of three server components: **Agents** orchestra
 Quickstart
 ```
 
-```{button-ref} tutorials/index
+```{button-ref} environment-tutorials/index
 :ref-type: doc
 :color: secondary
 :class: sd-rounded-pill
