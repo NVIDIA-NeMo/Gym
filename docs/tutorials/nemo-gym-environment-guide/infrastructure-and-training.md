@@ -207,6 +207,8 @@ CLI command: `ng_collect_rollouts`
 
 ## Directory Structure for a New Environment
 
+Running `ng_init_resources_server +entrypoint=resources_servers/my_environment` creates:
+
 ```
 resources_servers/my_environment/
 ├── app.py                      # Main server implementation
@@ -281,13 +283,11 @@ if __name__ == "__main__":
 
 ### Step-by-Step Checklist
 
-1. **Create the directory structure**
+1. **Initialize the resource server**
    ```bash
-   # simplified
-   mkdir -p resources_servers/my_env/{configs,data,tests}
-   touch resources_servers/my_env/app.py
-   touch resources_servers/my_env/configs/my_env.yaml
+   ng_init_resources_server +entrypoint=resources_servers/my_env
    ```
+   This scaffolds the full directory structure (app.py, configs, data, tests, requirements.txt, README.md) and a paired simple agent configuration.
 
 2. **Define your request/response models** with Pydantic
    - Tool input parameters
