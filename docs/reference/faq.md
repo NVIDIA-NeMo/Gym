@@ -461,30 +461,6 @@ checking consistency... done
 ```
 You may need to reformat some of your docstrings to Napoleon format docstrings https://sphinxcontrib-napoleon.readthedocs.io/en/latest/
 
-
-# FAQ: On-Policy Training
-
-During RL training, the model generates rollouts (inference) and then learns from them (training). **On-policy** means the exact same token IDs and logprobs are used in both steps. In practice, generation often uses an optimized inference server (e.g., vLLM) while training uses a different framework (e.g., Megatron). If the two produce different token IDs or logprobs for the same input, training becomes **off-policy**.
-
-## Why On-Policy Matters
-
-Policy optimization algorithms compute gradients from the ratio of training logprobs to generation logprobs. When these diverge, gradients become unreliable. Small mismatches are tolerable, but large ones cause training to crash, for example. 
-
-### Common Causes of Mismatch
-
-Several scenarios lead to train-generation mismatch, including differences in training and inference algorithm implementations or kernel implementations (e.g., vLLM vs Megatron-core):
-
-**Re-tokenization of prompts across multiple steps**
-: When generated tokens are de-tokenized to strings and then re-tokenized for the next model call, the token IDs can change. For example, tokens that de-tokenize to `"_Ski" + "nny"` might re-tokenize as a single `"_Skinny"` token.
-
-**Re-chat templating**
-: When the model's output is parsed into structured objects (like tool calls) and then re-rendered through a chat template, the formatting can differ from the original generation.
-
-:::{tip}
-For a detailed technical explanation of these problems and their solutions, refer to {doc}`/contribute/rl-framework-integration/openai-compatible-http-server-on-policy-correction`.
-:::
-
-
 # FAQ: Monotonic (Strictly-Increasing) Trajectories
 
 **Monotonicity** means the token sequence in a multi-step rollout only grows, so previous tokens are never modified or dropped between turns. NeMo Gym and NeMo RL currently require this property for training.
@@ -494,9 +470,7 @@ NeMo RL enforces monotonicity in two places:
 1. **vLLM worker**: Replaces re-tokenized prompt prefixes with the original token IDs from prior turns (the on-policy token ID fix)
 2. **NeMo Gym postprocessing**: Asserts that token IDs across turns form a contiguous, strictly-increasing sequence
 
-## When to Disable Monotonicity
-
-Some use cases intentionally break monotonicity. Examples include:
+Examples: 
 
 - **Reasoning trace removal**: Models like Qwen3 whose chat templates strip reasoning from previous turns
 - **Agent context management**: Agentic harnesses that summarize or truncate prior history as rollouts grow
@@ -507,17 +481,4 @@ Some use cases intentionally break monotonicity. Examples include:
 
 For models with a chat template that drops previous reasoning traces: modify the chat template to retain all thinking, or use the non-thinking model.
 
-For agents with non-monotonic trajectoires, the asserts may need to be disabled. This is not currently supported. 
-
-In general, when disabling the asserts, monitor NeMo RL's metrics such as gen_kl_error as described in [NeMo RL docs](https://github.com/NVIDIA-NeMo/RL/blob/main/docs/guides/grpo.md#metrics). Also monitor token ids across transitions and training stability. 
-
-### For Models with Reasoning Traces
-
-1. **Preferred**: Disable reasoning truncation and keep reasoning across all turns (preserves monotonicity and on-policy)
-2. **Alternative**: Disable monotonicity enforcement and accept off-policy training
-
-### For Agents with Context Management
-
-- Evaluate whether history modification is necessary for your use case
-- If you must modify history, disable monotonicity enforcement and monitor training stability closely
-- Leverage importance sampling to account for the off-policy distribution shift
+For agents with non-monotonic trajectoires, the asserts may need to be disabled. This is not currently supported, but can be experimented with.  
