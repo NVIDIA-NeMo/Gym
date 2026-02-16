@@ -88,38 +88,37 @@ def extract_sql_from_response(text: str) -> Optional[str]:
             if re.match(r"^\s*(SELECT|INSERT|UPDATE|DELETE|WITH|CREATE|ALTER|DROP)\s", content, re.IGNORECASE):
                 return content
 
-    # Try to find raw SQL statement
-    sql_pattern = r"((?:SELECT|INSERT|UPDATE|DELETE|WITH)\s+[\s\S]*?(?:;|$))"
-    matches = re.findall(sql_pattern, text, re.IGNORECASE)
-    if matches:
-        return matches[-1].strip().rstrip(";") + ";"
+    # Try to find raw SQL statement.
+    # Find the first SQL keyword and extract from there to the last semicolon.
+    # A greedy approach is used instead of a lazy one ([\s\S]*?) to avoid
+    # prematurely breaking on semicolons that appear inside string literals
+    # (e.g., INSTR(text, ';')) or SQL comments (e.g., -- convert to number;).
+    sql_start = re.search(r"(?:SELECT|INSERT|UPDATE|DELETE|WITH)\s", text, re.IGNORECASE)
+    if sql_start:
+        last_semicolon = text.rfind(";")
+        if last_semicolon >= sql_start.start():
+            extracted = text[sql_start.start() : last_semicolon + 1].strip()
+        else:
+            # No semicolon after the keyword — take everything to end of string
+            extracted = text[sql_start.start() :].strip()
+        # Normalize: ensure exactly one trailing semicolon
+        return extracted.rstrip(";") + ";"
 
     return None
 
 
-def _extract_question_text(params: NeMoGymResponseCreateParamsNonStreaming) -> str:
-    """Extract the question text from the last user message."""
-    last_text: Optional[str] = None
-    for m in params.input or []:
-        if getattr(m, "role", None) == "user":
-            c = getattr(m, "content", None)
-            if isinstance(c, str):
-                last_text = c
-    return (last_text or "").strip()
-
-
-def _extract_dialect_from_prompt(text: str) -> Optional[str]:
-    """Extract SQL dialect from a structured prompt."""
-    if not text:
-        return None
-    match = re.search(r"^\s*DIALECT:\s*([a-zA-Z0-9_+-]+)\s*$", text, re.MULTILINE)
-    return match.group(1) if match else None
+_DIALECT_ALIASES: dict[str, str] = {
+    "postgres": "postgresql",
+    "pg": "postgresql",
+    "sqlite3": "sqlite",
+}
 
 
 def _normalize_dialect(dialect: Optional[str]) -> Optional[str]:
     if not dialect:
         return None
-    return dialect.strip().lower()
+    normalized = dialect.strip().lower()
+    return _DIALECT_ALIASES.get(normalized, normalized)
 
 
 def _extract_judge_response_text(response: NeMoGymResponse) -> str:
@@ -171,7 +170,7 @@ class TextToSqlRunRequest(BaseRunRequest):
     sql: str  # Ground truth SQL query (required)
     sql_dialect: str  # SQL dialect: mysql, postgresql, sqlite (required)
     sql_context: str = ""  # Database schema (CREATE/INSERT statements)
-    sql_prompt: Optional[str] = None  # Natural language question (optional, extracted from input if not provided)
+    sql_prompt: str  # Natural language question (required)
     metadata: Optional[dict[str, Any]] = None
 
 
@@ -196,7 +195,7 @@ class TextToSqlVerifyResponse(BaseVerifyResponse):
     extracted_sql: Optional[str] = None
     sql_dialect: str  # SQL dialect used
     sql_context: str  # Database schema provided
-    sql_prompt: Optional[str] = None  # May be extracted from input
+    sql_prompt: str  # Natural language question
     judge_passed: bool = False
     failure_reason: Optional[FailureCode] = None
     judge_evaluations: list[JudgeEvaluation] = []
@@ -235,19 +234,38 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
         if sql_dialect not in SUPPORTED_DIALECTS:
             raise ValueError(f"Unsupported SQL dialect '{sql_dialect}'. Supported: {sorted(SUPPORTED_DIALECTS)}")
 
-        # Extract question from request field or from user message
-        sql_prompt = body.sql_prompt or _extract_question_text(body.responses_create_params)
+        # sql_prompt is a required field, validated by Pydantic
+        sql_prompt = body.sql_prompt
 
         # Get model output text directly from response
         generated = body.response.output_text or ""
-        if not generated:
-            raise ValueError("No assistant response found/extracted to verify")
 
         reward = 0.0
         failure_reason = None
         judge_passed = False
         judge_evaluations = []
         extracted_sql = None
+
+        if not generated:
+            failure_reason = FailureCode.NO_SQL_EXTRACTED
+            payload = body.model_dump()
+            payload.pop("sql", None)
+            payload.pop("sql_dialect", None)
+            payload.pop("sql_context", None)
+            payload.pop("sql_prompt", None)
+            return TextToSqlVerifyResponse(
+                **payload,
+                reward=0.0,
+                sql=expected_sql,
+                model_output="",
+                extracted_sql=None,
+                sql_dialect=sql_dialect,
+                sql_context=sql_context,
+                sql_prompt=sql_prompt,
+                judge_passed=False,
+                failure_reason=failure_reason,
+                judge_evaluations=[],
+            )
 
         try:
             # Extract SQL from model output
