@@ -18,10 +18,12 @@ import traceback
 from typing import Any
 
 import verifiers as vf
+import verifiers.envs.multiturn_env as _multiturn_env_module
 from fastapi import Body, Request, Response
 from openai.types.chat.chat_completion import ChatCompletion
 from pydantic import ConfigDict, Field
 from verifiers.utils.async_utils import maybe_semaphore
+from verifiers.utils.response_utils import parse_response_messages as _original_parse_response_messages
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
@@ -39,6 +41,28 @@ from nemo_gym.server_utils import get_global_aiohttp_client
 
 
 logger = logging.getLogger(__name__)
+
+
+async def _patched_parse_response_messages(response, message_type):
+    messages = await _original_parse_response_messages(response, message_type)
+    if message_type == "chat" and isinstance(messages, list):
+        for msg in messages:
+            if isinstance(msg, dict) and msg.get("role") == "assistant":
+                if hasattr(response, "prompt_token_ids"):
+                    msg["prompt_token_ids"] = response.prompt_token_ids
+                if response.choices and hasattr(response.choices[0], "token_ids"):
+                    msg["generation_token_ids"] = response.choices[0].token_ids
+                if (
+                    response.choices
+                    and response.choices[0].logprobs
+                    and hasattr(response.choices[0].logprobs, "content")
+                    and response.choices[0].logprobs.content
+                ):
+                    msg["generation_log_probs"] = [t.logprob for t in response.choices[0].logprobs.content]
+    return messages
+
+
+_multiturn_env_module.parse_response_messages = _patched_parse_response_messages
 
 
 class VerifiersNeMoGymResponse(NeMoGymResponse):
@@ -110,6 +134,9 @@ class VLLMOpenAIClient:
                 f"No generation_token_ids in response! Full message keys were: {list(choice_dict.get('message', {}).keys())}"
             )
 
+        if prompt_token_ids and isinstance(prompt_token_ids[0], str):
+            prompt_token_ids = [int(tid) for tid in prompt_token_ids]
+
         if generation_token_ids and isinstance(generation_token_ids[0], str):
             generation_token_ids = [int(tid) for tid in generation_token_ids]
 
@@ -166,7 +193,6 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
 
     def _get_env(self, vf_env_id: str) -> vf.Environment:
         if vf_env_id not in self.envs_cache:
-            logger.info(f"Loading verifiers environment: {vf_env_id}")
             self.envs_cache[vf_env_id] = vf.load_environment(vf_env_id, **self.config.vf_env_args)
         return self.envs_cache[vf_env_id]
 
@@ -229,9 +255,6 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
     ) -> VerifiersNeMoGymResponse:
         try:
             vf_env_id = body.vf_env_id or self.config.vf_env_id
-            if not vf_env_id:
-                raise ValueError("vf_env_id must be provided in request or config")
-
             vf_env = self._get_env(vf_env_id)
             task_idx = body.task_idx
 
