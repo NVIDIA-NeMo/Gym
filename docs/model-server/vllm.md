@@ -1,102 +1,13 @@
 (model-server-vllm)=
-# VLLMModel Server
+# vLLM Model Server
 
-[vLLM](https://docs.vllm.ai/) is a popular LLM inference engine. The NeMo Gym VLLMmodel server wraps vLLM's Chat Completions endpoint and converts requests/responses to NeMo Gym's native format which is OpenAI's [Responses API](https://platform.openai.com/docs/api-reference/responses) schema.
+[vLLM](https://docs.vllm.ai/) is a popular LLM inference engine. The NeMo Gym VLLMModel server wraps vLLM's Chat Completions endpoint and converts requests and responses to NeMo Gym's native format, the OpenAI [Responses API](https://platform.openai.com/docs/api-reference/responses) schema.
 
-This document will:
-1. Describe the historical context behind why we need such a conversion to/from Chat Completions and Responses.
-2. Detail the exact differences between Chat Completions and Responses schema.
-3. Provide an example of spinning up vLLM server, along with usage of VLLMModel.
-4. Detail the available configuration options for VLLMModel.
-5. Explain how to use the VLLMModel with multiple replicas of a model.
-6. Explain the differences between offline inference through VLLMModel and training.
+Most open-source models use Chat Completions format, while NeMo Gym uses the Responses API natively. VLLMModel bridges this gap by converting between the two formats automatically. For background on why NeMo Gym chose the Responses API and how the two schemas differ, see {ref}`responses-api-evolution`.
 
+## Use VLLMModel
 
-## How did OpenAI Responses API evolve and why is it necessary?
-Fundamentally, LLMs accept a sequence of tokens on input and produce a sequence of tokens on output. Critically, even if the direct information provided to the LLM is very simple, the outputs can be de-tokenized into a string which can be parsed in a variety of different manners.
-
-In late 2022, OpenAI released text-davinci-003 which used the [Completions API](https://developers.openai.com/api/docs/guides/completions/), accepting a prompt string on input and returning a text string as response.
-
-In March 2023, OpenAI released [GPT-3.5 Turbo](https://developers.openai.com/api/docs/models/gpt-3.5-turbo) along with the Chat Completions API. This API accepted not just a plain prompt string, but rather a sequence of objects representing the conversation input to the model. This API also returned not just a plain text string, but an object representing the model response that contained more directly useful information parsed from the original plain text string. 
-
-In other words, Chat Completions upgraded from Completions to provide a richer user experience in leveraging the response. For example, the Chat Completions response returned a list of "function calls" that were directly usable to select a particular function and call that function with model-provided arguments. This enabled the model to interact not just with the user but with its environment as well.
-
-In March 2025, OpenAI released the [Responses API](https://openai.com/index/new-tools-for-building-agents/) in order to better facilitate building agentic systems. Specifically, the Responses API returned not only a single model response like Chat Completions, but rather a sequence of possibly interleaved reasoning, function calls, function call execution results, and chat responses. So previously, while a single Chat Completion was limited to just a single model generation, the Responses API could generate some model response including a function call, execute that function call on the OpenAI server side, and return both results as part of a single Response to the user.
-
-Responses schema is also a superset of Chat Completions.
-
-Currently, the community has still yet to shift from Chat Completions schema to Responses schema. Part of this issue is that the majority of open-source models are still being trained using Chat Completions format, rather than in Responses format.
-
-Moving forward, Chat Completions will eventually be deprecated, but it will take time for the community to adopt the Responses API. OpenAI has tried to accelerate the effort, for example releasing additional guidance and acceptance criteria for how to implement an [open-source version of Responses API](https://www.openresponses.org/).
-
-
-## Chat Completions vs Responses API schema.
-The primary difference between Chat Completions and Responses API is that the Responses API Response object consists of a sequence of output items, while the Chat Completion only consists of a single model response.
-
-The `output` list for a Response can contain multiple item types, such as:
-- `ResponseOutputMessage` - The main user-facing message content returned by the model.
-- `ResponseOutputItemReasoning` - Internal reasoning or "thinking" traces that explain the model’s thought process.
-- `ResponseFunctionToolCall` - A request from the model to invoke an external function or tool.
-
-**Example**
-If a chat completion contains both thinking traces and user-facing text:
-```python
-ChatCompletion(
-    Choices=[
-        Choice(
-            message=ChatCompletionMessage(
-                content="<think>I'm thinking</think>Hi there!",
-                tool_calls=[{...}, {...}],
-                ...
-            )
-        )
-    ],
-    ...
-)
-```
-In the Responses schema, this would be represented as:
-```python
-Response(
-    output=[
-        ResponseOutputItemReasoning(
-            type="reasoning",
-            summary=[
-                Summary(
-                    type="summary_text",
-                    text="I'm thinking",
-                )
-            ]
-        ),
-        ResponseOutputMessage(
-            role="assistant",
-            type="message",
-            content=[
-                ResponseOutputText(
-                    type="output_text",
-                    text="Hi there!",
-                )
-            ]
-        ),
-        ResponseFunctionToolCall(
-            type="function_call",
-            ...
-
-        ),
-        ResponseFunctionToolCall(
-            type="function_call",
-            ...
-
-        ),
-        ...
-    ]
-)
-```
-
-
-## Use NeMo Gym with vLLM and a Chat Completions model
-Most models use Chat Completions format rather than the OpenAI Responses API schema that NeMo Gym uses natively. To bridge this gap, NeMo Gym provides a conversion layer.
-
-As a result, we provide a Responses API to Chat Completions mapping middleware layer in the form of `responses_api_models/vllm_model`. VLLMModel assumes that you are pointing to a vLLM instance (since it relies on vLLM-specific endpoints like `/tokenize` and vLLM-specific arguments like `return_tokens_as_token_ids`).
+VLLMModel provides a Responses API to Chat Completions mapping middleware layer via `responses_api_models/vllm_model`. It assumes you are pointing to a vLLM instance since it relies on vLLM-specific endpoints like `/tokenize` and vLLM-specific arguments like `return_tokens_as_token_ids`.
 
 **To use VLLMModel, just change the `responses_api_models/openai_model/configs/openai_model.yaml` in your config paths to `responses_api_models/vllm_model/configs/vllm_model.yaml`!**
 ```bash
@@ -185,7 +96,7 @@ base_url:
 3. **Why affinity?** Multi-turn conversations and agentic workflows that call the model multiple times in one trajectory need to hit the same model endpoint in order to hit the prefix cache, which significantly speeds up the prefill phase of model inference.
 
 
-## Training vs Offline inference
+## Training vs Offline Inference
 By default, VLLMModel will not track any token IDs explicitly. However, token IDs are necessary when using NeMo Gym in conjunction with a training framework in order to train a model. For NeMo RL training workflows, use the training-dedicated config which enables token ID tracking:
 
 ```yaml
