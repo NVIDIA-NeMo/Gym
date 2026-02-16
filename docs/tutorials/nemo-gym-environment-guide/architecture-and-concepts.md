@@ -13,8 +13,7 @@ NeMo Gym is a framework for building RL (Reinforcement Learning) environments de
 **Key characteristics:**
 - **Microservices architecture**: Each component runs as an independent HTTP server
 - **OpenAI-compatible APIs**: Uses the Responses API format for tool calling
-- **Scalable**: Components can be distributed across machines
-- **Composable**: Mix and match environments, agents, and models
+- **Scalable**: Built as a modular, multi‑server system specifically designed for high‑throughput, parallel rollout collection across many environments and models.
 
 ### A Note on Terminology: Environments vs Resource Servers
 
@@ -42,7 +41,7 @@ NeMo Gym uses a three-tier microservices architecture:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│              HeadServer (Port 11000)                        │
+│                 HeadServer                                  │
 │   - Global configuration distribution                       │
 │   - Server discovery and registry                           │
 └─────────────────────────────────────────────────────────────┘
@@ -66,7 +65,7 @@ NeMo Gym uses a three-tier microservices architecture:
 | **ResponsesAPIAgent** | Orchestrates rollouts | `/v1/responses`, `/run` |
 | **ResourcesServer** | Your RL environment | `/seed_session`, `/verify`, `/{tools}` |
 
-**Key insight**: Unlike traditional RL environments (like OpenAI Gym), NeMo Gym environments are HTTP servers that can be distributed, scaled, and composed independently.
+**Key insight**: Unlike traditional RL environments (like OpenAI Gym), NeMo Gym environments are HTTP servers. This modular, multi-server design enables high-throughput parallel rollout collection across many environments and models.
 
 ---
 
