@@ -74,7 +74,7 @@ flowchart LR
 ```
 
 1. {doc}`/get-started/detailed-setup` — Install NeMo Gym
-2. {doc}`/tutorials/creating-resource-server` — Build a basic resources server
+2. {doc}`/environment-tutorials/creating-training-environment` — Build a basic resources server
 3. {doc}`creating-training-environment` — Add verification and connect to training
 4. Start training with one of the {doc}`/training-tutorials/index`
 
