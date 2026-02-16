@@ -77,7 +77,7 @@ python3 scripts/create_dataset.py --env-id primeintellect/ascii-tree --size 5 --
 Update `requirements.txt` to: 
 ```
 -e nemo-gym[dev] @ ../../
-verifiers>=0.1.9
+verifiers==0.1.9.post3
 --extra-index-url https://hub.primeintellect.ai/primeintellect/simple/
 ascii-tree
 ```
