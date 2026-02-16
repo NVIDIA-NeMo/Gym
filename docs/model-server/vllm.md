@@ -186,7 +186,7 @@ base_url:
 
 
 ## Training vs Offline inference
-By default, VLLMModel will not track any token IDs explicitly. However, token IDs are necessary when using Gym in conjunction with a training framework in order to train a model. For NeMo RL training workflows, use the training-dedicated config which enables token ID tracking:
+By default, VLLMModel will not track any token IDs explicitly. However, token IDs are necessary when using NeMo Gym in conjunction with a training framework in order to train a model. For NeMo RL training workflows, use the training-dedicated config which enables token ID tracking:
 
 ```yaml
 # Use vllm_model_for_training.yaml

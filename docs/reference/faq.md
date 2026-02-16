@@ -282,7 +282,7 @@ ng_prepare_data "+config_paths=[$config_paths]" \
 
 
 # How To: Profile your resources server
-For large scale verifier training, it's critical that your resources server is as efficient as possible. It can be slammed with 16k concurrent requests or more. Gym provides easy tools to profile and understand the efficiency of your servers.
+For large scale verifier training, it's critical that your resources server is as efficient as possible. It can be slammed with 16k concurrent requests or more. NeMo Gym provides easy tools to profile and understand the efficiency of your servers.
 
 In one terminal, start your agent, model, and resources servers, with profiling enabled.
 - `profiling_enabled` (bool): whether profiling is enabled or not. By default this is disabled since it incurs some slight overhead we don't want at runtime.
@@ -395,7 +395,7 @@ One way I like to think about these things is:
 - You can do RL on SFT data, where your input is your SFT input, and the model answer scorer is just an exact match on the SFT gold label.
 - You can also do SFT on RL data using synthetic data generation, where you run your inputs into some strong teacher model, score the responses, and use the scores to pick your SFT gold label.
 
-Tying back to NeMo Gym, NeMo gym can be used to create synthetic data for SFT training by running strong teacher models on the different environments. Critically, it will also be used as the source of data during RL training.
+Tying back to NeMo Gym, NeMo Gym can be used to create synthetic data for SFT training by running strong teacher models on the different environments. Critically, it will also be used as the source of data during RL training.
 
 
 

@@ -4,7 +4,7 @@
 Model servers provide stateless LLM inference via OpenAI-compatible endpoints. They implement `ResponsesAPIModel` and expose two endpoints:
 
 - **`/v1/responses`** — [OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)
-  - This is the default input/output schema for for all Gym rollouts.
+  - This is the default input/output schema for all NeMo Gym rollouts.
 - **`/v1/chat/completions`** — [OpenAI Chat Completions API](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)
 
 
