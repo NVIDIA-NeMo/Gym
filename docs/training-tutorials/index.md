@@ -1,102 +1,73 @@
 (training-tutorials-index)=
 # Training Tutorials
 
-Hands-on tutorials for training models with NeMo Gym across different frameworks and configurations.
+We have hands-on tutorials with supported training frameworks to help you train with NeMo Gym environments. If you're interested in integrating another training framework, see the {doc}`Training Framework Integration Guide <../contribute/rl-framework-integration/index>`.
 
-## Training Frameworks
-
-NeMo Gym integrates with various RL training frameworks:
-
-| Framework | Algorithm | GPU Support | Best For |
-|-----------|-----------|-------------|----------|
-| [NeMo RL](../tutorials/nemo-rl-grpo/index) | GRPO | Multi-node | Production training |
-| [Unsloth](../tutorials/unsloth-training) | Various | Single GPU | Fast iteration |
-| [TRL](trl) | PPO, DPO | Multi-GPU | HuggingFace ecosystem |
-| [VeRL](verl) | Various | Multi-node | Research |
-
-## Recipe Tutorials
-
-Pre-configured training recipes for specific models:
+## RL (GRPO)
 
 ::::{grid} 1 2 2 2
 :gutter: 1 1 1 2
 
-:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` Nemotron 3 Nano
-:link: nemotron-nano
+:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` NeMo RL
+:link: nemo-rl-grpo/index
 :link-type: doc
-Efficient small model training.
+Tutorial-series: GRPO training to improve multi-step tool calling on the Workplace Assistant environment, scaling from single-node to multi-node training.
 +++
-{bdg-secondary}`nemotron` {bdg-secondary}`nano`
+{bdg-secondary}`nemo rl` {bdg-secondary}`grpo` {bdg-secondary}`3-5 hours`
 :::
 
-:::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Nemotron 3 Super
-:link: nemotron-super
-:link-type: doc
-High-performance training.
+:::{grid-item-card} {octicon}`link-external;1.5em;sd-mr-1` OpenRLHF
+:link: https://github.com/OpenRLHF/OpenRLHF/blob/main/examples/python/agent_func_nemogym_executor.py
+:link-type: url
+Review the agent executor for using NeMo Gym environments with OpenRLHF.
 +++
-{bdg-secondary}`nemotron` {bdg-secondary}`super`
+{bdg-secondary}`openrlhf`
+:::
+
+:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` TRL
+:link: trl
+:link-type: doc
+GRPO training on Workplace Assistant and Reasoning Gym environments
++++
+{bdg-secondary}`trl`
+:::
+
+:::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Unsloth
+:link: unsloth-training
+:link-type: doc
+GRPO training on instruction following and reasoning environments.
++++
+{bdg-secondary}`unsloth` {bdg-secondary}`single-gpu` {bdg-secondary}`30 min`
+:::
+
+
+:::{grid-item-card} {octicon}`gear;1.5em;sd-mr-1` NeMo Customizer
+:link-type: doc
+*Coming soon*
++++
+{bdg-secondary}`nemo customizer` {bdg-warning}`in progress`
+:::
+
+:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` VeRL
+:link-type: doc
+*Coming soon*
++++
+{bdg-secondary}`verl` {bdg-warning}`in progress`
 :::
 
 ::::
 
-## Framework Tutorials
+## SFT & DPO
 
-::::{grid} 1 2 2 2
+::::{grid} 1 1 2 2
 :gutter: 1 1 1 2
 
-:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` NeMo RL with GRPO
-:link: ../tutorials/nemo-rl-grpo/index
+:::{grid-item-card} {octicon}`file;1.5em;sd-mr-1` Offline Training with Rollouts
+:link: offline-training-w-rollouts
 :link-type: doc
-Multi-step tool calling with GRPO.
-+++
-{bdg-primary}`recommended` {bdg-secondary}`grpo`
-:::
-
-:::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Unsloth Training
-:link: ../tutorials/unsloth-training
-:link-type: doc
-Fast, memory-efficient fine-tuning.
-+++
-{bdg-secondary}`unsloth` {bdg-secondary}`efficient`
-:::
-
-:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` TRL Training
-:link: trl
-:link-type: doc
-HuggingFace TRL integration.
-+++
-{bdg-secondary}`trl` {bdg-secondary}`huggingface`
-:::
-
-:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` VeRL Training
-:link: verl
-:link-type: doc
-VeRL framework integration.
-+++
-{bdg-secondary}`verl`
-:::
-
-:::{grid-item-card} {octicon}`gear;1.5em;sd-mr-1` NeMo Customizer
-:link: nemo-customizer
-:link-type: doc
-NeMo Customizer integration.
-+++
-{bdg-secondary}`nemo-customizer`
-:::
-
-:::{grid-item-card} {octicon}`file;1.5em;sd-mr-1` Offline Training
-:link: ../tutorials/offline-training-w-rollouts
-:link-type: doc
-SFT and DPO from rollouts.
+Transform rollouts into training data for supervised fine-tuning (SFT) and direct preference optimization (DPO).
 +++
 {bdg-secondary}`sft` {bdg-secondary}`dpo`
 :::
 
 ::::
-
-## Choosing a Framework
-
-- **Production training**: Use NeMo RL for multi-node GRPO training
-- **Rapid prototyping**: Use Unsloth for fast single-GPU iteration
-- **HuggingFace models**: Use TRL for seamless ecosystem integration
-- **Offline training**: Use SFT/DPO when you have high-quality rollouts

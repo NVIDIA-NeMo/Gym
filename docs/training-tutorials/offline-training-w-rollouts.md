@@ -6,7 +6,29 @@
 This tutorial is **experimental** and may contain bugs. Proceed with caution.
 :::
 
+:::{card}
+
 **Goal**: Transform your generated rollouts into high-quality training data for {term}`supervised fine-tuning (SFT) <SFT (Supervised Fine-Tuning)>` and {term}`direct preference optimization (DPO) <DPO (Direct Preference Optimization)>`.
+
+**Time**: ~20 minutes
+
+^^^
+
+**In this tutorial, you will**:
+
+1. Filter and process collected rollouts
+2. Generate SFT and DPO training datasets
+3. Train models using offline training pipelines
+
+:::
+
+## Prerequisites
+
+- Completed {doc}`/get-started/detailed-setup`
+- Collected rollouts ({doc}`/get-started/rollout-collection`)
+- Virtual environment activated
+
+---
 
 ## Why Offline Training?
 
@@ -360,3 +382,26 @@ You now know how to transform rollouts into training data:
 - **Quality filtering and curation** techniques  
 - **Evaluation methods** to measure improvement
 - **Best practices** for sustainable offline training workflows
+
+---
+
+## Next Steps
+
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` GRPO Training
+:link: /training-tutorials/nemo-rl-grpo/index
+:link-type: doc
+
+Train with GRPO for more powerful optimization than offline methods.
+:::
+
+:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build Custom Environments
+:link: /environment-tutorials/index
+:link-type: doc
+
+Create custom training environments with advanced verification patterns.
+:::
+
+::::

@@ -75,6 +75,11 @@ dependencies = [
     # The licenses of the below dependencies include: Apache 2.0, MIT, and BSD 3-Clause
     #
     # By design, most (if not all) dependencies are unfrozen here to be easier to consume. The core pieces we need are server infra like FastAPI, etc.
+    #
+    # Dependency management philosophy:
+    # - pyproject.toml: Specifies minimum version requirements (e.g., "mlflow>=3.5.0" means "we need at least 3.5.0 for security/features")
+    # - uv.lock: Locks exact versions for reproducibility (e.g., "mlflow==3.9.0" means "we're currently using exactly 3.9.0")
+    # This ensures both flexibility for consumers and reproducibility for developers.
     ########################################
 
     # OpenAI: We leverage OpenAI Responses, Chat Completions, and Completions schemas for Nemo Gym abstractions. It may also be used to directly query endpoints.
@@ -125,14 +130,14 @@ dependencies = [
     "gradio",
 
     # MLFlow: used for interacting with the Gitlab model registry
-    # Updated Tue Aug 05, 2025 with mlflow==3.2.0
+    # Updated Mon Feb 10, 2026 with mlflow>=3.5.0
     # License: Apache 2.0 https://github.com/mlflow/mlflow/blob/1510ed1bc92d3a4258973005d64f64a43136e251/LICENSE.txt
-    "mlflow",
+    "mlflow>=3.5.0",
 
     # aiohttp: async http backend
-    # Updated Sun Sep 21, 2025 with aiohttp==3.12.15
+    # Updated Mon Feb 10, 2026 with aiohttp>=3.13.3
     # License: Apache 2.0 https://github.com/aio-libs/aiohttp/blob/9a2f146a12e3525b43e96723ef41584bf9cf784e/LICENSE.txt
-    "aiohttp",
+    "aiohttp>=3.13.3",
 
     # yappi: profiling tool
     # Updated Mon Sep 22, 2025 with yappi==1.6.10
@@ -140,7 +145,8 @@ dependencies = [
     "yappi",
 
     # Ray: Used for distributed processing
-    # Updated Fri Oct 18, 2025 with ray[default]==2.46.0
+    # Updated Mon Feb 10, 2026 with ray[default]==2.52.1 in uv.lock
+    # Security: Requires ray>=2.52.0 (currently resolves to 2.52.1 naturally)
     # License: Apache 2.0 https://github.com/ray-project/ray/blob/master/LICENSE
     "ray[default]",
 
@@ -158,6 +164,21 @@ dependencies = [
     # Updated: Thu Jan 08, 2026 with orjson==3.11.3
     # License: Apache 2.0 https://github.com/ijl/orjson/blob/fb3eb1f729c7e7b019f780af5695722c99c7c695/LICENSE-APACHE
     "orjson",
+
+    # urllib3: HTTP client library (transitive dependency, pinned for security)
+    # Updated: Mon Feb 10, 2026 with urllib3>=2.6.3
+    # License: MIT https://github.com/urllib3/urllib3/blob/main/LICENSE.txt
+    "urllib3>=2.6.3",
+
+    # fonttools: Library to manipulate font files (transitive dependency, pinned for security)
+    # Updated: Mon Feb 10, 2026 with fonttools>=4.60.2
+    # License: MIT https://github.com/fonttools/fonttools/blob/main/LICENSE
+    "fonttools>=4.60.2",
+
+    # python-multipart: Streaming multipart parser (transitive dependency, pinned for security)
+    # Updated: Mon Feb 10, 2026 with python-multipart>=0.0.22
+    # License: Apache 2.0 https://github.com/andrew-d/python-multipart/blob/master/LICENSE.txt
+    "python-multipart>=0.0.22",
 ]
 
 [dependency-groups]
