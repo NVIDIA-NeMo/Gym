@@ -357,8 +357,7 @@ if __name__ == "__main__":
 | In-memory state | Session-based state with `SESSION_ID_KEY` |
 
 The key differentiator is that NeMo Gym environments are HTTP microservices, enabling:
-- **Distributed training** across multiple machines
-- **Horizontal scaling** of environment instances
+- **High-throughput parallel rollout collection** across many environments and models
 - **Composition** of multiple environments in complex training scenarios
 - **Language-agnostic** tool implementations (anything that speaks HTTP)
 
