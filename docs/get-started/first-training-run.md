@@ -161,7 +161,7 @@ Browse available resource servers for math, code, tool-use, and more.
 :::
 
 :::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build Custom Environments
-:link: /tutorials/creating-resource-server
+:link: /environment-tutorials/creating-training-environment
 :link-type: doc
 
 Create your own training environment with custom tools and verification.

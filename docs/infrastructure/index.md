@@ -1,7 +1,7 @@
 (infrastructure-index)=
 # Infrastructure
 
-Learn how NeMo Gym is deployed and scaled for production workloads.
+Learn how to deploy NeMo Gym and plan cluster resources for training.
 
 ::::{grid} 1 2 2 2
 :gutter: 1 1 1 2
