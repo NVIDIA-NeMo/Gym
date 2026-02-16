@@ -68,15 +68,13 @@ Run multiple training environments simultaneously for rollout collection.
 
 ```{mermaid}
 flowchart LR
-    A[1. Setup] --> B[2. Resources Server]
-    B --> C[3. Training Environment]
-    C --> D[4. Train]
+    A[1. Setup] --> B[2. Training Environment]
+    B --> C[3. Train]
 ```
 
 1. {doc}`/get-started/detailed-setup` — Install NeMo Gym
-2. {doc}`/environment-tutorials/creating-training-environment` — Build a basic resources server
-3. {doc}`creating-training-environment` — Add verification and connect to training
-4. Start training with one of the {doc}`/training-tutorials/index`
+2. {doc}`creating-training-environment` — Build a training environment with verification
+3. Start training with one of the {doc}`/training-tutorials/index`
 
 ---
 
