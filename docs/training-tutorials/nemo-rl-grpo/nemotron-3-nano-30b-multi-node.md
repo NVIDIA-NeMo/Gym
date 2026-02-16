@@ -364,10 +364,7 @@ squeue --job=JOBID
 squeue --job=JOBID -o "%.18i %.9P %.30j %.8u %.2t %.10M %.6D %R"
 ```
 
-**Status meanings:**
-- `PD` (Pending): Waiting for resources
-- `R` (Running): Job is executing
-- `CG` (Completing): Job is finishing up
+**Note:** For job state codes (PD, R, CD, etc.), see [Slurm documentation](https://slurm.schedmd.com/squeue.html#SECTION_JOB-STATE-CODES).
 
 **✅ Success Check**: Job transitions from `PD` to `R` state.
 
