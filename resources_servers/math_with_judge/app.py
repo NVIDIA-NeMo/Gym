@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import contextlib
 import json
 import logging
@@ -45,6 +46,16 @@ from nemo_gym.openai_utils import (
 from nemo_gym.server_utils import get_response_json
 
 LOG = logging.getLogger(__name__)
+
+# Lock for appending to the judge verification JSONL (when MATH_JUDGE_LOG_DIR is set).
+_judge_log_lock: asyncio.Lock | None = None
+
+
+def _get_judge_log_lock() -> asyncio.Lock:
+    global _judge_log_lock
+    if _judge_log_lock is None:
+        _judge_log_lock = asyncio.Lock()
+    return _judge_log_lock
 
 
 def _get_judge_client_config() -> Optional[tuple[str, str, int, list[str]]]:
@@ -408,16 +419,40 @@ Example output: "My final verdict is different [[A!=B]]"."""
             self._judge_first_success_logged = True
         # Parse "Judgement: Yes" or "Judgement: No" (case-insensitive); last occurrence wins.
         reward = 0.0
+        judgement_parsed = "No"
         if "judgement:" in judge_text.lower():
             last_yes = judge_text.lower().rfind("judgement: yes")
             last_no = judge_text.lower().rfind("judgement: no")
             if last_yes >= 0 and (last_no < 0 or last_yes > last_no):
                 reward = 1.0
+                judgement_parsed = "Yes"
+            else:
+                judgement_parsed = "No"
         else:
             LOG.warning(
                 "Judge response had no 'Judgement:' line (reward=0). Snippet: %s",
                 (judge_text[:500] + "..." if len(judge_text) > 500 else judge_text) or "(empty)",
             )
+        # Append to JSONL when MATH_JUDGE_LOG_DIR is set (e.g. by pipeline).
+        log_dir = os.environ.get("MATH_JUDGE_LOG_DIR")
+        if log_dir:
+            record = {
+                "problem": question,
+                "predicted_answer": generated_answer,
+                "expected_answer": expected_answer,
+                "judgement_raw": judge_text,
+                "judgement": judgement_parsed,
+                "reward": int(reward),
+            }
+            log_path = os.path.join(log_dir, "math_judge_verifications.jsonl")
+            try:
+                os.makedirs(log_dir, exist_ok=True)
+                lock = _get_judge_log_lock()
+                async with lock:
+                    with open(log_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            except OSError as e:
+                LOG.warning("Failed to write judge verification to %s: %s", log_path, e)
         # Build one JudgeEvaluation with minimal NeMoGymResponse for consistency.
         out_text = NeMoGymResponseOutputText(annotations=[], text=judge_text)
         out_msg = NeMoGymResponseOutputMessage(
