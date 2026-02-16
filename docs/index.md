@@ -204,7 +204,7 @@ View all training tutorials →
 
 ## Infrastructure
 
-Deploy and scale NeMo Gym for production workloads.
+Deploy NeMo Gym and plan cluster resources for training.
 
 ::::{grid} 1 2 2 2
 :gutter: 1 1 1 2

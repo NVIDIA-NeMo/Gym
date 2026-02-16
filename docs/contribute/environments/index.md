@@ -2,7 +2,7 @@
 
 # Contribute Environments
 
-Help advance RL training for the community by contributing new environments. There are two main ways to get involved:
+Help advance RL training for the community by contributing new environments. There are several ways to get involved:
 
 ---
 
