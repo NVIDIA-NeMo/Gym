@@ -8,6 +8,8 @@ Now that you understand the configuration parameters for GRPO training, it's tim
 
 **Goal**: Set up your environment for GRPO training with NeMo RL and NeMo Gym.
 
+**Time**: ~30 minutes
+
 ^^^
 
 **In this section, you will**:
@@ -29,7 +31,7 @@ Now that you understand the configuration parameters for GRPO training, it's tim
 
 ---
 
-## Before You Begin
+## Prerequisites
 
 Make sure you have:
 
@@ -185,9 +187,13 @@ cd ../../..
 
 ---
 
+## Next Steps
+
+With your environment set up and data prepared, run your first training session:
+
 :::{button-ref} training-nemo-rl-grpo-single-node-training
 :color: primary
 :ref-type: ref
 
-Next: Single Node Training →
+Continue to Single Node Training →
 :::

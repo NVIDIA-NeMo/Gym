@@ -7,6 +7,8 @@ This tutorial guides you through your first RL training run using NeMo Gym for t
 
 **Goal**: Train your first RL model using NeMo Gym verification and Unsloth.
 
+**Time**: ~30 minutes (Colab)
+
 ^^^
 
 **In this tutorial, you will**:
@@ -17,9 +19,19 @@ This tutorial guides you through your first RL training run using NeMo Gym for t
 
 :::
 
-:::{tip}
-**No prior NeMo Gym setup required.** The Colab notebook is self-contained. For local training, see [Local Training](#local-training-advanced) below.
+:::{button-ref} rollout-collection
+:color: secondary
+:outline:
+:ref-type: doc
+
+← Previous: Rollout Collection
 :::
+
+## Prerequisites
+
+- **For Colab**: No prior NeMo Gym setup required — the notebook is self-contained
+- **For local training**: Completed {doc}`Detailed Setup Guide <detailed-setup>` and {doc}`Rollout Collection <rollout-collection>`
+- A Google account (for Colab) or a local GPU with 16GB+ VRAM
 
 ---
 
@@ -34,7 +46,7 @@ This tutorial guides you through your first RL training run using NeMo Gym for t
 | **Algorithm** | GRPO (Group Relative Policy Optimization) |
 
 :::{tip}
-**Why Unsloth?** Unsloth provides optimized memory usage, making it possible to train on free Colab T4 GPUs. For production multi-node training, see {doc}`/tutorials/nemo-rl-grpo/index`.
+**Why Unsloth?** Unsloth provides optimized memory usage, making it possible to train on free Colab T4 GPUs. For production multi-node training, see {doc}`/training-tutorials/nemo-rl-grpo/index`.
 :::
 
 ---
@@ -124,7 +136,7 @@ jupyter notebook nemo_gym_sudoku.ipynb
 
 ---
 
-## What's Next?
+## Next Steps
 
 After completing your first training run:
 
@@ -132,7 +144,7 @@ After completing your first training run:
 :gutter: 3
 
 :::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` Scale to Production
-:link: /tutorials/nemo-rl-grpo/index
+:link: /training-tutorials/nemo-rl-grpo/index
 :link-type: doc
 
 Multi-node GRPO training with NeMo RL for production workloads.
@@ -149,7 +161,7 @@ Browse available resource servers for math, code, tool-use, and more.
 :::
 
 :::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build Custom Environments
-:link: /tutorials/creating-resource-server
+:link: /environment-tutorials/creating-training-environment
 :link-type: doc
 
 Create your own training environment with custom tools and verification.
@@ -158,7 +170,7 @@ Create your own training environment with custom tools and verification.
 :::
 
 :::{grid-item-card} {octicon}`book;1.5em;sd-mr-1` Offline Training
-:link: /tutorials/offline-training-w-rollouts
+:link: /training-tutorials/offline-training-w-rollouts
 :link-type: doc
 
 Use collected rollouts for SFT or DPO training.

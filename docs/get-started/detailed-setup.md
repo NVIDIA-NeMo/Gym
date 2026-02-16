@@ -19,6 +19,14 @@
 
 :::
 
+:::{button-ref} index
+:color: secondary
+:outline:
+:ref-type: doc
+
+← Previous: Quickstart
+:::
+
 ## Requirements
 
 ### Hardware Requirements
@@ -71,7 +79,7 @@ While NeMo Gym itself does not require a GPU, some resource servers (particularl
 
 ---
 
-## Before You Start
+## Prerequisites
 
 Make sure you have these prerequisites ready before beginning:
 
@@ -162,7 +170,7 @@ Refer to {doc}`/reference/configuration` for additional `env.yaml` options.
 **Why GPT-4.1?** We use GPT-4.1 for getting started because it provides low latency (no reasoning step) and reliable function calling support out-of-the-box, letting you focus on learning NeMo Gym without configuration complexity.
 
 **Can I use my own model?** Yes! NeMo Gym works with any OpenAI-compatible inference server that supports function calling:
-- **Self-hosted models**: Use vLLM to serve your own models (see the [vLLM setup guide](../reference/faq.md#how-to-use-nemo-gym-with-a-non-responses-compatible-api-endpoint-like-vllm))
+- **Self-hosted models**: Use vLLM to serve your own models (see the {ref}`model-server-vllm`)
 - **Other providers**: Any inference server that implements the OpenAI API specification
 
 Simply update `policy_base_url`, `policy_api_key`, and `policy_model_name` in your `env.yaml` to point to your chosen endpoint.
@@ -390,4 +398,21 @@ Gym/
 ├── responses_api_agents/       # Agent implementations
 └── docs/                       # Documentation files
 ```
+
+---
+
+## Next Steps
+
+You've confirmed that NeMo Gym is working — the agent can call tools and return results. But a single interaction isn't enough for RL training. **The next step is to collect batches of scored interactions (rollouts) that become your training data.**
+
+:::{button-ref} rollout-collection
+:color: primary
+:ref-type: doc
+
+Continue to Rollout Collection →
+:::
+
+:::{note}
+Rollout collection is required before proceeding to tutorials like {doc}`/environment-tutorials/creating-training-environment` or training workflows. Complete it next.
+:::
 

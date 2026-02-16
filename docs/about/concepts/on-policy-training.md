@@ -45,6 +45,4 @@ Models like Qwen3 that produce reasoning traces present a specific challenge. So
 ## Related Topics
 
 - {doc}`../../contribute/rl-framework-integration/openai-compatible-http-server-on-policy-correction` — Technical details on on-policy corrections
-- {doc}`../../environment-tutorials/multi-turn` — Multi-turn environments where on-policy enforcement matters
-- {doc}`../../environment-tutorials/multi-step` — Multi-step environments with sequential tool calls
 - {doc}`key-terminology` — RL vocabulary including rollouts, logprobs, and policy

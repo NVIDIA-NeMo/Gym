@@ -5,23 +5,6 @@
 This page provides quick answers to commonly asked questions. Over time, these topics will be integrated into the structured product documentation (tutorials, guides, and reference sections) as we expand coverage. We've documented them here to provide immediate help while more comprehensive documentation is in progress.
 :::
 
-## Key Terms
-
-Before diving in, here are some NeMo Gym-specific terms:
-
-- **Resources server**: A server that provides task environments, tools, and verification logic for RL training. Examples include math verifiers, code execution sandboxes, and tool-calling environments.
-- **Agent server**: Orchestrates interactions between the model and resources server, managing conversation flow and tool calls.
-- **Model server**: Wraps an LLM endpoint (vLLM, OpenAI, etc.) to provide a consistent API for NeMo Gym.
-- **Responses API**: OpenAI's structured output format that separates reasoning, messages, and tool calls. NeMo Gym uses this as its native schema.
-
-# How To: Run tests for simple agent
-Run the Simple Chat Agent tests. `ng_test` or `nemo_gym_test` stands for `Nemo Gym Test`.
-```bash
-ng_test +entrypoint=responses_api_agents/simple_agent
-```
-
-Tests are strongly encouraged and you must have at least one test for every server you make. Test coverage is not explicitly required which means that **YOU ARE RESPONSIBLE FOR YOUR OWN SERVER CORRECTNESS AND FUNCTION**.
-
 
 # How To: Upload and download a dataset from HuggingFace
 The huggingface client requires that your credentials are in `env.yaml`, along with some other pertinent details needed to upload to the designated place.
@@ -298,90 +281,8 @@ ng_prepare_data "+config_paths=[$config_paths]" \
 ```
 
 
-# How To: ng_dump_config - Dump a YAML config as exactly as NeMo Gym sees it
-```bash
-# Example ng_run command
-config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
-ng_run "+config_paths=[$config_paths]"
-
-
-# Dump the exact yaml config that NeMo gym sees, just by swapping ng_run -> ng_dump_config
-ng_dump_config "+config_paths=[$config_paths]"
-```
-
-
-# How To: Use NeMo Gym with a non-Responses compatible API endpoint like vLLM
-Most models use Chat Completions format rather than the OpenAI Responses API schema that NeMo Gym uses natively. To bridge this gap, NeMo Gym provides a conversion layer.
-
-As a result, we provide a Responses API to Chat Completions mapping middleware layer in the form of `responses_api_models/vllm_model`. VLLMModel assumes that you are pointing to a vLLM instance (since it relies on vLLM-specific endpoints like `/tokenize` and vLLM-specific arguments like `return_tokens_as_token_ids`).
-
-**To use VLLMModel, just change the `responses_api_models/openai_model/configs/openai_model.yaml` in your config paths to `responses_api_models/vllm_model/configs/vllm_model.yaml`!**
-```bash
-config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\
-responses_api_models/vllm_model/configs/vllm_model.yaml"
-ng_run "+config_paths=[$config_paths]"
-```
-
-Here is an e2e example of how to spin up a NeMo Gym compatible vLLM Chat Completions OpenAI server.
-- If you want to use tools, find the appropriate vLLM arguments regarding the tool call parser to use. In this example, we use Qwen3-30B-A3B, which is suggested to use the `hermes` tool call parser.
-- If you are using a reasoning model, find the appropriate vLLM arguments regarding reasoning parser to use. In this example, we use Qwen3-30B-A3B, which is suggested to use the `qwen3` reasoning parser.
-
-```bash
-uv venv --python 3.12 --seed 
-source .venv/bin/activate
-# hf_transfer for faster model download. datasets for downloading data from HF
-uv pip install hf_transfer datasets vllm --torch-backend=auto
-
-# Qwen/Qwen3-30B-A3B, usable in Nemo RL!
-HF_HOME=.cache/ \
-HF_HUB_ENABLE_HF_TRANSFER=1 \
-    hf download Qwen/Qwen3-30B-A3B
-
-HF_HOME=.cache/ \
-HOME=. \
-vllm serve \
-    Qwen/Qwen3-30B-A3B \
-    --dtype auto \
-    --tensor-parallel-size 4 \
-    --gpu-memory-utilization 0.9 \
-    --enable-auto-tool-choice --tool-call-parser hermes \
-    --reasoning-parser qwen3 \
-    --host 0.0.0.0 \
-    --port 10240
-```
-
-
-# How To: Multi-verifier usage
-Gym is explicitly designed to support multi-verifier training.
-
-Let's say you want to use both math and search verifiers. Normally how you spin up the servers individually is:
-For math:
-```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/math_with_judge/configs/bytedtsinghua_dapo17k.yaml"
-ng_run "+config_paths=[${config_paths}]"
-```
-For search:
-```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/google_search/configs/google_search.yaml"
-ng_run "+config_paths=[$config_paths]"
-```
-
-If you want to use them both you would just add the yamls together like:
-```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/math_with_judge/configs/bytedtsinghua_dapo17k.yaml,\
-resources_servers/google_search/configs/google_search.yaml"
-ng_run "+config_paths=[$config_paths]"
-```
-
-The same process goes for data preparation and downstream training framework Gym configuration, you would just add additional server configs.
-
-
 # How To: Profile your resources server
-For large scale verifier training, it's critical that your resources server is as efficient as possible. It can be slammed with 16k concurrent requests or more. Gym provides easy tools to profile and understand the efficiency of your servers.
+For large scale verifier training, it's critical that your resources server is as efficient as possible. It can be slammed with 16k concurrent requests or more. NeMo Gym provides easy tools to profile and understand the efficiency of your servers.
 
 In one terminal, start your agent, model, and resources servers, with profiling enabled.
 - `profiling_enabled` (bool): whether profiling is enabled or not. By default this is disabled since it incurs some slight overhead we don't want at runtime.
@@ -425,34 +326,6 @@ name                                                                            
   - The `LibraryJudgeMathResourcesServer.verify` function and all functions it called including `_verify_answer`, etc accounted for a total of 17.98387s.
 - `tavg`: average time per call (often ttot / ncall).
   - The `LibraryJudgeMathResourcesServer.verify` function took 0.017562s per call on average.
-
-
-# How To: Use a custom client to call Gym Responses API model endpoints during training
-During training time, Gym keeps track of the ground truth prompt token ids, generation token ids, and generation log probs for downstream consumption by the RL framework. As a result, we need to add a few fields to request and response schemas in order to properly facilitate this. This usually doesn't matter if you are using 100% Gym, but in certain situations you may need or want to use a separate client (such as LiteLLM, your own OpenAI client, and so on) to call model endpoints.
-
-For Chat Completions, outside of training, an Assistant message will look like:
-```python
-ChatCompletionMessage(
-    content="<think>I'm thinking</think>Hi there!",
-    tool_calls=[{...}, {...}],
-    ...
-)
-```
-During training, a Chat Completions Assistant message will look like:
-```python
-ChatCompletionMessage(
-    content="<think>I'm thinking</think>Hi there!",
-    tool_calls=[{...}, {...}],
-    prompt_token_ids=[...],  # List[int]
-    generation_token_ids=[...],  # List[int]
-    generation_log_probs=[...],  # List[float]
-    ...
-)
-```
-And you have to ensure that when you make a request with your custom client that these three extra fields (prompt_token_ids, generation_token_ids, and generation_log_probs) are passed through correctly on a message level. And this also applies to the response i.e. you need to ensure that your custom client will correctly return these three extra fields.
-
-
-It's an analogous story for Responses-compatible APIs.
 
 
 # How To: Use Ray for parallelizing CPU-intensive tasks
@@ -507,71 +380,6 @@ def process_data_parallel(data_list):
 ```
 
 
-# FAQ: OpenAI Responses vs Chat Completions API
-Agents and verifiers work with responses in a standardized format based on the OpenAI Responses API schema. The verifier receives an object where the `output` field conforms to the Response object output [documented here](https://platform.openai.com/docs/api-reference/responses/object#responses/object-output).
-
-The `output` list can contain multiple item types, such as:
-- `ResponseOutputMessage` - The main user-facing message content returned by the model.
-- `ResponseOutputItemReasoning` - Internal reasoning or "thinking" traces that explain the model’s thought process.
-- `ResponseFunctionToolCall` - A request from the model to invoke an external function or tool.
-
-**Example**
-If a chat completion contains both thinking traces and user-facing text:
-```python
-ChatCompletion(
-    Choices=[
-        Choice(
-            message=ChatCompletionMessage(
-                content="<think>I'm thinking</think>Hi there!",
-                tool_calls=[{...}, {...}],
-                ...
-            )
-        )
-    ],
-    ...
-)
-```
-In the Responses schema, this would be represented as:
-```python
-Response(
-    output=[
-        ResponseOutputItemReasoning(
-            type="reasoning",
-            summary=[
-                Summary(
-                    type="summary_text",
-                    text="I'm thinking",
-                )
-            ]
-        ),
-        ResponseOutputMessage(
-            role="assistant",
-            type="message",
-            content=[
-                ResponseOutputText(
-                    type="output_text",
-                    text="Hi there!",
-                )
-            ]
-        ),
-        ResponseFunctionToolCall(
-            type="function_call",
-            ...
-
-        ),
-        ResponseFunctionToolCall(
-            type="function_call",
-            ...
-
-        ),
-        ...
-    ]
-)
-```
-
-Reasoning traces (`Reasoning` items) are parsed before the verifier processes the output. The parsing is **model-specific**, and the verifier does not need to worry about the extracting or interpreting reasoning traces. The verifier receives these items already separated and clearly typed.
-
-
 # FAQ: SFT and RL
 Reading time: 5 mins
 Date: Fri Aug 15, 2025
@@ -587,7 +395,7 @@ One way I like to think about these things is:
 - You can do RL on SFT data, where your input is your SFT input, and the model answer scorer is just an exact match on the SFT gold label.
 - You can also do SFT on RL data using synthetic data generation, where you run your inputs into some strong teacher model, score the responses, and use the scores to pick your SFT gold label.
 
-Tying back to NeMo Gym, NeMo gym can be used to create synthetic data for SFT training by running strong teacher models on the different environments. Critically, it will also be used as the source of data during RL training.
+Tying back to NeMo Gym, NeMo Gym can be used to create synthetic data for SFT training by running strong teacher models on the different environments. Critically, it will also be used as the source of data during RL training.
 
 
 
@@ -652,6 +460,7 @@ pickling environment... done
 checking consistency... done
 ```
 You may need to reformat some of your docstrings to Napoleon format docstrings https://sphinxcontrib-napoleon.readthedocs.io/en/latest/
+
 
 
 # FAQ: NeMo Gym, training frameworks, and token IDs
