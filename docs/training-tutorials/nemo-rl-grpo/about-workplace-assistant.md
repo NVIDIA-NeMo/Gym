@@ -8,6 +8,8 @@ Workplace Assistant is a **{term}`multi-step <Multi-step>` agentic {term}`tool-u
 
 **Goal**: Understand the training environment and how tasks are structured and verified.
 
+**Time**: ~10 minutes (read)
+
 ^^^
 
 **In this section, you will learn**:
@@ -25,6 +27,10 @@ Workplace Assistant is a **{term}`multi-step <Multi-step>` agentic {term}`tool-u
 
 ← Back to Tutorial Overview
 :::
+
+## Prerequisites
+
+- Read the {ref}`tutorial overview <training-nemo-rl-grpo-index>` to understand the training goals
 
 ---
 
@@ -231,3 +237,16 @@ async def route_to_python_function(self, path, body, request):
 :::
 
 ::::
+
+---
+
+## Next Steps
+
+Now that you understand the Workplace Assistant environment, learn how to configure NeMo Gym for training:
+
+:::{button-ref} training-nemo-rl-grpo-gym-configuration
+:color: primary
+:ref-type: ref
+
+Continue to Gym Configuration →
+:::

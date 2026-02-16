@@ -11,9 +11,6 @@ Model servers provide stateless LLM inference via OpenAI-compatible endpoints. T
 | Backend | Use Case | Function Calling | Latency |
 |---------|----------|------------------|---------|
 | [vLLM](vllm) | Self-hosted models, custom fine-tunes | ✅ Via chat template | Low |
-| [OpenAI](openai) | Quick prototyping, GPT models | ✅ Native | Medium |
-| [Azure OpenAI](azure-openai) | Enterprise deployments | ✅ Native | Medium |
-| [Responses-Native](responses-native) | Models with native Responses API | ✅ Native | Low |
 
 ## Backend Guides
 
@@ -26,30 +23,6 @@ Model servers provide stateless LLM inference via OpenAI-compatible endpoints. T
 Self-hosted inference with vLLM for maximum control.
 +++
 {bdg-secondary}`self-hosted` {bdg-secondary}`open-source`
-:::
-
-:::{grid-item-card} {octicon}`cloud;1.5em;sd-mr-1` OpenAI
-:link: openai
-:link-type: doc
-Connect to OpenAI's API for GPT models.
-+++
-{bdg-secondary}`cloud` {bdg-secondary}`api`
-:::
-
-:::{grid-item-card} {octicon}`cloud;1.5em;sd-mr-1` Azure OpenAI
-:link: azure-openai
-:link-type: doc
-Enterprise deployments with Azure.
-+++
-{bdg-secondary}`azure` {bdg-secondary}`enterprise`
-:::
-
-:::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Responses-Native Models
-:link: responses-native
-:link-type: doc
-Models with native Responses API support.
-+++
-{bdg-secondary}`responses-api` {bdg-secondary}`native`
 :::
 
 ::::

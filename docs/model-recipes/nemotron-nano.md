@@ -8,7 +8,7 @@ Quick-reference recipe for training models using the Nemotron Nano model family 
 **Use this page to**: select a model variant, check hardware requirements, and copy working launch commands.
 
 :::{tip}
-**New to NeMo Gym training?** Start with the {doc}`NeMo RL GRPO Tutorial <../tutorials/nemo-rl-grpo/index>` for a complete walkthrough before using this recipe.
+**New to NeMo Gym training?** Start with the {doc}`NeMo RL GRPO Tutorial <../training-tutorials/nemo-rl-grpo/index>` for a complete walkthrough before using this recipe.
 :::
 
 ---
@@ -49,7 +49,7 @@ Hardware requirements vary by model variant (approximate):
 
 **Common Requirements**:
 
-- NeMo RL v0.4.0+ installed ([setup instructions](../tutorials/nemo-rl-grpo/setup))
+- NeMo RL v0.4.0+ installed ([setup instructions](../training-tutorials/nemo-rl-grpo/setup))
 - HuggingFace token for model download
 - (Optional) Weights & Biases API key for experiment tracking
 
@@ -63,7 +63,7 @@ Never commit your HuggingFace token to version control. Use environment variable
 
 ### Nemotron Nano v2 9B (Recommended)
 
-This is the recommended starting point for tool-calling training with GRPO (Group Relative Policy Optimization). For detailed step-by-step instructions, see the {doc}`NeMo RL GRPO Tutorial <../tutorials/nemo-rl-grpo/index>`.
+This is the recommended starting point for tool-calling training with GRPO (Group Relative Policy Optimization). For detailed step-by-step instructions, see the {doc}`NeMo RL GRPO Tutorial <../training-tutorials/nemo-rl-grpo/index>`.
 
 **1. Download the model**:
 
@@ -238,28 +238,28 @@ If not found, re-download the model with `hf download`.
 :gutter: 3
 
 :::{grid-item-card} {octicon}`book;1.5em;sd-mr-1` Complete GRPO Tutorial
-:link: ../tutorials/nemo-rl-grpo/index
+:link: ../training-tutorials/nemo-rl-grpo/index
 :link-type: doc
 
 Step-by-step guide covering setup, single-node, and multi-node training with Nemotron Nano 9B v2.
 :::
 
 :::{grid-item-card} {octicon}`gear;1.5em;sd-mr-1` NeMo RL Configuration Reference
-:link: ../tutorials/nemo-rl-grpo/nemo-rl-configuration
+:link: ../training-tutorials/nemo-rl-grpo/nemo-rl-configuration
 :link-type: doc
 
 Detailed explanation of all GRPO and model hyperparameters.
 :::
 
 :::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` Workplace Assistant Environment
-:link: ../tutorials/nemo-rl-grpo/about-workplace-assistant
+:link: ../training-tutorials/nemo-rl-grpo/about-workplace-assistant
 :link-type: doc
 
 Learn about the tool-calling training environment used with Nemotron Nano.
 :::
 
 :::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` Multi-Node Training
-:link: ../tutorials/nemo-rl-grpo/multi-node-training
+:link: ../training-tutorials/nemo-rl-grpo/multi-node-training
 :link-type: doc
 
 Scale training to multiple nodes for production workloads.
