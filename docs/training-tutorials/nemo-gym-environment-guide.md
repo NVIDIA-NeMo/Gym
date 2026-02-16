@@ -40,7 +40,7 @@ In NeMo Gym, **"Resource Server" and "Environment" are the same thing**. The cod
 | Traditional RL (OpenAI Gym) | NeMo Gym |
 |----------------------------|----------|
 | Environment (Python object) | Resource Server (HTTP microservice) |
-| `env.step(action)` | `POST /{tool_endpoint}` |
+| `env.step(action)` | `POST /{tool_endpoint}` (or `/step` for Aviary-style envs) |
 | `env.reset()` | `POST /seed_session` |
 | Reward from `step()` | Reward from `POST /verify` |
 
@@ -94,11 +94,11 @@ NeMo Gym uses a three-tier microservices architecture:
 Every RL episode in NeMo Gym follows this lifecycle:
 
 ```
-1. seed_session() → Initialize environment state for a task. Called once at the start of each episode (triggered by new task or rollout step)
+1. seed_session() → Initialize environment state for a task. Called once at the start of each `run` episode (one dataset row / rollout invocation)
          ↓
 2. [Tool Calls]   → Agent interacts with environment via custom endpoints. This happens repeatedly over the course of the rollout.
          ↓
-3. verify()       → Evaluate final response, compute reward. Called once at the end of rollout step.
+3. verify()       → Evaluate final response, compute reward. Called once at the end of the episode.
 ```
 
 ### 2. The Base Classes
@@ -106,6 +106,7 @@ Every RL episode in NeMo Gym follows this lifecycle:
 The foundation of every Resource Server is `SimpleResourcesServer` from `nemo_gym/base_resources_server.py`:
 
 ```python
+# simplified
 from abc import abstractmethod
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -192,9 +193,10 @@ Flow
      - returns reward (here: always 1.0)
 ```
 
-**File: `resources_servers/example_single_tool_call/app.py`**
+**File (simplified excerpt, source-aligned): `resources_servers/example_single_tool_call/app.py`**
 
 ```python
+# simplified
 from fastapi import FastAPI
 from pydantic import BaseModel
 
@@ -374,9 +376,10 @@ ResourcesServer:
   - returns reward: 1.0 if exact match else 0.0
 ```
 
-**File: `resources_servers/example_multi_step/app.py`**
+**File (simplified excerpt, source-aligned): `resources_servers/example_multi_step/app.py`**
 
 ```python
+# simplified
 import json
 from typing import List
 
@@ -449,7 +452,7 @@ class ExampleMultiStepResourcesServer(SimpleResourcesServer):
 
     # Tool 1: Get the numeric value for a synonym
     async def get_synonym_value(self, body: GetSynonymValueRequest) -> GetSynonymValueResponse:
-        # Simple deterministic function: sum of ASCII values
+        # Simple deterministic function: sum of character code points
         return GetSynonymValueResponse(synonym_value=sum(map(ord, body.synonym)))
 
     # Tool 2: Extract/submit the final answer
@@ -473,7 +476,7 @@ class ExampleMultiStepResourcesServer(SimpleResourcesServer):
 
         # Compute reward based on exact match
         accuracy = expected == actual
-        set_overlap = len(set(actual) & set(expected)) / len(expected) if expected else 0.0
+        set_overlap = len(set(actual) & set(expected)) / len(expected)
 
         return ExampleMultiStepVerifyResponse(
             **body.model_dump(),
@@ -481,7 +484,7 @@ class ExampleMultiStepResourcesServer(SimpleResourcesServer):
             parsed_synonym_values=actual,
             accuracy=accuracy,
             set_overlap=set_overlap,
-            original_term_minefield_hit=body.minefield_label in actual,
+            original_term_minefield_hit=body.minefield_label in actual or body.minefield_label_value in actual,
             order_instruction_following_failure=not accuracy and set_overlap == 1.0,
         )
 
@@ -556,9 +559,10 @@ ResourcesServer:
   - reward = 1.0 if counter == expected_count else 0.0
 ```
 
-**File: `resources_servers/example_session_state_mgmt/app.py`**
+**File (simplified excerpt, source-aligned): `resources_servers/example_session_state_mgmt/app.py`**
 
 ```python
+# simplified
 from typing import Dict
 
 from fastapi import FastAPI, Request
@@ -679,7 +683,7 @@ Goal (what the agent is learning)
   - Learn realistic multi-step tool calling workflows (search → decide → act) with persistent per-episode state.
 
 Inputs
-  - user instruction + tool schemas (email/calendar/analytics/...)
+  - user instruction + tool schemas (company_directory + email/calendar/analytics/...)
   - ground truth calls (or other grading metadata) for verify()
 
 Flow (state is stored per session_id inside the ResourcesServer)
@@ -702,7 +706,7 @@ Flow (state is stored per session_id inside the ResourcesServer)
 
 Agent → ResourcesServer: POST /seed_session
   (ResourcesServer initializes a fresh in-memory “workbench” for this session_id:
-   email/calendar/analytics/project_management/crm toolkits + their data)
+   company_directory + email/calendar/analytics/project_management/crm toolkits + their data)
 
 User: "Reply to Carlos's last email about 'Task Update' with 'Thanks, I'll follow up tomorrow.'"
 
@@ -731,9 +735,10 @@ ResourcesServer:
   - returns reward 1.0 or 0.0
 ```
 
-**File: `resources_servers/workplace_assistant/app.py`**
+**File (simplified excerpt, source-aligned): `resources_servers/workplace_assistant/app.py`**
 
 ```python
+# simplified
 from typing import Any, Dict
 
 from fastapi import FastAPI, HTTPException, Request
@@ -881,6 +886,7 @@ Every environment needs a configuration file that defines:
 **File: `resources_servers/example_multi_step/configs/example_multi_step.yaml`**
 
 ```yaml
+# simplified
 # Define the Resource Server
 example_multi_step_resources_server:
   resources_servers:
@@ -928,6 +934,7 @@ example_multi_step_simple_agent:
 From `nemo_gym/config_types.py`:
 
 ```python
+# simplified
 class Domain(str, Enum):
     MATH = "math"
     CODING = "coding"
@@ -947,6 +954,7 @@ class Domain(str, Enum):
 To link servers together in configuration:
 
 ```yaml
+# simplified
 # Reference a model server
 model_server:
   type: responses_api_models
@@ -1057,9 +1065,10 @@ Each tool follows the OpenAI function calling schema:
 
 ### HeadServer: Central Configuration
 
-The HeadServer runs on port 11000 and serves as the central registry:
+The HeadServer defaults to port 11000 and serves as the central registry:
 
 ```python
+# simplified
 class HeadServer(BaseServer):
     config: BaseServerConfig
     _server_instances: List[dict] = []
@@ -1077,22 +1086,26 @@ class HeadServer(BaseServer):
 ### ServerClient: Inter-Service Communication
 
 ```python
+# simplified
 class ServerClient(BaseModel):
     head_server_config: BaseServerConfig
     global_config_dict: DictConfig
 
-    async def post(
-        self,
-        server_name: str,
-        url_path: str,
-        **kwargs
+    async def request(
+        self, server_name: str, url_path: str, method: str, **kwargs
     ) -> ClientResponse:
-        """Make HTTP POST to another server by name"""
-        server_config_dict = get_first_server_config_dict(
-            self.global_config_dict, server_name
-        )
-        base_url = f"http://{server_config_dict.host}:{server_config_dict.port}"
-        return await request(method="POST", url=f"{base_url}{url_path}", **kwargs)
+        server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
+        base_url = self._build_server_base_url(server_config_dict)
+
+        if "json" in kwargs:
+            json_obj = kwargs["json"]
+            if isinstance(json_obj, BaseModel):
+                kwargs["json"] = json_obj.model_dump(exclude_unset=True)
+
+        return await request(method=method, url=f"{base_url}{url_path}", _internal=True, **kwargs)
+
+    async def post(self, server_name: str, url_path: str, **kwargs) -> ClientResponse:
+        return await self.request(server_name=server_name, url_path=url_path, method="POST", **kwargs)
 
     async def get(
         self,
@@ -1116,6 +1129,7 @@ class ServerClient(BaseModel):
 ### SimpleServer: Base Infrastructure
 
 ```python
+# simplified
 SESSION_ID_KEY = "session_id"
 
 class SimpleServer(BaseServer):
@@ -1151,9 +1165,14 @@ class SimpleServer(BaseServer):
 
     @classmethod
     def run_webserver(cls) -> FastAPI:
-        """Start the server with uvicorn"""
+        global_config_dict = get_global_config_dict()
+        initialize_ray()
+
         server_config = cls.load_config_from_global_config()
-        server_client = ServerClient.load_from_global_config()
+        server_client = ServerClient(
+            head_server_config=ServerClient.load_head_server_config(),
+            global_config_dict=global_config_dict,
+        )
         server = cls(config=server_config, server_client=server_client)
 
         app = server.setup_webserver()
@@ -1163,7 +1182,7 @@ class SimpleServer(BaseServer):
             app,
             host=server.config.host,
             port=server.config.port,
-            timeout_graceful_shutdown=0.5
+            timeout_graceful_shutdown=0.5,
         )
         return app
 ```
@@ -1225,15 +1244,16 @@ Here's how a single rollout works end-to-end:
 For efficiency, NeMo Gym supports batch rollout collection:
 
 ```python
+# simplified
 class RolloutCollectionConfig(BaseNeMoGymCLIConfig):
-    """Batch rollout collection from JSONL dataset"""
-    agent_name: str
+    """Perform a batch of rollout collection."""
+    agent_name: Optional[str] = None
     input_jsonl_fpath: str
     output_jsonl_fpath: str
     limit: Optional[int] = None
-    concurrency: int = 1
-    dry_run: bool = False
-    global_aiohttp_connector_limit: int = 100 * 1024
+    num_repeats: Optional[int] = None
+    num_samples_in_parallel: Optional[int] = None
+    responses_create_params: Dict[str, Any] = Field(default_factory=dict)
 ```
 
 CLI command: `ng_collect_rollouts`
@@ -1261,6 +1281,7 @@ resources_servers/my_environment/
 ### Minimal app.py Template
 
 ```python
+# simplified
 from fastapi import FastAPI
 from pydantic import BaseModel
 
@@ -1317,6 +1338,7 @@ if __name__ == "__main__":
 
 1. **Create the directory structure**
    ```bash
+   # simplified
    mkdir -p resources_servers/my_env/{configs,data,tests}
    touch resources_servers/my_env/app.py
    touch resources_servers/my_env/configs/my_env.yaml
@@ -1346,6 +1368,7 @@ if __name__ == "__main__":
 
 6. **Test your environment**
    ```bash
+   # simplified
    python resources_servers/my_env/app.py
    # Or via CLI:
    ng_run +config=resources_servers/my_env/configs/my_env.yaml
@@ -1364,6 +1387,7 @@ if __name__ == "__main__":
    - The official walkthrough is in `docs/get-started/rollout-collection.md`. A typical command looks like:
 
    ```bash
+   # simplified
    ng_collect_rollouts +agent_name=my_env_simple_agent \
        +input_jsonl_fpath=resources_servers/my_env/data/example.jsonl \
        +output_jsonl_fpath=results/my_env_rollouts.jsonl \
