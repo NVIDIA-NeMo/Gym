@@ -297,7 +297,7 @@ Download from Hugging Face <data/download-huggingface>
 :maxdepth: 1
 
 Overview <environment-tutorials/index>
-🟡 Creating Training Environment <environment-tutorials/creating-training-environment>
+Creating Training Environment <environment-tutorials/creating-training-environment>
 Multi-Environment Training <environment-tutorials/multi-environment-training>
 ```
 
