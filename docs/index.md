@@ -297,7 +297,7 @@ Download from Hugging Face <data/download-huggingface>
 :maxdepth: 1
 
 Overview <environment-tutorials/index>
-🟡 Creating Training Environment <environment-tutorials/creating-training-environment>
+Creating Training Environment <environment-tutorials/creating-training-environment>
 Multi-Environment Training <environment-tutorials/multi-environment-training>
 ```
 
@@ -311,15 +311,6 @@ NeMo RL <training-tutorials/nemo-rl-grpo/index.md>
 TRL <training-tutorials/trl>
 Unsloth <training-tutorials/unsloth-training>
 Offline Training (SFT/DPO) <training-tutorials/offline-training-w-rollouts>
-```
-
-```{toctree}
-:caption: Model Recipes
-:hidden:
-:maxdepth: 1
-
-🟡 Overview <model-recipes/index>
-🟡 Nemotron 3 Nano <model-recipes/nemotron-nano>
 ```
 
 ```{toctree}
