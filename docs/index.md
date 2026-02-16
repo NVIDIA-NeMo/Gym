@@ -286,9 +286,9 @@ Rollout Collection <get-started/rollout-collection.md>
 :hidden:
 :maxdepth: 1
 
-🟡 Overview <data/index>
-🟡 Prepare and Validate <data/prepare-validate>
-🟡 Download from Hugging Face <data/download-huggingface>
+Overview <data/index>
+Prepare and Validate <data/prepare-validate>
+Download from Hugging Face <data/download-huggingface>
 ```
 
 ```{toctree}
