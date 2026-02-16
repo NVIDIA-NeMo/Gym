@@ -6,24 +6,7 @@ This tutorial demonstrates how to use [Unsloth](https://github.com/unslothai/uns
 
 **Unsloth** is a fast, memory-efficient library for fine-tuning large language models. It provides optimized implementations that significantly reduce memory usage and training time, making it possible to fine-tune larger models on consumer hardware.
 
-Unsloth can be used with NeMo Gym single-step verifiers including math tasks, structured outputs, instruction following, reasoning gym, and more. 
-
-:::{card}
-
-**Goal**: Fine-tune a model for single-step tasks using Unsloth with NeMo Gym verifiers.
-
-**Time**: ~30 minutes (Colab)
-
-^^^
-
-**In this tutorial, you will**:
-
-1. Set up Unsloth for efficient fine-tuning
-2. Use NeMo Gym for tasks and verification
-3. Train a model using GRPO on a single GPU
-4. Evaluate trained model performance 
-
-:::
+Unsloth can be used with NeMo Gym single-step verifiers including math tasks, structured outputs, instruction following, reasoning gym, and more.
 
 ## Prerequisites
 
@@ -34,18 +17,25 @@ Unsloth can be used with NeMo Gym single-step verifiers including math tasks, st
 
 ## Getting Started
 
-Follow this interactive notebook to train your first model with Unsloth and NeMo Gym:
+Follow these interactive notebooks to train models with Unsloth and NeMo Gym:
 
-:::{button-link} https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/nemo_gym_sudoku.ipynb
+:::{button-link} https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/NeMo-Gym-Sudoku.ipynb
 :color: primary
 :class: sd-rounded-pill
 
-Unsloth GRPO notebook
+Sudoku
+:::
+
+:::{button-link} https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/NeMo-Gym-Multi-Environment.ipynb
+:color: secondary
+:class: sd-rounded-pill
+
+Multi-Environment Training
 :::
 
 Check out [Unsloth's documentation](https://docs.unsloth.ai/models/nemotron-3#reinforcement-learning--nemo-gym) for more details.
 
-> **Note:** This notebook supports **single-step tasks** including math, structured outputs, instruction following, reasoning gym, and more. For multi-step tool calling scenarios, see the {doc}`GRPO with NeMo RL <nemo-rl-grpo/index>` tutorial.
+> **Note:** These notebooks support **single-step tasks** including math, structured outputs, instruction following, reasoning gym, and more. For multi-step tool calling scenarios, see the {doc}`GRPO with NeMo RL <nemo-rl-grpo/index>` tutorial.
 
 ---
 
