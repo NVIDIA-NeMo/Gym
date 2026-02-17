@@ -1032,3 +1032,7 @@ System:
   Memory: {sys_info["memory_gb"]} GB"""
 
         print(output)
+
+
+def reinstall():  # pragma: no cover
+    Popen("uv sync --extra dev --group docs", shell=True).communicate()

@@ -719,3 +719,12 @@ ng_collect_rollouts +h=true
 ```
 
 This will display all available configuration parameters and their descriptions.
+
+---
+
+## Re-install Gym and dependencies
+```bash
+ng_reinstall
+```
+
+This will re-install Gym and its dependencies into the currently activated Python virtual environment.
