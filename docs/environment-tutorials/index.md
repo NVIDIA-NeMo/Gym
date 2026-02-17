@@ -51,7 +51,7 @@ Below are a subset of rollout structures and core capabilities found across NeMo
 :link: creating-training-environment
 :link-type: doc
 
-Build `verify()`, prepare data, connect to NeMo RL.
+Implement tools, define verification logic, and test your environment end-to-end.
 
 +++
 {bdg-primary}`start here` {bdg-secondary}`45-90 min`
