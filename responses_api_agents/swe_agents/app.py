@@ -18,8 +18,11 @@ import time
 import uuid
 from asyncio import Semaphore
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Literal, Optional
+import os
 import ray
+import hashlib
+import random
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
@@ -133,6 +136,30 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         description="Session ID for the run",
     )
 
+    # Override Openhands prompts with custom prompts
+    user_prompt_template: Optional[str] = Field(
+        default=None,
+        description="Path to the user prompt template file",
+    )
+    system_prompt_template: Optional[str] = Field(
+        default=None,
+        description="Path to the system prompt template file",
+    )
+    system_prompt_long_horizon_template: Optional[str] = Field(
+        default=None,
+        description="Path to the system prompt long horizon template file",
+    )
+
+    agent_cls: Optional[Literal["CodeActAgent", "OpenCodeAgent", "CodexAgent"]] = Field(
+        default="CodeActAgent",
+        description="Class to use for the agent",
+    )
+
+    run_with_mixed_prompts: bool = Field(
+        default=False,
+        description="Whether to run with mixed prompts",
+    )
+
 
 class SWEBenchRunRequest(BaseRunRequest):
     """Request format for SWE-bench runs."""
@@ -162,6 +189,7 @@ class SWEBenchVerifyResponse(BaseVerifyResponse):
         None  # 1.0 if nemo-gym is in the assistant message, 0.0 otherwise
     )
     is_finish_tool_call: Optional[float] = None  # 1.0 if finish tool call is detected, 0.0 otherwise
+    original_resolved_without_finish_tool_call: Optional[float] = None  # 1.0 if original resolved, 0.0 otherwise
 
 
 class SWEBenchWrapper(SimpleResponsesAPIAgent):
@@ -202,6 +230,37 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         instance_dir = (
             f"{problem_info.get('instance_id', 'unknown')}_{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
         )
+
+        base_path = str(Path(__file__).resolve().parent / "prompts")
+
+        # TODO (sugam): hard coded paths to prompts
+        choice_1 = {
+            "user_prompt_template": f"{base_path}/user_prompt_1.j2",
+            "system_prompt_template": f"{base_path}/system_prompt_1.j2",
+            "system_prompt_long_horizon_template": f"{base_path}/system_prompt_1.j2",
+            "agent_cls": "OpenCodeAgent",
+        }
+
+        choice_2 = {
+            "user_prompt_template": f"{base_path}/user_prompt_2.j2",
+            "system_prompt_template": f"{base_path}/system_prompt_2.j2",
+            "system_prompt_long_horizon_template": f"{base_path}/system_prompt_2.j2",
+            "agent_cls": "CodexAgent",
+        }
+
+        choice_3 = {
+            "user_prompt_template": f"{base_path}/user_prompt_3.j2",
+            "system_prompt_template": f"{base_path}/system_prompt_3.j2",
+            "system_prompt_long_horizon_template": f"{base_path}/system_prompt_3.j2",
+            "agent_cls": "CodeActAgent",
+        }
+
+        # random.seed(42)
+        instance_id = problem_info.get("instance_id", "unknown")
+        rng = random.Random(instance_id)
+        prompt_agent_choice = rng.choice([choice_1, choice_2, choice_3])
+        
+
         try:
             ray_queue_time = time.time()
             params = {
@@ -226,6 +285,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "apptainer_memory_limit_mb": self.config.apptainer_memory_limit_mb,
                 "command_exec_timeout": self.config.command_exec_timeout,
             }
+
+            if self.config.run_with_mixed_prompts:
+                print(f"Instance ID: {instance_id}. Random seed: {rng.seed} Agent choice: {prompt_agent_choice["agent_cls"]}", flush=True)
+                params.update(prompt_agent_choice)
 
             future = runner_ray_remote.remote(run_swebench_evaluation, params)
             result = await future
@@ -323,7 +386,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         last_message = response.output[-1]
         if isinstance(last_message, NeMoGymResponseFunctionToolCall) and last_message.name == "finish":
-            print(f"[REWARD] Finish tool call: {last_message.name} detected", flush=True)
+            print(f"Finish tool call: {last_message.name} detected", flush=True)
             return True
 
         return False
@@ -338,7 +401,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 and message.role == "assistant"
                 and ("nemogym" in message.content[0].text.lower() or "litellm" in message.content[0].text.lower())
             ):
-                print(f"[REWARD] Nemo-Gym in assistant message: {message.content[0].text}", flush=True)
+                print(f"Nemo-Gym in assistant message: {message.content[0].text}", flush=True)
                 return True
 
         return False
@@ -386,17 +449,13 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # Parse metrics from JSON string if present
             metrics = json.loads(metadata.get("swe-bench-metrics", "{}")) if "swe-bench-metrics" in metadata else {}
 
-            # Only consider the response resolved if the finish tool call is present and the resolved metric is True
             is_finish_tool_call = self.check_finish_tool_call(response)
-            # if is_finish_tool_call:
-            #     resolved = metrics.get("resolved") or (metadata.get("resolved") == "True")
-            # else:
-            #     resolved = False
+            is_nemo_gym_in_assistant_message = self.check_nemo_gym_in_assistant_message(response)
+
             resolved = metrics.get("resolved") or (metadata.get("resolved") == "True")
 
-            # TODO: remove this check after behavior fix
-            is_nemo_gym_in_assistant_message = self.check_nemo_gym_in_assistant_message(response)
-            resolved = resolved and not is_nemo_gym_in_assistant_message
+            if is_nemo_gym_in_assistant_message:
+                resolved = False
 
             # Extract individual metrics with proper type conversion
             patch_exists = metrics.get("patch_exists") or (metadata.get("patch_exists") == "True")

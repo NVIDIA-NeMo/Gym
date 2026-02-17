@@ -23,7 +23,7 @@ import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import tomlkit
 
@@ -63,10 +63,14 @@ class SweBenchGenerationConfig:
     agent_max_turns: int = 100
     swebench_tests_timeout: int = 30 * 60
     swebench_agent_timeout: int = 45 * 60
-    apptainer_memory_limit_mb: int = 32 * 1024
-    command_exec_timeout: int = 5 * 60
+    apptainer_memory_limit_mb: int | None = 32 * 1024
+    command_exec_timeout: int | None = 5 * 60
     inference: SweBenchInferenceConfig = field(default_factory=SweBenchInferenceConfig)
     server: dict = field(default_factory=dict)
+    user_prompt_template: Optional[str] = None
+    system_prompt_template: Optional[str] = None
+    system_prompt_long_horizon_template: Optional[str] = None
+    agent_cls: Optional[Literal["CodeActAgent", "OpenCodeAgent", "CodexAgent"]] = None
 
 
 # Converts the parameter names above to the corresponding OpenAI parameter names.
@@ -281,7 +285,7 @@ class RunOpenHandsAgent:
             f"./evaluation/benchmarks/swe_bench/scripts/run_infer.sh "
             f"    llm.model "  # name of llm config section in config.toml
             f"    {self.cfg.agent_framework_commit} "  # openhands commit
-            f"    CodeActAgent "  # agent
+            f"    {self.cfg.agent_cls if self.cfg.agent_cls else 'CodeActAgent'} "  # agent
             f"    0 "  # Note: this is eval limit which randomly chooses an instance from the dataset
             f"    {self.cfg.agent_max_turns} "  # max agent iterations
             f"    1 "  # number of workers
@@ -292,6 +296,10 @@ class RunOpenHandsAgent:
             f"    {local_dataset_path} "
             f"    {config_file_path}"
         )
+        if self.cfg.user_prompt_template is not None:
+            agent_main_cmd += "    /openhands_setup/OpenHands/user_prompt.j2 "
+            agent_main_cmd += "    /openhands_setup/OpenHands/system_prompt.j2 "
+            agent_main_cmd += "    /openhands_setup/OpenHands/system_prompt_long_horizon.j2 "
 
         agent_script_path = Path(self.output_dir) / agent_script_name
         with open(agent_script_path, "w") as f:
@@ -601,6 +609,20 @@ class RunOpenHandsAgent:
             miniforge3_path = Path(self.openhands_setup_dir) / "miniforge3"
             mount_args.append(f"--mount type=bind,src={miniforge3_path},dst=/openhands_setup/miniforge3,ro")
             mount_args.append(f"--mount type=bind,src={miniforge3_path},dst={miniforge3_path},ro")
+
+            # Mount custom prompts if provided
+            if self.cfg.user_prompt_template is not None:
+                mount_args.append(
+                    f"--mount type=bind,src={self.cfg.user_prompt_template},dst=/openhands_setup/OpenHands/user_prompt.j2"
+                )
+            if self.cfg.system_prompt_template is not None:
+                mount_args.append(
+                    f"--mount type=bind,src={self.cfg.system_prompt_template},dst=/openhands_setup/OpenHands/system_prompt.j2"
+                )
+            if self.cfg.system_prompt_long_horizon_template is not None:
+                mount_args.append(
+                    f"--mount type=bind,src={self.cfg.system_prompt_long_horizon_template},dst=/openhands_setup/OpenHands/system_prompt_long_horizon.j2"
+                )
 
         # Add SWE-bench setup directory mount if available (for evaluation)
         if mode == "eval" and data_point["dataset_name"] != "nv-internal-1":
