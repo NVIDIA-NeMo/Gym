@@ -119,9 +119,11 @@ This generates training data with verification scores!
 
 Now that you can generate rollouts, choose your path:
 
-- **Use an existing training environment** — Browse the [Available Environments](#-available-environments) below to find a training-ready environment that matches your goals.
+- **Start training** — Train models using NeMo Gym with your preferred RL framework. See the [Training Tutorials](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/index.html).
 
-- **Build a custom training environment** — Implement or integrate existing tools and define task verification logic. Get started with the [Creating a Training Environment](https://docs.nvidia.com/nemo/gym/latest/environment-tutorials/creating-training-environment.html) tutorial.
+- **Use an existing environment** — Browse the [Available Environments](#-available-environments) below to find an environment that matches your goals.
+
+- **Build a custom environment** — Implement or integrate existing tools and define task verification logic. Get started with the [Creating a Training Environment](https://docs.nvidia.com/nemo/gym/latest/environment-tutorials/creating-training-environment.html) tutorial.
 
 
 ## 📦 Available Environments
