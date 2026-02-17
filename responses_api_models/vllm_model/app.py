@@ -266,7 +266,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 "Please do not use a reasoning parser in vLLM! There is one source of truth for handling data (including reasoning), which is NeMo Gym!"
             )
 
-        if self.config.return_token_id_information:
+        if (self.config.return_token_id_information and
+            "prompt_token_ids" not in choice_dict["message"]):
             log_probs = choice_dict["logprobs"]["content"]
             generation_log_probs = [log_prob["logprob"] for log_prob in log_probs]
 
