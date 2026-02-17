@@ -52,6 +52,7 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
+from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 from nemo_gym.server_status import StatusCommand
 from nemo_gym.server_utils import (
     HEAD_SERVER_KEY_NAME,
@@ -448,6 +449,21 @@ def run(
     rh = RunHelper()
     rh.start(global_config_dict_parser_config)
     rh.run_forever()
+
+
+def e2e_rollout_collection():  # pragma: no cover
+    rh = RunHelper()
+    rh.start(None)
+
+    rch = RolloutCollectionHelper()
+    rollout_collection_config = RolloutCollectionConfig.model_validate(get_global_config_dict())
+
+    try:
+        asyncio.run(rch.run_from_config(rollout_collection_config))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        rh.shutdown()
 
 
 def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover
