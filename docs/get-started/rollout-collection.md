@@ -206,7 +206,7 @@ Browse the available resource servers on GitHub to find a training-ready environ
 :::
 
 :::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build a Custom Training Environment
-:link: ../tutorials/creating-resource-server
+:link: ../environment-tutorials/creating-training-environment
 :link-type: doc
 
 Implement or integrate existing tools and define task verification logic.

@@ -5,23 +5,6 @@
 This page provides quick answers to commonly asked questions. Over time, these topics will be integrated into the structured product documentation (tutorials, guides, and reference sections) as we expand coverage. We've documented them here to provide immediate help while more comprehensive documentation is in progress.
 :::
 
-## Key Terms
-
-Before diving in, here are some NeMo Gym-specific terms:
-
-- **Resources server**: A server that provides task environments, tools, and verification logic for RL training. Examples include math verifiers, code execution sandboxes, and tool-calling environments.
-- **Agent server**: Orchestrates interactions between the model and resources server, managing conversation flow and tool calls.
-- **Model server**: Wraps an LLM endpoint (vLLM, OpenAI, etc.) to provide a consistent API for NeMo Gym.
-- **Responses API**: OpenAI's structured output format that separates reasoning, messages, and tool calls. NeMo Gym uses this as its native schema.
-
-# How To: Run tests for simple agent
-Run the Simple Chat Agent tests. `ng_test` or `nemo_gym_test` stands for `Nemo Gym Test`.
-```bash
-ng_test +entrypoint=responses_api_agents/simple_agent
-```
-
-Tests are strongly encouraged and you must have at least one test for every server you make. Test coverage is not explicitly required which means that **YOU ARE RESPONSIBLE FOR YOUR OWN SERVER CORRECTNESS AND FUNCTION**.
-
 
 # How To: Upload and download a dataset from HuggingFace
 The huggingface client requires that your credentials are in `env.yaml`, along with some other pertinent details needed to upload to the designated place.
@@ -298,62 +281,8 @@ ng_prepare_data "+config_paths=[$config_paths]" \
 ```
 
 
-# How To: ng_dump_config - Dump a YAML config as exactly as NeMo Gym sees it
-```bash
-# Example ng_run command
-config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
-ng_run "+config_paths=[$config_paths]"
-
-
-# Dump the exact yaml config that NeMo gym sees, just by swapping ng_run -> ng_dump_config
-ng_dump_config "+config_paths=[$config_paths]"
-```
-
-
-# How To: Use NeMo Gym with a non-Responses compatible API endpoint like vLLM
-Most models use Chat Completions format rather than the OpenAI Responses API schema that NeMo Gym uses natively. To bridge this gap, NeMo Gym provides a conversion layer.
-
-As a result, we provide a Responses API to Chat Completions mapping middleware layer in the form of `responses_api_models/vllm_model`. VLLMModel assumes that you are pointing to a vLLM instance (since it relies on vLLM-specific endpoints like `/tokenize` and vLLM-specific arguments like `return_tokens_as_token_ids`).
-
-**To use VLLMModel, just change the `responses_api_models/openai_model/configs/openai_model.yaml` in your config paths to `responses_api_models/vllm_model/configs/vllm_model.yaml`!**
-```bash
-config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\
-responses_api_models/vllm_model/configs/vllm_model.yaml"
-ng_run "+config_paths=[$config_paths]"
-```
-
-Here is an e2e example of how to spin up a NeMo Gym compatible vLLM Chat Completions OpenAI server.
-- If you want to use tools, find the appropriate vLLM arguments regarding the tool call parser to use. In this example, we use Qwen3-30B-A3B, which is suggested to use the `hermes` tool call parser.
-- If you are using a reasoning model, find the appropriate vLLM arguments regarding reasoning parser to use. In this example, we use Qwen3-30B-A3B, which is suggested to use the `qwen3` reasoning parser.
-
-```bash
-uv venv --python 3.12 --seed 
-source .venv/bin/activate
-# hf_transfer for faster model download. datasets for downloading data from HF
-uv pip install hf_transfer datasets vllm --torch-backend=auto
-
-# Qwen/Qwen3-30B-A3B, usable in Nemo RL!
-HF_HOME=.cache/ \
-HF_HUB_ENABLE_HF_TRANSFER=1 \
-    hf download Qwen/Qwen3-30B-A3B
-
-HF_HOME=.cache/ \
-HOME=. \
-vllm serve \
-    Qwen/Qwen3-30B-A3B \
-    --dtype auto \
-    --tensor-parallel-size 4 \
-    --gpu-memory-utilization 0.9 \
-    --enable-auto-tool-choice --tool-call-parser hermes \
-    --reasoning-parser qwen3 \
-    --host 0.0.0.0 \
-    --port 10240
-```
-
-
 # How To: Profile your resources server
-For large scale verifier training, it's critical that your resources server is as efficient as possible. It can be slammed with 16k concurrent requests or more. Gym provides easy tools to profile and understand the efficiency of your servers.
+For large scale verifier training, it's critical that your resources server is as efficient as possible. It can be slammed with 16k concurrent requests or more. NeMo Gym provides easy tools to profile and understand the efficiency of your servers.
 
 In one terminal, start your agent, model, and resources servers, with profiling enabled.
 - `profiling_enabled` (bool): whether profiling is enabled or not. By default this is disabled since it incurs some slight overhead we don't want at runtime.
@@ -397,34 +326,6 @@ name                                                                            
   - The `LibraryJudgeMathResourcesServer.verify` function and all functions it called including `_verify_answer`, etc accounted for a total of 17.98387s.
 - `tavg`: average time per call (often ttot / ncall).
   - The `LibraryJudgeMathResourcesServer.verify` function took 0.017562s per call on average.
-
-
-# How To: Use a custom client to call Gym Responses API model endpoints during training
-During training time, Gym keeps track of the ground truth prompt token ids, generation token ids, and generation log probs for downstream consumption by the RL framework. As a result, we need to add a few fields to request and response schemas in order to properly facilitate this. This usually doesn't matter if you are using 100% Gym, but in certain situations you may need or want to use a separate client (such as LiteLLM, your own OpenAI client, and so on) to call model endpoints.
-
-For Chat Completions, outside of training, an Assistant message will look like:
-```python
-ChatCompletionMessage(
-    content="<think>I'm thinking</think>Hi there!",
-    tool_calls=[{...}, {...}],
-    ...
-)
-```
-During training, a Chat Completions Assistant message will look like:
-```python
-ChatCompletionMessage(
-    content="<think>I'm thinking</think>Hi there!",
-    tool_calls=[{...}, {...}],
-    prompt_token_ids=[...],  # List[int]
-    generation_token_ids=[...],  # List[int]
-    generation_log_probs=[...],  # List[float]
-    ...
-)
-```
-And you have to ensure that when you make a request with your custom client that these three extra fields (prompt_token_ids, generation_token_ids, and generation_log_probs) are passed through correctly on a message level. And this also applies to the response i.e. you need to ensure that your custom client will correctly return these three extra fields.
-
-
-It's an analogous story for Responses-compatible APIs.
 
 
 # How To: Use Ray for parallelizing CPU-intensive tasks
@@ -479,71 +380,6 @@ def process_data_parallel(data_list):
 ```
 
 
-# FAQ: OpenAI Responses vs Chat Completions API
-Agents and verifiers work with responses in a standardized format based on the OpenAI Responses API schema. The verifier receives an object where the `output` field conforms to the Response object output [documented here](https://platform.openai.com/docs/api-reference/responses/object#responses/object-output).
-
-The `output` list can contain multiple item types, such as:
-- `ResponseOutputMessage` - The main user-facing message content returned by the model.
-- `ResponseOutputItemReasoning` - Internal reasoning or "thinking" traces that explain the model’s thought process.
-- `ResponseFunctionToolCall` - A request from the model to invoke an external function or tool.
-
-**Example**
-If a chat completion contains both thinking traces and user-facing text:
-```python
-ChatCompletion(
-    Choices=[
-        Choice(
-            message=ChatCompletionMessage(
-                content="<think>I'm thinking</think>Hi there!",
-                tool_calls=[{...}, {...}],
-                ...
-            )
-        )
-    ],
-    ...
-)
-```
-In the Responses schema, this would be represented as:
-```python
-Response(
-    output=[
-        ResponseOutputItemReasoning(
-            type="reasoning",
-            summary=[
-                Summary(
-                    type="summary_text",
-                    text="I'm thinking",
-                )
-            ]
-        ),
-        ResponseOutputMessage(
-            role="assistant",
-            type="message",
-            content=[
-                ResponseOutputText(
-                    type="output_text",
-                    text="Hi there!",
-                )
-            ]
-        ),
-        ResponseFunctionToolCall(
-            type="function_call",
-            ...
-
-        ),
-        ResponseFunctionToolCall(
-            type="function_call",
-            ...
-
-        ),
-        ...
-    ]
-)
-```
-
-Reasoning traces (`Reasoning` items) are parsed before the verifier processes the output. The parsing is **model-specific**, and the verifier does not need to worry about the extracting or interpreting reasoning traces. The verifier receives these items already separated and clearly typed.
-
-
 # FAQ: SFT and RL
 Reading time: 5 mins
 Date: Fri Aug 15, 2025
@@ -559,7 +395,7 @@ One way I like to think about these things is:
 - You can do RL on SFT data, where your input is your SFT input, and the model answer scorer is just an exact match on the SFT gold label.
 - You can also do SFT on RL data using synthetic data generation, where you run your inputs into some strong teacher model, score the responses, and use the scores to pick your SFT gold label.
 
-Tying back to NeMo Gym, NeMo gym can be used to create synthetic data for SFT training by running strong teacher models on the different environments. Critically, it will also be used as the source of data during RL training.
+Tying back to NeMo Gym, NeMo Gym can be used to create synthetic data for SFT training by running strong teacher models on the different environments. Critically, it will also be used as the source of data during RL training.
 
 
 
@@ -624,55 +460,3 @@ pickling environment... done
 checking consistency... done
 ```
 You may need to reformat some of your docstrings to Napoleon format docstrings https://sphinxcontrib-napoleon.readthedocs.io/en/latest/
-
-
-# FAQ: NeMo Gym, training frameworks, and token IDs
-One of the goals of NeMo Gym is to act as a rollout tool for LLM post-training, either as synthetic data generation for SFT or as training environments for RL.
-
-RL training frameworks don't typically operate in OpenAI schema; they operate in tokens IDs. It is especially critical to always have the correct token IDs during training so that we stay on-policy and to make sure that what we think the model sees is what the model actually sees. However, when providing this OpenAI schema compatible interface to training environment developers, we lose track of the token IDs in Gym.
-
-For example, say we are training a Qwen 3 family model. During rollouts, the model can sample from the entire token distribution. The token IDs are then decoded into text and subsequently converted to OpenAI schema and returned to the training environment developer. At some point for multi-step and multi-turn scenarios, the training environment developer will call the model again with the previously output OpenAI schema. This re-tokenization causes problems since a single string can map to multiple possible sequences of token IDs. So if the model generations token ID sequence 1 and the re-tokenization outputs token ID sequence 2, suddenly things can become off policy when the Gym result is consumed by the RL training framework.
-
-So, the OpenAI compatible model server in a training framework needs to be able to handle this discrepancy. In order to do that, Gym needs a handle on the ground truth token IDs and it needs to provide that information back to the training frameworks' OpenAI compatible server.
-
-See the "How To: Use a custom client to call Gym Responses API model endpoints during training" section above for related details on token ID handling.
-
-
-# FAQ: Why use aiohttp backend instead of httpx/httpcore for async http?
-
-TL;DR: httpx is O(n^2) runtime where n is the number of queued requests (i.e. for each request, we check all other queued requests). This is terribly inefficient and results in major slowdowns.
-
-On Wed Sep 17, 2025, inspired by the Deepseek R1 Nature paper, we tried launching a larger rollout batch run with up to 16 off policy steps in NeMo RL. Our setting resulted in Gym being slammed with 16k concurrent requests. At the time, we were using a single Gym instance with multiple data-parallel vLLM workers, and that setup hung for 40 minutes before the first request was processed. Something was wrong.
-
-Before that time, we had also gotten reports that the rollout collection in Gym couldn't be used with high concurrency i.e. in some cases people had to set the concurrency to 32 requests in parallel. Putting these two data points together, we figured something was wrong with the concurrency setup in Gym.
-
-For some context, Gym is a set of servers that end up calling a model endpoint server at some point. And it's really important that we never artificially restrict the concurrency in the Gym side since technically we are always clients of that model endpoint server, since the model endpoint server could handle many more requests than we're restricting the concurrency to. So we always want Gym to be as efficient as possible and not have e.g. max parallel requests or smth parameter in Gym.
-
-Eventually, we isolated the issue to our async http backend -- httpx and httpcore. We originally decided to use httpx for the async http backend in Gym because the OpenAI client uses it by default so we can share the same backend http client. Unfortunately, the httpcore connection pool subroutine for pooling connections over requests is O(n^2) where n is the number of queued requests.
-
-Networking mental model:
-1. A request is sent by Gym to the model endpoint server.
-2. This request requires a connection from our client side to the server side.
-   1. This connection is a socket (identified by a port) and a socket is an open file (managed by the operating system).
-   2. If we are sending 100 requests, in the worst case we could open 100 connections == 100 open files. This quickly becomes very expensive.
-   3. So, async http backends will pool requests across connections to a single endpoint, where multiple requests can leverage the same file if they are going to the same endpoint origin.
-   4. This is called connection pooling. And it's possible that all 100 requests share a single connection.
-3. But this connection pooling now needs some management logic. When the client sends a new request, it needs to determine if that request can reuse an existing connection.
-   1. And this is where the httpcore connection pool logic is very inefficient.
-
-Here are the key calls in the stack trace:
-1. OpenAI client at some point calls httpx client
-2. httpx client calls into the transport [here](https://github.com/encode/httpx/blob/4b23574cf83307ce27d3b14b4a425dc58c57d28d/httpx/_client.py#L1014)
-3. Transport calls into httpcore connection pool [here](https://github.com/encode/httpx/blob/4b23574cf83307ce27d3b14b4a425dc58c57d28d/httpx/_transports/default.py#L250)
-4. For each request, the httpcore connection pool calls this `_assign_requests_to_connections` subroutine [here](https://github.com/encode/httpcore/blob/5974b03c7df89d3ee4e23779900d5349d550753c/httpcore/_async/connection_pool.py#L228)
-   1. This subroutine loops through connections [here](https://github.com/encode/httpcore/blob/5974b03c7df89d3ee4e23779900d5349d550753c/httpcore/_async/connection_pool.py#L284)
-   2. and loops through queued requests [here](https://github.com/encode/httpcore/blob/5974b03c7df89d3ee4e23779900d5349d550753c/httpcore/_async/connection_pool.py#L303)
-   3. Which results in a total of O(n^2) runtime if the number of queued requests is large. Which is always the case if we slam with some larger number of requests.
-
-In the end, we decided to swap our http backend from httpx to aiohttp since we had good prior experience working with aiohttp in production infra.
-
-Here are some Github issues related to this problem. They didn't help too much, but they did validate our solution (kind of) to use aiohttp as as async http backend instead.
-- https://github.com/openai/openai-python/issues/1596
-- https://github.com/encode/httpx/issues/3215#issuecomment-2220795088
-
-If you are using AsyncOpenAI client with a parallelism > 32, you may also want to check if this kind of inefficiency also affects your setup.

@@ -1,18 +1,16 @@
 (model-server-index)=
 # Model Server
 
-Model servers provide stateless LLM inference via OpenAI-compatible endpoints. They implement `SimpleResponsesAPIModel` and expose two endpoints:
+Model servers provide stateless LLM inference via OpenAI-compatible endpoints. They implement `ResponsesAPIModel` and expose two endpoints:
 
-- **`/v1/chat/completions`** — Standard Chat Completions API
-- **`/v1/responses`** — Responses API with tool calling support
+- **`/v1/responses`** — [OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)
+  - This is the default input/output schema for all NeMo Gym rollouts.
+- **`/v1/chat/completions`** — [OpenAI Chat Completions API](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)
 
-## Choosing a Backend
-
-| Backend | Use Case | Function Calling | Latency |
-|---------|----------|------------------|---------|
-| [vLLM](vllm) | Self-hosted models, custom fine-tunes | ✅ Via chat template | Low |
 
 ## Backend Guides
+
+Guides for OpenAI and Azure OpenAI Responses API models and more are coming soon!
 
 ::::{grid} 1 2 2 2
 :gutter: 1 1 1 2
@@ -26,20 +24,3 @@ Self-hosted inference with vLLM for maximum control.
 :::
 
 ::::
-
-## Configuration Example
-
-Model servers are configured in YAML:
-
-```yaml
-policy_model:
-  responses_api_models:
-    openai_model:
-      entrypoint: app.py
-      openai_base_url: ${policy_base_url}
-      openai_api_key: ${policy_api_key}
-      openai_model: ${policy_model_name}
-```
-
-See {doc}`/reference/configuration` for complete configuration reference.
-
