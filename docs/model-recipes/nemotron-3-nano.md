@@ -1,8 +1,6 @@
-(training-nemo-rl-grpo-nemotron-3-nano-30b)=
+# Nemotron 3 Nano 30B
 
-# Nemotron 3 Nano 30B Multi-Node Training
-
-After completing the standard multi-node training tutorial with Nemotron Nano 9B v2, you may want to scale up to larger models like Nemotron 3 Nano 30B. This tutorial walks through the complete setup for distributed training across multiple nodes using Slurm and Ray.
+This tutorial walks through the complete setup for distributed training of Nemotron 3 Nano 30B across multiple nodes using Slurm and Ray.
 
 :::{card}
 
@@ -19,21 +17,14 @@ After completing the standard multi-node training tutorial with Nemotron Nano 9B
 
 :::
 
-:::{button-ref} training-nemo-rl-grpo-multi-node-training
-:color: secondary
-:outline:
-:ref-type: ref
-
-← Previous: Multi-Node Training
-:::
-
 ---
 
 ## Prerequisites
 
-Make sure you have:
+Before starting, complete the {ref}`NeMo RL GRPO tutorial <training-nemo-rl-grpo-index>` to understand the NeMo RL training workflow and GRPO fundamentals.
 
-- ✅ Completed the {doc}`Multi-Node Training <multi-node-training>` tutorial
+You'll also need:
+
 - ✅ Access to Slurm cluster with enroot/pyxis container support
 - ✅ Access to NeMo RL container: `nvcr.io/nvidia/nemo-rl:v0.4.0.nemotron_3_nano`
 - ✅ Understanding of Ray distributed computing framework
@@ -570,9 +561,9 @@ Congratulations! You've successfully set up and launched Nemotron 3 Nano 30B mul
 :gutter: 3
 
 :::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Use Other Training Environments
-:link: https://github.com/NVIDIA-NeMo/Gym#-available-resource-servers
+:link: https://github.com/NVIDIA-NeMo/Gym#-available-environments
 
-Browse available resource servers on GitHub to find other training environments.
+Browse available environments on GitHub to find other training options.
 :::
 
 :::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build a Custom Training Environment
