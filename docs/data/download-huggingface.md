@@ -92,7 +92,68 @@ ng_download_dataset_from_hf \
 
 ::::
 
+::::{tab-item} Python Script
+Downloads using the `datasets` library directly with streaming support.
+
+**Use when**: You need custom preprocessing, streaming for large datasets, or specific split handling.
+
+```python
+import json
+from datasets import load_dataset
+
+output_file = "train.jsonl"
+dataset_name = "nvidia/OpenMathInstruct-2"
+split_name = "train_1M"  # Check dataset page for available splits
+
+with open(output_file, "w", encoding="utf-8") as f:
+    for line in load_dataset(dataset_name, split=split_name, streaming=True):
+        f.write(json.dumps(line) + "\n")
+```
+
+Run the script:
+
+```bash
+uv run download.py
+```
+
+Verify the download:
+
+```bash
+wc -l train.jsonl
+# Expected: 1000000 train.jsonl
+```
+
+**Streaming benefits**:
+- Memory-efficient for large datasets (millions of rows)
+- Progress visible during download
+
+:::{note}
+For gated or private datasets, authenticate first:
+
+```bash
+export HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+Or use `huggingface-cli login` before running the script.
+:::
+
+::::
+
 :::::
+
+---
+
+## NVIDIA Datasets
+
+Ready-to-use datasets for common training tasks:
+
+| Dataset | Repository | Domain |
+|---------|-----------|--------|
+| OpenMathReasoning | `nvidia/Nemotron-RL-math-OpenMathReasoning` | Math |
+| Competitive Coding | `nvidia/nemotron-RL-coding-competitive_coding` | Code |
+| Workplace Assistant | `nvidia/Nemotron-RL-agent-workplace_assistant` | Agent |
+| Structured Outputs | `nvidia/Nemotron-RL-instruction_following-structured_outputs` | Instruction |
+| MCQA | `nvidia/Nemotron-RL-knowledge-mcqa` | Knowledge |
 
 ---
 
@@ -147,7 +208,7 @@ Avoid passing tokens on the command line—they appear in shell history.
 **Recommended** — Use environment variable:
 
 ```bash
-export hf_token=hf_xxxxxxxxxxxxxxxxxxxxxxxxx
+export HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxxx
 ng_download_dataset_from_hf \
     +repo_id=my-org/private-dataset \
     +output_dirpath=./data/
@@ -167,20 +228,6 @@ ng_download_dataset_from_hf \
     +output_dirpath=./data/
 ```
 :::
-
----
-
-## NVIDIA Datasets
-
-| Dataset | Repository |
-|---------|-----------|
-| OpenMathReasoning | `nvidia/Nemotron-RL-math-OpenMathReasoning` |
-| Competitive Coding | `nvidia/nemotron-RL-coding-competitive_coding` |
-| Workplace Assistant | `nvidia/Nemotron-RL-agent-workplace_assistant` |
-| Structured Outputs | `nvidia/Nemotron-RL-instruction_following-structured_outputs` |
-| MCQA | `nvidia/Nemotron-RL-knowledge-mcqa` |
-
----
 
 :::{dropdown} Automatic Downloads During Data Preparation
 :icon: download
@@ -238,7 +285,30 @@ rm -rf ~/.cache/huggingface/hub/datasets--<org>--<dataset>
 | Auto-download | `nemo_gym/train_data_utils.py:476-494` |
 :::
 
-## Related
+## Next Steps
 
-- {doc}`prepare-validate` — Validate downloaded datasets
-- {doc}`/reference/cli-commands` — Full CLI reference
+::::{grid} 1 2 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`checklist;1.5em;sd-mr-1` Prepare and Validate
+:link: prepare-validate
+:link-type: doc
+
+Preprocess raw data, run `ng_prepare_data`, and add `agent_ref` routing.
+:::
+
+:::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` Collect Rollouts
+:link: /get-started/rollout-collection
+:link-type: doc
+
+Generate training examples by running your agent on prepared data.
+:::
+
+:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` Train with NeMo RL
+:link: /training-tutorials/nemo-rl-grpo/index
+:link-type: doc
+
+Use validated data with NeMo RL for GRPO training.
+:::
+
+::::

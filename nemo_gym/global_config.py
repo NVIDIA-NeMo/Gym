@@ -16,6 +16,7 @@ from collections import defaultdict
 from os import getenv
 from pathlib import Path
 from platform import python_version
+from random import randint
 from socket import gethostbyname, gethostname, socket
 from typing import ClassVar, List, Optional, Tuple, Type
 
@@ -48,8 +49,12 @@ PYTHON_VERSION_KEY_NAME = "python_version"
 PIP_INSTALL_VERBOSE_KEY_NAME = "pip_install_verbose"
 USE_ABSOLUTE_IP = "use_absolute_ip"
 UV_PIP_SET_PYTHON_KEY_NAME = "uv_pip_set_python"
+SKIP_VENV_IF_PRESENT_KEY_NAME = "skip_venv_if_present"
 HF_TOKEN_KEY_NAME = "hf_token"
 RAY_HEAD_NODE_ADDRESS_KEY_NAME = "ray_head_node_address"
+TASK_INDEX_KEY_NAME = "_task_index"
+PORT_RANGE_LOW_KEY_NAME = "port_range_low"
+PORT_RANGE_HIGH_KEY_NAME = "port_range_high"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -61,8 +66,11 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     PIP_INSTALL_VERBOSE_KEY_NAME,
     USE_ABSOLUTE_IP,
     UV_PIP_SET_PYTHON_KEY_NAME,
+    SKIP_VENV_IF_PRESENT_KEY_NAME,
     HF_TOKEN_KEY_NAME,
     RAY_HEAD_NODE_ADDRESS_KEY_NAME,
+    PORT_RANGE_LOW_KEY_NAME,
+    PORT_RANGE_HIGH_KEY_NAME,
 ]
 
 POLICY_BASE_URL_KEY_NAME = "policy_base_url"
@@ -149,6 +157,8 @@ class GlobalConfigDictParser(BaseModel):
         self,
         server_instance_configs: List[ServerInstanceConfig],
         default_host: str,
+        port_range_low: int,
+        port_range_high: int,
         initial_disallowed_ports: Optional[List[int]] = None,
     ) -> List[int]:
         server_refs = [c.get_server_ref() for c in server_instance_configs]
@@ -173,8 +183,10 @@ class GlobalConfigDictParser(BaseModel):
                 if not run_server_config_dict.get("host"):
                     run_server_config_dict["host"] = default_host
                 if not run_server_config_dict.get("port"):
-                    port = find_open_port(
+                    port = _find_open_port_using_range(
                         disallowed_ports=disallowed_ports,
+                        port_range_low=port_range_low,
+                        port_range_high=port_range_high,
                     )
                     run_server_config_dict["port"] = port
                     disallowed_ports.append(port)  # Disallow newly allocated port.
@@ -269,8 +281,17 @@ class GlobalConfigDictParser(BaseModel):
         head_server_port = head_server_config.get("port", DEFAULT_HEAD_SERVER_PORT)
 
         initial_disallowed_ports = [head_server_port] if head_server_port is not None else []
+
+        with open_dict(global_config_dict):
+            port_range_low = global_config_dict.setdefault(PORT_RANGE_LOW_KEY_NAME, 10_001)
+            port_range_high = global_config_dict.setdefault(PORT_RANGE_HIGH_KEY_NAME, 20_000)
+
         disallowed_ports = self.validate_and_populate_defaults(
-            server_instance_configs, default_host, initial_disallowed_ports
+            server_instance_configs=server_instance_configs,
+            default_host=default_host,
+            initial_disallowed_ports=initial_disallowed_ports,
+            port_range_low=port_range_low,
+            port_range_high=port_range_high,
         )
 
         with open_dict(global_config_dict):
@@ -295,6 +316,10 @@ class GlobalConfigDictParser(BaseModel):
 
             # Constrain python version since ray is sensitive to this.
             global_config_dict[PYTHON_VERSION_KEY_NAME] = python_version()
+
+            # Skip venv setup is opt-in and defaults to False.
+            if SKIP_VENV_IF_PRESENT_KEY_NAME not in global_config_dict:
+                global_config_dict[SKIP_VENV_IF_PRESENT_KEY_NAME] = False
 
         if parse_config.hide_secrets:
             self._recursively_hide_secrets(global_config_dict)
@@ -405,14 +430,36 @@ def find_open_port(
     if disallowed_ports is None:
         disallowed_ports = []
 
-    # Find an open port that doesn't conflict with disallowed ports.
-    for _ in range(max_retries):
-        with socket() as s:
-            s.bind(("", 0))  # Bind to a free port provided by the host.
-            port = s.getsockname()[1]
+    global_config_dict = get_global_config_dict()
 
-            if port not in disallowed_ports:
+    return _find_open_port_using_range(
+        disallowed_ports=disallowed_ports,
+        max_retries=max_retries,
+        port_range_low=global_config_dict[PORT_RANGE_LOW_KEY_NAME],
+        port_range_high=global_config_dict[PORT_RANGE_HIGH_KEY_NAME],
+    )
+
+
+def _find_open_port_using_range(
+    disallowed_ports: List[int],
+    port_range_low: int,
+    port_range_high: int,
+    max_retries: int = 50,
+) -> int:  # pragma: no cover
+    # Find an open port that doesn't conflict with disallowed ports.
+
+    with socket() as s:
+        for _ in range(max_retries):
+            # Pick a random port in our range that is not disallowed
+            port = None
+            while port is None or port in disallowed_ports:
+                port = randint(port_range_low, port_range_high)
+
+            try:
+                s.bind(("", port))
                 return port
+            except OSError:
+                pass
 
     raise RuntimeError(
         f"Unable to find an open port that doesn't conflict with disallowed ports "

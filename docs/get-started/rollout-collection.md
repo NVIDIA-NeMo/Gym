@@ -8,6 +8,8 @@ In the previous tutorial, you set up NeMo Gym and ran your first agent interacti
 
 **Goal**: Generate your first batch of rollouts and understand how they become training data.
 
+**Time**: ~10 minutes | **Cost**: ~$0.05 (OpenAI API)
+
 ^^^
 
 **In this tutorial, you will**:
@@ -28,7 +30,7 @@ In the previous tutorial, you set up NeMo Gym and ran your first agent interacti
 
 ---
 
-## Before You Begin
+## Prerequisites
 
 Make sure you have:
 
@@ -188,28 +190,37 @@ ng_collect_rollouts \
 
 ---
 
-## What's Next?
+## Next Steps
 
 Congratulations! You now have a working NeMo Gym installation and understand how to generate rollouts. Choose your path based on your goals:
 
 ::::{grid} 1 1 2 2
 :gutter: 3
 
-:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Use an Existing Training Environment
-:link: https://github.com/NVIDIA-NeMo/Gym#-available-resource-servers
+:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` Start Training
+:link: ../training-tutorials/index
+:link-type: doc
 
-Browse the available resource servers on GitHub to find a training-ready environment that matches your goals.
+Train models using NeMo Gym with your preferred RL framework.
 +++
-{bdg-secondary}`github` {bdg-secondary}`resource-servers`
+{bdg-primary}`recommended next step` {bdg-secondary}`training`
 :::
 
-:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build a Custom Training Environment
-:link: ../tutorials/creating-resource-server
+:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Use an Existing Environment
+:link: https://github.com/NVIDIA-NeMo/Gym#-available-environments
+
+Explore environments available for training and evaluation.
++++
+{bdg-secondary}`environments`
+:::
+
+:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build a Custom Environment
+:link: ../environment-tutorials/creating-training-environment
 :link-type: doc
 
 Implement or integrate existing tools and define task verification logic.
 +++
-{bdg-secondary}`tutorial` {bdg-secondary}`custom-tools`
+{bdg-secondary}`custom-environment`
 :::
 
 ::::
