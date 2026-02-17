@@ -283,7 +283,7 @@ class GlobalConfigDictParser(BaseModel):
         initial_disallowed_ports = [head_server_port] if head_server_port is not None else []
 
         with open_dict(global_config_dict):
-            port_range_low = global_config_dict.setdefault(PORT_RANGE_LOW_KEY_NAME, 10_001)
+            port_range_low = global_config_dict.setdefault(PORT_RANGE_LOW_KEY_NAME, 15_001)
             port_range_high = global_config_dict.setdefault(PORT_RANGE_HIGH_KEY_NAME, 20_000)
 
         disallowed_ports = self.validate_and_populate_defaults(
