@@ -1,0 +1,40 @@
+toolcall_schema_single_step_tool_use_with_argument_comparison_resources_server:
+  resources_servers:
+    single_step_tool_use_with_argument_comparison:
+      entrypoint: app.py
+      domain: agent
+      tool_call_comparator_config:
+        word_count_similarity_threshold: 0.1
+toolcall_schema_single_step_tool_use_with_argument_comparison_agent:
+  responses_api_agents:
+    tool_simulation_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: toolcall_schema_single_step_tool_use_with_argument_comparison_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/single_step_tool_use_with_argument_comparison/data/train.jsonl
+        num_repeats: 1
+        gitlab_identifier:
+          dataset_name: single_step_tool_use_with_argument_comparison
+          version: 0.0.1
+          artifact_fpath: train.jsonl
+        license: Apache 2.0
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/single_step_tool_use_with_argument_comparison/data/validation.jsonl
+        num_repeats: 1
+        gitlab_identifier:
+          dataset_name: single_step_tool_use_with_argument_comparison
+          version: 0.0.1
+          artifact_fpath: validation.jsonl
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/single_step_tool_use_with_argument_comparison/data/example.jsonl
+        num_repeats: 1
