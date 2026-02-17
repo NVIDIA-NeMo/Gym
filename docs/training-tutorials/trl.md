@@ -4,7 +4,7 @@
 
 [TRL (Transformer Reinforcement Learning)](https://github.com/huggingface/trl) is Hugging Face's library for post-training foundation models. This integration enables training models in NeMo Gym environments using TRL's GRPOTrainer with vLLM server mode.
 
-### Install TRL and NeMo Gym
+## Install TRL and NeMo Gym
 
 1. **Install TRL venv with vLLM and some extras**
 
@@ -26,7 +26,7 @@
    uv sync
    ```
 
-### Prepare a Dataset
+## Prepare a Dataset
 
 In this example we use the reasoning gym resources server in NeMo Gym to train a model in sudoku:
 
