@@ -38,6 +38,7 @@ class CompCodingResourcesServerConfig(BaseResourcesServerConfig):
     num_processes: int
     unit_test_timeout_secs: int
     debug: bool
+    reasoning_format_penalty: float = -0.2
 
 
 # ----------------------------
@@ -66,6 +67,7 @@ class CompCodingVerifyResponse(BaseVerifyResponse):
     result: Optional[List[Union[int, bool]]] = None
     metadata: Optional[Dict[str, Any]] = None
     unit_tests_time_taken: Optional[float] = None
+    reasoning_format_violation_rate: float = 0.0
 
 
 # ----------------------------
@@ -76,6 +78,29 @@ class CompCodingResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context):
         self._semaphore: Semaphore = Semaphore(value=self.config.num_processes)
+
+    @staticmethod
+    def _has_reasoning_format_violation(response) -> bool:
+        open_tag = "<think>"
+        close_tag = "</think>"
+
+        # Final answer (output_text) should not contain any think tags.
+        final_answer = response.output_text or ""
+        if open_tag in final_answer or close_tag in final_answer:
+            return True
+
+        # Reasoning content should not have more than 1 think tag.
+        reasoning = ""
+        for item in response.output or []:
+            if getattr(item, "type", None) == "reasoning":
+                for summary in getattr(item, "summary", []) or []:
+                    text = getattr(summary, "text", None)
+                    if isinstance(text, str):
+                        reasoning += text
+        if reasoning.count(open_tag) > 1 or reasoning.count(close_tag) > 1:
+            return True
+
+        return False
 
     async def verify(self, body: CompCodingVerifyRequest) -> CompCodingVerifyResponse:
         model_out = body.response.output_text
@@ -139,14 +164,21 @@ class CompCodingResourcesServer(SimpleResourcesServer):
 
             unit_tests_time_taken = time() - start_time
 
+        has_violation = self._has_reasoning_format_violation(body.response)
+
         return CompCodingVerifyResponse(
             **body.model_dump(),
-            reward=1.0 if all(r == True for r in result) else 0.0,
+            reward=(
+                self.config.reasoning_format_penalty
+                if has_violation
+                else (1.0 if all(r == True for r in result) else 0.0)
+            ),
             extracted_model_output=model_out,
             extracted_model_code=code,
             result=result,
             metadata=metadata,
             unit_tests_time_taken=unit_tests_time_taken,
+            reasoning_format_violation_rate=1.0 if has_violation else 0.0,
         )
 
 
