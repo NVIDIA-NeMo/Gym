@@ -35,7 +35,7 @@ Make sure you have:
 
 - ✅ Completed the {doc}`Multi-Node Training <multi-node-training>` tutorial
 - ✅ Access to Slurm cluster with enroot/pyxis container support
-- ✅ Access to NeMo RL container (v0.4.0 or later with Nemotron 3 Nano support)
+- ✅ Access to NeMo RL container: `nvcr.io/nvidia/nemo-rl:v0.4.0.nemotron_3_nano`
 - ✅ Understanding of Ray distributed computing framework
 - ✅ Sufficient storage space (~110GB for model, data, and cache; checkpoints and logs accumulate with each run)
 
