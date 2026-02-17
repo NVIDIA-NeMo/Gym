@@ -452,7 +452,12 @@ def run(
 
 
 def e2e_rollout_collection():  # pragma: no cover
+    # Ensure we have the right config first thing
     rollout_collection_config = RolloutCollectionConfig.model_validate(get_global_config_dict())
+
+    # Prepare data
+
+    # Convert to RolloutCollectionConfig
 
     rh = RunHelper()
     rh.start(None)
