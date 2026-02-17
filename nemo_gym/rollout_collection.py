@@ -19,7 +19,7 @@ from collections import Counter
 from contextlib import nullcontext
 from itertools import repeat
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
@@ -37,7 +37,18 @@ from nemo_gym.server_utils import (
 )
 
 
-class E2ERolloutCollectionConfig(BaseNeMoGymCLIConfig):
+class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
+    output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
+    num_samples_in_parallel: Optional[int] = Field(
+        default=None, description="Limit the number of concurrent samples running at once."
+    )
+    responses_create_params: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Overrides for the responses_create_params e.g. temperature, max_output_tokens, etc.",
+    )
+
+
+class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
     """
     Spin up all necessary servers and perform a batch of rollout collection using each dataset inside the provided configs.
 
@@ -50,17 +61,10 @@ class E2ERolloutCollectionConfig(BaseNeMoGymCLIConfig):
     ```
     """
 
-    output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
-    num_samples_in_parallel: Optional[int] = Field(
-        default=None, description="Limit the number of concurrent samples running at once."
-    )
-    responses_create_params: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="Overrides for the responses_create_params e.g. temperature, max_output_tokens, etc.",
-    )
+    split: Union[Literal["train"], Literal["validation"]]
 
 
-class RolloutCollectionConfig(E2ERolloutCollectionConfig):
+class RolloutCollectionConfig(SharedRolloutCollectionConfig):
     """
     Perform a batch of rollout collection.
 

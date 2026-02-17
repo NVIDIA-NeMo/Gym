@@ -19,6 +19,7 @@ import platform
 import shlex
 import sys
 import tomllib
+from copy import deepcopy
 from glob import glob
 from importlib.metadata import version as md_version
 from os import environ, makedirs
@@ -34,7 +35,7 @@ import psutil
 import rich
 import uvicorn
 from devtools import pprint
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import Field
 from tqdm.auto import tqdm
 
@@ -52,7 +53,7 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
-from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+from nemo_gym.rollout_collection import E2ERolloutCollectionConfig, RolloutCollectionConfig, RolloutCollectionHelper
 from nemo_gym.server_status import StatusCommand
 from nemo_gym.server_utils import (
     HEAD_SERVER_KEY_NAME,
@@ -62,6 +63,7 @@ from nemo_gym.server_utils import (
     ServerStatus,
     initialize_ray,
 )
+from nemo_gym.train_data_utils import TrainDataProcessor
 
 
 def _setup_env_command(
@@ -452,17 +454,44 @@ def run(
 
 
 def e2e_rollout_collection():  # pragma: no cover
+    global_config_dict = get_global_config_dict()
+
     # Ensure we have the right config first thing
-    rollout_collection_config = RolloutCollectionConfig.model_validate(get_global_config_dict())
+    e2e_rollout_collection_config = E2ERolloutCollectionConfig.model_validate(global_config_dict)
 
     # Prepare data
+    data_processor_config_dict = deepcopy(global_config_dict)
+    with open_dict(data_processor_config_dict):
+        data_processor_config_dict["should_download"] = True
+        data_processor_config_dict["mode"] = "train_preparation"
+
+        output_fpath = Path(e2e_rollout_collection_config.output_jsonl_fpath)
+        data_processor_config_dict["output_dirpath"] = str(output_fpath / "preprocessed_datasets")
+
+    data_processor = TrainDataProcessor()
+    data_processor.run(data_processor_config_dict)
 
     # Convert to RolloutCollectionConfig
+    rollout_collection_config_dict = deepcopy(global_config_dict)
+    with open_dict(rollout_collection_config_dict):
+        rollout_collection_config_dict["input_jsonl_fpath"] = str(
+            output_fpath / "preprocessed_datasets" / f"{e2e_rollout_collection_config.split}.jsonl"
+        )
+
+    rollout_collection_config = RolloutCollectionConfig.model_validate(rollout_collection_config_dict)
 
     rh = RunHelper()
     rh.start(None)
 
     rch = RolloutCollectionHelper()
+
+    print(
+        f"""Output artifacts:
+1. Preprocessed datasets: {data_processor_config_dict["output_dirpath"]}
+2. Dataset file used for rollout collection: {rollout_collection_config_dict["input_jsonl_fpath"]}
+3. Rollout collection results file: {output_fpath}
+"""
+    )
     try:
         asyncio.run(rch.run_from_config(rollout_collection_config))
     except KeyboardInterrupt:
