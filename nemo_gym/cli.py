@@ -383,7 +383,7 @@ Process `{process_name}` stderr:
         print("Waiting for processes to finish...")
         for process_name, process in self._processes.items():
             try:
-                process.wait(timeout=5)
+                process.wait(timeout=1)
             except TimeoutExpired:
                 print(
                     f"""Process `{process_name}` didn't shutdown within the 5s timeout, killing instead. You may see messages like:
