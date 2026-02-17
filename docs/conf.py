@@ -28,7 +28,7 @@ import sys
 project = "NeMo Gym"
 copyright = "2025, NVIDIA Corporation"
 author = "NVIDIA Corporation"
-release = "0.1.1"
+release = "0.2.0"
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
@@ -86,6 +86,7 @@ autodoc2_docstring_parser_regexes = [
 
 html_theme = "nvidia_sphinx_theme"
 html_theme_options = {
+    "show_version_warning_banner": True,
     "icon_links": [
         {
             "name": "GitHub",
