@@ -66,9 +66,8 @@ Clone the Nemotron 3 Nano v3 branch of NeMo RL:
 
 ```bash
 cd $WORKSPACE
-git clone -b nano-v3 https://github.com/NVIDIA-NeMo/RL.git RL-nano-v3
+git clone --recurse-submodules -b nano-v3 https://github.com/NVIDIA-NeMo/RL.git RL-nano-v3
 cd RL-nano-v3
-git submodule update --init --recursive
 ```
 
 **✅ Success Check**: Repository cloned with nano-v3 branch checked out.
@@ -106,7 +105,7 @@ For faster job startup on subsequent runs, pre-pull and convert to .sqsh format:
 
 ```bash
 mkdir -p ~/.config/enroot
-echo "machine nvcr.io login \$oauthtoken password YOUR_API_KEY" >> ~/.config/enroot/.credentials
+echo "machine nvcr.io login \$oauthtoken password <YOUR_API_KEY>" >> ~/.config/enroot/.credentials
 ```
 
 **Step 2: Pull Container Using Sbatch**
@@ -118,10 +117,15 @@ Create `pull_container.sh`:
 ```bash
 #!/bin/bash
 #SBATCH --job-name=enroot-import
+#SBATCH --account=<your_account>
+#SBATCH --partition=<partition_name>
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --time=01:00:00
 #SBATCH --output=enroot-import-%j.out
+
+# Set workspace directory (adjust to your cluster's large storage)
+WORKSPACE=/path/to/large/storage/$USER
 
 ENROOT_CACHE_PATH=$WORKSPACE/.cache/enroot
 
@@ -165,46 +169,57 @@ uvx --version
 
 ---
 
-### 1.5 Download Training Data
+### 1.5 Download and Process Training Data
 
-Download the Nemotron 3 Nano RL Training Blend dataset from HuggingFace:
+Download and process the dataset on a compute node (head nodes have limited memory):
+
+Create `prepare_data.sh`:
 
 ```bash
-cd $WORKSPACE/RL-nano-v3
+#!/bin/bash
+#SBATCH --job-name=prepare-data
+#SBATCH --account=<your_account>
+#SBATCH --partition=<partition_name>
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --time=00:20:00
+#SBATCH --output=prepare-data-%j.out
 
+# Data directory
+DATA_DIR=${WORKSPACE}/RL-nano-v3/data/
+
+# Download dataset
 uvx --from huggingface-hub hf download nvidia/Nemotron-3-Nano-RL-Training-Blend \
     --repo-type dataset \
-    --local-dir data
-```
-
-**✅ Success Check**: Dataset downloaded to `data/` directory.
-
----
-
-### 1.6 Process and Split Data
-
-Fill in placeholders in the dataset and create train/validation splits:
-
-```bash
-cd $WORKSPACE/RL-nano-v3
+    --local-dir ${DATA_DIR}
 
 # Fill in placeholders
-chmod +x data/create_nanov3_jsonl.py
-./data/create_nanov3_jsonl.py --input data/train.jsonl --output data/train-full.jsonl
+chmod +x ${DATA_DIR}/create_nanov3_jsonl.py
+${DATA_DIR}/create_nanov3_jsonl.py --input ${DATA_DIR}/train.jsonl --output ${DATA_DIR}/train-full.jsonl
 
 # Split: reserve last 1000 rows for validation
-head -n -1000 data/train-full.jsonl > data/train-split.jsonl
-tail -n 1000 data/train-full.jsonl > data/val-split.jsonl
+head -n -1000 ${DATA_DIR}/train-full.jsonl > ${DATA_DIR}/train-split.jsonl
+tail -n 1000 ${DATA_DIR}/train-full.jsonl > ${DATA_DIR}/val-split.jsonl
 
 # Verify split
-wc -l data/train-split.jsonl data/val-split.jsonl
+wc -l ${DATA_DIR}/train-split.jsonl ${DATA_DIR}/val-split.jsonl
 ```
 
-**✅ Success Check**: Two files created: `train-split.jsonl` and `val-split.jsonl`.
+Submit the job (exports WORKSPACE and HF_TOKEN to the compute node):
+
+```bash
+sbatch --export=WORKSPACE,HF_TOKEN prepare_data.sh
+```
+
+:::{note}
+**Why use a compute node?** The `create_nanov3_jsonl.py` script is memory-intensive and may fail on head nodes which have resource limits. Running on a compute node ensures sufficient memory.
+:::
+
+**✅ Success Check**: Job completes and creates `train-split.jsonl` and `val-split.jsonl`.
 
 ---
 
-### 1.7 Download Model
+### 1.6 Download Model
 
 Download the Nemotron 3 Nano 30B model:
 
@@ -220,7 +235,7 @@ uvx --from huggingface-hub hf download nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF1
 
 ---
 
-### 1.8 Verify Setup
+### 1.7 Verify Setup
 
 Confirm all components are in place:
 
@@ -234,9 +249,13 @@ ls -lh
 # Check data files
 ls -lh data/train-split.jsonl data/val-split.jsonl
 
-# Check model size
+# Check model size and key files
 du -sh model/
-# Expected: ~63GB
+# Expected: ~59GB
+
+# Verify essential model files exist
+ls model/config.json model/*.safetensors
+# Should show config.json and 13 safetensors files
 ```
 
 **✅ Success Check**: All directories and files present with correct sizes.
