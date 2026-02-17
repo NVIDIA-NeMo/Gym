@@ -6,18 +6,32 @@ Build custom training environments that define how models receive rewards.
 
 ---
 
-## Environment Patterns
+## Environment Properties
 
-NeMo Gym environments use the `verify()` method to compute rewards from model responses. Different patterns handle different training scenarios:
+Training environments can be broadly characterized along four dimensions:
+1. **Rollout structure**: The interaction pattern between the model, environment, and user.
+2. **Core capabilities**: The behaviors or skills that a model needs in order to succeed in a given use case.
+3. **Knowledge domain**: What subject area, area of expertise, or field of study is involved.
+4. **Task type**: The high-level use case that is represented in the training environment.
 
-| Pattern | Description | Key Characteristic |
+| Rollout structure | Description |
+|---|---|
+| Multi-step | Interleaved assistant and tool messages |
+| Multi-turn | Interleaved user and assistant messages |
+| Multi-modal | Interleaved text, image, video, and/or audio messages |
+| Long context | Message content is very large or the number of messages is very large |
+
+| Core capability | Developer/User need | Rollout Structures Required |
 |---|---|---|
-| **Single-step** | One model response per task | `verify()` evaluates the final response |
-| **Multi-step** | Sequential tool calls within a turn | `/step` endpoint routes tool calls; model drives the loop |
-| **Multi-turn** | Conversation with accumulated history | User messages alternate with assistant responses |
-| **User modeling** | LLM-simulated user interactions | Generates synthetic training data at scale |
-
-**Implementation reference**: All patterns inherit from `SimpleResourcesServer` (`nemo_gym/base_resources_server.py`), which provides `verify()` and `seed_session()` endpoints.
+| Information dependency | The model receives environment responses that may require changes to subsequent actions. | Multi-step |
+| Proactive asking |
+| Information dependency | The model receives environment responses that may require changes to subsequent actions. | Multi step |
+| Proactive asking | Developers put the model in a situation where user context is missing. The model needs to recognize user context is missing and ask the user for the missing context. | Multi turn |
+| Schema adherence | Users need more than one piece of information delivered by the model at one time in a specified delivery format. | |
+| Meta data instruction following | User constrains the meta-properties of the model response e.g. “respond in 5 words”. | |
+|Counterintuitive instruction following	| User provides instructions that are against conventional wisdom, typically making sense in the specific context in which the model is being used | |
+| Information relevance | Given a large volume of inputs, the model needs to ignore content irrelevant to the task at hand. | Long context |
+| Multiple intent synthesis | Users provide multiple tasks for the model to accomplish. | Multi step, Multi turn |
 
 ---
 
