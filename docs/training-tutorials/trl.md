@@ -1,139 +1,240 @@
 (training-trl)=
 
-# TRL Training
+# RL Training with TRL
 
-```{warning}
-**Status: In Development** — TRL integration is planned but not yet implemented. Track progress at [GitHub Issue #548](https://github.com/NVIDIA-NeMo/Gym/issues/548).
+[TRL (Transformer Reinforcement Learning)](https://github.com/huggingface/trl) is Hugging Face's library for post-training foundation models. This integration enables training models in NeMo Gym environments using TRL's GRPOTrainer with vLLM server mode.
 
-Looking to train now? Use {doc}`NeMo RL <../tutorials/nemo-rl-grpo/index>` (production-ready) or {doc}`Unsloth <../tutorials/unsloth-training>` (single GPU).
+## Install TRL and NeMo Gym
+
+1. **Install TRL venv with vLLM and some extras**
+
+   ```bash
+   cd trl/
+   uv venv
+   source .venv/bin/activate
+   uv sync --extra vllm
+   uv pip install fastapi uvicorn accelerate deepspeed wandb omegaconf
+   ```
+
+1. **Install NeMo Gym in a separate venv**
+
+   ```bash
+   git clone https://github.com/NVIDIA-NeMo/Gym.git
+   cd Gym
+   uv venv --python 3.12
+   source .venv/bin/activate
+   uv sync
+   ```
+
+## Prepare a Dataset
+
+In this example we use the reasoning gym resources server in NeMo Gym to train a model in sudoku:
+
+```bash
+cd Gym
+source .venv/bin/activate
+uv pip install reasoning-gym
+cd resources_servers/reasoning_gym
+python scripts/create_dataset.py \
+    --task mini_sudoku \
+    --size 2000 \
+    --seed 42 \
+    --output data/reasoning_gym/train_mini_sudoku.jsonl
+
+python scripts/create_dataset.py \
+    --task mini_sudoku \
+    --size 50 \
+    --seed 24 \
+    --output data/reasoning_gym/val_mini_sudoku.jsonl
 ```
 
-Train models using [Hugging Face TRL](https://huggingface.co/docs/trl) with NeMo Gym verifiers as reward functions.
+## Interactive Training
 
-## Why TRL + NeMo Gym?
+Training requires 2+ GPUs, one for the vLLM server, and one for training. The NeMo Gym TRL integration currently depends on vLLM server mode.
 
-**TRL** provides production-ready RL training for large language models:
+To run training on a single node, launch the NeMo Gym servers, vLLM server, then run training:
 
-- PPO, DPO, ORPO algorithms out of the box
-- Seamless HuggingFace Hub integration
-- Active community and documentation
+### Setup
 
-**NeMo Gym** adds:
+1. **Update Environment Config**
 
-- Domain-specific verifiers (math, code, tool calling)
-- Standardized reward computation via HTTP API
-- Pre-built training environments
+   Update `env.yaml` in `Gym/` to include model information:
 
-## Planned Integration Pattern
+   ```yaml
+   policy_base_url: http://127.0.0.1:8000/v1
+   policy_api_key: EMPTY
+   policy_model_name: Qwen/Qwen2.5-1.5B-Instruct
+   ```
 
-When implemented, TRL integration will use NeMo Gym verifiers as reward functions via HTTP:
+2. **Update Training Config**
 
-```text
-┌─────────────┐     HTTP      ┌──────────────────────┐
-│  TRL Trainer │ ──────────▶ │  NeMo Gym Resource   │
-│  (PPO/DPO)   │             │  Server (Verifier)   │
-│              │ ◀────────── │                      │
-│              │   reward    │                      │
-└─────────────┘              └──────────────────────┘
-```
+   Update `examples/scripts/nemo_gym/config.yaml` to point to the mini sudoku dataset:
 
-### Proposed Reward Wrapper
+   ```yaml
+   model_name: "Qwen/Qwen2.5-1.5B-Instruct"
 
-The integration will expose NeMo Gym verifiers as TRL-compatible reward functions:
+   dataset_path: "/path/to/Gym/resources_servers/reasoning_gym/data/reasoning_gym/train_mini_sudoku.jsonl"
+   eval_dataset_path: "/path/to/Gym/resources_servers/reasoning_gym/data/reasoning_gym/val_mini_sudoku.jsonl"
 
-```python
-# Proposed implementation (not yet available)
-# Location: nemo_gym/integrations/trl.py
+   task: "mini-sudoku"
+   output_dir: "outputs/nemo_gym_sudoku"
 
-from typing import List
+   learning_rate: 1.0e-5
+   num_generations: 16
+   per_device_train_batch_size: 8
+   gradient_accumulation_steps: 1
+   max_completion_length: 10000
+   vllm_importance_sampling_correction: true
 
-class NeMoGymRewardFunction:
-    """Wrap a NeMo Gym resource server as a TRL reward function."""
-    
-    def __init__(self, resources_server_url: str):
-        from nemo_gym import ResourcesServerClient
-        self.client = ResourcesServerClient(resources_server_url)
-    
-    def __call__(self, outputs: List[str]) -> List[float]:
-        """Compute rewards for a batch of model outputs."""
-        rewards = []
-        for output in outputs:
-            response = self.client.verify(output)
-            rewards.append(response.reward)
-        return rewards
-```
+   temperature: 1.0
+   top_p: 0.999
+   ```
 
-### Usage Pattern (Planned)
+### Run Training
 
-```python
-# Planned usage (not yet available)
-from trl import PPOTrainer, PPOConfig
-from nemo_gym.integrations.trl import NeMoGymRewardFunction
 
-# Start a resource server (e.g., math verification)
-# nemo-gym serve math --port 8080
+1. **Start NeMo Gym Servers**
 
-# Create reward function pointing to the server
-reward_fn = NeMoGymRewardFunction("http://localhost:8080")
+   ```bash
+   cd Gym/
+   source .venv/bin/activate
 
-# Use with TRL trainer
-config = PPOConfig(...)
-trainer = PPOTrainer(config=config, reward_model=reward_fn)
-trainer.train()
-```
+   config_paths="resources_servers/reasoning_gym/configs/reasoning_gym.yaml,\
+   responses_api_models/vllm_model/configs/vllm_model_for_training.yaml"
 
-## Target Algorithms
+   ng_run "+config_paths=[${config_paths}]"
+   ```
 
-| Algorithm | TRL Support | NeMo Gym Integration |
-|-----------|-------------|----------------------|
-| PPO | ✅ Stable | 🔜 Planned |
-| DPO | ✅ Stable | 🔜 Planned |
-| ORPO | ✅ Stable | 🔜 Planned |
-| GRPO | ❌ Not in TRL | ✅ Use {doc}`NeMo RL <../tutorials/nemo-rl-grpo/index>` |
+1. **Start TRL vLLM Server on GPU 0**
 
-## Architecture Considerations
+   ```bash
+   cd trl/
+   source .venv/bin/activate
+   CUDA_VISIBLE_DEVICES=0 trl vllm-serve \
+     --model Qwen/Qwen2.5-1.5B-Instruct \
+     --max-model-len 16384 \
+     --host 0.0.0.0 \
+     --port 8000
+   ```
 
-For architects evaluating this integration:
+1. **Run Training on GPU 1**
 
-**Network Latency**
-: Verifier calls add HTTP round-trip latency per batch. Mitigate with batched verification and local resource servers.
+   ```bash
+   cd trl/
+   source .venv/bin/activate
+   cd examples/scripts/nemo_gym
 
-**Distributed Training**
-: Each TRL worker connects to the same or separate resource servers. Compatibility with FSDP and DeepSpeed training modes is a design goal.
+   CUDA_VISIBLE_DEVICES=1 python train_multi_environment.py --config config.yaml
+   ```
 
-**Error Handling**
-: Planned retry logic and timeout configuration for verifier failures during training.
+## Multi-Node Training with Slurm
 
-## Contributing
+An example five-node training script is provided in `submit.sh`. Nodes one through four run the training backend, while node five runs vLLM inference for NeMo Gym agent rollouts.
 
-Help move TRL integration forward:
+Before running the Slurm script, ensure you have completed the TRL and NeMo Gym installation steps above. The script assumes `.venv` directories exist for both TRL and Gym. If you use a container in the Slurm script, you should also create the virtual environments from the container in an interactive session or with a separate sbatch script.
 
-1. **Track progress**: Watch [Issue #548](https://github.com/NVIDIA-NeMo/Gym/issues/548)
-2. **Contribute**: See {doc}`../contribute/rl-framework-integration/index` for integration guidelines
+1. **Configure the Script**
 
-## Available Alternatives
+   Update `submit.sh` with your Slurm account, partition, paths to your project directory, and updated training configs.
 
-Ready to train today? These integrations work now:
+1. **Submit the Job**
 
-::::{grid} 1 2 2 2
-:gutter: 3
+   ```bash
+   sbatch submit.sh
+   ```
 
-:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` NeMo RL with GRPO
-:link: ../tutorials/nemo-rl-grpo/index
-:link-type: doc
+1. **Monitor Training**
 
-Production-ready multi-node training with GRPO algorithm.
-+++
-{bdg-success}`available` {bdg-primary}`recommended`
-:::
+   ```bash
+   tail -f logs/<job_id>/*
+   ```
 
-:::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Unsloth Training
-:link: ../tutorials/unsloth-training
-:link-type: doc
+## Multi-Environment Training
 
-Fast, memory-efficient fine-tuning on a single GPU.
-+++
-{bdg-success}`available` {bdg-secondary}`single-gpu`
-:::
+NeMo Gym is designed to enable training on many environments simultaneously and at scale. This allows learning diverse capabilities, such as tool calling and reasoning, in a single training run. In this example, we add the workplace assistant environment to the mini sudoku setup above, which is a multi-step tool use environment for office tasks.
 
-::::
+1. **Prepare Workplace Assistant Dataset**
+
+   Many NeMo Gym datasets used to train Nemotron models are available on Hugging Face. Use `ng_prepare_data` to download and prepare datasets. This command:
+
+   - Downloads the dataset from Hugging Face
+   - Validates the format and computes metrics
+   - Adds an `agent_ref` field to each example that tells NeMo Gym which agent server should handle that example
+
+   First, create `env.yaml` in `Gym/` with your HF token:
+
+   ```yaml
+   hf_token: <your_hf_token>
+   ```
+
+   Then prepare the dataset:
+
+   ```bash
+   cd Gym
+   source .venv/bin/activate
+
+   config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
+   resources_servers/workplace_assistant/configs/workplace_assistant.yaml"
+
+   ng_prepare_data "+config_paths=[${config_paths}]" \
+       +output_dirpath=data/workplace_assistant \
+       +mode=train_preparation \
+       +should_download=true \
+       +data_source=huggingface
+   ```
+
+   This creates `train.jsonl` and `validation.jsonl` files in `data/workplace_assistant/`.
+
+1. **Create Combined Dataset**
+
+   Combine datasets into a single file with tasks from both environments:
+
+   ```bash
+   cat data/workplace_assistant/train_workplace.jsonl data/reasoning_gym/train_mini_sudoku.jsonl | shuf > train_multi_env.jsonl
+   ```
+
+   > **Tip**: Ensure datasets are the same size before shuffling for an even blend of tasks. Repeat for the validation dataset.
+
+1. **Update Training Config**
+
+   Update the config to point to the combined dataset:
+
+   ```yaml
+   model_name: "Qwen/Qwen3-4B-Instruct-2507"
+
+   dataset_path: "/path/to/data/train_multi_env.jsonl"
+   eval_dataset_path: "/path/to/data/val_multi_env.jsonl"
+
+   task: "workplace-sudoku"                    # used in wandb run name
+   output_dir: "outputs/nemo_gym_multi_env"
+
+   # ... rest of config same
+   ```
+
+1. **Update ng_run**
+
+   Whether training interactively or via Slurm, update the `ng_run` command to include config files from each resources server:
+
+   ```bash
+   cd Gym
+   source .venv/bin/activate
+
+   config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
+   resources_servers/workplace_assistant/configs/workplace_assistant.yaml,\
+   resources_servers/reasoning_gym/configs/reasoning_gym.yaml"
+
+   ng_run "+config_paths=[${config_paths}]"
+   ```
+
+   This starts servers for both environments. The training script automatically routes each example to the correct agent server based on its `agent_ref` field.
+
+1. **Run Training**
+
+   Update the Slurm submission script to use the new training config and both `ng_run` resources server configs, then submit the job as before.
+
+   The training script reads `agent_ref` from each example's metadata, routes requests to the correct NeMo Gym agent server, and handles different agents and environments in the same batch.
+
+## Resources
+
+- [TRL GitHub](https://github.com/huggingface/trl)
+- [TRL Documentation](https://huggingface.co/docs/trl/en/index)

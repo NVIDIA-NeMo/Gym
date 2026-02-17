@@ -2,39 +2,47 @@
 
 # Environment Tutorials
 
-Build custom training environments that define how models receive rewards.
+Learn how to build custom environments for training or evaluation using NeMo Gym.
+
+:::{tip}
+Looking to use an existing environment rather than build your own? See the [Available Environments](https://github.com/NVIDIA-NeMo/Gym#-available-environments) in the README.
+:::
 
 ---
 
-## Environment Patterns
+## Environment Properties
 
-NeMo Gym environments use the `verify()` method to compute rewards from model responses. Different patterns handle different training scenarios:
+Training environments can be broadly characterized along five dimensions:
+1. **Rollout structure**: The interaction pattern between the model, environment, and user.
+2. **Core capabilities**: The behaviors or skills that a model needs in order to succeed in a given use case.
+3. **Knowledge domain**: What subject area, area of expertise, or field of study is involved.
+4. **Task type**: The high-level use case that is represented in the training environment.
+5. **Verification method**: How the environment computes rewards from model responses. See {doc}`/about/concepts/task-verification` for details.
 
-| Pattern | Description | Key Characteristic |
+Below are a subset of rollout structures and core capabilities found across NeMo Gym environments. We plan to add these as structured metadata to environments in the future. If you have ideas for additional properties, please let us know by [opening an issue](https://github.com/NVIDIA-NeMo/Gym/issues).
+
+### Rollout Structure
+| Rollout structure | Description |
+|---|---|
+| Multi-step | Interleaved assistant and tool messages |
+| Multi-turn | Interleaved user and assistant messages |
+| Multi-modal | Interleaved text, image, video, and/or audio messages |
+| Long context | Message content is very large or the number of messages is very large |
+
+### Core Capabilities
+| Core capability | Developer/User need | Rollout Structures Required |
 |---|---|---|
-| **Single-step** | One model response per task | `verify()` evaluates the final response |
-| **Multi-step** | Sequential tool calls within a turn | `/step` endpoint routes tool calls; model drives the loop |
-| **Multi-turn** | Conversation with accumulated history | User messages alternate with assistant responses |
-| **User modeling** | LLM-simulated user interactions | Generates synthetic training data at scale |
-
-**Implementation reference**: All patterns inherit from `SimpleResourcesServer` (`nemo_gym/base_resources_server.py`), which provides `verify()` and `seed_session()` endpoints.
-
----
-
-## Verification Methods
-
-| Method | When to Use | Example Server |
-|---|---|---|
-| **Exact match** | Answers have one correct form | `mcqa/app.py` — Choice grading |
-| **Library verification** | Domain-specific parsing needed | `math_with_judge/app.py` — Uses `math_verify` library |
-| **LLM-as-judge** | Semantic equivalence matters | `equivalence_llm_judge/app.py` — Configurable judge prompts |
-| **Reward model** | Learned preferences | NeMo RL `RewardModelEnvironment` |
+| Information dependency | The model receives environment responses that may require changes to subsequent actions. | Multi-step |
+| Proactive asking | Developers put the model in a situation where user context is missing. The model needs to recognize user context is missing and ask the user for the missing context. | Multi-turn |
+| Schema adherence | Users need more than one piece of information delivered by the model at one time in a specified delivery format. | |
+| Meta data instruction following | User constrains the meta-properties of the model response e.g. “respond in 5 words”. | |
+| Counterintuitive instruction following | User provides instructions that are against conventional wisdom, typically making sense in the specific context in which the model is being used | |
+| Information relevance | Given a large volume of inputs, the model needs to ignore content irrelevant to the task at hand. | Long context |
+| Multiple intent synthesis | Users provide multiple tasks for the model to accomplish. | Multi-step, Multi-turn |
 
 ---
 
 ## Tutorials
-
-### Foundational
 
 ::::{grid} 1 2 2 2
 :gutter: 2
@@ -43,48 +51,19 @@ NeMo Gym environments use the `verify()` method to compute rewards from model re
 :link: creating-training-environment
 :link-type: doc
 
-Build `verify()`, prepare data, connect to NeMo RL.
+Implement tools, define verification logic, and test your environment end-to-end.
 
 +++
 {bdg-primary}`start here` {bdg-secondary}`45-90 min`
 :::
 
-::::
+:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Multi-Environment Training
+:link: multi-environment-training
+:link-type: doc
 
----
+Run multiple training environments simultaneously for rollout collection.
 
-## Learning Path
-
-**New to NeMo Gym?** Follow this sequence:
-
-```{mermaid}
-flowchart LR
-    A[1. Setup] --> B[2. Resources Server]
-    B --> C[3. Training Environment]
-    C --> D[4. Train]
-```
-
-1. {doc}`/get-started/detailed-setup` — Install NeMo Gym
-2. {doc}`/tutorials/creating-resource-server` — Build a basic resources server
-3. {doc}`creating-training-environment` — Add verification and connect to training
-4. Start training with one of the {doc}`/training-tutorials/index`
-
----
-
-## Reference Implementations
-
-NeMo Gym includes working examples in `resources_servers/`:
-
-| Server | Pattern | Verification |
-|---|---|---|
-| `mcqa/` | Single-step | Regex extraction, exact match |
-| `example_multi_step/` | Multi-step | Function call validation |
-| `calendar/` | Multi-turn | State comparison |
-| `equivalence_llm_judge/` | Single-step | LLM judge with swap check |
-| `math_with_judge/` | Single-step | Library + judge fallback |
-| `aviary/` | Multi-step | Aviary environment integration |
-| `workplace_assistant/` | Multi-step | Session state, tool routing |
-
-:::{tip}
-Use `ng_init_resources_server +entrypoint=resources_servers/my_env` to scaffold a new environment from a template.
++++
 :::
+
+::::
