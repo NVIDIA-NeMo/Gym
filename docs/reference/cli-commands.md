@@ -187,7 +187,7 @@ ng_collect_rollouts \
 
 ### `ng_collect_rollouts` / `nemo_gym_collect_rollouts`
 
-Perform a batch of rollout collection.
+Spin up all necessary servers and perform a batch of rollout collection using each dataset inside the provided configs.
 
 **Parameters**
 

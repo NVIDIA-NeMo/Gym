@@ -39,7 +39,7 @@ from nemo_gym.server_utils import (
 
 class E2ERolloutCollectionConfig(BaseNeMoGymCLIConfig):
     """
-    Spin up all necessary servers and perform a batch of rollout collection.
+    Spin up all necessary servers and perform a batch of rollout collection using each dataset inside the provided configs.
 
     Examples:
 
