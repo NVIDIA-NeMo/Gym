@@ -185,6 +185,38 @@ ng_collect_rollouts \
     +num_samples_in_parallel=10
 ```
 
+### `ng_collect_rollouts` / `nemo_gym_collect_rollouts`
+
+Perform a batch of rollout collection.
+
+**Parameters**
+
+```{list-table}
+:header-rows: 1
+:widths: 25 15 60
+
+* - Parameter
+  - Type
+  - Description
+* - `output_jsonl_fpath`
+  - str
+  - The output data JSONL file path.
+* - `num_samples_in_parallel`
+  - Optional[int]
+  - Limit the number of concurrent samples running at once.
+* - `responses_create_params`
+  - Dict
+  - Overrides for the `responses_create_params`, such as `temperature` and `max_output_tokens`.
+```
+
+**Example**
+
+```bash
+ng_e2e_collect_rollouts \
+    +output_jsonl_fpath=weather_rollouts.jsonl \
+    +num_samples_in_parallel=10
+```
+
 ---
 
 ### `ng_profile` / `nemo_gym_profile`

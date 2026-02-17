@@ -452,12 +452,12 @@ def run(
 
 
 def e2e_rollout_collection():  # pragma: no cover
+    rollout_collection_config = RolloutCollectionConfig.model_validate(get_global_config_dict())
+
     rh = RunHelper()
     rh.start(None)
 
     rch = RolloutCollectionHelper()
-    rollout_collection_config = RolloutCollectionConfig.model_validate(get_global_config_dict())
-
     try:
         asyncio.run(rch.run_from_config(rollout_collection_config))
     except KeyboardInterrupt:

@@ -37,7 +37,30 @@ from nemo_gym.server_utils import (
 )
 
 
-class RolloutCollectionConfig(BaseNeMoGymCLIConfig):
+class E2ERolloutCollectionConfig(BaseNeMoGymCLIConfig):
+    """
+    Spin up all necessary servers and perform a batch of rollout collection.
+
+    Examples:
+
+    ```bash
+    ng_collect_rollouts \
+        +output_jsonl_fpath=weather_rollouts.jsonl \
+        +num_samples_in_parallel=10
+    ```
+    """
+
+    output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
+    num_samples_in_parallel: Optional[int] = Field(
+        default=None, description="Limit the number of concurrent samples running at once."
+    )
+    responses_create_params: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Overrides for the responses_create_params e.g. temperature, max_output_tokens, etc.",
+    )
+
+
+class RolloutCollectionConfig(E2ERolloutCollectionConfig):
     """
     Perform a batch of rollout collection.
 
@@ -61,20 +84,12 @@ class RolloutCollectionConfig(BaseNeMoGymCLIConfig):
     input_jsonl_fpath: str = Field(
         description="The input data source to use to collect rollouts, in the form of a file path to a jsonl file."
     )
-    output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     limit: Optional[int] = Field(
         default=None, description="Maximum number of examples to load and take from the input dataset."
     )
     num_repeats: Optional[int] = Field(
         default=None,
         description="The number of times to repeat each example to run. Useful if you want to calculate mean@k e.g. mean@4 or mean@16.",
-    )
-    num_samples_in_parallel: Optional[int] = Field(
-        default=None, description="Limit the number of concurrent samples running at once."
-    )
-    responses_create_params: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="Overrides for the responses_create_params e.g. temperature, max_output_tokens, etc.",
     )
 
 
