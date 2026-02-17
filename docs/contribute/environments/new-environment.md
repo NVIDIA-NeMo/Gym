@@ -7,7 +7,7 @@ An environment consists of three components: Agents, Models, and Resources. Most
 This guide focuses on the resource server contribution process.
 
 :::{tip}
-For a guide to building your first resource server, see {doc}`/tutorials/creating-resource-server`.
+For a guide to building your first resource server, see {doc}`/environment-tutorials/creating-training-environment`.
 :::
 
 ## Guiding principles
@@ -98,7 +98,7 @@ Prepare the dataset for your environment:
 Build your resource server:
 
 - Run `ng_init_resources_server +entrypoint=resources_servers/my_server` to scaffold the new resource server
-- Follow the {doc}`/tutorials/creating-resource-server` guide to implement your specific logic
+- Follow the {doc}`/environment-tutorials/creating-training-environment` guide to implement your specific logic
 - Implement verification logic for your tasks by defining the `verify()` function
 - Set the `domain` field in your resource server configuration (see {py:class}`~nemo_gym.config_types.Domain`).
 - Complete the auto-generated `README.md` with licensing information
@@ -229,6 +229,6 @@ For multi-step scenarios, the model returns training information on response mes
 
 ## Reference
 
-- {doc}`/tutorials/creating-resource-server` - Introductory tutorial for creating your first resource server
+- {doc}`/environment-tutorials/creating-training-environment` - Introductory tutorial for creating your first resource server
 - {doc}`/about/concepts/task-verification` - Verification and reward concepts
 - {doc}`/about/concepts/core-components` - Resource server architecture

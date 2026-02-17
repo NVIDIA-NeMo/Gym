@@ -33,7 +33,7 @@ GRPO training on Workplace Assistant and Reasoning Gym environments
 :::
 
 :::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Unsloth
-:link: unsloth-training
+:link: unsloth
 :link-type: doc
 GRPO training on instruction following and reasoning environments.
 +++

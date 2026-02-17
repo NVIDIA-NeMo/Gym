@@ -1,7 +1,7 @@
 (infrastructure-index)=
 # Infrastructure
 
-Learn how NeMo Gym is deployed and scaled for production workloads.
+Learn how to deploy NeMo Gym and plan cluster resources for training.
 
 ::::{grid} 1 2 2 2
 :gutter: 1 1 1 2
@@ -14,12 +14,12 @@ Server deployment patterns and training framework integration.
 {bdg-secondary}`deployment` {bdg-secondary}`topology` {bdg-secondary}`training-integration`
 :::
 
-:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` SWE RL Infrastructure Case Study
-:link: deployment-topology
+:::{grid-item-card} {octicon}`note;1.5em;sd-mr-1` Engineering Notes
+:link: engineering-notes/index
 :link-type: doc
-Infrastructure challenges regarding SoftWare Engineering (SWE) task RL as a case study.
+Technical notes on infrastructure decisions and design rationale.
 +++
-{bdg-secondary}`swe-rl` {bdg-secondary}`case-study`
+{bdg-secondary}`engineering-notes` {bdg-secondary}`case-studies`
 :::
 
 ::::

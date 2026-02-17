@@ -19,9 +19,9 @@ For training, we use datasets like SWE Gym, R2E gym, etc. Each SWE RL rollout cu
 
 ## Deployment topology during training
 
-When we go to train with NeMo RL, assuming async RL setup, we will provision a set of GPU nodes on the cluster from Slurm and split those into training and generation GPU resources. We will spin Gym up on the Ray head node which may be colocated with either the train or generation GPUs.
+When we go to train with NeMo RL, assuming async RL setup, we will provision a set of GPU nodes on the cluster from Slurm and split those into training and generation GPU resources. We will spin NeMo Gym up on the Ray head node which may be colocated with either the train or generation GPUs.
 
-At rollout time, we will make a batch of requests to Gym which include SWE RL tasks. Inside the SWE RL Gym server, we will do some config preprocessing, and call ray.remote with SPREAD scheduling policy across our available GPU nodes. Inside the ray.remote call, we will spin up the task instance container using a containerization framework called apptainer. We chose Apptainer (called Singularity at the time we started the effort) because our clusters use enroot as the containerization framework on the Slurm level, and Apptainer was the only containerization framework that we could run from within an enroot container. Looking back, we got lucky this is the choice we made since Apptainer has now pivoted to exactly supporting these agentic coding scenarios.
+At rollout time, we will make a batch of requests to NeMo Gym which include SWE RL tasks. Inside the SWE RL NeMo Gym server, we will do some config preprocessing, and call ray.remote with SPREAD scheduling policy across our available GPU nodes. Inside the ray.remote call, we will spin up the task instance container using a containerization framework called apptainer. We chose Apptainer (called Singularity at the time we started the effort) because our clusters use enroot as the containerization framework on the Slurm level, and Apptainer was the only containerization framework that we could run from within an enroot container. Looking back, we got lucky this is the choice we made since Apptainer has now pivoted to exactly supporting these agentic coding scenarios.
 
 Inside the apptainer, we will run the harness logic (e.g. OpenHands) to orchestrate calls to the model endpoint and command executions. After the trajectory finishes, we will spin up another instance of the same task container to run final unit tests validation to see whether or not the patch the model generated was correct. If correct, we give reward 1.
 
@@ -40,6 +40,6 @@ The quality of the code that the model generates is a minor factor. Usually we j
 
 ## Current challenges and next steps
 
-Eventually we want to scale SWE RL to match the production RL batch size of up to 4 steps off policy * 256 prompts per step * 16 rollouts per prompt, but our preliminary experiments have shown that 4 steps off policy is too much for the SWE RL setting, and our software (including both Gym but mainly the model generation speed i.e. vLLM inference software) is not fast enough to support 256x16 so we've kept it at 16x32 for now.
+Eventually we want to scale SWE RL to match the production RL batch size of up to 4 steps off policy * 256 prompts per step * 16 rollouts per prompt, but our preliminary experiments have shown that 4 steps off policy is too much for the SWE RL setting, and our software (including both NeMo Gym but mainly the model generation speed i.e. vLLM inference software) is not fast enough to support 256x16 so we've kept it at 16x32 for now.
 
 SWE RL is a long horizon task (open research question how to properly train e2e still) and it's also the longest wall clock time training environment by far. For example, the step time for all other RL environments is around 7 minutes, but for SWE the fastest we've been able to go with batch size 512 is around 20 minutes for both train and rollout.

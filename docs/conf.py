@@ -141,4 +141,7 @@ redirects = {
     "about/concepts/configuration-system.html": "configuration.html",
     # Top-level page moves (from root to reference/)
     "how-to-faq.html": "reference/faq.html",
+    # Infrastructure engineering notes moved to subdirectory
+    "infrastructure/swe-rl-case-study.html": "engineering-notes/swe-rl-case-study.html",
+    "infrastructure/aiohttp-vs-httpx.html": "engineering-notes/aiohttp-vs-httpx.html",
 }
