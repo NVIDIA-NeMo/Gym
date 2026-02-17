@@ -19,7 +19,7 @@ import shutil
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from openai.types.responses.function_tool import FunctionTool
 
@@ -643,6 +643,10 @@ async def run_swebench_evaluation(
     ray_submit_time: Optional[float] = None,
     apptainer_memory_limit_mb: Optional[int] = None,
     command_exec_timeout: Optional[int] = None,
+    user_prompt_template: Optional[str] = None,
+    system_prompt_template: Optional[str] = None,
+    system_prompt_long_horizon_template: Optional[str] = None,
+    agent_cls: Optional[Literal["CodeActAgent", "OpenCodeAgent", "CodexAgent"]] = None,
 ) -> Dict:
     # Create persistent directory for I/O and logs in local workspace
     workspace_root = Path(os.path.dirname(os.path.abspath(__file__)))
@@ -681,6 +685,10 @@ async def run_swebench_evaluation(
         command_exec_timeout=command_exec_timeout,
         inference=inference_config,
         server=server,
+        user_prompt_template=user_prompt_template,
+        system_prompt_template=system_prompt_template,
+        system_prompt_long_horizon_template=system_prompt_long_horizon_template,
+        agent_cls=agent_cls,
     )
 
     run_oh = RunOpenHandsAgent(

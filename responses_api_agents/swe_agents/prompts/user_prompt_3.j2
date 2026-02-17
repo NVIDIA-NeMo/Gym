@@ -1,0 +1,63 @@
+
+
+
+<issue_desc>
+{{ instance.problem_statement }}
+</issue_desc>
+
+{% set language = instance.repo_language | default('python') %}
+I've uploaded a {{ language }} repository in the directory {{ workspace_path }}.
+
+<workspace_dir>
+{{ workspace_path }}
+</workspace_dir>
+
+I've already taken care of all changes to any of the test files described in the <issue_desc>.
+Your task is to make the changes to non-test files in the {{ workspace_path }} directory.
+
+# Workflow
+1. Understand the problem deeply. Carefully read the issue and think critically about what is required.
+2. Investigate the codebase. Explore relevant files, search for key functions, and gather context.
+3. Develop a clear, step-by-step plan. Break down the fix into manageable,
+incremental steps - use the todo tool to track your progress.
+4. Implement the fix incrementally. Make small, testable code changes.
+5. Debug as needed. Use debugging techniques to isolate and resolve issues.
+6. Test frequently. Run tests after each change to verify correctness.
+7. Iterate until the root cause is fixed and all tests pass.
+8. Reflect and validate comprehensively. After tests pass, think about the original intent, write additional tests to ensure correctness, and remember there are hidden tests that must also pass before the solution is truly complete.
+**CRITICAL - Before ending your turn:**
+- Review and update the todo list, marking completed, skipped (with explanations), or blocked items.
+
+## 1. Deeply Understand the Problem
+- Carefully read the issue and think hard about a plan to solve it before coding.
+- Break down the problem into manageable parts. Consider the following:
+- What is the expected behavior?
+- What are the edge cases?
+- What are the potential pitfalls?
+- How does this fit into the larger context of the codebase?
+- What are the dependencies and interactions with other parts of the code
+
+## 2. Codebase Investigation
+- Explore relevant files and directories.
+- Search for key functions, classes, or variables related to the issue.
+- Read and understand relevant code snippets.
+- Identify the root cause of the problem.
+- Validate and update your understanding continuously as you gather more context.
+
+## 3. Develop a Detailed Plan
+- Outline a specific, simple, and verifiable sequence of steps to fix the problem.
+- Create a todo list to track your progress.
+- Each time you check off a step, update the todo list.
+- Make sure that you ACTUALLY continue on to the next step after checking off a step instead of ending your turn and asking the user what they want to do next.
+
+## 4. Making Code Changes
+- Before editing, always read the relevant file contents or section to ensure complete context.
+- Make small, testable, incremental changes that logically follow from your investigation and plan.
+
+## 5. Debugging
+- Make code changes only if you have high confidence they can solve the problem
+- When debugging, try to determine the root cause rather than addressing symptoms
+- Debug for as long as needed to identify the root cause and identify a fix
+- Use print statements, logs, or temporary code to inspect program state, including descriptive statements or error messages to understand what's happening
+- To test hypotheses, you can also add test statements or functions
+- Revisit your assumptions if unexpected behavior occurs.
