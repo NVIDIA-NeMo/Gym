@@ -67,6 +67,12 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     uses_reasoning_parser: bool
     replace_developer_role_with_system: bool = False
 
+    # Whether or not the model can generate a reasoning output, and called again to produce additional reasoning output.
+    sequential_reasoning_allowed: bool = True
+
+    # As of Feb 2026, we default this to False since majority of open source models aren't responses native with the exception of GPT-OSS
+    is_responses_native: bool = False
+
     chat_template_kwargs: Optional[Dict[str, Any]] = None
 
     # Corresponds to the extra_body of OpenAI Client.
@@ -101,6 +107,9 @@ class VLLMModel(SimpleResponsesAPIModel):
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:
+        if self.config.is_responses_native:
+            return self._responses_native(request, body)
+
         # Response Create Params -> Chat Completion Create Params
         chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(body)
         body.model = self.config.model
@@ -141,6 +150,33 @@ class VLLMModel(SimpleResponsesAPIModel):
             incomplete_details={"reason": "max_output_tokens"} if choice.finish_reason == "length" else None,
         )
 
+    async def _responses_native(
+        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming
+    ) -> NeMoGymResponse:
+        """
+        The following config parameters are effectively no-ops with Responses native models:
+        - uses_reasoning_parser: bool (Not applicable)
+        """
+        # The following parameters could be supported, but have not been supported yet for Responses-native models:
+        if self.config.return_token_id_information:
+            raise NotImplementedError
+        if self.config.replace_developer_role_with_system:
+            raise NotImplementedError
+        if self.config.sequential_reasoning_allowed:
+            raise NotImplementedError
+
+        body_dict = body.model_dump(exclude_unset=True)
+        body_dict["model"] = self.config.model
+        if self.config.chat_template_kwargs:
+            body_dict["chat_template_kwargs"] = deepcopy(self.config.chat_template_kwargs)
+        if self.config.extra_body:
+            body_dict = self.config.extra_body | body_dict
+
+        client = self._resolve_client(request)
+        response_dict = await client.create_response(**body_dict)
+
+        return NeMoGymResponse.model_validate(response_dict)
+
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
@@ -155,13 +191,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.chat_template_kwargs:
             body_dict["chat_template_kwargs"] = deepcopy(self.config.chat_template_kwargs)
 
-        session_id = request.session[SESSION_ID_KEY]
-        if session_id not in self._session_id_to_client:
-            # There is probably a better way to select the endpoint for this request. But this will do for now.
-            client_idx = len(self._session_id_to_client) % len(self._clients)
-            client = self._clients[client_idx]
-            self._session_id_to_client[session_id] = client
-        client = self._session_id_to_client[session_id]
+        client = self._resolve_client(request)
 
         create_params = body_dict
 
@@ -207,6 +237,11 @@ class VLLMModel(SimpleResponsesAPIModel):
                     pass
                 else:
                     raise NotImplementedError
+
+        if not self.config.sequential_reasoning_allowed:
+            last_message = body_dict["messages"][-1]
+            if last_message["role"] == "assistant" and not (last_message["content"] or last_message["tool_calls"]):
+                return self._create_empty_chat_completion()
 
         if self.config.extra_body:
             create_params = self.config.extra_body | create_params
@@ -313,6 +348,17 @@ class VLLMModel(SimpleResponsesAPIModel):
             # choice_dict.pop("token_ids")
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
+
+    def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
+        session_id = request.session[SESSION_ID_KEY]
+        if session_id not in self._session_id_to_client:
+            # There is probably a better way to select the endpoint for this request. But this will do for now.
+            client_idx = len(self._session_id_to_client) % len(self._clients)
+            client = self._clients[client_idx]
+            self._session_id_to_client[session_id] = client
+        client = self._session_id_to_client[session_id]
+
+        return client
 
 
 class VLLMConverterResponsesToChatCompletionsState(BaseModel):
