@@ -14,6 +14,8 @@ Training environments can be broadly characterized along four dimensions:
 3. **Knowledge domain**: What subject area, area of expertise, or field of study is involved.
 4. **Task type**: The high-level use case that is represented in the training environment.
 
+The tables below are only a small subset of of the rollout structures and core capabilities that exist. As new training environments are added to NeMo Gym and as we discover new use cases, these tables below will grow.
+
 | Rollout structure | Description |
 |---|---|
 | Multi-step | Interleaved assistant and tool messages |
@@ -24,14 +26,12 @@ Training environments can be broadly characterized along four dimensions:
 | Core capability | Developer/User need | Rollout Structures Required |
 |---|---|---|
 | Information dependency | The model receives environment responses that may require changes to subsequent actions. | Multi-step |
-| Proactive asking |
-| Information dependency | The model receives environment responses that may require changes to subsequent actions. | Multi step |
-| Proactive asking | Developers put the model in a situation where user context is missing. The model needs to recognize user context is missing and ask the user for the missing context. | Multi turn |
+| Proactive asking | Developers put the model in a situation where user context is missing. The model needs to recognize user context is missing and ask the user for the missing context. | Multi-turn |
 | Schema adherence | Users need more than one piece of information delivered by the model at one time in a specified delivery format. | |
 | Meta data instruction following | User constrains the meta-properties of the model response e.g. “respond in 5 words”. | |
-|Counterintuitive instruction following	| User provides instructions that are against conventional wisdom, typically making sense in the specific context in which the model is being used | |
+| Counterintuitive instruction following | User provides instructions that are against conventional wisdom, typically making sense in the specific context in which the model is being used | |
 | Information relevance | Given a large volume of inputs, the model needs to ignore content irrelevant to the task at hand. | Long context |
-| Multiple intent synthesis | Users provide multiple tasks for the model to accomplish. | Multi step, Multi turn |
+| Multiple intent synthesis | Users provide multiple tasks for the model to accomplish. | Multi-step, Multi-turn |
 
 ---
 
