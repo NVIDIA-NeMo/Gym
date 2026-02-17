@@ -8,6 +8,7 @@ tags:
   - llm-training
   - rollout-collection
   - agent-environments
+  - rl-environments
 personas:
   - Data Scientists
   - Machine Learning Engineers
@@ -33,7 +34,7 @@ A training environment consists of three server components: **Agents** orchestra
 Quickstart
 ```
 
-```{button-ref} tutorials/index
+```{button-ref} environment-tutorials/index
 :ref-type: doc
 :color: secondary
 :class: sd-rounded-pill
@@ -64,15 +65,15 @@ Motivation and benefits of NeMo Gym.
 :link-type: doc
 Core components, configuration, verification and RL terminology.
 +++
-{bdg-secondary}`agents` {bdg-secondary}`models` {bdg-secondary}`resources`
+{bdg-secondary}`environments` {bdg-secondary}`agents` {bdg-secondary}`models` {bdg-secondary}`resources`
 :::
 
 :::{grid-item-card} {octicon}`globe;1.5em;sd-mr-1` Ecosystem
 :link: about/ecosystem
 :link-type: doc
-Understand how NeMo Gym fits within the NVIDIA NeMo Framework.
+Understand how NeMo Gym fits within the RL environment ecosystem.
 +++
-{bdg-secondary}`nemo-framework`
+{bdg-secondary}`ecosystem` {bdg-secondary}`integrations`
 :::
 
 ::::
@@ -118,9 +119,9 @@ Train a Sudoku-solving model with GRPO using a self-contained Colab notebook.
 
 ::::
 
-## Server Components
+## Environment Configuration
 
-Configure and customize the three server components of a training environment.
+Configure and customize environment components and prepare datasets.
 
 ::::{grid} 1 2 2 2
 :gutter: 1 1 1 2
@@ -131,14 +132,6 @@ Configure and customize the three server components of a training environment.
 Configure LLM inference backends including vLLM.
 +++
 {bdg-secondary}`inference` {bdg-secondary}`vllm`
-:::
-
-:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` Agent Server
-:link: agent-server/index
-:link-type: doc
-Orchestrate rollout lifecycle and tool calling.
-+++
-{bdg-secondary}`agents` {bdg-secondary}`orchestration`
 :::
 
 :::{grid-item-card} {octicon}`database;1.5em;sd-mr-1` Data
@@ -166,6 +159,14 @@ Build a complete training environment from scratch.
 {bdg-primary}`beginner` {bdg-secondary}`foundational`
 :::
 
+:::{grid-item-card} {octicon}`stack;1.5em;sd-mr-1` Multi-Environment Training
+:link: environment-tutorials/multi-environment-training
+:link-type: doc
+Run multiple training environments simultaneously for rollout collection.
++++
+{bdg-secondary}`multi-environment` {bdg-secondary}`multi-verifier`
+:::
+
 ::::
 
 ```{button-ref} environment-tutorials/index
@@ -178,39 +179,23 @@ View all environment tutorials →
 
 ## Training Tutorials
 
-Train models using NeMo Gym with various RL frameworks.
+Train models using NeMo Gym with your preferred RL framework.
 
 ::::{grid} 1 2 2 2
 :gutter: 1 1 1 2
 
-:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` NeMo RL with GRPO
-:link: training-nemo-rl-grpo-index
-:link-type: ref
-Multi-node GRPO training for production workloads.
-+++
-{bdg-primary}`recommended` {bdg-secondary}`grpo` {bdg-secondary}`multi-node`
-:::
-
-:::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Unsloth
-:link: training-unsloth
-:link-type: ref
-Fast, memory-efficient fine-tuning on single GPU.
-+++
-{bdg-secondary}`unsloth` {bdg-secondary}`efficient`
-:::
-
-:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` TRL
-:link: training-tutorials/trl
+:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` RL (GRPO)
+:link: training-tutorials/index
 :link-type: doc
-HuggingFace TRL integration for PPO and DPO.
+Hands-on tutorials with NeMo RL, TRL, Unsloth, and more.
 +++
-{bdg-secondary}`trl` {bdg-secondary}`huggingface`
+{bdg-secondary}`grpo`
 :::
 
-:::{grid-item-card} {octicon}`file;1.5em;sd-mr-1` Offline Training
+:::{grid-item-card} {octicon}`file;1.5em;sd-mr-1` SFT & DPO
 :link: offline-training-w-rollouts
 :link-type: ref
-SFT and DPO from collected rollouts.
+Transform rollouts into SFT and DPO format.
 +++
 {bdg-secondary}`sft` {bdg-secondary}`dpo`
 :::
@@ -227,7 +212,7 @@ View all training tutorials →
 
 ## Infrastructure
 
-Deploy and scale NeMo Gym for production workloads.
+Deploy NeMo Gym and plan cluster resources for training.
 
 ::::{grid} 1 2 2 2
 :gutter: 1 1 1 2
@@ -281,7 +266,6 @@ Home <self>
 
 Overview <about/index.md>
 Concepts <about/concepts/index>
-🟡 Architecture <about/architecture>
 Ecosystem <about/ecosystem>
 ```
 
@@ -301,17 +285,8 @@ Rollout Collection <get-started/rollout-collection.md>
 :hidden:
 :maxdepth: 1
 
-🟡 Overview <model-server/index>
-🟡 vLLM <model-server/vllm>
-```
-
-```{toctree}
-:caption: Agent Server
-:hidden:
-:maxdepth: 1
-
-🟡 Overview <agent-server/index>
-🟡 OpenAI Agents SDK <agent-server/integrate-agents/openai-agents-sdk>
+Overview <model-server/index>
+vLLM <model-server/vllm>
 ```
 
 ```{toctree}
@@ -319,9 +294,9 @@ Rollout Collection <get-started/rollout-collection.md>
 :hidden:
 :maxdepth: 1
 
-🟡 Overview <data/index>
-🟡 Prepare and Validate <data/prepare-validate>
-🟡 Download from Hugging Face <data/download-huggingface>
+Overview <data/index>
+Prepare and Validate <data/prepare-validate>
+Download from Hugging Face <data/download-huggingface>
 ```
 
 ```{toctree}
@@ -329,8 +304,9 @@ Rollout Collection <get-started/rollout-collection.md>
 :hidden:
 :maxdepth: 1
 
-🟡 Overview <environment-tutorials/index>
-🟡 Creating Training Environment <environment-tutorials/creating-training-environment>
+Overview <environment-tutorials/index>
+Creating Training Environment <environment-tutorials/creating-training-environment>
+Multi-Environment Training <environment-tutorials/multi-environment-training>
 ```
 
 ```{toctree}
@@ -338,12 +314,11 @@ Rollout Collection <get-started/rollout-collection.md>
 :hidden:
 :maxdepth: 1
 
-🟡 Overview <training-tutorials/index>
-🟡 Nemotron Nano <training-tutorials/nemotron-nano>
-NeMo RL GRPO <tutorials/nemo-rl-grpo/index.md>
-Unsloth Training <tutorials/unsloth-training>
-🟡 TRL <training-tutorials/trl>
-Offline Training <tutorials/offline-training-w-rollouts>
+Overview <training-tutorials/index>
+NeMo RL <training-tutorials/nemo-rl-grpo/index.md>
+TRL <training-tutorials/trl>
+Unsloth <training-tutorials/unsloth>
+Offline Training (SFT/DPO) <training-tutorials/offline-training-w-rollouts>
 ```
 
 ```{toctree}
@@ -351,8 +326,9 @@ Offline Training <tutorials/offline-training-w-rollouts>
 :hidden:
 :maxdepth: 1
 
-🟡 Overview <infrastructure/index>
-🟡 Deployment Topology <infrastructure/deployment-topology>
+Overview <infrastructure/index>
+Deployment Topology <infrastructure/deployment-topology>
+Engineering Notes <infrastructure/engineering-notes/index>
 ```
 
 ```{toctree}

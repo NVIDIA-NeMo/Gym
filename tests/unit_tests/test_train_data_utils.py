@@ -56,7 +56,7 @@ class TestLoadAndValidateServerInstanceConfigs:
         # Fix the port returned
         find_open_port_mock = MagicMock()
         find_open_port_mock.return_value = 12345
-        monkeypatch.setattr(nemo_gym.global_config, "find_open_port", find_open_port_mock)
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
 
         config = TrainDataProcessorConfig(
             output_dirpath="",

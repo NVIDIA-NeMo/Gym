@@ -390,8 +390,8 @@ You now know how to transform rollouts into training data:
 ::::{grid} 1 1 2 2
 :gutter: 3
 
-:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` Online RL Training
-:link: /tutorials/nemo-rl-grpo/index
+:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` GRPO Training
+:link: /training-tutorials/nemo-rl-grpo/index
 :link-type: doc
 
 Train with GRPO for more powerful optimization than offline methods.
