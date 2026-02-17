@@ -86,7 +86,6 @@ autodoc2_docstring_parser_regexes = [
 
 html_theme = "nvidia_sphinx_theme"
 html_theme_options = {
-    "show_version_warning_banner": True,
     "icon_links": [
         {
             "name": "GitHub",
