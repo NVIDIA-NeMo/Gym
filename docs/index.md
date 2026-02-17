@@ -109,14 +109,6 @@ Generate batches of scored interactions and view them with the rollout viewer.
 {bdg-secondary}`10 min` {bdg-secondary}`rollouts` {bdg-secondary}`training-data`
 :::
 
-:::{grid-item-card} {octicon}`play;1.5em;sd-mr-1` First Training Run
-:link: get-started/first-training-run
-:link-type: doc
-Train a Sudoku-solving model with GRPO using a self-contained Colab notebook.
-+++
-{bdg-secondary}`30 min` {bdg-secondary}`training` {bdg-secondary}`colab`
-:::
-
 ::::
 
 ## Environment Configuration
@@ -277,7 +269,6 @@ Ecosystem <about/ecosystem>
 Quickstart <get-started/index>
 Detailed Setup Guide <get-started/detailed-setup.md>
 Rollout Collection <get-started/rollout-collection.md>
-🟡 First Training Run <get-started/first-training-run.md>
 ```
 
 ```{toctree}
