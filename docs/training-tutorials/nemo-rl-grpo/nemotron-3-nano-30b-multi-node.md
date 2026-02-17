@@ -2,11 +2,11 @@
 
 # Nemotron 3 Nano 30B Multi-Node Training
 
-After completing the standard multi-node training tutorial with Nemotron Nano 9B v2, you may want to scale up to larger models like Nemotron 3 Nano 30B. This tutorial walks through the complete setup for distributed training across 32 nodes using Slurm and Ray.
+After completing the standard multi-node training tutorial with Nemotron Nano 9B v2, you may want to scale up to larger models like Nemotron 3 Nano 30B. This tutorial walks through the complete setup for distributed training across multiple nodes using Slurm and Ray.
 
 :::{card}
 
-**Goal**: Train Nemotron 3 Nano 30B on 32 nodes using GRPO with proper multi-node Ray cluster coordination.
+**Goal**: Train Nemotron 3 Nano 30B on 2 nodes using GRPO with proper multi-node Ray cluster coordination.
 
 ^^^
 
@@ -15,7 +15,7 @@ After completing the standard multi-node training tutorial with Nemotron Nano 9B
 1. Set up the Nemotron 3 Nano 30B training environment
 2. Download and prepare the training dataset
 3. Configure the launch script for multi-node coordination
-4. Submit and monitor the 32-node training job
+4. Submit and monitor the multi-node training job
 
 :::
 
@@ -278,7 +278,7 @@ Create `launch_nemotron_training.sh`:
 
 # Configuration
 HOST_BASE=$WORKSPACE  # Or your preferred base directory
-NUM_NODES=32
+NUM_NODES=2  # Change to 32 for large-scale training
 
 # Paths
 DATA_DIR=${HOST_BASE}/RL-nano-v3/data
@@ -335,7 +335,7 @@ chmod +x launch_nemotron_training.sh
 :::{tip}
 **Key Configuration Points:**
 
-- `NUM_NODES=32`: 32 nodes × 8 GPUs = **256 GPUs total**
+- `NUM_NODES=2`: 2 nodes × 8 GPUs = **16 GPUs total**. For large-scale training, change to `NUM_NODES=32` (256 GPUs total)
 - `--chdir=/tmp`: Sets a neutral working directory for the job
 - `HF_HOME` and `TRANSFORMERS_CACHE`: Set to shared storage so all nodes can access model conversions
 - `BASE_LOG_DIR`: Specifies where Ray cluster logs will be written
@@ -362,7 +362,7 @@ bash $WORKSPACE/RL-nano-v3/launch_nemotron_training.sh
 **Expected output:**
 
 ```
-Submitting 32-node training job...
+Submitting 2-node training job...
 Using BASE_LOG_DIR: /home/user/nemoRL/nemo-rl
 Submitted batch job 9453356
 ```
@@ -420,11 +420,13 @@ tail -f $WORKSPACE/nemoRL/nemo-rl/${JOBID}-logs/ray-driver.log
 Check that all Ray actors are online:
 
 ```bash
-# For 32-node job (32 nodes × 8 GPUs = 256 actors)
-grep "Number of actors online: 256/256" $WORKSPACE/RL-nano-v3/logs/slurm-${JOBID}.out
+# For 2-node job (2 nodes × 8 GPUs = 16 actors)
+grep "Number of actors online: 16/16" $WORKSPACE/RL-nano-v3/logs/slurm-${JOBID}.out
+
+# For 32-node job, look for: 256/256
 ```
 
-**✅ Success Check**: All actors online (256/256 for 32 nodes).
+**✅ Success Check**: All actors online (16/16 for 2 nodes, or 256/256 for 32 nodes).
 
 ---
 
@@ -562,7 +564,7 @@ $HOME/
 
 ## Next Steps
 
-Congratulations! You've successfully set up and launched Nemotron 3 Nano 30B training on a 32-node cluster using Ray and Slurm.
+Congratulations! You've successfully set up and launched Nemotron 3 Nano 30B multi-node training using Ray and Slurm.
 
 ::::{grid} 1 1 2 2
 :gutter: 3
