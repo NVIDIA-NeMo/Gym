@@ -469,7 +469,8 @@ def e2e_rollout_collection():  # pragma: no cover
         data_processor_config_dict["mode"] = "train_preparation"
 
         output_fpath = Path(e2e_rollout_collection_config.output_jsonl_fpath)
-        data_processor_config_dict["output_dirpath"] = str(output_fpath / "preprocessed_datasets")
+        data_process_output_dir = output_fpath.parent / "preprocessed_datasets"
+        data_processor_config_dict["output_dirpath"] = str(data_process_output_dir)
 
     data_processor = TrainDataProcessor()
     data_processor.run(data_processor_config_dict)
@@ -477,7 +478,7 @@ def e2e_rollout_collection():  # pragma: no cover
     # Convert to RolloutCollectionConfig
     rollout_collection_config_dict = deepcopy(global_config_dict)
     with open_dict(rollout_collection_config_dict):
-        input_jsonl_fpath = output_fpath / "preprocessed_datasets" / f"{e2e_rollout_collection_config.split}.jsonl"
+        input_jsonl_fpath = data_process_output_dir / f"{e2e_rollout_collection_config.split}.jsonl"
         assert input_jsonl_fpath.exists()
         rollout_collection_config_dict["input_jsonl_fpath"] = str(input_jsonl_fpath)
 
