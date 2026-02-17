@@ -350,6 +350,9 @@ class UvicornLoggingConfig(BaseModel):
     uvicorn_logging_show_200_ok: bool = False
 
 
+_NEMO_GYM_STARTED_RAY_CLUSTER: bool = False
+
+
 def initialize_ray() -> None:
     """
     Initialize ray cluster in a process.
@@ -371,6 +374,8 @@ def initialize_ray() -> None:
         ray_init_kwargs["address"] = ray_head_node_address
     else:
         print("NeMo Gym is starting a new Ray cluster...")
+        global _NEMO_GYM_STARTED_RAY_CLUSTER
+        _NEMO_GYM_STARTED_RAY_CLUSTER = True
 
     ray.init(**ray_init_kwargs)
 
@@ -378,6 +383,20 @@ def initialize_ray() -> None:
         with open_dict(global_config_dict):
             global_config_dict["ray_head_node_address"] = ray.get_runtime_context().gcs_address
         print(f"Started Ray cluster at {global_config_dict['ray_head_node_address']}")
+
+
+def maybe_ray_cluster_exit():  # pragma: no cover
+    global _NEMO_GYM_STARTED_RAY_CLUSTER
+
+    if not _NEMO_GYM_STARTED_RAY_CLUSTER:
+        return
+
+    ray.shutdown()
+
+    _NEMO_GYM_STARTED_RAY_CLUSTER = False
+
+
+atexit.register(maybe_ray_cluster_exit)
 
 
 IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME = "IS_NEMO_GYM_FASTAPI_WORKER"
