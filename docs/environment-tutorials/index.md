@@ -2,20 +2,26 @@
 
 # Environment Tutorials
 
-Build custom training environments that define how models receive rewards.
+Learn how to build custom environments for training or evaluation using NeMo Gym.
+
+:::{tip}
+Looking to use an existing environment rather than build your own? See the [Available Environments](https://github.com/NVIDIA-NeMo/Gym#-available-environments) in the README.
+:::
 
 ---
 
 ## Environment Properties
 
-Training environments can be broadly characterized along four dimensions:
+Training environments can be broadly characterized along five dimensions:
 1. **Rollout structure**: The interaction pattern between the model, environment, and user.
 2. **Core capabilities**: The behaviors or skills that a model needs in order to succeed in a given use case.
 3. **Knowledge domain**: What subject area, area of expertise, or field of study is involved.
 4. **Task type**: The high-level use case that is represented in the training environment.
+5. **Verification method**: How the environment computes rewards from model responses. See {doc}`/about/concepts/task-verification` for details.
 
-The tables below are only a small subset of of the rollout structures and core capabilities that exist. As new training environments are added to NeMo Gym and as we discover new use cases, these tables below will grow.
+Below are a subset of rollout structures and core capabilities found across NeMo Gym environments. We plan to add these as structured metadata to environments in the future. If you have ideas for additional properties, please let us know by [opening an issue](https://github.com/NVIDIA-NeMo/Gym/issues).
 
+### Rollout Structure
 | Rollout structure | Description |
 |---|---|
 | Multi-step | Interleaved assistant and tool messages |
@@ -23,6 +29,7 @@ The tables below are only a small subset of of the rollout structures and core c
 | Multi-modal | Interleaved text, image, video, and/or audio messages |
 | Long context | Message content is very large or the number of messages is very large |
 
+### Core Capabilities
 | Core capability | Developer/User need | Rollout Structures Required |
 |---|---|---|
 | Information dependency | The model receives environment responses that may require changes to subsequent actions. | Multi-step |
@@ -35,20 +42,7 @@ The tables below are only a small subset of of the rollout structures and core c
 
 ---
 
-## Verification Methods
-
-| Method | When to Use | Example Server |
-|---|---|---|
-| **Exact match** | Answers have one correct form | `mcqa/app.py` — Choice grading |
-| **Library verification** | Domain-specific parsing needed | `math_with_judge/app.py` — Uses `math_verify` library |
-| **LLM-as-judge** | Semantic equivalence matters | `equivalence_llm_judge/app.py` — Configurable judge prompts |
-| **Reward model** | Learned preferences | NeMo RL `RewardModelEnvironment` |
-
----
-
 ## Tutorials
-
-### Foundational
 
 ::::{grid} 1 2 2 2
 :gutter: 2
@@ -73,39 +67,3 @@ Run multiple training environments simultaneously for rollout collection.
 :::
 
 ::::
-
----
-
-## Learning Path
-
-**New to NeMo Gym?** Follow this sequence:
-
-```{mermaid}
-flowchart LR
-    A[1. Setup] --> B[2. Training Environment]
-    B --> C[3. Train]
-```
-
-1. {doc}`/get-started/detailed-setup` — Install NeMo Gym
-2. {doc}`creating-training-environment` — Build a training environment with verification
-3. Start training with one of the {doc}`/training-tutorials/index`
-
----
-
-## Reference Implementations
-
-NeMo Gym includes working examples in `resources_servers/`:
-
-| Server | Pattern | Verification |
-|---|---|---|
-| `mcqa/` | Single-step | Regex extraction, exact match |
-| `example_multi_step/` | Multi-step | Function call validation |
-| `calendar/` | Multi-turn | State comparison |
-| `equivalence_llm_judge/` | Single-step | LLM judge with swap check |
-| `math_with_judge/` | Single-step | Library + judge fallback |
-| `aviary/` | Multi-step | Aviary environment integration |
-| `workplace_assistant/` | Multi-step | Session state, tool routing |
-
-:::{tip}
-Use `ng_init_resources_server +entrypoint=resources_servers/my_env` to scaffold a new environment from a template.
-:::
