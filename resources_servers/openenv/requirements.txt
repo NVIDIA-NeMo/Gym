@@ -1,0 +1,7 @@
+-e nemo-gym[dev] @ ../../
+openenv-core[core]>=0.2.0
+-e openenv-echo-env @ ../../3rdparty/OpenEnv/envs/echo_env
+-e openenv-coding_env @ ../../3rdparty/OpenEnv/envs/coding_env
+-e openenv-maze-env @ ../../3rdparty/OpenEnv/envs/maze_env
+# -e openenv-chess-env @ ../../3rdparty/OpenEnv/envs/chess_env
+# -e openenv-git-env @ ../../3rdparty/OpenEnv/envs/git_env
