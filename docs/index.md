@@ -159,6 +159,14 @@ Build a complete training environment from scratch.
 {bdg-primary}`beginner` {bdg-secondary}`foundational`
 :::
 
+:::{grid-item-card} {octicon}`stack;1.5em;sd-mr-1` Multi-Environment Training
+:link: environment-tutorials/multi-environment-training
+:link-type: doc
+Run multiple training environments simultaneously for rollout collection.
++++
+{bdg-secondary}`multi-environment` {bdg-secondary}`multi-verifier`
+:::
+
 ::::
 
 ```{button-ref} environment-tutorials/index
