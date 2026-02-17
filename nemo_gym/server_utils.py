@@ -391,6 +391,7 @@ def maybe_ray_cluster_exit():  # pragma: no cover
     if not _NEMO_GYM_STARTED_RAY_CLUSTER:
         return
 
+    print("Shutting down Ray cluster spun up by NeMo Gym...")
     ray.shutdown()
 
     _NEMO_GYM_STARTED_RAY_CLUSTER = False
