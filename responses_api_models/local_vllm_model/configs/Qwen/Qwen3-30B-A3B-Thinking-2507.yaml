@@ -32,8 +32,7 @@ policy_model:
           enable_multithread_load: true
           num_threads: 16
 
-num_samples_in_parallel: 128
 # Recommended in https://huggingface.co/Qwen/Qwen3-30B-A3B-Thinking-2507#best-practices
 responses_create_params:
-  temperature": 0.6
+  temperature: 0.6
   top_p: 0.95

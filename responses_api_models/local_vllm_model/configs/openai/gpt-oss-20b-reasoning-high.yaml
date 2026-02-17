@@ -2,11 +2,11 @@ policy_model:
   responses_api_models:
     local_vllm_model:
       entrypoint: app.py
-      model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      model: openai/gpt-oss-20b
       return_token_id_information: false
-      uses_reasoning_parser: true
+      uses_reasoning_parser: false
       replace_developer_role_with_system: false
-      sequential_reasoning_allowed: false
+      is_responses_native: true
       debug: false
 
       # For example, if your model is downloaded at ~/.cache/huggingface/hub/models--Qwen--Qwen3-235B-A22B-Instruct-2507, your hf_home here would be `~/.cache/huggingface`
@@ -25,15 +25,13 @@ policy_model:
         pipeline_parallel_size: 1
 
         trust_remote_code: true
-        mamba_ssm_cache_dtype: float32
         gpu_memory_utilization: 0.9
         enable_auto_tool_choice: true
-        tool_call_parser: qwen3_coder
-        reasoning_parser: deepseek_r1
+        tool_call_parser: openai
         model_loader_extra_config:
           enable_multithread_load: true
           num_threads: 16
 
 responses_create_params:
-  temperature: 1.0
-  top_p: 0.95
+  reasoning:
+    effort: high
