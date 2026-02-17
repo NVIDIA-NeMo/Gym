@@ -38,16 +38,138 @@ class Eval(BaseModel):
     rollout_collection_config: RolloutCollectionConfig
 
 
-EVALS: List[Eval] = []
-
-
 class ModelEvalConfig(BaseModel):
     model_short_name_for_upload: str
     initial_global_config_dict: Dict[str, Any]
     spinup_command: Optional[str] = None
 
 
-MODEL_EVAL_CONFIGS: List[ModelEvalConfig] = []
+EVALS: List[Eval] = []
+
+
+MODEL_EVAL_CONFIGS: List[ModelEvalConfig] = [
+    ModelEvalConfig(
+        model_short_name_for_upload="gpt-oss-20b-reasoning-high",
+        initial_global_config_dict={
+            "policy_base_url": "???",
+            "policy_api_key": "???",
+            "policy_model_name": "openai/gpt-oss-20b",
+            "config_paths": [
+                "responses_api_models/openai_model/configs/openai_model.yaml",
+            ],
+            "num_samples_in_parallel": 128,
+            "responses_create_params": {
+                "reasoning": {
+                    "effort": "high",
+                },
+            },
+        },
+        spinup_command=r"""HF_HUB_OFFLINE=1 \
+HF_HOME=.cache/ \
+HOME=. \
+vllm serve \
+    openai/gpt-oss-20b \
+    --dtype auto \
+    --tensor-parallel-size 8 \
+    --gpu-memory-utilization 0.9 \
+    --enable-auto-tool-choice --tool-call-parser openai \
+    --host 0.0.0.0 \
+    --port 10240""",
+    ),
+    ModelEvalConfig(
+        model_short_name_for_upload="gpt-oss-120b-reasoning-low",
+        initial_global_config_dict={
+            "policy_base_url": "???",
+            "policy_api_key": "???",
+            "policy_model_name": "openai/gpt-oss-120b",
+            "config_paths": [
+                "responses_api_models/openai_model/configs/openai_model.yaml",
+            ],
+            "responses_create_params": {
+                "reasoning": {
+                    "effort": "low",
+                },
+                # From https://huggingface.co/openai/gpt-oss-120b/discussions/21#6892bbe3342676ebf6ba7428
+                "temperature": 1.0,
+                "top_p": 1.0,
+                "max_output_tokens": 131072,
+            },
+        },
+        spinup_command=r"""HF_HUB_OFFLINE=1 \
+HF_HOME=.cache/ \
+HOME=. \
+vllm serve \
+    openai/gpt-oss-120b \
+    --dtype auto \
+    --tensor-parallel-size 8 \
+    --gpu-memory-utilization 0.9 \
+    --enable-auto-tool-choice --tool-call-parser openai \
+    --host 0.0.0.0 \
+    --port 10240""",
+    ),
+    ModelEvalConfig(
+        model_short_name_for_upload="gpt-oss-120b-reasoning-medium",
+        initial_global_config_dict={
+            "policy_base_url": "???",
+            "policy_api_key": "???",
+            "policy_model_name": "openai/gpt-oss-120b",
+            "config_paths": [
+                "responses_api_models/openai_model/configs/openai_model.yaml",
+            ],
+            "responses_create_params": {
+                "reasoning": {
+                    "effort": "medium",
+                },
+                # From https://huggingface.co/openai/gpt-oss-120b/discussions/21#6892bbe3342676ebf6ba7428
+                "temperature": 1.0,
+                "top_p": 1.0,
+                "max_output_tokens": 131072,
+            },
+        },
+        spinup_command=r"""HF_HUB_OFFLINE=1 \
+HF_HOME=.cache/ \
+HOME=. \
+vllm serve \
+    openai/gpt-oss-120b \
+    --dtype auto \
+    --tensor-parallel-size 8 \
+    --gpu-memory-utilization 0.9 \
+    --enable-auto-tool-choice --tool-call-parser openai \
+    --host 0.0.0.0 \
+    --port 10240""",
+    ),
+    ModelEvalConfig(
+        model_short_name_for_upload="gpt-oss-120b-reasoning-high",
+        initial_global_config_dict={
+            "policy_base_url": "???",
+            "policy_api_key": "???",
+            "policy_model_name": "openai/gpt-oss-120b",
+            "config_paths": [
+                "responses_api_models/openai_model/configs/openai_model.yaml",
+            ],
+            "responses_create_params": {
+                "reasoning": {
+                    "effort": "high",
+                },
+                # From https://huggingface.co/openai/gpt-oss-120b/discussions/21#6892bbe3342676ebf6ba7428
+                "temperature": 1.0,
+                "top_p": 1.0,
+                "max_output_tokens": 131072,
+            },
+        },
+        spinup_command=r"""HF_HUB_OFFLINE=1 \
+HF_HOME=.cache/ \
+HOME=. \
+vllm serve \
+    openai/gpt-oss-120b \
+    --dtype auto \
+    --tensor-parallel-size 8 \
+    --gpu-memory-utilization 0.9 \
+    --enable-auto-tool-choice --tool-call-parser openai \
+    --host 0.0.0.0 \
+    --port 10240""",
+    ),
+]
 
 
 async def main():

@@ -5,6 +5,7 @@ policy_model:
       model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
       return_token_id_information: false
       uses_reasoning_parser: true
+      replace_developer_role_with_system: false
       debug: false
 
       # For example, if your model is downloaded at ~/.cache/huggingface/hub/models--Qwen--Qwen3-235B-A22B-Instruct-2507, your hf_home here would be `~/.cache/huggingface`
@@ -23,6 +24,7 @@ policy_model:
         pipeline_parallel_size: 1
 
         trust_remote_code: true
+        mamba_ssm_cache_dtype: float32
         gpu_memory_utilization: 0.9
         enable_auto_tool_choice: true
         tool_call_parser: qwen3_coder
@@ -30,3 +32,9 @@ policy_model:
         model_loader_extra_config:
           enable_multithread_load: true
           num_threads: 16
+
+num_samples_in_parallel: 128
+# Recommended in https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16#use-it-with-transformers
+responses_create_params:
+  temperature": 1.0
+  top_p: 1.0
