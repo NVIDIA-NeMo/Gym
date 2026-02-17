@@ -275,8 +275,8 @@ ng_init_resources_server = "nemo_gym.cli:init_resources_server"
 # Rollout collection
 nemo_gym_collect_rollouts = "nemo_gym.rollout_collection:collect_rollouts"
 ng_collect_rollouts = "nemo_gym.rollout_collection:collect_rollouts"
-nemo_gym_e2e_collect_rollouts = "nemo_gym.cli:e2e_collect_rollouts"
-ng_e2e_collect_rollouts = "nemo_gym.cli:e2e_collect_rollouts"
+nemo_gym_e2e_collect_rollouts = "nemo_gym.cli:e2e_rollout_collection"
+ng_e2e_collect_rollouts = "nemo_gym.cli:e2e_rollout_collection"
 
 # Reward profiling
 nemo_gym_profile = "nemo_gym.profile:profile"
