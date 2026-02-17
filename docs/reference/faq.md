@@ -460,3 +460,15 @@ pickling environment... done
 checking consistency... done
 ```
 You may need to reformat some of your docstrings to Napoleon format docstrings https://sphinxcontrib-napoleon.readthedocs.io/en/latest/
+
+
+# FAQ: Model responses from inference.nvidia.com have no diversity
+`inference.nvidia.com` uses LiteLLM caching by default which leads to no diversity in model responses (pass@1 similar to pass@5). Please set something like the following flags in order to enable diverse responses:
+```yaml
+policy_model:
+  responses_api_models:
+    vllm_model:
+      extra_body:
+        cache:
+          no-cache: true
+```
