@@ -37,9 +37,17 @@ Quickstart
 ```{button-ref} environment-tutorials/index
 :ref-type: doc
 :color: secondary
+:class: sd-rounded-pill sd-mr-3
+
+Environment Tutorials
+```
+
+```{button-ref} training-tutorials/index
+:ref-type: doc
+:color: secondary
 :class: sd-rounded-pill
 
-Explore Tutorials
+Training Tutorials
 ```
 ````
 
