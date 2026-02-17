@@ -73,7 +73,7 @@ _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
 
 class GlobalAIOHTTPAsyncClientConfig(BaseModel):
     global_aiohttp_connector_limit: int = 100 * 1024
-    global_aiohttp_connector_limit_per_host: int = 1024
+    global_aiohttp_connector_limit_per_host: int = 16 * 1024
 
     global_aiohttp_client_request_debug: bool = False
 
