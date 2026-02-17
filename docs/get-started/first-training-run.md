@@ -153,9 +153,9 @@ Multi-node GRPO training with NeMo RL for production workloads.
 :::
 
 :::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Try Different Environments
-:link: https://github.com/NVIDIA-NeMo/Gym#-available-resource-servers
+:link: https://github.com/NVIDIA-NeMo/Gym#-available-environments
 
-Browse available resource servers for math, code, tool-use, and more.
+Browse available environments for math, code, tool-use, and more.
 +++
 {bdg-secondary}`environments`
 :::
