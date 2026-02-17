@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-import sys
 from abc import abstractmethod
 from collections import Counter, defaultdict
 from math import sqrt
@@ -447,54 +446,48 @@ class TrainDataProcessor(BaseModel):
 
         if not local_datasets_not_found:
             return
-        backend = config.data_source
-        is_valid, error_msg = validate_backend_credentials(backend)
+
+        hf_backend_ok, hf_error_msg = validate_backend_credentials("huggingface")
+        gitlab_backend_ok, gitlab_error_msg = validate_backend_credentials("gitlab")
+
         global_config = get_global_config_dict()
-        if not is_valid:
-            print(f"Cannot download datasets: {error_msg}")
-            sys.exit(1)
 
         for (
             server_name,
             datasets,
         ) in local_datasets_not_found.items():  # pragma: no cover
             for d in datasets:
-                try:
-                    if backend == "gitlab":
-                        if d.gitlab_identifier is None:
-                            print(f"Dataset `{d.name}` missing gitlab_identifier for GitLab backend")
-                            continue
+                if d.gitlab_identifier and d.huggingface_identifier:
+                    backend = config.data_source
+                elif not d.gitlab_identifier:
+                    assert hf_backend_ok, hf_error_msg
+                    backend = "huggingface"
+                elif not d.huggingface_identifier:
+                    assert gitlab_backend_ok, gitlab_error_msg
+                else:
+                    raise NotImplementedError
 
-                        download_config = DownloadJsonlDatasetGitlabConfig.model_validate(
-                            d.gitlab_identifier.model_dump() | {"output_fpath": d.jsonl_fpath}
-                        )
-                        print(
-                            f"Downloading dataset `{d.name}` for `{server_name}` from {backend} using {download_config}"
-                        )
-                        download_jsonl_dataset(download_config)
+                if backend == "gitlab":
+                    download_config = DownloadJsonlDatasetGitlabConfig.model_validate(
+                        d.gitlab_identifier.model_dump() | {"output_fpath": d.jsonl_fpath}
+                    )
+                    print(f"Downloading dataset `{d.name}` for `{server_name}` from {backend} using {download_config}")
+                    download_jsonl_dataset(download_config)
 
-                    elif backend == "huggingface":
-                        hf_identifier = d.huggingface_identifier
-
-                        if hf_identifier is None:
-                            print(f"Dataset `{d.name}` missing huggingface_identifier for HuggingFace backend")
-                            continue
-
-                        download_config = DownloadJsonlDatasetHuggingFaceConfig.model_validate(
-                            {
-                                "repo_id": hf_identifier.repo_id,
-                                "artifact_fpath": hf_identifier.artifact_fpath,
-                                "output_fpath": d.jsonl_fpath,
-                                # Only pass split if artifact_fpath is not set
-                                **({"split": d.type} if not hf_identifier.artifact_fpath else {}),
-                                HF_TOKEN_KEY_NAME: global_config.get(HF_TOKEN_KEY_NAME),
-                            }
-                        )
-                        print(f"Downloading '{d.type}' split from {hf_identifier.repo_id} to {d.jsonl_fpath}...")
-                        download_hf_dataset_as_jsonl(download_config)
-
-                except Exception as e:
-                    print(f"Failed to download dataset `{d.name}` from {backend}: {e}")
+                elif backend == "huggingface":
+                    hf_identifier = d.huggingface_identifier
+                    download_config = DownloadJsonlDatasetHuggingFaceConfig.model_validate(
+                        {
+                            "repo_id": hf_identifier.repo_id,
+                            "artifact_fpath": hf_identifier.artifact_fpath,
+                            "output_fpath": d.jsonl_fpath,
+                            # Only pass split if artifact_fpath is not set
+                            **({"split": d.type} if not hf_identifier.artifact_fpath else {}),
+                            HF_TOKEN_KEY_NAME: global_config.get(HF_TOKEN_KEY_NAME),
+                        }
+                    )
+                    print(f"Downloading '{d.type}' split from {hf_identifier.repo_id} to {d.jsonl_fpath}...")
+                    download_hf_dataset_as_jsonl(download_config)
 
     ########################################
     # Validate samples and aggregate metrics
