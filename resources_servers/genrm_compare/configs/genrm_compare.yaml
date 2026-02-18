@@ -47,6 +47,11 @@ genrm_compare:
         type: responses_api_models
         name: genrm_model
       
+      # Cohort-based verify (Difference 1): number of rollouts per prompt before running comparison.
+      # When > 1, verify() buffers by prompt and returns relative rewards when cohort is full.
+      # Ensure rollout data has this many rows per prompt (e.g. num_repeats in rollout collection).
+      num_rollouts_per_prompt: 16
+      
       # Generation params for GenRM calls
       genrm_responses_create_params:
         input: []

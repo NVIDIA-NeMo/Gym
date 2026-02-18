@@ -1,20 +1,29 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """
-Comparison strategies for multi-generation reward computation.
+Comparison strategies and utilities for multi-generation reward computation.
 
-This module provides the infrastructure for comparing multiple candidate responses
-in RLHF workflows. The main use case is GRPO (Group Relative Policy Optimization)
-training where N responses are generated per prompt and compared pairwise.
+For rollout collection (RLHF/GRPO), reward computation is now handled inside the
+genrm_compare resources server: verify() buffers by prompt and runs comparison
+when num_rollouts_per_prompt is reached (Difference 1). Rollout collection
+simply posts each row to the agent /run; no strategy or buffering in Gym.
+
+This module still provides:
+- GenRMStrategy: thin client for calling genrm_compare /compare (batch API)
+- get_prompt_key, extract_conversation_history, generate_response: utilities for
+  scripts or tests that need to group by prompt or call the policy model directly.
 """
 
-import hashlib
-import json
 from typing import Dict, List, Optional, Protocol, Tuple, runtime_checkable
 
 from pydantic import BaseModel, Field
 
 from nemo_gym.server_utils import ServerClient, raise_for_status
+
+from resources_servers.genrm_compare.utils import (
+    extract_conversation_history,
+    get_prompt_key,
+)
 
 
 @runtime_checkable
@@ -160,68 +169,8 @@ class GenRMStrategy:
 
 
 # =============================================================================
-# Utility Functions for Rollout Collection Integration
+# Utility Functions (generate_response, extract_generated_text)
 # =============================================================================
-
-
-def get_prompt_key(example: Dict) -> str:
-    """Get stable key for grouping examples by prompt and principle.
-
-    Examples with the same conversation history but different principles
-    should be in separate groups, so we include principle in the hash.
-
-    Args:
-        example: A rollout example dict containing responses_create_params and optional principle
-
-    Returns:
-        A stable string key that uniquely identifies the prompt + principle combination
-
-    Examples:
-        >>> example1 = {"prompt_id": "123", "principle": "Be concise"}
-        >>> get_prompt_key(example1)
-        '123::Be concise'
-
-        >>> example2 = {"responses_create_params": {"input": [...]}, "principle": "Be helpful"}
-        >>> key = get_prompt_key(example2)  # Returns SHA256 hash of conversation + principle
-    """
-    if "prompt_id" in example:
-        # If prompt_id exists, combine it with principle for uniqueness
-        prompt_id = str(example["prompt_id"])
-        principle = example.get("principle")
-        if principle is not None:
-            return f"{prompt_id}::{principle}"
-        return prompt_id
-
-    # Hash both conversation history and principle together
-    conv = extract_conversation_history(example)
-    principle = example.get("principle")
-    key_data = {
-        "conversation": conv,
-        "principle": principle,
-    }
-    return hashlib.sha256(json.dumps(key_data, sort_keys=True).encode()).hexdigest()
-
-
-def extract_conversation_history(example: Dict) -> List[Dict]:
-    """Extract conversation history from example.
-
-    Gym examples store history in responses_create_params.input
-
-    Args:
-        example: A rollout example dict
-
-    Returns:
-        List of message dicts with 'role' and 'content'
-
-    Raises:
-        ValueError: If example is missing required fields
-    """
-    responses_create_params = example.get("responses_create_params")
-    if responses_create_params is None:
-        raise ValueError(f"Example missing 'responses_create_params': {list(example.keys())}")
-    if "input" not in responses_create_params:
-        raise ValueError(f"responses_create_params missing 'input': {list(responses_create_params.keys())}")
-    return responses_create_params["input"]
 
 
 def extract_generated_text(gen_result: Dict) -> str:
