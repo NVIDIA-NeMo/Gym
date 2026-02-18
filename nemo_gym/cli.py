@@ -470,8 +470,6 @@ def e2e_rollout_collection():  # pragma: no cover
     # Ensure we have the right config first thing
     e2e_rollout_collection_config = E2ERolloutCollectionConfig.model_validate(global_config_dict)
 
-    wandb.init(project=None, name=None, dir=None)
-
     # Prepare data
     data_processor_config_dict = deepcopy(global_config_dict)
     with open_dict(data_processor_config_dict):
@@ -481,6 +479,15 @@ def e2e_rollout_collection():  # pragma: no cover
         output_fpath = Path(e2e_rollout_collection_config.output_jsonl_fpath)
         data_process_output_dir = output_fpath.parent / "preprocessed_datasets"
         data_processor_config_dict["output_dirpath"] = str(data_process_output_dir)
+
+    wandb_dir = output_fpath.parent / "wandb"
+    wandb_run = wandb.init(
+        project=e2e_rollout_collection_config.wandb_project,
+        name=e2e_rollout_collection_config.wandb_name,
+        dir=wandb_dir,
+    )
+    # Log params
+    wandb_run.config.update(OmegaConf.to_container(global_config_dict))
 
     data_processor = TrainDataProcessor()
     data_processor.run(data_processor_config_dict)
@@ -512,6 +519,9 @@ def e2e_rollout_collection():  # pragma: no cover
         pass
     finally:
         rh.shutdown()
+
+    # TODO: log rollouts
+    wandb_run.log(None, step=1, commit=True)
 
 
 def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover

@@ -62,6 +62,9 @@ class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
     """
 
     split: Union[Literal["train"], Literal["validation"]]
+    wandb_project: str
+    wandb_name: str
+    wandb_dir: str
 
 
 class RolloutCollectionConfig(SharedRolloutCollectionConfig):
