@@ -176,6 +176,9 @@ Create `prepare_data.sh`:
 #SBATCH --time=00:20:00
 #SBATCH --output=prepare-data-%j.out
 
+# Set workspace directory (adjust to your cluster's large storage)
+WORKSPACE=/path/to/large/storage/$USER
+
 # Data directory
 DATA_DIR=${WORKSPACE}/RL-nano-v3/data/
 
@@ -196,10 +199,10 @@ tail -n 1000 ${DATA_DIR}/train-full.jsonl > ${DATA_DIR}/val-split.jsonl
 wc -l ${DATA_DIR}/train-split.jsonl ${DATA_DIR}/val-split.jsonl
 ```
 
-Submit the job (exports WORKSPACE and HF_TOKEN to the compute node):
+Submit the job:
 
 ```bash
-sbatch --export=WORKSPACE,HF_TOKEN prepare_data.sh
+sbatch prepare_data.sh
 ```
 
 :::{note}
