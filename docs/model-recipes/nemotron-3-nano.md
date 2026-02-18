@@ -202,6 +202,10 @@ wc -l ${DATA_DIR}/train-split.jsonl ${DATA_DIR}/val-split.jsonl
 Submit the job:
 
 ```bash
+# If dataset requires authentication, export HF_TOKEN:
+# sbatch --export=HF_TOKEN prepare_data.sh
+
+# Otherwise:
 sbatch prepare_data.sh
 ```
 
