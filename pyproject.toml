@@ -124,10 +124,10 @@ dependencies = [
     "hydra-core",
     "omegaconf",
 
-    # Gradio: For simple frontend interfaces for viewing data
-    # Updated Sun Aug 03, 2025 with gradio==5.16.0
-    # License: Apache 2.0 https://github.com/gradio-app/gradio/blob/2b4432edea8a62659e180e24eedd2bddbed08e77/LICENSE
-    "gradio",
+    # rich: used for nicer terminal content displays
+    # Updated Tue Feb 17, 2026 with rich==14.3.2
+    # License: MIT https://github.com/Textualize/rich/blob/27701029082052c6541031b6f139097230253900/LICENSE
+    "rich",
 
     # MLFlow: used for interacting with the Gitlab model registry
     # Updated Mon Feb 10, 2026 with mlflow>=3.5.0

@@ -196,7 +196,6 @@ Fetch datasets from HuggingFace Hub.
 |---------|-------------|
 | `ng_prepare_data` | Validate and generate metrics |
 | `ng_download_dataset_from_hf` | Download from HuggingFace |
-| `ng_viewer` | View dataset in Gradio UI |
 
 See {doc}`/reference/cli-commands` for details.
 

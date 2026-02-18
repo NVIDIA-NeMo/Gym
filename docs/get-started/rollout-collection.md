@@ -118,29 +118,11 @@ Collecting rollouts: 100%|████████████████| 10/1
 
 ## 4. View Rollouts
 
-Launch the rollout viewer:
-
 ```bash
-ng_viewer +jsonl_fpath=results/example_single_tool_call_rollouts.jsonl
+cat results/example_single_tool_call_rollouts.jsonl
 ```
 
-The viewer starts on port 7860 and accepts requests only from localhost by default. Visit <http://127.0.0.1:7860> in your browser.
-
-:::{tip}
-**Configuring Network Access**
-
-By default, the viewer accepts requests only from localhost (`server_host=127.0.0.1`). To make it accessible from a different machine:
-
-```bash
-# Accept requests from anywhere (e.g., for remote access)
-ng_viewer +jsonl_fpath=results/example_single_tool_call_rollouts.jsonl +server_host=0.0.0.0
-
-# Use a custom port
-ng_viewer +jsonl_fpath=results/example_single_tool_call_rollouts.jsonl +server_port=8080
-```
-:::
-
-The viewer shows each rollout with:
+Each rollout row should contain:
 
 - **Input**: The original query and tools
 - **Response**: Tool calls and agent output
