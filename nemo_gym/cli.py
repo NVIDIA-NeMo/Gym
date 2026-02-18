@@ -514,14 +514,13 @@ def e2e_rollout_collection():  # pragma: no cover
 """
     )
     try:
-        asyncio.run(rch.run_from_config(rollout_collection_config))
+        results = asyncio.run(rch.run_from_config(rollout_collection_config))
     except KeyboardInterrupt:
         pass
     finally:
         rh.shutdown()
 
-    # TODO: log rollouts
-    wandb_run.log(None, step=1, commit=True)
+    wandb_run.log(results, step=1, commit=True)
 
 
 def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover

@@ -101,7 +101,7 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
 
 
 class RolloutCollectionHelper(BaseModel):  # pragma: no cover
-    async def run_from_config(self, config: RolloutCollectionConfig):
+    async def run_from_config(self, config: RolloutCollectionConfig) -> List[dict]:
         range_iterator = repeat(0)
         if config.limit:
             range_iterator = range(config.limit)
@@ -163,11 +163,15 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
 
                 return result
 
-            await tqdm.gather(*map(_post_coroutine, rows), desc="Collecting rollouts", miniters=tqdm_miniters)
+            results = await tqdm.gather(
+                *map(_post_coroutine, rows), desc="Collecting rollouts", miniters=tqdm_miniters
+            )
 
         avg_metrics = {k: v / len(rows) for k, v in metrics.items()}
         avg_metrics.setdefault("reward", 0.0)
         print(orjson.dumps(avg_metrics, indent=4))
+
+        return results
 
     def run_examples(
         self, examples: List[Dict], head_server_config: Optional[BaseServerConfig] = None
