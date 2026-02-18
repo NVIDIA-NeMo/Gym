@@ -122,7 +122,9 @@ class RunHelper:  # pragma: no cover
     _server_instance_display_configs: List[ServerInstanceDisplayConfig]
     _server_client: ServerClient
 
-    def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig, ray_gpu_pgs=None, ray_gpu_nodes=None) -> None:
+    def start(
+        self, global_config_dict_parser_config: GlobalConfigDictParserConfig, ray_gpu_pgs=None, ray_gpu_nodes=None
+    ) -> None:
         global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
 
         # Initialize Ray cluster in the main process
@@ -133,6 +135,7 @@ class RunHelper:  # pragma: no cover
 
         if ray_gpu_pgs and ray_gpu_nodes:
             import ray
+
             ray.get(self._head_ray_gpu_helper.set_gpu_pgs.remote(ray_gpu_nodes, ray_gpu_pgs))
 
         # Assume Nemo Gym Run is for a single agent.
@@ -469,7 +472,7 @@ ng_collect_rollouts +agent_name=example_multi_step_simple_agent \
     +limit=null
 
 # View your rollouts
-ng_viewer +jsonl_fpath=resources_servers/example_multi_step/data/example_rollouts.jsonl
+head -1 resources_servers/example_multi_step/data/example_rollouts.jsonl
 ```
 """
     with open(example_rollouts_fpath) as f:
