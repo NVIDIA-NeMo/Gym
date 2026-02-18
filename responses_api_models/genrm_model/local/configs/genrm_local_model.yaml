@@ -1,6 +1,6 @@
 genrm_local_model:
   responses_api_models:
-    genrm_model.local:
+    genrm_model/local:
       entrypoint: app.py
       model: ${genrm_model_name}
       return_token_id_information: false
