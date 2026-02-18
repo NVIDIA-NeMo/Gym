@@ -465,12 +465,12 @@ def run(
 
 
 def e2e_rollout_collection():  # pragma: no cover
-    wandb.init(project=None, name=None, dir=None)
-
     global_config_dict = get_global_config_dict()
 
     # Ensure we have the right config first thing
     e2e_rollout_collection_config = E2ERolloutCollectionConfig.model_validate(global_config_dict)
+
+    wandb.init(project=None, name=None, dir=None)
 
     # Prepare data
     data_processor_config_dict = deepcopy(global_config_dict)
@@ -1049,4 +1049,8 @@ System:
 
 
 def reinstall():  # pragma: no cover
+    global_config_dict = get_global_config_dict()
+    # Just here for help
+    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+
     Popen("uv sync --extra dev --group docs", shell=True).communicate()
