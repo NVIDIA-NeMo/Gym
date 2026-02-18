@@ -34,6 +34,7 @@ from typing import Dict, List, Optional, Tuple
 import psutil
 import rich
 import uvicorn
+import wandb
 from devtools import pprint
 from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import Field
@@ -464,6 +465,8 @@ def run(
 
 
 def e2e_rollout_collection():  # pragma: no cover
+    wandb.init(project=None, name=None, dir=None)
+
     global_config_dict = get_global_config_dict()
 
     # Ensure we have the right config first thing
