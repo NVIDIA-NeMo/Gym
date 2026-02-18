@@ -262,10 +262,6 @@ ng_test = "nemo_gym.cli:test"
 nemo_gym_test_all = "nemo_gym.cli:test_all"
 ng_test_all = "nemo_gym.cli:test_all"
 
-# Dataset viewing
-nemo_gym_viewer = "nemo_gym.dataset_viewer:main"
-ng_viewer = "nemo_gym.dataset_viewer:main"
-
 # Development convenience aliases.
 nemo_gym_dev_test = "nemo_gym.cli:dev_test"
 ng_dev_test = "nemo_gym.cli:dev_test"
