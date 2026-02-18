@@ -102,26 +102,53 @@ class LocalVLLMModelActor:
         self.server_thread.start()
 
     def _patch_signal_handler(self) -> None:
-        # Pass through signal setting not allowed in threads.
-        # See https://github.com/vllm-project/vllm/blob/275de34170654274616082721348b7edd9741d32/vllm/entrypoints/launcher.py#L94
-        # This may be vLLM version specific!
+        # vLLM's serve_http calls loop.add_signal_handler(SIGINT/SIGTERM), which can only be
+        # called from the main thread. We run the vLLM server in a worker thread, so we must
+        # no-op signal handler registration. See vllm/entrypoints/launcher.py (serve_http).
+        # api_server does "from vllm.entrypoints.launcher import serve_http" at import time,
+        # so we must patch api_server.serve_http (the reference run_server_worker actually
+        # calls), not launcher.serve_http. We make get_running_loop() return a proxy that
+        # no-ops add_signal_handler so the real uvloop loop never sees the call.
 
         import signal
-        from asyncio import get_running_loop
 
-        from vllm.entrypoints import launcher
+        from vllm.entrypoints.openai import api_server
 
-        original_serve_http = launcher.serve_http
+        original_serve_http = api_server.serve_http
 
-        def new_serve_http(*args, **kwargs):
-            loop = get_running_loop()
-            loop.add_signal_handler = lambda *args, **kwargs: None
+        async def new_serve_http(*args, **kwargs):
+            import asyncio
 
-            return original_serve_http(*args, **kwargs)
+            real_loop = asyncio.get_running_loop()
 
-        launcher.serve_http = new_serve_http
+            class _LoopProxy:
+                """Proxy that no-ops add_signal_handler so launcher can run in a worker thread."""
 
-        # Patch signal as well.
+                def __init__(self, loop):
+                    self._loop = loop
+
+                def add_signal_handler(self, *a, **kw):
+                    pass
+
+                def __getattr__(self, name):
+                    return getattr(self._loop, name)
+
+            proxy = _LoopProxy(real_loop)
+            orig_get_running_loop = asyncio.get_running_loop
+
+            def patched_get_running_loop():
+                loop = orig_get_running_loop()
+                return proxy if loop is real_loop else loop
+
+            asyncio.get_running_loop = patched_get_running_loop
+            try:
+                return await original_serve_http(*args, **kwargs)
+            finally:
+                asyncio.get_running_loop = orig_get_running_loop
+
+        api_server.serve_http = new_serve_http
+
+        # Patch signal.signal so no thread tries to register process-level handlers either.
         signal.signal = lambda *args, **kwargs: None
 
     def _patch_uvicorn_logger(self) -> None:
@@ -184,6 +211,12 @@ class LocalVLLMModel(VLLMModel):
         return str(Path(self.config.hf_home) / "hub")
 
     def download_model(self) -> None:
+        # Check if model is a local path
+        if Path(self.config.model).exists():
+            print(f"Model path {self.config.model} exists locally, skipping download.")
+            return
+
+        # Otherwise, download from HuggingFace
         maybe_hf_token = self.get_hf_token()
         cache_dir = self.get_cache_dir()
 

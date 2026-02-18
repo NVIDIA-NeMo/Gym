@@ -81,6 +81,15 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 class VLLMModel(SimpleResponsesAPIModel):
     config: VLLMModelConfig
 
+    def get_converter(self) -> "VLLMConverter":
+        """Return the converter used for Responses API <-> Chat Completions mapping.
+
+        Override in subclasses (e.g. GenRMModel) to use a specialized converter.
+        """
+        return VLLMConverter(
+            return_token_id_information=self.config.return_token_id_information,
+        )
+
     def model_post_init(self, context):
         self._clients = [
             NeMoGymAsyncOpenAI(
@@ -92,9 +101,7 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
 
-        self._converter = VLLMConverter(
-            return_token_id_information=self.config.return_token_id_information,
-        )
+        self._converter = self.get_converter()
 
         return super().model_post_init(context)
 
