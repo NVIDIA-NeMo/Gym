@@ -229,9 +229,6 @@ temp*
 #Vim stuff
 *.sw*
 
-# Gradio
-*.gradio
-
 # Hydra outputs
 outputs
 

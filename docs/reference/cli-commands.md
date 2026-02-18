@@ -308,45 +308,6 @@ ng_prepare_data "+config_paths=[${config_paths}]" \
 
 ---
 
-### `ng_viewer` / `nemo_gym_viewer`
-
-Launch a Gradio interface to view and explore dataset rollouts interactively.
-
-**Parameters**
-
-```{list-table}
-:header-rows: 1
-:widths: 20 10 70
-
-* - Parameter
-  - Type
-  - Description
-* - `jsonl_fpath`
-  - str
-  - Filepath to a local JSONL file to view.
-* - `server_host`
-  - str
-  - Network address where the viewer accepts requests. Defaults to `"127.0.0.1"` (localhost only). Set to `"0.0.0.0"` to accept requests from anywhere.
-* - `server_port`
-  - int
-  - Port where the viewer accepts requests. Defaults to `7860`. If the specified port is unavailable, Gradio will search for the next available port.
-```
-
-**Examples**
-
-```bash
-# Launch viewer with default settings (accessible from localhost only)
-ng_viewer +jsonl_fpath=weather_rollouts.jsonl
-
-# Accept requests from anywhere (e.g., for remote access)
-ng_viewer +jsonl_fpath=weather_rollouts.jsonl +server_host=0.0.0.0
-
-# Use a custom port
-ng_viewer +jsonl_fpath=weather_rollouts.jsonl +server_port=8080
-```
-
----
-
 ## Dataset Registry - GitLab
 
 Commands for uploading, downloading, and managing datasets in GitLab Model Registry.

@@ -583,7 +583,7 @@ ng_collect_rollouts +agent_name=example_multi_step_simple_agent \
     +limit=null
 
 # View your rollouts
-ng_viewer +jsonl_fpath=resources_servers/example_multi_step/data/example_rollouts.jsonl
+head -1 resources_servers/example_multi_step/data/example_rollouts.jsonl
 ```
 """
     with open(example_rollouts_fpath) as f:
