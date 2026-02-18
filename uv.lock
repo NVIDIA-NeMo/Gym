@@ -6,6 +6,38 @@ resolution-markers = [
     "python_full_version < '3.13'",
 ]
 
+[manifest]
+excludes = [
+    "alembic",
+    "blinker",
+    "cffi",
+    "contourpy",
+    "cryptography",
+    "cycler",
+    "docker",
+    "flask",
+    "flask-cors",
+    "graphene",
+    "graphql-core",
+    "graphql-relay",
+    "gunicorn",
+    "huey",
+    "joblib",
+    "kiwisolver",
+    "matplotlib",
+    "pillow",
+    "prettytable",
+    "pyparsing",
+    "scikit-learn",
+    "scipy",
+    "skops",
+    "sqlalchemy",
+    "threadpoolctl",
+    "waitress",
+    "wcwidth",
+    "werkzeug",
+]
+
 [[package]]
 name = "accessible-pygments"
 version = "0.0.5"
@@ -1054,6 +1086,22 @@ wheels = [
 ]
 
 [[package]]
+name = "mlflow"
+version = "3.9.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "mlflow-skinny" },
+    { name = "mlflow-tracing" },
+    { name = "numpy" },
+    { name = "pandas" },
+    { name = "pyarrow" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/95/e5/9f8481b879329ed0f5317eda459fb7eebe9eb9bae7d99ba6a7d68074f619/mlflow-3.9.0.tar.gz", hash = "sha256:47a41fa22107b0ceee1f91e2184759ebfaffa31d7913b70318b78fb5369e52ec", size = 9105613, upload-time = "2026-01-29T07:56:51.477Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e9/ce/871d1168206164242856b5cbf327693b708d6a63c3163d90f89ad5e70807/mlflow-3.9.0-py3-none-any.whl", hash = "sha256:280f94854e5ece42fc5538180b276661c62dbfb2c848a98e8873e78915379ac6", size = 9692264, upload-time = "2026-01-29T07:56:48.811Z" },
+]
+
+[[package]]
 name = "mlflow-skinny"
 version = "3.9.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1081,6 +1129,25 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/fc/18/34a8c085eece1abb7edaed3b9a383670b97a4a234fec62d1823e8c64d11b/mlflow_skinny-3.9.0.tar.gz", hash = "sha256:0598e0635dd1af9d195fb429210819aa4b56e9d6014f87134241f2325d57a290", size = 2329309, upload-time = "2026-01-29T07:42:36.8Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c0/7c/a82fd9d6ecefba347e3a65168df63fd79784fa8c22b8734fb4cb71f2d469/mlflow_skinny-3.9.0-py3-none-any.whl", hash = "sha256:9b98706cdf9e07a61da7fbcd717c8d35ac89c76e084d25aafdbc150028e832d5", size = 2807062, upload-time = "2026-01-29T07:42:35.132Z" },
+]
+
+[[package]]
+name = "mlflow-tracing"
+version = "3.9.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cachetools" },
+    { name = "databricks-sdk" },
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-proto" },
+    { name = "opentelemetry-sdk" },
+    { name = "packaging" },
+    { name = "protobuf" },
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/36/ba/11c8b4a4841104b55ad63a1f11ad72b1f282b819c4da197cf01128b61c25/mlflow_tracing-3.9.0.tar.gz", hash = "sha256:3a0676e6f362712299d191108a5cbcd596f6d84f23f050dfbf80161e245d456c", size = 1176445, upload-time = "2026-01-29T07:44:59.525Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a1/9c/d726d51aec6a2349f90630b43972cee1f683a22b4b3683a241b02a454baf/mlflow_tracing-3.9.0-py3-none-any.whl", hash = "sha256:93df8df0697303ad3135df6228934e5d9d2f264d2683b97a6f06ad865ec418a0", size = 1410828, upload-time = "2026-01-29T07:44:57.615Z" },
 ]
 
 [[package]]
@@ -1276,6 +1343,7 @@ dependencies = [
     { name = "fonttools" },
     { name = "hydra-core" },
     { name = "itsdangerous" },
+    { name = "mlflow" },
     { name = "mlflow-skinny" },
     { name = "omegaconf" },
     { name = "openai" },
@@ -1330,6 +1398,7 @@ requires-dist = [
     { name = "fonttools", specifier = ">=4.60.2" },
     { name = "hydra-core" },
     { name = "itsdangerous" },
+    { name = "mlflow" },
     { name = "mlflow-skinny" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8.0" },
     { name = "omegaconf" },

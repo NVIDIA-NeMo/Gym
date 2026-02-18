@@ -135,9 +135,11 @@ dependencies = [
     "rich",
 
     # mlflow-skinny: used for interacting with the Gitlab model registry. We use the "skinny" version that does not have unnecessary dependencies.
+    # mlflow dependency is necessary for importing. However, all of mlflow's dependencies that don't overlap with mlflow-skinny are excluded below.
     # Updated Tue Feb 17, 2026 with mlflow-skinny==3.9.0
     # License: Apache 2.0 https://github.com/mlflow/mlflow/blob/c6ce84e817897e1a0461632f8a06d4e5e4ac3726/LICENSE.txt
     "mlflow-skinny",
+    "mlflow",
 
     # aiohttp: async http backend
     # Updated Mon Feb 10, 2026 with aiohttp>=3.13.3
@@ -246,6 +248,38 @@ build-backend = "setuptools.build_meta"
 
 [tool.uv]
 managed = true
+required-version = ">=0.9.30"
+exclude-dependencies = [
+    # Exclude unwanted dependencies from mlflow
+    "alembic",
+    "blinker",
+    "cffi",
+    "contourpy",
+    "cryptography",
+    "cycler",
+    "docker",
+    "flask",
+    "flask-cors",
+    "graphene",
+    "graphql-core",
+    "graphql-relay",
+    "gunicorn",
+    "huey",
+    "joblib",
+    "kiwisolver",
+    "matplotlib",
+    "pillow",
+    "prettytable",
+    "pyparsing",
+    "scikit-learn",
+    "scipy",
+    "skops",
+    "sqlalchemy",
+    "threadpoolctl",
+    "wcwidth",
+    "werkzeug",
+    "waitress",
+]
 
 [tool.setuptools.dynamic]
 version = {attr = "nemo_gym.__version__"}
