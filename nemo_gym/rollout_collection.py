@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
-import json
 from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
@@ -21,6 +20,7 @@ from itertools import repeat
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
+import orjson
 from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
 
@@ -108,7 +108,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
             print(f"Limiting the number of rows to {config.limit}!")
 
         with open(config.input_jsonl_fpath) as input_dataset:
-            rows = [row for _, row in zip(range_iterator, map(json.loads, input_dataset))]
+            rows = [row for _, row in zip(range_iterator, map(orjson.loads, input_dataset))]
         print(f"Found {len(rows)} rows!")
 
         if config.num_repeats:
@@ -147,7 +147,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
         Path(config.output_jsonl_fpath).parent.mkdir(exist_ok=True, parents=True)
         with open(config.output_jsonl_fpath, "a") as f:
 
-            async def _post_coroutine(row: dict) -> None:
+            async def _post_coroutine(row: dict) -> dict:
                 row["responses_create_params"] = row["responses_create_params"] | config.responses_create_params
                 # Use config.agent_name if specified, otherwise use agent_ref from the row
                 agent_name = config.agent_name or row.get("agent_ref", {}).get("name")
@@ -159,13 +159,15 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
                     # For ng_profile to match rollouts to tasks
                     if TASK_INDEX_KEY_NAME in row:
                         result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
-                    f.write(json.dumps(result) + "\n")
+                    f.write(orjson.dumps(result) + "\n")
+
+                return result
 
             await tqdm.gather(*map(_post_coroutine, rows), desc="Collecting rollouts", miniters=tqdm_miniters)
 
         avg_metrics = {k: v / len(rows) for k, v in metrics.items()}
         avg_metrics.setdefault("reward", 0.0)
-        print(json.dumps(avg_metrics, indent=4))
+        print(orjson.dumps(avg_metrics, indent=4))
 
     def run_examples(
         self, examples: List[Dict], head_server_config: Optional[BaseServerConfig] = None
