@@ -1329,7 +1329,7 @@ requires-dist = [
     { name = "fastapi" },
     { name = "fonttools", specifier = ">=4.60.2" },
     { name = "hydra-core" },
-    { name = "itsdangerous", specifier = ">=2.2.0" },
+    { name = "itsdangerous" },
     { name = "mlflow-skinny" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8.0" },
     { name = "omegaconf" },
