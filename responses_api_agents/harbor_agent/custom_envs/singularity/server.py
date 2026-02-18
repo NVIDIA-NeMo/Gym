@@ -11,6 +11,7 @@ Usage (inside container):
 
 import argparse
 import asyncio
+import inspect
 import logging
 import os
 import shutil
@@ -18,6 +19,7 @@ import signal
 import subprocess
 import sys
 from contextlib import asynccontextmanager
+from typing import Dict, Optional
 
 import uvicorn
 from fastapi import FastAPI
@@ -26,14 +28,14 @@ from pydantic import BaseModel
 
 class CommandRequest(BaseModel):
     command: str
-    cwd: str | None = None
-    env: dict[str, str] | None = None
-    timeout_sec: int | None = None
+    cwd: Optional[str] = None
+    env: Optional[Dict[str, str]] = None
+    timeout_sec: Optional[int] = None
 
 
 class CommandResult(BaseModel):
-    stdout: str | None = None
-    stderr: str | None = None
+    stdout: Optional[str] = None
+    stderr: Optional[str] = None
     return_code: int
 
 
@@ -74,12 +76,14 @@ def _warm_tmux_server():
 
     Never crashes - just logs and continues.
     """
+    tmux_path = shutil.which("tmux") or "/usr/bin/tmux"
     try:
         result = subprocess.run(
-            ["tmux", "start-server"],
+            [tmux_path, "start-server"],
             capture_output=True,
             text=True,
             timeout=5,
+            env={**os.environ, "PATH": "/usr/bin:/usr/local/bin:" + os.environ.get("PATH", "/bin")},
         )
         if result.returncode == 0:
             logger.debug("Pre-started tmux server")
@@ -98,11 +102,11 @@ async def lifespan(app: FastAPI):
     yield
     logger.debug("Singularity FastAPI server shutting down...")
     try:
-        subprocess.run(["tmux", "kill-server"], capture_output=True, timeout=5)
+        _tmux = shutil.which("tmux") or "/usr/bin/tmux"
+        subprocess.run([_tmux, "kill-server"], capture_output=True, timeout=5)
         logger.debug("Stopped tmux server")
     except Exception as e:
         logger.warning(f"Could not stop tmux server: {e}")
-
 
 # =============================================================================
 # FastAPI App & Routes
@@ -123,6 +127,8 @@ def exec_command(req: CommandRequest):
     """
     # Set up environment
     env = os.environ.copy()
+    # Ensure PATH includes standard locations so apt-installed tools (e.g. tmux) are found
+    env["PATH"] = "/usr/bin:/usr/local/bin:" + env.get("PATH", "/bin")
     if req.env:
         env.update(req.env)
 
@@ -199,7 +205,6 @@ async def shutdown():
     asyncio.create_task(delayed_shutdown())
     return {"message": "Shutdown initiated"}
 
-
 # =============================================================================
 # Singularity Environment Setup
 # =============================================================================
@@ -257,7 +262,7 @@ def setup_dpkg_for_overlay() -> None:
                     src = os.path.join(root, filename)
                     rel_path = os.path.relpath(src, dpkg_dir)
                     try:
-                        with open(src, "rb") as f:
+                        with open(src, 'rb') as f:
                             saved_contents[rel_path] = f.read()
                     except Exception:
                         pass
@@ -273,7 +278,7 @@ def setup_dpkg_for_overlay() -> None:
             dest = os.path.join(dpkg_dir, rel_path)
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             try:
-                with open(dest, "wb") as f:
+                with open(dest, 'wb') as f:
                     f.write(content)
             except Exception:
                 pass
@@ -308,7 +313,11 @@ def setup_common_directories() -> None:
     ]
 
     for directory in directories:
-        os.makedirs(directory, exist_ok=True)
+        try:
+            os.makedirs(directory, exist_ok=True)
+        except FileExistsError:
+            # Path exists but is not a directory (e.g. some R2E-Gym / Singularity images)
+            logger.debug("Skip creating %s (exists and is not a directory)", directory)
 
     logger.debug("Created common directories")
 
@@ -323,8 +332,8 @@ def setup_fake_sudo() -> None:
     os.makedirs(os.path.dirname(sudo_path), exist_ok=True)
 
     with open(sudo_path, "w") as f:
-        f.write("#!/bin/bash\n")
-        f.write("# Fake sudo for Singularity fakeroot\n")
+        f.write('#!/bin/bash\n')
+        f.write('# Fake sudo for Singularity fakeroot\n')
         f.write('exec "$@"\n')
     os.chmod(sudo_path, 0o755)
 
@@ -335,22 +344,29 @@ def setup_apt_sources() -> None:
     """Configure apt sources.list with deb-src lines.
 
     Some packages need source repos for build-dep.
+    Skips if sources.list is a directory (some images use sources.list.d only).
     """
     sources_file = "/etc/apt/sources.list"
+    if not os.path.isfile(sources_file):
+        logger.debug("/etc/apt/sources.list is not a regular file (e.g. is a directory), skipping apt sources setup")
+        return
 
     # Read existing content
     content = ""
-    if os.path.exists(sources_file):
+    try:
         with open(sources_file, "r") as f:
             content = f.read()
+    except OSError as e:
+        logger.warning(f"Could not read {sources_file}: {e}")
+        return
 
     if "deb-src" in content:
         return  # Already has source repos
 
     # Add deb-src for each deb line
-    deb_lines = [line for line in content.split("\n") if line.strip().startswith("deb ")]
+    deb_lines = [line for line in content.split('\n') if line.strip().startswith('deb ')]
     for deb_line in deb_lines:
-        src_line = deb_line.replace("deb ", "deb-src ", 1)
+        src_line = deb_line.replace('deb ', 'deb-src ', 1)
         if src_line not in content:
             content += f"\n{src_line}"
 
@@ -373,9 +389,11 @@ def setup_apt_sources() -> None:
             content += f"\ndeb-src http://archive.ubuntu.com/ubuntu {codename}-updates main universe"
 
         logger.debug(f"Added deb-src lines for {distro}/{codename}")
-
-    with open(sources_file, "w") as f:
-        f.write(content)
+    try:
+        with open(sources_file, "w") as f:
+            f.write(content)
+    except OSError as e:
+        logger.warning(f"Could not write {sources_file}: {e}")
 
 
 def setup_singularity_environment(workdir: str) -> None:
@@ -392,7 +410,6 @@ def setup_singularity_environment(workdir: str) -> None:
 
     os.environ["SINGULARITY_WORKDIR"] = workdir
     logger.debug("Singularity environment setup complete")
-
 
 # =============================================================================
 # Main Entry Point
@@ -412,15 +429,23 @@ def main():
 
     setup_singularity_environment(args.workdir)
 
-    uvicorn.run(
-        app,
-        host="127.0.0.1",  # Bind to loopback only for security (harbor harness connects via localhost)
-        port=args.port,
-        timeout_graceful_shutdown=5,
-        timeout_keep_alive=120,  # Keep connections alive for 2 minutes to handle agent wait times
-        access_log=False,
-        server_header=False,
-    )
+    # Build uvicorn kwargs; R2E-Gym images may have old uvicorn (0.15) without these args
+    uvicorn_kwargs = {
+        "host": "127.0.0.1",
+        "port": args.port,
+        "access_log": False,
+        "server_header": False,
+    }
+    try:
+        sig = inspect.signature(uvicorn.Config.__init__)
+        params = sig.parameters
+        if "timeout_graceful_shutdown" in params:
+            uvicorn_kwargs["timeout_graceful_shutdown"] = 5
+        if "timeout_keep_alive" in params:
+            uvicorn_kwargs["timeout_keep_alive"] = 120
+    except (ValueError, TypeError):
+        pass
+    uvicorn.run(app, **uvicorn_kwargs)
 
 
 if __name__ == "__main__":
