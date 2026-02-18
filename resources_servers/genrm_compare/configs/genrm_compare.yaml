@@ -1,10 +1,12 @@
 # GenRM Pairwise Comparison Resources Server Config
 #
 # This server compares multiple candidate responses using a GenRM model.
-# The GenRM model uses a special chat template with roles 'response_1' and 'response_2'.
+# The GenRM model uses a special chat template with roles 'response_1', 'response_2',
+# and optionally 'principle' (see use_principle and default_principle below).
 #
-# Uses genrm_model.local by default (local vLLM server). The genrm_model_local server
-# is defined below; override genrm_model_server.name to use genrm_model.remote instead.
+# The GenRM model server is defined by the top-level "genrm_model" block below (same
+# structure as responses_api_models/genrm_model/configs/genrm_model.yaml). Override
+# genrm_model_server.name to use a different model server (e.g. from another config).
 #
 # Expected GenRM output format (JSON):
 # {
@@ -13,14 +15,15 @@
 #     "ranking": <1-6>   # 1=R1 much better, 6=R2 much better
 # }
 
-# GenRM model server: local vLLM (download + start vLLM). Uses ${genrm_model_name} from env.
-genrm_model_local:
+# GenRM model server (local vLLM). Same structure as responses_api_models/genrm_model/configs/genrm_model.yaml.
+# Uses ${genrm_model_name} from env. Load this block when running genrm_compare, or load that file instead.
+genrm_model:
   responses_api_models:
-    genrm_model.local:
+    genrm_model:
       entrypoint: app.py
       model: ${genrm_model_name}
       return_token_id_information: false
-      uses_reasoning_parser: false
+      uses_reasoning_parser: false  # GenRM outputs structured JSON, not reasoning
       supports_principle_role: true
       hf_home: null
       vllm_serve_env_vars:
@@ -39,10 +42,10 @@ genrm_compare:
     genrm_compare:
       entrypoint: app.py
       
-      # GenRM model server: points to genrm_model.local (see genrm_model_local above)
+      # GenRM model server: points to the "genrm_model" block above (or another config with that name)
       genrm_model_server:
         type: responses_api_models
-        name: genrm_model_local
+        name: genrm_model
       
       # Generation params for GenRM calls
       genrm_responses_create_params:
