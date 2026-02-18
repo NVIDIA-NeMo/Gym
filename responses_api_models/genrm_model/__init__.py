@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# GenRM Response API Model: remote and local subpackages.
+# GenRM Response API Model (local vLLM server).
 #
-# - genrm_model.remote: GenRMModel (remote vLLM endpoint)
-# - genrm_model.local: LocalGenRMModel (local vLLM server)
+# - GenRMModel / GenRMModelConfig: GenRM with locally managed vLLM server

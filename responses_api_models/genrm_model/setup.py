@@ -12,22 +12,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from sys import platform
 
-[project]
-name = "genrm-model-local"
-version = "0.2.0rc0"
-requires-python = ">=3.12"
+import setuptools
+
 dependencies = [
     "nemo-gym[dev]",
+    "hf_transfer==0.1.9",
+    "uvicorn==0.40.0",
 ]
 
-[build-system]
-build-backend = "setuptools.build_meta"
-requires = ["setuptools>=61", "setuptools-scm"]
+if platform == "darwin":
+    dependencies.append("vllm==0.11.0")
+else:
+    dependencies.append("vllm==0.11.2")
 
-[tool.setuptools.packages.find]
-where = [".."]
-include = ["genrm_model*"]
 
-[tool.uv.sources]
-nemo-gym = { path = "../../..", editable = true }
+setuptools.setup(install_requires=dependencies)
