@@ -107,6 +107,11 @@ dependencies = [
     # License: MIT https://github.com/fastapi/fastapi/blob/6df50d40fe195adc026af169d6ebf298a1c183a5/LICENSE
     "fastapi",
 
+    # itsdangerous: Requirement for Starlette SessionMiddleware
+    # Updated Tue Feb 17, 2026 with itsdangerous==2.2.0
+    # License: BSD 3-Clause https://github.com/pallets/itsdangerous/blob/672971d66a2ef9f85151e53283113f33d642dabd/LICENSE.txt
+    "itsdangerous",
+
     # Uvicorn: Used to serve FastAPI apps
     # Updated Mon Jul 28, 2025 with uvicorn==0.35.0
     # License: BSD 3-Clause https://github.com/encode/uvicorn/blob/c1144fd4f130388cffc05ee17b08747ce8c1be11/LICENSE.md
