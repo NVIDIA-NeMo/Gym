@@ -1424,7 +1424,7 @@ requires-dist = [
     { name = "urllib3", specifier = ">=2.6.3" },
     { name = "uvicorn" },
     { name = "uvloop" },
-    { name = "wandb", specifier = ">=0.25.0" },
+    { name = "wandb" },
     { name = "yappi" },
 ]
 provides-extras = ["dev"]
