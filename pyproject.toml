@@ -129,10 +129,10 @@ dependencies = [
     # License: MIT https://github.com/Textualize/rich/blob/27701029082052c6541031b6f139097230253900/LICENSE
     "rich",
 
-    # MLFlow: used for interacting with the Gitlab model registry
-    # Updated Mon Feb 10, 2026 with mlflow>=3.5.0
-    # License: Apache 2.0 https://github.com/mlflow/mlflow/blob/1510ed1bc92d3a4258973005d64f64a43136e251/LICENSE.txt
-    "mlflow>=3.5.0",
+    # mlflow-skinny: used for interacting with the Gitlab model registry. We use the "skinny" version that does not have unnecessary dependencies.
+    # Updated Tue Feb 17, 2026 with mlflow-skinny==3.9.0
+    # License: Apache 2.0 https://github.com/mlflow/mlflow/blob/c6ce84e817897e1a0461632f8a06d4e5e4ac3726/LICENSE.txt
+    "mlflow-skinny",
 
     # aiohttp: async http backend
     # Updated Mon Feb 10, 2026 with aiohttp>=3.13.3
