@@ -9,6 +9,10 @@ math_with_judge:
         input: []
       }
       should_use_judge: true
+      # Skip the judge for the first N verify calls; use library-only reward.
+      judge_warmup_verify_calls: 2048
+      # Approximate characters per token, used for truncation estimates.
+      chars_per_token_estimate: 1.0
       domain: math
       verified: false
       description: Math dataset with math-verify and LLM-as-a-judge
