@@ -1,3 +1,5 @@
+(model-recipes-nemotron-3-nano)=
+
 # Nemotron 3 Nano 30B
 
 This tutorial walks through the complete setup for distributed training of Nemotron 3 Nano 30B across multiple nodes using Slurm and Ray.
@@ -62,10 +64,6 @@ cd RL-nano-v3
 ```
 
 **✅ Success Check**: Repository cloned with nano-v3 branch checked out.
-
----
-
----
 
 ---
 
