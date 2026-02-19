@@ -17,7 +17,7 @@ uv sync
 First set `env.yaml` for a local model:
 ```
 policy_base_url: "http://localhost:8000/v1"
-policy_api_key: "none"
+policy_api_key: <>
 policy_model_name: "Qwen/Qwen3-4B-Instruct-2507"
 ```
 
