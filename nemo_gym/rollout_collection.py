@@ -65,6 +65,7 @@ class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
     wandb_project: str
     wandb_name: str
     wandb_dir: str
+    wandb_api_key: str
 
 
 class RolloutCollectionConfig(SharedRolloutCollectionConfig):

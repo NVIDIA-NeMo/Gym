@@ -480,6 +480,7 @@ def e2e_rollout_collection():  # pragma: no cover
         data_process_output_dir = output_fpath.parent / "preprocessed_datasets"
         data_processor_config_dict["output_dirpath"] = str(data_process_output_dir)
 
+    environ["WANDB_API_KEY"] = e2e_rollout_collection_config.wandb_api_key
     wandb_dir = output_fpath.parent / "wandb"
     wandb_run = wandb.init(
         project=e2e_rollout_collection_config.wandb_project,
