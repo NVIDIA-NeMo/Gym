@@ -337,6 +337,7 @@ Engineering Notes <infrastructure/engineering-notes/index>
 :maxdepth: 1
 
 Configuration <reference/configuration>
+NeMo RL & Gym Compatibility <reference/nemo-rl-gym-compatibility>
 reference/cli-commands.md
 apidocs/index.rst
 FAQ <reference/faq>
