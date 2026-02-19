@@ -47,6 +47,7 @@ from nemo_gym.global_config import (
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
     PIP_INSTALL_VERBOSE_KEY_NAME,
     PYTHON_VERSION_KEY_NAME,
+    SKIP_VENV_IF_PRESENT_KEY_NAME,
     UV_PIP_SET_PYTHON_KEY_NAME,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
@@ -62,13 +63,17 @@ from nemo_gym.server_utils import (
 )
 
 
-def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  # pragma: no cover
+def _setup_env_command(
+    dir_path: Path, global_config_dict: DictConfig, prefix: Optional[str] = None
+) -> str:  # pragma: no cover
     head_server_deps = global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]
 
     uv_venv_cmd = f"uv venv --seed --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} .venv"
 
-    has_pyproject_toml = exists(f"{dir_path / 'pyproject.toml'}")
-    has_requirements_txt = exists(f"{dir_path / 'requirements.txt'}")
+    venv_python_fpath = dir_path / ".venv/bin/python"
+    venv_activate_fpath = dir_path / ".venv/bin/activate"
+    skip_venv_if_present = global_config_dict[SKIP_VENV_IF_PRESENT_KEY_NAME]
+    should_skip_venv_setup = bool(skip_venv_if_present) and venv_python_fpath.exists() and venv_activate_fpath.exists()
 
     is_editable_install = exists(f"{dir_path / '../../pyproject.toml'}")
 
@@ -80,46 +85,61 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
 
     verbose_flag = "-v " if global_config_dict.get(PIP_INSTALL_VERBOSE_KEY_NAME) else ""
 
-    # TEMPORARY: need to specify test-pypi index until its published to pypi.org
-    # DELETE BEFORE MERGING
-    pypi_index_flags = (
-        "--index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ "
-        if not is_editable_install
-        else ""
-    )
-
-    if has_pyproject_toml and has_requirements_txt:
-        raise RuntimeError(
-            f"Found both pyproject.toml and requirements.txt for uv venv setup in server dir: {dir_path}. Please only use one or the other!"
+    if should_skip_venv_setup:
+        env_setup_cmd = _venv_install_or_skip(
+            should_skip=True,
+            uv_venv_cmd=uv_venv_cmd,
+            install_cmd="",
+            prefix=prefix,
         )
-    elif has_pyproject_toml:
-        if is_editable_install:
-            install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
-        else:
-            # install nemo-gym from pypi instead of relative path in pyproject.toml
-            install_cmd = (
-                f"""uv pip install {verbose_flag}{uv_pip_python_flag}{pypi_index_flags}nemo-gym && """
-                f"""uv pip install {verbose_flag}{uv_pip_python_flag}--no-sources '-e .' {" ".join(head_server_deps)}"""
-            )
-    elif has_requirements_txt:
-        if is_editable_install:
-            install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}-r requirements.txt {" ".join(head_server_deps)}"""
-        else:
-            # install nemo-gym from pypi instead of relative path in requirements.txt
-            install_cmd = (
-                f"""(echo 'nemo-gym' && grep -v -F '../..' requirements.txt) | """
-                f"""uv pip install {verbose_flag}{uv_pip_python_flag}{pypi_index_flags}-r /dev/stdin {" ".join(head_server_deps)}"""
-            )
     else:
-        raise RuntimeError(f"Missing pyproject.toml or requirements.txt for uv venv setup in server dir: {dir_path}")
+        has_pyproject_toml = exists(f"{dir_path / 'pyproject.toml'}")
+        has_requirements_txt = exists(f"{dir_path / 'requirements.txt'}")
+        if has_pyproject_toml and has_requirements_txt:
+            raise RuntimeError(
+                f"Found both pyproject.toml and requirements.txt for uv venv setup in server dir: {dir_path}. Please only use one or the other!"
+            )
+        elif has_pyproject_toml:
+            if is_editable_install:
+                install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
+            else:
+                # install nemo-gym from pypi instead of relative path in pyproject.toml
+                install_cmd = (
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}nemo-gym && """
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}--no-sources '-e .' {" ".join(head_server_deps)}"""
+                )
+        elif has_requirements_txt:
+            if is_editable_install:
+                install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}-r requirements.txt {" ".join(head_server_deps)}"""
+            else:
+                # install nemo-gym from pypi instead of relative path in requirements.txt
+                install_cmd = (
+                    f"""(echo 'nemo-gym' && grep -v -F '../..' requirements.txt) | """
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}-r /dev/stdin {" ".join(head_server_deps)}"""
+                )
+        else:
+            raise RuntimeError(
+                f"Missing pyproject.toml or requirements.txt for uv venv setup in server dir: {dir_path}"
+            )
+        env_setup_cmd = _venv_install_or_skip(
+            should_skip=False,
+            uv_venv_cmd=uv_venv_cmd,
+            install_cmd=install_cmd,
+            prefix=prefix,
+        )
 
-    cmd = f"""cd {dir_path} \\
-    && {uv_venv_cmd} \\
-    && source .venv/bin/activate \\
-    && {install_cmd} \\
-    """
+    return f"cd {dir_path} && {env_setup_cmd}"
 
-    return cmd
+
+def _venv_install_or_skip(should_skip: bool, uv_venv_cmd: str, install_cmd: str, prefix: Optional[str] = None) -> str:
+    if should_skip:
+        return "source .venv/bin/activate"
+
+    if prefix is not None:
+        uv_venv_cmd = f"{uv_venv_cmd} > >(sed 's/^/({prefix}) /') 2> >(sed 's/^/({prefix}) /' >&2)"
+        install_cmd = f"{install_cmd} > >(sed 's/^/({prefix}) /') 2> >(sed 's/^/({prefix}) /' >&2)"
+
+    return f"{uv_venv_cmd} && source .venv/bin/activate && {install_cmd}"
 
 
 def _run_command(command: str, working_dir_path: Path) -> Popen:  # pragma: no cover
@@ -130,7 +150,16 @@ def _run_command(command: str, working_dir_path: Path) -> Popen:  # pragma: no c
         custom_env["PYTHONPATH"] = f"{work_dir}:{py_path}"
     else:
         custom_env["PYTHONPATH"] = work_dir
-    return Popen(command, executable="/bin/bash", shell=True, env=custom_env)
+    redirect_stdout = sys.stdout
+    redirect_stderr = sys.stderr
+    return Popen(
+        command,
+        executable="/bin/bash",
+        shell=True,
+        env=custom_env,
+        stdout=redirect_stdout,
+        stderr=redirect_stderr,
+    )
 
 
 class RunConfig(BaseNeMoGymCLIConfig):
@@ -235,7 +264,7 @@ class RunHelper:  # pragma: no cover
 
             dir_path = PARENT_DIR / Path(first_key, second_key)
 
-            command = f"""{_setup_env_command(dir_path, global_config_dict)} \\
+            command = f"""{_setup_env_command(dir_path, global_config_dict, top_level_path)} \\
     && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
     {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(top_level_path)} \\
     python {str(entrypoint_fpath)}"""
@@ -506,7 +535,7 @@ ng_collect_rollouts +agent_name=example_multi_step_simple_agent \
     +limit=null
 
 # View your rollouts
-ng_viewer +jsonl_fpath=resources_servers/example_multi_step/data/example_rollouts.jsonl
+head -1 resources_servers/example_multi_step/data/example_rollouts.jsonl
 ```
 """
     with open(example_rollouts_fpath) as f:

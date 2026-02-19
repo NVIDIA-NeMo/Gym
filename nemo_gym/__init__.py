@@ -38,9 +38,6 @@ environ["TRANSFORMERS_CACHE"] = environ["HF_DATASETS_CACHE"]
 # UV caching directory overrides to local folders.
 environ["UV_CACHE_DIR"] = str(CACHE_DIR / "uv")
 
-# Turn off Gradio analytics
-environ["GRADIO_ANALYTICS_ENABLED"] = "False"
-
 from nemo_gym.package_info import (
     __contact_emails__,
     __contact_names__,
