@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import io
+import json
 import multiprocessing
 import re
 import signal
@@ -215,7 +216,7 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
     async def verify(self, body: PythonMathVerifyRequest) -> PythonMathVerifyResponse:
         expected = body.expected_result
 
-        # Extract actual answer from final assistant message
+        # Search assistant messages (last-to-first) for \boxed{}.
         actual = None
         for output in reversed(body.response.output):
             if output.type == "message" and output.role == "assistant":
@@ -224,13 +225,25 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
                     if content.type == "output_text":
                         text_content += content.text
 
-                # Extract boxed answer
-                match = re.search(r"\\boxed\{([^}]+)\}", text_content)
-                if match:
-                    actual = match.group(1).strip()
+                actual = _extract_boxed_answer(text_content)
+                if actual is not None:
                     break
 
-        accuracy = str(actual) == str(expected)
+        # Fallback: the model may print the boxed answer inside executed code,
+        # so search tool output (stdout) as well.
+        if actual is None:
+            for output in reversed(body.response.output):
+                if output.type == "function_call_output":
+                    try:
+                        tool_resp = json.loads(output.output)
+                        stdout_text = tool_resp.get("stdout", "")
+                    except (json.JSONDecodeError, AttributeError):
+                        stdout_text = output.output
+                    actual = _extract_boxed_answer(stdout_text)
+                    if actual is not None:
+                        break
+
+        accuracy = _answers_match(actual, expected)
         reward = 1.0 if accuracy else 0.0
 
         return PythonMathVerifyResponse(
@@ -239,6 +252,74 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
             extracted_answer=actual,
             accuracy=accuracy,
         )
+
+
+def _normalize_answer(s: str) -> str:
+    """Strip common math delimiters and whitespace for fair comparison.
+
+    Many expected_result values are wrapped in \\(...\\) or $...$,
+    but model answers inside \\boxed{} never include those wrappers.
+    Without this normalization, ~67% of answers can never match.
+    """
+    s = s.strip()
+    if s.startswith("\\(") and s.endswith("\\)"):
+        s = s[2:-2].strip()
+    if s.startswith("$") and s.endswith("$") and len(s) > 1:
+        s = s[1:-1].strip()
+    if s.startswith("\\text{") and s.endswith("}"):
+        s = s[6:-1].strip()
+    s = " ".join(s.split())
+    return s
+
+
+def _answers_match(actual: Optional[str], expected: str) -> bool:
+    """Compare answers after normalization, with numeric fallback."""
+    if actual is None:
+        return False
+
+    norm_actual = _normalize_answer(actual)
+    norm_expected = _normalize_answer(expected)
+
+    # Exact match after normalization
+    if norm_actual == norm_expected:
+        return True
+
+    # Numeric fallback (handles "42" vs "42.0", "0.5" vs ".5", etc.)
+    try:
+        fa = float(norm_actual)
+        fe = float(norm_expected)
+        if abs(fa - fe) < 1e-6 * max(1.0, abs(fe)):
+            return True
+    except (ValueError, OverflowError):
+        pass
+
+    return False
+
+
+def _extract_boxed_answer(text: str) -> Optional[str]:
+    """Extract the content inside the last \\boxed{...} in text.
+
+    Uses brace-depth tracking so nested braces are handled correctly
+    (e.g. \\boxed{\\frac{1}{2}} correctly returns '\\frac{1}{2}').
+    """
+    marker = "\\boxed{"
+    # Use the last occurrence so chain-of-thought intermediate boxes are skipped.
+    idx = text.rfind(marker)
+    if idx == -1:
+        return None
+    start = idx + len(marker)
+    depth = 1
+    i = start
+    while i < len(text) and depth > 0:
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+        i += 1
+    if depth != 0:
+        return None
+    result = text[start : i - 1].strip()
+    return result if result else None
 
 
 def _get_last_expr_value(code: str, globals_dict: dict, locals_dict: dict):
