@@ -26,6 +26,7 @@ from typing import Any, Optional
 
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict
+from pydantic_core import ValidationError
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -261,6 +262,21 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         app = super().setup_webserver()
         return app
 
+    @staticmethod
+    def _truncate_answer_for_judge(text: str, budget_chars: int) -> str:
+        """Truncate while preserving end-of-answer content (usually where final answer appears)."""
+        if budget_chars <= 0:
+            return ""
+        if len(text) <= budget_chars:
+            return text
+        marker = "\n... [truncated for judge context limit]\n"
+        marker_len = len(marker)
+        if budget_chars <= marker_len + 16:
+            return text[-budget_chars:]
+        head_chars = max(0, int(budget_chars * 0.2))
+        tail_chars = budget_chars - head_chars - marker_len
+        return text[:head_chars] + marker + text[-tail_chars:]
+
     def _should_skip_for_length(self, body: LLMJudgeVerifyRequest, expected: str) -> bool:
         """Check if length threshold should skip second evaluation (rescue or swap).
 
@@ -444,32 +460,29 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
 
             # Budget remaining for the generated_answer
             max_answer_tokens = cfg.max_judge_input_tokens - overhead_tokens_est
-            if max_answer_tokens < 100:
-                # Not enough room even for a minimal answer -- skip this judge call
-                # Return not-equal with a dummy evaluation
-                user_prompt = prompt_template.format(
-                    question=question,
-                    expected_answer=expected_answer,
-                    generated_answer="[TRUNCATED - answer too long for judge context]",
+            if max_answer_tokens <= 0:
+                print(
+                    "[WARNING] - equivalence_llm_judge - No token budget for generated_answer "
+                    f"(max_answer_tokens={max_answer_tokens}). Returning not-equal."
                 )
-                msgs: list[NeMoGymEasyInputMessage] = []
-                if system_message:
-                    msgs.append(NeMoGymEasyInputMessage(role="system", content=system_message))
-                msgs.append(NeMoGymEasyInputMessage(role="user", content=user_prompt))
-                responses_create_params.input = msgs
                 eval_record = JudgeEvaluation(
                     responses_create_params=responses_create_params,
                     response=NeMoGymResponse(
-                        id="truncated", created_at=0, model="", object="response", output=[]
+                        id="truncated",
+                        created_at=0,
+                        model="",
+                        object="response",
+                        output=[],
+                        parallel_tool_calls=True,
+                        tool_choice="auto",
+                        tools=[],
                     ),
                     verdict_label=None,
                 )
                 return False, eval_record
 
-            max_answer_chars = int(max_answer_tokens * cpt)
-            if len(generated_answer) > max_answer_chars:
-                generated_answer = generated_answer[:max_answer_chars] + "\n... [truncated for judge context limit]"
-        ### End truncation logic ###        
+            max_answer_chars = max(64, int(max_answer_tokens * cpt))
+            generated_answer = self._truncate_answer_for_judge(generated_answer, max_answer_chars)        
 
         user_prompt = prompt_template.format(
             question=question, expected_answer=expected_answer, generated_answer=generated_answer
@@ -486,7 +499,19 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
             url_path="/v1/responses",
             json=responses_create_params,
         )
-        judge_response = NeMoGymResponse.model_validate(await response.json())
+        try:
+            judge_response = NeMoGymResponse.model_validate(await response.json())
+        except ValidationError:
+            judge_response = NeMoGymResponse(
+                id="validation_error",
+                created_at=0,
+                model="",
+                object="response",
+                output=[],
+                parallel_tool_calls=True,
+                tool_choice="auto",
+                tools=[],
+            )
         eval_record = JudgeEvaluation(
             responses_create_params=responses_create_params,
             response=judge_response,
