@@ -20,11 +20,6 @@ from pydantic import BaseModel, Field
 
 from nemo_gym.server_utils import ServerClient, raise_for_status
 
-from resources_servers.genrm_compare.utils import (
-    extract_conversation_history,
-    get_prompt_key,
-)
-
 
 @runtime_checkable
 class ComparisonStrategy(Protocol):

@@ -174,7 +174,9 @@ def _input_to_conversation_history(input_messages: Any) -> List[Dict[str, str]]:
             content = getattr(m, "content", "") or ""
         if isinstance(content, list):
             content = "".join(
-                part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "output_text"
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "output_text"
             )
         out.append({"role": str(role), "content": str(content)})
     return out
@@ -209,7 +211,6 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             principle,
         )
         future: asyncio.Future[float] = asyncio.get_running_loop().create_future()
-        response_dict = body.response.model_dump() if hasattr(body.response, "model_dump") else body.response
 
         async with _cohort_lock:
             if prompt_key not in _cohort_buffers:
@@ -222,12 +223,9 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 # Cohort complete: run comparison and resolve all futures
                 assert len(buf) == cfg.num_rollouts_per_prompt
                 first_params = buf[0][0].responses_create_params
-                conversation_history = _input_to_conversation_history(
-                    getattr(first_params, "input", []) or []
-                )
+                conversation_history = _input_to_conversation_history(getattr(first_params, "input", []) or [])
                 response_objs = [
-                    (b.response.model_dump() if hasattr(b.response, "model_dump") else b.response)
-                    for b, _ in buf
+                    (b.response.model_dump() if hasattr(b.response, "model_dump") else b.response) for b, _ in buf
                 ]
                 principle_val = getattr(buf[0][0], "principle", None) or principle
                 try:
