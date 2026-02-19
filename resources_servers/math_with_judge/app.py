@@ -44,6 +44,12 @@ class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     should_use_judge: bool = True
+    # Skip the judge for the first N verify calls; use library-only reward.
+    judge_warmup_verify_calls: int = 0
+    # If set, truncate judge inputs to stay within this token budget.
+    max_judge_input_tokens: Optional[int] = None
+    # Approximate characters per token, used for truncation estimates.
+    chars_per_token_estimate: float = 3.5
 
 
 class LibraryJudgeMathRunRequest(BaseRunRequest):
@@ -99,7 +105,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
 
         logging.getLogger("math_verify").setLevel(logging.CRITICAL)
 
-        # Use Latex and plain math extraction from predictions
+        # Configure math_verify to extract answers from both formula and plain text formats.
         # https://github.com/huggingface/Math-Verify?tab=readme-ov-file#extraction-targets
         self._library_verifier = math_metric(
             gold_extraction_target=(LatexExtractionConfig(),),
@@ -154,13 +160,20 @@ Example output: "My final verdict is different [[A!=B]]"."""
         """
 
         library_reward, extracted_answer = self._verify_answer_with_library(expected_answer, generated_answer)
-        if not self.config.should_use_judge or library_reward > 0.5:
+        judge_warmup_verify_calls = int(getattr(self.config, "judge_warmup_verify_calls", 0) or 0)
+        if judge_warmup_verify_calls > 0:
+            if not hasattr(self, "_verify_calls"):
+                self._verify_calls = 0
+            self._verify_calls += 1
+            if self._verify_calls <= judge_warmup_verify_calls:
+                return library_reward, extracted_answer, library_reward, None
+        if not self.config.should_use_judge or library_reward > 0.05:
             return library_reward, extracted_answer, library_reward, None
 
-        judge_reward, judge_evaluations = await self._verify_answer_with_judge(
-            question, expected_answer, generated_answer
-        )
-        return judge_reward, extracted_answer, library_reward, judge_evaluations
+        judge_answer = extracted_answer if extracted_answer else generated_answer
+        judge_reward, judge_evaluations = await self._verify_answer_with_judge(question, expected_answer, judge_answer)
+        final_reward = max(judge_reward, library_reward)
+        return final_reward, extracted_answer, library_reward, judge_evaluations
 
     @classmethod
     @contextlib.contextmanager
@@ -172,11 +185,27 @@ Example output: "My final verdict is different [[A!=B]]"."""
         ):
             yield
 
+    @staticmethod
+    def _strip_math_delimiters(s: str) -> str:
+        """Strip outer math delimiters from expected answers.
+
+        Many expected_answer values are wrapped in \\(...\\) or $...$,
+        which causes the math_verify parser to fail when we wrap them
+        in \\boxed{}.  Removing these outer delimiters fixes parsing.
+        """
+        s = s.strip()
+        if s.startswith("\\(") and s.endswith("\\)"):
+            s = s[2:-2].strip()
+        if s.startswith("$") and s.endswith("$") and len(s) > 1:
+            s = s[1:-1].strip()
+        return s
+
     def _verify_answer_with_library(self, expected_answer: str, generated_answer: str) -> tuple[float, Optional[str]]:
         # This functionality is migrated from Nemo RL.
         # https://github.com/NVIDIA-NeMo/RL/blob/e1f56c42ae175d3863ccaf4e21b7de7e9c46c2e1/nemo_rl/environments/math_environment.py
         try:
-            ground_truth_parsable = "\\boxed{" + expected_answer + "}"
+            stripped = self._strip_math_delimiters(expected_answer)
+            ground_truth_parsable = "\\boxed{" + stripped + "}"
             with self._mute_output():
                 ret_score, extracted_answer = self._library_verifier([ground_truth_parsable], [generated_answer])
 
@@ -197,7 +226,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
                     # If no match is found, that means all the answers are
                     # incorrect.  The first prediction is used as the extracted
                     # answer.
-                    extracted_answer = extracted_prediction[0]
+                    extracted_answer = extracted_prediction[0] if extracted_prediction else None
 
             return reward, extracted_answer
 
@@ -235,6 +264,23 @@ Example output: "My final verdict is different [[A!=B]]"."""
     ) -> tuple[bool, JudgeEvaluation]:
         config = self.config
         responses_create_params = config.judge_responses_create_params.model_copy(deep=True)
+
+        # Truncate answers if they would exceed the judge model's context window.
+        if getattr(config, "max_judge_input_tokens", None) is not None:
+            cpt = getattr(config, "chars_per_token_estimate", 3.5)
+            scaffold = self.JUDGE_PROMPT_TEMPLATE.format(question=question, first_answer="", second_answer="")
+            overhead_chars = len(self.JUDGE_SYSTEM_MESSAGE) + len(scaffold)
+            overhead_tokens_est = overhead_chars / cpt
+            budget_chars = int((config.max_judge_input_tokens - overhead_tokens_est) * cpt)
+            if budget_chars >= 100 and (len(first_answer) + len(second_answer)) > budget_chars:
+                total = len(first_answer) + len(second_answer)
+                first_answer = first_answer[: int(budget_chars * len(first_answer) / total)]
+                second_answer = second_answer[: int(budget_chars * len(second_answer) / total)]
+                if first_answer and not first_answer.endswith("\n"):
+                    first_answer += "\n... [truncated]"
+                if second_answer and not second_answer.endswith("\n"):
+                    second_answer += "\n... [truncated]"
+
         judge_prompt = self.JUDGE_PROMPT_TEMPLATE.format(
             question=question, first_answer=first_answer, second_answer=second_answer
         )
