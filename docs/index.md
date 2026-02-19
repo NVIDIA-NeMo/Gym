@@ -34,7 +34,7 @@ A training environment consists of three server components: **Agents** orchestra
 Quickstart
 ```
 
-```{button-ref} tutorials/index
+```{button-ref} environment-tutorials/index
 :ref-type: doc
 :color: secondary
 :class: sd-rounded-pill
@@ -109,19 +109,11 @@ Generate batches of scored interactions and view them with the rollout viewer.
 {bdg-secondary}`10 min` {bdg-secondary}`rollouts` {bdg-secondary}`training-data`
 :::
 
-:::{grid-item-card} {octicon}`play;1.5em;sd-mr-1` First Training Run
-:link: get-started/first-training-run
-:link-type: doc
-Train a Sudoku-solving model with GRPO using a self-contained Colab notebook.
-+++
-{bdg-secondary}`30 min` {bdg-secondary}`training` {bdg-secondary}`colab`
-:::
-
 ::::
 
-## Server Components
+## Environment Configuration
 
-Configure and customize the three server components of a training environment.
+Configure and customize environment components and prepare datasets.
 
 ::::{grid} 1 2 2 2
 :gutter: 1 1 1 2
@@ -132,14 +124,6 @@ Configure and customize the three server components of a training environment.
 Configure LLM inference backends including vLLM.
 +++
 {bdg-secondary}`inference` {bdg-secondary}`vllm`
-:::
-
-:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` Agent Server
-:link: agent-server/index
-:link-type: doc
-Orchestrate rollout lifecycle and tool calling.
-+++
-{bdg-secondary}`agents` {bdg-secondary}`orchestration`
 :::
 
 :::{grid-item-card} {octicon}`database;1.5em;sd-mr-1` Data
@@ -165,6 +149,14 @@ Learn how to build custom training environments for various RL scenarios.
 Build a complete training environment from scratch.
 +++
 {bdg-primary}`beginner` {bdg-secondary}`foundational`
+:::
+
+:::{grid-item-card} {octicon}`stack;1.5em;sd-mr-1` Multi-Environment Training
+:link: environment-tutorials/multi-environment-training
+:link-type: doc
+Run multiple training environments simultaneously for rollout collection.
++++
+{bdg-secondary}`multi-environment` {bdg-secondary}`multi-verifier`
 :::
 
 ::::
@@ -212,7 +204,7 @@ View all training tutorials →
 
 ## Infrastructure
 
-Deploy and scale NeMo Gym for production workloads.
+Deploy NeMo Gym and plan cluster resources for training.
 
 ::::{grid} 1 2 2 2
 :gutter: 1 1 1 2
@@ -266,7 +258,6 @@ Home <self>
 
 Overview <about/index.md>
 Concepts <about/concepts/index>
-🟡 Architecture <about/architecture>
 Ecosystem <about/ecosystem>
 ```
 
@@ -278,7 +269,6 @@ Ecosystem <about/ecosystem>
 Quickstart <get-started/index>
 Detailed Setup Guide <get-started/detailed-setup.md>
 Rollout Collection <get-started/rollout-collection.md>
-🟡 First Training Run <get-started/first-training-run.md>
 ```
 
 ```{toctree}
@@ -286,17 +276,8 @@ Rollout Collection <get-started/rollout-collection.md>
 :hidden:
 :maxdepth: 1
 
-🟡 Overview <model-server/index>
-🟡 vLLM <model-server/vllm>
-```
-
-```{toctree}
-:caption: Agent Server
-:hidden:
-:maxdepth: 1
-
-🟡 Overview <agent-server/index>
-🟡 OpenAI Agents SDK <agent-server/integrate-agents/openai-agents-sdk>
+Overview <model-server/index>
+vLLM <model-server/vllm>
 ```
 
 ```{toctree}
@@ -304,9 +285,9 @@ Rollout Collection <get-started/rollout-collection.md>
 :hidden:
 :maxdepth: 1
 
-🟡 Overview <data/index>
-🟡 Prepare and Validate <data/prepare-validate>
-🟡 Download from Hugging Face <data/download-huggingface>
+Overview <data/index>
+Prepare and Validate <data/prepare-validate>
+Download from Hugging Face <data/download-huggingface>
 ```
 
 ```{toctree}
@@ -315,7 +296,7 @@ Rollout Collection <get-started/rollout-collection.md>
 :maxdepth: 1
 
 Overview <environment-tutorials/index>
-🟡 Creating Training Environment <environment-tutorials/creating-training-environment>
+Creating Training Environment <environment-tutorials/creating-training-environment>
 Multi-Environment Training <environment-tutorials/multi-environment-training>
 ```
 
@@ -327,7 +308,7 @@ Multi-Environment Training <environment-tutorials/multi-environment-training>
 Overview <training-tutorials/index>
 NeMo RL <training-tutorials/nemo-rl-grpo/index.md>
 TRL <training-tutorials/trl>
-Unsloth <training-tutorials/unsloth-training>
+Unsloth <training-tutorials/unsloth>
 Offline Training (SFT/DPO) <training-tutorials/offline-training-w-rollouts>
 ```
 
@@ -336,8 +317,8 @@ Offline Training (SFT/DPO) <training-tutorials/offline-training-w-rollouts>
 :hidden:
 :maxdepth: 1
 
-🟡 Overview <model-recipes/index>
-🟡 Nemotron 3 Nano <model-recipes/nemotron-nano>
+Overview <model-recipes/index>
+Nemotron 3 Nano <model-recipes/nemotron-3-nano>
 ```
 
 ```{toctree}
@@ -347,7 +328,7 @@ Offline Training (SFT/DPO) <training-tutorials/offline-training-w-rollouts>
 
 Overview <infrastructure/index>
 Deployment Topology <infrastructure/deployment-topology>
-SWE RL Case Study <infrastructure/swe-rl-case-study>
+Engineering Notes <infrastructure/engineering-notes/index>
 ```
 
 ```{toctree}

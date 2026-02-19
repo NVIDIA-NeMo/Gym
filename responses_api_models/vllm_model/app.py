@@ -263,7 +263,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 ) + (choice_dict["message"]["content"] or "")
         else:
             assert not choice_dict["message"].get("reasoning_content"), (
-                "Please do not use a reasoning parser in vLLM! There is one source of truth for handling data (including reasoning), which is NeMo Gym!"
+                f"NeMo Gym server `{self.config.name}` config has explicitly been set to not use a reasoning parser i.e. `uses_reasoning_parser: false`. Please do not use a reasoning parser in your vLLM endpoint, or fix the `{self.config.name}` server config!"
             )
 
         if self.config.return_token_id_information:

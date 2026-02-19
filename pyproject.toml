@@ -107,6 +107,11 @@ dependencies = [
     # License: MIT https://github.com/fastapi/fastapi/blob/6df50d40fe195adc026af169d6ebf298a1c183a5/LICENSE
     "fastapi",
 
+    # itsdangerous: Requirement for Starlette SessionMiddleware
+    # Updated Tue Feb 17, 2026 with itsdangerous==2.2.0
+    # License: BSD 3-Clause https://github.com/pallets/itsdangerous/blob/672971d66a2ef9f85151e53283113f33d642dabd/LICENSE.txt
+    "itsdangerous",
+
     # Uvicorn: Used to serve FastAPI apps
     # Updated Mon Jul 28, 2025 with uvicorn==0.35.0
     # License: BSD 3-Clause https://github.com/encode/uvicorn/blob/c1144fd4f130388cffc05ee17b08747ce8c1be11/LICENSE.md
@@ -124,15 +129,17 @@ dependencies = [
     "hydra-core",
     "omegaconf",
 
-    # Gradio: For simple frontend interfaces for viewing data
-    # Updated Sun Aug 03, 2025 with gradio==5.16.0
-    # License: Apache 2.0 https://github.com/gradio-app/gradio/blob/2b4432edea8a62659e180e24eedd2bddbed08e77/LICENSE
-    "gradio",
+    # rich: used for nicer terminal content displays
+    # Updated Tue Feb 17, 2026 with rich==14.3.2
+    # License: MIT https://github.com/Textualize/rich/blob/27701029082052c6541031b6f139097230253900/LICENSE
+    "rich",
 
-    # MLFlow: used for interacting with the Gitlab model registry
-    # Updated Mon Feb 10, 2026 with mlflow>=3.5.0
-    # License: Apache 2.0 https://github.com/mlflow/mlflow/blob/1510ed1bc92d3a4258973005d64f64a43136e251/LICENSE.txt
-    "mlflow>=3.5.0",
+    # mlflow-skinny: used for interacting with the Gitlab model registry. We use the "skinny" version that does not have unnecessary dependencies.
+    # mlflow dependency is necessary for importing. However, all of mlflow's dependencies that don't overlap with mlflow-skinny are excluded below.
+    # Updated Tue Feb 17, 2026 with mlflow-skinny==3.9.0
+    # License: Apache 2.0 https://github.com/mlflow/mlflow/blob/c6ce84e817897e1a0461632f8a06d4e5e4ac3726/LICENSE.txt
+    "mlflow-skinny",
+    "mlflow",
 
     # aiohttp: async http backend
     # Updated Mon Feb 10, 2026 with aiohttp>=3.13.3
@@ -241,6 +248,38 @@ build-backend = "setuptools.build_meta"
 
 [tool.uv]
 managed = true
+required-version = ">=0.9.30"
+exclude-dependencies = [
+    # Exclude unwanted dependencies from mlflow
+    "alembic",
+    "blinker",
+    "cffi",
+    "contourpy",
+    "cryptography",
+    "cycler",
+    "docker",
+    "flask",
+    "flask-cors",
+    "graphene",
+    "graphql-core",
+    "graphql-relay",
+    "gunicorn",
+    "huey",
+    "joblib",
+    "kiwisolver",
+    "matplotlib",
+    "pillow",
+    "prettytable",
+    "pyparsing",
+    "scikit-learn",
+    "scipy",
+    "skops",
+    "sqlalchemy",
+    "threadpoolctl",
+    "wcwidth",
+    "werkzeug",
+    "waitress",
+]
 
 [tool.setuptools.dynamic]
 version = {attr = "nemo_gym.__version__"}
@@ -261,10 +300,6 @@ nemo_gym_test = "nemo_gym.cli:test"
 ng_test = "nemo_gym.cli:test"
 nemo_gym_test_all = "nemo_gym.cli:test_all"
 ng_test_all = "nemo_gym.cli:test_all"
-
-# Dataset viewing
-nemo_gym_viewer = "nemo_gym.dataset_viewer:main"
-ng_viewer = "nemo_gym.dataset_viewer:main"
 
 # Development convenience aliases.
 nemo_gym_dev_test = "nemo_gym.cli:dev_test"
