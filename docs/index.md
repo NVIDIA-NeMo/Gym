@@ -313,6 +313,15 @@ Offline Training (SFT/DPO) <training-tutorials/offline-training-w-rollouts>
 ```
 
 ```{toctree}
+:caption: Model Recipes
+:hidden:
+:maxdepth: 1
+
+Overview <model-recipes/index>
+Nemotron 3 Nano <model-recipes/nemotron-3-nano>
+```
+
+```{toctree}
 :caption: Infrastructure
 :hidden:
 :maxdepth: 1
