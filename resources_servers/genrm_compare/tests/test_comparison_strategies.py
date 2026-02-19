@@ -10,9 +10,11 @@ from resources_servers.genrm_compare.comparison_strategies import (
     ComparisonStrategy,
     GenRMStrategy,
     GenRMStrategyConfig,
-    extract_conversation_history,
     extract_generated_text,
     generate_response,
+)
+from resources_servers.genrm_compare.utils import (
+    extract_conversation_history,
     get_prompt_key,
 )
 

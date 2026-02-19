@@ -109,10 +109,8 @@ class TestGenRMCompareResourcesServer:
 
     def test_single_response_returns_default(self, config):
         """Single response should return default score."""
-        server = GenRMCompareResourcesServer(config=config)
-
-        # Mock the server_client
-        server.server_client = MagicMock()
+        # model_construct bypasses Pydantic validation; server_client is unused for single-response path
+        server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
 
         # Create request with single response
         request = GenRMCompareRequest(
