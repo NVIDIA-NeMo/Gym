@@ -94,6 +94,9 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
         print(f"Found {len(rows)} rows!")
 
         if config.num_repeats:
+            if config.num_repeats_add_seed:
+                print("Adding unique `seed` values to each input!")
+
             previous_length = len(rows)
             expanded = []
             for task_idx, row in enumerate(rows):
