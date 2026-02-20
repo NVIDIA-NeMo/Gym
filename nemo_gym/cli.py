@@ -66,7 +66,7 @@ from nemo_gym.server_utils import (
 )
 
 
-def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  # pragma: no cover
+def _setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: Optional[str] = None) -> str:  # pragma: no cover
     head_server_deps = global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]
 
     uv_venv_cmd = f"uv venv --seed --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} .venv"
@@ -89,6 +89,7 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
             should_skip=True,
             uv_venv_cmd=uv_venv_cmd,
             install_cmd="",
+            prefix=prefix,
         )
     else:
         has_pyproject_toml = exists(f"{dir_path / 'pyproject.toml'}")
@@ -109,19 +110,24 @@ def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  
             should_skip=False,
             uv_venv_cmd=uv_venv_cmd,
             install_cmd=install_cmd,
+            prefix=prefix,
         )
 
     return f"cd {dir_path} && {env_setup_cmd}"
 
 
-def _venv_install_or_skip(should_skip: bool, uv_venv_cmd: str, install_cmd: str) -> str:
+def _venv_install_or_skip(should_skip: bool, uv_venv_cmd: str, install_cmd: str, prefix: Optional[str] = None) -> str:
     if should_skip:
         return "source .venv/bin/activate"
+
+    if prefix is not None:
+        uv_venv_cmd = f"{uv_venv_cmd} > >(sed 's/^/({prefix}) /') 2> >(sed 's/^/({prefix}) /' >&2)"
+        install_cmd = f"{install_cmd} > >(sed 's/^/({prefix}) /') 2> >(sed 's/^/({prefix}) /' >&2)"
 
     return f"{uv_venv_cmd} && source .venv/bin/activate && {install_cmd}"
 
 
-def _run_command(command: str, working_dir_path: Path, top_level_name: Optional[str] = None) -> Popen:  # pragma: no cover
+def _run_command(command: str, working_dir_path: Path) -> Popen:  # pragma: no cover
     work_dir = f"{working_dir_path.absolute()}"
     custom_env = environ.copy()
     py_path = custom_env.get("PYTHONPATH", None)
@@ -129,11 +135,8 @@ def _run_command(command: str, working_dir_path: Path, top_level_name: Optional[
         custom_env["PYTHONPATH"] = f"{work_dir}:{py_path}"
     else:
         custom_env["PYTHONPATH"] = work_dir
-    redirect_stdout = None
-    redirect_stderr = None
-    if top_level_name is not None:
-        redirect_stdout = open(f"{work_dir}/run-{top_level_name}.out.log", "a")
-        redirect_stderr = open(f"{work_dir}/run-{top_level_name}.err.log", "a")
+    redirect_stdout = sys.stdout
+    redirect_stderr = sys.stderr
     return Popen(
         command,
         executable="/bin/bash",
@@ -249,12 +252,12 @@ class RunHelper:  # pragma: no cover
 
             dir_path = PARENT_DIR / Path(first_key, second_key)
 
-            command = f"""{_setup_env_command(dir_path, global_config_dict)} \\
+            command = f"""{_setup_env_command(dir_path, global_config_dict, top_level_path)} \\
     && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
     {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(top_level_path)} \\
     python {str(entrypoint_fpath)}"""
 
-            process = _run_command(command, dir_path, top_level_path)
+            process = _run_command(command, dir_path)
             self._processes[top_level_path] = process
 
             host = server_config_dict.get("host")
