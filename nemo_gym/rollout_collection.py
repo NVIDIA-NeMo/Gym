@@ -107,7 +107,7 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
 
 
 class RolloutCollectionHelper(BaseModel):  # pragma: no cover
-    async def run_from_config(self, config: RolloutCollectionConfig) -> List[dict]:
+    def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[dict]:
         range_iterator = repeat(0)
         if config.limit:
             range_iterator = range(config.limit)
