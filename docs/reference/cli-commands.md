@@ -165,6 +165,9 @@ Perform a batch of rollout collection.
 * - `num_repeats`
   - Optional[int]
   - The number of times to repeat each example to run. Useful if you want to calculate mean@k, such as mean@4 or mean@16.
+* - `num_repeats_add_seed`
+  - bool
+  - When num_repeats > 1, add a "seed" parameter on the Responses create params.
 * - `num_samples_in_parallel`
   - Optional[int]
   - Limit the number of concurrent samples running at once.

@@ -16,6 +16,7 @@ import asyncio
 from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
+from copy import deepcopy
 from itertools import repeat
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
@@ -99,6 +100,10 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=None,
         description="The number of times to repeat each example to run. Useful if you want to calculate mean@k e.g. mean@4 or mean@16.",
     )
+    num_repeats_add_seed: bool = Field(
+        default=False,
+        description='When num_repeats > 1, add a "seed" parameter on the Responses create params.',
+    )
 
 
 class RolloutCollectionHelper(BaseModel):  # pragma: no cover
@@ -112,14 +117,40 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
             rows = [row for _, row in zip(range_iterator, map(orjson.loads, input_dataset))]
         print(f"Found {len(rows)} rows!")
 
+        # Validate all rows have an agent specified (either via config or agent_ref in data)
+        if not config.agent_name:
+            missing_agent_indices = [idx for idx, row in enumerate(rows) if not row.get("agent_ref", {}).get("name")]
+            if missing_agent_indices:
+                raise ValueError(
+                    f"No agent specified for rows {missing_agent_indices}. Either provide +agent_name config or include agent_ref in data."
+                )
+
+        if config.responses_create_params:
+            print(f"Overriding responses_create_params fields with {config.responses_create_params}")
+            for row in rows:
+                row["responses_create_params"] = row["responses_create_params"] | config.responses_create_params
+
         if config.num_repeats:
+            if config.num_repeats_add_seed:
+                print("Adding unique `seed` values to each input!")
+
             previous_length = len(rows)
             expanded = []
             for task_idx, row in enumerate(rows):
-                for _ in range(config.num_repeats):
-                    expanded.append({**row, TASK_INDEX_KEY_NAME: task_idx})
+                for i in range(config.num_repeats):
+                    d = deepcopy(row) | {TASK_INDEX_KEY_NAME: task_idx}
+                    if config.num_repeats_add_seed:
+                        d["responses_create_params"]["seed"] = i
+
+                    expanded.append(d)
+
             rows = expanded
             print(f"Repeating rows (in a pattern of abc to aabbcc) from {previous_length} to {len(rows)}!")
+
+        return rows
+
+    async def run_from_config(self, config: RolloutCollectionConfig):
+        rows = self._preprocess_rows_from_config(config)
 
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
@@ -133,23 +164,11 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
             f"The tqdm progress bar will only update every {tqdm_miniters} samples that finish to ensure that you are not being spammed."
         )
 
-        if config.responses_create_params:
-            print(f"Overriding responses_create_params fields with {config.responses_create_params}")
-
-        # Validate all rows have an agent specified (either via config or agent_ref in data)
-        if not config.agent_name:
-            missing_agent_indices = [idx for idx, row in enumerate(rows) if not row.get("agent_ref", {}).get("name")]
-            if missing_agent_indices:
-                raise ValueError(
-                    f"No agent specified for rows {missing_agent_indices}. Either provide +agent_name config or include agent_ref in data."
-                )
-
         metrics = Counter()
         Path(config.output_jsonl_fpath).parent.mkdir(exist_ok=True, parents=True)
         with open(config.output_jsonl_fpath, "a") as f:
 
-            async def _post_coroutine(row: dict) -> dict:
-                row["responses_create_params"] = row["responses_create_params"] | config.responses_create_params
+            async def _post_coroutine(row: dict) -> None:
                 # Use config.agent_name if specified, otherwise use agent_ref from the row
                 agent_name = config.agent_name or row.get("agent_ref", {}).get("name")
                 async with semaphore:
