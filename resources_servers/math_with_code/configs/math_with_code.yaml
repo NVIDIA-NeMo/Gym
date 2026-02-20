@@ -27,4 +27,4 @@ math_with_code_simple_agent:
         - name: example
           type: example
           jsonl_fpath: resources_servers/math_with_code/data/example.jsonl
-      max_steps: 4  # Limiting tool calling may help with stalled rollouts
+      max_steps: 3  # Tighter cap to reduce long-tail rollout stragglers
