@@ -73,8 +73,10 @@ The `agent_ref` field maps each row to a specific resource server. A training da
 Run this command from the repository root:
 
 ```bash
-ng_prepare_data \
-    "+config_paths=[resources_servers/example_multi_step/configs/example_multi_step.yaml]" \
+config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
+resources_servers/example_multi_step/configs/example_multi_step.yaml"
+
+ng_prepare_data "+config_paths=[${config_paths}]" \
     +output_dirpath=data/test \
     +mode=example_validation
 ```
@@ -143,8 +145,10 @@ flowchart LR
 To prepare training data with auto-download:
 
 ```bash
-ng_prepare_data \
-    "+config_paths=[resources_servers/workplace_assistant/configs/workplace_assistant.yaml]" \
+config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
+resources_servers/workplace_assistant/configs/workplace_assistant.yaml"
+
+ng_prepare_data "+config_paths=[${config_paths}]" \
     +output_dirpath=data/workplace_assistant \
     +mode=train_preparation \
     +should_download=true
@@ -192,7 +196,6 @@ Fetch datasets from HuggingFace Hub.
 |---------|-------------|
 | `ng_prepare_data` | Validate and generate metrics |
 | `ng_download_dataset_from_hf` | Download from HuggingFace |
-| `ng_viewer` | View dataset in Gradio UI |
 
 See {doc}`/reference/cli-commands` for details.
 

@@ -21,6 +21,7 @@ Format and validate JSONL datasets for NeMo Gym training using `ng_prepare_data`
 
 **Prerequisites**:
 - NeMo Gym installed ({doc}`/get-started/detailed-setup`)
+- `policy_base_url`, `policy_api_key`, and `policy_model_name` set in env.yaml
 
 ---
 
@@ -29,8 +30,10 @@ Format and validate JSONL datasets for NeMo Gym training using `ng_prepare_data`
 From the repository root:
 
 ```bash
+config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml"
 ng_prepare_data \
-    "+config_paths=[resources_servers/example_multi_step/configs/example_multi_step.yaml]" \
+    "+config_paths=[$config_paths]" \
     +output_dirpath=data/test \
     +mode=example_validation
 ```
@@ -394,7 +397,7 @@ Generate training examples by running your agent on prepared data.
 :::
 
 :::{card} {octicon}`book;1.5em;sd-mr-1` NeMo RL Integration
-:link: /tutorials/nemo-rl-grpo/index
+:link: /training-tutorials/nemo-rl-grpo/index
 :link-type: doc
 
 Use validated data with NeMo RL for GRPO training.

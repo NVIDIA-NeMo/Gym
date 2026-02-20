@@ -165,6 +165,9 @@ Perform a batch of rollout collection.
 * - `num_repeats`
   - Optional[int]
   - The number of times to repeat each example to run. Useful if you want to calculate mean@k, such as mean@4 or mean@16.
+* - `num_repeats_add_seed`
+  - bool
+  - When num_repeats > 1, add a "seed" parameter on the Responses create params.
 * - `num_samples_in_parallel`
   - Optional[int]
   - Limit the number of concurrent samples running at once.
@@ -272,45 +275,6 @@ responses_api_models/openai_model/configs/openai_model.yaml"
 ng_prepare_data "+config_paths=[${config_paths}]" \
     +output_dirpath=data/example_multi_step \
     +mode=example_validation
-```
-
----
-
-### `ng_viewer` / `nemo_gym_viewer`
-
-Launch a Gradio interface to view and explore dataset rollouts interactively.
-
-**Parameters**
-
-```{list-table}
-:header-rows: 1
-:widths: 20 10 70
-
-* - Parameter
-  - Type
-  - Description
-* - `jsonl_fpath`
-  - str
-  - Filepath to a local JSONL file to view.
-* - `server_host`
-  - str
-  - Network address where the viewer accepts requests. Defaults to `"127.0.0.1"` (localhost only). Set to `"0.0.0.0"` to accept requests from anywhere.
-* - `server_port`
-  - int
-  - Port where the viewer accepts requests. Defaults to `7860`. If the specified port is unavailable, Gradio will search for the next available port.
-```
-
-**Examples**
-
-```bash
-# Launch viewer with default settings (accessible from localhost only)
-ng_viewer +jsonl_fpath=weather_rollouts.jsonl
-
-# Accept requests from anywhere (e.g., for remote access)
-ng_viewer +jsonl_fpath=weather_rollouts.jsonl +server_host=0.0.0.0
-
-# Use a custom port
-ng_viewer +jsonl_fpath=weather_rollouts.jsonl +server_port=8080
 ```
 
 ---
