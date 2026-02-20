@@ -1,0 +1,6 @@
+# Cache — fetched SEC filings metadata, parsed content, ticker mappings
+cache/
+
+# Large/generated data files
+data/*.jsonl
+data/*.csv
