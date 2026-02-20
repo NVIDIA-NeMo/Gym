@@ -83,7 +83,7 @@ class RolloutCollectionConfig(BaseNeMoGymCLIConfig):
 
 
 class RolloutCollectionHelper(BaseModel):  # pragma: no cover
-    async def run_from_config(self, config: RolloutCollectionConfig):
+    def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[dict]:
         range_iterator = repeat(0)
         if config.limit:
             range_iterator = range(config.limit)
@@ -92,6 +92,14 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
         with open(config.input_jsonl_fpath) as input_dataset:
             rows = [row for _, row in zip(range_iterator, map(json.loads, input_dataset))]
         print(f"Found {len(rows)} rows!")
+
+        # Validate all rows have an agent specified (either via config or agent_ref in data)
+        if not config.agent_name:
+            missing_agent_indices = [idx for idx, row in enumerate(rows) if not row.get("agent_ref", {}).get("name")]
+            if missing_agent_indices:
+                raise ValueError(
+                    f"No agent specified for rows {missing_agent_indices}. Either provide +agent_name config or include agent_ref in data."
+                )
 
         if config.num_repeats:
             if config.num_repeats_add_seed:
@@ -110,6 +118,16 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
             rows = expanded
             print(f"Repeating rows (in a pattern of abc to aabbcc) from {previous_length} to {len(rows)}!")
 
+        if config.responses_create_params:
+            print(f"Overriding responses_create_params fields with {config.responses_create_params}")
+            for row in rows:
+                row["responses_create_params"] = row["responses_create_params"] | config.responses_create_params
+
+        return rows
+
+    async def run_from_config(self, config: RolloutCollectionConfig):
+        rows = self._preprocess_rows_from_config(config)
+
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
             print(f"Querying with {config.num_samples_in_parallel} concurrent requests")
@@ -122,23 +140,11 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
             f"The tqdm progress bar will only update every {tqdm_miniters} samples that finish to ensure that you are not being spammed."
         )
 
-        if config.responses_create_params:
-            print(f"Overriding responses_create_params fields with {config.responses_create_params}")
-
-        # Validate all rows have an agent specified (either via config or agent_ref in data)
-        if not config.agent_name:
-            missing_agent_indices = [idx for idx, row in enumerate(rows) if not row.get("agent_ref", {}).get("name")]
-            if missing_agent_indices:
-                raise ValueError(
-                    f"No agent specified for rows {missing_agent_indices}. Either provide +agent_name config or include agent_ref in data."
-                )
-
         metrics = Counter()
         Path(config.output_jsonl_fpath).parent.mkdir(exist_ok=True, parents=True)
         with open(config.output_jsonl_fpath, "a") as f:
 
             async def _post_coroutine(row: dict) -> None:
-                row["responses_create_params"] = row["responses_create_params"] | config.responses_create_params
                 # Use config.agent_name if specified, otherwise use agent_ref from the row
                 agent_name = config.agent_name or row.get("agent_ref", {}).get("name")
                 async with semaphore:
