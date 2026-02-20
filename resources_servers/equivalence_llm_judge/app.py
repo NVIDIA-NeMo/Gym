@@ -501,7 +501,15 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         )
         try:
             judge_response = NeMoGymResponse.model_validate(await response.json())
-        except ValidationError:
+        except ValidationError as exc:
+            print(
+                "[WARNING] - equivalence_llm_judge - Failed to validate judge response.\n"
+                "Falling back to synthetic non-equal response.\n"
+                f"question_len={len(question)}\n"
+                f"expected_len={len(expected_answer)}\n"
+                f"generated_len={len(generated_answer)}\n"
+                f"validation_error={exc}"
+            )
             judge_response = NeMoGymResponse(
                 id="validation_error",
                 created_at=0,
