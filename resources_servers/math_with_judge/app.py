@@ -44,8 +44,6 @@ class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     should_use_judge: bool = True
-    # Skip the judge for the first N verify calls; use library-only reward.
-    judge_warmup_verify_calls: int = 0
     # If set, truncate judge inputs to stay within this token budget.
     max_judge_input_tokens: Optional[int] = None
     # Approximate characters per token, used for truncation estimates.
@@ -160,20 +158,12 @@ Example output: "My final verdict is different [[A!=B]]"."""
         """
 
         library_reward, extracted_answer = self._verify_answer_with_library(expected_answer, generated_answer)
-        judge_warmup_verify_calls = int(getattr(self.config, "judge_warmup_verify_calls", 0) or 0)
-        if judge_warmup_verify_calls > 0:
-            if not hasattr(self, "_verify_calls"):
-                self._verify_calls = 0
-            self._verify_calls += 1
-            if self._verify_calls <= judge_warmup_verify_calls:
-                return library_reward, extracted_answer, library_reward, None
-        if not self.config.should_use_judge or library_reward > 0.05:
+        if not self.config.should_use_judge or library_reward > 0.5:
             return library_reward, extracted_answer, library_reward, None
 
         judge_answer = extracted_answer if extracted_answer else generated_answer
         judge_reward, judge_evaluations = await self._verify_answer_with_judge(question, expected_answer, judge_answer)
-        final_reward = max(judge_reward, library_reward)
-        return final_reward, extracted_answer, library_reward, judge_evaluations
+        return judge_reward, extracted_answer, library_reward, judge_evaluations
 
     @classmethod
     @contextlib.contextmanager
