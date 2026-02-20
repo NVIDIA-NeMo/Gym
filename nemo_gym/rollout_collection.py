@@ -69,6 +69,10 @@ class RolloutCollectionConfig(BaseNeMoGymCLIConfig):
         default=None,
         description="The number of times to repeat each example to run. Useful if you want to calculate mean@k e.g. mean@4 or mean@16.",
     )
+    num_repeats_add_seed: bool = Field(
+        default=False,
+        description='When num_repeats > 1, add a "seed" parameter on the Responses create params.',
+    )
     num_samples_in_parallel: Optional[int] = Field(
         default=None, description="Limit the number of concurrent samples running at once."
     )
@@ -93,8 +97,13 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
             previous_length = len(rows)
             expanded = []
             for task_idx, row in enumerate(rows):
-                for _ in range(config.num_repeats):
-                    expanded.append({**row, TASK_INDEX_KEY_NAME: task_idx})
+                for i in range(config.num_repeats):
+                    d = {**row, TASK_INDEX_KEY_NAME: task_idx}
+                    if config.num_repeats_add_seed:
+                        d["responses_create_params"]["seed"] = i
+
+                    expanded.append(d)
+
             rows = expanded
             print(f"Repeating rows (in a pattern of abc to aabbcc) from {previous_length} to {len(rows)}!")
 
