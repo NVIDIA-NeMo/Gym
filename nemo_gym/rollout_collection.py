@@ -17,6 +17,7 @@ import json
 from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
+from copy import deepcopy
 from itertools import repeat
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -101,6 +102,11 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
                     f"No agent specified for rows {missing_agent_indices}. Either provide +agent_name config or include agent_ref in data."
                 )
 
+        if config.responses_create_params:
+            print(f"Overriding responses_create_params fields with {config.responses_create_params}")
+            for row in rows:
+                row["responses_create_params"] = row["responses_create_params"] | config.responses_create_params
+
         if config.num_repeats:
             if config.num_repeats_add_seed:
                 print("Adding unique `seed` values to each input!")
@@ -109,7 +115,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
             expanded = []
             for task_idx, row in enumerate(rows):
                 for i in range(config.num_repeats):
-                    d = {**row, TASK_INDEX_KEY_NAME: task_idx}
+                    d = deepcopy(row) | {TASK_INDEX_KEY_NAME: task_idx}
                     if config.num_repeats_add_seed:
                         d["responses_create_params"]["seed"] = i
 
@@ -117,11 +123,6 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
 
             rows = expanded
             print(f"Repeating rows (in a pattern of abc to aabbcc) from {previous_length} to {len(rows)}!")
-
-        if config.responses_create_params:
-            print(f"Overriding responses_create_params fields with {config.responses_create_params}")
-            for row in rows:
-                row["responses_create_params"] = row["responses_create_params"] | config.responses_create_params
 
         return rows
 
