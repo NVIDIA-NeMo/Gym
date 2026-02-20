@@ -266,11 +266,11 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 metadata=trial_result if trial_result else {},
             )
 
-            # Save result to disk
-            output_path = output_file_dir / instance_id
+            # Save result to disk (folder = run_id/date, file = task name)
+            output_path = output_file_dir / run_id
             output_path.mkdir(parents=True, exist_ok=True)
 
-            with open(output_path / f"{run_id}.json", "w") as f:
+            with open(output_path / f"{instance_id}.json", "w") as f:
                 json.dump(verify_response.model_dump(), f, indent=2)
 
             return verify_response
@@ -278,7 +278,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
     def _get_results_output_dir(self, policy_model_name: str, run_timestamp: datetime) -> Path:
         """Build immutable run output directory grouped by dataset/model."""
         dataset_key = self._sanitize_path_component(self._get_dataset_key())
-        model_key = self._sanitize_path_component(policy_model_name)
+        model_key = self._sanitize_path_component(self._extract_model_name(policy_model_name))
         return (
             Path.cwd()
             / "results"
@@ -290,7 +290,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
     def _get_jobs_output_dir(self, policy_model_name: str, run_timestamp: datetime) -> Path:
         """Build Harbor jobs directory grouped by dataset/model."""
         dataset_key = self._sanitize_path_component(self._get_dataset_key())
-        model_key = self._sanitize_path_component(policy_model_name)
+        model_key = self._sanitize_path_component(self._extract_model_name(policy_model_name))
         return (
             Path(self.config.harbor_jobs_dir)
             / dataset_key
@@ -314,6 +314,16 @@ class HarborAgent(SimpleResponsesAPIAgent):
     def _build_job_name(self, run_id: str) -> str:
         """Build a Harbor job name from run id only."""
         return run_id
+
+    @staticmethod
+    def _extract_model_name(policy_model_name: str) -> str:
+        """Extract the final model name from a full path or HF-style identifier.
+
+        '/lustre/.../nano-v3-sft-...-hf'  -> 'nano-v3-sft-...-hf'
+        'Qwen/Qwen3-8B'                   -> 'Qwen3-8B'
+        'my-model'                         -> 'my-model'
+        """
+        return Path(policy_model_name).name or policy_model_name
 
     def _sanitize_path_component(self, value: str) -> str:
         """Sanitize path components to avoid accidental nested directories."""

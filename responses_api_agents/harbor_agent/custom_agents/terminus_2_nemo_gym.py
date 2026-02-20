@@ -39,6 +39,7 @@ class Terminus2NemoGym(Terminus2):
         interleaved_thinking: bool = False,
         responses_create_params: dict[str, Any] | None = None,
         nemo_model_server_timeout_sec: float = 120.0,
+        think_tag_in_generation_prompt: bool = False,
         *args: Any,
         **kwargs: Any,
     ) -> None:
@@ -57,6 +58,7 @@ class Terminus2NemoGym(Terminus2):
                 model_info=model_info,
                 responses_create_params=responses_create_params,
                 timeout_sec=nemo_model_server_timeout_sec,
+                think_tag_in_generation_prompt=think_tag_in_generation_prompt,
             )
 
         super().__init__(

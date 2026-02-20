@@ -191,6 +191,112 @@ class HarborAgentUtils:
         }
 
     # ------------------------------------------------------------------ #
+    #  Raw content parsing — extract function calls from raw LLM JSON     #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
+        """Try to extract a JSON object from text that may have surrounding content.
+
+        Handles the common case where terminus-2's raw LLM response is valid
+        JSON, as well as responses with extra text before/after the JSON object.
+        """
+        # Fast path: try direct parse
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                return parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # Slow path: find the first balanced {...} in the text
+        if not text or "{" not in text:
+            return None
+
+        brace_depth = 0
+        start = -1
+        in_string = False
+        escape_next = False
+
+        for i, ch in enumerate(text):
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == "\\" and in_string:
+                escape_next = True
+                continue
+            if ch == '"' and not escape_next:
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                if brace_depth == 0:
+                    start = i
+                brace_depth += 1
+            elif ch == "}":
+                brace_depth -= 1
+                if brace_depth == 0 and start >= 0:
+                    try:
+                        parsed = json.loads(text[start : i + 1])
+                        if isinstance(parsed, dict):
+                            return parsed
+                    except json.JSONDecodeError:
+                        pass
+                    start = -1
+
+        return None
+
+    @staticmethod
+    def _parse_raw_content_tool_calls(
+        message: str, agent_step_index: int
+    ) -> List[Dict[str, Any]]:
+        """Parse function calls from a raw terminus-2 JSON response.
+
+        When ``raw_content=true`` in the trajectory config, the step message
+        contains the full LLM JSON response (with ``analysis``, ``plan``,
+        ``commands``, ``task_complete`` fields).  We extract the ``commands``
+        array and ``task_complete`` flag to build ATIF-compatible tool_call
+        dicts so that downstream processing can treat them identically to
+        steps produced with ``raw_content=false``.
+        """
+        parsed = HarborAgentUtils._extract_json_object(message)
+        if parsed is None:
+            return []
+
+        tool_calls: List[Dict[str, Any]] = []
+
+        commands = parsed.get("commands", [])
+        if isinstance(commands, list):
+            for i, cmd in enumerate(commands):
+                if not isinstance(cmd, dict) or "keystrokes" not in cmd:
+                    continue
+                tool_calls.append(
+                    {
+                        "tool_call_id": f"call_{agent_step_index}_{i + 1}",
+                        "function_name": "bash_command",
+                        "arguments": {
+                            "keystrokes": cmd["keystrokes"],
+                            "duration": cmd.get("duration", 1.0),
+                        },
+                    }
+                )
+
+        task_complete = parsed.get("task_complete", False)
+        if isinstance(task_complete, str):
+            task_complete = task_complete.lower() in ("true", "1", "yes")
+        if task_complete:
+            tool_calls.append(
+                {
+                    "tool_call_id": f"call_{agent_step_index}_task_complete",
+                    "function_name": "mark_task_complete",
+                    "arguments": {},
+                }
+            )
+
+        return tool_calls
+
+    # ------------------------------------------------------------------ #
     #  Output conversion — trajectory → NeMo Gym output items             #
     # ------------------------------------------------------------------ #
 
@@ -204,8 +310,13 @@ class HarborAgentUtils:
            carries token IDs / logprobs, otherwise ``NeMoGymResponseOutputMessage``.
         2. One **function_call** item per tool call the agent made.
         3. One **function_call_output** item per observation result.
+
+        When the trajectory was produced with ``raw_content=true`` (no
+        ``tool_calls`` on agent steps), function calls are parsed from the
+        raw LLM JSON stored in ``step.message``.
         """
         output_items: List[Dict[str, Any]] = []
+        agent_step_index = 0
 
         for step in trajectory.get("steps", []):
             if step.get("source") != "agent":
@@ -253,7 +364,13 @@ class HarborAgentUtils:
                 )
             output_items.append(message.model_dump())
 
-            tool_calls = step.get("tool_calls", [])
+            tool_calls = step.get("tool_calls") or []
+            # raw_content mode: parse function calls from the raw JSON message
+            if not tool_calls:
+                tool_calls = HarborAgentUtils._parse_raw_content_tool_calls(
+                    step.get("message", "") or "", agent_step_index
+                )
+
             observation = step.get("observation", {})
             results = observation.get("results", [])
 
@@ -285,6 +402,8 @@ class HarborAgentUtils:
                     status="completed",
                 )
                 output_items.append(fco.model_dump())
+
+            agent_step_index += 1
 
         return output_items
 

@@ -19,13 +19,17 @@ from harbor.llms.base import (
 from harbor.models.metric import UsageInfo
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 
-# Phrases in vLLM / OpenAI error bodies that signal context-length overflow.
+# Phrases in vLLM / OpenAI error bodies that signal context-length overflow. 
 _CONTEXT_LENGTH_ERROR_PHRASES = (
     "context length exceeded",
     "context_length_exceeded",
     "maximum context length",
     "`inputs` tokens + `max_new_tokens`",
 )
+
+_THINK_OPEN = "<think>"
+_THINK_CLOSE = "</think>"
+_THINK_PATTERN = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 
 
 class NemoGymLLM(BaseLLM):
@@ -39,6 +43,7 @@ class NemoGymLLM(BaseLLM):
         model_info: dict[str, Any] | None = None,
         responses_create_params: dict[str, Any] | None = None,
         timeout_sec: float = 600.0,
+        think_tag_in_generation_prompt: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -47,6 +52,7 @@ class NemoGymLLM(BaseLLM):
         self._collect_rollout_details = collect_rollout_details
         self._model_info = model_info or {}
         self._timeout_sec = timeout_sec
+        self._think_tag_in_generation_prompt = think_tag_in_generation_prompt
 
         # Pre-compute extra chat params from responses_create_params once,
         # since they don't change between calls.
@@ -76,6 +82,37 @@ class NemoGymLLM(BaseLLM):
             message_history = []
         messages = message_history + [{"role": "user", "content": prompt}]
 
+        # Harbor's Chat stores reasoning as a separate ``reasoning_content``
+        # field when interleaved_thinking is enabled.  Merge it back into
+        # thinking tags in content — the format that app.py's
+        # ``uses_reasoning_parser`` preprocessing expects.
+        #
+        # When think_tag_in_generation_prompt is true, the nanov3 chat
+        # template renders reasoning with \n padding:
+        #   "<think>\n" + rc + "\n</think>\n" + content
+        # Case 2 extraction preserves the original \n boundaries (rc ends
+        # with \n, content starts with \n), so we strip one from each
+        # before merging — app.py extracts the bare rc, and the template
+        # re-adds the \n padding, producing the original token sequence.
+        #
+        # When the model skipped thinking entirely (no reasoning_content
+        # AND no think tags in content), prepend "<think>\n" to match the
+        # generation prompt's "<think>\n" suffix.
+        for msg in messages:
+            if msg.get("role") != "assistant":
+                continue
+            rc = msg.pop("reasoning_content", None)
+            content = msg.get("content") or ""
+            if rc:
+                if self._think_tag_in_generation_prompt:
+                    # Strip exactly one \n — the template re-adds it via
+                    # "<think>\n" + rc + "\n</think>\n" + content.
+                    rc = rc.removesuffix("\n")
+                    content = content.removeprefix("\n")
+                msg["content"] = f"<think>{rc}</think>{content}"
+            elif self._think_tag_in_generation_prompt and _THINK_OPEN not in content and _THINK_CLOSE not in content:
+                msg["content"] = f"{_THINK_OPEN}\n{content}"
+
         payload: dict[str, Any] = {
             "model": self._model_name,
             "messages": messages,
@@ -94,13 +131,45 @@ class NemoGymLLM(BaseLLM):
             message.get("reasoning_content") if isinstance(message, dict) else None
         )
 
-        # vLLM model server with uses_reasoning_parser merges reasoning into content
-        # as <think>...</think> and does not return reasoning_content. Extract it so the
-        # trajectory gets reasoning_content and content is the remainder.
-        if reasoning_content is None and isinstance(content, str) and "<think>" in content:
-            reasoning_matches, content = self._extract_reasoning_from_content(content)
-            if reasoning_matches:
-                reasoning_content = "\n".join(reasoning_matches)
+        # Extract reasoning from the response content.  There are two cases:
+        #
+        # 1. Content has matched open+close tags (e.g. "<think>rc</think>text"):
+        #    app.py wraps reasoning this way when uses_reasoning_parser is true.
+        #    We mirror app.py's _parse_think_tags exactly: findall + sub to
+        #    strip all <think> blocks, but only keep the FIRST match as
+        #    reasoning_content (app.py line 190: reasoning_matches[0]).
+        #    No .strip() — preserve whitespace so round-tripping is lossless.
+        #
+        # 2. Content has only a close tag (e.g. "rc</think>text"):
+        #    The open tag was in the generation prompt (e.g. nanov3 appends
+        #    <think>\n to every prompt), so the model's output starts mid-think.
+        #    This happens when uses_reasoning_parser is not used or reasoning
+        #    was not separated by the server.
+        if reasoning_content is None and isinstance(content, str):
+            if _THINK_OPEN in content:
+                # Case 1: matched open+close tags (app.py wrapped reasoning).
+                # Match app.py: findall gets all, sub removes all, keep first.
+                matches = _THINK_PATTERN.findall(content)
+                remaining = _THINK_PATTERN.sub("", content)
+                if matches:
+                    if remaining:
+                        reasoning_content = matches[0]
+                        content = remaining
+                    else:
+                        # Entire output classified as reasoning — model didn't
+                        # generate the close tag.  Treat as content so the agent
+                        # can act on it; leave reasoning_content None so the
+                        # merge won't inject a close tag that was never generated
+                        # (which would break token contiguity).
+                        content = matches[0]
+                        reasoning_content = None
+            elif _THINK_CLOSE in content:
+                # Case 2: unmatched close tag — open tag was in the generation
+                # prompt (e.g. nanov3 appends <think>\n), so the model's output
+                # starts mid-think.  Split on the first close tag.
+                parts = content.split(_THINK_CLOSE, 1)
+                reasoning_content = parts[0]
+                content = parts[1] if len(parts) > 1 else ""
 
         if isinstance(choice, dict) and choice.get("finish_reason") == "length":
             raise OutputLengthExceededError(
@@ -127,24 +196,16 @@ class NemoGymLLM(BaseLLM):
         )
 
     def get_model_context_limit(self) -> int:
-        """Get the context limit (max input tokens) for the current model.
-
-        Returns:
-            int: The maximum input tokens the model can accept, or a fallback value if unavailable.
-        """
         fallback_context_limit = 1000000
 
         try:
             max_input_tokens = self._model_info.get("max_input_tokens")
-
-            # Fallback to max_tokens if max_input_tokens not available
             if max_input_tokens is None:
                 max_input_tokens = self._model_info.get("max_tokens")
 
             if isinstance(max_input_tokens, int) and max_input_tokens > 0:
                 return max_input_tokens
 
-            # Model info exists but doesn't have context limit info
             self._logger.warning(
                 f"Model '{self._model_name}' info found but missing context limit fields. "
                 f"Using fallback context limit: {fallback_context_limit}"
@@ -158,16 +219,10 @@ class NemoGymLLM(BaseLLM):
         return fallback_context_limit
 
     def get_model_output_limit(self) -> int | None:
-        """Get the output limit (max output tokens) for the current model.
-
-        Returns:
-            int | None: The maximum output tokens the model can generate, or None if unavailable.
-        """
         try:
             max_output_tokens = self._model_info.get("max_output_tokens")
 
             if max_output_tokens is None:
-                # Model info exists but doesn't have max_output_tokens
                 self._logger.debug(
                     f"Model '{self._model_name}' info found but missing max_output_tokens field."
                 )
@@ -191,23 +246,16 @@ class NemoGymLLM(BaseLLM):
             response = await client.post(endpoint, json=payload)
 
         if response.status_code >= 400:
-            self._raise_for_status(response)
+            error_text = response.text.lower()
+            if any(phrase in error_text for phrase in _CONTEXT_LENGTH_ERROR_PHRASES):
+                raise ContextLengthExceededError(
+                    f"Model {self._model_name} context length exceeded: {response.text}"
+                )
+            response.raise_for_status()
 
         return response.json()
 
-    def _raise_for_status(self, response: httpx.Response) -> None:
-        """Inspect HTTP error responses and raise appropriate harbor errors."""
-        error_text = response.text.lower()
-
-        if any(phrase in error_text for phrase in _CONTEXT_LENGTH_ERROR_PHRASES):
-            raise ContextLengthExceededError(
-                f"Model {self._model_name} context length exceeded: {response.text}"
-            )
-
-        response.raise_for_status()
-
     def _chat_completions_endpoint(self) -> str:
-        """Build a chat completions endpoint that tolerates base URLs with/without /v1."""
         if self._api_base.endswith("/v1"):
             return f"{self._api_base}/chat/completions"
         return f"{self._api_base}/v1/chat/completions"
@@ -217,11 +265,9 @@ class NemoGymLLM(BaseLLM):
         choice = choices[0] if isinstance(choices, list) and choices else {}
         message = choice.get("message", {}) if isinstance(choice, dict) else {}
 
-        # vllm_model/app.py writes token-id details into choice.message.
         prompt_token_ids = (
             message.get("prompt_token_ids") if isinstance(message, dict) else None
         )
-        # Keep a top-level prompt fallback for compatibility with OpenAI-style response shapes.
         if prompt_token_ids is None:
             prompt_token_ids = response.get("prompt_token_ids")
 
@@ -235,7 +281,6 @@ class NemoGymLLM(BaseLLM):
         )
 
     def _build_extra_chat_params(self, responses_create_params: dict[str, Any]) -> dict[str, Any]:
-        """Convert responses_create_params to chat completion params (called once at init)."""
         if not responses_create_params:
             return {}
 
@@ -256,7 +301,6 @@ class NemoGymLLM(BaseLLM):
             responses_params
         ).model_dump(exclude_unset=True)
 
-        # Harbor constructs chat history itself; keep only non-message params.
         chat_params.pop("messages", None)
         return chat_params
 
@@ -269,7 +313,6 @@ class NemoGymLLM(BaseLLM):
         if not isinstance(choice, dict):
             return None
 
-        # Primary schema from responses_api_models/vllm_model/app.py
         message = choice.get("message", {})
         if isinstance(message, dict):
             generation_log_probs = message.get("generation_log_probs")
@@ -278,7 +321,6 @@ class NemoGymLLM(BaseLLM):
                     float(lp) for lp in generation_log_probs if isinstance(lp, (int, float))
                 ] or None
 
-        # Fallback schema used by OpenAI-style responses
         logprobs_data = choice.get("logprobs")
         if isinstance(logprobs_data, dict):
             content = logprobs_data.get("content", [])
@@ -330,11 +372,3 @@ class NemoGymLLM(BaseLLM):
             return None
 
         return normalized or None
-
-    def _extract_reasoning_from_content(self, content: str) -> tuple[list[str], str]:
-        """Extract reasoning from <think></think> tags; return (matches, cleaned_content)."""
-        pattern = re.compile(r"<think>(.*?)</think>", re.DOTALL)
-        matches = pattern.findall(content)
-        cleaned = pattern.sub("", content).strip()
-        return matches, cleaned
-

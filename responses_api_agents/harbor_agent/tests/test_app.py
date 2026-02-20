@@ -112,6 +112,98 @@ DEFAULT_TRAJECTORY = {
 
 # Trajectory without token-level details (no prompt_token_ids, completion_token_ids, logprobs).
 # Used to verify output messages are plain NeMoGymResponseOutputMessage (no training fields).
+# Trajectory produced with raw_content=true: step.message contains the full
+# raw LLM JSON, and there are NO tool_calls.  Function calls must be parsed
+# from the message on the Gym side.
+TRAJECTORY_RAW_CONTENT = {
+    "schema_version": "ATIF-v1.5",
+    "session_id": "test-session-raw",
+    "agent": {"name": "terminus-2", "version": "2.0.0", "model_name": "hosted_vllm/test_model"},
+    "steps": [
+        {
+            "step_id": 1,
+            "source": "user",
+            "message": "You are an AI assistant. Solve this task:\nFix the bug in foo.py.",
+        },
+        {
+            "step_id": 2,
+            "source": "agent",
+            "model_name": "hosted_vllm/test_model",
+            "message": json.dumps({
+                "analysis": "I will look at foo.py.",
+                "plan": "Read the file and fix the bug.",
+                "commands": [
+                    {"keystrokes": "cat foo.py\n", "duration": 0.1},
+                ],
+                "task_complete": False,
+            }),
+            "observation": {"results": [{"content": "def foo():\n    return 1 + '2'\n"}]},
+            "metrics": {
+                "prompt_tokens": 500,
+                "completion_tokens": 100,
+                "prompt_token_ids": [100, 101, 102],
+                "completion_token_ids": [200, 201, 202],
+                "logprobs": [-0.01, -0.02, -0.03],
+            },
+        },
+        {
+            "step_id": 3,
+            "source": "agent",
+            "model_name": "hosted_vllm/test_model",
+            "message": json.dumps({
+                "analysis": "Found the bug. Fixing it now.",
+                "plan": "Change '2' to 2.",
+                "commands": [
+                    {"keystrokes": "sed -i 's/+ '2'/+ 2/' foo.py\n", "duration": 0.1},
+                ],
+                "task_complete": True,
+            }),
+            "observation": {"results": [{"content": ""}]},
+            "metrics": {
+                "prompt_tokens": 700,
+                "completion_tokens": 80,
+                "prompt_token_ids": [103, 104, 105],
+                "completion_token_ids": [203, 204, 205],
+                "logprobs": [-0.04, -0.05],
+            },
+        },
+    ],
+    "final_metrics": {"total_prompt_tokens": 1200, "total_completion_tokens": 180, "total_cached_tokens": 0},
+}
+
+
+# Trajectory with raw_content=true and multiple commands per step.
+TRAJECTORY_RAW_CONTENT_MULTI_CMD = {
+    "schema_version": "ATIF-v1.5",
+    "session_id": "test-session-raw-multi",
+    "agent": {"name": "terminus-2", "version": "2.0.0", "model_name": "hosted_vllm/test_model"},
+    "steps": [
+        {
+            "step_id": 1,
+            "source": "user",
+            "message": "Create hello.txt with Hello, world!",
+        },
+        {
+            "step_id": 2,
+            "source": "agent",
+            "model_name": "hosted_vllm/test_model",
+            "message": json.dumps({
+                "analysis": "I need to create the file.",
+                "plan": "Write and verify the file.",
+                "commands": [
+                    {"keystrokes": "echo 'Hello, world!' > hello.txt\n", "duration": 0.1},
+                    {"keystrokes": "cat hello.txt\n", "duration": 0.1},
+                ],
+                "task_complete": False,
+            }),
+            "observation": {"results": [{"content": "Hello, world!\n"}]},
+            "metrics": {"prompt_tokens": 300, "completion_tokens": 60},
+        },
+    ],
+    "final_metrics": {"total_prompt_tokens": 300, "total_completion_tokens": 60, "total_cached_tokens": 0},
+}
+
+
 TRAJECTORY_NO_TOKEN_DETAILS = {
     "schema_version": "ATIF-v1.5",
     "session_id": "test-session-456",
@@ -463,3 +555,200 @@ class TestExtractReward:
     )
     def test_extract_reward(self, verifier_result, expected) -> None:
         assert HarborAgentUtils.extract_reward(verifier_result) == expected
+
+
+# ===========================================================================
+#  Raw content parsing tests
+# ===========================================================================
+
+
+class TestExtractJsonObject:
+    def test_direct_json(self) -> None:
+        msg = '{"analysis": "ok", "plan": "go", "commands": []}'
+        result = HarborAgentUtils._extract_json_object(msg)
+        assert result == {"analysis": "ok", "plan": "go", "commands": []}
+
+    def test_json_with_surrounding_text(self) -> None:
+        msg = 'Here is my response:\n{"analysis": "ok", "plan": "go", "commands": []}\nDone.'
+        result = HarborAgentUtils._extract_json_object(msg)
+        assert result is not None
+        assert result["analysis"] == "ok"
+
+    def test_nested_json(self) -> None:
+        msg = json.dumps({
+            "analysis": "test",
+            "plan": "test",
+            "commands": [{"keystrokes": "ls\n", "duration": 0.1}],
+        })
+        result = HarborAgentUtils._extract_json_object(msg)
+        assert result is not None
+        assert len(result["commands"]) == 1
+
+    def test_returns_none_for_invalid(self) -> None:
+        assert HarborAgentUtils._extract_json_object("not json at all") is None
+        assert HarborAgentUtils._extract_json_object("") is None
+        assert HarborAgentUtils._extract_json_object("{broken") is None
+
+    def test_returns_none_for_non_dict(self) -> None:
+        assert HarborAgentUtils._extract_json_object("[1, 2, 3]") is None
+
+
+class TestParseRawContentToolCalls:
+    def test_single_command(self) -> None:
+        msg = json.dumps({
+            "analysis": "Looking at foo.py",
+            "plan": "Read the file",
+            "commands": [{"keystrokes": "cat foo.py\n", "duration": 0.1}],
+        })
+        calls = HarborAgentUtils._parse_raw_content_tool_calls(msg, 0)
+        assert len(calls) == 1
+        assert calls[0]["tool_call_id"] == "call_0_1"
+        assert calls[0]["function_name"] == "bash_command"
+        assert calls[0]["arguments"]["keystrokes"] == "cat foo.py\n"
+        assert calls[0]["arguments"]["duration"] == 0.1
+
+    def test_multiple_commands(self) -> None:
+        msg = json.dumps({
+            "analysis": "Setup",
+            "plan": "Create and verify",
+            "commands": [
+                {"keystrokes": "echo 'hello' > file.txt\n", "duration": 0.1},
+                {"keystrokes": "cat file.txt\n", "duration": 0.1},
+            ],
+        })
+        calls = HarborAgentUtils._parse_raw_content_tool_calls(msg, 2)
+        assert len(calls) == 2
+        assert calls[0]["tool_call_id"] == "call_2_1"
+        assert calls[1]["tool_call_id"] == "call_2_2"
+
+    def test_task_complete(self) -> None:
+        msg = json.dumps({
+            "analysis": "Done",
+            "plan": "Mark complete",
+            "commands": [{"keystrokes": "echo done\n", "duration": 0.1}],
+            "task_complete": True,
+        })
+        calls = HarborAgentUtils._parse_raw_content_tool_calls(msg, 3)
+        assert len(calls) == 2
+        assert calls[0]["function_name"] == "bash_command"
+        assert calls[1]["tool_call_id"] == "call_3_task_complete"
+        assert calls[1]["function_name"] == "mark_task_complete"
+
+    def test_task_complete_string_true(self) -> None:
+        msg = json.dumps({
+            "analysis": "Done",
+            "plan": "Mark complete",
+            "commands": [],
+            "task_complete": "true",
+        })
+        calls = HarborAgentUtils._parse_raw_content_tool_calls(msg, 0)
+        assert len(calls) == 1
+        assert calls[0]["function_name"] == "mark_task_complete"
+
+    def test_missing_duration_defaults(self) -> None:
+        msg = json.dumps({
+            "analysis": "test",
+            "plan": "test",
+            "commands": [{"keystrokes": "ls\n"}],
+        })
+        calls = HarborAgentUtils._parse_raw_content_tool_calls(msg, 0)
+        assert calls[0]["arguments"]["duration"] == 1.0
+
+    def test_empty_commands(self) -> None:
+        msg = json.dumps({
+            "analysis": "Waiting",
+            "plan": "Wait for output",
+            "commands": [],
+        })
+        calls = HarborAgentUtils._parse_raw_content_tool_calls(msg, 0)
+        assert calls == []
+
+    def test_invalid_message(self) -> None:
+        assert HarborAgentUtils._parse_raw_content_tool_calls("not json", 0) == []
+        assert HarborAgentUtils._parse_raw_content_tool_calls("", 0) == []
+
+    def test_skips_invalid_commands(self) -> None:
+        msg = json.dumps({
+            "analysis": "test",
+            "plan": "test",
+            "commands": [
+                "not a dict",
+                {"no_keystrokes": True},
+                {"keystrokes": "ls\n", "duration": 0.1},
+            ],
+        })
+        calls = HarborAgentUtils._parse_raw_content_tool_calls(msg, 0)
+        assert len(calls) == 1
+        assert calls[0]["tool_call_id"] == "call_0_3"
+
+
+class TestTrajectoryToResponsesRawContent:
+    """Tests for trajectory_to_responses with raw_content=true trajectories."""
+
+    def test_parses_function_calls_from_raw_message(self) -> None:
+        items = HarborAgentUtils.trajectory_to_responses(TRAJECTORY_RAW_CONTENT)
+        # 2 agent steps, each with: message + function_call + function_call_output
+        # Step 2 also has task_complete → extra function_call
+        # Step 1: message + bash_command fc + fco = 3
+        # Step 2: message + bash_command fc + task_complete fc + fco = 4
+        assert len(items) == 7
+
+    def test_raw_message_preserved_in_output_text(self) -> None:
+        items = HarborAgentUtils.trajectory_to_responses(TRAJECTORY_RAW_CONTENT)
+        msg0_text = items[0]["content"][0]["text"]
+        # The raw JSON should be in the output text
+        assert '"analysis"' in msg0_text
+        assert "I will look at foo.py" in msg0_text
+
+    def test_function_call_ids_use_agent_step_index(self) -> None:
+        items = HarborAgentUtils.trajectory_to_responses(TRAJECTORY_RAW_CONTENT)
+        # First agent step (index 0): bash_command
+        fc0 = items[1]
+        assert fc0["type"] == "function_call"
+        assert fc0["call_id"] == "call_0_1"
+        assert fc0["name"] == "bash_command"
+        args0 = json.loads(fc0["arguments"])
+        assert args0["keystrokes"] == "cat foo.py\n"
+
+        # Second agent step (index 1): bash_command + task_complete
+        fc1 = items[4]
+        assert fc1["type"] == "function_call"
+        assert fc1["call_id"] == "call_1_1"
+        fc_complete = items[5]
+        assert fc_complete["call_id"] == "call_1_task_complete"
+        assert fc_complete["name"] == "mark_task_complete"
+
+    def test_observation_linked_to_function_call(self) -> None:
+        items = HarborAgentUtils.trajectory_to_responses(TRAJECTORY_RAW_CONTENT)
+        # First step: fco should link to call_0_1
+        fco0 = items[2]
+        assert fco0["type"] == "function_call_output"
+        assert fco0["call_id"] == "call_0_1"
+        assert "def foo():" in fco0["output"]
+
+    def test_training_fields_preserved(self) -> None:
+        items = HarborAgentUtils.trajectory_to_responses(TRAJECTORY_RAW_CONTENT)
+        msg0 = items[0]
+        assert msg0["prompt_token_ids"] == [100, 101, 102]
+        assert msg0["generation_token_ids"] == [200, 201, 202]
+        assert msg0["generation_log_probs"] == [-0.01, -0.02, -0.03]
+
+    def test_multi_command_step(self) -> None:
+        items = HarborAgentUtils.trajectory_to_responses(TRAJECTORY_RAW_CONTENT_MULTI_CMD)
+        # 1 agent step: message + 2 function_calls + 1 function_call_output = 4
+        assert len(items) == 4
+        assert items[0]["type"] == "message"
+        assert items[1]["type"] == "function_call"
+        assert items[1]["call_id"] == "call_0_1"
+        assert items[2]["type"] == "function_call"
+        assert items[2]["call_id"] == "call_0_2"
+        assert items[3]["type"] == "function_call_output"
+        assert items[3]["call_id"] == "call_0_1"
+
+    def test_existing_tool_calls_not_overridden(self) -> None:
+        """When tool_calls are present (raw_content=false), parsing is skipped."""
+        items = HarborAgentUtils.trajectory_to_responses(DEFAULT_TRAJECTORY)
+        # Should work exactly as before — 6 items
+        assert len(items) == 6
+        fc0 = items[1]
+        assert fc0["call_id"] == "call_0_1"
