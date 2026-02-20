@@ -29,11 +29,9 @@ equivalence_llm_judge:
 
         Show your reason why they are equivalent or not equivalent first and then provide the output.
 
-        Output format:
-        - Return ONLY one final line.
-        - If equivalent, output exactly: [[A=B]]
-        - If not equivalent, output exactly: [[A!=B]]
-        - No explanation, no extra text.
+        Output (at the end after double newlines):
+        - If equivalent: [[A=B]] they are equivalent
+        - If not equivalent: [[A!=B]] they are not equivalent
 
         ===== Example 1 (equivalent) =====
         QUESTION:
