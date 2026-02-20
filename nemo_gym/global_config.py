@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from collections import defaultdict
-from os import getenv
+from os import environ, getenv
 from pathlib import Path
 from platform import python_version
 from random import randint
@@ -27,7 +27,7 @@ from openai import __version__ as openai_version
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from ray import __version__ as ray_version
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import CACHE_DIR, PARENT_DIR
 from nemo_gym.config_types import (
     ServerInstanceConfig,
     is_almost_server,
@@ -327,6 +327,14 @@ class GlobalConfigDictParser(BaseModel):
             global_config_dict.setdefault(SKIP_VENV_IF_PRESENT_KEY_NAME, False)
 
             global_config_dict.setdefault(DRY_RUN_KEY_NAME, False)
+
+            # UV related configuration
+            # UV caching directory overrides to local folders.
+            global_config_dict.setdefault(UV_CACHE_DIR_KEY_NAME, str(CACHE_DIR / "uv"))
+            # Set the appropriate environment variable here, and matche the config
+            environ["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
+            # By default, build the
+            global_config_dict.setdefault(UV_VENV_DIR_KEY_NAME, False)
 
         if parse_config.hide_secrets:
             self._recursively_hide_secrets(global_config_dict)

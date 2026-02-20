@@ -35,9 +35,6 @@ environ["TRANSFORMERS_CACHE"] = environ["HF_DATASETS_CACHE"]
 # TODO When `TRANSFORMERS_CACHE` is no longer supported in transformers>=5.0.0, migrate to `HF_HOME`
 # environ["HF_HOME"] = join(CACHE_DIR, "huggingface")
 
-# UV caching directory overrides to local folders.
-environ["UV_CACHE_DIR"] = str(CACHE_DIR / "uv")
-
 from nemo_gym.package_info import (
     __contact_emails__,
     __contact_names__,
