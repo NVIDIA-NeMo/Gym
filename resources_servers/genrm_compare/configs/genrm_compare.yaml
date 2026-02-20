@@ -37,7 +37,7 @@ genrm_model:
         gpu_memory_utilization: 0.9
       debug: false
 
-genrm_compare:
+genrm_compare_resources_server:
   resources_servers:
     genrm_compare:
       entrypoint: app.py
@@ -99,3 +99,18 @@ genrm_compare:
       verified: false
       description: GenRM pairwise comparison for RLHF training
       value: Compare multiple candidate responses using GenRM model
+
+genrm_compare_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: genrm_compare_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/genrm_compare/data/example.jsonl
