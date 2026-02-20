@@ -574,7 +574,7 @@ You've learned how to:
 ✅ Configure the required `domain` field  
 ✅ Add tools and verification logic  
 ✅ Write and run tests  
-✅ Run your server with an model
+✅ Run your server with a model
 ✅ Create required data artifacts  
 
 Resource servers are the foundation for building custom RL environments in NeMo Gym. Experiment with different tool implementations and verification strategies to create engaging tasks for your models!
