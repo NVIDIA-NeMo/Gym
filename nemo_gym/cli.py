@@ -67,6 +67,16 @@ from nemo_gym.server_utils import (
 
 
 def _setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: Optional[str] = None) -> str:  # pragma: no cover
+    # Check for prebaked venv baked into the container (avoids shared-filesystem I/O contention).
+    # Set NEMO_GYM_PREBAKED_VENVS_ROOT=/opt/prebaked_gym/venvs to enable.
+    # Expected layout: {root}/{category}/{server_name}/.venv  (e.g. .../responses_api_models/vllm_model/.venv)
+    prebaked_root = os.environ.get("NEMO_GYM_PREBAKED_VENVS_ROOT", "")
+    if prebaked_root:
+        prebaked_venv = Path(prebaked_root) / dir_path.parent.name / dir_path.name / ".venv"
+        if (prebaked_venv / "bin" / "python").exists():
+            print(f"[prebaked] Using prebaked venv for {dir_path.name}: {prebaked_venv}")
+            return f"cd {dir_path} && source {prebaked_venv}/bin/activate"
+
     head_server_deps = global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]
 
     uv_venv_cmd = f"uv venv --seed --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} .venv"
@@ -206,7 +216,7 @@ class RunHelper:  # pragma: no cover
     _server_instance_display_configs: List[ServerInstanceDisplayConfig]
     _server_client: ServerClient
 
-    def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
+    def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig, ray_gpu_pgs=None, ray_gpu_nodes=None) -> None:
         global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
 
         # Initialize Ray cluster in the main process
@@ -214,6 +224,10 @@ class RunHelper:  # pragma: no cover
         initialize_ray()
 
         self._head_ray_gpu_helper = _start_global_ray_gpu_scheduling_helper()
+
+        if ray_gpu_pgs and ray_gpu_nodes:
+            import ray
+            ray.get(self._head_ray_gpu_helper.set_gpu_pgs.remote(ray_gpu_nodes, ray_gpu_pgs))
 
         # Assume Nemo Gym Run is for a single agent.
         escaped_config_dict_yaml_str = shlex.quote(OmegaConf.to_yaml(global_config_dict))

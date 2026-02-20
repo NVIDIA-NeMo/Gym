@@ -16,12 +16,15 @@ import os
 import sys
 from collections import defaultdict
 from time import sleep
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import ray
 import ray.util.state
 from ray.actor import ActorClass, ActorProxy
-from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+from ray.util.scheduling_strategies import (
+    NodeAffinitySchedulingStrategy,
+    PlacementGroupSchedulingStrategy,
+)
 
 from nemo_gym.global_config import (
     RAY_GPU_NODES_KEY_NAME,
@@ -84,6 +87,10 @@ class _NeMoGymRayGPUSchedulingHelper:  # pragma: no cover
         self.cfg = cfg
         self.avail_gpus_dict = defaultdict(int)
         self.used_gpus_dict = defaultdict(int)
+        # Maps node_id -> PlacementGroup for nodes with PG-based reservations.
+        # When a PG is available for a node, spinup_single_ray_gpu_node_worker
+        # uses PlacementGroupSchedulingStrategy instead of NodeAffinitySchedulingStrategy.
+        self.node_pg_dict: Dict[str, object] = {}
 
     def _post_init(self) -> None:
         # If value of RAY_GPU_NODES_KEY_NAME is None, then Gym will use all Ray GPU nodes
@@ -108,13 +115,34 @@ class _NeMoGymRayGPUSchedulingHelper:  # pragma: no cover
         print(f"DEBUG: _NeMoGymRayGPUSchedulingHelper: post init: avail gpus = {self.avail_gpus_dict} (intermediate)", flush=True)
 
         default_num_gpus_per_node = self.cfg.get(RAY_NUM_GPUS_PER_NODE_KEY_NAME, 8)
-        for node_id in allowed_gpu_nodes:
-            if node_id in self.avail_gpus_dict:
-                continue
-            print(f"DEBUG: _NeMoGymRayGPUSchedulingHelper: post init: warning: ray state API did not return info for node={repr(node_id)}", flush=True)
-            self.avail_gpus_dict[node_id] = default_num_gpus_per_node
+        if allowed_gpu_nodes is not None:
+            for node_id in allowed_gpu_nodes:
+                if node_id in self.avail_gpus_dict:
+                    continue
+                print(f"DEBUG: _NeMoGymRayGPUSchedulingHelper: post init: warning: ray state API did not return info for node={repr(node_id)}", flush=True)
+                self.avail_gpus_dict[node_id] = default_num_gpus_per_node
 
         print(f"DEBUG: _NeMoGymRayGPUSchedulingHelper: post init: avail gpus = {self.avail_gpus_dict}", flush=True)
+
+    def set_gpu_pgs(self, node_ids: list, pgs: list) -> None:
+        """Register PlacementGroup reservations for judge nodes.
+
+        Called after _post_init with the PG objects directly (can't go through OmegaConf).
+        PGs and node_ids are ordered the same: pgs[i] reserves GPUs on node_ids[i].
+        """
+        if len(node_ids) != len(pgs):
+            raise ValueError(
+                f"node_ids and pgs must have the same length, got {len(node_ids)} and {len(pgs)}"
+            )
+
+        for node_id, pg in zip(node_ids, pgs):
+            if not hasattr(pg, "bundle_specs") or pg.bundle_specs is None:
+                raise ValueError(f"PlacementGroup for node {node_id} is missing bundle_specs")
+            self.node_pg_dict[node_id] = pg
+            bundle_gpus = sum(bundle.get("GPU", 0) for bundle in pg.bundle_specs)
+            self.avail_gpus_dict[node_id] = bundle_gpus
+
+        print(f"DEBUG: _NeMoGymRayGPUSchedulingHelper: set_gpu_pgs: {len(self.node_pg_dict)} nodes have PG reservations", flush=True)
 
     def alloc_gpu_node(self, num_gpus: int, desc: Optional[str]) -> Optional[str]:
         print(f"DEBUG: _NeMoGymRayGPUSchedulingHelper: alloc gpu [{desc}]: avail gpus = {self.avail_gpus_dict}", flush=True)
@@ -127,6 +155,10 @@ class _NeMoGymRayGPUSchedulingHelper:  # pragma: no cover
                 return node_id
         print(f"DEBUG: _NeMoGymRayGPUSchedulingHelper: alloc gpu [{desc}]: no available node", flush=True)
         return None
+
+    def get_pg_for_node(self, node_id: str) -> Optional[object]:
+        """Return the PlacementGroup for a node, or None if no PG reservation exists."""
+        return self.node_pg_dict.get(node_id, None)
 
 
 def lookup_ray_node_id_to_ip_dict() -> Dict[str, str]:  # pragma: no cover
@@ -166,12 +198,21 @@ def spinup_single_ray_gpu_node_worker(
     if node_id is None:
         raise RuntimeError(f"Cannot find an available Ray node with {num_gpus} GPUs to spin up {worker_cls}")
 
+    pg = ray.get(helper.get_pg_for_node.remote(node_id))
+
     worker_options = {}
     worker_options["num_gpus"] = num_gpus
-    worker_options["scheduling_strategy"] = NodeAffinitySchedulingStrategy(
-        node_id=node_id,
-        soft=False,
-    )
+    if pg is not None:
+        worker_options["scheduling_strategy"] = PlacementGroupSchedulingStrategy(
+            placement_group=pg,
+            placement_group_capture_child_tasks=True,
+        )
+        worker_options["num_cpus"] = 0
+    else:
+        worker_options["scheduling_strategy"] = NodeAffinitySchedulingStrategy(
+            node_id=node_id,
+            soft=False,
+        )
     worker_options["runtime_env"] = {
         "py_executable": sys.executable,
         "env_vars": _prepare_ray_worker_env_vars(),
