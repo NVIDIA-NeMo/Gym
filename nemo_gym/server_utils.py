@@ -59,6 +59,7 @@ from nemo_gym.config_types import (
     BaseServerConfig,
 )
 from nemo_gym.global_config import (
+    DRY_RUN_KEY_NAME,
     HEAD_SERVER_KEY_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     RAY_HEAD_NODE_ADDRESS_KEY_NAME,
@@ -557,7 +558,7 @@ repr(e): {repr(e)}"""
             _add_prefix(sys.stderr)
 
     @classmethod
-    def run_webserver(cls) -> FastAPI:  # pragma: no cover
+    def run_webserver(cls) -> Optional[FastAPI]:  # pragma: no cover
         global_config_dict = get_global_config_dict()
 
         initialize_ray()
@@ -570,6 +571,9 @@ repr(e): {repr(e)}"""
             global_config_dict=global_config_dict,
         )
         server = cls(config=server_config, server_client=server_client)
+
+        if global_config_dict[DRY_RUN_KEY_NAME]:
+            return
 
         app = server.setup_webserver()
         server.set_ulimit()

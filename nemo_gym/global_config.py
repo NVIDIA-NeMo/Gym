@@ -55,6 +55,7 @@ RAY_HEAD_NODE_ADDRESS_KEY_NAME = "ray_head_node_address"
 TASK_INDEX_KEY_NAME = "_task_index"
 PORT_RANGE_LOW_KEY_NAME = "port_range_low"
 PORT_RANGE_HIGH_KEY_NAME = "port_range_high"
+DRY_RUN_KEY_NAME = "dry_run"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -71,6 +72,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     RAY_HEAD_NODE_ADDRESS_KEY_NAME,
     PORT_RANGE_LOW_KEY_NAME,
     PORT_RANGE_HIGH_KEY_NAME,
+    DRY_RUN_KEY_NAME,
 ]
 
 POLICY_BASE_URL_KEY_NAME = "policy_base_url"
@@ -318,8 +320,9 @@ class GlobalConfigDictParser(BaseModel):
             global_config_dict[PYTHON_VERSION_KEY_NAME] = python_version()
 
             # Skip venv setup is opt-in and defaults to False.
-            if SKIP_VENV_IF_PRESENT_KEY_NAME not in global_config_dict:
-                global_config_dict[SKIP_VENV_IF_PRESENT_KEY_NAME] = False
+            global_config_dict.setdefault(SKIP_VENV_IF_PRESENT_KEY_NAME, False)
+
+            global_config_dict.setdefault(DRY_RUN_KEY_NAME, False)
 
         if parse_config.hide_secrets:
             self._recursively_hide_secrets(global_config_dict)
