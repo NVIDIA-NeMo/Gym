@@ -1,0 +1,8 @@
+# We redundantly gitignore the default files to be ignore for every resources server.
+# e.g. You work on one resources server with this data and switch branches.
+# Each resources server still needs its own customer gitignore for flexibility.
+*/data/*train.jsonl
+*/data/*validation.jsonl
+*/data/*train_prepare.jsonl
+*/data/*validation_prepare.jsonl
+*/data/*example_prepare.jsonl

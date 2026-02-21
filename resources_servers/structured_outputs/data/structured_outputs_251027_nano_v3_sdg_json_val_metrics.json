@@ -1,0 +1,53 @@
+{
+    "name": "validation",
+    "type": "validation",
+    "jsonl_fpath": "resources_servers/structured_outputs/data/structured_outputs_251027_nano_v3_sdg_json_val.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": {
+        "dataset_name": "structured_outputs_251027_nano_v3_sdg_json_val",
+        "version": "0.0.2",
+        "artifact_fpath": "structured_outputs_251027_nano_v3_sdg_json_val.jsonl"
+    },
+    "license": "Apache 2.0",
+    "Number of examples": 512,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 512,
+        "Average": 681.31,
+        "Min": 271.0,
+        "Max": 1287.0,
+        "Standard deviation": 227.01
+    },
+    "Number of turns": {
+        "Total # non-null values": 512,
+        "Average": 1.52,
+        "Min": 1.0,
+        "Max": 2.0,
+        "Standard deviation": 0.5
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "schema_str": {
+        "unique_count": 64,
+        "total_count": 512
+    },
+    "schema_type": {
+        "unique_count": 1,
+        "total_count": 512
+    },
+    "schema_fields_count": {
+        "unique_count": 10,
+        "total_count": 512
+    }
+}

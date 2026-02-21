@@ -1,0 +1,7 @@
+-e nemo-gym[dev] @ ../../
+reasoning-gym>=0.1.19
+matplotlib==3.10.6
+pillow==12.1.1
+pyparsing==3.2.3
+cycler==0.12.1
+kiwisolver==1.4.9

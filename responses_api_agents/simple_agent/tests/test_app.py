@@ -1,17 +1,19 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from unittest.mock import MagicMock, call
+import json
+from unittest.mock import AsyncMock, MagicMock, call
 
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
@@ -93,8 +95,9 @@ class TestApp:
             "tools": [],
         }
 
-        dotjson_mock = MagicMock()
-        dotjson_mock.json.return_value = mock_response_data
+        dotjson_mock = AsyncMock()
+        dotjson_mock.read.return_value = json.dumps(mock_response_data)
+        dotjson_mock.cookies = MagicMock()
         server.server_client.post.return_value = dotjson_mock
 
         # No model provided should use the one from the config
@@ -153,6 +156,9 @@ class TestApp:
             "truncation": None,
             "usage": None,
             "user": None,
+            "conversation": None,
+            "prompt_cache_key": None,
+            "safety_identifier": None,
         }
         assert expected_responses_dict == actual_responses_dict
 
@@ -223,8 +229,9 @@ class TestApp:
             "tools": [],
         }
 
-        dotjson_mock = MagicMock()
-        dotjson_mock.json.side_effect = [mock_response_reasoning_data, mock_response_chat_data]
+        dotjson_mock = AsyncMock()
+        dotjson_mock.read.side_effect = [json.dumps(mock_response_reasoning_data), json.dumps(mock_response_chat_data)]
+        dotjson_mock.cookies = MagicMock()
         server.server_client.post.return_value = dotjson_mock
 
         # No model provided should use the one from the config
@@ -240,7 +247,8 @@ class TestApp:
                 ),
                 cookies=None,
             ),
-            call().json(),
+            call().ok.__bool__(),
+            call().read(),
             call(
                 server_name="my server name",
                 url_path="/v1/responses",
@@ -258,7 +266,8 @@ class TestApp:
                 ),
                 cookies=dotjson_mock.cookies,
             ),
-            call().json(),
+            call().ok.__bool__(),
+            call().read(),
             call().cookies.items(),
             call().cookies.items().__iter__(),
             call().cookies.items().__len__(),
@@ -320,5 +329,8 @@ class TestApp:
             "truncation": None,
             "usage": None,
             "user": None,
+            "conversation": None,
+            "prompt_cache_key": None,
+            "safety_identifier": None,
         }
         assert expected_responses_dict == actual_responses_dict

@@ -1,0 +1,7 @@
+[llm.model]
+# The following parameters are overridden by Nemo-Skills:
+# model, base_url, temperature, top_p.
+# Specifying them here will have no effect! Use Nemo-Skills options instead.
+api_key = "EMPTY"  # pragma: allowlist secret
+custom_llm_provider = "openai"
+native_tool_calling = true
