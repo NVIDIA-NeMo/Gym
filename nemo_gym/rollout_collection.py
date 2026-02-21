@@ -168,7 +168,7 @@ class RolloutCollectionHelper(BaseModel):
                 row[ROLLOUT_INDEX_KEY_NAME] = task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]]
                 task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]] += 1
 
-            rows.append(row)
+                rows.append(row)
 
         input_file.close()
 
