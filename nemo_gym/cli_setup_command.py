@@ -2,7 +2,6 @@ from os import environ
 from pathlib import Path
 from subprocess import Popen
 from sys import stderr, stdout
-from typing import Optional
 
 from omegaconf import DictConfig
 
@@ -17,7 +16,7 @@ from nemo_gym.global_config import (
 )
 
 
-def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: Optional[str] = None) -> str:
+def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: str) -> str:
     head_server_deps = global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]
 
     uv_venv_cmd = f"uv venv --seed --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} .venv"
@@ -67,13 +66,12 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: Op
     return f"cd {dir_path} && {env_setup_cmd}"
 
 
-def venv_install_or_skip(should_skip: bool, uv_venv_cmd: str, install_cmd: str, prefix: Optional[str] = None) -> str:
+def venv_install_or_skip(should_skip: bool, uv_venv_cmd: str, install_cmd: str, prefix: str) -> str:
     if should_skip:
         return "source .venv/bin/activate"
 
-    if prefix is not None:
-        uv_venv_cmd = f"{uv_venv_cmd} > >(sed 's/^/({prefix}) /') 2> >(sed 's/^/({prefix}) /' >&2)"
-        install_cmd = f"{install_cmd} > >(sed 's/^/({prefix}) /') 2> >(sed 's/^/({prefix}) /' >&2)"
+    uv_venv_cmd = f"{uv_venv_cmd} > >(sed 's/^/({prefix}) /') 2> >(sed 's/^/({prefix}) /' >&2)"
+    install_cmd = f"{install_cmd} > >(sed 's/^/({prefix}) /') 2> >(sed 's/^/({prefix}) /' >&2)"
 
     return f"{uv_venv_cmd} && source .venv/bin/activate && {install_cmd}"
 

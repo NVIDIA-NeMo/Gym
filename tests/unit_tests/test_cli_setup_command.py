@@ -29,8 +29,9 @@ class TestCLISetupCommandSetupEnvCommand:
         actual_command = setup_env_command(
             dir_path=server_dir,
             global_config_dict=self._debug_global_config_dict,
+            prefix="my server name",
         )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version .venv && source .venv/bin/activate && uv pip install -r requirements.txt ray[default]==test ray version openai==test openai version"
+        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version .venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source .venv/bin/activate && uv pip install -r requirements.txt ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         assert expected_command == actual_command
 
     def test_skips_install_when_venv_present(self, tmp_path: Path) -> None:
@@ -39,20 +40,10 @@ class TestCLISetupCommandSetupEnvCommand:
         actual_command = setup_env_command(
             dir_path=server_dir,
             global_config_dict=self._debug_global_config_dict | {"skip_venv_if_present": True},
+            prefix="my server name",
         )
 
         expected_command = f"cd {server_dir} && source .venv/bin/activate"
-        assert expected_command == actual_command
-
-    def test_with_prefix_print(self, tmp_path: Path) -> None:
-        server_dir = self._setup_server_dir(tmp_path)
-
-        actual_command = setup_env_command(
-            dir_path=server_dir,
-            global_config_dict=self._debug_global_config_dict,
-            prefix="my server name",
-        )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version .venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source .venv/bin/activate && uv pip install -r requirements.txt ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         assert expected_command == actual_command
 
     def test_head_server_deps(self, tmp_path: Path) -> None:
@@ -61,8 +52,9 @@ class TestCLISetupCommandSetupEnvCommand:
         actual_command = setup_env_command(
             dir_path=server_dir,
             global_config_dict=self._debug_global_config_dict | {"head_server_deps": ["dep 1", "dep 2"]},
+            prefix="my server name",
         )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version .venv && source .venv/bin/activate && uv pip install -r requirements.txt dep 1 dep 2"
+        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version .venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source .venv/bin/activate && uv pip install -r requirements.txt dep 1 dep 2 > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         assert expected_command == actual_command
 
     def test_python_version(self, tmp_path: Path) -> None:
@@ -71,8 +63,9 @@ class TestCLISetupCommandSetupEnvCommand:
         actual_command = setup_env_command(
             dir_path=server_dir,
             global_config_dict=self._debug_global_config_dict | {"python_version": "my python version"},
+            prefix="my server name",
         )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python my python version .venv && source .venv/bin/activate && uv pip install -r requirements.txt ray[default]==test ray version openai==test openai version"
+        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python my python version .venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source .venv/bin/activate && uv pip install -r requirements.txt ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         assert expected_command == actual_command
 
     def test_uv_pip_set_python(self, tmp_path: Path) -> None:
@@ -81,8 +74,9 @@ class TestCLISetupCommandSetupEnvCommand:
         actual_command = setup_env_command(
             dir_path=server_dir,
             global_config_dict=self._debug_global_config_dict | {"uv_pip_set_python": True},
+            prefix="my server name",
         )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version .venv && source .venv/bin/activate && uv pip install --python .venv/bin/python -r requirements.txt ray[default]==test ray version openai==test openai version"
+        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version .venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source .venv/bin/activate && uv pip install --python .venv/bin/python -r requirements.txt ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         assert expected_command == actual_command
 
     def test_pip_install_verbose(self, tmp_path: Path) -> None:
@@ -91,8 +85,9 @@ class TestCLISetupCommandSetupEnvCommand:
         actual_command = setup_env_command(
             dir_path=server_dir,
             global_config_dict=self._debug_global_config_dict | {"pip_install_verbose": True},
+            prefix="my server name",
         )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version .venv && source .venv/bin/activate && uv pip install -v -r requirements.txt ray[default]==test ray version openai==test openai version"
+        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version .venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source .venv/bin/activate && uv pip install -v -r requirements.txt ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         assert expected_command == actual_command
 
     def test_pyproject_requirements_raises_error(self, tmp_path: Path) -> None:
@@ -103,6 +98,7 @@ class TestCLISetupCommandSetupEnvCommand:
             setup_env_command(
                 dir_path=server_dir,
                 global_config_dict=self._debug_global_config_dict,
+                prefix="my server name",
             )
 
     def test_missing_pyproject_requirements_raises_error(self, tmp_path: Path) -> None:
@@ -113,6 +109,7 @@ class TestCLISetupCommandSetupEnvCommand:
             setup_env_command(
                 dir_path=server_dir,
                 global_config_dict=self._debug_global_config_dict,
+                prefix="my server name",
             )
 
     def test_pyproject(self, tmp_path: Path) -> None:
@@ -123,20 +120,22 @@ class TestCLISetupCommandSetupEnvCommand:
         actual_command = setup_env_command(
             dir_path=server_dir,
             global_config_dict=self._debug_global_config_dict,
+            prefix="my server name",
         )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version .venv && source .venv/bin/activate && uv pip install '-e .' ray[default]==test ray version openai==test openai version"
+        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version .venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source .venv/bin/activate && uv pip install '-e .' ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         assert expected_command == actual_command
 
-    def test_uv_cache_dir(self, tmp_path: Path) -> None:
+    def test_uv_venv_dir(self, tmp_path: Path) -> None:
         server_dir = self._setup_server_dir(tmp_path)
 
-        uv_cache_dir = tmp_path / "uv"
+        uv_venv_dir = tmp_path / "uv_venv_dir"
 
         actual_command = setup_env_command(
             dir_path=server_dir,
-            global_config_dict=self._debug_global_config_dict | {"uv_cache_dir": str(uv_cache_dir)},
+            global_config_dict=self._debug_global_config_dict | {"uv_venv_dir": str(uv_venv_dir)},
+            prefix="my server name",
         )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version .venv && source .venv/bin/activate && uv pip install -r requirements.txt ray[default]==test ray version openai==test openai version"
+        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version .venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source .venv/bin/activate && uv pip install -r requirements.txt ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         assert expected_command == actual_command
 
 

@@ -444,7 +444,7 @@ head -1 resources_servers/example_multi_step/data/example_rollouts.jsonl
 
 def _test_single(test_config: TestConfig, global_config_dict: DictConfig) -> Popen:  # pragma: no cover
     # Eventually we may want more sophisticated testing here, but this is sufficient for now.
-    command = f"""{setup_env_command(test_config.dir_path, global_config_dict)} && pytest"""
+    command = f"""{setup_env_command(test_config.dir_path, global_config_dict, test_config.entrypoint)} && pytest"""
     return run_command(command, test_config.dir_path)
 
 
