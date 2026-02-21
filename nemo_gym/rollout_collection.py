@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 from asyncio import Future, Semaphore
+from collections import Counter
 from contextlib import nullcontext
 from copy import deepcopy
 from itertools import repeat
@@ -26,7 +27,12 @@ from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
 
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig
-from nemo_gym.global_config import TASK_INDEX_KEY_NAME
+from nemo_gym.global_config import (
+    AGENT_REF_KEY_NAME,
+    RESPONSES_CREATE_PARAMS_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+)
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
@@ -111,48 +117,65 @@ class RolloutCollectionHelper(BaseModel):
         range_iterator = repeat(0)
         if config.limit:
             range_iterator = range(config.limit)
-            print(f"Limiting the number of rows to {config.limit}!")
+            print(f"Limiting the number of rows to {config.limit}")
 
-        with open(config.input_jsonl_fpath) as input_dataset:
-            rows: list[dict] = [row for _, row in zip(range_iterator, map(orjson.loads, input_dataset))]
-        print(f"Found {len(rows)} rows!")
+        if config.num_repeats_add_seed:
+            print("Adding unique `seed` values to each input")
 
         if config.agent_name:
-            for row in rows:
-                row.setdefault("agent_ref", {"name": config.agent_name})
-        else:
-            # Validate all rows have an agent specified (either via config or agent_ref in data)
-            missing_agent_indices = [idx for idx, row in enumerate(rows) if not row.get("agent_ref", {}).get("name")]
-            if missing_agent_indices:
-                raise ValueError(
-                    f"No agent specified for rows {missing_agent_indices}. Either provide +agent_name config or include agent_ref in data."
-                )
+            print(f"Using `{config.agent_name}` for rows that do not already have an agent ref")
 
         if config.responses_create_params:
             print(f"Overriding responses_create_params fields with {config.responses_create_params}")
-            for row in rows:
-                row["responses_create_params"] = row["responses_create_params"] | config.responses_create_params
+
+        num_repeats = config.num_repeats or 1
+        if num_repeats:
+            print(f"Repeating rows {num_repeats} times (in a pattern of abc to aabbcc)!")
+
+        input_file = open(config.input_jsonl_fpath)
+        rows_iterator: Iterator[str] = input_file
+        rows_iterator: Iterator[str] = tqdm(rows_iterator, desc="Reading rows")
+        rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
 
         # For ng_profile to match rollouts to tasks
-        for task_idx, row in enumerate(rows):
-            row[TASK_INDEX_KEY_NAME] = task_idx
+        row_to_task_idx: Dict[str, int] = dict()
+        task_idx_to_rollout_idx: Dict[int, int] = Counter()
+        row_idxs_missing_agent_ref: List[int] = []
+        rows: List[Dict] = []
+        for i, row_str in rows_iterator:
+            row = orjson.loads(row_str)
 
-        if config.num_repeats:
-            if config.num_repeats_add_seed:
-                print("Adding unique `seed` values to each input!")
+            # Resolve agent name
+            if config.agent_name:
+                row.setdefault(AGENT_REF_KEY_NAME, {"name": config.agent_name})
+            else:
+                row_idxs_missing_agent_ref.append(i)
 
-            previous_length = len(rows)
-            expanded = []
-            for row in rows:
-                for i in range(config.num_repeats):
-                    if config.num_repeats_add_seed:
-                        row = deepcopy(row)
-                        row["responses_create_params"]["seed"] = i
+            # Responses create params
+            row[RESPONSES_CREATE_PARAMS_KEY_NAME] = (
+                row[RESPONSES_CREATE_PARAMS_KEY_NAME] | config.responses_create_params
+            )
 
-                    expanded.append(row)
+            # Resolve task index
+            row[TASK_INDEX_KEY_NAME] = row_to_task_idx.setdefault(row_str, len(row_to_task_idx))
 
-            rows = expanded
-            print(f"Repeating rows (in a pattern of abc to aabbcc) from {previous_length} to {len(rows)}!")
+            for i in range(num_repeats):
+                row = deepcopy(row)
+                if config.num_repeats_add_seed:
+                    row[RESPONSES_CREATE_PARAMS_KEY_NAME]["seed"] = i
+
+                # Resolve rollout index
+                row[ROLLOUT_INDEX_KEY_NAME] = task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]]
+                task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]] += 1
+
+            rows.append(row)
+
+        input_file.close()
+
+        if row_idxs_missing_agent_ref:
+            raise ValueError(
+                f"No agent specified for rows {row_idxs_missing_agent_ref}. Either provide +agent_name config or include agent_ref in data."
+            )
 
         return rows
 
@@ -169,23 +192,23 @@ class RolloutCollectionHelper(BaseModel):
         results: List[Dict] = []
         results_file = open(config.output_jsonl_fpath, "ab")
         for future in self.run_examples(rows, semaphore=semaphore):
-            row, result = await future
-
-            # For ng_profile to match rollouts to tasks
-            if TASK_INDEX_KEY_NAME in row:
-                result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
+            _, result = await future
 
             results_file.write(orjson.dumps(result) + b"\n")
             results.append(result)
 
-        numeric_results: List[Dict] = []
+        filtered_results: List[Dict] = []
         for result in results:
-            numeric_results.append({k: v for k, v in result.items() if isinstance(v, (int, float))})
+            result = result | result["response"].get("usage", None)
 
-        df = DataFrame.from_records(numeric_results)
+            numeric_results = {k: v for k, v in result.items() if isinstance(v, (int, float))}
+
+            filtered_results.append(numeric_results)
+
+        df = DataFrame.from_records(filtered_results)
         groups = df.groupby(TASK_INDEX_KEY_NAME)
         description = groups.describe()
-        print(description)
+        print(description.to_json(indent=4))
 
         return results
 

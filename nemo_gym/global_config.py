@@ -52,7 +52,6 @@ UV_PIP_SET_PYTHON_KEY_NAME = "uv_pip_set_python"
 SKIP_VENV_IF_PRESENT_KEY_NAME = "skip_venv_if_present"
 HF_TOKEN_KEY_NAME = "hf_token"
 RAY_HEAD_NODE_ADDRESS_KEY_NAME = "ray_head_node_address"
-TASK_INDEX_KEY_NAME = "_task_index"
 PORT_RANGE_LOW_KEY_NAME = "port_range_low"
 PORT_RANGE_HIGH_KEY_NAME = "port_range_high"
 DRY_RUN_KEY_NAME = "dry_run"
@@ -78,6 +77,13 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     UV_CACHE_DIR_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
 ]
+
+# Data keys
+TASK_INDEX_KEY_NAME = "_ng_task_index"
+ROLLOUT_INDEX_KEY_NAME = "_ng_rollout_index"
+RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
+RESPONSE_KEY_NAME = "response"
+AGENT_REF_KEY_NAME = "agent_ref"
 
 POLICY_BASE_URL_KEY_NAME = "policy_base_url"
 POLICY_API_KEY_KEY_NAME = "policy_api_key"  # pragma: allowlist secret
