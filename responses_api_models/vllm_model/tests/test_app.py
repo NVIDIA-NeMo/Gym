@@ -2597,3 +2597,182 @@ class TestVLLMConverter:
             ),
         ]
         assert expected_messages == actual_messages
+
+    def test_metadata_chat_template_kwargs_override(self, monkeypatch: MonkeyPatch):
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://api.openai.com/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            chat_template_kwargs={"enable_thinking": True, "some_other_param": "value1"},
+        )
+        server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+        app = server.setup_webserver()
+
+        mock_chat_completion = NeMoGymChatCompletion(
+            id="chtcmpl",
+            object="chat.completion",
+            created=FIXED_TIME,
+            model="dummy_model",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="stop",
+                    message=NeMoGymChatCompletionMessage(
+                        role="assistant",
+                        content="response",
+                        tool_calls=[],
+                    ),
+                )
+            ],
+        )
+
+        captured_kwargs = {}
+
+        async def mock_create_chat_completion(**kwargs):
+            captured_kwargs.update(kwargs)
+            return mock_chat_completion.model_dump()
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        server._clients = [mock_client]
+
+        request_body_with_override = NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                NeMoGymEasyInputMessage(
+                    type="message",
+                    role="user",
+                    content="hello",
+                )
+            ],
+            metadata={"chat_template_kwargs": json.dumps({"enable_thinking": False})},
+        )
+
+        client = TestClient(app)
+        response = client.post(
+            "/v1/responses",
+            json=request_body_with_override.model_dump(exclude_unset=True, mode="json"),
+        )
+        assert response.status_code == 200
+
+        assert "chat_template_kwargs" in captured_kwargs
+        assert captured_kwargs["chat_template_kwargs"]["enable_thinking"] is False
+        assert captured_kwargs["chat_template_kwargs"]["some_other_param"] == "value1"
+
+        captured_kwargs.clear()
+        request_body_no_override = NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                NeMoGymEasyInputMessage(
+                    type="message",
+                    role="user",
+                    content="hello",
+                )
+            ],
+        )
+
+        response = client.post(
+            "/v1/responses",
+            json=request_body_no_override.model_dump(exclude_unset=True, mode="json"),
+        )
+        assert response.status_code == 200
+
+        assert "chat_template_kwargs" in captured_kwargs
+        assert captured_kwargs["chat_template_kwargs"]["enable_thinking"] is True
+        assert captured_kwargs["chat_template_kwargs"]["some_other_param"] == "value1"
+
+        captured_kwargs.clear()
+        request_body_multi_override = NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                NeMoGymEasyInputMessage(
+                    type="message",
+                    role="user",
+                    content="hello",
+                )
+            ],
+            metadata={
+                "chat_template_kwargs": json.dumps(
+                    {"enable_thinking": False, "some_other_param": "value2", "new_param": "new"}
+                )
+            },
+        )
+
+        response = client.post(
+            "/v1/responses",
+            json=request_body_multi_override.model_dump(exclude_unset=True, mode="json"),
+        )
+        assert response.status_code == 200
+
+        assert captured_kwargs["chat_template_kwargs"]["enable_thinking"] is False
+        assert captured_kwargs["chat_template_kwargs"]["some_other_param"] == "value2"
+        assert captured_kwargs["chat_template_kwargs"]["new_param"] == "new"
+
+    def test_metadata_extra_body_override(self, monkeypatch: MonkeyPatch):
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://api.openai.com/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            extra_body={"guided_json": '{"type": "object"}', "min_tokens": 10},
+        )
+        server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+        app = server.setup_webserver()
+
+        mock_chat_completion = NeMoGymChatCompletion(
+            id="chtcmpl",
+            object="chat.completion",
+            created=FIXED_TIME,
+            model="dummy_model",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="stop",
+                    message=NeMoGymChatCompletionMessage(
+                        role="assistant",
+                        content="response",
+                        tool_calls=[],
+                    ),
+                )
+            ],
+        )
+
+        captured_kwargs = {}
+
+        async def mock_create_chat_completion(**kwargs):
+            captured_kwargs.update(kwargs)
+            return mock_chat_completion.model_dump()
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        server._clients = [mock_client]
+
+        request_body_with_override = NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                NeMoGymEasyInputMessage(
+                    type="message",
+                    role="user",
+                    content="hello",
+                )
+            ],
+            metadata={"extra_body": json.dumps({"min_tokens": 20, "new_param": "value"})},
+        )
+
+        client = TestClient(app)
+        response = client.post(
+            "/v1/responses",
+            json=request_body_with_override.model_dump(exclude_unset=True, mode="json"),
+        )
+        assert response.status_code == 200
+
+        assert captured_kwargs["guided_json"] == '{"type": "object"}'
+        assert captured_kwargs["min_tokens"] == 20
+        assert captured_kwargs["new_param"] == "value"

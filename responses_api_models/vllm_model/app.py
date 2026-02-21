@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import re
 from copy import deepcopy
 from time import time
@@ -152,8 +153,48 @@ class VLLMModel(SimpleResponsesAPIModel):
         body_dict = body.model_dump(exclude_unset=True)
         body_dict["model"] = self.config.model
 
+        chat_template_kwargs = {}
         if self.config.chat_template_kwargs:
-            body_dict["chat_template_kwargs"] = deepcopy(self.config.chat_template_kwargs)
+            chat_template_kwargs = deepcopy(self.config.chat_template_kwargs)
+
+        # Merge global config chat_template_kwargs with per-request overrides in metadata (e.g. per-sample reasoning on/off)
+        if body_dict.get("metadata") and isinstance(body_dict["metadata"], dict):
+            metadata_chat_kwargs_str = body_dict["metadata"].get("chat_template_kwargs")
+            if metadata_chat_kwargs_str:
+                if isinstance(metadata_chat_kwargs_str, str):
+                    metadata_chat_kwargs = json.loads(metadata_chat_kwargs_str)
+                else:
+                    metadata_chat_kwargs = metadata_chat_kwargs_str
+
+                if isinstance(metadata_chat_kwargs, dict):
+                    chat_template_kwargs.update(metadata_chat_kwargs)
+                else:
+                    raise ValueError(
+                        f"metadata.chat_template_kwargs must be a dict or JSON-encoded dict string, got {type(metadata_chat_kwargs)}: {metadata_chat_kwargs}"
+                    )
+
+        if chat_template_kwargs:
+            body_dict["chat_template_kwargs"] = chat_template_kwargs
+
+        # Merge global config extra_body with per-request overrides from metadata
+        extra_body = {}
+        if self.config.extra_body:
+            extra_body = deepcopy(self.config.extra_body)
+
+        if body_dict.get("metadata") and isinstance(body_dict["metadata"], dict):
+            metadata_extra_body_str = body_dict["metadata"].get("extra_body")
+            if metadata_extra_body_str:
+                if isinstance(metadata_extra_body_str, str):
+                    metadata_extra_body = json.loads(metadata_extra_body_str)
+                else:
+                    metadata_extra_body = metadata_extra_body_str
+
+                if isinstance(metadata_extra_body, dict):
+                    extra_body.update(metadata_extra_body)
+                else:
+                    raise ValueError(
+                        f"metadata.extra_body must be a dict or JSON-encoded dict string, got {type(metadata_extra_body)}: {metadata_extra_body}"
+                    )
 
         session_id = request.session[SESSION_ID_KEY]
         if session_id not in self._session_id_to_client:
@@ -208,8 +249,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 else:
                     raise NotImplementedError
 
-        if self.config.extra_body:
-            create_params = self.config.extra_body | create_params
+        if extra_body:
+            create_params = extra_body | create_params
 
         try:
             chat_completion_dict = await client.create_chat_completion(**create_params)
