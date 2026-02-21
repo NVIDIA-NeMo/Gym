@@ -17,7 +17,7 @@ import os
 import re
 import urllib
 from copy import deepcopy
-from multiprocessing import Process
+from multiprocessing import Process, Value
 from time import sleep, time
 from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
@@ -32,7 +32,7 @@ from nemo_gym.base_responses_api_model import (
     Body,
     SimpleResponsesAPIModel,
 )
-from nemo_gym.global_config import find_open_port
+from nemo_gym.global_config import find_open_port, get_global_config_dict, PORT_RANGE_HIGH_KEY_NAME, PORT_RANGE_LOW_KEY_NAME
 from nemo_gym.openai_utils import (
     RESPONSES_TO_TRAIN,
     NeMoGymAsyncOpenAI,
@@ -95,16 +95,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
         return super().model_post_init(context)
 
 
-def _start_vllm_server(config: VLLMModelConfig, server_host: str, server_port: int, router_dp_rank: int) -> None:
-    for k, v in (config.server_env or {}).items():
-        os.environ[k] = v
-
-    import uvloop
-    import vllm.engine.arg_utils
-    import vllm.entrypoints.openai.api_server
-    import vllm.entrypoints.openai.cli_args
-    import vllm.utils.argparse_utils
-
+def _build_vllm_argv(config: VLLMModelConfig, server_host: str, server_port: int) -> list[str]:
     argv = []
     argv.append("--model")
     argv.append(config.model)
@@ -125,7 +116,6 @@ def _start_vllm_server(config: VLLMModelConfig, server_host: str, server_port: i
                 arg_key = f"--{k2}"
             argv.append(arg_key)
         elif isinstance(v, dict):
-            # Dict values must be passed as JSON strings to vLLM CLI
             arg_key = f"--{k2}"
             argv.append(arg_key)
             argv.append(json.dumps(v))
@@ -133,13 +123,54 @@ def _start_vllm_server(config: VLLMModelConfig, server_host: str, server_port: i
             arg_key = f"--{k2}"
             argv.append(arg_key)
             argv.append(f"{v}")
+    return argv
 
-    server_args = vllm.utils.argparse_utils.FlexibleArgumentParser()
-    server_args = vllm.entrypoints.openai.cli_args.make_arg_parser(server_args)
-    server_args = server_args.parse_args(argv)
-    vllm.entrypoints.openai.cli_args.validate_parsed_serve_args(server_args)
 
-    uvloop.run(vllm.entrypoints.openai.api_server.run_server(server_args))
+def _start_vllm_server(
+    config: VLLMModelConfig,
+    server_host: str,
+    port_range_low: int,
+    port_range_high: int,
+    actual_port: "Value",
+    router_dp_rank: int,
+    max_retries: int = 10,
+) -> None:
+    for k, v in (config.server_env or {}).items():
+        os.environ[k] = v
+
+    import uvloop
+    import vllm.engine.arg_utils
+    import vllm.entrypoints.openai.api_server
+    import vllm.entrypoints.openai.cli_args
+    import vllm.utils.argparse_utils
+
+    from random import randint
+
+    last_exc = None
+    for attempt in range(max_retries):
+        port = randint(port_range_low, port_range_high)
+        argv = _build_vllm_argv(config, server_host, port)
+
+        server_args = vllm.utils.argparse_utils.FlexibleArgumentParser()
+        server_args = vllm.entrypoints.openai.cli_args.make_arg_parser(server_args)
+        server_args = server_args.parse_args(argv)
+        vllm.entrypoints.openai.cli_args.validate_parsed_serve_args(server_args)
+
+        try:
+            actual_port.value = port
+            uvloop.run(vllm.entrypoints.openai.api_server.run_server(server_args))
+            return
+        except OSError as e:
+            import errno
+            if e.errno == errno.EADDRINUSE:
+                last_exc = e
+                continue
+            raise
+
+    raise RuntimeError(
+        f"Failed to start vLLM server after {max_retries} attempts "
+        f"on port range {port_range_low}-{port_range_high}"
+    ) from last_exc
 
 
 @ray.remote
@@ -149,7 +180,12 @@ class VLLMServerSpinupWorker:
         self.working_dir = working_dir
         self.router_dp_rank = router_dp_rank
         self._server_host = lookup_current_ray_node_ip()
-        self._server_port = find_open_port()
+
+        global_config_dict = get_global_config_dict()
+        port_range_low = global_config_dict[PORT_RANGE_LOW_KEY_NAME]
+        port_range_high = global_config_dict[PORT_RANGE_HIGH_KEY_NAME]
+
+        self._actual_port = Value("i", 0)
 
         if self.working_dir is not None:
             os.chdir(self.working_dir)
@@ -159,7 +195,9 @@ class VLLMServerSpinupWorker:
             args=(
                 self.config,
                 self._server_host,
-                self._server_port,
+                port_range_low,
+                port_range_high,
+                self._actual_port,
                 self.router_dp_rank,
             ),
             daemon=False,
@@ -171,7 +209,7 @@ class VLLMServerSpinupWorker:
         return self._server_host
 
     def _get_port(self) -> int:
-        return self._server_port
+        return self._actual_port.value
 
 
 # Use this to query the VLLM servers during spinup without having to start an
@@ -237,28 +275,31 @@ class VLLMModel(SimpleResponsesAPIModel):
                     router_dp_rank=router_dp_rank,
                 )
 
-                server_ip = ray.get(server_worker._get_ip.remote())
-                server_port = ray.get(server_worker._get_port.remote())
-                server_url = f"http://{server_ip}:{server_port}/v1"
-
-                self._server_urls.append(server_url)
                 self._server_workers.append(server_worker)
 
-                self._clients.append(
-                    NeMoGymAsyncOpenAI(
-                        base_url=server_url,
-                        api_key=self.config.api_key,
-                    )
-                )
+            for server_worker in self._server_workers:
+                server_ip = ray.get(server_worker._get_ip.remote())
 
-            for server_url in self._server_urls:
                 while True:
+                    server_port = ray.get(server_worker._get_port.remote())
+                    if server_port == 0:
+                        sleep(1)
+                        continue
+                    server_url = f"http://{server_ip}:{server_port}/v1"
                     try:
                         _vllm_server_heartbeat(server_url)
                         break
                     except Exception:
                         sleep(3)
                         continue
+
+                self._server_urls.append(server_url)
+                self._clients.append(
+                    NeMoGymAsyncOpenAI(
+                        base_url=server_url,
+                        api_key=self.config.api_key,
+                    )
+                )
 
         else:
             self._server_urls = None
