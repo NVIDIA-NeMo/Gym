@@ -165,6 +165,9 @@ Perform a batch of rollout collection.
 * - `num_repeats`
   - Optional[int]
   - The number of times to repeat each example to run. Useful if you want to calculate mean@k, such as mean@4 or mean@16.
+* - `num_repeats_add_seed`
+  - bool
+  - When num_repeats > 1, add a "seed" parameter on the Responses create params.
 * - `num_samples_in_parallel`
   - Optional[int]
   - Limit the number of concurrent samples running at once.
@@ -183,6 +186,55 @@ ng_collect_rollouts \
     +limit=100 \
     +num_repeats=4 \
     +num_samples_in_parallel=10
+```
+
+---
+
+### `ng_profile` / `nemo_gym_profile`
+
+Computes statistics on rewards and task difficulty for rollouts collected with `ng_collect_rollouts` with `num_repeats` > 1. This outputs a new "reward profiled" dataset, where each task in the dataset has metrics like the average reward, standard deviation, min/max, and pass rate. This is useful in filtering tasks before training for difficulty, variance, or creating a curriculum. 
+
+**Parameters**
+
+```{list-table}
+:header-rows: 1
+:widths: 25 15 60
+
+* - Parameter
+  - Type
+  - Description
+* - `input_jsonl_fpath`
+  - str
+  - Path to the original task dataset JSONL file.
+* - `rollouts_jsonl_fpath`
+  - str
+  - Path to the rollouts file from `ng_collect_rollouts` (must have been run with `num_repeats` > 1).
+* - `output_jsonl_fpath`
+  - str
+  - Output file path for the reward profiled dataset.
+* - `pass_threshold`
+  - Optional[float]
+  - Reward threshold for computing pass rate. If not specified, pass rate metrics are not included.
+```
+
+**Output Fields**
+
+Each output row contains all original task fields plus:
+- `avg_reward`: Average reward across all rollouts
+- `std_reward`: Standard deviation of rewards
+- `min_reward`: Minimum reward observed
+- `max_reward`: Maximum reward observed
+- `total_samples`: Number of rollout samples
+- `pass_rate`, `pass_rate_total`, `pass_rate_passed`, `pass_threshold`: (Only if `pass_threshold` is specified)
+
+**Example**
+
+```bash
+ng_profile \
+    +input_jsonl_fpath=tasks.jsonl \
+    +rollouts_jsonl_fpath=rollouts.jsonl \
+    +output_jsonl_fpath=profiled_tasks.jsonl \
+    +pass_threshold=1.0
 ```
 
 ---
@@ -223,45 +275,6 @@ responses_api_models/openai_model/configs/openai_model.yaml"
 ng_prepare_data "+config_paths=[${config_paths}]" \
     +output_dirpath=data/example_multi_step \
     +mode=example_validation
-```
-
----
-
-### `ng_viewer` / `nemo_gym_viewer`
-
-Launch a Gradio interface to view and explore dataset rollouts interactively.
-
-**Parameters**
-
-```{list-table}
-:header-rows: 1
-:widths: 20 10 70
-
-* - Parameter
-  - Type
-  - Description
-* - `jsonl_fpath`
-  - str
-  - Filepath to a local JSONL file to view.
-* - `server_host`
-  - str
-  - Network address where the viewer accepts requests. Defaults to `"127.0.0.1"` (localhost only). Set to `"0.0.0.0"` to accept requests from anywhere.
-* - `server_port`
-  - int
-  - Port where the viewer accepts requests. Defaults to `7860`. If the specified port is unavailable, Gradio will search for the next available port.
-```
-
-**Examples**
-
-```bash
-# Launch viewer with default settings (accessible from localhost only)
-ng_viewer +jsonl_fpath=weather_rollouts.jsonl
-
-# Accept requests from anywhere (e.g., for remote access)
-ng_viewer +jsonl_fpath=weather_rollouts.jsonl +server_host=0.0.0.0
-
-# Use a custom port
-ng_viewer +jsonl_fpath=weather_rollouts.jsonl +server_port=8080
 ```
 
 ---
@@ -543,6 +556,87 @@ ng_version
 
 # Output as JSON
 ng_version +json=true
+```
+
+---
+
+### `ng_pip_list` / `nemo_gym_pip_list`
+
+Each server has its own isolated virtual environment. To inspect the packages:
+
+**Parameters**
+
+```{list-table}
+:header-rows: 1
+:widths: 20 10 70
+
+* - Parameter
+  - Type
+  - Description
+* - `entrypoint`
+  - str
+  - The relative entrypoint path to the server directory
+* - `format`
+  - Optional[str]
+  - Output format for pip list. Options: 'columns' (default), 'freeze', 'json'. Default: `None`.
+* - `outdated`
+  - bool
+  - List outdated packages. Default: `False`.
+```
+
+**Examples**
+
+```bash
+# List all packages
+ng_pip_list +entrypoint=resources_servers/example_single_tool_call
+
+# Output as JSON
+ng_pip_list +entrypoint=resources_servers/example_single_tool_call +format=json
+
+# Check for outdated packages
+ng_pip_list +entrypoint=resources_servers/example_single_tool_call +outdated=true
+```
+
+---
+
+### `ng_status` / `nemo_gym_status`
+
+View all currently running NeMo Gym servers and their health status.
+
+**Example**
+
+```bash
+ng_status
+
+NeMo Gym Server Status:
+
+[1] ✓ example_single_tool_call (resources_servers/example_single_tool_call)
+{
+    'server_type': 'resources_servers',
+    'name': 'example_single_tool_call',
+    'port': 58117,
+    'pid': 89904,
+    'uptime_seconds': '0d 0h 0m 41.5s',
+}
+[2] ✓ example_single_tool_call_simple_agent (responses_api_agents/simple_agent)
+{
+    'server_type': 'responses_api_agents',
+    'name': 'simple_agent',
+    'port': 58118,
+    'pid': 89905,
+    'uptime_seconds': '0d 0h 0m 41.5s',
+}
+[3] ✓ policy_model (responses_api_models/openai_model)
+{
+    'server_type': 'responses_api_models',
+    'name': 'openai_model',
+    'port': 58119,
+    'pid': 89907,
+    'uptime_seconds': '0d 0h 0m 41.5s',
+}
+
+3 servers found (3 healthy, 0 unhealthy)
+
 ```
 
 ---

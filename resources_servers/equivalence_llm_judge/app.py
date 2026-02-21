@@ -21,7 +21,9 @@ The judge prompt is fully configurable via server config.
 # limitations under the License.
 from __future__ import annotations
 
+import asyncio
 import re
+from contextlib import nullcontext
 from typing import Any, Optional
 
 from fastapi import FastAPI
@@ -41,6 +43,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.server_utils import get_response_json
 
 
 class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
@@ -59,8 +62,11 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
 
+    # Concurrency limit for judge endpoint requests. Set to None to disable limiting.
+    judge_endpoint_max_concurrency: Optional[int] = 64
+
     judge_system_message: Optional[str] = None
-    judge_prompt_template: str
+    judge_prompt_template_fpath: str = "prompt_templates/equivalence_llm_judge.txt"
     judge_equal_label: str = "[[A=B]]"
     judge_not_equal_label: str = "[[A!=B]]"
     # Optional regex to extract the question from the last user message.
@@ -258,6 +264,17 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
 
     config: LLMJudgeResourcesServerConfig
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        if self.config.judge_endpoint_max_concurrency is not None:
+            self._judge_endpoint_max_concurrency = asyncio.Semaphore(value=self.config.judge_endpoint_max_concurrency)
+        else:
+            self._judge_endpoint_max_concurrency = nullcontext()
+
+        with open(self.config.judge_prompt_template_fpath, "r") as f:
+            self._judge_prompt_template = f.read().strip()
+
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         return app
@@ -443,7 +460,7 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         not_equal_label = cfg.judge_not_equal_label
 
         responses_create_params = cfg.judge_responses_create_params.model_copy(deep=True)
-        prompt_template = cfg.judge_prompt_template
+        prompt_template = self._judge_prompt_template
         system_message = cfg.judge_system_message
 
         ### Truncation logic to prevent exceeding context length ###
@@ -494,32 +511,21 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         msgs.append(NeMoGymEasyInputMessage(role="user", content=user_prompt))
         responses_create_params.input = msgs
 
-        response = await self.server_client.post(
-            server_name=cfg.judge_model_server.name,
-            url_path="/v1/responses",
-            json=responses_create_params,
-        )
-        try:
-            judge_response = NeMoGymResponse.model_validate(await response.json())
-        except ValidationError as exc:
-            print(
-                "[WARNING] - equivalence_llm_judge - Failed to validate judge response.\n"
-                "Falling back to synthetic non-equal response.\n"
-                f"question_len={len(question)}\n"
-                f"expected_len={len(expected_answer)}\n"
-                f"generated_len={len(generated_answer)}\n"
-                f"validation_error={exc}"
-            )
-            judge_response = NeMoGymResponse(
-                id="validation_error",
-                created_at=0,
-                model="",
-                object="response",
-                output=[],
-                parallel_tool_calls=True,
-                tool_choice="auto",
-                tools=[],
-            )
+        async with self._judge_endpoint_max_concurrency:
+            try:
+                response = await self.server_client.post(
+                    server_name=cfg.judge_model_server.name,
+                    url_path="/v1/responses",
+                    json=responses_create_params,
+                )
+                judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
+            except Exception as e:
+                print(
+                    f"DEBUG: LLMJudgeResourcesServer: judge model server HTTP POST error: {type(e).__name__} {e}",
+                    flush=True,
+                )
+                raise e
+
         eval_record = JudgeEvaluation(
             responses_create_params=responses_create_params,
             response=judge_response,
