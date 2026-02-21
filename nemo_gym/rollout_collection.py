@@ -211,7 +211,16 @@ class RolloutCollectionHelper(BaseModel):
         df = DataFrame.from_records(filtered_results)
         groups = df.groupby(TASK_INDEX_KEY_NAME)
         description = groups.describe()
-        print(description.to_json(indent=4))
+
+        output_fstem = Path(config.output_jsonl_fpath).stem
+        metrics_fstem = output_fstem + "_metrics"
+        metrics_fpath = Path(config.output_jsonl_fpath).with_stem(metrics_fstem).with_suffix(".json")
+
+        metrics_fpath.write_text(description.to_json(indent=4))
+
+        print(f"""Finished rollout collection! View results at:
+Rollouts: {config.output_jsonl_fpath}
+Metrics: {metrics_fpath}""")
 
         return results
 
