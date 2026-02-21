@@ -178,7 +178,11 @@ class RolloutCollectionHelper(BaseModel):
             results_file.write(orjson.dumps(result) + b"\n")
             results.append(result)
 
-        df = DataFrame.from_records(results)
+        numeric_results: List[Dict] = []
+        for result in results:
+            numeric_results.append({k: v for k, v in result.items() if isinstance(v, (int, float))})
+
+        df = DataFrame.from_records(numeric_results)
         groups = df.groupby(TASK_INDEX_KEY_NAME)
         description = groups.describe()
         print(description)
