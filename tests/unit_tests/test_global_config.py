@@ -20,7 +20,7 @@ from pytest import MonkeyPatch, raises
 
 import nemo_gym.global_config
 import nemo_gym.server_utils
-from nemo_gym import CACHE_DIR
+from nemo_gym import CACHE_DIR, PARENT_DIR
 from nemo_gym.global_config import (
     DEFAULT_HEAD_SERVER_PORT,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
@@ -54,7 +54,7 @@ class TestServerUtils:
             "skip_venv_if_present": False,
             "dry_run": False,
             "uv_cache_dir": str(CACHE_DIR / "uv"),
-            "uv_venv_dir": "",
+            "uv_venv_dir": str(PARENT_DIR),
         }
 
     def test_get_global_config_dict_sanity(self, monkeypatch: MonkeyPatch) -> None:
