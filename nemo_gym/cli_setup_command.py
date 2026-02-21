@@ -21,7 +21,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     head_server_deps = global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]
 
     root_venv_path = global_config_dict[UV_VENV_DIR_KEY_NAME]
-    venv_path = Path(root_venv_path, *dir_path.parts[-2:], ".venv")
+    venv_path = Path(root_venv_path, *dir_path.parts[-2:], ".venv").absolute()
 
     uv_venv_cmd = f"uv venv --seed --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} {venv_path}"
 
@@ -59,7 +59,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
         prefix_cmd = f" > >(sed 's/^/({prefix}) /') 2> >(sed 's/^/({prefix}) /' >&2)"
         env_setup_cmd = f"{uv_venv_cmd}{prefix_cmd} && source {venv_activate_fpath} && {install_cmd}{prefix_cmd}"
 
-    return f"cd {dir_path} && {env_setup_cmd}"
+    return f"{env_setup_cmd} && cd {dir_path}"
 
 
 def run_command(command: str, working_dir_path: Path) -> Popen:

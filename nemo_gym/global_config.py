@@ -333,9 +333,9 @@ class GlobalConfigDictParser(BaseModel):
             global_config_dict.setdefault(UV_CACHE_DIR_KEY_NAME, str(CACHE_DIR / "uv"))
             # Set the appropriate environment variable here, and matche the config
             environ["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
-            # By default, build the directories in their individual folders (empty string i.e. "" is interpreted as such)
-            # Otherwise build them in a shared directory, still split by server type.
-            global_config_dict.setdefault(UV_VENV_DIR_KEY_NAME, "")
+            # By default, build the directories in their individual folders using the root repository
+            # e.g. PARENT_DIR/responses_api_models/my_server
+            global_config_dict.setdefault(UV_VENV_DIR_KEY_NAME, str(PARENT_DIR))
 
         if parse_config.hide_secrets:
             self._recursively_hide_secrets(global_config_dict)

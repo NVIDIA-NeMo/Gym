@@ -17,6 +17,13 @@ from os import environ
 from pathlib import Path
 
 
+# /path/to/dir/Gym (PARENT_DIR)
+# |- cache (CACHE_DIR)
+# |- results (RESULTS_DIR)
+# |- nemo_gym (ROOT_DIR)
+# |- responses_api_models
+# |- responses_api_agents
+# ...
 ROOT_DIR = Path(__file__).absolute().parent
 PARENT_DIR = ROOT_DIR.parent
 CACHE_DIR = PARENT_DIR / "cache"
