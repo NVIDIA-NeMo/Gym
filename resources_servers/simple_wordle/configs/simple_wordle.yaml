@@ -1,0 +1,4 @@
+simple_wordle:
+  resources_servers:
+    simple_wordle:
+      entrypoint: app.py
