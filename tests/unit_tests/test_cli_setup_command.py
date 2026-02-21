@@ -1,7 +1,5 @@
 from pathlib import Path
 
-from omegaconf import OmegaConf
-
 from nemo_gym.cli_setup_command import setup_env_command
 from tests.unit_tests.test_global_config import TestServerUtils
 
@@ -35,8 +33,10 @@ class TestCLISetupCommand:
     def test_setup_env_command_skips_install_when_venv_present(self, tmp_path: Path) -> None:
         server_dir = self._setup_server_dir(tmp_path)
 
-        global_config_dict = OmegaConf.create(self._debug_global_config_dict | {"skip_venv_if_present": True})
+        actual_command = setup_env_command(
+            dir_path=server_dir,
+            global_config_dict=self._debug_global_config_dict | {"skip_venv_if_present": True},
+        )
 
-        command = setup_env_command(server_dir, global_config_dict)
-
-        assert command == f"cd {server_dir} && source .venv/bin/activate"
+        expected_command = f"cd {server_dir} && source .venv/bin/activate"
+        assert expected_command == actual_command
