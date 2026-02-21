@@ -124,3 +124,15 @@ class TestCLISetupCommand:
         )
         expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version .venv && source .venv/bin/activate && uv pip install '-e .' ray[default]==test ray version openai==test openai version"
         assert expected_command == actual_command
+
+    def test_setup_env_command_uv_cache_dir(self, tmp_path: Path) -> None:
+        server_dir = self._setup_server_dir(tmp_path)
+
+        uv_cache_dir = tmp_path / "uv"
+
+        actual_command = setup_env_command(
+            dir_path=server_dir,
+            global_config_dict=self._debug_global_config_dict | {"uv_cache_dir": str(uv_cache_dir)},
+        )
+        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version .venv && source .venv/bin/activate && uv pip install -r requirements.txt ray[default]==test ray version openai==test openai version"
+        assert expected_command == actual_command

@@ -21,7 +21,7 @@ import sys
 import tomllib
 from glob import glob
 from importlib.metadata import version as md_version
-from os import environ, makedirs
+from os import makedirs
 from os.path import exists
 from pathlib import Path
 from signal import SIGINT
@@ -39,7 +39,7 @@ from pydantic import Field
 from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR, __version__
-from nemo_gym.cli_setup_command import setup_env_command
+from nemo_gym.cli_setup_command import run_command, setup_env_command
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
@@ -57,26 +57,6 @@ from nemo_gym.server_utils import (
     ServerStatus,
     initialize_ray,
 )
-
-
-def _run_command(command: str, working_dir_path: Path) -> Popen:  # pragma: no cover
-    work_dir = f"{working_dir_path.absolute()}"
-    custom_env = environ.copy()
-    py_path = custom_env.get("PYTHONPATH", None)
-    if py_path is not None:
-        custom_env["PYTHONPATH"] = f"{work_dir}:{py_path}"
-    else:
-        custom_env["PYTHONPATH"] = work_dir
-    redirect_stdout = sys.stdout
-    redirect_stderr = sys.stderr
-    return Popen(
-        command,
-        executable="/bin/bash",
-        shell=True,
-        env=custom_env,
-        stdout=redirect_stdout,
-        stderr=redirect_stderr,
-    )
 
 
 class RunConfig(BaseNeMoGymCLIConfig):
@@ -186,7 +166,7 @@ class RunHelper:  # pragma: no cover
     {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(top_level_path)} \\
     python {str(entrypoint_fpath)}"""
 
-            process = _run_command(command, dir_path)
+            process = run_command(command, dir_path)
             self._processes[top_level_path] = process
 
             host = server_config_dict.get("host")
@@ -465,7 +445,7 @@ head -1 resources_servers/example_multi_step/data/example_rollouts.jsonl
 def _test_single(test_config: TestConfig, global_config_dict: DictConfig) -> Popen:  # pragma: no cover
     # Eventually we may want more sophisticated testing here, but this is sufficient for now.
     command = f"""{setup_env_command(test_config.dir_path, global_config_dict)} && pytest"""
-    return _run_command(command, test_config.dir_path)
+    return run_command(command, test_config.dir_path)
 
 
 def test():  # pragma: no cover
@@ -830,7 +810,7 @@ def pip_list():  # pragma: no cover
     print(f"Virtual environment: {venv_path.absolute()}")
     print("-" * 72)
 
-    proc = _run_command(command, dir_path)
+    proc = run_command(command, dir_path)
     return_code = proc.wait()
     exit(return_code)
 

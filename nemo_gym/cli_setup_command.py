@@ -1,4 +1,7 @@
+from os import environ
 from pathlib import Path
+from subprocess import Popen
+from sys import stderr, stdout
 from typing import Optional
 
 from omegaconf import DictConfig
@@ -71,3 +74,24 @@ def venv_install_or_skip(should_skip: bool, uv_venv_cmd: str, install_cmd: str, 
         install_cmd = f"{install_cmd} > >(sed 's/^/({prefix}) /') 2> >(sed 's/^/({prefix}) /' >&2)"
 
     return f"{uv_venv_cmd} && source .venv/bin/activate && {install_cmd}"
+
+
+def run_command(command: str, working_dir_path: Path) -> Popen:
+    work_dir = f"{working_dir_path.absolute()}"
+    custom_env = environ.copy()
+    py_path = custom_env.get("PYTHONPATH", None)
+    if py_path is not None:
+        custom_env["PYTHONPATH"] = f"{work_dir}:{py_path}"
+    else:
+        custom_env["PYTHONPATH"] = work_dir
+
+    redirect_stdout = stdout
+    redirect_stderr = stderr
+    return Popen(
+        command,
+        executable="/bin/bash",
+        shell=True,
+        env=custom_env,
+        stdout=redirect_stdout,
+        stderr=redirect_stderr,
+    )
