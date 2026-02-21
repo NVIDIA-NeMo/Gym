@@ -116,6 +116,7 @@ def _build_vllm_argv(config: VLLMModelConfig, server_host: str, server_port: int
                 arg_key = f"--{k2}"
             argv.append(arg_key)
         elif isinstance(v, dict):
+            # Dict values must be passed as JSON strings to vLLM CLI
             arg_key = f"--{k2}"
             argv.append(arg_key)
             argv.append(json.dumps(v))
@@ -135,6 +136,17 @@ def _start_vllm_server(
     router_dp_rank: int,
     max_retries: int = 10,
 ) -> None:
+    """Start a vLLM OpenAI-compatible server, retrying on port conflicts.
+
+    Port selection happens here (inside the subprocess) rather than in the
+    parent to eliminate the TOCTOU gap that occurs when a port is probed in
+    one process and later bound in another.  If vLLM's sock.bind() fails
+    with EADDRINUSE, we pick a new random port and retry.
+
+    The chosen port is written to *actual_port* (a multiprocessing.Value
+    backed by shared memory) so the parent process can discover which port
+    the server ultimately bound to.
+    """
     for k, v in (config.server_env or {}).items():
         os.environ[k] = v
 
@@ -157,12 +169,18 @@ def _start_vllm_server(
         vllm.entrypoints.openai.cli_args.validate_parsed_serve_args(server_args)
 
         try:
+            # Write the candidate port to shared memory so the parent can
+            # read it once the server is up (via heartbeat polling).
             actual_port.value = port
             uvloop.run(vllm.entrypoints.openai.api_server.run_server(server_args))
             return
         except OSError as e:
             import errno
             if e.errno == errno.EADDRINUSE:
+                # Port was claimed between selection and bind (race with
+                # another server on the same node).  Reset the sentinel
+                # and retry with a different port.
+                actual_port.value = -1
                 last_exc = e
                 continue
             raise
@@ -185,7 +203,9 @@ class VLLMServerSpinupWorker:
         port_range_low = global_config_dict[PORT_RANGE_LOW_KEY_NAME]
         port_range_high = global_config_dict[PORT_RANGE_HIGH_KEY_NAME]
 
-        self._actual_port = Value("i", 0)
+        # Shared memory integer for the subprocess to report which port it
+        # actually bound to.  -1 = not yet determined / retrying.
+        self._actual_port = Value("i", -1)
 
         if self.working_dir is not None:
             os.chdir(self.working_dir)
@@ -209,6 +229,7 @@ class VLLMServerSpinupWorker:
         return self._server_host
 
     def _get_port(self) -> int:
+        """Return the port the vLLM server bound to, or -1 if still starting."""
         return self._actual_port.value
 
 
@@ -277,12 +298,18 @@ class VLLMModel(SimpleResponsesAPIModel):
 
                 self._server_workers.append(server_worker)
 
+            # Wait for each server to come up.  The subprocess picks its own
+            # port and writes it to shared memory.  We poll _get_port() until
+            # it returns a real port (not -1), then confirm the server is
+            # reachable via heartbeat.  Re-reading the port each iteration
+            # handles the case where the subprocess retries on a new port
+            # after an EADDRINUSE.
             for server_worker in self._server_workers:
                 server_ip = ray.get(server_worker._get_ip.remote())
 
                 while True:
                     server_port = ray.get(server_worker._get_port.remote())
-                    if server_port == 0:
+                    if server_port == -1:
                         sleep(1)
                         continue
                     server_url = f"http://{server_ip}:{server_port}/v1"
