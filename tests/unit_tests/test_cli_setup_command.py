@@ -145,7 +145,7 @@ class TestCLISetupCommandRunCommand:
         Popen_mock = MagicMock()
         monkeypatch.setattr(nemo_gym.cli_setup_command, "Popen", Popen_mock)
 
-        get_global_config_dict_mock = MagicMock(return_value=dict())
+        get_global_config_dict_mock = MagicMock(return_value={"uv_cache_dir": "default uv cache dir"})
         monkeypatch.setattr(nemo_gym.cli_setup_command, "get_global_config_dict", get_global_config_dict_mock)
 
         monkeypatch.setattr(nemo_gym.cli_setup_command, "environ", dict())
@@ -167,7 +167,7 @@ class TestCLISetupCommandRunCommand:
             "my command",
             executable="/bin/bash",
             shell=True,
-            env={"PYTHONPATH": "/my path"},
+            env={"PYTHONPATH": "/my path", "UV_CACHE_DIR": "default uv cache dir"},
             stdout="stdout",
             stderr="stderr",
         )
@@ -187,7 +187,28 @@ class TestCLISetupCommandRunCommand:
             "my command",
             executable="/bin/bash",
             shell=True,
-            env={"PYTHONPATH": "/my path:existing pythonpath"},
+            env={"PYTHONPATH": "/my path:existing pythonpath", "UV_CACHE_DIR": "default uv cache dir"},
+            stdout="stdout",
+            stderr="stderr",
+        )
+        actual_args = Popen_mock.call_args
+        assert expected_args == actual_args
+
+    def test_custom_uv_cache_dir(self, monkeypatch: MonkeyPatch) -> None:
+        Popen_mock, get_global_config_dict_mock = self._setup(monkeypatch)
+
+        get_global_config_dict_mock.return_value = {"uv_cache_dir": "my uv cache dir"}
+
+        run_command(
+            command="my command",
+            working_dir_path=Path("/my path"),
+        )
+
+        expected_args = call(
+            "my command",
+            executable="/bin/bash",
+            shell=True,
+            env={"PYTHONPATH": "/my path", "UV_CACHE_DIR": "my uv cache dir"},
             stdout="stdout",
             stderr="stderr",
         )

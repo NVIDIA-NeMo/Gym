@@ -11,6 +11,7 @@ from nemo_gym.global_config import (
     PIP_INSTALL_VERBOSE_KEY_NAME,
     PYTHON_VERSION_KEY_NAME,
     SKIP_VENV_IF_PRESENT_KEY_NAME,
+    UV_CACHE_DIR_KEY_NAME,
     UV_PIP_SET_PYTHON_KEY_NAME,
     get_global_config_dict,
 )
@@ -88,6 +89,8 @@ def run_command(command: str, working_dir_path: Path) -> Popen:
         custom_env["PYTHONPATH"] = f"{work_dir}:{py_path}"
     else:
         custom_env["PYTHONPATH"] = work_dir
+
+    custom_env["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
 
     redirect_stdout = stdout
     redirect_stderr = stderr
