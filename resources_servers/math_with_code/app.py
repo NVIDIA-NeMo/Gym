@@ -16,7 +16,6 @@ import asyncio
 import io
 import json
 import multiprocessing
-import re
 import signal
 import time
 from contextlib import redirect_stderr, redirect_stdout
