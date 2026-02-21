@@ -25,9 +25,8 @@ class TestCLISetupCommand:
         actual_command = setup_env_command(
             dir_path=server_dir,
             global_config_dict=self._debug_global_config_dict,
-            prefix="my_server_name",
         )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version .venv > >(sed 's/^/(my_server_name) /') 2> >(sed 's/^/(my_server_name) /' >&2) && source .venv/bin/activate && uv pip install -r requirements.txt ray[default]==test ray version openai==test openai version > >(sed 's/^/(my_server_name) /') 2> >(sed 's/^/(my_server_name) /' >&2)"
+        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version .venv && source .venv/bin/activate && uv pip install -r requirements.txt ray[default]==test ray version openai==test openai version"
         assert expected_command == actual_command
 
     def test_setup_env_command_skips_install_when_venv_present(self, tmp_path: Path) -> None:
