@@ -1,8 +1,10 @@
 from pathlib import Path
+from unittest.mock import MagicMock, call
 
-from pytest import raises
+from pytest import MonkeyPatch, raises
 
-from nemo_gym.cli_setup_command import setup_env_command
+import nemo_gym.cli_setup_command
+from nemo_gym.cli_setup_command import run_command, setup_env_command
 from tests.unit_tests.test_global_config import TestServerUtils
 
 
@@ -136,3 +138,33 @@ class TestCLISetupCommandSetupEnvCommand:
         )
         expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version .venv && source .venv/bin/activate && uv pip install -r requirements.txt ray[default]==test ray version openai==test openai version"
         assert expected_command == actual_command
+
+
+class TestCLISetupCommandRunCommand:
+    def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
+        Popen_mock = MagicMock()
+        monkeypatch.setattr(nemo_gym.cli_setup_command, "Popen", Popen_mock)
+
+        get_global_config_dict_mock = MagicMock(return_value=dict())
+        monkeypatch.setattr(nemo_gym.cli_setup_command, "get_global_config_dict", get_global_config_dict_mock)
+
+        monkeypatch.setattr(nemo_gym.cli_setup_command, "environ", dict())
+
+        monkeypatch.setattr(nemo_gym.cli_setup_command, "stdout", "stdout")
+        monkeypatch.setattr(nemo_gym.cli_setup_command, "stderr", "stderr")
+
+        run_command(
+            command="my command",
+            working_dir_path=Path("/my path"),
+        )
+
+        expected_args = call(
+            "my command",
+            executable="/bin/bash",
+            shell=True,
+            env={"PYTHONPATH": "/my path"},
+            stdout="stdout",
+            stderr="stderr",
+        )
+        actual_args = Popen_mock.call_args
+        assert expected_args == actual_args
