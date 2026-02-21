@@ -56,7 +56,9 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
 
     # TEMPORARY: pointing to local source until published to pypi.org
     # DELETE BEFORE MERGING
-    _NEMO_GYM_LOCAL_PATH = "/lustre/fsw/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/cmunley/gympypifix"
+    _NEMO_GYM_LOCAL_PATH = (
+        "/lustre/fsw/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/cmunley/gympypifix"
+    )
     pypi_index_flags = ""
 
     if should_skip_venv_setup:
@@ -70,7 +72,9 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             )
         elif has_pyproject_toml:
             if is_editable_install:
-                install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
+                install_cmd = (
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
+                )
             else:
                 # install nemo-gym from pypi instead of relative path in pyproject.toml
                 install_cmd = (

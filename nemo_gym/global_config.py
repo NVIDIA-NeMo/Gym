@@ -239,7 +239,6 @@ class GlobalConfigDictParser(BaseModel):
             cwd_env_yaml = Path.cwd() / "env.yaml"
             dotenv_path = cwd_env_yaml if cwd_env_yaml.exists() else PARENT_DIR / "env.yaml"
 
-
         dotenv_extra_config = DictConfig({})
         if dotenv_path.exists() and not parse_config.skip_load_from_dotenv:
             dotenv_extra_config = OmegaConf.load(dotenv_path)
