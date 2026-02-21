@@ -59,7 +59,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
         prefix_cmd = f" > >(sed 's/^/({prefix}) /') 2> >(sed 's/^/({prefix}) /' >&2)"
         env_setup_cmd = f"{uv_venv_cmd}{prefix_cmd} && source {venv_activate_fpath} && {install_cmd}{prefix_cmd}"
 
-    return f"{env_setup_cmd} && cd {dir_path}"
+    return f"cd {dir_path} && {env_setup_cmd}"
 
 
 def run_command(command: str, working_dir_path: Path) -> Popen:
