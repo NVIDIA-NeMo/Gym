@@ -41,6 +41,7 @@ from resources_servers.newton_bench.newton_bench_utils.sandbox import (
     validate_python_code,
 )
 from resources_servers.newton_bench.newton_bench_utils.schemas import MODULE_REQUEST_CLASSES_MAPPING
+from resources_servers.newton_bench.setup_newton_bench import ensure_newton_bench
 
 
 REPO_ROOT = Path(__file__).parent.parent.parent
@@ -172,6 +173,7 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
 
         app.router.lifespan_context = lifespan
 
+        ensure_newton_bench()
         modules_dir = NEWTON_BENCH_PATH / "modules"
         try:
             if modules_dir.exists() and modules_dir.is_dir():
