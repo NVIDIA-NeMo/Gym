@@ -54,11 +54,6 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
 
     is_editable_install = (dir_path / "../../pyproject.toml").exists()
 
-    # TEMPORARY: pointing to local source until published to pypi.org
-    # DELETE BEFORE MERGING
-    _NEMO_GYM_LOCAL_PATH = (
-        "/lustre/fsw/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/cmunley/gympypifix"
-    )
     if should_skip_venv_setup:
         env_setup_cmd = f"source {venv_activate_fpath}"
     else:
@@ -70,13 +65,11 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             )
         elif has_pyproject_toml:
             if is_editable_install:
-                install_cmd = (
-                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
-                )
+                install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
             else:
                 # install nemo-gym from pypi instead of relative path in pyproject.toml
                 install_cmd = (
-                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}{_NEMO_GYM_LOCAL_PATH} && """
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}nemo-gym && """
                     f"""uv pip install {verbose_flag}{uv_pip_python_flag}--no-sources '-e .' {" ".join(head_server_deps)}"""
                 )
         elif has_requirements_txt:
@@ -85,7 +78,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             else:
                 # install nemo-gym from pypi instead of relative path in requirements.txt
                 install_cmd = (
-                    f"""(echo '{_NEMO_GYM_LOCAL_PATH}' && grep -v -F '../..' requirements.txt) | """
+                    f"""(echo 'nemo-gym' && grep -v -F '../..' requirements.txt) | """
                     f"""uv pip install {verbose_flag}{uv_pip_python_flag}-r /dev/stdin {" ".join(head_server_deps)}"""
                 )
         else:
