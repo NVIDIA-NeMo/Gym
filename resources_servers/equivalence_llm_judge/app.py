@@ -5,13 +5,14 @@ Compares a model's generated answer to an expected answer using an LLM judge.
 The judge prompt is fully configurable via server config.
 """
 
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,11 +21,13 @@ The judge prompt is fully configurable via server config.
 # limitations under the License.
 from __future__ import annotations
 
+import asyncio
 import re
+from contextlib import nullcontext
 from typing import Any, Optional
 
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -39,6 +42,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.server_utils import get_response_json
 
 
 class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
@@ -57,8 +61,11 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
 
+    # Concurrency limit for judge endpoint requests. Set to None to disable limiting.
+    judge_endpoint_max_concurrency: Optional[int] = 64
+
     judge_system_message: Optional[str] = None
-    judge_prompt_template: str
+    judge_prompt_template_fpath: str = "prompt_templates/equivalence_llm_judge.txt"
     judge_equal_label: str = "[[A=B]]"
     judge_not_equal_label: str = "[[A!=B]]"
     # Optional regex to extract the question from the last user message.
@@ -69,11 +76,37 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     # The last match is used. If capture groups exist, the first non-empty group is
     # returned; otherwise, the entire last match is used.
     response_extract_regex: Optional[str] = None
-    # If true, perform a second judge pass swapping expected and generated answers
-    # to reduce potential positional bias. Default is false for speed.
+
+    # Swap check: Run second judge pass with swapped expected/generated to detect positional bias
     check_twice_swap: bool = False
     # Reward to assign if the second (swap) pass fails. Defaults to 0.0; can be set to -1.0.
     reward_if_swap_fails: float = 0.0
+
+    # ========================================================================
+    # Per-Record Regex Features (OpenQA support)
+    # ========================================================================
+    # These features enable mixed datasets with different answer formats.
+    # They only activate when template_metadata.output_regex is present.
+    # Safe to enable by default - falls back to response_extract_regex when
+    # no per-record regex is present.
+
+    # [NEW] Enable per-record regex override from template_metadata.output_regex
+    use_per_record_regex: bool = True
+
+    # --- The following features ONLY work when use_per_record_regex=True ---
+
+    # [NEW] If set, skip regex extraction when expected_answer length exceeds this threshold.
+    # When skipped, the full generation is used instead of extracting with regex.
+    # Only applies when per-record regex is present. Set to None to disable.
+    extraction_length_threshold: Optional[int] = 120
+
+    # [NEW] If true, when first pass fails, retry with full generation (no regex) for partial credit.
+    # Helps recover from regex extraction failures. Only activates when per-record regex exists.
+    check_full_generation_on_fail: bool = True
+
+    # [NEW] Reward when full generation check succeeds after first pass fails.
+    # Default is 0.5 (partial credit).
+    reward_if_full_generation_succeeds: float = 0.5
 
 
 class LLMJudgeRunRequest(BaseRunRequest):
@@ -83,7 +116,9 @@ class LLMJudgeRunRequest(BaseRunRequest):
     grading, but `options` and `metadata` are accepted for compatibility.
     """
 
-    uuid: Optional[str] = None
+    model_config = ConfigDict(extra="allow")
+
+    uuid: Optional[str | int] = None
     expected_answer: Optional[str] = None
     options: Optional[list[dict[str, str]]] = None
     metadata: Optional[dict[str, Any]] = None
@@ -220,47 +255,178 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
 
     config: LLMJudgeResourcesServerConfig
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        if self.config.judge_endpoint_max_concurrency is not None:
+            self._judge_endpoint_max_concurrency = asyncio.Semaphore(value=self.config.judge_endpoint_max_concurrency)
+        else:
+            self._judge_endpoint_max_concurrency = nullcontext()
+
+        with open(self.config.judge_prompt_template_fpath, "r") as f:
+            self._judge_prompt_template = f.read().strip()
+
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         return app
 
-    async def verify(self, body: LLMJudgeVerifyRequest) -> LLMJudgeVerifyResponse:
-        expected = _extract_expected_answer(body) or ""
-        question = _extract_question_text(body.responses_create_params, self.config.question_extract_regex)
-        generated = _extract_last_assistant_text(body, self.config.response_extract_regex)
+    def _should_skip_for_length(self, body: LLMJudgeVerifyRequest, expected: str) -> bool:
+        """Check if length threshold should skip second evaluation (rescue or swap).
 
-        # Run judge twice to mitigate positional or presentation bias by swapping orders.
-        first_equal, first_eval = await self._generate_judge_evaluation(
-            question=question, expected_answer=expected, generated_answer=generated
-        )
-        if not first_equal:
-            reward = 0.0
-            payload = body.model_dump()
-            # Avoid duplicate field when constructing response
-            payload.pop("expected_answer", None)
-            return LLMJudgeVerifyResponse(
-                **payload, reward=reward, expected_answer=expected, judge_evaluations=[first_eval]
-            )
+        When length exceeds threshold AND per-record regex is present, second eval is redundant:
+        - Already using full generation (no regex benefit from rescue)
+        - Swap unreliable for long text
 
-        # If first pass says equal, optionally confirm with a second pass (swap answers).
-        if not self.config.check_twice_swap:
-            payload = body.model_dump()
-            payload.pop("expected_answer", None)
-            return LLMJudgeVerifyResponse(
-                **payload, reward=1.0, expected_answer=expected, judge_evaluations=[first_eval]
-            )
+        Only applies when there's an actual per-record regex that was skipped due to length.
+        """
+        if not self.config.use_per_record_regex:
+            return False
+        if self.config.extraction_length_threshold is None:
+            return False
+        if len(expected) <= self.config.extraction_length_threshold:
+            return False
 
-        second_equal, second_eval = await self._generate_judge_evaluation(
-            question=question, expected_answer=generated, generated_answer=expected
-        )
-        # If they are both equal, we give a reward of 1.0; otherwise use configured fallback.
-        # User has to expect this on the training side to discard the data points if negative.
-        reward = 1.0 if second_equal else self.config.reward_if_swap_fails
+        # Only skip if there's a per-record regex that would have been skipped
+        if hasattr(body, "template_metadata") and isinstance(body.template_metadata, dict):
+            if body.template_metadata.get("output_regex"):
+                return True  # Per-record regex exists and was skipped due to length
+
+        return False  # No per-record regex, length threshold doesn't apply
+
+    def _get_extraction_regex(self, body: LLMJudgeVerifyRequest, expected: str) -> Optional[str]:
+        """Determine which regex to use for extraction, considering per-record overrides and length threshold.
+
+        Returns:
+            - str: regex pattern to extract answer (default or per-record override)
+            - None: use full generation (when length threshold exceeded)
+        """
+        extract_regex = self.config.response_extract_regex
+
+        if self.config.use_per_record_regex:
+            # Check for per-record regex override
+            if hasattr(body, "template_metadata") and isinstance(body.template_metadata, dict):
+                regex_override = body.template_metadata.get("output_regex")
+                if regex_override:
+                    extract_regex = regex_override
+
+                    # Skip per-record regex for long expected answers (return None → full generation)
+                    if self.config.extraction_length_threshold is not None:
+                        if len(expected) > self.config.extraction_length_threshold:
+                            extract_regex = None
+
+        return extract_regex
+
+    def _make_response(
+        self, body: LLMJudgeVerifyRequest, expected: str, reward: float, evaluations: list
+    ) -> LLMJudgeVerifyResponse:
+        """Create verification response with reward and evaluations."""
         payload = body.model_dump()
         payload.pop("expected_answer", None)
         return LLMJudgeVerifyResponse(
-            **payload, reward=reward, expected_answer=expected, judge_evaluations=[first_eval, second_eval]
+            **payload, reward=reward, expected_answer=expected, judge_evaluations=evaluations
         )
+
+    async def _handle_first_pass_failed(
+        self,
+        body: LLMJudgeVerifyRequest,
+        expected: str,
+        question: str,
+        first_eval,
+    ) -> LLMJudgeVerifyResponse:
+        """Handle when first judge evaluation fails (returns not equal).
+
+        Options:
+        1. Skip rescue for long answers (already using full generation)
+        2. Try rescue with full generation (for short answers with regex)
+        3. Return immediate failure
+        """
+        # Skip rescue for long answers - already using full generation
+        if self._should_skip_for_length(body, expected):
+            return self._make_response(body, expected, reward=0.0, evaluations=[first_eval])
+
+        # Try rescue if configured (only when per-record regex exists and could have failed)
+        if (
+            self.config.check_full_generation_on_fail
+            and self.config.use_per_record_regex
+            and hasattr(body, "template_metadata")
+            and isinstance(body.template_metadata, dict)
+            and body.template_metadata.get("output_regex")
+        ):
+            # Retry with full generation (no regex) - rescue from regex extraction failure
+            generated_full = _extract_last_assistant_text(body, extract_regex=None)
+            second_equal, second_eval = await self._generate_judge_evaluation(
+                question=question, expected_answer=expected, generated_answer=generated_full
+            )
+
+            reward = self.config.reward_if_full_generation_succeeds if second_equal else 0.0
+            return self._make_response(body, expected, reward, [first_eval, second_eval])
+
+        # No rescue - immediate failure
+        return self._make_response(body, expected, reward=0.0, evaluations=[first_eval])
+
+    async def _handle_first_pass_succeeded(
+        self,
+        body: LLMJudgeVerifyRequest,
+        expected: str,
+        question: str,
+        generated: str,
+        first_eval,
+    ) -> LLMJudgeVerifyResponse:
+        """Handle when first judge evaluation succeeds (returns equal).
+
+        Options:
+        1. Return immediate success (no swap check)
+        2. Skip swap for long answers (unreliable for long text)
+        3. Run swap check to detect positional bias
+        """
+        # No swap check configured
+        if not self.config.check_twice_swap:
+            return self._make_response(body, expected, reward=1.0, evaluations=[first_eval])
+
+        # Skip swap for long answers
+        if self._should_skip_for_length(body, expected):
+            return self._make_response(body, expected, reward=1.0, evaluations=[first_eval])
+
+        # Run swap check
+        second_equal, second_eval = await self._generate_judge_evaluation(
+            question=question, expected_answer=generated, generated_answer=expected
+        )
+        reward = 1.0 if second_equal else self.config.reward_if_swap_fails
+        return self._make_response(body, expected, reward, [first_eval, second_eval])
+
+    async def verify(self, body: LLMJudgeVerifyRequest) -> LLMJudgeVerifyResponse:
+        """Verify model response by comparing with expected answer using LLM judge.
+
+        Flow:
+        1. Extract question and expected answer
+        2. Determine extraction regex (per-record override, length threshold)
+        3. Extract answer to judge (could be regex-extracted OR full generation)
+        4. Run first judge evaluation on extracted answer
+        5. Handle failure → rescue with full generation or immediate fail
+        6. Handle success → swap check or immediate success
+        """
+        # Step 1: Extract question and expected answer
+        expected = _extract_expected_answer(body) or ""
+        question = _extract_question_text(body.responses_create_params, self.config.question_extract_regex)
+
+        # Step 2: Determine extraction regex (None if long answer triggers threshold)
+        extract_regex = self._get_extraction_regex(body, expected)
+
+        # Step 3: Extract answer to judge
+        # - If extract_regex is not None → regex-extracted answer
+        # - If extract_regex is None (long answer) → full generation
+        generated = _extract_last_assistant_text(body, extract_regex)
+
+        # Step 4: Run first judge evaluation
+        first_equal, first_eval = await self._generate_judge_evaluation(
+            question=question, expected_answer=expected, generated_answer=generated
+        )
+
+        # Step 5 & 6: Handle result based on first evaluation
+        if not first_equal:
+            return await self._handle_first_pass_failed(body, expected, question, first_eval)
+        else:
+            return await self._handle_first_pass_succeeded(body, expected, question, generated, first_eval)
 
     async def _generate_judge_evaluation(
         self, *, question: str, expected_answer: str, generated_answer: str
@@ -270,7 +436,7 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         not_equal_label = cfg.judge_not_equal_label
 
         responses_create_params = cfg.judge_responses_create_params.model_copy(deep=True)
-        prompt_template = cfg.judge_prompt_template
+        prompt_template = self._judge_prompt_template
         system_message = cfg.judge_system_message
 
         user_prompt = prompt_template.format(
@@ -283,12 +449,21 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         msgs.append(NeMoGymEasyInputMessage(role="user", content=user_prompt))
         responses_create_params.input = msgs
 
-        response = await self.server_client.post(
-            server_name=cfg.judge_model_server.name,
-            url_path="/v1/responses",
-            json=responses_create_params,
-        )
-        judge_response = NeMoGymResponse.model_validate(response.json())
+        async with self._judge_endpoint_max_concurrency:
+            try:
+                response = await self.server_client.post(
+                    server_name=cfg.judge_model_server.name,
+                    url_path="/v1/responses",
+                    json=responses_create_params,
+                )
+                judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
+            except Exception as e:
+                print(
+                    f"DEBUG: LLMJudgeResourcesServer: judge model server HTTP POST error: {type(e).__name__} {e}",
+                    flush=True,
+                )
+                raise e
+
         eval_record = JudgeEvaluation(
             responses_create_params=responses_create_params,
             response=judge_response,

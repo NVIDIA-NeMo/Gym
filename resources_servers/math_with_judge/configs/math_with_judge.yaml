@@ -1,0 +1,43 @@
+math_with_judge:
+  resources_servers:
+    math_with_judge:
+      entrypoint: app.py
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_responses_create_params: {
+        input: []
+      }
+      should_use_judge: false
+      domain: math
+      verified: false
+      description: Math dataset with math-verify and LLM-as-a-judge
+      value: Improve math capabilities including AIME 24 / 25
+math_with_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: math_with_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/math_with_judge/data/train.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-math-OpenMathReasoning
+          artifact_fpath: train.jsonl
+        license: Creative Commons Attribution 4.0 International
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/math_with_judge/data/aime24_validation.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-math-OpenMathReasoning
+          artifact_fpath: validation.jsonl
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/math_with_judge/data/example.jsonl

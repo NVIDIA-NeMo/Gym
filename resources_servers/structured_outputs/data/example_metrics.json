@@ -1,0 +1,50 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/structured_outputs/data/example.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": null,
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 820.2,
+        "Min": 760.0,
+        "Max": 927.0,
+        "Standard deviation": 82.06
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.6,
+        "Min": 1.0,
+        "Max": 2.0,
+        "Standard deviation": 0.548
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "schema_str": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "schema_type": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "schema_fields_count": {
+        "unique_count": 5,
+        "total_count": 5
+    }
+}

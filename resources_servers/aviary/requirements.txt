@@ -1,0 +1,6 @@
+-e nemo-gym[dev] @ ../../
+fhaviary[gsm8k,hotpotqa,notebook,llm]>=0.28.0
+tqdm
+datasets
+huggingface-hub
+pillow==12.1.1
