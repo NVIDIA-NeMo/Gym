@@ -37,10 +37,40 @@ class TestRolloutCollection:
 
         rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
         assert rows == [
-            {"_task_index": 0, "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1}, "x": 0},
-            {"_task_index": 0, "responses_create_params": {"input": [], "seed": 1, "temperature": 0.1}, "x": 0},
-            {"_task_index": 1, "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1}, "x": 1},
-            {"_task_index": 1, "responses_create_params": {"input": [], "seed": 1, "temperature": 0.1}, "x": 1},
-            {"_task_index": 2, "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1}, "x": 2},
-            {"_task_index": 2, "responses_create_params": {"input": [], "seed": 1, "temperature": 0.1}, "x": 2},
+            {
+                "_task_index": 0,
+                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                "x": 0,
+                "agent_ref": {"name": "my_agent"},
+            },
+            {
+                "_task_index": 0,
+                "responses_create_params": {"input": [], "seed": 1, "temperature": 0.1},
+                "x": 0,
+                "agent_ref": {"name": "my_agent"},
+            },
+            {
+                "_task_index": 1,
+                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                "x": 1,
+                "agent_ref": {"name": "my_agent"},
+            },
+            {
+                "_task_index": 1,
+                "responses_create_params": {"input": [], "seed": 1, "temperature": 0.1},
+                "x": 1,
+                "agent_ref": {"name": "my_agent"},
+            },
+            {
+                "_task_index": 2,
+                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                "x": 2,
+                "agent_ref": {"name": "my_agent"},
+            },
+            {
+                "_task_index": 2,
+                "responses_create_params": {"input": [], "seed": 1, "temperature": 0.1},
+                "x": 2,
+                "agent_ref": {"name": "my_agent"},
+            },
         ]

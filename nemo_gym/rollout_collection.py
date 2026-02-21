@@ -134,19 +134,23 @@ class RolloutCollectionHelper(BaseModel):
             for row in rows:
                 row["responses_create_params"] = row["responses_create_params"] | config.responses_create_params
 
+        # For ng_profile to match rollouts to tasks
+        for task_idx, row in enumerate(rows):
+            row[TASK_INDEX_KEY_NAME] = task_idx
+
         if config.num_repeats:
             if config.num_repeats_add_seed:
                 print("Adding unique `seed` values to each input!")
 
             previous_length = len(rows)
             expanded = []
-            for task_idx, row in enumerate(rows):
+            for row in rows:
                 for i in range(config.num_repeats):
-                    d = deepcopy(row) | {TASK_INDEX_KEY_NAME: task_idx}
                     if config.num_repeats_add_seed:
-                        d["responses_create_params"]["seed"] = i
+                        row = deepcopy(row)
+                        row["responses_create_params"]["seed"] = i
 
-                    expanded.append(d)
+                    expanded.append(row)
 
             rows = expanded
             print(f"Repeating rows (in a pattern of abc to aabbcc) from {previous_length} to {len(rows)}!")
@@ -161,7 +165,10 @@ class RolloutCollectionHelper(BaseModel):
             print(f"Querying with {config.num_samples_in_parallel} concurrent requests")
             semaphore = Semaphore(config.num_samples_in_parallel)
 
+        Path(config.output_jsonl_fpath).parent.mkdir(exist_ok=True, parents=True)
+
         results: List[Dict] = []
+        results_file = open(config.output_jsonl_fpath, "ab")
         for future in self.run_examples(rows, semaphore=semaphore):
             row, result = await future
 
@@ -169,13 +176,8 @@ class RolloutCollectionHelper(BaseModel):
             if TASK_INDEX_KEY_NAME in row:
                 result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
 
+            results_file.write(orjson.dumps(result) + b"\n")
             results.append(result)
-
-        if config.output_jsonl_fpath:
-            Path(config.output_jsonl_fpath).parent.mkdir(exist_ok=True, parents=True)
-            with open(config.output_jsonl_fpath, "ab") as f:
-                for result in results:
-                    f.write(orjson.dumps(result) + b"\n")
 
         metrics = Counter()
         for result in results:
