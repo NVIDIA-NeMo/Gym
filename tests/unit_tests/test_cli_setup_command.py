@@ -141,7 +141,7 @@ class TestCLISetupCommandSetupEnvCommand:
 
 
 class TestCLISetupCommandRunCommand:
-    def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
+    def _setup(self, monkeypatch: MonkeyPatch) -> tuple[MagicMock, MagicMock]:
         Popen_mock = MagicMock()
         monkeypatch.setattr(nemo_gym.cli_setup_command, "Popen", Popen_mock)
 
@@ -153,6 +153,11 @@ class TestCLISetupCommandRunCommand:
         monkeypatch.setattr(nemo_gym.cli_setup_command, "stdout", "stdout")
         monkeypatch.setattr(nemo_gym.cli_setup_command, "stderr", "stderr")
 
+        return Popen_mock, get_global_config_dict_mock
+
+    def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
+        Popen_mock, get_global_config_dict_mock = self._setup(monkeypatch)
+
         run_command(
             command="my command",
             working_dir_path=Path("/my path"),
@@ -163,6 +168,26 @@ class TestCLISetupCommandRunCommand:
             executable="/bin/bash",
             shell=True,
             env={"PYTHONPATH": "/my path"},
+            stdout="stdout",
+            stderr="stderr",
+        )
+        actual_args = Popen_mock.call_args
+        assert expected_args == actual_args
+
+    def test_custom_pythonpath(self, monkeypatch: MonkeyPatch) -> None:
+        Popen_mock, get_global_config_dict_mock = self._setup(monkeypatch)
+        monkeypatch.setattr(nemo_gym.cli_setup_command, "environ", {"PYTHONPATH": "existing pythonpath"})
+
+        run_command(
+            command="my command",
+            working_dir_path=Path("/my path"),
+        )
+
+        expected_args = call(
+            "my command",
+            executable="/bin/bash",
+            shell=True,
+            env={"PYTHONPATH": "/my path:existing pythonpath"},
             stdout="stdout",
             stderr="stderr",
         )
