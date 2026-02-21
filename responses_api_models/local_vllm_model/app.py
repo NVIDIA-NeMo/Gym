@@ -162,7 +162,7 @@ class LocalVLLMModel(VLLMModel):
 
     _local_vllm_model_actor: LocalVLLMModelActor
 
-    def model_post_init(self, context):
+    def setup_webserver(self):
         print(
             f"Downloading {self.config.model}. If the model has been downloaded previously, the cached version will be used."
         )
@@ -171,7 +171,7 @@ class LocalVLLMModel(VLLMModel):
         print("Starting vLLM server. This will take a couple of minutes...")
         self.start_vllm_server()
 
-        return super().model_post_init(context)
+        return super().setup_webserver()
 
     def get_hf_token(self) -> Optional[str]:
         return get_global_config_dict().get(HF_TOKEN_KEY_NAME)

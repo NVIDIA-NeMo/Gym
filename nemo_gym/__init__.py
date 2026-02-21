@@ -17,6 +17,13 @@ from os import environ
 from pathlib import Path
 
 
+# /path/to/dir/Gym (PARENT_DIR)
+# |- cache (CACHE_DIR)
+# |- results (RESULTS_DIR)
+# |- nemo_gym (ROOT_DIR)
+# |- responses_api_models
+# |- responses_api_agents
+# ...
 ROOT_DIR = Path(__file__).absolute().parent
 PARENT_DIR = ROOT_DIR.parent
 CACHE_DIR = PARENT_DIR / "cache"
@@ -34,9 +41,6 @@ environ["HF_DATASETS_CACHE"] = str(CACHE_DIR / "huggingface")
 environ["TRANSFORMERS_CACHE"] = environ["HF_DATASETS_CACHE"]
 # TODO When `TRANSFORMERS_CACHE` is no longer supported in transformers>=5.0.0, migrate to `HF_HOME`
 # environ["HF_HOME"] = join(CACHE_DIR, "huggingface")
-
-# UV caching directory overrides to local folders.
-environ["UV_CACHE_DIR"] = str(CACHE_DIR / "uv")
 
 from nemo_gym.package_info import (
     __contact_emails__,

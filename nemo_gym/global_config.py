@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from collections import defaultdict
-from os import getenv
+from os import environ, getenv
 from pathlib import Path
 from platform import python_version
 from random import randint
@@ -27,7 +27,7 @@ from openai import __version__ as openai_version
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from ray import __version__ as ray_version
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import CACHE_DIR, PARENT_DIR
 from nemo_gym.config_types import (
     ServerInstanceConfig,
     is_almost_server,
@@ -55,6 +55,9 @@ RAY_HEAD_NODE_ADDRESS_KEY_NAME = "ray_head_node_address"
 TASK_INDEX_KEY_NAME = "_task_index"
 PORT_RANGE_LOW_KEY_NAME = "port_range_low"
 PORT_RANGE_HIGH_KEY_NAME = "port_range_high"
+DRY_RUN_KEY_NAME = "dry_run"
+UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
+UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -71,6 +74,9 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     RAY_HEAD_NODE_ADDRESS_KEY_NAME,
     PORT_RANGE_LOW_KEY_NAME,
     PORT_RANGE_HIGH_KEY_NAME,
+    DRY_RUN_KEY_NAME,
+    UV_CACHE_DIR_KEY_NAME,
+    UV_VENV_DIR_KEY_NAME,
 ]
 
 POLICY_BASE_URL_KEY_NAME = "policy_base_url"
@@ -318,8 +324,18 @@ class GlobalConfigDictParser(BaseModel):
             global_config_dict[PYTHON_VERSION_KEY_NAME] = python_version()
 
             # Skip venv setup is opt-in and defaults to False.
-            if SKIP_VENV_IF_PRESENT_KEY_NAME not in global_config_dict:
-                global_config_dict[SKIP_VENV_IF_PRESENT_KEY_NAME] = False
+            global_config_dict.setdefault(SKIP_VENV_IF_PRESENT_KEY_NAME, False)
+
+            global_config_dict.setdefault(DRY_RUN_KEY_NAME, False)
+
+            # UV related configuration
+            # UV caching directory overrides to local folders.
+            global_config_dict.setdefault(UV_CACHE_DIR_KEY_NAME, str(CACHE_DIR / "uv"))
+            # Set the appropriate environment variable here, and matche the config
+            environ["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
+            # By default, build the directories in their individual folders using the root repository
+            # e.g. PARENT_DIR/responses_api_models/my_server
+            global_config_dict.setdefault(UV_VENV_DIR_KEY_NAME, str(PARENT_DIR))
 
         if parse_config.hide_secrets:
             self._recursively_hide_secrets(global_config_dict)
