@@ -173,6 +173,9 @@ class VLLMServerSpinupWorker:
     def _get_port(self) -> int:
         return self._server_port
 
+    def is_alive(self) -> bool:
+        return self._server_proc.is_alive()
+
 
 # Use this to query the VLLM servers during spinup without having to start an
 # asyncio event loop for the async client.
@@ -251,14 +254,24 @@ class VLLMModel(SimpleResponsesAPIModel):
                     )
                 )
 
-            for server_url in self._server_urls:
-                while True:
+            remaining_workers = self._server_workers.copy()
+            remaining_urls = self._server_urls.copy()
+            while remaining_workers:
+                for i in reversed(range(len(remaining_workers))):
+                    server_worker = remaining_workers[i]
+                    server_url = remaining_urls[i]
+
+                    server_worker: VLLMServerSpinupWorker
+                    assert ray.get(server_worker.is_alive.remote())
+
                     try:
                         _vllm_server_heartbeat(server_url)
-                        break
+                        remaining_workers.pop(i)
+                        remaining_urls.pop(i)
                     except Exception:
-                        sleep(3)
                         continue
+
+                sleep(3)
 
         else:
             self._server_urls = None
