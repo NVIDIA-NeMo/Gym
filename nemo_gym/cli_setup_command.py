@@ -59,8 +59,6 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     _NEMO_GYM_LOCAL_PATH = (
         "/lustre/fsw/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/cmunley/gympypifix"
     )
-    pypi_index_flags = ""
-
     if should_skip_venv_setup:
         env_setup_cmd = f"source {venv_activate_fpath}"
     else:
