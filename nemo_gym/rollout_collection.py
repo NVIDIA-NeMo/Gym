@@ -114,11 +114,14 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
             print(f"Limiting the number of rows to {config.limit}!")
 
         with open(config.input_jsonl_fpath) as input_dataset:
-            rows = [row for _, row in zip(range_iterator, map(orjson.loads, input_dataset))]
+            rows: list[dict] = [row for _, row in zip(range_iterator, map(orjson.loads, input_dataset))]
         print(f"Found {len(rows)} rows!")
 
-        # Validate all rows have an agent specified (either via config or agent_ref in data)
-        if not config.agent_name:
+        if config.agent_name:
+            for row in rows:
+                row.setdefault("agent_ref", {"name": config.agent_name})
+        else:
+            # Validate all rows have an agent specified (either via config or agent_ref in data)
             missing_agent_indices = [idx for idx, row in enumerate(rows) if not row.get("agent_ref", {}).get("name")]
             if missing_agent_indices:
                 raise ValueError(
@@ -194,7 +197,9 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
         return results
 
     def run_examples(
-        self, examples: List[Dict], head_server_config: Optional[BaseServerConfig] = None
+        self,
+        examples: List[Dict],
+        head_server_config: Optional[BaseServerConfig] = None,
     ) -> Iterator[Future]:
         """
         We provide this function as a lower level interface for running rollout collection.
