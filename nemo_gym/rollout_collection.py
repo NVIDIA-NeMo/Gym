@@ -13,9 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
-import json
 from asyncio import Future, Semaphore
-from collections import Counter
 from contextlib import nullcontext
 from copy import deepcopy
 from itertools import repeat
@@ -23,6 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
+from pandas import DataFrame
 from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
 
@@ -179,13 +178,10 @@ class RolloutCollectionHelper(BaseModel):
             results_file.write(orjson.dumps(result) + b"\n")
             results.append(result)
 
-        metrics = Counter()
-        for result in results:
-            metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
-
-        avg_metrics = {k: v / len(rows) for k, v in metrics.items()}
-        avg_metrics.setdefault("reward", 0.0)
-        print(json.dumps(avg_metrics, indent=4))
+        df = DataFrame.from_records(results)
+        groups = df.groupby(TASK_INDEX_KEY_NAME)
+        description = groups.describe()
+        print(description)
 
         return results
 
