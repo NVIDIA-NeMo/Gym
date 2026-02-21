@@ -230,7 +230,7 @@ Examples:
                         help="Number of training samples (default: 1000)")
     parser.add_argument("--output_dir", type=str, default="data",
                         help="Output directory for JSONL files (default: data)")
-    parser.add_argument("--seed", type=int, default=42,
+    parser.add_argument("--seed", type=int, default=886,
                         help="Random seed (default: 42)")
     args = parser.parse_args()
 
@@ -250,7 +250,9 @@ Examples:
 
     # Generate example data (small subset of validation for quick testing)
     print(f"\nGenerating example samples...")
-    example_data = val_data[:20]
+    import random
+    rng = random.Random(args.seed)
+    example_data = rng.sample(val_data, 20)
     save_jsonl(example_data, output_dir / "example.jsonl")
 
     print("\nDone!")
