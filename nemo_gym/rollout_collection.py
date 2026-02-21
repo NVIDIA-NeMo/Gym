@@ -142,14 +142,14 @@ class RolloutCollectionHelper(BaseModel):
         task_idx_to_rollout_idx: Dict[int, int] = Counter()
         row_idxs_missing_agent_ref: List[int] = []
         rows: List[Dict] = []
-        for i, row_str in rows_iterator:
+        for row_idx, row_str in rows_iterator:
             row = orjson.loads(row_str)
 
             # Resolve agent name
             if config.agent_name:
                 row.setdefault(AGENT_REF_KEY_NAME, {"name": config.agent_name})
-            else:
-                row_idxs_missing_agent_ref.append(i)
+            elif not row.get(AGENT_REF_KEY_NAME, dict()).get("name"):
+                row_idxs_missing_agent_ref.append(row_idx)
 
             # Responses create params
             row[RESPONSES_CREATE_PARAMS_KEY_NAME] = (
@@ -159,14 +159,15 @@ class RolloutCollectionHelper(BaseModel):
             # Resolve task index
             row[TASK_INDEX_KEY_NAME] = row_to_task_idx.setdefault(row_str, len(row_to_task_idx))
 
-            for i in range(num_repeats):
+            for repeat_idx in range(num_repeats):
                 row = deepcopy(row)
-                if config.num_repeats_add_seed:
-                    row[RESPONSES_CREATE_PARAMS_KEY_NAME]["seed"] = i
 
                 # Resolve rollout index
                 row[ROLLOUT_INDEX_KEY_NAME] = task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]]
                 task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]] += 1
+
+                if config.num_repeats_add_seed:
+                    row[RESPONSES_CREATE_PARAMS_KEY_NAME]["seed"] = row[ROLLOUT_INDEX_KEY_NAME]
 
                 rows.append(row)
 
@@ -179,7 +180,7 @@ class RolloutCollectionHelper(BaseModel):
 
         return rows
 
-    async def run_from_config(self, config: RolloutCollectionConfig):  # pragma: no cover
+    async def run_from_config(self, config: RolloutCollectionConfig):
         rows = self._preprocess_rows_from_config(config)
 
         semaphore = nullcontext()
