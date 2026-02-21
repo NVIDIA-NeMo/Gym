@@ -192,7 +192,10 @@ class RolloutCollectionHelper(BaseModel):
         results: List[Dict] = []
         results_file = open(config.output_jsonl_fpath, "ab")
         for future in self.run_examples(rows, semaphore=semaphore):
-            _, result = await future
+            row, result = await future
+
+            result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
+            result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
 
             results_file.write(orjson.dumps(result) + b"\n")
             results.append(result)
