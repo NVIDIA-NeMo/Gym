@@ -28,7 +28,6 @@ from typing import Any, Optional
 
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict
-from pydantic_core import ValidationError
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -468,9 +467,7 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
             cpt = cfg.chars_per_token_estimate
             # Estimate token count of the non-answer portions of the prompt
             # by rendering the template with an empty generated_answer
-            scaffold = prompt_template.format(
-                question=question, expected_answer=expected_answer, generated_answer=""
-            )
+            scaffold = prompt_template.format(question=question, expected_answer=expected_answer, generated_answer="")
             system_chars = len(system_message) if system_message else 0
             overhead_chars = len(scaffold) + system_chars
             overhead_tokens_est = overhead_chars / cpt
@@ -499,7 +496,7 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
                 return False, eval_record
 
             max_answer_chars = max(64, int(max_answer_tokens * cpt))
-            generated_answer = self._truncate_answer_for_judge(generated_answer, max_answer_chars)        
+            generated_answer = self._truncate_answer_for_judge(generated_answer, max_answer_chars)
 
         user_prompt = prompt_template.format(
             question=question, expected_answer=expected_answer, generated_answer=generated_answer

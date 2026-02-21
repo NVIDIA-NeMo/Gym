@@ -162,9 +162,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
             return library_reward, extracted_answer, library_reward, None
 
         judge_answer = extracted_answer if extracted_answer else generated_answer
-        judge_reward, judge_evaluations = await self._verify_answer_with_judge(
-            question, expected_answer, judge_answer
-        )
+        judge_reward, judge_evaluations = await self._verify_answer_with_judge(question, expected_answer, judge_answer)
         return judge_reward, extracted_answer, library_reward, judge_evaluations
 
     @classmethod
@@ -260,9 +258,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
         # Truncate answers if they would exceed the judge model's context window.
         if getattr(config, "max_judge_input_tokens", None) is not None:
             cpt = getattr(config, "chars_per_token_estimate", 3.5)
-            scaffold = self.JUDGE_PROMPT_TEMPLATE.format(
-                question=question, first_answer="", second_answer=""
-            )
+            scaffold = self.JUDGE_PROMPT_TEMPLATE.format(question=question, first_answer="", second_answer="")
             overhead_chars = len(self.JUDGE_SYSTEM_MESSAGE) + len(scaffold)
             overhead_tokens_est = overhead_chars / cpt
             budget_chars = int((config.max_judge_input_tokens - overhead_tokens_est) * cpt)
