@@ -17,7 +17,7 @@ from os import getenv
 from pathlib import Path
 from platform import python_version
 from random import randint
-from socket import gethostbyname, gethostname, socket
+from socket import SO_REUSEADDR, SOL_SOCKET, gethostbyname, gethostname, socket
 from typing import ClassVar, List, Optional, Tuple, Type
 
 import hydra
@@ -453,15 +453,19 @@ def _find_open_port_using_range(
     port_range_high: int,
     max_retries: int = 50,
 ) -> int:  # pragma: no cover
-    # Find an open port that doesn't conflict with disallowed ports.
+    disallowed_set = set(disallowed_ports)
+    tried_ports: set[int] = set()
+    attempts = 0
 
-    with socket() as s:
-        for _ in range(max_retries):
-            # Pick a random port in our range that is not disallowed
-            port = None
-            while port is None or port in disallowed_ports:
-                port = randint(port_range_low, port_range_high)
+    while attempts < max_retries:
+        port = randint(port_range_low, port_range_high)
+        if port in disallowed_set or port in tried_ports:
+            continue
+        tried_ports.add(port)
+        attempts += 1
 
+        with socket() as s:
+            s.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
             try:
                 s.bind(("", port))
                 return port
@@ -469,8 +473,9 @@ def _find_open_port_using_range(
                 pass
 
     raise RuntimeError(
-        f"Unable to find an open port that doesn't conflict with disallowed ports "
-        f"{disallowed_ports} after {max_retries} attempts"
+        f"Unable to find an open port in range {port_range_low}-{port_range_high} "
+        f"that doesn't conflict with disallowed ports after {max_retries} attempts. "
+        f"Tried ports: {sorted(tried_ports)}"
     )
 
 
