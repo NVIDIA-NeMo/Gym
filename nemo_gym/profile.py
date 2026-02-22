@@ -45,7 +45,7 @@ class RewardProfilingMetrics(BaseModel):
     pass_threshold: Optional[float] = Field(default=None, description="Threshold used for pass_rate calculation.")
 
 
-class AggregateMetrics(BaseModel):
+class SingleKeyAggregateMetrics(BaseModel):
     # ONLY for histogram
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -55,6 +55,13 @@ class AggregateMetrics(BaseModel):
     median: float
     stddev: float
     histogram: Histogram = Field(exclude=True)
+
+
+class AggregateMetrics(BaseModel):
+    # This data structure only explicitly lists the guaranteed metadata, but summaries for additional metrics for samples are also allowed
+    model_config = ConfigDict(extra="allow")
+
+    reward: SingleKeyAggregateMetrics
 
 
 class GroupMetrics(AggregateMetrics):
