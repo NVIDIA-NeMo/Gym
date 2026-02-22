@@ -180,7 +180,7 @@ class RolloutCollectionHelper(BaseModel):
 
         return rows
 
-    async def run_from_config(self, config: RolloutCollectionConfig):
+    async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         rows = self._preprocess_rows_from_config(config)
 
         semaphore = nullcontext()
