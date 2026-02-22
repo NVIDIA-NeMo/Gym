@@ -232,6 +232,9 @@ class VLLMServerSpinupWorker:
         """Return the port the vLLM server bound to, or -1 if still starting."""
         return self._actual_port.value
 
+    def is_alive(self) -> bool:
+        return self._server_proc.is_alive()
+
 
 # Use this to query the VLLM servers during spinup without having to start an
 # asyncio event loop for the async client.
@@ -310,23 +313,25 @@ class VLLMModel(SimpleResponsesAPIModel):
                 while True:
                     server_port = ray.get(server_worker._get_port.remote())
                     if server_port == -1:
+                        server_worker_ref: VLLMServerSpinupWorker = server_worker
+                        assert ray.get(server_worker_ref.is_alive.remote())
                         sleep(1)
                         continue
                     server_url = f"http://{server_ip}:{server_port}/v1"
                     try:
                         _vllm_server_heartbeat(server_url)
+                        self._server_urls.append(server_url)
+                        self._clients.append(
+                            NeMoGymAsyncOpenAI(
+                                base_url=server_url,
+                                api_key=self.config.api_key,
+                            )
+                        )
                         break
                     except Exception:
+                        server_worker_ref: VLLMServerSpinupWorker = server_worker
+                        assert ray.get(server_worker_ref.is_alive.remote())
                         sleep(3)
-                        continue
-
-                self._server_urls.append(server_url)
-                self._clients.append(
-                    NeMoGymAsyncOpenAI(
-                        base_url=server_url,
-                        api_key=self.config.api_key,
-                    )
-                )
 
         else:
             self._server_urls = None
