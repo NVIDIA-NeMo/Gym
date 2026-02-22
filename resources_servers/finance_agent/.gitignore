@@ -4,3 +4,7 @@ cache/
 # Large/generated data files
 data/*.jsonl
 data/*.csv
+
+# Keep required example files
+!data/example.jsonl
+!data/example_rollouts.jsonl

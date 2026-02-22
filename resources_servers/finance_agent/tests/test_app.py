@@ -13,20 +13,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Tests for Finance Agent Resource Server."""
+
 import json
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from nemo_gym.config_types import ModelServerRef
+from nemo_gym.openai_utils import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
 from nemo_gym.server_utils import ServerClient
 from resources_servers.finance_agent.app import (
-    PrepareFilingRequest,
-    RateLimiter,
-    FinanceAgentSearchRequest,
     FinanceAgentResourcesServer,
     FinanceAgentResourcesServerConfig,
+    FinanceAgentSearchRequest,
+    FinanceAgentVerifyRequest,
+    RateLimiter,
+    RetrieveInformationRequest,
 )
 
 
@@ -54,6 +61,7 @@ MOCK_HTML = """
 # Fixtures
 # ============================================================================
 
+
 @pytest.fixture
 def temp_cache_dir():
     """Create a temporary cache directory for tests."""
@@ -64,37 +72,34 @@ def temp_cache_dir():
 @pytest.fixture
 def server_config(temp_cache_dir):
     """Create test server configuration."""
+    prompt_fpath = str(Path(__file__).resolve().parents[1] / "prompt_templates/finance_agent_judge.txt")
     return FinanceAgentResourcesServerConfig(
         host="0.0.0.0",
         port=8080,
         entrypoint="",
         name="finance_agent_test",
         cache_dir=temp_cache_dir,
+        judge_prompt_template_fpath=prompt_fpath,
     )
 
 
 @pytest.fixture
 def server(server_config):
     """Create test server instance."""
-    return FinanceAgentResourcesServer(
-        config=server_config,
-        server_client=MagicMock(spec=ServerClient)
-    )
+    return FinanceAgentResourcesServer(config=server_config, server_client=MagicMock(spec=ServerClient))
 
 
 # ============================================================================
 # Test: Server Initialization
 # ============================================================================
 
+
 class TestServerInitialization:
     def test_sanity(self, server_config) -> None:
         """Test server can be instantiated."""
-        server = FinanceAgentResourcesServer(
-            config=server_config,
-            server_client=MagicMock(spec=ServerClient)
-        )
+        server = FinanceAgentResourcesServer(config=server_config, server_client=MagicMock(spec=ServerClient))
         assert server is not None
-    
+
     def test_cache_directories_created(self, server, temp_cache_dir) -> None:
         """Test cache directories are created on init."""
         assert Path(temp_cache_dir).exists()
@@ -105,345 +110,162 @@ class TestServerInitialization:
 # Test: Rate Limiter
 # ============================================================================
 
+
 class TestRateLimiter:
     @pytest.mark.asyncio
     async def test_rate_limiter_allows_requests(self):
         """Test rate limiter allows requests within limit."""
         limiter = RateLimiter(max_requests=5, window_seconds=1.0)
-        
+
         # Should allow 5 requests immediately
         for _ in range(5):
             await limiter.acquire()
-        
+
         # Requests should be recorded
         assert len(limiter.requests) == 5
 
 
 # ============================================================================
-# Test: Company Search (Helper Methods)
+# Test: Ticker Lookup
 # ============================================================================
 
-class TestCompanySearch:
-    def test_tokenize(self, server) -> None:
-        """Test tokenization of text."""
-        assert server._tokenize("APPLE INC.") == {"APPLE", "INC"}
-        assert server._tokenize("shift4 payments") == {"SHIFT4", "PAYMENTS"}
-        assert server._tokenize("U.S. Steel Corp") == {"U", "S", "STEEL", "CORP"}
-    
-    def test_tokenize_min_length(self, server) -> None:
-        """Test tokenization with minimum length filter."""
-        # With min_length=2, single-char tokens are filtered out
-        assert server._tokenize("X", min_length=2) == set()  # Empty - "X" filtered
-        assert server._tokenize("U.S. Steel Corp", min_length=2) == {"STEEL", "CORP"}  # U, S filtered
-        assert server._tokenize("3M Company", min_length=2) == {"3M", "COMPANY"}  # 3M passes (2 chars)
-    
-    def test_single_char_query_no_company_match(self, server) -> None:
-        """Test that single-char queries don't match via company name search."""
-        server._companies = [
-            {"ticker": "X", "cik": "0001163302", "name": "UNITED STATES STEEL CORP"},
-            {"ticker": "KARX", "cik": "0001729637", "name": "KARBON-X CORP."},
-            {"ticker": "LIMX", "cik": "0001803977", "name": "LIMITLESS X HOLDINGS INC."},
-        ]
-        
-        # Single-char "X" should NOT match any company by name
-        results = server._search_company_by_tokens("X")
-        assert len(results) == 0  # No matches - single char filtered
-    
-    def test_search_company_token_match(self, server) -> None:
-        """Test token-based matching."""
-        server._companies = [
-            {"ticker": "AAPL", "cik": "0000320193", "name": "APPLE INC."},
-            {"ticker": "MSFT", "cik": "0000789019", "name": "MICROSOFT CORP"},
-        ]
-        
-        # "APPLE" token matches "APPLE" in "APPLE INC."
-        results = server._search_company_by_tokens("APPLE")
-        assert len(results) == 1
-        assert results[0]["ticker"] == "AAPL"
-    
-    def test_search_company_no_partial_match(self, server) -> None:
-        """Test that partial tokens don't match (Cat should not match Catalyst)."""
-        server._companies = [
-            {"ticker": "CPRX", "cik": "0001234567", "name": "CATALYST PHARMACEUTICALS"},
-            {"ticker": "CAT", "cik": "0000018230", "name": "CATERPILLAR INC"},
-        ]
-        
-        # "CAT" should NOT match "CATALYST" or "CATERPILLAR" - tokens must match exactly
-        results = server._search_company_by_tokens("CAT")
-        assert len(results) == 0  # No matches - CAT is not a token in either name
-    
-    def test_search_company_case_insensitive(self, server) -> None:
-        """Test case-insensitive matching."""
-        server._companies = [
-            {"ticker": "AAPL", "cik": "0000320193", "name": "APPLE INC."},
-        ]
-        
-        results = server._search_company_by_tokens("apple")
-        assert len(results) == 1
-        assert results[0]["ticker"] == "AAPL"
-    
-    def test_search_company_multiple_tokens(self, server) -> None:
-        """Test matching with multiple query tokens - ALL must match."""
-        server._companies = [
-            {"ticker": "X", "cik": "0001163302", "name": "UNITED STATES STEEL CORP"},
-            {"ticker": "STLD", "cik": "0001022671", "name": "STEEL DYNAMICS INC"},
-        ]
-        
-        # "Steel" matches both companies (STEEL token in both)
-        results = server._search_company_by_tokens("Steel")
-        assert len(results) == 2
-        
-        # "United Steel" matches only US Steel (both UNITED and STEEL must be in name)
-        results = server._search_company_by_tokens("United Steel")
-        assert len(results) == 1
-        assert results[0]["ticker"] == "X"
-        
-        # "US Steel" does NOT match (US is not a token in "UNITED STATES STEEL")
-        results = server._search_company_by_tokens("US Steel")
-        assert len(results) == 0  # No match - LLM should retry with full name or ticker
-    
-    def test_search_company_limit(self, server) -> None:
-        """Test result limiting."""
-        server._companies = [
-            {"ticker": "STLA", "cik": "0001", "name": "STEEL COMPANY A"},
-            {"ticker": "STLB", "cik": "0002", "name": "STEEL COMPANY B"},
-            {"ticker": "STLC", "cik": "0003", "name": "STEEL COMPANY C"},
-        ]
-        
-        results = server._search_company_by_tokens("STEEL", limit=2)
-        assert len(results) == 2
-    
-    def test_search_shift4(self, server) -> None:
-        """Test Shift4 company search."""
-        server._companies = [
-            {"ticker": "FOUR", "cik": "0001639723", "name": "SHIFT4 PAYMENTS INC"},
-        ]
-        
-        # "Shift4" token matches "SHIFT4" in company name
-        results = server._search_company_by_tokens("Shift4")
-        assert len(results) == 1
-        assert results[0]["ticker"] == "FOUR"
+
+class TestTickerLookup:
+    @pytest.mark.asyncio
+    async def test_exact_ticker(self, server) -> None:
+        """Exact ticker returns company info."""
+        server._tickers = {"AAPL": {"cik": "0000320193", "name": "APPLE INC."}}
+        server._initialized = True
+
+        result = await server._resolve_ticker("AAPL")
+        assert result is not None
+        assert result["ticker"] == "AAPL"
+        assert result["cik"] == "0000320193"
+
+    @pytest.mark.asyncio
+    async def test_case_insensitive(self, server) -> None:
+        """Ticker lookup is case-insensitive."""
+        server._tickers = {"AAPL": {"cik": "0000320193", "name": "APPLE INC."}}
+        server._initialized = True
+
+        result = await server._resolve_ticker("aapl")
+        assert result is not None
+        assert result["ticker"] == "AAPL"
+
+    @pytest.mark.asyncio
+    async def test_unknown_ticker(self, server) -> None:
+        """Unknown ticker returns None."""
+        server._tickers = {"AAPL": {"cik": "0000320193", "name": "APPLE INC."}}
+        server._initialized = True
+
+        result = await server._resolve_ticker("NOTEXIST")
+        assert result is None
 
 
-# ============================================================================
-# Test: Filing Cache
-# ============================================================================
-
-class TestFilingCache:
-    def test_get_company_cache_path(self, server) -> None:
-        """Test cache path generation with CIK padding."""
-        path = server._get_company_cache_path("320193")
-        assert path.name == "0000320193.jsonl"
-    
-    def test_has_company_cache_false(self, server) -> None:
-        """Test cache check returns False for missing cache."""
-        assert server._has_company_cache("0000320193") is False
-    
-    def test_save_and_load_filings(self, server) -> None:
-        """Test saving and loading filings."""
-        test_filings = [
-            {"ticker": "AAPL", "form": "10-K", "filing_date": "2025-01-15"},
-            {"ticker": "AAPL", "form": "10-Q", "filing_date": "2024-11-01"},
-        ]
-        
-        server._save_company_filings("0000320193", test_filings)
-        assert server._has_company_cache("0000320193")
-        
-        loaded = server._load_company_filings("0000320193")
-        assert len(loaded) == 2
-        assert loaded[0]["form"] == "10-K"
-
-
-# ============================================================================
-# Test: Manual Ticker Mappings
-# ============================================================================
-
-class TestManualTickerMappings:
-    def test_manual_mappings_applied(self, server) -> None:
-        """Test that manual ticker mappings are applied (e.g., US Steel ticker X)."""
-        # Simulate loading tickers without X in the cache
-        server._ticker_to_cik = {"AAPL": "0000320193"}
-        server._cik_to_ticker = {"0000320193": "AAPL"}
-        server._companies = [{"ticker": "AAPL", "cik": "0000320193", "name": "APPLE INC."}]
-        
-        # Apply manual mappings
-        server._apply_manual_ticker_mappings()
-        
-        # X should now be present (US Steel)
-        assert "X" in server._ticker_to_cik
-        assert server._ticker_to_cik["X"] == "0001163302"
-        
-        # Company should be in the list
-        x_companies = [c for c in server._companies if c["ticker"] == "X"]
-        assert len(x_companies) == 1
-        assert x_companies[0]["name"] == "UNITED STATES STEEL CORP"
-    
-    def test_manual_mappings_not_duplicated(self, server) -> None:
-        """Test that manual mappings don't create duplicates if already present."""
-        # Pre-populate with X
-        server._ticker_to_cik = {"X": "0001163302"}
-        server._cik_to_ticker = {"0001163302": "X"}
-        server._companies = [{"ticker": "X", "cik": "0001163302", "name": "UNITED STATES STEEL CORP"}]
-        
-        # Apply manual mappings again
-        server._apply_manual_ticker_mappings()
-        
-        # Should still only have one X entry
-        x_companies = [c for c in server._companies if c["ticker"] == "X"]
-        assert len(x_companies) == 1
-    
-    def test_us_steel_resolvable_by_ticker(self, server) -> None:
-        """Test that US Steel can be resolved by ticker X after manual mapping."""
-        server._ticker_to_cik = {}
-        server._cik_to_ticker = {}
-        server._companies = []
-        
-        # Apply manual mappings
-        server._apply_manual_ticker_mappings()
-        
-        # Should be able to resolve X
-        matches = server._resolve_all_matches("X")
-        assert len(matches) == 1
-        assert matches[0]["ticker"] == "X"
-        assert matches[0]["cik"] == "0001163302"
-        assert matches[0]["match_type"] == "ticker"
-
-
-# ============================================================================
-# Test: Resolve All Matches (company_or_ticker logic)
-# ============================================================================
-
-class TestResolveAllMatches:
-    def test_resolve_ticker_match(self, server) -> None:
-        """Test that exact ticker match is found."""
-        server._ticker_to_cik = {"AAPL": "0000320193"}
-        server._companies = [{"ticker": "AAPL", "cik": "0000320193", "name": "APPLE INC."}]
-        
-        matches = server._resolve_all_matches("AAPL")
-        assert len(matches) == 1
-        assert matches[0]["ticker"] == "AAPL"
-        assert matches[0]["match_type"] == "ticker"
-    
-    def test_resolve_company_name_match(self, server) -> None:
-        """Test that company name fuzzy match is found."""
-        server._ticker_to_cik = {"FOUR": "0001639723"}
-        server._companies = [{"ticker": "FOUR", "cik": "0001639723", "name": "SHIFT4 PAYMENTS INC"}]
-        
-        matches = server._resolve_all_matches("Shift4")
-        assert len(matches) == 1
-        assert matches[0]["ticker"] == "FOUR"
-        assert matches[0]["match_type"] == "company_name"
-    
-    def test_resolve_deduplicates_by_cik(self, server) -> None:
-        """Test that same company matched by both ticker and name is deduplicated."""
-        server._ticker_to_cik = {"AAPL": "0000320193"}
-        server._companies = [{"ticker": "AAPL", "cik": "0000320193", "name": "APPLE INC."}]
-        
-        # "AAPL" matches as ticker, "APPLE" also in company name
-        matches = server._resolve_all_matches("AAPL")
-        assert len(matches) == 1  # Deduplicated
-        assert matches[0]["match_type"] == "ticker"  # Ticker match takes priority
-    
-    def test_resolve_multiple_companies(self, server) -> None:
-        """Test that multiple different companies can be returned."""
-        server._ticker_to_cik = {
-            "AAPL": "0000320193",
-            "APP": "0000111111",
-        }
-        server._companies = [
-            {"ticker": "AAPL", "cik": "0000320193", "name": "APPLE INC."},
-            {"ticker": "APP", "cik": "0000111111", "name": "APPLOVIN CORP"},
-        ]
-        
-        # "APP" matches ticker exactly
-        matches = server._resolve_all_matches("APP")
-        assert len(matches) >= 1
-        tickers = [m["ticker"] for m in matches]
-        assert "APP" in tickers
+def _write_filings_cache(server, cik: str, filings: dict):
+    """Test helper: write filings dict to the server's cache directory."""
+    with open(server._get_company_cache_path(cik), "w") as f:
+        json.dump(filings, f)
 
 
 # ============================================================================
 # Test: Main Endpoint (sec_filing_search)
 # ============================================================================
 
+
 class TestSECFilingSearch:
     @pytest.mark.asyncio
     async def test_search_by_ticker(self, server) -> None:
         """Test searching by ticker symbol."""
-        server._ticker_to_cik = {"AAPL": "0000320193"}
-        server._companies = [{"ticker": "AAPL", "cik": "0000320193", "name": "APPLE INC."}]
+        server._tickers = {"AAPL": {"cik": "0000320193", "name": "APPLE INC."}}
         server._initialized = True
-        
-        # Pre-cache filings
-        test_filings = [
-            {"ticker": "AAPL", "cik": "0000320193", "form": "10-K",
-             "filing_date": "2025-01-15", "report_date": "2024-12-31",
-             "accession_number": "0000320193-25-000001", "filing_url": "https://..."},
-        ]
-        server._save_company_filings("0000320193", test_filings)
-        
-        request = FinanceAgentSearchRequest(company_or_ticker="AAPL", top_n=5)
+
+        test_filings = {
+            "000032019325000001": {
+                "ticker": "AAPL",
+                "cik": "0000320193",
+                "form": "10-K",
+                "filing_date": "2025-01-15",
+                "report_date": "2024-12-31",
+                "accession_number": "0000320193-25-000001",
+                "filing_url": "https://...",
+            },
+        }
+        _write_filings_cache(server, "0000320193", test_filings)
+
+        request = FinanceAgentSearchRequest(ticker="AAPL")
         response = await server.sec_filing_search(request)
-        
+
         results = json.loads(response.results)
         assert len(results) == 1
         assert results[0]["ticker"] == "AAPL"
-        assert results[0]["match_type"] == "ticker"
-    
-    @pytest.mark.asyncio
-    async def test_search_by_company_name(self, server) -> None:
-        """Test searching by company name (fuzzy resolution)."""
-        server._ticker_to_cik = {"FOUR": "0001639723"}
-        server._companies = [{"ticker": "FOUR", "cik": "0001639723", "name": "SHIFT4 PAYMENTS INC"}]
-        server._initialized = True
-        
-        # Pre-cache filings
-        test_filings = [
-            {"ticker": "FOUR", "cik": "0001639723", "form": "10-K",
-             "filing_date": "2025-01-15", "report_date": "2024-12-31",
-             "accession_number": "0001639723-25-000001", "filing_url": "https://..."},
-        ]
-        server._save_company_filings("0001639723", test_filings)
-        
-        # Make request by company name
-        request = FinanceAgentSearchRequest(company_or_ticker="Shift4", top_n=5)
-        response = await server.sec_filing_search(request)
-        
-        results = json.loads(response.results)
-        assert len(results) == 1
-        assert results[0]["ticker"] == "FOUR"
-        assert results[0]["match_type"] == "company_name"
-    
+        assert results[0]["company_name"] == "APPLE INC."
+
     @pytest.mark.asyncio
     async def test_search_not_found(self, server) -> None:
-        """Test error when company not found."""
+        """Unknown ticker returns an error with suggestion."""
         server._initialized = True
-        
-        request = FinanceAgentSearchRequest(company_or_ticker="NOTEXIST")
+
+        request = FinanceAgentSearchRequest(ticker="NOTEXIST")
         response = await server.sec_filing_search(request)
-        
+
         results = json.loads(response.results)
         assert "error" in results
-    
+        assert "NOTEXIST" in results["error"]
+
     @pytest.mark.asyncio
     async def test_returns_only_default_form_types(self, server) -> None:
         """Test that only 10-K, 10-Q, and DEF 14A filings are returned by default."""
-        server._ticker_to_cik = {"AAPL": "0000320193"}
-        server._companies = [{"ticker": "AAPL", "cik": "0000320193", "name": "APPLE INC."}]
+        server._tickers = {"AAPL": {"cik": "0000320193", "name": "APPLE INC."}}
         server._initialized = True
-        
-        test_filings = [
-            {"ticker": "AAPL", "form": "10-K", "filing_date": "2025-01-15", "report_date": "2024-12-31", "accession_number": "a", "filing_url": ""},
-            {"ticker": "AAPL", "form": "10-Q", "filing_date": "2024-11-01", "report_date": "2024-09-30", "accession_number": "b", "filing_url": ""},
-            {"ticker": "AAPL", "form": "8-K", "filing_date": "2024-10-01", "report_date": "2024-10-01", "accession_number": "c", "filing_url": ""},
-            {"ticker": "AAPL", "form": "DEF 14A", "filing_date": "2024-09-01", "report_date": "2024-09-01", "accession_number": "d", "filing_url": ""},
-            {"ticker": "AAPL", "form": "4", "filing_date": "2024-08-01", "report_date": "2024-08-01", "accession_number": "e", "filing_url": ""},
-        ]
-        server._save_company_filings("0000320193", test_filings)
-        
-        request = FinanceAgentSearchRequest(company_or_ticker="AAPL")
+
+        test_filings = {
+            "a": {
+                "ticker": "AAPL",
+                "form": "10-K",
+                "filing_date": "2025-01-15",
+                "report_date": "2024-12-31",
+                "accession_number": "a",
+                "filing_url": "",
+            },
+            "b": {
+                "ticker": "AAPL",
+                "form": "10-Q",
+                "filing_date": "2024-11-01",
+                "report_date": "2024-09-30",
+                "accession_number": "b",
+                "filing_url": "",
+            },
+            "c": {
+                "ticker": "AAPL",
+                "form": "8-K",
+                "filing_date": "2024-10-01",
+                "report_date": "2024-10-01",
+                "accession_number": "c",
+                "filing_url": "",
+            },
+            "d": {
+                "ticker": "AAPL",
+                "form": "DEF 14A",
+                "filing_date": "2024-09-01",
+                "report_date": "2024-09-01",
+                "accession_number": "d",
+                "filing_url": "",
+            },
+            "e": {
+                "ticker": "AAPL",
+                "form": "4",
+                "filing_date": "2024-08-01",
+                "report_date": "2024-08-01",
+                "accession_number": "e",
+                "filing_url": "",
+            },
+        }
+        _write_filings_cache(server, "0000320193", test_filings)
+
+        request = FinanceAgentSearchRequest(ticker="AAPL")
         response = await server.sec_filing_search(request)
-        
+
         results = json.loads(response.results)
         assert len(results) == 3
         forms = [r["form"] for r in results]
@@ -452,32 +274,39 @@ class TestSECFilingSearch:
         assert "DEF 14A" in forms
         assert "8-K" not in forms
         assert "4" not in forms
-    
+
     @pytest.mark.asyncio
-    async def test_top_n_limit(self, server) -> None:
-        """Test limiting results with top_n."""
-        server._ticker_to_cik = {"AAPL": "0000320193"}
-        server._companies = [{"ticker": "AAPL", "cik": "0000320193", "name": "APPLE INC."}]
+    async def test_results_capped_at_30(self, server) -> None:
+        """Results are capped at 30 regardless of how many filings exist."""
+        server._tickers = {"AAPL": {"cik": "0000320193", "name": "APPLE INC."}}
         server._initialized = True
-        
-        test_filings = [
-            {"ticker": "AAPL", "form": "10-Q", "filing_date": f"2024-{i:02d}-01", "report_date": f"2024-{i:02d}-01", "accession_number": f"{i}", "filing_url": ""}
-            for i in range(1, 13)
-        ]
-        server._save_company_filings("0000320193", test_filings)
-        
-        request = FinanceAgentSearchRequest(company_or_ticker="AAPL", top_n=3)
+
+        test_filings = {
+            f"{i}": {
+                "ticker": "AAPL",
+                "form": "10-Q",
+                "filing_date": f"2024-{(i % 12) + 1:02d}-{(i % 28) + 1:02d}",
+                "report_date": f"2024-{(i % 12) + 1:02d}-{(i % 28) + 1:02d}",
+                "accession_number": f"{i}",
+                "filing_url": "",
+            }
+            for i in range(1, 51)
+        }
+        _write_filings_cache(server, "0000320193", test_filings)
+
+        request = FinanceAgentSearchRequest(ticker="AAPL")
         response = await server.sec_filing_search(request)
-        
+
         results = json.loads(response.results)
-        assert len(results) == 3
+        assert len(results) == 30
 
 
 # ============================================================================
-# Test: Prepare Filing
+# Test: Download and Parse Filing
 # ============================================================================
 
-class TestPrepareFiling:
+
+class TestDownloadAndParseFiling:
     def test_parse_sec_url(self, server) -> None:
         """Test SEC URL parsing."""
         url = "https://www.sec.gov/Archives/edgar/data/320193/000032019325000008/aapl-20241228.htm"
@@ -485,28 +314,28 @@ class TestPrepareFiling:
         assert result is not None
         assert result["cik"] == "0000320193"
         assert "000032019325000008" in result["accession_number"].replace("-", "")
-    
+
     def test_parse_sec_url_invalid(self, server) -> None:
         """Test parsing invalid URL returns None."""
         result = server._parse_sec_url("https://example.com/file.htm")
         assert result is None
-    
+
     def test_parse_html_to_text(self, server) -> None:
         """Test HTML parsing removes scripts/styles and extracts text."""
         result = server._parse_html_to_text(MOCK_HTML)
-        
+
         # Should have content
         assert "Company Financial Report" in result
         assert "Revenue Details" in result
         assert "$1,000,000" in result
-        
+
         # Should NOT have script/style content
         assert "alert" not in result
         assert "color: red" not in result
-        
+
         # iXBRL tags should be unwrapped (content kept)
         assert "iXBRL Header" in result
-    
+
     def test_get_content_filepath(self, server) -> None:
         """Test filepath generation for content files."""
         path = server._get_content_filepath("0000320193", "0000320193-25-000008")
@@ -514,3 +343,327 @@ class TestPrepareFiling:
         assert "0000320193" in str(path.parent)
 
 
+# ============================================================================
+# Test: Retrieve Information
+# ============================================================================
+
+
+class TestRetrieveInformation:
+    @pytest.fixture(autouse=True)
+    def _configure_retrieval_model(self, server):
+        server.config.retrieval_model_server = ModelServerRef(type="responses_api_models", name="test-model")
+
+    @pytest.mark.asyncio
+    async def test_prompt_with_curly_braces_in_content(self, server) -> None:
+        """Curly braces in document text must not break placeholder substitution."""
+        server._data_storage["doc"] = 'Revenue {"COGS": 500, "net": 1000} end of report'
+
+        import orjson
+
+        payload = orjson.dumps(
+            {
+                "id": "r1",
+                "created_at": 0,
+                "model": "m",
+                "object": "response",
+                "output": [
+                    {
+                        "id": "msg1",
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "COGS is 500", "annotations": []}],
+                    }
+                ],
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        )
+        mock_response = MagicMock()
+        mock_response.read = AsyncMock(return_value=payload)
+        server.server_client = MagicMock()
+        server.server_client.post = AsyncMock(return_value=mock_response)
+
+        request = RetrieveInformationRequest(prompt="What is COGS in {{doc}}?")
+        response = await server.retrieve_information(request)
+        assert "COGS is 500" in response.results
+
+    @pytest.mark.asyncio
+    async def test_missing_key_error(self, server) -> None:
+        """Referencing a key not in data storage returns an error."""
+        request = RetrieveInformationRequest(prompt="Tell me about {{nonexistent}}")
+        response = await server.retrieve_information(request)
+        assert "ERROR: Key 'nonexistent' not in data storage." in response.results
+
+    @pytest.mark.asyncio
+    async def test_no_placeholder_error(self, server) -> None:
+        """Prompt without {{key}} placeholders returns an error."""
+        request = RetrieveInformationRequest(prompt="What is the revenue?")
+        response = await server.retrieve_information(request)
+        assert "ERROR: Prompt must contain at least one {{key_name}} placeholder." in response.results
+
+    @pytest.mark.asyncio
+    async def test_prompt_too_large(self, server) -> None:
+        """Prompt exceeding max_chars returns a size error."""
+        server._data_storage["huge"] = "x" * 600_000
+        request = RetrieveInformationRequest(prompt="Summarize {{huge}}")
+        response = await server.retrieve_information(request)
+        assert "ERROR: Prompt too large" in response.results
+        assert "huge: 600000 chars" in response.results
+
+
+# ============================================================================
+# Test: Verify (reward calculation)
+# ============================================================================
+
+
+class TestVerify:
+    """Tests for verify() — the reward function used during training."""
+
+    @staticmethod
+    def _msg(text: str) -> dict:
+        return {
+            "id": "msg_1",
+            "content": [{"annotations": [], "text": text, "type": "output_text"}],
+            "role": "assistant",
+            "status": "completed",
+            "type": "message",
+        }
+
+    @staticmethod
+    def _tool_call(name: str, arguments: str) -> dict:
+        return {
+            "id": "tc_1",
+            "call_id": "call_1",
+            "name": name,
+            "arguments": arguments,
+            "type": "function_call",
+            "status": "completed",
+        }
+
+    def _make_response(self, *output_items) -> NeMoGymResponse:
+        return NeMoGymResponse(
+            id="resp_test",
+            created_at=0.0,
+            model="test",
+            object="response",
+            output=list(output_items),
+            parallel_tool_calls=False,
+            tool_choice="auto",
+            tools=[],
+        )
+
+    def _make_verify_request(self, response: NeMoGymResponse, expected_answer: str) -> FinanceAgentVerifyRequest:
+        return FinanceAgentVerifyRequest(
+            question="What was revenue?",
+            expected_answer=expected_answer,
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[{"role": "user", "content": "What was revenue?"}]
+            ),
+            response=response,
+        )
+
+    def _make_judge_response(self, text: str) -> str:
+        return NeMoGymResponse(
+            id="judge_resp",
+            created_at=0.0,
+            model="judge",
+            object="response",
+            output=[
+                {
+                    "id": "judge_msg",
+                    "content": [{"annotations": [], "text": text, "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        ).model_dump_json()
+
+    @staticmethod
+    def _prompt_template_fpath() -> str:
+        return str(Path(__file__).resolve().parents[1] / "prompt_templates/finance_agent_judge.txt")
+
+    def _create_server_with_judge(self, tmp_path: Path) -> FinanceAgentResourcesServer:
+        config = FinanceAgentResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="test",
+            cache_dir=str(tmp_path),
+            judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            judge_prompt_template_fpath=self._prompt_template_fpath(),
+        )
+        return FinanceAgentResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    def _create_server_no_judge(self, tmp_path: Path) -> FinanceAgentResourcesServer:
+        config = FinanceAgentResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="test",
+            cache_dir=str(tmp_path),
+            judge_prompt_template_fpath=self._prompt_template_fpath(),
+        )
+        return FinanceAgentResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    @pytest.mark.asyncio
+    async def test_verify_fully_correct(self, tmp_path) -> None:
+        """Judge returns [[2]] → reward 1.0 with metadata."""
+        server = self._create_server_with_judge(tmp_path)
+        post_mock = MagicMock()
+        post_mock.read = AsyncMock(
+            return_value=self._make_judge_response("The answer matches exactly. The rating is: [[2]]")
+        )
+        server.server_client.post = AsyncMock(return_value=post_mock)
+
+        response = self._make_response(
+            self._tool_call("submit_final_result", json.dumps({"final_result": "$391.0 billion"}))
+        )
+        req = self._make_verify_request(response, "$391.0 billion")
+        res = await server.verify(req)
+        assert res.reward == 1.0
+        assert res.judge_rating == 2
+        assert "[[2]]" in res.judge_text
+
+    @pytest.mark.asyncio
+    async def test_verify_partially_correct(self, tmp_path) -> None:
+        """Judge returns [[1]] → reward 0.0."""
+        server = self._create_server_with_judge(tmp_path)
+        post_mock = MagicMock()
+        post_mock.read = AsyncMock(
+            return_value=self._make_judge_response("Correct number but missing explanation. [[1]]")
+        )
+        server.server_client.post = AsyncMock(return_value=post_mock)
+
+        response = self._make_response(
+            self._tool_call("submit_final_result", json.dumps({"final_result": "$391 billion"}))
+        )
+        req = self._make_verify_request(response, "$391.0 billion")
+        res = await server.verify(req)
+        assert res.reward == 0.0
+
+    @pytest.mark.asyncio
+    async def test_verify_incorrect(self, tmp_path) -> None:
+        """Judge returns [[0]] → reward 0.0."""
+        server = self._create_server_with_judge(tmp_path)
+        post_mock = MagicMock()
+        post_mock.read = AsyncMock(return_value=self._make_judge_response("Completely wrong value. [[0]]"))
+        server.server_client.post = AsyncMock(return_value=post_mock)
+
+        response = self._make_response(
+            self._tool_call("submit_final_result", json.dumps({"final_result": "$100 million"}))
+        )
+        req = self._make_verify_request(response, "$391.0 billion")
+        res = await server.verify(req)
+        assert res.reward == 0.0
+
+    @pytest.mark.asyncio
+    async def test_verify_unparseable_judge_output(self, tmp_path) -> None:
+        """Judge returns no [[N]] rating → reward 0.0, judge_rating is None."""
+        server = self._create_server_with_judge(tmp_path)
+        post_mock = MagicMock()
+        post_mock.read = AsyncMock(
+            return_value=self._make_judge_response("I cannot determine a rating for this response.")
+        )
+        server.server_client.post = AsyncMock(return_value=post_mock)
+
+        response = self._make_response(
+            self._tool_call("submit_final_result", json.dumps({"final_result": "$391.0 billion"}))
+        )
+        req = self._make_verify_request(response, "$391.0 billion")
+        res = await server.verify(req)
+        assert res.reward == 0.0
+        assert res.judge_rating is None
+
+    @pytest.mark.asyncio
+    async def test_verify_extracts_answer_from_submit_tool(self, tmp_path) -> None:
+        """Answer is extracted from submit_final_result, not from text messages."""
+        server = self._create_server_with_judge(tmp_path)
+        post_mock = MagicMock()
+        post_mock.read = AsyncMock(return_value=self._make_judge_response("[[2]]"))
+        server.server_client.post = AsyncMock(return_value=post_mock)
+
+        response = self._make_response(
+            self._msg("I think the answer is maybe $100 million"),
+            self._tool_call("submit_final_result", json.dumps({"final_result": "$391.0 billion"})),
+        )
+        req = self._make_verify_request(response, "$391.0 billion")
+        res = await server.verify(req)
+        assert res.reward == 1.0
+
+        # Verify the judge was called with the tool call answer, not the text
+        call_args = server.server_client.post.call_args
+        judge_payload = call_args.kwargs["json"] if "json" in call_args.kwargs else call_args[1].get("json")
+        judge_input_text = str(judge_payload)
+        assert "$391.0 billion" in judge_input_text
+
+    @pytest.mark.asyncio
+    async def test_verify_falls_back_to_text_message(self, tmp_path) -> None:
+        """When no submit_final_result tool call, extracts from last assistant message."""
+        server = self._create_server_with_judge(tmp_path)
+        post_mock = MagicMock()
+        post_mock.read = AsyncMock(return_value=self._make_judge_response("[[2]]"))
+        server.server_client.post = AsyncMock(return_value=post_mock)
+
+        response = self._make_response(self._msg("The revenue was $391.0 billion."))
+        req = self._make_verify_request(response, "$391.0 billion")
+        res = await server.verify(req)
+        assert res.reward == 1.0
+
+    @pytest.mark.asyncio
+    async def test_verify_no_judge_substring_match(self, tmp_path) -> None:
+        """Without judge configured, uses substring matching."""
+        server = self._create_server_no_judge(tmp_path)
+
+        response = self._make_response(
+            self._tool_call("submit_final_result", json.dumps({"final_result": "Revenue was $391.0 billion in 2024"}))
+        )
+        req = self._make_verify_request(response, "$391.0 billion")
+        res = await server.verify(req)
+        assert res.reward == 1.0
+
+    @pytest.mark.asyncio
+    async def test_verify_no_judge_substring_mismatch(self, tmp_path) -> None:
+        """Without judge, substring mismatch → reward 0.0."""
+        server = self._create_server_no_judge(tmp_path)
+
+        response = self._make_response(
+            self._tool_call("submit_final_result", json.dumps({"final_result": "$100 million"}))
+        )
+        req = self._make_verify_request(response, "$391.0 billion")
+        res = await server.verify(req)
+        assert res.reward == 0.0
+
+    @pytest.mark.asyncio
+    async def test_verify_judge_call_failure(self, tmp_path) -> None:
+        """Judge HTTP call failure → reward 0.0, no crash."""
+        server = self._create_server_with_judge(tmp_path)
+        server.server_client.post = AsyncMock(side_effect=ConnectionError("judge unavailable"))
+
+        response = self._make_response(
+            self._tool_call("submit_final_result", json.dumps({"final_result": "$391.0 billion"}))
+        )
+        req = self._make_verify_request(response, "$391.0 billion")
+        res = await server.verify(req)
+        assert res.reward == 0.0
+
+    @pytest.mark.asyncio
+    async def test_verify_curly_braces_in_content(self, tmp_path) -> None:
+        """Curly braces in answers must not break judge prompt formatting."""
+        server = self._create_server_with_judge(tmp_path)
+        post_mock = MagicMock()
+        post_mock.read = AsyncMock(return_value=self._make_judge_response("[[2]]"))
+        server.server_client.post = AsyncMock(return_value=post_mock)
+
+        response = self._make_response(
+            self._tool_call("submit_final_result", json.dumps({"final_result": 'Revenue {"net": 1000}'}))
+        )
+        req = self._make_verify_request(response, '{"net": 1000}')
+        res = await server.verify(req)
+        assert res.reward == 1.0
