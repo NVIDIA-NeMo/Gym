@@ -17,9 +17,6 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from numpy import array as np_array
-from numpy import median as np_median
-from numpy import ndarray
 from pydantic import BaseModel, ConfigDict, Field
 from wandb import Histogram
 
@@ -59,22 +56,18 @@ class AggregateMetrics(BaseModel):
     stddev: float
     histogram: Histogram = Field(exclude=True)
 
-    @classmethod
-    def from_records_and_key_numeric(cls, records: List[Dict[str, Any]], key: str) -> "Optional[AggregateMetrics]":
-        values = [d[key] for d in records if d[key] is not None]
-        if not values or not isinstance(values[0], (int, bool, float)):
-            return
 
-        values: ndarray = np_array(values)
+class GroupMetrics(AggregateMetrics):
+    sample: Dict[str, Any]
 
-        return AggregateMetrics(
-            mean=values.mean(),
-            max=values.max(),
-            min=values.min(),
-            median=np_median(values),
-            stddev=values.std(),
-            histogram=Histogram(values),
-        )
+
+class AgentMetrics(AggregateMetrics):
+    agent_name: str
+
+
+class ProfilingMetrics(BaseModel):
+    metrics_by_group: List[GroupMetrics]
+    metrics_by_agent: List[AgentMetrics]
 
 
 def profile():
