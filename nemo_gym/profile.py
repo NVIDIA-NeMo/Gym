@@ -15,9 +15,13 @@
 import json
 from collections import defaultdict
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from numpy import array as np_array
+from numpy import median as np_median
+from numpy import ndarray
+from pydantic import BaseModel, ConfigDict, Field
+from wandb import Histogram
 
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import TASK_INDEX_KEY_NAME, get_global_config_dict
@@ -42,6 +46,35 @@ class RewardProfilingMetrics(BaseModel):
     pass_rate_total: Optional[int] = Field(default=None, description="Total rollouts used for pass_rate calculation.")
     pass_rate_passed: Optional[int] = Field(default=None, description="Number of rollouts that passed.")
     pass_threshold: Optional[float] = Field(default=None, description="Threshold used for pass_rate calculation.")
+
+
+class AggregateMetrics(BaseModel):
+    # ONLY for histogram
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    mean: float
+    max: float
+    min: float
+    median: float
+    stddev: float
+    histogram: Histogram = Field(exclude=True)
+
+    @classmethod
+    def from_records_and_key_numeric(cls, records: List[Dict[str, Any]], key: str) -> "Optional[AggregateMetrics]":
+        values = [d[key] for d in records if d[key] is not None]
+        if not values or not isinstance(values[0], (int, bool, float)):
+            return
+
+        values: ndarray = np_array(values)
+
+        return AggregateMetrics(
+            mean=values.mean(),
+            max=values.max(),
+            min=values.min(),
+            median=np_median(values),
+            stddev=values.std(),
+            histogram=Histogram(values),
+        )
 
 
 def profile():
