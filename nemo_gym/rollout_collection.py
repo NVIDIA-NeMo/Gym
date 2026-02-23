@@ -24,7 +24,6 @@ from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 import orjson
 from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
-from wandb import Table
 
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig
 from nemo_gym.global_config import (
@@ -32,7 +31,7 @@ from nemo_gym.global_config import (
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
-    WANDB_RUN,
+    get_wandb_run,
 )
 from nemo_gym.profile import RewardProfiler
 from nemo_gym.server_utils import (
@@ -44,6 +43,7 @@ from nemo_gym.server_utils import (
     raise_for_status,
     set_global_aiohttp_client,
 )
+from wandb import Table
 
 
 class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
@@ -203,6 +203,7 @@ class RolloutCollectionHelper(BaseModel):
 
         rows: List[Dict] = []
         results: List[Dict] = []
+        result_strs: List[List[str]] = []
         results_file = open(config.output_jsonl_fpath, "ab")
         for future in self.run_examples(input_rows, semaphore=semaphore):
             row, result = await future
@@ -210,12 +211,14 @@ class RolloutCollectionHelper(BaseModel):
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
 
-            results_file.write(orjson.dumps(result) + b"\n")
             rows.append(row)
             results.append(result)
+            result_strs.append([orjson.dumps(result)])
+            results_file.write(result_strs[-1][0] + b"\n")
 
-        if WANDB_RUN:  # pragma: no cover
-            WANDB_RUN.log({"Rollouts": Table(results)})
+        if get_wandb_run():  # pragma: no cover
+            get_wandb_run().log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
+        del result_strs
 
         # Sort to ensure consistent ordering
         rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
@@ -227,7 +230,7 @@ class RolloutCollectionHelper(BaseModel):
             group_level_metrics, agent_level_metrics, output_fpath
         )
 
-        if WANDB_RUN:  # pragma: no cover
+        if get_wandb_run():  # pragma: no cover
             agent_level_metrics_to_log = dict()
             for agent_metrics in agent_level_metrics:
                 agent_name = agent_metrics[AGENT_REF_KEY_NAME]["name"]
@@ -236,7 +239,7 @@ class RolloutCollectionHelper(BaseModel):
 
                 agent_level_metrics_to_log.pop(f"{agent_name}/{AGENT_REF_KEY_NAME}")
 
-            WANDB_RUN.log(agent_level_metrics_to_log)
+            get_wandb_run().log(agent_level_metrics_to_log)
 
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {materialized_jsonl_fpath}

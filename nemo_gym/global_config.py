@@ -97,7 +97,11 @@ DEFAULT_HEAD_SERVER_PORT = 11000
 
 
 # W&B
-WANDB_RUN: Optional[Run] = None
+_WANDB_RUN: Optional[Run] = None
+
+
+def get_wandb_run() -> Optional[Run]:
+    return _WANDB_RUN
 
 
 class GlobalConfigDictParserConfig(BaseModel):
@@ -359,8 +363,8 @@ class GlobalConfigDictParser(BaseModel):
         if wandb_config.is_available:  # pragma: no cover
             environ["WANDB_API_KEY"] = wandb_config.wandb_api_key
 
-            global WANDB_RUN
-            WANDB_RUN = wandb.init(
+            global _WANDB_RUN
+            _WANDB_RUN = wandb.init(
                 project=wandb_config.wandb_project,
                 name=wandb_config.wandb_name,
             )
@@ -368,7 +372,7 @@ class GlobalConfigDictParser(BaseModel):
             # Log params
             config_dict_to_log = deepcopy(global_config_dict)
             self._recursively_hide_secrets(config_dict_to_log)
-            WANDB_RUN.config.update(OmegaConf.to_container(config_dict_to_log))
+            _WANDB_RUN.config.update(OmegaConf.to_container(config_dict_to_log))
 
         return global_config_dict
 
