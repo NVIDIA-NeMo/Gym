@@ -22,7 +22,7 @@ import tomllib
 from copy import deepcopy
 from glob import glob
 from importlib.metadata import version as md_version
-from os import makedirs
+from os import environ, makedirs
 from os.path import exists
 from pathlib import Path
 from signal import SIGINT
@@ -311,19 +311,22 @@ Process `{process_name}` stderr:
             process.send_signal(SIGINT)
 
         print("Waiting for processes to finish...")
+        killed_process_names: List[str] = []
         for process_name, process in self._processes.items():
             try:
                 process.wait(timeout=1)
             except TimeoutExpired:
-                print(
-                    f"""Process `{process_name}` didn't shutdown within the 5s timeout, killing instead. You may see messages like:
+                process.kill()
+                killed_process_names.append(process_name)
+
+        if killed_process_names:
+            print(
+                f"""Some processes ({", ".join(killed_process_names)}) didn't shutdown within the 5s timeout, killing instead. You may see messages like:
 ```bash
 rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been killed. It's either GCS is terminated by `ray stop` or is killed unexpectedly. If it is killed unexpectedly, see the log file gcs_server.out. https://docs.ray.io/en/master/ray-observability/user-guides/configure-logging.html#logging-directory-structure. The program will terminate.
 ```
 """
-                )
-                process.kill()
-
+            )
         self._processes = dict()
 
         self._head_server.should_exit = True
