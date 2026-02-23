@@ -188,7 +188,7 @@ ng_collect_rollouts \
     +num_samples_in_parallel=10
 ```
 
-### `ng_collect_rollouts` / `nemo_gym_collect_rollouts`
+### `ng_e2e_collect_rollouts` / `nemo_gym_e2e_collect_rollouts`
 
 Spin up all necessary servers and perform a batch of rollout collection using each dataset inside the provided configs.
 
