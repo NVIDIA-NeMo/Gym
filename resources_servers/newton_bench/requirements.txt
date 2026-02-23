@@ -1,4 +1,4 @@
--e nemo-gym @ ../../
+-e nemo-gym[dev] @ ../../
 numpy>=1.24.0
 scipy>=1.7
 sympy>=1.10
