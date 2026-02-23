@@ -248,6 +248,9 @@ class RunOpenHandsAgent:
             "chown $uid:$uid /tmp/tmux-$uid || true && "
             "chmod 700 /tmp/tmux-$uid && "
             "tmux -S /tmp/tmux-$uid/default start-server || true && "
+            # Copy jq to a standard PATH location so it's available in the OpenHands
+            # tmux session (which doesn't inherit the miniforge PATH).
+            "cp /openhands_setup/miniforge3/bin/jq /usr/local/bin/jq 2>/dev/null || true && "
             # Use pre-built OpenHands
             "cd /openhands_setup/OpenHands && "
             "export RUNTIME=local && "

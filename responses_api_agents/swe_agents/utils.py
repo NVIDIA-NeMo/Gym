@@ -1049,11 +1049,19 @@ mamba install -y --override-channels conda-forge::python=3.12 conda-forge::nodej
 
 {miniforge_dir}/bin/python -m pip install -q 'packaging==26.0'
 
+# Install jq as a static binary (avoid conda solver changing other package versions)
+if [ ! -f "{miniforge_dir}/bin/jq" ]; then
+    echo "Installing jq static binary..."
+    curl -fsSL https://github.com/jqlang/jq/releases/download/jq-1.8.1/jq-linux-amd64 -o "{miniforge_dir}/bin/jq"
+    chmod +x "{miniforge_dir}/bin/jq"
+fi
+
 # Verify installations
 echo "Verifying package installations..."
 which python
 which node
 which poetry
+which jq
 
 # Clone OpenHands
 if [ ! -d "{openhands_dir}/.git" ]; then
