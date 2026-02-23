@@ -585,4 +585,4 @@ class WANDBConfig(BaseModel):
 
     @property
     def is_available(self) -> bool:
-        return self.project and self.name and self.api_key
+        return self.wandb_project and self.wandb_name and self.wandb_api_key
