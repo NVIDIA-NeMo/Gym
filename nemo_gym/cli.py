@@ -425,7 +425,9 @@ def e2e_rollout_collection():  # pragma: no cover
         assert input_jsonl_fpath.exists()
         rollout_collection_config_dict["input_jsonl_fpath"] = str(input_jsonl_fpath)
 
-    rollout_collection_config = RolloutCollectionConfig.model_validate(rollout_collection_config_dict)
+    rollout_collection_config = RolloutCollectionConfig.model_validate(
+        OmegaConf.to_container(rollout_collection_config_dict)
+    )
 
     rh = RunHelper()
     rh.start(None)
