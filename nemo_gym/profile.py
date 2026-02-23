@@ -140,12 +140,12 @@ def profile():  # pragma: no cover
     config = RewardProfileConfig.model_validate(get_global_config_dict())
 
     with open(config.materialized_inputs_jsonl_fpath) as f:
-        rows = list(orjson.loads, f)
+        rows = list(map(orjson.loads, f))
 
     with open(config.rollouts_jsonl_fpath) as f:
-        results = list(orjson.loads, f)
+        results = list(map(orjson.loads, f))
 
     rp = RewardProfiler()
     reward_profiling_fpath, agent_level_metrics_fpath = rp.profile_and_write_to_disk(
-        rows, results, config.rollouts_jsonl_fpath
+        rows, results, Path(config.rollouts_jsonl_fpath)
     )
