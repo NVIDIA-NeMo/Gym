@@ -32,6 +32,7 @@ from nemo_gym.global_config import (
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
+from nemo_gym.profile import RewardProfiler
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
@@ -109,6 +110,10 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=False,
         description='When num_repeats > 1, add a "seed" parameter on the Responses create params.',
     )
+    resume_from_cache: bool = Field(
+        default=False,
+        description="If the same command is run multiple times, check the materialized inputs and current outputs and remove the inputs that have already been run",
+    )
 
 
 class RolloutCollectionHelper(BaseModel):
@@ -180,7 +185,13 @@ class RolloutCollectionHelper(BaseModel):
         return rows
 
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
-        rows = self._preprocess_rows_from_config(config)
+        input_rows = self._preprocess_rows_from_config(config)
+
+        output_fpath = Path(config.output_jsonl_fpath)
+        materialized_jsonl_fpath = output_fpath.with_stem(output_fpath.stem + "_materialized").with_suffix(".jsonl")
+        with materialized_jsonl_fpath.open("wb") as f:
+            for row in input_rows:
+                f.write(orjson.dumps(row) + b"\n")
 
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
@@ -189,26 +200,37 @@ class RolloutCollectionHelper(BaseModel):
 
         Path(config.output_jsonl_fpath).parent.mkdir(exist_ok=True, parents=True)
 
+        rows: List[Dict] = []
         results: List[Dict] = []
         results_file = open(config.output_jsonl_fpath, "ab")
-        for future in self.run_examples(rows, semaphore=semaphore):
+        for future in self.run_examples(input_rows, semaphore=semaphore):
             row, result = await future
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
 
             results_file.write(orjson.dumps(result) + b"\n")
+            rows.append(row)
             results.append(result)
 
-        output_fstem = Path(config.output_jsonl_fpath).stem
-        metrics_fstem = output_fstem + "_metrics"
-        metrics_fpath = Path(config.output_jsonl_fpath).with_stem(metrics_fstem).with_suffix(".json")
+        # Sort to ensure consistent ordering
+        rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
+        results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
 
-        metrics_fpath.write_text("")
+        rp = RewardProfiler()
+        group_level_metrics, agent_level_metrics = rp.profile_from_data(rows, results)
+
+        reward_profiling_fpath = output_fpath.with_stem(output_fpath.stem + "_reward_profiling").with_suffix(".jsonl")
+        reward_profiling_fpath.write_bytes(orjson.dumps(rp.prepare_for_serialization(group_level_metrics)))
+
+        agent_level_metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_agent_metrics").with_suffix(".json")
+        agent_level_metrics_fpath.write_bytes(orjson.dumps(rp.prepare_for_serialization(agent_level_metrics)))
 
         print(f"""Finished rollout collection! View results at:
-Rollouts: {config.output_jsonl_fpath}
-Metrics: {metrics_fpath}""")
+Fully materialized inputs: {materialized_jsonl_fpath}
+Rollouts: {output_fpath}
+Reward profiling outputs: {reward_profiling_fpath}
+Agent-level metrics: {agent_level_metrics_fpath}""")
 
         return results
 
