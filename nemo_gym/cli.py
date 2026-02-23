@@ -22,7 +22,7 @@ import tomllib
 from copy import deepcopy
 from glob import glob
 from importlib.metadata import version as md_version
-from os import environ, makedirs
+from os import makedirs
 from os.path import exists
 from pathlib import Path
 from signal import SIGINT
@@ -34,7 +34,6 @@ from typing import Dict, List, Optional, Tuple
 import psutil
 import rich
 import uvicorn
-import wandb
 from devtools import pprint
 from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import Field
@@ -416,16 +415,6 @@ def e2e_rollout_collection():  # pragma: no cover
         data_process_output_dir = output_fpath.parent / "preprocessed_datasets"
         data_processor_config_dict["output_dirpath"] = str(data_process_output_dir)
 
-    environ["WANDB_API_KEY"] = e2e_rollout_collection_config.wandb_api_key
-    wandb_dir = output_fpath.parent / "wandb"
-    wandb_run = wandb.init(
-        project=e2e_rollout_collection_config.wandb_project,
-        name=e2e_rollout_collection_config.wandb_name,
-        dir=wandb_dir,
-    )
-    # Log params
-    wandb_run.config.update(OmegaConf.to_container(global_config_dict))
-
     data_processor = TrainDataProcessor()
     data_processor.run(data_processor_config_dict)
 
@@ -451,13 +440,11 @@ def e2e_rollout_collection():  # pragma: no cover
 """
     )
     try:
-        results = asyncio.run(rch.run_from_config(rollout_collection_config))
+        asyncio.run(rch.run_from_config(rollout_collection_config))
     except KeyboardInterrupt:
         pass
     finally:
         rh.shutdown()
-
-    wandb_run.log(results, step=1, commit=True)
 
 
 def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover

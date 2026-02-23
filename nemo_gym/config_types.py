@@ -571,3 +571,18 @@ def is_almost_server(server_type_config_dict: Any) -> bool:
 ########################################
 
 AGENT_REF_KEY = "agent_ref"
+
+
+########################################
+# Weights and Biases
+########################################
+
+
+class WANDBConfig(BaseModel):
+    wandb_project: Optional[str] = None
+    wandb_name: Optional[str] = None
+    wandb_api_key: Optional[str] = None
+
+    @property
+    def is_available(self) -> bool:
+        return self.project and self.name and self.api_key

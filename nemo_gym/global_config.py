@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from collections import defaultdict
+from copy import deepcopy
 from os import environ, getenv
 from pathlib import Path
 from platform import python_version
@@ -22,14 +23,17 @@ from typing import ClassVar, List, Optional, Tuple, Type
 
 import hydra
 import rich
+import wandb
 from omegaconf import DictConfig, OmegaConf, open_dict
 from openai import __version__ as openai_version
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from ray import __version__ as ray_version
+from wandb import Run
 
 from nemo_gym import CACHE_DIR, PARENT_DIR
 from nemo_gym.config_types import (
     ServerInstanceConfig,
+    WANDBConfig,
     is_almost_server,
     is_server_ref,
     maybe_get_server_instance_config,
@@ -90,6 +94,10 @@ POLICY_API_KEY_KEY_NAME = "policy_api_key"  # pragma: allowlist secret
 POLICY_MODEL_NAME_KEY_NAME = "policy_model_name"
 
 DEFAULT_HEAD_SERVER_PORT = 11000
+
+
+# W&B
+WANDB_RUN: Optional[Run] = None
 
 
 class GlobalConfigDictParserConfig(BaseModel):
@@ -345,6 +353,22 @@ class GlobalConfigDictParser(BaseModel):
 
         if parse_config.hide_secrets:
             self._recursively_hide_secrets(global_config_dict)
+
+        # Set up W&B
+        wandb_config = WANDBConfig.model_validate(global_config_dict)
+        if wandb_config.is_available:  # pragma: no cover
+            environ["WANDB_API_KEY"] = wandb_config.wandb_api_key
+
+            global WANDB_RUN
+            WANDB_RUN = wandb.init(
+                project=wandb_config.wandb_project,
+                name=wandb_config.wandb_name,
+            )
+
+            # Log params
+            config_dict_to_log = deepcopy(global_config_dict)
+            self._recursively_hide_secrets(config_dict_to_log)
+            WANDB_RUN.config.update(OmegaConf.to_container(config_dict_to_log))
 
         return global_config_dict
 
