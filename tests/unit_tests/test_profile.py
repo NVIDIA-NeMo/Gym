@@ -97,7 +97,6 @@ class TestProfile:
 
         expected_group_level_metrics = [
             {
-                "_ng_task_index": 0,
                 "mean/reward": 0.5,
                 "mean/abc usage": 1.0,
                 "max/reward": 1,
@@ -110,9 +109,13 @@ class TestProfile:
                 "std/abc usage": 0.0,
                 "histogram/reward": None,
                 "histogram/abc usage": None,
+                "sample": {
+                    "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                    "x": 0,
+                    "agent_ref": {"name": "my_agent"},
+                },
             },
             {
-                "_ng_task_index": 1,
                 "mean/reward": 0.5,
                 "mean/abc usage": 1.0,
                 "max/reward": 1,
@@ -125,9 +128,13 @@ class TestProfile:
                 "std/abc usage": 0.0,
                 "histogram/reward": None,
                 "histogram/abc usage": None,
+                "sample": {
+                    "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                    "x": 1,
+                    "agent_ref": {"name": "my_agent"},
+                },
             },
             {
-                "_ng_task_index": 2,
                 "mean/reward": 0.5,
                 "mean/abc usage": 1.0,
                 "max/reward": 1,
@@ -140,13 +147,18 @@ class TestProfile:
                 "std/abc usage": 0.0,
                 "histogram/reward": None,
                 "histogram/abc usage": None,
+                "sample": {
+                    "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                    "x": 2,
+                    "agent_ref": {"name": "my_agent"},
+                },
             },
         ]
         assert expected_group_level_metrics == actual_group_level_metrics
 
         expected_agent_level_metrics = [
             {
-                "agent_name": "my_agent",
+                "agent_ref": {"name": "my_agent"},
                 "mean/reward": 0.5,
                 "mean/abc usage": 1.0,
                 "max/reward": 1,

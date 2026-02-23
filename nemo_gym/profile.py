@@ -23,7 +23,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from wandb import Histogram
 
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, get_global_config_dict
+from nemo_gym.global_config import (
+    AGENT_REF_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+    get_global_config_dict,
+)
 
 
 class ProfileConfig(BaseNeMoGymCLIConfig):
@@ -104,6 +109,7 @@ def profile_from_data(
     results: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     filtered_results: List[Dict] = []
+    task_idx_to_row: Dict[int, Dict] = dict()
     for row, result in zip(rows, results):
         # Add additional helpful information
         result = result | result["response"].get("usage", None)
@@ -114,14 +120,27 @@ def profile_from_data(
         numeric_results["agent_name"] = row["agent_ref"]["name"]
 
         filtered_results.append(numeric_results)
+        task_idx_to_row.setdefault(row[TASK_INDEX_KEY_NAME], row)
 
     df = DataFrame.from_records(filtered_results)
 
     group_level_df = df.drop(columns=[ROLLOUT_INDEX_KEY_NAME, "agent_name"]).groupby(TASK_INDEX_KEY_NAME)
     group_level_metrics = calculate_metrics_single_df(group_level_df)
+    for group_metrics in group_level_metrics:
+        row = task_idx_to_row[group_metrics[TASK_INDEX_KEY_NAME]]
+
+        row = row.copy()
+        row.pop(TASK_INDEX_KEY_NAME)
+        row.pop(ROLLOUT_INDEX_KEY_NAME)
+
+        group_metrics["sample"] = row
+
+        group_metrics.pop(TASK_INDEX_KEY_NAME)
 
     agent_level_df = df.drop(columns=[ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME]).groupby("agent_name")
     agent_level_metrics = calculate_metrics_single_df(agent_level_df)
+    for agent_metrics in agent_level_metrics:
+        agent_metrics[AGENT_REF_KEY_NAME] = {"name": agent_metrics.pop("agent_name")}
 
     return group_level_metrics, agent_level_metrics
 
