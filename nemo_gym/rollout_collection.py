@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
-from pandas import DataFrame
 from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
 
@@ -201,23 +200,11 @@ class RolloutCollectionHelper(BaseModel):
             results_file.write(orjson.dumps(result) + b"\n")
             results.append(result)
 
-        filtered_results: List[Dict] = []
-        for result in results:
-            result = result | result["response"].get("usage", None)
-
-            numeric_results = {k: v for k, v in result.items() if isinstance(v, (int, float))}
-
-            filtered_results.append(numeric_results)
-
-        df = DataFrame.from_records(filtered_results)
-        groups = df.groupby(TASK_INDEX_KEY_NAME)
-        description = groups.describe()
-
         output_fstem = Path(config.output_jsonl_fpath).stem
         metrics_fstem = output_fstem + "_metrics"
         metrics_fpath = Path(config.output_jsonl_fpath).with_stem(metrics_fstem).with_suffix(".json")
 
-        metrics_fpath.write_text(description.to_json(indent=4))
+        metrics_fpath.write_text("")
 
         print(f"""Finished rollout collection! View results at:
 Rollouts: {config.output_jsonl_fpath}

@@ -19,7 +19,7 @@ from pytest import MonkeyPatch
 
 import nemo_gym.profile
 from nemo_gym.global_config import TASK_INDEX_KEY_NAME
-from nemo_gym.profile import ProfileConfig, RewardProfilingMetrics, profile
+from nemo_gym.profile import ProfileConfig, RewardProfilingMetrics, profile, profile_from_data
 
 
 class TestProfile:
@@ -29,6 +29,139 @@ class TestProfile:
             rollouts_jsonl_fpath="",
             output_jsonl_fpath="",
         )
+
+    def test_profile_from_data(self) -> None:
+        rows = [
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                "x": 0,
+                "agent_ref": {"name": "my_agent"},
+            },
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 1,
+                "responses_create_params": {"input": [], "seed": 1, "temperature": 0.1},
+                "x": 0,
+                "agent_ref": {"name": "my_agent"},
+            },
+            {
+                "_ng_task_index": 1,
+                "_ng_rollout_index": 0,
+                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                "x": 1,
+                "agent_ref": {"name": "my_agent"},
+            },
+            {
+                "_ng_task_index": 1,
+                "_ng_rollout_index": 1,
+                "responses_create_params": {"input": [], "seed": 1, "temperature": 0.1},
+                "x": 1,
+                "agent_ref": {"name": "my_agent"},
+            },
+            {
+                "_ng_task_index": 2,
+                "_ng_rollout_index": 0,
+                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                "x": 2,
+                "agent_ref": {"name": "my_agent"},
+            },
+            {
+                "_ng_task_index": 2,
+                "_ng_rollout_index": 1,
+                "responses_create_params": {"input": [], "seed": 1, "temperature": 0.1},
+                "x": 2,
+                "agent_ref": {"name": "my_agent"},
+            },
+        ]
+        results = [
+            {"_ng_task_index": 0, "_ng_rollout_index": 0, "response": {"usage": {"abc usage": 1}}, "reward": 0},
+            {"_ng_task_index": 0, "_ng_rollout_index": 1, "response": {"usage": {"abc usage": 1}}, "reward": 1},
+            {"_ng_task_index": 1, "_ng_rollout_index": 0, "response": {"usage": {"abc usage": 1}}, "reward": 0},
+            {"_ng_task_index": 1, "_ng_rollout_index": 1, "response": {"usage": {"abc usage": 1}}, "reward": 1},
+            {"_ng_task_index": 2, "_ng_rollout_index": 0, "response": {"usage": {"abc usage": 1}}, "reward": 0},
+            {"_ng_task_index": 2, "_ng_rollout_index": 1, "response": {"usage": {"abc usage": 1}}, "reward": 1},
+        ]
+
+        actual_group_level_metrics, actual_agent_level_metrics = profile_from_data(rows, results)
+
+        def _clean_metrics(metrics: list[dict]):
+            for row in metrics:
+                for key in list(row):
+                    if key.startswith("histogram"):
+                        row[key] = None
+
+        _clean_metrics(actual_group_level_metrics)
+        _clean_metrics(actual_agent_level_metrics)
+
+        expected_group_level_metrics = [
+            {
+                "_ng_task_index": 0,
+                "mean/reward": 0.5,
+                "mean/abc usage": 1.0,
+                "max/reward": 1,
+                "max/abc usage": 1,
+                "min/reward": 0,
+                "min/abc usage": 1,
+                "median/reward": 0.5,
+                "median/abc usage": 1.0,
+                "std/reward": 0.7071067811865476,
+                "std/abc usage": 0.0,
+                "histogram/reward": None,
+                "histogram/abc usage": None,
+            },
+            {
+                "_ng_task_index": 1,
+                "mean/reward": 0.5,
+                "mean/abc usage": 1.0,
+                "max/reward": 1,
+                "max/abc usage": 1,
+                "min/reward": 0,
+                "min/abc usage": 1,
+                "median/reward": 0.5,
+                "median/abc usage": 1.0,
+                "std/reward": 0.7071067811865476,
+                "std/abc usage": 0.0,
+                "histogram/reward": None,
+                "histogram/abc usage": None,
+            },
+            {
+                "_ng_task_index": 2,
+                "mean/reward": 0.5,
+                "mean/abc usage": 1.0,
+                "max/reward": 1,
+                "max/abc usage": 1,
+                "min/reward": 0,
+                "min/abc usage": 1,
+                "median/reward": 0.5,
+                "median/abc usage": 1.0,
+                "std/reward": 0.7071067811865476,
+                "std/abc usage": 0.0,
+                "histogram/reward": None,
+                "histogram/abc usage": None,
+            },
+        ]
+        assert expected_group_level_metrics == actual_group_level_metrics
+
+        expected_agent_level_metrics = [
+            {
+                "agent_name": "my_agent",
+                "mean/reward": 0.5,
+                "mean/abc usage": 1.0,
+                "max/reward": 1,
+                "max/abc usage": 1,
+                "min/reward": 0,
+                "min/abc usage": 1,
+                "median/reward": 0.5,
+                "median/abc usage": 1.0,
+                "std/reward": 0.5477225575051661,
+                "std/abc usage": 0.0,
+                "histogram/reward": None,
+                "histogram/abc usage": None,
+            }
+        ]
+        assert expected_agent_level_metrics == actual_agent_level_metrics
 
     def test_reward_profiling_metrics(self) -> None:
         metrics = RewardProfilingMetrics(
