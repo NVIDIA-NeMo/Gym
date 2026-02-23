@@ -464,6 +464,7 @@ class TrainDataProcessor(BaseModel):
                     backend = "huggingface"
                 elif not d.huggingface_identifier:
                     assert gitlab_backend_ok, gitlab_error_msg
+                    backend = "gitlab"
                 else:
                     raise NotImplementedError
 
