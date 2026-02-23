@@ -103,7 +103,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
 
         logging.getLogger("math_verify").setLevel(logging.CRITICAL)
 
-        # Configure math_verify to extract answers from both formula and plain text formats.
+        # Use Latex and plain math extraction from predictions
         # https://github.com/huggingface/Math-Verify?tab=readme-ov-file#extraction-targets
         self._library_verifier = math_metric(
             gold_extraction_target=(LatexExtractionConfig(),),
