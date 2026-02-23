@@ -221,7 +221,10 @@ class RolloutCollectionHelper(BaseModel):
         results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
 
         rp = RewardProfiler()
-        reward_profiling_fpath, agent_level_metrics_fpath = rp.profile_and_write_to_disk(rows, results, output_fpath)
+        group_level_metrics, agent_level_metrics = rp.profile_from_data(rows, results)
+        reward_profiling_fpath, agent_level_metrics_fpath = rp.write_to_disk(
+            group_level_metrics, agent_level_metrics, output_fpath
+        )
 
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {materialized_jsonl_fpath}

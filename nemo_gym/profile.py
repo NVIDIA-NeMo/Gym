@@ -113,14 +113,12 @@ class RewardProfiler:
 
         return results
 
-    def profile_and_write_to_disk(
+    def write_to_disk(
         self,
-        rows: List[Dict[str, Any]],
-        results: List[Dict[str, Any]],
+        group_level_metrics: List[Dict[str, Any]],
+        agent_level_metrics: List[Dict[str, Any]],
         base_output_fpath: Path,
     ) -> Tuple[Path, Path]:
-        group_level_metrics, agent_level_metrics = self.profile_from_data(rows, results)
-
         reward_profiling_fpath = base_output_fpath.with_stem(base_output_fpath.stem + "_reward_profiling").with_suffix(
             ".jsonl"
         )
@@ -146,8 +144,9 @@ def profile():  # pragma: no cover
         results = list(map(orjson.loads, f))
 
     rp = RewardProfiler()
-    reward_profiling_fpath, agent_level_metrics_fpath = rp.profile_and_write_to_disk(
-        rows, results, Path(config.rollouts_jsonl_fpath)
+    group_level_metrics, agent_level_metrics = rp.profile_from_data(rows, results)
+    reward_profiling_fpath, agent_level_metrics_fpath = rp.write_to_disk(
+        group_level_metrics, agent_level_metrics, Path(config.rollouts_jsonl_fpath)
     )
 
     print(f"""Profiling outputs:
