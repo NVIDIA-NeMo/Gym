@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import atexit
 from collections import defaultdict
 from copy import deepcopy
 from os import environ, getenv
@@ -99,21 +98,6 @@ DEFAULT_HEAD_SERVER_PORT = 11000
 
 # W&B
 WANDB_RUN: Optional[Run] = None
-
-
-def maybe_wandb_run_finish():  # pragma: no cover
-    global WANDB_RUN
-
-    if not WANDB_RUN:
-        return
-
-    print("Finishing W&B upload...")
-    WANDB_RUN.finish()
-
-    WANDB_RUN = None
-
-
-atexit.register(maybe_wandb_run_finish)
 
 
 class GlobalConfigDictParserConfig(BaseModel):
