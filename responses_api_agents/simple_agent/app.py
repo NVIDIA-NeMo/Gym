@@ -103,9 +103,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             new_outputs.extend(output)
 
             if usage:
-                usage.input_tokens += model_response.input_tokens
-                usage.output_tokens += model_response.output_tokens
-                usage.total_tokens += model_response.total_tokens
+                usage.input_tokens += model_response.usage.input_tokens
+                usage.output_tokens += model_response.usage.output_tokens
+                usage.total_tokens += model_response.usage.total_tokens
 
                 # TODO support more advanced token details
                 # usage.input_tokens_details.cached_tokens += model_response.input_tokens_details.cached_tokens
