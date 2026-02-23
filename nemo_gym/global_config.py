@@ -24,13 +24,12 @@ from typing import ClassVar, List, Optional, Tuple, Type
 
 import hydra
 import rich
-import wandb
 from omegaconf import DictConfig, OmegaConf, open_dict
 from openai import __version__ as openai_version
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from ray import __version__ as ray_version
-from wandb import Run
 
+import wandb
 from nemo_gym import CACHE_DIR, PARENT_DIR
 from nemo_gym.config_types import (
     ServerInstanceConfig,
@@ -39,6 +38,7 @@ from nemo_gym.config_types import (
     is_server_ref,
     maybe_get_server_instance_config,
 )
+from wandb import Run
 
 
 _GLOBAL_CONFIG_DICT = None
@@ -385,8 +385,6 @@ class GlobalConfigDictParser(BaseModel):
             config_dict_to_log = deepcopy(global_config_dict)
             self._recursively_hide_secrets(config_dict_to_log)
             WANDB_RUN.config.update(OmegaConf.to_container(config_dict_to_log))
-
-            print(f"Started a W&B run at project `{wandb_config.wandb_project}` name `{wandb_config.wandb_name}`")
 
         return global_config_dict
 
