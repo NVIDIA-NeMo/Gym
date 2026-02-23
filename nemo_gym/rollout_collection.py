@@ -24,6 +24,7 @@ from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 import orjson
 from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
+from wandb import Table
 
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig
 from nemo_gym.global_config import (
@@ -31,6 +32,7 @@ from nemo_gym.global_config import (
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
+    WANDB_RUN,
 )
 from nemo_gym.profile import RewardProfiler
 from nemo_gym.server_utils import (
@@ -212,6 +214,9 @@ class RolloutCollectionHelper(BaseModel):
             rows.append(row)
             results.append(result)
 
+        if WANDB_RUN:  # pragma: no cover
+            WANDB_RUN.log({"Rollouts": Table(results)})
+
         # Sort to ensure consistent ordering
         rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
         results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
@@ -221,6 +226,17 @@ class RolloutCollectionHelper(BaseModel):
         reward_profiling_fpath, agent_level_metrics_fpath = rp.write_to_disk(
             group_level_metrics, agent_level_metrics, output_fpath
         )
+
+        if WANDB_RUN:  # pragma: no cover
+            agent_level_metrics_to_log = dict()
+            for agent_metrics in agent_level_metrics:
+                agent_name = agent_metrics[AGENT_REF_KEY_NAME]["name"]
+                for key, value in agent_metrics.items():
+                    agent_level_metrics_to_log[f"{agent_name}/{key}"] = value
+
+                agent_level_metrics_to_log.pop(f"{agent_name}/{AGENT_REF_KEY_NAME}")
+
+            WANDB_RUN.log(agent_level_metrics_to_log)
 
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {materialized_jsonl_fpath}

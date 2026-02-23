@@ -61,7 +61,7 @@ class RewardProfiler:
         self,
         rows: List[Dict[str, Any]],
         results: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         filtered_results: List[Dict] = []
         task_idx_to_row: Dict[int, Dict] = dict()
         for row, result in zip(rows, results):
