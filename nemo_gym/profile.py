@@ -149,3 +149,7 @@ def profile():  # pragma: no cover
     reward_profiling_fpath, agent_level_metrics_fpath = rp.profile_and_write_to_disk(
         rows, results, Path(config.rollouts_jsonl_fpath)
     )
+
+    print(f"""Profiling outputs:
+Reward profiling outputs: {reward_profiling_fpath}
+Agent-level metrics: {agent_level_metrics_fpath}""")
