@@ -75,6 +75,9 @@ class TrainDataProcessorConfig(BaseNeMoGymCLIConfig):
         default="huggingface",
         description="Where to download missing datasets from: 'gitlab' (NVIDIA internal) or 'huggingface' (external).",
     )
+    overwrite_metrics_conflicts: bool = Field(
+        default=False, description="Whether or not to overwrite metrics conflicts."
+    )
 
     @property
     def in_scope_dataset_types(self) -> List[DatasetType]:
@@ -331,7 +334,9 @@ class TrainDataProcessor(BaseModel):
         self.load_datasets(config, server_instance_configs)
 
         self._print_title("Validate samples and aggregate metrics")
-        dataset_type_to_aggregate_metrics = self.validate_samples_and_aggregate_metrics(server_instance_configs)
+        dataset_type_to_aggregate_metrics = self.validate_samples_and_aggregate_metrics(
+            server_instance_configs, config.overwrite_metrics_conflicts
+        )
 
         self._print_title("Collate samples and aggregate metrics")
         self.collate_samples(config, server_instance_configs, dataset_type_to_aggregate_metrics)
@@ -627,7 +632,7 @@ class TrainDataProcessor(BaseModel):
             return conflicting_metrics_fpath
 
     def validate_samples_and_aggregate_metrics(
-        self, server_instance_configs: List[ServerInstanceConfig]
+        self, server_instance_configs: List[ServerInstanceConfig], overwrite_metrics_conflicts: bool
     ) -> Dict[str, DatasetMetrics]:
         conflicting_fpaths: List[str] = []
         dataset_type_to_aggregate_metrics: Dict[str, DatasetMetrics] = defaultdict(DatasetMetrics)
@@ -663,11 +668,16 @@ class TrainDataProcessor(BaseModel):
             target_fpaths_str = "\n- ".join(
                 [""] + [fp.replace("_conflict.json", ".json") for fp in conflicting_fpaths]
             )
-            raise ValueError(f"""
+            print_str = f"""
 Found conflicting aggregate metrics that need to be corrected:{conflicting_fpaths_str}
 
 This could be due to a change in how metrics are calculated, leading to outdated metrics. Try deleting the below file(s) and rerunning data preparation:{target_fpaths_str}
-""")
+"""
+
+            if overwrite_metrics_conflicts:
+                print(print_str)
+            else:
+                raise ValueError(print_str)
 
         return dict(dataset_type_to_aggregate_metrics)
 
@@ -749,11 +759,15 @@ This could be due to a change in how metrics are calculated, leading to outdated
             target_fpaths_str = "\n- ".join(
                 [""] + [fp.replace("_conflict.json", ".json") for fp in conflicting_fpaths]
             )
-            raise ValueError(f"""
+            print_str = f"""
 Found conflicting aggregate metrics that need to be corrected:{conflicting_fpaths_str}
 
 This could be due to a change in how metrics are calculated, leading to outdated metrics. Try deleting the below file(s) and rerunning data preparation:{target_fpaths_str}
-""")
+"""
+            if config.overwrite_metrics_conflicts:
+                print(print_str)
+            else:
+                raise ValueError(print_str)
 
         final_fpaths_str = "\n- ".join([""] + [f"{type}: {fpath}" for type, fpath in final_fpaths.items()])
         print(f"View your final data!{final_fpaths_str}")

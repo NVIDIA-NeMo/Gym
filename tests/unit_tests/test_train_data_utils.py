@@ -401,6 +401,7 @@ class TestValidateSamplesAndAggregateMetrics:
                     responses_api_agents=server_type_config_dict["responses_api_agents"],
                 ),
             ],
+            overwrite_metrics_conflicts=False,
         )
 
         expected_dataset_type_to_aggregate_metrics = {
@@ -539,6 +540,7 @@ class TestValidateSamplesAndAggregateMetrics:
                         responses_api_agents=server_type_config_dict["responses_api_agents"],
                     ),
                 ],
+                overwrite_metrics_conflicts=False,
             )
 
         assert write_filenames == [Path("resources_servers/example_multi_step/data/example_metrics_conflict.json")]
