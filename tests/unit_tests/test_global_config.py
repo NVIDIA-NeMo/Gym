@@ -123,8 +123,8 @@ class TestServerUtils:
 
         # Override OmegaConf.load to avoid file reads.
         omegaconf_load_mock = MagicMock()
-        omegaconf_load_mock.side_effect = lambda path: (
-            DictConfig({}) if "env" not in str(path) else DictConfig({"extra_dot_env_key": 2})
+        omegaconf_load_mock.side_effect = (
+            lambda path: DictConfig({}) if "env" not in str(path) else DictConfig({"extra_dot_env_key": 2})
         )
         monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
 

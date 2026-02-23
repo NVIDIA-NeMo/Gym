@@ -15,7 +15,7 @@
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v6.0.0
+    rev: v4.4.0
     hooks:
     - id: end-of-file-fixer
       # only include python files
@@ -25,7 +25,7 @@ repos:
       files: \.py$
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: "v0.15.1" # Use the appropriate version
+    rev: "v0.9.9" # Use the appropriate version
     hooks:
     - id: ruff
       args: ["--fix"]
