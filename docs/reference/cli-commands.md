@@ -297,6 +297,9 @@ Prepare and validate training data, generating metrics and statistics for datase
 * - `should_download`
   - bool
   - Whether to automatically download missing datasets from remote registries. Default: `False`.
+* - `overwrite_metrics_conflicts`
+  - bool
+  - Whether or not to overwrite metrics conflicts. Default: `False`.
 ```
 
 **Example**
