@@ -188,7 +188,9 @@ class RolloutCollectionHelper(BaseModel):
         input_rows = self._preprocess_rows_from_config(config)
 
         output_fpath = Path(config.output_jsonl_fpath)
-        materialized_jsonl_fpath = output_fpath.with_stem(output_fpath.stem + "_materialized").with_suffix(".jsonl")
+        materialized_jsonl_fpath = output_fpath.with_stem(output_fpath.stem + "_materialized_inputs").with_suffix(
+            ".jsonl"
+        )
         with materialized_jsonl_fpath.open("wb") as f:
             for row in input_rows:
                 f.write(orjson.dumps(row) + b"\n")
@@ -221,7 +223,9 @@ class RolloutCollectionHelper(BaseModel):
         group_level_metrics, agent_level_metrics = rp.profile_from_data(rows, results)
 
         reward_profiling_fpath = output_fpath.with_stem(output_fpath.stem + "_reward_profiling").with_suffix(".jsonl")
-        reward_profiling_fpath.write_bytes(orjson.dumps(rp.prepare_for_serialization(group_level_metrics)))
+        with reward_profiling_fpath.open("wb") as f:
+            for row in rp.prepare_for_serialization(group_level_metrics):
+                f.write(orjson.dumps(row) + b"\n")
 
         agent_level_metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_agent_metrics").with_suffix(".json")
         agent_level_metrics_fpath.write_bytes(orjson.dumps(rp.prepare_for_serialization(agent_level_metrics)))

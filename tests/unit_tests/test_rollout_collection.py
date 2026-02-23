@@ -127,14 +127,34 @@ class TestRolloutCollection:
 
         assert expected_results == actual_returned_results
 
+        expected_materialized_inputs_len = 6
+        with (tmp_path / "output_materialized_inputs.jsonl").open() as f:
+            actual_materialized_inputs_len = len(list(f))
+        assert expected_materialized_inputs_len == actual_materialized_inputs_len
+
         with output_jsonl_fpath.open() as f:
             actual_written_results = [json.loads(line) for line in f]
         assert expected_results == actual_written_results
 
-        metrics_fpath = output_jsonl_fpath.with_name("output_metrics.json")
-        actual_metrics = json.loads(metrics_fpath.read_text())
-        expected_metrics = None
-        assert expected_metrics == actual_metrics
+        expected_reward_profiling_output_len = 3
+        reward_profiling_fpath = tmp_path / "output_reward_profiling.jsonl"
+        with reward_profiling_fpath.open() as f:
+            actual_reward_profiling_output_len = len(list(f))
+        assert expected_reward_profiling_output_len == actual_reward_profiling_output_len
+
+        agent_level_metrics_fpath = tmp_path / "output_agent_metrics.json"
+        actual_agent_level_metrics = json.loads(agent_level_metrics_fpath.read_text())
+        expected_agent_level_metrics = [
+            {
+                "mean/abc usage": 1.0,
+                "max/abc usage": 1,
+                "min/abc usage": 1,
+                "median/abc usage": 1.0,
+                "std/abc usage": 0.0,
+                "agent_ref": {"name": "my agent name"},
+            }
+        ]
+        assert expected_agent_level_metrics == actual_agent_level_metrics
 
     async def test_run_from_config_sorted(self, tmp_path: Path) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
