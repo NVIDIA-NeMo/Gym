@@ -46,6 +46,9 @@ from nemo_gym.server_utils import (
 )
 
 
+ROLLOUT_ROW_TIMEOUT_SECONDS = 180.0
+
+
 class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     num_samples_in_parallel: Optional[int] = Field(
@@ -308,7 +311,7 @@ Agent-level metrics: {agent_level_metrics_fpath}""")
                 try:
                     res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
                     await raise_for_status(res)
-                    return row, await res.json()
+                    return row, await get_response_json(res)
                 except Exception as e:
                     print(
                         f"[WARNING] Rollout failed for row {row.get('_rowidx', '?')}: {e}.\n"
