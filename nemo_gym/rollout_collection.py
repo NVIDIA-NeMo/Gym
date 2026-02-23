@@ -31,11 +31,13 @@ from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
     get_global_config_dict,
-    get_response_json,
     is_global_aiohttp_client_setup,
     raise_for_status,
     set_global_aiohttp_client,
 )
+
+
+ROLLOUT_ROW_TIMEOUT_SECONDS = 180.0
 
 
 class RolloutCollectionConfig(BaseNeMoGymCLIConfig):
@@ -149,9 +151,23 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
                 # Use config.agent_name if specified, otherwise use agent_ref from the row
                 agent_name = config.agent_name or row.get("agent_ref", {}).get("name")
                 async with semaphore:
-                    response = await server_client.post(server_name=agent_name, url_path="/run", json=row)
-                    await raise_for_status(response)
-                    result = await get_response_json(response)
+                    try:
+                        response = await asyncio.wait_for(
+                            server_client.post(server_name=agent_name, url_path="/run", json=row),
+                            timeout=ROLLOUT_ROW_TIMEOUT_SECONDS,
+                        )
+                        await asyncio.wait_for(raise_for_status(response), timeout=ROLLOUT_ROW_TIMEOUT_SECONDS)
+                        result = await asyncio.wait_for(response.json(), timeout=ROLLOUT_ROW_TIMEOUT_SECONDS)
+                    except Exception as e:
+                        print(
+                            f"[WARNING] Rollout failed in run_from_config for row {row.get('_rowidx', '?')}: {e}.\n"
+                            f"  Returning zero-reward result."
+                        )
+                        result = {
+                            "response": {"output": []},
+                            "reward": 0.0,
+                        }
+                    f.write(json.dumps(result) + "\n")
                     metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
                     # For ng_profile to match rollouts to tasks
                     if TASK_INDEX_KEY_NAME in row:
@@ -174,9 +190,12 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             try:
-                res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
-                await raise_for_status(res)
-                return row, await res.json()
+                res = await asyncio.wait_for(
+                    server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row),
+                    timeout=ROLLOUT_ROW_TIMEOUT_SECONDS,
+                )
+                await asyncio.wait_for(raise_for_status(res), timeout=ROLLOUT_ROW_TIMEOUT_SECONDS)
+                return row, await asyncio.wait_for(res.json(), timeout=ROLLOUT_ROW_TIMEOUT_SECONDS)
             except Exception as e:
                 print(
                     f"[WARNING] Rollout failed for row {row.get('_rowidx', '?')}: {e}.\n"
