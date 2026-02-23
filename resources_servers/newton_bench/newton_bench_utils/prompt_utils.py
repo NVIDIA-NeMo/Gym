@@ -15,11 +15,10 @@
 import importlib
 import re
 import sys
-from pathlib import Path
+
+from resources_servers.newton_bench.setup_newton_bench import NEWTON_BENCH_PATH
 
 
-REPO_ROOT = Path(__file__).parent.parent.parent.parent
-NEWTON_BENCH_PATH = REPO_ROOT / "NewtonBench"
 if str(NEWTON_BENCH_PATH) not in sys.path:
     sys.path.insert(0, str(NEWTON_BENCH_PATH))
 

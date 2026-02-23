@@ -17,10 +17,10 @@ import importlib
 import inspect
 import logging
 import math
+import os
 import sys
 import time
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
 from fastapi import FastAPI, HTTPException, Request
@@ -41,11 +41,9 @@ from resources_servers.newton_bench.newton_bench_utils.sandbox import (
     validate_python_code,
 )
 from resources_servers.newton_bench.newton_bench_utils.schemas import MODULE_REQUEST_CLASSES_MAPPING
-from resources_servers.newton_bench.setup_newton_bench import ensure_newton_bench
+from resources_servers.newton_bench.setup_newton_bench import NEWTON_BENCH_PATH, ensure_newton_bench
 
 
-REPO_ROOT = Path(__file__).parent.parent.parent
-NEWTON_BENCH_PATH = REPO_ROOT / "NewtonBench"
 if str(NEWTON_BENCH_PATH) not in sys.path:
     sys.path.insert(0, str(NEWTON_BENCH_PATH))
 
@@ -275,6 +273,12 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
         law_version = metadata.get("law_version")
 
         try:
+            if not (os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")):
+                raise HTTPException(
+                    status_code=500,
+                    detail="NewtonBench: Missing API keys (OPENAI_API_KEY or OPENROUTER_API_KEY) required for symbolic evaluation.",
+                )
+
             extracted_law = self._extract_law_from_response(body.response)
 
             if extracted_law is None:
@@ -312,6 +316,7 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
                 param_description=param_description,
                 difficulty=difficulty,
                 law_version=law_version,
+                judge_model_name="gpt41",
             )
 
             # Symbolic equivalence uses LLM judge

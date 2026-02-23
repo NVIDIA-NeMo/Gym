@@ -19,16 +19,16 @@ from pathlib import Path
 
 
 _REPO_URL = "https://github.com/HKUST-KnowComp/NewtonBench"
-_NEWTON_BENCH_PATH = Path(__file__).parent.parent.parent / "NewtonBench"
+NEWTON_BENCH_PATH = Path(__file__).parent.parent.parent / "NewtonBench"
 
 
 def ensure_newton_bench() -> None:
     """Clone NewtonBench if not present and ensure it is on sys.path."""
-    if not _NEWTON_BENCH_PATH.exists():
-        logging.info("Cloning NewtonBench into %s", _NEWTON_BENCH_PATH)
+    if not NEWTON_BENCH_PATH.exists():
+        logging.info("Cloning NewtonBench into %s", NEWTON_BENCH_PATH)
         subprocess.run(
-            ["git", "clone", "--depth=1", _REPO_URL, str(_NEWTON_BENCH_PATH)],
+            ["git", "clone", "--depth=1", _REPO_URL, str(NEWTON_BENCH_PATH)],
             check=True,
         )
-    if str(_NEWTON_BENCH_PATH) not in sys.path:
-        sys.path.insert(0, str(_NEWTON_BENCH_PATH))
+    if str(NEWTON_BENCH_PATH) not in sys.path:
+        sys.path.insert(0, str(NEWTON_BENCH_PATH))

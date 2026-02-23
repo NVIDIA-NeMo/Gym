@@ -4,13 +4,20 @@ NeMo Gym environment for [NewtonBench](https://github.com/HKUST-KnowComp/NewtonB
 
 ## Prerequisites
 
-Clone the [NewtonBench](https://github.com/HKUST-KnowComp/NewtonBench) repository into the NeMo Gym repository root so that experiment modules can be loaded when running tools (e.g. `run_experiment_*`).
+### Automatic Setup
+The resource server automatically clones the [NewtonBench](https://github.com/HKUST-KnowComp/NewtonBench) repository into the NeMo Gym repository root on the first launch or test run. You do not need to clone it manually.
 
-```bash
-git clone https://github.com/HKUST-KnowComp/NewtonBench.git
-```
+### API Keys for Symbolic Judge
+The `verify` process uses NewtonBench's internal LLM judge (defaulting to `gpt41`) to compare the agent's proposed law with the ground truth symbolically. 
 
-Run the command above from the NeMo Gym repository root so that the `NewtonBench` directory exists at the root (e.g. `Gym/NewtonBench/`).
+This requires an API key for either OpenAI or OpenRouter. Providing either one of the following environment variables is sufficient for the default `gpt41` judge:
+
+- `OPENAI_API_KEY` (Recommended for direct OpenAI access)
+- `OPENROUTER_API_KEY` (Fallback/Alternative)
+
+You should set this in your shell or in a `.env` file inside the cloned `NewtonBench` directory. Remember to restart the resource server after setting the environment variable so that it can be accessed by the process.
+
+> Note: These are separate from the agent's model keys and must be accessible to the resource server process.
 
 ## Dataset Generation
 
@@ -39,6 +46,8 @@ python resources_servers/newton_bench/generate_dataset.py \
 ```bash
 python resources_servers/newton_bench/generate_dataset.py --code-assisted
 ```
+
+> Note: Please ensure that the `NewtonBench` repository is properly cloned and run `source resources_servers/newton_bench/.venv/bin/activate` to activate the required environment before executing the dataset generation script.
 
 ## Rollout Collection
 
@@ -97,8 +106,7 @@ ng_collect_rollouts \
 
 ## Running Tests
 ```bash
-source resources_servers/newton_bench/.venv/bin/activate 
-pytest resources_servers/newton_bench/tests/test_app.py
+ng_test +entrypoint=resources_servers/newton_bench
 ```
 
 ## Qwen/Qwen3-VL-8B-Thinking Evaluation Summary
