@@ -685,8 +685,31 @@ This could be due to a change in how metrics are calculated, leading to outdated
 
             aggregate_metrics_dict = aggregate_metrics.model_dump(mode="json", by_alias=True)
 
+            # Add metadata for collated metrics (similar to validate step)
             parent = Path(config.output_dirpath)
             parent.mkdir(exist_ok=True)
+            collated_fpath = parent / f"{type}.jsonl"
+
+            # Get metadata from first dataset of this type
+            dataset_metadata = {}
+            for c in server_instance_configs:
+                for d in c.datasets:
+                    if d.type == type:
+                        dataset_metadata = {
+                            "name": type,
+                            "type": type,
+                            "jsonl_fpath": str(collated_fpath),
+                            "num_repeats": 1,
+                            "gitlab_identifier": d.gitlab_identifier.model_dump() if d.gitlab_identifier else None,
+                            "license": d.license,
+                        }
+                        break
+                if dataset_metadata:
+                    break
+
+            # Merge metadata with aggregate metrics
+            aggregate_metrics_dict = dataset_metadata | aggregate_metrics_dict
+
             metrics_fpath = parent / f"{type}_metrics.json"
             maybe_conflicting_metrics_fpath = self._validate_aggregate_metrics(
                 aggregate_metrics_dict=aggregate_metrics_dict,
