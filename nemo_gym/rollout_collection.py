@@ -46,6 +46,9 @@ from nemo_gym.server_utils import (
 )
 
 
+ROLLOUT_ROW_TIMEOUT_SECONDS = 180.0
+
+
 class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     num_samples_in_parallel: Optional[int] = Field(
@@ -306,9 +309,12 @@ Agent-level metrics: {agent_level_metrics_fpath}""")
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
             try:
-                res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
-                await raise_for_status(res)
-                return row, await get_response_json(res)
+                res = await asyncio.wait_for(
+                    server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row),
+                    timeout=ROLLOUT_ROW_TIMEOUT_SECONDS,
+                )
+                await asyncio.wait_for(raise_for_status(res), timeout=ROLLOUT_ROW_TIMEOUT_SECONDS)
+                return row, await asyncio.wait_for(get_response_json(res), timeout=ROLLOUT_ROW_TIMEOUT_SECONDS)
             except Exception as e:
                 print(
                     f"[WARNING] Rollout failed for row {row.get('_rowidx', '?')}: {e}.\n"
