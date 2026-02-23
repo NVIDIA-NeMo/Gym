@@ -386,6 +386,8 @@ class GlobalConfigDictParser(BaseModel):
             self._recursively_hide_secrets(config_dict_to_log)
             WANDB_RUN.config.update(OmegaConf.to_container(config_dict_to_log))
 
+            print(f"Started a W&B run at project `{wandb_config.wandb_project}` name `{wandb_config.wandb_name}`")
+
         return global_config_dict
 
     def parse_no_environment(
