@@ -12,14 +12,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import json
-from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Tuple
 
+import orjson
 from pandas import DataFrame
 from pandas.core.groupby.generic import DataFrameGroupBy
-from pydantic import BaseModel, Field
+from pydantic import Field
 from wandb import Histogram
 
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
@@ -31,25 +30,11 @@ from nemo_gym.global_config import (
 )
 
 
-class ProfileConfig(BaseNeMoGymCLIConfig):
-    input_jsonl_fpath: str = Field(description="Original task dataset.")
-    rollouts_jsonl_fpath: str = Field(description="Rollouts file from ng_collect_rollouts with num_repeats.")
-    output_jsonl_fpath: str = Field(description="Output file for profiled dataset.")
-    pass_threshold: Optional[float] = Field(
-        default=None, description="Reward threshold for pass_rate. If None, pass_rate not computed."
+class RewardProfileConfig(BaseNeMoGymCLIConfig):
+    materialized_inputs_jsonl_fpath: str = Field(
+        description="The file path of the materialized inputs as output by ng_collect_rollouts."
     )
-
-
-class RewardProfilingMetrics(BaseModel):
-    avg_reward: float = Field(description="Average reward across all rollouts for this task.")
-    std_reward: float = Field(description="Standard deviation of rewards.")
-    min_reward: float = Field(description="Minimum reward observed.")
-    max_reward: float = Field(description="Maximum reward observed.")
-    total_samples: int = Field(description="Number of rollout samples for this task.")
-    pass_rate: Optional[float] = Field(default=None, description="Fraction of rollouts meeting pass_threshold.")
-    pass_rate_total: Optional[int] = Field(default=None, description="Total rollouts used for pass_rate calculation.")
-    pass_rate_passed: Optional[int] = Field(default=None, description="Number of rollouts that passed.")
-    pass_threshold: Optional[float] = Field(default=None, description="Threshold used for pass_rate calculation.")
+    rollouts_jsonl_fpath: str = Field(description="The file path of the rollouts as output by ng_collect_rollouts.")
 
 
 class RewardProfiler:
@@ -128,42 +113,39 @@ class RewardProfiler:
 
         return results
 
+    def profile_and_write_to_disk(
+        self,
+        rows: List[Dict[str, Any]],
+        results: List[Dict[str, Any]],
+        base_output_fpath: Path,
+    ) -> Tuple[Path, Path]:
+        group_level_metrics, agent_level_metrics = self.profile_from_data(rows, results)
 
-def profile():
-    config = ProfileConfig.model_validate(get_global_config_dict())
+        reward_profiling_fpath = base_output_fpath.with_stem(base_output_fpath.stem + "_reward_profiling").with_suffix(
+            ".jsonl"
+        )
+        with reward_profiling_fpath.open("wb") as f:
+            for row in self.prepare_for_serialization(group_level_metrics):
+                f.write(orjson.dumps(row) + b"\n")
 
-    grouped_rewards: dict[int, list[float]] = defaultdict(list)
+        agent_level_metrics_fpath = base_output_fpath.with_stem(base_output_fpath.stem + "_agent_metrics").with_suffix(
+            ".json"
+        )
+        agent_level_metrics_fpath.write_bytes(orjson.dumps(self.prepare_for_serialization(agent_level_metrics)))
+
+        return reward_profiling_fpath, agent_level_metrics_fpath
+
+
+def profile():  # pragma: no cover
+    config = RewardProfileConfig.model_validate(get_global_config_dict())
+
+    with open(config.materialized_inputs_jsonl_fpath) as f:
+        rows = list(orjson.loads, f)
+
     with open(config.rollouts_jsonl_fpath) as f:
-        for line in f:
-            rollout = json.loads(line)
-            task_idx = rollout.get(TASK_INDEX_KEY_NAME)
-            if task_idx is not None:
-                grouped_rewards[task_idx].append(rollout.get("reward", 0.0))
+        results = list(orjson.loads, f)
 
-    Path(config.output_jsonl_fpath).parent.mkdir(exist_ok=True, parents=True)
-    with open(config.input_jsonl_fpath) as f_in, open(config.output_jsonl_fpath, "w") as f_out:
-        for task_idx, line in enumerate(f_in):
-            if task_idx not in grouped_rewards:
-                continue
-
-            task = json.loads(line)
-            rewards = grouped_rewards[task_idx]
-            avg = sum(rewards) / len(rewards)
-
-            metrics = RewardProfilingMetrics(
-                avg_reward=avg,
-                std_reward=(sum((r - avg) ** 2 for r in rewards) / len(rewards)) ** 0.5,
-                min_reward=min(rewards),
-                max_reward=max(rewards),
-                total_samples=len(rewards),
-            )
-
-            if config.pass_threshold is not None:
-                passed = sum(1 for r in rewards if r >= config.pass_threshold)
-                metrics.pass_rate = passed / len(rewards)
-                metrics.pass_rate_total = len(rewards)
-                metrics.pass_rate_passed = passed
-                metrics.pass_threshold = config.pass_threshold
-
-            profiled_task = {**task, **metrics.model_dump(exclude_none=True)}
-            f_out.write(json.dumps(profiled_task) + "\n")
+    rp = RewardProfiler()
+    reward_profiling_fpath, agent_level_metrics_fpath = rp.profile_and_write_to_disk(
+        rows, results, config.rollouts_jsonl_fpath
+    )

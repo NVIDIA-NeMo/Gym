@@ -186,6 +186,7 @@ class RolloutCollectionHelper(BaseModel):
 
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         input_rows = self._preprocess_rows_from_config(config)
+        # Returned rows are sorted by (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
 
         output_fpath = Path(config.output_jsonl_fpath)
         materialized_jsonl_fpath = output_fpath.with_stem(output_fpath.stem + "_materialized_inputs").with_suffix(
@@ -220,15 +221,7 @@ class RolloutCollectionHelper(BaseModel):
         results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
 
         rp = RewardProfiler()
-        group_level_metrics, agent_level_metrics = rp.profile_from_data(rows, results)
-
-        reward_profiling_fpath = output_fpath.with_stem(output_fpath.stem + "_reward_profiling").with_suffix(".jsonl")
-        with reward_profiling_fpath.open("wb") as f:
-            for row in rp.prepare_for_serialization(group_level_metrics):
-                f.write(orjson.dumps(row) + b"\n")
-
-        agent_level_metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_agent_metrics").with_suffix(".json")
-        agent_level_metrics_fpath.write_bytes(orjson.dumps(rp.prepare_for_serialization(agent_level_metrics)))
+        reward_profiling_fpath, agent_level_metrics_fpath = rp.profile_and_write_to_disk(rows, results, output_fpath)
 
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {materialized_jsonl_fpath}
