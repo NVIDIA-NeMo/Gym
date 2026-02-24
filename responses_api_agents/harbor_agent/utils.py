@@ -269,30 +269,29 @@ class HarborAgentUtils:
         commands = parsed.get("commands", [])
         if isinstance(commands, list):
             for i, cmd in enumerate(commands):
-                if not isinstance(cmd, dict) or "keystrokes" not in cmd:
+                # Strict expected schema: each command is a dict with
+                # "keystrokes" and optional "duration".
+                if not isinstance(cmd, dict):
                     continue
+                keystrokes = cmd.get("keystrokes")
+                if not isinstance(keystrokes, str) or not keystrokes:
+                    continue
+                raw_duration = cmd.get("duration", 1.0)
+                try:
+                    duration = float(raw_duration)
+                except (TypeError, ValueError):
+                    duration = 1.0
+
                 tool_calls.append(
                     {
                         "tool_call_id": f"call_{agent_step_index}_{i + 1}",
                         "function_name": "bash_command",
                         "arguments": {
-                            "keystrokes": cmd["keystrokes"],
-                            "duration": cmd.get("duration", 1.0),
+                            "keystrokes": keystrokes,
+                            "duration": duration,
                         },
                     }
                 )
-
-        task_complete = parsed.get("task_complete", False)
-        if isinstance(task_complete, str):
-            task_complete = task_complete.lower() in ("true", "1", "yes")
-        if task_complete:
-            tool_calls.append(
-                {
-                    "tool_call_id": f"call_{agent_step_index}_task_complete",
-                    "function_name": "mark_task_complete",
-                    "arguments": {},
-                }
-            )
 
         return tool_calls
 
