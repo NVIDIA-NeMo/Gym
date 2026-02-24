@@ -203,3 +203,54 @@ class TestRolloutCollection:
         ]
 
         assert expected_results == actual_returned_results
+
+    def test_load_from_cache(self, tmp_path: Path) -> None:
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        materialized_inputs_jsonl_fpath = tmp_path / "output_materialized_inputs.jsonl"
+
+        materialized_inputs = [
+            {"_ng_task_index": 0, "_ng_rollout_index": 0, "input": True},
+            {"_ng_task_index": 0, "_ng_rollout_index": 1, "input": True},
+            {"_ng_task_index": 1, "_ng_rollout_index": 0, "input": True},
+            {"_ng_task_index": 1, "_ng_rollout_index": 1, "input": True},
+            {"_ng_task_index": 2, "_ng_rollout_index": 0, "input": True},
+            {"_ng_task_index": 2, "_ng_rollout_index": 1, "input": True},
+        ]
+        materialized_inputs_jsonl_fpath.write_text("\n".join(map(json.dumps, materialized_inputs)) + "\n")
+
+        outputs = [
+            {"_ng_task_index": 0, "_ng_rollout_index": 0, "output": True},
+            {"_ng_task_index": 0, "_ng_rollout_index": 1, "output": True},
+            {"_ng_task_index": 1, "_ng_rollout_index": 1, "output": True},
+        ]
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        output_jsonl_fpath.write_text("\n".join(map(json.dumps, outputs)) + "\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            limit=3,
+            num_repeats=2,
+        )
+
+        actual_returned_results = RolloutCollectionHelper()._load_from_cache(config)
+
+        expected_results = (
+            [
+                {"_ng_task_index": 1, "_ng_rollout_index": 0, "input": True},
+                {"_ng_task_index": 2, "_ng_rollout_index": 0, "input": True},
+                {"_ng_task_index": 2, "_ng_rollout_index": 1, "input": True},
+            ],
+            [
+                {"_ng_task_index": 0, "_ng_rollout_index": 0, "input": True},
+                {"_ng_task_index": 0, "_ng_rollout_index": 1, "input": True},
+                {"_ng_task_index": 1, "_ng_rollout_index": 1, "input": True},
+            ],
+            [
+                {"_ng_task_index": 0, "_ng_rollout_index": 0, "output": True},
+                {"_ng_task_index": 0, "_ng_rollout_index": 1, "output": True},
+                {"_ng_task_index": 1, "_ng_rollout_index": 1, "output": True},
+            ],
+        )
+
+        assert expected_results == actual_returned_results[:3]

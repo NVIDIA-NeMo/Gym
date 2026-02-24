@@ -191,23 +191,22 @@ class RolloutCollectionHelper(BaseModel):
         self, config: RolloutCollectionConfig
     ) -> Tuple[List[Dict], List[Dict], List[Dict], List[List[str]]]:
         with config.materialized_jsonl_fpath.open() as f:
-            input_rows = list(map(orjson.loads, f))
-        original_input_rows_len = len(input_rows)
+            original_input_rows = list(map(orjson.loads, f))
         with Path(config.output_jsonl_fpath).open() as f:
             results_strs = [[line.strip()] for line in f]
-        results = [orjson.loads(p[0]) for p in f]
+        results = [orjson.loads(p[0]) for p in results_strs]
 
         get_key = lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
 
         seen_rows = set(map(get_key, results))
-        input_rows = [row for row in input_rows if get_key(row) not in seen_rows]
+        input_rows = [row for row in original_input_rows if get_key(row) not in seen_rows]
 
-        key_to_row = dict(zip(map(get_key, input_rows), input_rows))
+        key_to_row = dict(zip(map(get_key, original_input_rows), original_input_rows))
         rows = [key_to_row[get_key(result)] for result in results]
 
         print(
             f"""Resumed from cache. Found:
-- {original_input_rows_len} original input rows
+- {len(original_input_rows)} original input rows
 - {len(input_rows)} rows that still need to be run
 - {len(rows)} rows that have already been run"""
         )
