@@ -14,7 +14,7 @@
 # limitations under the License.
 import importlib
 from abc import ABC, abstractmethod
-from typing import Annotated, Any, Dict, Literal, Optional, Union, List
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
@@ -78,44 +78,6 @@ class RoundRobinRoutingPolicy(RoutingPolicy):
         return client_idx
 
 
-class CacheAwareRoutingPolicy(RoutingPolicy):
-    """Cache-aware routing that delegates to an external router.
-
-    The external router is expected to expose:
-    - route(request_body) -> int
-    - prefill_complete(request_id)
-    - generation_complete(request_id)
-
-    The raw request body dict is passed directly to the external router,
-    which is responsible for any tokenization or processing it needs.
-    """
-
-    def __init__(self, external_router: Any, clients: List[NeMoGymAsyncOpenAI]):
-        self._external_router = external_router
-        self._clients = clients
-
-    def select_client(
-        self,
-        *,
-        request_body: Dict[str, Any],
-        request_id: str,
-        session_id: Optional[str] = None,
-    ) -> int:
-        worker_idx = self._external_router.route(request_body)
-
-        num_clients = len(self._clients)
-        if not (0 <= worker_idx < num_clients):
-            worker_idx = worker_idx % num_clients
-
-        return worker_idx
-
-    def on_prefill_complete(self, request_id: str) -> None:
-        self._external_router.prefill_complete(request_id)
-
-    def on_generation_complete(self, request_id: str) -> None:
-        self._external_router.generation_complete(request_id)
-
-
 # --- Config models ---
 
 
@@ -124,6 +86,13 @@ class RoundRobinRoutingPolicyConfig(BaseModel):
 
 
 class CacheAwareRoutingPolicyConfig(BaseModel):
+    """Config for an external cache-aware routing policy.
+
+    ``router_class`` must be a fully-qualified class name that subclasses
+    :class:`RoutingPolicy`. It will be instantiated with
+    ``router_cls(clients=clients, **router_kwargs)``.
+    """
+
     type: Literal["cache_aware"] = "cache_aware"
     router_class: str
     router_kwargs: Dict[str, Any] = Field(default_factory=dict)
@@ -135,7 +104,10 @@ RoutingPolicyConfig = Annotated[
 ]
 
 
-def create_routing_policy(config: Union[RoundRobinRoutingPolicyConfig, CacheAwareRoutingPolicyConfig], clients: List[NeMoGymAsyncOpenAI]) -> RoutingPolicy:
+def create_routing_policy(
+    config: Union[RoundRobinRoutingPolicyConfig, CacheAwareRoutingPolicyConfig],
+    clients: List[NeMoGymAsyncOpenAI],
+) -> RoutingPolicy:
     """Factory function to create a routing policy from a config."""
     if isinstance(config, RoundRobinRoutingPolicyConfig):
         return RoundRobinRoutingPolicy(clients)
@@ -143,7 +115,11 @@ def create_routing_policy(config: Union[RoundRobinRoutingPolicyConfig, CacheAwar
         module_path, class_name = config.router_class.rsplit(".", 1)
         module = importlib.import_module(module_path)
         router_cls = getattr(module, class_name)
-        external_router = router_cls(**config.router_kwargs)
-        return CacheAwareRoutingPolicy(external_router, clients)
+        if not (isinstance(router_cls, type) and issubclass(router_cls, RoutingPolicy)):
+            raise TypeError(
+                f"{config.router_class} must be a subclass of RoutingPolicy, got {router_cls}"
+            )
+        policy = router_cls(clients=clients, **config.router_kwargs)
+        return policy
     else:
         raise ValueError(f"Unknown routing policy config type: {type(config)}")
