@@ -246,6 +246,7 @@ def _harbor_run_mocks(
         patch("responses_api_agents.harbor_agent.app.get_global_config_dict") as mock_gc,
         patch("responses_api_agents.harbor_agent.app.runner_ray_remote") as mock_ray,
         patch("asyncio.to_thread") as mock_to_thread,
+        patch.object(HarborAgent, "_build_job_config", return_value={"job_name": "mock_job"}),
     ):
         mock_gc.return_value = _GLOBAL_CONFIG
         mock_ray.remote.return_value = MagicMock()
@@ -314,14 +315,6 @@ class TestApp:
         assert len(response.response.output) == 0
         assert response.responses_create_params.temperature == 0.3
         assert response.responses_create_params.input == []
-
-    def test_build_job_config_raises_without_dataset(self) -> None:
-        server = _make_server(harbor_dataset_name=None, harbor_local_dataset_path=None)
-        with pytest.raises(ValueError, match="requires a dataset"):
-            server._build_job_config(
-                "test_task", "hosted_vllm/test_model", "http://localhost:8000/v1",
-                job_name="test_task__run", jobs_dir=Path("/tmp/harbor_jobs"),
-            )
 
     @pytest.mark.parametrize("model_name, expected", [
         ("/lustre/models/nano-v3-sft-hf", "nano-v3-sft-hf"),

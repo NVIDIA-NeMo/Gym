@@ -127,21 +127,17 @@ class NemoGymLLM(BaseLLM):
         # Extract reasoning from the response content.  There are two cases:
         #
         # 1. Content has matched open+close tags (e.g. "<think>rc</think>text"):
-        #    app.py wraps reasoning this way when uses_reasoning_parser is true.
-        #    We mirror app.py's _parse_think_tags exactly: findall + sub to
-        #    strip all <think> blocks, but only keep the FIRST match as
-        #    reasoning_content (app.py line 190: reasoning_matches[0]).
+        #    vllm_model app.py wraps reasoning this way when uses_reasoning_parser is true.
+        #    We mirror vllm_model app.py's _parse_think_tags exactly: findall + sub to
+        #    strip all <think> blocks, but only keep the FIRST match as reasoning_content.
         #    No .strip() — preserve whitespace so round-tripping is lossless.
         #
         # 2. Content has only a close tag (e.g. "rc</think>text"):
-        #    The open tag was in the generation prompt (e.g. nanov3 appends
+        #    The open tag was in the generation prompt (e.g. nano-v3 appends
         #    <think>\n to every prompt), so the model's output starts mid-think.
-        #    This happens when uses_reasoning_parser is not used or reasoning
-        #    was not separated by the server.
         if reasoning_content is None and isinstance(content, str):
             if _THINK_OPEN in content:
-                # Case 1: matched open+close tags (app.py wrapped reasoning).
-                # Match app.py: findall gets all, sub removes all, keep first.
+                # Case 1: matched open+close tags.
                 matches = _THINK_PATTERN.findall(content)
                 remaining = _THINK_PATTERN.sub("", content)
                 if matches:
