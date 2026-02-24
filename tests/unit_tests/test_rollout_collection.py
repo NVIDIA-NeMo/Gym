@@ -16,6 +16,8 @@ import json
 from asyncio import Future
 from pathlib import Path
 
+import orjson
+
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
 
@@ -216,7 +218,7 @@ class TestRolloutCollection:
             {"_ng_task_index": 2, "_ng_rollout_index": 0, "input": True},
             {"_ng_task_index": 2, "_ng_rollout_index": 1, "input": True},
         ]
-        materialized_inputs_jsonl_fpath.write_text("\n".join(map(json.dumps, materialized_inputs)) + "\n")
+        materialized_inputs_jsonl_fpath.write_bytes(b"\n".join(map(orjson.dumps, materialized_inputs)) + b"\n")
 
         outputs = [
             {"_ng_task_index": 0, "_ng_rollout_index": 0, "output": True},
@@ -224,7 +226,7 @@ class TestRolloutCollection:
             {"_ng_task_index": 1, "_ng_rollout_index": 1, "output": True},
         ]
         output_jsonl_fpath = tmp_path / "output.jsonl"
-        output_jsonl_fpath.write_text("\n".join(map(json.dumps, outputs)) + "\n")
+        output_jsonl_fpath.write_bytes(b"\n".join(map(orjson.dumps, outputs)) + b"\n")
 
         config = RolloutCollectionConfig(
             input_jsonl_fpath=str(input_jsonl_fpath),
@@ -251,6 +253,11 @@ class TestRolloutCollection:
                 {"_ng_task_index": 0, "_ng_rollout_index": 1, "output": True},
                 {"_ng_task_index": 1, "_ng_rollout_index": 1, "output": True},
             ],
+            [
+                [orjson.dumps({"_ng_task_index": 0, "_ng_rollout_index": 0, "output": True})],
+                [orjson.dumps({"_ng_task_index": 0, "_ng_rollout_index": 1, "output": True})],
+                [orjson.dumps({"_ng_task_index": 1, "_ng_rollout_index": 1, "output": True})],
+            ],
         )
 
-        assert expected_results == actual_returned_results[:3]
+        assert expected_results == actual_returned_results

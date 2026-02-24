@@ -192,7 +192,7 @@ class RolloutCollectionHelper(BaseModel):
     ) -> Tuple[List[Dict], List[Dict], List[Dict], List[List[str]]]:
         with config.materialized_jsonl_fpath.open() as f:
             original_input_rows = list(map(orjson.loads, f))
-        with Path(config.output_jsonl_fpath).open() as f:
+        with Path(config.output_jsonl_fpath).open("rb") as f:
             result_strs = [[line.strip()] for line in f]
         results = [orjson.loads(p[0]) for p in result_strs]
 
