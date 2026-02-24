@@ -1,4 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -176,6 +176,7 @@ def format_entry_to_nemo_gym(entry: dict) -> dict:
             "input": [{"role": "user", "content": entry["question"]}],
         },
         **entry,
+        "agent_ref": {"type": "responses_api_agents", "name": "reasoning_gym_simple_agent"},
     }
 
 
