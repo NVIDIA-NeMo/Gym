@@ -108,23 +108,40 @@ async def run_harbor_job(job_config_dict: dict) -> str:
     - result.json: Summary result with reward, agent_result, verifier_result, etc.
     - agent/trajectory.json: Full ATIF trajectory with per-step messages, tool
       calls, observations, and per-token logprobs.
+
+    Harbor writes result.json and trajectory.json to disk even when the trial
+    fails (e.g. verifier timeout, reward file not found, OOM).  We recover the
+    trial directory after an exception so the caller can still use the partial
+    trajectory for training.
     """
     from harbor.job import Job
     from harbor.models.job.config import JobConfig
 
     config = JobConfig(**job_config_dict)
     job = Job(config)
-    await job.run()
 
-    # Find the trial directory from the job output directory
+    job_error = None
+    try:
+        await job.run()
+    except Exception as e:
+        job_error = e
+
+    # Find the trial directory from the job output directory.  Harbor writes
+    # result.json before propagating most exceptions, so we can usually
+    # recover the trial even when job.run() raised.
     job_dir = config.jobs_dir / config.job_name
-    for trial_dir in job_dir.iterdir():
-        if not trial_dir.is_dir():
-            continue
-        result_path = trial_dir / "result.json"
-        if result_path.exists():
-            return str(trial_dir)
+    if job_dir.exists():
+        for trial_dir in job_dir.iterdir():
+            if not trial_dir.is_dir():
+                continue
+            result_path = trial_dir / "result.json"
+            if result_path.exists():
+                return str(trial_dir)
 
+    # No trial directory found — re-raise the original error if there was one,
+    # otherwise raise FileNotFoundError.
+    if job_error is not None:
+        raise job_error
     raise FileNotFoundError(f"No trial result found in {job_dir}")
 
 
@@ -309,7 +326,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
     def _build_run_id(self, run_timestamp: datetime) -> str:
         """Build a compact, sortable run id for immutable file naming."""
         time_key = run_timestamp.strftime("%Y%m%d_%H%M%S")
-        return f"{time_key}_{uuid4().hex[:4]}"
+        return f"{time_key}_{uuid4().hex[:8]}"
 
     def _build_job_name(self, run_id: str) -> str:
         """Build a Harbor job name from run id only."""

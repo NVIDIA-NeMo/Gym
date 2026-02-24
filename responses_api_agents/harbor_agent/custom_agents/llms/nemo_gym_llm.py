@@ -43,7 +43,6 @@ class NemoGymLLM(BaseLLM):
         model_info: dict[str, Any] | None = None,
         responses_create_params: dict[str, Any] | None = None,
         timeout_sec: float = 600.0,
-        think_tag_in_generation_prompt: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -52,7 +51,12 @@ class NemoGymLLM(BaseLLM):
         self._collect_rollout_details = collect_rollout_details
         self._model_info = model_info or {}
         self._timeout_sec = timeout_sec
-        self._think_tag_in_generation_prompt = think_tag_in_generation_prompt
+
+        # Accumulated token IDs from the most recent turn, used for
+        # on-policy correction via _replace_prefix_tokens in vLLM.
+        self._last_prompt_token_ids: list[int] | None = None
+        self._last_completion_token_ids: list[int] | None = None
+        self._last_logprobs: list[float] | None = None
 
         # Pre-compute extra chat params from responses_create_params once,
         # since they don't change between calls.
@@ -82,36 +86,16 @@ class NemoGymLLM(BaseLLM):
             message_history = []
         messages = message_history + [{"role": "user", "content": prompt}]
 
-        # Harbor's Chat stores reasoning as a separate ``reasoning_content``
-        # field when interleaved_thinking is enabled.  Merge it back into
-        # thinking tags in content — the format that app.py's
-        # ``uses_reasoning_parser`` preprocessing expects.
-        #
-        # When think_tag_in_generation_prompt is true, the nanov3 chat
-        # template renders reasoning with \n padding:
-        #   "<think>\n" + rc + "\n</think>\n" + content
-        # Case 2 extraction preserves the original \n boundaries (rc ends
-        # with \n, content starts with \n), so we strip one from each
-        # before merging — app.py extracts the bare rc, and the template
-        # re-adds the \n padding, producing the original token sequence.
-        #
-        # When the model skipped thinking entirely (no reasoning_content
-        # AND no think tags in content), prepend "<think>\n" to match the
-        # generation prompt's "<think>\n" suffix.
-        for msg in messages:
-            if msg.get("role") != "assistant":
-                continue
-            rc = msg.pop("reasoning_content", None)
-            content = msg.get("content") or ""
-            if rc:
-                if self._think_tag_in_generation_prompt:
-                    # Strip exactly one \n — the template re-adds it via
-                    # "<think>\n" + rc + "\n</think>\n" + content.
-                    rc = rc.removesuffix("\n")
-                    content = content.removeprefix("\n")
-                msg["content"] = f"<think>{rc}</think>{content}"
-            elif self._think_tag_in_generation_prompt and _THINK_OPEN not in content and _THINK_CLOSE not in content:
-                msg["content"] = f"{_THINK_OPEN}\n{content}"
+        # Attach token IDs from the previous turn to the last assistant
+        # message so vLLM can perform on-policy correction via
+        # _replace_prefix_tokens (see NeMoRLOpenAIChatRequestMixin).
+        if self._last_prompt_token_ids is not None:
+            for msg in reversed(messages):
+                if msg.get("role") == "assistant":
+                    msg["prompt_token_ids"] = self._last_prompt_token_ids
+                    msg["generation_token_ids"] = self._last_completion_token_ids or []
+                    msg["generation_log_probs"] = self._last_logprobs or []
+                    break
 
         payload: dict[str, Any] = {
             "model": self._model_name,
@@ -120,6 +104,15 @@ class NemoGymLLM(BaseLLM):
         payload.update(self._extra_chat_params)
 
         response_dict = await self._post_chat_completions(payload)
+
+        # Detect silently-swallowed context-length errors from the Gym proxy.
+        # When vLLM returns 400 "maximum context length", the proxy catches it
+        # and returns a fake 200 with id="chtcmpl-123" and content=None.
+        if response_dict.get("id") == "chtcmpl-123":
+            raise ContextLengthExceededError(
+                f"Model {self._model_name} context length exceeded "
+                f"(detected fake response id='chtcmpl-123')"
+            )
 
         choices = response_dict.get("choices", [])
         choice = choices[0] if isinstance(choices, list) and choices else {}
@@ -185,6 +178,10 @@ class NemoGymLLM(BaseLLM):
         if self._collect_rollout_details:
             prompt_token_ids, completion_token_ids = self._extract_token_ids(response_dict)
             logprobs = self._extract_logprobs(response_dict)
+            # Store for on-policy correction on the next turn.
+            self._last_prompt_token_ids = prompt_token_ids
+            self._last_completion_token_ids = completion_token_ids
+            self._last_logprobs = logprobs
 
         return LLMResponse(
             content=content,

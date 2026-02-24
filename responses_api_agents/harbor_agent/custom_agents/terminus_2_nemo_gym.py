@@ -2,7 +2,9 @@ from pathlib import Path
 from typing import Any, Literal
 
 from harbor.agents.terminus_2.terminus_2 import Terminus2
-from harbor.llms.base import BaseLLM
+from harbor.environments.base import BaseEnvironment
+from harbor.llms.base import BaseLLM, ContextLengthExceededError
+from harbor.models.agent.context import AgentContext
 
 from responses_api_agents.harbor_agent.custom_agents.llms.nemo_gym_llm import NemoGymLLM
 
@@ -39,7 +41,6 @@ class Terminus2NemoGym(Terminus2):
         interleaved_thinking: bool = False,
         responses_create_params: dict[str, Any] | None = None,
         nemo_model_server_timeout_sec: float = 120.0,
-        think_tag_in_generation_prompt: bool = False,
         *args: Any,
         **kwargs: Any,
     ) -> None:
@@ -58,7 +59,6 @@ class Terminus2NemoGym(Terminus2):
                 model_info=model_info,
                 responses_create_params=responses_create_params,
                 timeout_sec=nemo_model_server_timeout_sec,
-                think_tag_in_generation_prompt=think_tag_in_generation_prompt,
             )
 
         super().__init__(
@@ -85,3 +85,23 @@ class Terminus2NemoGym(Terminus2):
             *args,
             **kwargs,
         )
+
+    async def run(
+        self, instruction: str, environment: BaseEnvironment, context: AgentContext
+    ) -> None:
+        """Override run() to gracefully handle agent errors.
+
+        The parent's run() has a finally block that saves rollout_details and
+        dumps the trajectory before any exception propagates. By catching
+        exceptions here, we let Harbor's trial system proceed normally with the
+        verifier — returning the agent's conversation history from all completed
+        turns (reward will be 0 for incomplete work) instead of crashing the
+        entire rollout batch.
+        """
+        try:
+            await super().run(instruction, environment, context)
+        except Exception as e:
+            self.logger.info(
+                f"Agent error: {type(e).__name__}: {e}. "
+                "Returning history from completed turns."
+            )
