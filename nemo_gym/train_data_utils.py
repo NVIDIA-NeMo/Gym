@@ -728,6 +728,12 @@ This could be due to a change in how metrics are calculated, leading to outdated
             aggregate_metrics = aggregate_metrics.aggregate()
 
             aggregate_metrics_dict = aggregate_metrics.model_dump(mode="json", by_alias=True)
+            d = next(
+                (dataset for c in server_instance_configs for dataset in c.datasets if dataset.type == type),
+                None,
+            )
+            if d is not None:
+                aggregate_metrics_dict = d.model_dump() | aggregate_metrics_dict
 
             parent = Path(config.output_dirpath)
             parent.mkdir(exist_ok=True, parents=True)
