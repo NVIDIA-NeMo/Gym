@@ -34,6 +34,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    JudgeTruncationConfigMixin,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
@@ -45,7 +46,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.server_utils import get_response_json
 
 
-class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
+class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig, JudgeTruncationConfigMixin):
     """Configuration for the LLM judge server.
 
     - judge_model_server: target model server to use as the judge.
@@ -107,14 +108,6 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     # [NEW] Reward when full generation check succeeds after first pass fails.
     # Default is 0.5 (partial credit).
     reward_if_full_generation_succeeds: float = 0.5
-    # Prevent exceeding context length for the judge model.
-    # Maximum number of tokens allowed for the judge prompt input.
-    # If the assembled judge prompt would exceed this, the generated_answer
-    # is truncated to fit. Set to None to disable truncation.
-    max_judge_input_tokens: Optional[int] = None
-    # Approximate characters-per-token ratio used for truncation estimation.
-    # Default 3.5 is conservative for most tokenizers (actual is ~3.5-4.0).
-    chars_per_token_estimate: float = 3.5
 
 
 class LLMJudgeRunRequest(BaseRunRequest):
