@@ -193,7 +193,7 @@ class RolloutCollectionHelper(BaseModel):
         with config.materialized_jsonl_fpath.open() as f:
             input_rows = list(map(orjson.loads, f))
         original_input_rows_len = len(input_rows)
-        with Path(config.output_jsonl_fpath) as f:
+        with Path(config.output_jsonl_fpath).open() as f:
             results_strs = [[line.strip()] for line in f]
         results = [orjson.loads(p[0]) for p in f]
 
