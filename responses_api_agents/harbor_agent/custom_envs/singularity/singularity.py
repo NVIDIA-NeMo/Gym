@@ -269,7 +269,7 @@ class SingularityEnvironment(BaseEnvironment):
             '#!/bin/bash\n'
             '# Harbor server bootstrap - run task setup.sh then start server.\n'
             '# First arg is WORKDIR (container cwd), rest are server args.\n'
-            'WORKDIR="${1:-/testbed}"; shift\n'
+            'WORKDIR="${1:-/app}"; shift\n'
             '\n'
             '# Refresh apt cache so apt-get install (e.g. in setup.sh or for tmux) can find packages\n'
             'if command -v apt-get >/dev/null 2>&1; then\n'
@@ -362,6 +362,7 @@ class SingularityEnvironment(BaseEnvironment):
                 "--writable-tmpfs",
                 "--fakeroot",
                 "--containall",
+                "--pid",
                 *bind_mounts,
                 str(self._sif_path),
                 *bootstrap_cmd,
@@ -611,55 +612,6 @@ class SingularityEnvironment(BaseEnvironment):
         # Start the FastAPI server
         await self._start_server()
 
-        # Upload environment files to /app (keeps /app in sync for any server/agent use).
-        # Setup already ran in bootstrap (copy env_files + run /app/setup.sh once).
-        await self._upload_environment_files()
-
-    async def _run_environment_setup(self) -> None:
-        """If environment/files/setup.sh exists, run it in the container (e.g. apply bug for SWE-smith).
-        Not called from start() — setup runs once in bootstrap. Kept for optional reuse if needed."""
-        setup_sh = self.environment_dir / "files" / "setup.sh"
-        if not setup_sh.exists():
-            return
-        self.logger.debug("Running environment setup script: /app/setup.sh")
-        try:
-            result = await self.exec(command="bash /app/setup.sh", timeout_sec=120)
-            if result.return_code != 0:
-                self.logger.warning(
-                    f"Environment setup script exited with code {result.return_code}: {result.stderr or result.stdout}"
-                )
-        except Exception as e:
-            self.logger.warning(f"Environment setup script failed: {e}")
-
-    async def _upload_environment_files(self) -> None:
-        """Upload environment/files to /app in the container.
-
-        Bootstrap already copies /staging/env_files to /app and runs /app/setup.sh once.
-        This upload runs after the server is up to keep /app in sync (e.g. if env files
-        changed or for consistency). Uses exec to copy from host staging into /app.
-        """
-        files_dir = self.environment_dir / "files"
-        if not files_dir.exists():
-            return
-
-        # Check if there are any files to upload (skip empty directories)
-        try:
-            has_files = any(files_dir.iterdir())
-        except (PermissionError, OSError):
-            has_files = False
-
-        if not has_files:
-            return
-
-        self.logger.debug(f"Uploading environment files from {files_dir} to /app")
-        try:
-            await self.upload_dir(
-                source_dir=files_dir,
-                target_dir="/app",
-            )
-        except Exception as e:
-            self.logger.warning(f"Failed to upload environment files: {e}")
-
     async def stop(self, delete: bool) -> None:
         """Stop the Singularity environment and all child processes."""
         # Close HTTP client (don't send /shutdown - it could hit another trial's server
@@ -742,8 +694,10 @@ class SingularityEnvironment(BaseEnvironment):
         try:
             # Calculate HTTP timeout:
             # - If timeout_sec provided: add 10s buffer for HTTP overhead
-            # - If timeout_sec is None: no HTTP timeout (match Docker/Daytona behavior)
-            http_timeout = timeout_sec + 10 if timeout_sec else None
+            # - If timeout_sec is None: use a generous default (600s) to prevent
+            #   infinite hangs when the container dies (e.g. OOM-killed).
+            _DEFAULT_HTTP_TIMEOUT = 600
+            http_timeout = (timeout_sec + 10) if timeout_sec else _DEFAULT_HTTP_TIMEOUT
 
             response = await self._http_client.post(
                 f"http://localhost:{self._server_port}/exec",
@@ -765,8 +719,11 @@ class SingularityEnvironment(BaseEnvironment):
             )
 
             # Log errors so they're visible in trial logs (stderr is otherwise discarded)
-            if exec_result.return_code != 0 and exec_result.stderr:
-                self.logger.warning(f"Command failed (rc={exec_result.return_code}): {exec_result.stderr}")
+            if exec_result.return_code != 0:
+                error_output = exec_result.stderr or exec_result.stdout or "<no output>"
+                self.logger.warning(
+                    f"Command failed (rc={exec_result.return_code}): {error_output}"
+                )
 
             return exec_result
 
@@ -797,7 +754,8 @@ class SingularityEnvironment(BaseEnvironment):
         # Move to target in container
         result = await self.exec(f"cp /staging/{source.name} {target_path}")
         if result.return_code != 0:
-            raise RuntimeError(f"Failed to upload file: {result.stderr}")
+            error_output = result.stderr or result.stdout or "<no output>"
+            raise RuntimeError(f"Failed to upload file: {error_output}")
 
     async def upload_dir(self, source_dir: Path | str, target_dir: str) -> None:
         """Upload a directory to the container via staging directory."""
@@ -818,7 +776,8 @@ class SingularityEnvironment(BaseEnvironment):
             # Try alternative approach
             result = await self.exec(f"cp -r /staging/{source.name} {target_dir}")
             if result.return_code != 0:
-                raise RuntimeError(f"Failed to upload directory: {result.stderr}")
+                error_output = result.stderr or result.stdout or "<no output>"
+                raise RuntimeError(f"Failed to upload directory: {error_output}")
 
     async def download_file(self, source_path: str, target_path: Path | str) -> None:
         """Download a file from the container via staging directory."""
@@ -830,7 +789,8 @@ class SingularityEnvironment(BaseEnvironment):
         staging_path = f"/staging/download_{filename}"
         result = await self.exec(f"cp {source_path} {staging_path}")
         if result.return_code != 0:
-            raise RuntimeError(f"Failed to download file: {result.stderr}")
+            error_output = result.stderr or result.stdout or "<no output>"
+            raise RuntimeError(f"Failed to download file: {error_output}")
 
         # Copy from staging to target
         staging_file = self._staging_dir / f"download_{filename}"
@@ -850,7 +810,8 @@ class SingularityEnvironment(BaseEnvironment):
         staging_path = f"/staging/download_{dirname}"
         result = await self.exec(f"cp -r {source_dir} {staging_path}")
         if result.return_code != 0:
-            raise RuntimeError(f"Failed to download directory: {result.stderr}")
+            error_output = result.stderr or result.stdout or "<no output>"
+            raise RuntimeError(f"Failed to download directory: {error_output}")
 
         # Copy from staging to target
         staging_subdir = self._staging_dir / f"download_{dirname}"

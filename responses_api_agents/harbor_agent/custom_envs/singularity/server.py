@@ -14,8 +14,8 @@ import asyncio
 import inspect
 import logging
 import os
+import re
 import shutil
-import signal
 import subprocess
 import sys
 from contextlib import asynccontextmanager
@@ -115,6 +115,33 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
+_BLACKLISTED_COMMAND_PATTERNS = [
+    # Process-killing commands that could escape the container and kill vLLM workers
+    re.compile(r"\bkillall\b"),
+    re.compile(r"\bpkill\b"),
+    re.compile(r"\bkill\s+.*\$\("),        # kill $(...)
+    re.compile(r"\bkill\s+.*`"),            # kill `...`
+    re.compile(r"\bkill\s+(-\d+\s+|-[A-Z]+\s+|-SIG[A-Z]+\s+)*\$\w+"),  # kill $VAR
+    re.compile(r"\bkill\s+(-\d+\s+|-[A-Z]+\s+|-SIG[A-Z]+\s+)*-1\b"),   # kill -1 (all user procs)
+    re.compile(r"\bkill\s+(-\d+\s+|-[A-Z]+\s+|-SIG[A-Z]+\s+)*0\b"),    # kill 0 (process group)
+    # System shutdown / reboot
+    re.compile(r"\b(shutdown|reboot|poweroff|halt|init\s+[06])\b"),
+    # Destructive disk writes
+    re.compile(r"\bdd\s+.*of=\s*/dev/"),
+    # Filesystem destruction of critical paths
+    re.compile(r"\brm\s+(-\w+\s+)*(/\s*$|/\*)"),
+    re.compile(r"\brm\s+(-\w+\s+)*(/(bin|usr|etc|var|home|root|opt|lib|lib64|sbin|boot|dev|proc|sys))\b"),
+]
+
+
+def _is_blacklisted(command: str) -> str | None:
+    """Return a reason string if the command matches a blacklisted pattern, else None."""
+    for pattern in _BLACKLISTED_COMMAND_PATTERNS:
+        if pattern.search(command):
+            return f"Command blocked by safety filter (matched: {pattern.pattern})"
+    return None
+
+
 @app.post("/exec", response_model=CommandResult)
 def exec_command(req: CommandRequest):
     """Execute a command in the container (using sync subprocess).
@@ -125,6 +152,15 @@ def exec_command(req: CommandRequest):
 
     Exceptions propagate to crash the trial (aligned with Docker/Daytona).
     """
+    blocked_reason = _is_blacklisted(req.command)
+    if blocked_reason:
+        logger.warning(f"Blocked command: {req.command[:200]} — {blocked_reason}")
+        return CommandResult(
+            stdout=blocked_reason,
+            stderr=None,
+            return_code=1,
+        )
+
     # Set up environment
     env = os.environ.copy()
     # Ensure PATH includes standard locations so apt-installed tools (e.g. tmux) are found
@@ -192,18 +228,6 @@ async def health_check():
     """Health check endpoint."""
     return {"status": "ok"}
 
-
-@app.post("/shutdown")
-async def shutdown():
-    """Trigger server shutdown."""
-    logger.info("Shutdown requested via API")
-
-    async def delayed_shutdown():
-        await asyncio.sleep(0.1)
-        os.kill(os.getpid(), signal.SIGTERM)
-
-    asyncio.create_task(delayed_shutdown())
-    return {"message": "Shutdown initiated"}
 
 # =============================================================================
 # Singularity Environment Setup
