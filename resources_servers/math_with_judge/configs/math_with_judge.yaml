@@ -8,9 +8,7 @@ math_with_judge:
       judge_responses_create_params: {
         input: []
       }
-      should_use_judge: true
-      # Approximate characters per token, used for truncation estimates.
-      chars_per_token_estimate: 1.0
+      should_use_judge: false
       domain: math
       verified: false
       description: Math dataset with math-verify and LLM-as-a-judge
