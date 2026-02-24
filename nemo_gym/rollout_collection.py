@@ -113,9 +113,14 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         description="If the same command is run multiple times, check the materialized inputs and current outputs and remove the inputs that have already been run",
     )
 
+    @property
+    def materialized_jsonl_fpath(self) -> Path:
+        output_fpath = Path(self.output_jsonl_fpath)
+        return output_fpath.with_stem(output_fpath.stem + "_materialized_inputs").with_suffix(".jsonl")
+
 
 class RolloutCollectionHelper(BaseModel):
-    def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[dict]:
+    def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
         range_iterator = repeat(0)
         if config.limit:
             range_iterator = range(config.limit)
@@ -182,28 +187,65 @@ class RolloutCollectionHelper(BaseModel):
 
         return rows
 
-    async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
-        input_rows = self._preprocess_rows_from_config(config)
-        # Returned rows are sorted by (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
+    def _load_from_cache(
+        self, config: RolloutCollectionConfig
+    ) -> Tuple[List[Dict], List[Dict], List[Dict], List[List[str]]]:
+        with config.materialized_jsonl_fpath.open() as f:
+            input_rows = list(map(orjson.loads, f))
+        original_input_rows_len = len(input_rows)
+        with Path(config.output_jsonl_fpath) as f:
+            results_strs = [[line.strip()] for line in f]
+        results = [orjson.loads(p[0]) for p in f]
 
-        output_fpath = Path(config.output_jsonl_fpath)
-        materialized_jsonl_fpath = output_fpath.with_stem(output_fpath.stem + "_materialized_inputs").with_suffix(
-            ".jsonl"
+        get_key = lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
+
+        seen_rows = set(map(get_key, results))
+        input_rows = [row for row in input_rows if get_key(row) not in seen_rows]
+
+        key_to_row = dict(zip(map(get_key, input_rows), input_rows))
+        rows = [key_to_row[get_key(result)] for result in results]
+
+        print(
+            f"""Resumed from cache. Found:
+- {original_input_rows_len} original input rows
+- {len(input_rows)} rows that still need to be run
+- {len(rows)} rows that have already been run"""
         )
-        with materialized_jsonl_fpath.open("wb") as f:
-            for row in input_rows:
-                f.write(orjson.dumps(row) + b"\n")
+
+        return input_rows, rows, results, results_strs
+
+    async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
+        output_fpath = Path(config.output_jsonl_fpath)
+
+        if config.resume_from_cache:
+            (
+                input_rows,
+                rows,
+                results,
+                results_strs,
+            ) = self._load_from_cache(config)
+        else:
+            rows: List[Dict] = []
+            results: List[Dict] = []
+            result_strs: List[List[str]] = []
+
+            input_rows = self._preprocess_rows_from_config(config)
+            # Returned rows are sorted by (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
+
+            with config.materialized_jsonl_fpath.open("wb") as f:
+                for row in input_rows:
+                    f.write(orjson.dumps(row) + b"\n")
+
+            print("Clearing output fpath since `resume_from_cache=False`!")
+            output_fpath.unlink(missing_ok=True)
 
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
             print(f"Querying with {config.num_samples_in_parallel} concurrent requests")
             semaphore = Semaphore(config.num_samples_in_parallel)
 
-        Path(config.output_jsonl_fpath).parent.mkdir(exist_ok=True, parents=True)
+        output_fpath.parent.mkdir(exist_ok=True, parents=True)
 
-        rows: List[Dict] = []
-        results: List[Dict] = []
-        result_strs: List[List[str]] = []
         results_file = open(config.output_jsonl_fpath, "ab")
         for future in self.run_examples(input_rows, semaphore=semaphore):
             row, result = await future
@@ -242,7 +284,7 @@ class RolloutCollectionHelper(BaseModel):
             get_wandb_run().log(agent_level_metrics_to_log)
 
         print(f"""Finished rollout collection! View results at:
-Fully materialized inputs: {materialized_jsonl_fpath}
+Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
 Reward profiling outputs: {reward_profiling_fpath}
 Agent-level metrics: {agent_level_metrics_fpath}""")
