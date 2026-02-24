@@ -19,7 +19,6 @@ import orjson
 from pandas import DataFrame
 from pandas.core.groupby.generic import DataFrameGroupBy
 from pydantic import Field
-from wandb import Histogram
 
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
@@ -28,6 +27,7 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     get_global_config_dict,
 )
+from wandb import Histogram
 
 
 class RewardProfileConfig(BaseNeMoGymCLIConfig):
@@ -68,12 +68,15 @@ class RewardProfiler:
             # Add additional helpful information
             result = result | result["response"].get("usage", None)
 
-            numeric_results = {k: v for k, v in result.items() if isinstance(v, (int, float))}
-
             # agent_name is a temporary column used for aggregations below
-            numeric_results["agent_name"] = row["agent_ref"]["name"]
+            numeric_result = {"agent_name": row["agent_ref"]["name"]}
+            for k, v in result.items():
+                if isinstance(v, bool):
+                    numeric_result[k] = int(v)
+                elif isinstance(v, (int, float)):
+                    numeric_result[k] = v
 
-            filtered_results.append(numeric_results)
+            filtered_results.append(numeric_result)
             task_idx_to_row.setdefault(row[TASK_INDEX_KEY_NAME], row)
 
         df = DataFrame.from_records(filtered_results)
