@@ -189,7 +189,7 @@ def visit_resource_server(data: dict, level: int = 1) -> ResourceServerMetadata:
 def visit_agent_datasets(data: dict) -> AgentDatasetsMetadata:  # pragma: no cover
     agent = AgentDatasetsMetadata()
     for k1, v1 in data.items():
-        if k1.endswith("_simple_agent") and isinstance(v1, dict):
+        if k1.endswith("_agent") and isinstance(v1, dict):
             v2 = v1.get("responses_api_agents")
             if isinstance(v2, dict):
                 # Look for any agent key
