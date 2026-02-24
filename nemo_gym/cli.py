@@ -174,7 +174,7 @@ class RunHelper:  # pragma: no cover
             # cache size. For Nemotron's set of environments, parallel installation can produce
             # a cache 10-20GB larger than serial installation.
             if global_config_dict[DRY_RUN_KEY_NAME]:
-                print('DRY_RUN enabled: setup commands are run serially')
+                print("DRY_RUN enabled: setup commands are run serially")
                 process.communicate()
 
             host = server_config_dict.get("host")
