@@ -357,6 +357,7 @@ def generate_training_table(servers: list[ServerInfo]) -> str:  # pragma: no cov
 
     rows.sort(
         key=lambda r: (
+            normalize_str(r[0]),  # resource server name
             normalize_str(r[1]),  # domain
             # TODO: Add back in when we can verify resource servers
             # 0 if "✓" in r[8] else 1,  # verified first (reverse order for checkmarks...hyphens)
