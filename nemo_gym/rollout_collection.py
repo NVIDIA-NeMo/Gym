@@ -245,7 +245,7 @@ class RolloutCollectionHelper(BaseModel):
 
         output_fpath.parent.mkdir(exist_ok=True, parents=True)
 
-        results_file = open(config.output_jsonl_fpath, "ab")
+        results_file = output_fpath.open("ab")
         for future in self.run_examples(input_rows, semaphore=semaphore):
             row, result = await future
 
