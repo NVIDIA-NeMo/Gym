@@ -29,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from ray import __version__ as ray_version
 
 import wandb
+import wandb.util
 from nemo_gym import CACHE_DIR, PARENT_DIR
 from nemo_gym.config_types import (
     ServerInstanceConfig,
@@ -97,6 +98,8 @@ DEFAULT_HEAD_SERVER_PORT = 11000
 
 
 # W&B
+# Increase row limit since some of our rollouts are pretty hefty
+wandb.util.VALUE_BYTES_LIMIT = 10_000_000
 _WANDB_RUN: Optional[Run] = None
 
 
