@@ -169,6 +169,13 @@ class RunHelper:  # pragma: no cover
 
             process = run_command(command, dir_path)
             self._processes[top_level_path] = process
+            # In dry run mode, wait for each setup command to finish before starting the next.
+            # This installs uv virtual environments serially, which significantly reduces uv
+            # cache size. For Nemotron's set of environments, parallel installation can produce
+            # a cache 10-20GB larger than serial installation.
+            if global_config_dict[DRY_RUN_KEY_NAME]:
+                print("DRY_RUN enabled: setup commands are run serially")
+                process.communicate()
 
             host = server_config_dict.get("host")
             port = server_config_dict.get("port")
