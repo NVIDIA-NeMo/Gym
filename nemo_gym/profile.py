@@ -147,6 +147,9 @@ def profile():  # pragma: no cover
     with open(config.rollouts_jsonl_fpath) as f:
         results = list(map(orjson.loads, f))
 
+    # Results may be out of order.
+    results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
+
     rp = RewardProfiler()
     group_level_metrics, agent_level_metrics = rp.profile_from_data(rows, results)
     reward_profiling_fpath, agent_level_metrics_fpath = rp.write_to_disk(
