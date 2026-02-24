@@ -215,7 +215,7 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
     async def verify(self, body: PythonMathVerifyRequest) -> PythonMathVerifyResponse:
         expected = body.expected_result
 
-        # Search assistant messages (last-to-first) for \boxed{}.
+        # Extract actual answer from final assistant message
         actual = None
         for output in reversed(body.response.output):
             if output.type == "message" and output.role == "assistant":

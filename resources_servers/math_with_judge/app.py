@@ -29,6 +29,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    JudgeTruncationConfigMixin,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
@@ -40,14 +41,10 @@ from nemo_gym.openai_utils import (
 from nemo_gym.server_utils import get_response_json
 
 
-class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
+class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig, JudgeTruncationConfigMixin):
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     should_use_judge: bool = True
-    # If set, truncate judge inputs to stay within this token budget.
-    max_judge_input_tokens: Optional[int] = None
-    # Approximate characters per token, used for truncation estimates.
-    chars_per_token_estimate: float = 3.5
 
 
 class LibraryJudgeMathRunRequest(BaseRunRequest):
