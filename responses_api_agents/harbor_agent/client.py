@@ -27,7 +27,7 @@ async def main():
             "responses_create_params": {
                 "input": [],
             },
-            "instance_id": "pandas-dev__pandas-7447",
+            "instance_id": "hello_world",
         },
     )
     data = await result.json()
