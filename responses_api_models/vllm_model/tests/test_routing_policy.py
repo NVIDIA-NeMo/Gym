@@ -12,24 +12,57 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock
 
 import pytest
 
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
 from responses_api_models.vllm_model.routing_policy import (
-    CacheAwareRoutingPolicy,
     CacheAwareRoutingPolicyConfig,
     RoundRobinRoutingPolicy,
     RoundRobinRoutingPolicyConfig,
+    RoutingPolicy,
     create_routing_policy,
 )
 
 DUMMY_REQUEST_BODY = {"model": "test", "messages": [{"role": "user", "content": "hello"}]}
 
 
-def _make_mock_clients(n: int):
+def _make_mock_clients(n: int) -> List[NeMoGymAsyncOpenAI]:
     return [MagicMock(spec=NeMoGymAsyncOpenAI) for _ in range(n)]
+
+
+# ---------------------------------------------------------------------------
+# Test stub: a minimal RoutingPolicy subclass usable as an external router
+# ---------------------------------------------------------------------------
+
+
+class _StubCacheAwarePolicy(RoutingPolicy):
+    """Minimal RoutingPolicy subclass for testing the factory and lifecycle hooks."""
+
+    def __init__(self, clients: List[NeMoGymAsyncOpenAI], route_return: int = 0, **kwargs):
+        self._clients = clients
+        self._route_return = route_return
+        self.route_calls: List[Dict[str, Any]] = []
+        self.prefill_calls: List[str] = []
+        self.generation_calls: List[str] = []
+
+    def select_client(
+        self,
+        *,
+        request_body: Dict[str, Any],
+        request_id: str,
+        session_id: Optional[str] = None,
+    ) -> int:
+        self.route_calls.append(request_body)
+        return self._route_return
+
+    def on_prefill_complete(self, request_id: str) -> None:
+        self.prefill_calls.append(request_id)
+
+    def on_generation_complete(self, request_id: str) -> None:
+        self.generation_calls.append(request_id)
 
 
 class TestRoundRobinRoutingPolicy:
@@ -68,45 +101,23 @@ class TestRoundRobinRoutingPolicy:
         policy.on_generation_complete("req_1")
 
 
-class TestCacheAwareRoutingPolicy:
-    def _make_policy(self, num_clients=3, route_return=0):
-        mock_router = MagicMock()
-        mock_router.route.return_value = route_return
-        clients = _make_mock_clients(num_clients)
-        policy = CacheAwareRoutingPolicy(mock_router, clients)
-        return policy, mock_router
+class TestExternalRoutingPolicy:
+    """Tests for external routing policies that subclass RoutingPolicy directly."""
 
-    def test_delegates_to_external_router(self):
-        policy, mock_router = self._make_policy(num_clients=3, route_return=1)
+    def test_stub_receives_request_body(self):
+        clients = _make_mock_clients(2)
+        policy = _StubCacheAwarePolicy(clients, route_return=1)
         idx = policy.select_client(request_body=DUMMY_REQUEST_BODY, request_id="req_1")
         assert idx == 1
-        mock_router.route.assert_called_once_with(DUMMY_REQUEST_BODY)
+        assert policy.route_calls == [DUMMY_REQUEST_BODY]
 
-    def test_fallback_on_out_of_range_index(self):
-        # External router returns index 5 but only 3 clients
-        policy, _ = self._make_policy(num_clients=3, route_return=5)
-        idx = policy.select_client(request_body=DUMMY_REQUEST_BODY, request_id="req_1")
-        assert idx == 5 % 3  # 2
-
-    def test_negative_index_fallback(self):
-        policy, _ = self._make_policy(num_clients=3, route_return=-1)
-        idx = policy.select_client(request_body=DUMMY_REQUEST_BODY, request_id="req_1")
-        assert 0 <= idx < 3
-
-    def test_valid_index_no_fallback(self):
-        policy, _ = self._make_policy(num_clients=3, route_return=0)
-        idx = policy.select_client(request_body=DUMMY_REQUEST_BODY, request_id="req_1")
-        assert idx == 0
-
-    def test_on_prefill_complete(self):
-        policy, mock_router = self._make_policy()
+    def test_stub_lifecycle_callbacks(self):
+        clients = _make_mock_clients(2)
+        policy = _StubCacheAwarePolicy(clients)
         policy.on_prefill_complete("req_42")
-        mock_router.prefill_complete.assert_called_once_with("req_42")
-
-    def test_on_generation_complete(self):
-        policy, mock_router = self._make_policy()
         policy.on_generation_complete("req_42")
-        mock_router.generation_complete.assert_called_once_with("req_42")
+        assert policy.prefill_calls == ["req_42"]
+        assert policy.generation_calls == ["req_42"]
 
 
 class TestCreateRoutingPolicy:
@@ -116,25 +127,37 @@ class TestCreateRoutingPolicy:
         policy = create_routing_policy(config, clients)
         assert isinstance(policy, RoundRobinRoutingPolicy)
 
-    def test_creates_cache_aware(self):
+    def test_creates_external_policy(self):
         clients = _make_mock_clients(2)
         config = CacheAwareRoutingPolicyConfig(
-            router_class="unittest.mock.MagicMock",
-            router_kwargs={"name": "test_router"},
+            router_class="responses_api_models.vllm_model.tests.test_routing_policy._StubCacheAwarePolicy",
         )
         policy = create_routing_policy(config, clients)
-        assert isinstance(policy, CacheAwareRoutingPolicy)
+        assert isinstance(policy, RoutingPolicy)
+        assert isinstance(policy, _StubCacheAwarePolicy)
 
-    def test_cache_aware_passes_kwargs(self):
+    def test_external_policy_receives_clients_and_kwargs(self):
+        clients = _make_mock_clients(3)
+        config = CacheAwareRoutingPolicyConfig(
+            router_class="responses_api_models.vllm_model.tests.test_routing_policy._StubCacheAwarePolicy",
+            router_kwargs={"route_return": 2},
+        )
+        policy = create_routing_policy(config, clients)
+        assert isinstance(policy, _StubCacheAwarePolicy)
+        assert policy._clients is clients
+        idx = policy.select_client(request_body=DUMMY_REQUEST_BODY, request_id="req_1")
+        assert idx == 2
+
+    def test_non_routing_policy_class_raises(self):
+        """Classes that don't subclass RoutingPolicy are rejected."""
         clients = _make_mock_clients(2)
         config = CacheAwareRoutingPolicyConfig(
-            router_class="unittest.mock.MagicMock",
-            router_kwargs={"some_param": 42},
+            router_class="builtins.object",
         )
-        policy = create_routing_policy(config, clients)
-        assert isinstance(policy, CacheAwareRoutingPolicy)
+        with pytest.raises(TypeError, match="must be a subclass of RoutingPolicy"):
+            create_routing_policy(config, clients)
 
-    def test_cache_aware_invalid_class_raises(self):
+    def test_invalid_module_raises(self):
         clients = _make_mock_clients(2)
         config = CacheAwareRoutingPolicyConfig(
             router_class="nonexistent.module.ClassName",

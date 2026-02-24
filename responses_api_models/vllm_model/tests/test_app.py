@@ -58,7 +58,7 @@ from responses_api_models.vllm_model.app import (
     VLLMModel,
     VLLMModelConfig,
 )
-from responses_api_models.vllm_model.routing_policy import CacheAwareRoutingPolicyConfig
+from responses_api_models.vllm_model.routing_policy import RoutingPolicy
 
 
 # Used for mocking created_at timestamp generation
@@ -2042,34 +2042,32 @@ class TestApp:
 
 
 class TestCacheAwareRoutingIntegration:
-    def test_cache_aware_routing_delegates_to_external_router(self, monkeypatch: MonkeyPatch):
-        """Integration test: cache-aware routing passes request body to external router,
-        routes to the correct client, and calls lifecycle callbacks."""
-        mock_router = MagicMock()
-        mock_router.route.return_value = 1  # Route to second client
-
+    def _make_server(self, monkeypatch: MonkeyPatch, num_backends: int = 2):
         config = VLLMModelConfig(
             host="0.0.0.0",
             port=8081,
-            base_url=["http://api.openai.com/v1", "http://api.openai.com/v2"],
+            base_url=[f"http://api.openai.com/v{i + 1}" for i in range(num_backends)],
             api_key="dummy_key",  # pragma: allowlist secret
             model="dummy_model",
             entrypoint="",
             name="",
             return_token_id_information=False,
             uses_reasoning_parser=False,
-            routing_policy=CacheAwareRoutingPolicyConfig(
-                router_class="unittest.mock.MagicMock",
-            ),
         )
-
         get_global_config_dict_mock = MagicMock()
         get_global_config_dict_mock.return_value = dict()
         monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
+        return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
 
-        server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
-        # Replace the auto-created external router with our controlled mock
-        server._routing_policy._external_router = mock_router
+    def test_cache_aware_routing_delegates_to_external_router(self, monkeypatch: MonkeyPatch):
+        """Integration test: an external RoutingPolicy subclass routes requests,
+        receives the raw request body, and gets lifecycle callbacks."""
+        server = self._make_server(monkeypatch, num_backends=2)
+
+        # Inject a mock RoutingPolicy that routes everything to client index 1
+        mock_policy = MagicMock(spec=RoutingPolicy)
+        mock_policy.select_client.return_value = 1
+        server._routing_policy = mock_policy
 
         app = server.setup_webserver()
 
@@ -2091,11 +2089,13 @@ class TestCacheAwareRoutingIntegration:
             ],
         )
 
-        # Mock chat completion on both clients
         mock_method_1 = AsyncMock(return_value=mock_chat_completion.model_dump())
         mock_method_2 = AsyncMock(return_value=mock_chat_completion.model_dump())
-        server._clients[0].create_chat_completion = mock_method_1
-        server._clients[1].create_chat_completion = mock_method_2
+        mock_client_0 = MagicMock()
+        mock_client_0.create_chat_completion = mock_method_1
+        mock_client_1 = MagicMock()
+        mock_client_1.create_chat_completion = mock_method_2
+        server._clients = [mock_client_0, mock_client_1]
 
         input_messages = [
             NeMoGymEasyInputMessage(
@@ -2114,20 +2114,20 @@ class TestCacheAwareRoutingIntegration:
         )
         assert response.status_code == 200
 
-        # Verify the external router received the request body dict
-        mock_router.route.assert_called_once()
-        route_arg = mock_router.route.call_args[0][0]
-        assert isinstance(route_arg, dict)
-        assert "model" in route_arg
-        assert "messages" in route_arg
+        # Verify select_client was called with the raw request body dict
+        mock_policy.select_client.assert_called_once()
+        call_kwargs = mock_policy.select_client.call_args.kwargs
+        assert isinstance(call_kwargs["request_body"], dict)
+        assert "model" in call_kwargs["request_body"]
+        assert "messages" in call_kwargs["request_body"]
 
-        # Verify chat completion was called on client 2 (index 1), not client 1
+        # Verify chat completion was routed to client 2 (index 1), not client 1
         mock_method_1.assert_not_called()
         mock_method_2.assert_called_once()
 
         # Verify lifecycle callbacks were invoked
-        mock_router.prefill_complete.assert_called_once()
-        mock_router.generation_complete.assert_called_once()
+        mock_policy.on_prefill_complete.assert_called_once()
+        mock_policy.on_generation_complete.assert_called_once()
 
 
 class TestVLLMConverter:
