@@ -655,7 +655,11 @@ class TrainDataProcessor(BaseModel):
                 )
                 if maybe_conflicting_metrics_fpath is not None:
                     conflicting_fpaths.append(str(maybe_conflicting_metrics_fpath))
-                    continue
+
+                    if maybe_conflicting_metrics_fpath:
+                        pass
+                    else:
+                        continue
 
                 with open(metrics_fpath, "w") as f:
                     json.dump(aggregate_metrics_dict, f, indent=4)
@@ -734,7 +738,11 @@ This could be due to a change in how metrics are calculated, leading to outdated
             )
             if maybe_conflicting_metrics_fpath is not None:
                 conflicting_fpaths.append(str(maybe_conflicting_metrics_fpath))
-                continue
+
+                if config.overwrite_metrics_conflicts:
+                    pass
+                else:
+                    continue
 
             with open(metrics_fpath, "w") as f:
                 json.dump(aggregate_metrics_dict, f, indent=4)
