@@ -7,6 +7,8 @@ NeMo Gym environment for [NewtonBench](https://github.com/HKUST-KnowComp/NewtonB
 ### Automatic Setup
 The resource server automatically clones the [NewtonBench](https://github.com/HKUST-KnowComp/NewtonBench) repository into the NeMo Gym repository root on the first launch or test run. You do not need to clone it manually.
 
+> Note: After the first launch, you should set up the required API keys (see below) and restart the resource server to enable the `verify` functionality.
+
 ### API Keys for Symbolic Judge
 The `verify` process uses NewtonBench's internal LLM judge (defaulting to `gpt41`) to compare the agent's proposed law with the ground truth symbolically. 
 

@@ -14,7 +14,6 @@
 
 import asyncio
 import math
-import os
 import time
 from unittest.mock import MagicMock, patch
 
@@ -1000,16 +999,15 @@ result
             responses_create_params={"input": [{"role": "user", "content": "test", "type": "message"}]},
             response=mock_response,
         )
-        with patch.dict(os.environ, {"OPENAI_API_KEY": "test_key"}):
-            with patch("resources_servers.newton_bench.app._load_module") as mock_load:
-                mock_mod = {"core": MagicMock(), "param_description": None}
-                mock_mod["core"].evaluate_law.return_value = {
-                    "symbolic_equivalent": True,
-                    "rmsle": 0.1,
-                    "exact_accuracy": 1.0,
-                }
-                mock_load.return_value = mock_mod
-                response = await server.verify(mock_request, verify_request)
+        with patch("resources_servers.newton_bench.app._load_module") as mock_load:
+            mock_mod = {"core": MagicMock(), "param_description": None}
+            mock_mod["core"].evaluate_law.return_value = {
+                "symbolic_equivalent": True,
+                "rmsle": 0.1,
+                "exact_accuracy": 1.0,
+            }
+            mock_load.return_value = mock_mod
+            response = await server.verify(mock_request, verify_request)
         assert isinstance(response, NewtonBenchVerifyResponse)
         assert math.isclose(response.reward, 0.9548387096774194, rel_tol=1e-9, abs_tol=1e-9)
         assert response.symbolic_equivalent is True
@@ -1036,16 +1034,15 @@ result
             responses_create_params={"input": [{"role": "user", "content": "test", "type": "message"}]},
             response=mock_response,
         )
-        with patch.dict(os.environ, {"OPENAI_API_KEY": "test_key"}):
-            with patch("resources_servers.newton_bench.app._load_module") as mock_load:
-                mock_mod = {"core": MagicMock(), "param_description": None}
-                mock_mod["core"].evaluate_law.return_value = {
-                    "symbolic_equivalent": False,
-                    "rmsle": 1e-6,
-                    "exact_accuracy": 0.0,
-                }
-                mock_load.return_value = mock_mod
-                response = await server.verify(mock_request, verify_request)
+        with patch("resources_servers.newton_bench.app._load_module") as mock_load:
+            mock_mod = {"core": MagicMock(), "param_description": None}
+            mock_mod["core"].evaluate_law.return_value = {
+                "symbolic_equivalent": False,
+                "rmsle": 1e-6,
+                "exact_accuracy": 0.0,
+            }
+            mock_load.return_value = mock_mod
+            response = await server.verify(mock_request, verify_request)
         assert isinstance(response, NewtonBenchVerifyResponse)
         assert math.isclose(response.reward, 0.4, rel_tol=1e-6, abs_tol=1e-6)
         assert response.rmsle == 1e-6
@@ -1069,8 +1066,7 @@ result
             responses_create_params={"input": [{"role": "user", "content": "test", "type": "message"}]},
             response=mock_response,
         )
-        with patch.dict(os.environ, {"OPENAI_API_KEY": "test_key"}):
-            response = await server.verify(mock_request, verify_request)
+        response = await server.verify(mock_request, verify_request)
         assert isinstance(response, NewtonBenchVerifyResponse)
         assert response.reward == 0.0
         assert response.extracted_law is None
@@ -1111,8 +1107,7 @@ result
             responses_create_params={"input": [{"role": "user", "content": "test", "type": "message"}]},
             response=mock_response,
         )
-        with patch.dict(os.environ, {"OPENAI_API_KEY": "test_key"}):
-            response = await server.verify(mock_request, verify_request)
+        response = await server.verify(mock_request, verify_request)
         assert isinstance(response, NewtonBenchVerifyResponse)
         assert response.reward == 0.0
         assert "Missing module_name" in (response.evaluation_error or "")
@@ -1139,12 +1134,11 @@ result
             responses_create_params={"input": [{"role": "user", "content": "test", "type": "message"}]},
             response=mock_response,
         )
-        with patch.dict(os.environ, {"OPENAI_API_KEY": "test_key"}):
-            with patch("resources_servers.newton_bench.app._load_module") as mock_load:
-                mock_mod = {"core": MagicMock(), "param_description": None}
-                mock_mod["core"].evaluate_law.side_effect = ValueError("Invalid function syntax")
-                mock_load.return_value = mock_mod
-                response = await server.verify(mock_request, verify_request)
+        with patch("resources_servers.newton_bench.app._load_module") as mock_load:
+            mock_mod = {"core": MagicMock(), "param_description": None}
+            mock_mod["core"].evaluate_law.side_effect = ValueError("Invalid function syntax")
+            mock_load.return_value = mock_mod
+            response = await server.verify(mock_request, verify_request)
         assert isinstance(response, NewtonBenchVerifyResponse)
         assert response.reward == 0.0
         assert response.extracted_law is not None
@@ -1171,16 +1165,15 @@ result
             responses_create_params={"input": [{"role": "user", "content": "test", "type": "message"}]},
             response=mock_response,
         )
-        with patch.dict(os.environ, {"OPENAI_API_KEY": "test_key"}):
-            with patch("resources_servers.newton_bench.app._load_module") as mock_load:
-                mock_mod = {"core": MagicMock(), "param_description": None}
-                mock_mod["core"].evaluate_law.return_value = {
-                    "symbolic_equivalent": False,
-                    "rmsle": 100.0,
-                    "exact_accuracy": 0.0,
-                }
-                mock_load.return_value = mock_mod
-                response = await server.verify(mock_request, verify_request)
+        with patch("resources_servers.newton_bench.app._load_module") as mock_load:
+            mock_mod = {"core": MagicMock(), "param_description": None}
+            mock_mod["core"].evaluate_law.return_value = {
+                "symbolic_equivalent": False,
+                "rmsle": 100.0,
+                "exact_accuracy": 0.0,
+            }
+            mock_load.return_value = mock_mod
+            response = await server.verify(mock_request, verify_request)
         assert isinstance(response, NewtonBenchVerifyResponse)
         assert math.isclose(response.reward, -0.9592233009708737, rel_tol=1e-9, abs_tol=1e-9)
         assert response.symbolic_equivalent is False

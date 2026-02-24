@@ -172,6 +172,12 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
         app.router.lifespan_context = lifespan
 
         ensure_newton_bench()
+        key_found = os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
+        if not key_found:
+            logging.warning(
+                "No API key found for evaluation. Please set OPENROUTER_API_KEY or OPENAI_API_KEY in the environment variables and restart the server."
+            )
+
         modules_dir = NEWTON_BENCH_PATH / "modules"
         try:
             if modules_dir.exists() and modules_dir.is_dir():
@@ -273,10 +279,10 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
         law_version = metadata.get("law_version")
 
         try:
-            if not (os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")):
-                raise HTTPException(
-                    status_code=500,
-                    detail="NewtonBench: Missing API keys (OPENAI_API_KEY or OPENROUTER_API_KEY) required for symbolic evaluation.",
+            key_found = os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
+            if not key_found:
+                logging.warning(
+                    "No API key found for evaluation. Please set OPENROUTER_API_KEY or OPENAI_API_KEY in the environment variables and restart the server."
                 )
 
             extracted_law = self._extract_law_from_response(body.response)
