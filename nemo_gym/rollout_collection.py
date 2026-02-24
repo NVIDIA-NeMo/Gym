@@ -207,8 +207,8 @@ class RolloutCollectionHelper(BaseModel):
         print(
             f"""Resumed from cache. Found:
 - {len(original_input_rows)} original input rows
-- {len(input_rows)} rows that still need to be run
-- {len(rows)} rows that have already been run"""
+- {len(rows)} rows that have already been run
+- {len(input_rows)} rows that still need to be run"""
         )
 
         return input_rows, rows, results, result_strs
