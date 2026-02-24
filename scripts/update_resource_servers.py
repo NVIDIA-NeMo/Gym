@@ -265,9 +265,6 @@ def get_example_and_training_server_info() -> tuple[list[ServerInfo], list[Serve
             server_name = subdir.name
             is_example_only = server_name.startswith("example_")
 
-            if not is_example_only and not yaml_data.huggingface_repo_id:
-                continue
-
             display_name = (
                 (server_name[len("example_") :] if is_example_only else server_name).replace("_", " ").title()
             )
