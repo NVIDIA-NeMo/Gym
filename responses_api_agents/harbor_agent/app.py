@@ -92,6 +92,8 @@ class HarborAgentConfig(BaseResponsesAPIAgentConfig):
     # --- Model routing ---
     # NeMo Gym model server reference used to resolve Harbor model base URL.
     model_server: ModelServerRef
+
+
 class HarborRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
     instance_id: str
@@ -271,9 +273,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
             # Update responses_create_params with the actual input sent to the agent
             updated_params = body.responses_create_params
             if input_messages:
-                updated_params = body.responses_create_params.model_copy(
-                    update={"input": input_messages}
-                )
+                updated_params = body.responses_create_params.model_copy(update={"input": input_messages})
 
             verify_response = HarborVerifyResponse(
                 responses_create_params=updated_params,
@@ -296,23 +296,13 @@ class HarborAgent(SimpleResponsesAPIAgent):
         """Build immutable run output directory grouped by dataset/model."""
         dataset_key = self._sanitize_path_component(self._get_dataset_key())
         model_key = self._sanitize_path_component(self._extract_model_name(policy_model_name))
-        return (
-            Path.cwd()
-            / "results"
-            / "runs"
-            / dataset_key
-            / model_key
-        )
+        return Path.cwd() / "results" / "runs" / dataset_key / model_key
 
     def _get_jobs_output_dir(self, policy_model_name: str, run_timestamp: datetime) -> Path:
         """Build Harbor jobs directory grouped by dataset/model."""
         dataset_key = self._sanitize_path_component(self._get_dataset_key())
         model_key = self._sanitize_path_component(self._extract_model_name(policy_model_name))
-        return (
-            Path(self.config.harbor_jobs_dir)
-            / dataset_key
-            / model_key
-        )
+        return Path(self.config.harbor_jobs_dir) / dataset_key / model_key
 
     def _get_dataset_key(self) -> str:
         """Derive a stable dataset key for folder naming."""
@@ -395,9 +385,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
             import_path=self.config.harbor_agent_import_path,
             model_name=model_name,
             override_timeout_sec=(
-                float(self.config.harbor_agent_timeout)
-                if self.config.harbor_agent_timeout is not None
-                else None
+                float(self.config.harbor_agent_timeout) if self.config.harbor_agent_timeout is not None else None
             ),
             kwargs=agent_kwargs,
         )
@@ -414,9 +402,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
 
         verifier_config = VerifierConfig(
             override_timeout_sec=(
-                float(self.config.harbor_verifier_timeout)
-                if self.config.harbor_verifier_timeout is not None
-                else None
+                float(self.config.harbor_verifier_timeout) if self.config.harbor_verifier_timeout is not None else None
             ),
         )
 
@@ -447,9 +433,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
             job_name=job_name,
             jobs_dir=jobs_dir,
             timeout_multiplier=(
-                self.config.harbor_timeout_multiplier
-                if self.config.harbor_timeout_multiplier is not None
-                else 1.0
+                self.config.harbor_timeout_multiplier if self.config.harbor_timeout_multiplier is not None else 1.0
             ),
             orchestrator=orchestrator_config,
             environment=environment_config,

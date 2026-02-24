@@ -1,7 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 import re
 from typing import Any
 
 import httpx
+from harbor.llms.base import (
+    BaseLLM,
+    ContextLengthExceededError,
+    LLMResponse,
+    OutputLengthExceededError,
+)
+from harbor.models.metric import UsageInfo
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -10,16 +31,10 @@ from tenacity import (
     wait_exponential,
 )
 
-from harbor.llms.base import (
-    BaseLLM,
-    ContextLengthExceededError,
-    LLMResponse,
-    OutputLengthExceededError,
-)
-from harbor.models.metric import UsageInfo
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 
-# Phrases in vLLM / OpenAI error bodies that signal context-length overflow. 
+
+# Phrases in vLLM / OpenAI error bodies that signal context-length overflow.
 _CONTEXT_LENGTH_ERROR_PHRASES = (
     "context length exceeded",
     "context_length_exceeded",
@@ -60,19 +75,19 @@ class NemoGymLLM(BaseLLM):
 
         # Pre-compute extra chat params from responses_create_params once,
         # since they don't change between calls.
-        self._extra_chat_params = self._build_extra_chat_params(
-            responses_create_params or {}
-        )
+        self._extra_chat_params = self._build_extra_chat_params(responses_create_params or {})
 
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=15),
         retry=(
             retry_if_exception_type(Exception)
-            & retry_if_not_exception_type((
-                ContextLengthExceededError,
-                OutputLengthExceededError,
-            ))
+            & retry_if_not_exception_type(
+                (
+                    ContextLengthExceededError,
+                    OutputLengthExceededError,
+                )
+            )
         ),
         reraise=True,
     )
@@ -110,8 +125,7 @@ class NemoGymLLM(BaseLLM):
         # and returns a fake 200 with id="chtcmpl-123" and content=None.
         if response_dict.get("id") == "chtcmpl-123":
             raise ContextLengthExceededError(
-                f"Model {self._model_name} context length exceeded "
-                f"(detected fake response id='chtcmpl-123')"
+                f"Model {self._model_name} context length exceeded (detected fake response id='chtcmpl-123')"
             )
 
         choices = response_dict.get("choices", [])
@@ -120,9 +134,7 @@ class NemoGymLLM(BaseLLM):
         content = message.get("content", "") if isinstance(message, dict) else ""
         if content is None:
             content = ""
-        reasoning_content = (
-            message.get("reasoning_content") if isinstance(message, dict) else None
-        )
+        reasoning_content = message.get("reasoning_content") if isinstance(message, dict) else None
 
         # Extract reasoning from the response content.  There are two cases:
         #
@@ -216,18 +228,14 @@ class NemoGymLLM(BaseLLM):
             max_output_tokens = self._model_info.get("max_output_tokens")
 
             if max_output_tokens is None:
-                self._logger.debug(
-                    f"Model '{self._model_name}' info found but missing max_output_tokens field."
-                )
+                self._logger.debug(f"Model '{self._model_name}' info found but missing max_output_tokens field.")
 
             if isinstance(max_output_tokens, int) and max_output_tokens > 0:
                 return max_output_tokens
 
             return None
         except Exception as e:
-            self._logger.debug(
-                f"Failed to retrieve model info for '{self._model_name}': {e}."
-            )
+            self._logger.debug(f"Failed to retrieve model info for '{self._model_name}': {e}.")
             return None
 
     async def _post_chat_completions(
@@ -241,9 +249,7 @@ class NemoGymLLM(BaseLLM):
         if response.status_code >= 400:
             error_text = response.text.lower()
             if any(phrase in error_text for phrase in _CONTEXT_LENGTH_ERROR_PHRASES):
-                raise ContextLengthExceededError(
-                    f"Model {self._model_name} context length exceeded: {response.text}"
-                )
+                raise ContextLengthExceededError(f"Model {self._model_name} context length exceeded: {response.text}")
             response.raise_for_status()
 
         return response.json()
@@ -258,15 +264,11 @@ class NemoGymLLM(BaseLLM):
         choice = choices[0] if isinstance(choices, list) and choices else {}
         message = choice.get("message", {}) if isinstance(choice, dict) else {}
 
-        prompt_token_ids = (
-            message.get("prompt_token_ids") if isinstance(message, dict) else None
-        )
+        prompt_token_ids = message.get("prompt_token_ids") if isinstance(message, dict) else None
         if prompt_token_ids is None:
             prompt_token_ids = response.get("prompt_token_ids")
 
-        completion_token_ids = (
-            message.get("generation_token_ids") if isinstance(message, dict) else None
-        )
+        completion_token_ids = message.get("generation_token_ids") if isinstance(message, dict) else None
 
         return (
             self._normalize_token_ids(prompt_token_ids),
@@ -279,20 +281,16 @@ class NemoGymLLM(BaseLLM):
 
         from responses_api_models.vllm_model.app import VLLMConverter
 
-        params_for_conversion = {
-            key: value for key, value in responses_create_params.items() if key != "input"
-        }
+        params_for_conversion = {key: value for key, value in responses_create_params.items() if key != "input"}
         params_for_conversion["input"] = []
-        responses_params = NeMoGymResponseCreateParamsNonStreaming.model_validate(
-            params_for_conversion
-        )
+        responses_params = NeMoGymResponseCreateParamsNonStreaming.model_validate(params_for_conversion)
 
         converter = VLLMConverter(
             return_token_id_information=self._collect_rollout_details,
         )
-        chat_params = converter.responses_to_chat_completion_create_params(
-            responses_params
-        ).model_dump(exclude_unset=True)
+        chat_params = converter.responses_to_chat_completion_create_params(responses_params).model_dump(
+            exclude_unset=True
+        )
 
         chat_params.pop("messages", None)
         return chat_params
@@ -310,9 +308,7 @@ class NemoGymLLM(BaseLLM):
         if isinstance(message, dict):
             generation_log_probs = message.get("generation_log_probs")
             if isinstance(generation_log_probs, list):
-                return [
-                    float(lp) for lp in generation_log_probs if isinstance(lp, (int, float))
-                ] or None
+                return [float(lp) for lp in generation_log_probs if isinstance(lp, (int, float))] or None
 
         logprobs_data = choice.get("logprobs")
         if isinstance(logprobs_data, dict):
@@ -336,9 +332,7 @@ class NemoGymLLM(BaseLLM):
         completion_tokens = usage.get("completion_tokens", 0) or 0
         prompt_tokens_details = usage.get("prompt_tokens_details") or {}
         cache_tokens = (
-            prompt_tokens_details.get("cached_tokens", 0)
-            if isinstance(prompt_tokens_details, dict)
-            else 0
+            prompt_tokens_details.get("cached_tokens", 0) if isinstance(prompt_tokens_details, dict) else 0
         ) or 0
 
         return UsageInfo(

@@ -1,3 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
 FastAPI server that runs inside a Singularity container to execute commands.
 
@@ -10,7 +24,6 @@ Usage (inside container):
 """
 
 import argparse
-import asyncio
 import inspect
 import logging
 import os
@@ -53,10 +66,7 @@ def setup_logging() -> None:
     # Console handler - outputs to stdout, captured by parent process
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)  # Set level that is logged to trial.log
-    console_formatter = logging.Formatter(
-        "[%(asctime)s] %(levelname)s: %(message)s",
-        datefmt="%H:%M:%S"
-    )
+    console_formatter = logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s", datefmt="%H:%M:%S")
     console_handler.setFormatter(console_formatter)
     logger.addHandler(console_handler)
 
@@ -108,6 +118,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Could not stop tmux server: {e}")
 
+
 # =============================================================================
 # FastAPI App & Routes
 # =============================================================================
@@ -119,11 +130,11 @@ _BLACKLISTED_COMMAND_PATTERNS = [
     # Process-killing commands that could escape the container and kill vLLM workers
     re.compile(r"\bkillall\b"),
     re.compile(r"\bpkill\b"),
-    re.compile(r"\bkill\s+.*\$\("),        # kill $(...)
-    re.compile(r"\bkill\s+.*`"),            # kill `...`
+    re.compile(r"\bkill\s+.*\$\("),  # kill $(...)
+    re.compile(r"\bkill\s+.*`"),  # kill `...`
     re.compile(r"\bkill\s+(-\d+\s+|-[A-Z]+\s+|-SIG[A-Z]+\s+)*\$\w+"),  # kill $VAR
-    re.compile(r"\bkill\s+(-\d+\s+|-[A-Z]+\s+|-SIG[A-Z]+\s+)*-1\b"),   # kill -1 (all user procs)
-    re.compile(r"\bkill\s+(-\d+\s+|-[A-Z]+\s+|-SIG[A-Z]+\s+)*0\b"),    # kill 0 (process group)
+    re.compile(r"\bkill\s+(-\d+\s+|-[A-Z]+\s+|-SIG[A-Z]+\s+)*-1\b"),  # kill -1 (all user procs)
+    re.compile(r"\bkill\s+(-\d+\s+|-[A-Z]+\s+|-SIG[A-Z]+\s+)*0\b"),  # kill 0 (process group)
     # System shutdown / reboot
     re.compile(r"\b(shutdown|reboot|poweroff|halt|init\s+[06])\b"),
     # Destructive disk writes
@@ -286,7 +297,7 @@ def setup_dpkg_for_overlay() -> None:
                     src = os.path.join(root, filename)
                     rel_path = os.path.relpath(src, dpkg_dir)
                     try:
-                        with open(src, 'rb') as f:
+                        with open(src, "rb") as f:
                             saved_contents[rel_path] = f.read()
                     except Exception:
                         pass
@@ -302,7 +313,7 @@ def setup_dpkg_for_overlay() -> None:
             dest = os.path.join(dpkg_dir, rel_path)
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             try:
-                with open(dest, 'wb') as f:
+                with open(dest, "wb") as f:
                     f.write(content)
             except Exception:
                 pass
@@ -324,14 +335,22 @@ def setup_common_directories() -> None:
     """
     directories = [
         # apt
-        "/etc/apt", "/etc/apt/apt.conf.d", "/etc/apt/preferences.d",
-        "/etc/apt/sources.list.d", "/etc/apt/trusted.gpg.d",
-        "/var/lib/apt/lists/partial", "/var/cache/apt/archives/partial",
+        "/etc/apt",
+        "/etc/apt/apt.conf.d",
+        "/etc/apt/preferences.d",
+        "/etc/apt/sources.list.d",
+        "/etc/apt/trusted.gpg.d",
+        "/var/lib/apt/lists/partial",
+        "/var/cache/apt/archives/partial",
         "/var/log/apt",
         # temp
-        "/tmp", "/var/tmp",
+        "/tmp",
+        "/var/tmp",
         # user
-        "/root", "/root/.cache", "/root/.local/bin", "/home",
+        "/root",
+        "/root/.cache",
+        "/root/.local/bin",
+        "/home",
         # bin
         "/usr/local/bin",
     ]
@@ -356,8 +375,8 @@ def setup_fake_sudo() -> None:
     os.makedirs(os.path.dirname(sudo_path), exist_ok=True)
 
     with open(sudo_path, "w") as f:
-        f.write('#!/bin/bash\n')
-        f.write('# Fake sudo for Singularity fakeroot\n')
+        f.write("#!/bin/bash\n")
+        f.write("# Fake sudo for Singularity fakeroot\n")
         f.write('exec "$@"\n')
     os.chmod(sudo_path, 0o755)
 
@@ -388,9 +407,9 @@ def setup_apt_sources() -> None:
         return  # Already has source repos
 
     # Add deb-src for each deb line
-    deb_lines = [line for line in content.split('\n') if line.strip().startswith('deb ')]
+    deb_lines = [line for line in content.split("\n") if line.strip().startswith("deb ")]
     for deb_line in deb_lines:
-        src_line = deb_line.replace('deb ', 'deb-src ', 1)
+        src_line = deb_line.replace("deb ", "deb-src ", 1)
         if src_line not in content:
             content += f"\n{src_line}"
 
@@ -434,6 +453,7 @@ def setup_singularity_environment(workdir: str) -> None:
 
     os.environ["SINGULARITY_WORKDIR"] = workdir
     logger.debug("Singularity environment setup complete")
+
 
 # =============================================================================
 # Main Entry Point

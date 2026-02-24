@@ -1,9 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 from pathlib import Path
 from typing import Any, Literal
 
 from harbor.agents.terminus_2.terminus_2 import Terminus2
 from harbor.environments.base import BaseEnvironment
-from harbor.llms.base import BaseLLM, ContextLengthExceededError
+from harbor.llms.base import BaseLLM
 from harbor.models.agent.context import AgentContext
 
 from responses_api_agents.harbor_agent.custom_agents.llms.nemo_gym_llm import NemoGymLLM
@@ -24,8 +38,7 @@ class Terminus2NemoGym(Terminus2):
         parser_name: str = "json",
         api_base: str | None = None,
         temperature: float = 0.7,
-        reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "default"]
-        | None = None,
+        reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "default"] | None = None,
         collect_rollout_details: bool = False,
         session_id: str | None = None,
         enable_summarize: bool = True,
@@ -48,9 +61,7 @@ class Terminus2NemoGym(Terminus2):
             if model_name is None:
                 raise ValueError("model_name is required for Terminus2NemoGym")
             if api_base is None:
-                raise ValueError(
-                    "api_base is required for Terminus2NemoGym when llm is not provided"
-                )
+                raise ValueError("api_base is required for Terminus2NemoGym when llm is not provided")
 
             llm = NemoGymLLM(
                 model_name=model_name,
@@ -86,9 +97,7 @@ class Terminus2NemoGym(Terminus2):
             **kwargs,
         )
 
-    async def run(
-        self, instruction: str, environment: BaseEnvironment, context: AgentContext
-    ) -> None:
+    async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
         """Override run() to gracefully handle agent errors.
 
         The parent's run() has a finally block that saves rollout_details and
@@ -101,7 +110,4 @@ class Terminus2NemoGym(Terminus2):
         try:
             await super().run(instruction, environment, context)
         except Exception as e:
-            self.logger.info(
-                f"Agent error: {type(e).__name__}: {e}. "
-                "Returning history from completed turns."
-            )
+            self.logger.info(f"Agent error: {type(e).__name__}: {e}. Returning history from completed turns.")

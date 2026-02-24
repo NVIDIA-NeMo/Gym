@@ -248,9 +248,7 @@ class HarborAgentUtils:
         return None
 
     @staticmethod
-    def _parse_raw_content_tool_calls(
-        message: str, agent_step_index: int
-    ) -> List[Dict[str, Any]]:
+    def _parse_raw_content_tool_calls(message: str, agent_step_index: int) -> List[Dict[str, Any]]:
         """Parse function calls from a raw terminus-2 JSON response.
 
         When ``raw_content=true`` in the trajectory config, the step message

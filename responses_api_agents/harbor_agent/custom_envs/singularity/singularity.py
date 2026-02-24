@@ -1,3 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
 Singularity/Apptainer environment for running tasks on HPC clusters.
 
@@ -16,7 +30,6 @@ import tempfile
 from pathlib import Path
 
 import httpx
-
 from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.models.environment_type import EnvironmentType
 from harbor.models.task.config import EnvironmentConfig
@@ -25,6 +38,7 @@ from harbor.models.trial.paths import EnvironmentPaths, TrialPaths
 
 class MemoryLimitExceededError(Exception):
     """Raised when a container exceeds its memory limit."""
+
     pass
 
 
@@ -109,10 +123,7 @@ class SingularityEnvironment(BaseEnvironment):
     @property
     def _is_sif_image(self) -> bool:
         """True when docker_image points to a pre-built .sif file."""
-        return bool(
-            self.task_env_config.docker_image
-            and self.task_env_config.docker_image.endswith(".sif")
-        )
+        return bool(self.task_env_config.docker_image and self.task_env_config.docker_image.endswith(".sif"))
 
     @property
     def _dockerfile_path(self) -> Path:
@@ -130,8 +141,7 @@ class SingularityEnvironment(BaseEnvironment):
             sif_path = Path(self.task_env_config.docker_image)
             if not sif_path.exists():
                 raise FileNotFoundError(
-                    f".sif file not found: {sif_path}. "
-                    f"Please convert Docker images to .sif format first."
+                    f".sif file not found: {sif_path}. Please convert Docker images to .sif format first."
                 )
             self.logger.debug(f"Using pre-built .sif image: {sif_path}")
 
@@ -167,7 +177,6 @@ class SingularityEnvironment(BaseEnvironment):
         port = s.getsockname()[1]
         return s, port
 
-
     async def _convert_docker_to_sif(self, docker_image: str) -> Path:
         """Convert a Docker image to Singularity .sif format.
 
@@ -193,9 +202,7 @@ class SingularityEnvironment(BaseEnvironment):
         try:
             # Run blocking flock in thread executor to avoid blocking event loop
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
-                None, lambda: fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            )
+            await loop.run_in_executor(None, lambda: fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX))
             self.logger.debug(f"Lock acquired for: {docker_image}")
 
             # Handle force pull - delete existing .sif if requested
@@ -266,46 +273,46 @@ class SingularityEnvironment(BaseEnvironment):
         # (venv/conda/system) and exec'd so the process can have a different name.
         bootstrap_script = self._staging_dir / "bootstrap.sh"
         bootstrap_script.write_text(
-            '#!/bin/bash\n'
-            '# Harbor server bootstrap - run task setup.sh then start server.\n'
-            '# First arg is WORKDIR (container cwd), rest are server args.\n'
+            "#!/bin/bash\n"
+            "# Harbor server bootstrap - run task setup.sh then start server.\n"
+            "# First arg is WORKDIR (container cwd), rest are server args.\n"
             'WORKDIR="${1:-/app}"; shift\n'
-            '\n'
-            '# Refresh apt cache so apt-get install (e.g. in setup.sh or for tmux) can find packages\n'
-            'if command -v apt-get >/dev/null 2>&1; then\n'
-            '  apt-get update -qq 2>/dev/null || true\n'
-            'fi\n'
-            '\n'
-            '# Workdir/venv/conda for Terminus-2 tmux login shells: set in task environment/files/setup.sh\n'
-            '# (e.g. append to ~/.bash_profile so bash --login sees correct PATH and activates venv/conda).\n'
-            '\n'
-            'if [ -d /staging/env_files ]; then\n'
-            '    mkdir -p /app\n'
-            '    cp -r /staging/env_files/. /app/ 2>/dev/null || true\n'
-            '    if [ -f /app/setup.sh ]; then\n'
+            "\n"
+            "# Refresh apt cache so apt-get install (e.g. in setup.sh or for tmux) can find packages\n"
+            "if command -v apt-get >/dev/null 2>&1; then\n"
+            "  apt-get update -qq 2>/dev/null || true\n"
+            "fi\n"
+            "\n"
+            "# Workdir/venv/conda for Terminus-2 tmux login shells: set in task environment/files/setup.sh\n"
+            "# (e.g. append to ~/.bash_profile so bash --login sees correct PATH and activates venv/conda).\n"
+            "\n"
+            "if [ -d /staging/env_files ]; then\n"
+            "    mkdir -p /app\n"
+            "    cp -r /staging/env_files/. /app/ 2>/dev/null || true\n"
+            "    if [ -f /app/setup.sh ]; then\n"
             '        echo "[harbor] Running task setup.sh..." >&2\n'
-            '        bash /app/setup.sh\n'
-            '    fi\n'
-            'fi\n'
-            '\n'
-            '# Terminus-2: tmux socket dir; /tmp may be read-only or unwritable in Singularity\n'
+            "        bash /app/setup.sh\n"
+            "    fi\n"
+            "fi\n"
+            "\n"
+            "# Terminus-2: tmux socket dir; /tmp may be read-only or unwritable in Singularity\n"
             'export TMUX_TMPDIR="${TMUX_TMPDIR:-/app/.tmux-sockets}"\n'
             'mkdir -p "$TMUX_TMPDIR"\n'
-            '\n'
+            "\n"
             'PYTHON_EXEC=""\n'
             'for cand in "$(which python3 2>/dev/null | head -1)" "${WORKDIR}/.venv/bin/python3" "./.venv/bin/python3" "/usr/bin/python3" "/opt/conda/bin/python3" "/opt/miniconda3/bin/python3"; do\n'
             '  if [ -n "$cand" ] && [ -x "$cand" ] && "$cand" -c "import uvicorn" 2>/dev/null; then\n'
             '    PYTHON_EXEC="$cand"; break\n'
-            '  fi\n'
-            'done\n'
+            "  fi\n"
+            "done\n"
             'if [ -z "$PYTHON_EXEC" ]; then\n'
             '  echo "[harbor] Error: uvicorn not available. Add install to task environment/files/setup.sh" >&2\n'
-            '  exit 1\n'
-            'fi\n'
-            '# Resolve to absolute path; exec the real path (not a symlink) so Python finds venv site-packages\n'
+            "  exit 1\n"
+            "fi\n"
+            "# Resolve to absolute path; exec the real path (not a symlink) so Python finds venv site-packages\n"
             'if [ "${PYTHON_EXEC#/}" = "$PYTHON_EXEC" ]; then\n'
             '  PYTHON_EXEC="$(cd "$(dirname "$PYTHON_EXEC")" && pwd)/$(basename "$PYTHON_EXEC")"\n'
-            'fi\n'
+            "fi\n"
             'exec "$PYTHON_EXEC" "$@"\n'
         )
         bootstrap_script.chmod(0o755)
@@ -327,9 +334,12 @@ class SingularityEnvironment(BaseEnvironment):
             # Mount task environment/files so setup.sh can run before server (e.g. install Python/uvicorn)
             env_files_dir = self.environment_dir / "files"
             bind_mounts = [
-                "-B", f"{self._staging_dir}:/staging",
-                "-B", f"{self.trial_paths.verifier_dir}:{EnvironmentPaths.verifier_dir}",
-                "-B", f"{self.trial_paths.agent_dir}:{EnvironmentPaths.agent_dir}",
+                "-B",
+                f"{self._staging_dir}:/staging",
+                "-B",
+                f"{self.trial_paths.verifier_dir}:{EnvironmentPaths.verifier_dir}",
+                "-B",
+                f"{self.trial_paths.agent_dir}:{EnvironmentPaths.agent_dir}",
             ]
             if env_files_dir.exists():
                 bind_mounts.extend(["-B", f"{env_files_dir}:/staging/env_files"])
@@ -347,18 +357,23 @@ class SingularityEnvironment(BaseEnvironment):
                         no_mount_args.extend(["--no-mount", part])
             # Use exec + wrapper so /app exists before runtime chdir to image WORKDIR (R2E-Gym has no /app)
             bootstrap_cmd = [
-                "bash", "-c",
-                "mkdir -p /app && exec /staging/bootstrap.sh \"$@\"",
+                "bash",
+                "-c",
+                'mkdir -p /app && exec /staging/bootstrap.sh "$@"',
                 "bash",
                 self._workdir,
                 "/staging/_hbexec.py",
-                "--port", str(self._server_port),
-                "--workdir", self._workdir,
+                "--port",
+                str(self._server_port),
+                "--workdir",
+                self._workdir,
             ]
             cmd = [
-                "singularity", "exec",
+                "singularity",
+                "exec",
                 *no_mount_args,
-                "--pwd", self._workdir,
+                "--pwd",
+                self._workdir,
                 "--writable-tmpfs",
                 "--fakeroot",
                 "--containall",
@@ -368,7 +383,9 @@ class SingularityEnvironment(BaseEnvironment):
                 *bootstrap_cmd,
             ]
 
-            self.logger.info(f"Starting Singularity container with server on port {self._server_port} (attempt {port_attempt + 1}/{max_port_retries})")
+            self.logger.info(
+                f"Starting Singularity container with server on port {self._server_port} (attempt {port_attempt + 1}/{max_port_retries})"
+            )
 
             # Release the reserved port and immediately start the container
             # The small window here is unavoidable, but SO_REUSEADDR helps
@@ -389,9 +406,7 @@ class SingularityEnvironment(BaseEnvironment):
 
             for i in range(60):  # 60 second timeout for server startup
                 try:
-                    response = await self._http_client.get(
-                        f"http://localhost:{self._server_port}/health"
-                    )
+                    response = await self._http_client.get(f"http://localhost:{self._server_port}/health")
                     if response.status_code == 200:
                         # IMPORTANT: Verify OUR server is still alive before declaring ready.
                         # Another concurrent trial may have grabbed this port and responded
@@ -409,9 +424,7 @@ class SingularityEnvironment(BaseEnvironment):
                             break  # Will trigger retry with new port
                         self.logger.info("Singularity FastAPI server is ready")
                         # Start memory watchdog now that server is ready
-                        self._memory_watchdog_task = asyncio.create_task(
-                            self._memory_watchdog()
-                        )
+                        self._memory_watchdog_task = asyncio.create_task(self._memory_watchdog())
                         server_ready = True
                         break
                 except httpx.RequestError:
@@ -421,10 +434,11 @@ class SingularityEnvironment(BaseEnvironment):
                 if self._server_process.returncode is not None:
                     await self._stream_task
                     last_error = RuntimeError(
-                        f"Server process died on port {self._server_port}. "
-                        f"Check trial.log for server output."
+                        f"Server process died on port {self._server_port}. Check trial.log for server output."
                     )
-                    self.logger.warning(f"Server failed to start on port {self._server_port}, will retry with new port")
+                    self.logger.warning(
+                        f"Server failed to start on port {self._server_port}, will retry with new port"
+                    )
                     break
 
                 await asyncio.sleep(1)
@@ -438,7 +452,9 @@ class SingularityEnvironment(BaseEnvironment):
                 self._http_client = None
 
         # All retries exhausted
-        raise last_error or RuntimeError(f"Failed to start Singularity FastAPI server after {max_port_retries} port attempts")
+        raise last_error or RuntimeError(
+            f"Failed to start Singularity FastAPI server after {max_port_retries} port attempts"
+        )
 
     async def _stream_server_output(self) -> None:
         """Stream server stdout/stderr to logger in real-time."""
@@ -447,7 +463,7 @@ class SingularityEnvironment(BaseEnvironment):
 
         try:
             async for line in self._server_process.stdout:
-                decoded = line.decode(errors='replace').rstrip()
+                decoded = line.decode(errors="replace").rstrip()
                 if decoded:
                     # Log at debug level to avoid cluttering trial logs
                     self.logger.debug(f"[server] {decoded}")
@@ -465,6 +481,7 @@ class SingularityEnvironment(BaseEnvironment):
         Note: /proc reads are essentially instantaneous (kernel memory, not disk)
         so this doesn't need to be async.
         """
+
         def get_all_descendants(root_pid: int) -> set[int]:
             """Get all PIDs in the process tree by walking /proc children."""
             pids = set()
@@ -537,7 +554,7 @@ class SingularityEnvironment(BaseEnvironment):
 
         self.logger.debug(
             f"Memory watchdog started: limit={self._memory_limit_bytes // 1024 // 1024}MB, "
-            f"kill_at={kill_threshold*100:.0f}%, intervals={fast_interval}s/{base_interval}s"
+            f"kill_at={kill_threshold * 100:.0f}%, intervals={fast_interval}s/{base_interval}s"
         )
 
         while True:
@@ -562,7 +579,7 @@ class SingularityEnvironment(BaseEnvironment):
                         # Warn if growth rate would hit limit in less than 5 seconds
                         if growth_rate > 0:
                             remaining_bytes = self._memory_limit_bytes * kill_threshold - mem_usage
-                            time_to_limit = remaining_bytes / growth_rate if growth_rate > 0 else float('inf')
+                            time_to_limit = remaining_bytes / growth_rate if growth_rate > 0 else float("inf")
                             if time_to_limit < 5 and time_to_limit > 0:
                                 self.logger.warning(
                                     f"Memory explosion detected: {mem_mb:.0f}MB, "
@@ -577,7 +594,7 @@ class SingularityEnvironment(BaseEnvironment):
                 if mem_usage > self._memory_limit_bytes * kill_threshold:
                     error_msg = f"Container exceeded memory limit ({mem_mb:.0f}MB > {limit_mb * kill_threshold:.0f}MB)"
                     self.logger.error(
-                        f"Memory limit exceeded: {mem_mb:.0f}MB > {limit_mb * kill_threshold:.0f}MB ({usage_pct*100:.0f}%). "
+                        f"Memory limit exceeded: {mem_mb:.0f}MB > {limit_mb * kill_threshold:.0f}MB ({usage_pct * 100:.0f}%). "
                         f"Killing container to prevent OOM."
                     )
                     # Set flag BEFORE killing so exec() can check it
@@ -650,16 +667,12 @@ class SingularityEnvironment(BaseEnvironment):
             # Run pkill as a backup to catch any escaped child processes
             # (e.g., processes that daemonized or detached)
             try:
-                subprocess.run(
-                    ["pkill", "-9", "-P", str(pid)],
-                    capture_output=True,
-                    timeout=5
-                )
+                subprocess.run(["pkill", "-9", "-P", str(pid)], capture_output=True, timeout=5)
             except Exception:
                 pass
 
         # Cancel stream task if running
-        if hasattr(self, '_stream_task') and self._stream_task:
+        if hasattr(self, "_stream_task") and self._stream_task:
             self._stream_task.cancel()
             try:
                 await self._stream_task
@@ -672,9 +685,7 @@ class SingularityEnvironment(BaseEnvironment):
 
         # Note: We don't delete .sif files as they can be reused
         if delete:
-            self.logger.debug(
-                f"Singularity image preserved at {self._sif_path} for reuse"
-            )
+            self.logger.debug(f"Singularity image preserved at {self._sif_path} for reuse")
 
     async def exec(
         self,
@@ -721,9 +732,7 @@ class SingularityEnvironment(BaseEnvironment):
             # Log errors so they're visible in trial logs (stderr is otherwise discarded)
             if exec_result.return_code != 0:
                 error_output = exec_result.stderr or exec_result.stdout or "<no output>"
-                self.logger.warning(
-                    f"Command failed (rc={exec_result.return_code}): {error_output}"
-                )
+                self.logger.warning(f"Command failed (rc={exec_result.return_code}): {error_output}")
 
             return exec_result
 
@@ -732,10 +741,9 @@ class SingularityEnvironment(BaseEnvironment):
             if self._memory_limit_exceeded:
                 raise MemoryLimitExceededError(self._memory_limit_exceeded)
             raise asyncio.TimeoutError(
-                f"HTTP request timed out after {http_timeout} seconds"
-                if http_timeout else "HTTP request timed out"
+                f"HTTP request timed out after {http_timeout} seconds" if http_timeout else "HTTP request timed out"
             )
-        except (httpx.ConnectError, httpx.RemoteProtocolError) as e:
+        except (httpx.ConnectError, httpx.RemoteProtocolError):
             # Check if memory watchdog killed the container
             if self._memory_limit_exceeded:
                 raise MemoryLimitExceededError(self._memory_limit_exceeded)

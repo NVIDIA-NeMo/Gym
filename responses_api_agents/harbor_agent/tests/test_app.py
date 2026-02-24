@@ -125,19 +125,24 @@ DEFAULT_TRAJECTORY = _make_trajectory(
     steps=[
         _USER_STEP,
         _make_step_agent(
-            2, "Analysis: I will look at foo.py.\nPlan: Read the file and fix the bug.",
+            2,
+            "Analysis: I will look at foo.py.\nPlan: Read the file and fix the bug.",
             reasoning_content="Hidden reasoning step 1.",
             tool_calls=[_bash_tool_call("call_0_1", "cat foo.py\n")],
             observation_content="def foo():\n    return 1 + '2'\n",
-            prompt_token_ids=[100, 101, 102], completion_token_ids=[200, 201, 202],
+            prompt_token_ids=[100, 101, 102],
+            completion_token_ids=[200, 201, 202],
             logprobs=[-0.01, -0.02, -0.03],
         ),
         _make_step_agent(
-            3, "Analysis: Found the bug. Fixing it now.\nPlan: Change '2' to 2.",
+            3,
+            "Analysis: Found the bug. Fixing it now.\nPlan: Change '2' to 2.",
             reasoning_content="Hidden reasoning step 2.",
             tool_calls=[_bash_tool_call("call_1_1", "sed -i 's/+ '2'/+ 2/' foo.py\n")],
-            prompt_tokens=700, completion_tokens=80,
-            prompt_token_ids=[103, 104, 105], completion_token_ids=[203, 204, 205],
+            prompt_tokens=700,
+            completion_tokens=80,
+            prompt_token_ids=[103, 104, 105],
+            completion_token_ids=[203, 204, 205],
             logprobs=[-0.04, -0.05],
         ),
     ],
@@ -147,18 +152,29 @@ TRAJECTORY_RAW_CONTENT = _make_trajectory(
     steps=[
         _USER_STEP,
         _make_step_agent(
-            2, _raw_msg("I will look at foo.py.", "Read the file and fix the bug.",
-                        [{"keystrokes": "cat foo.py\n", "duration": 0.1}]),
+            2,
+            _raw_msg(
+                "I will look at foo.py.",
+                "Read the file and fix the bug.",
+                [{"keystrokes": "cat foo.py\n", "duration": 0.1}],
+            ),
             observation_content="def foo():\n    return 1 + '2'\n",
-            prompt_token_ids=[100, 101, 102], completion_token_ids=[200, 201, 202],
+            prompt_token_ids=[100, 101, 102],
+            completion_token_ids=[200, 201, 202],
             logprobs=[-0.01, -0.02, -0.03],
         ),
         _make_step_agent(
-            3, _raw_msg("Found the bug. Fixing it now.", "Change '2' to 2.",
-                        [{"keystrokes": "sed -i 's/+ '2'/+ 2/' foo.py\n", "duration": 0.1}],
-                        task_complete=True),
-            prompt_tokens=700, completion_tokens=80,
-            prompt_token_ids=[103, 104, 105], completion_token_ids=[203, 204, 205],
+            3,
+            _raw_msg(
+                "Found the bug. Fixing it now.",
+                "Change '2' to 2.",
+                [{"keystrokes": "sed -i 's/+ '2'/+ 2/' foo.py\n", "duration": 0.1}],
+                task_complete=True,
+            ),
+            prompt_tokens=700,
+            completion_tokens=80,
+            prompt_token_ids=[103, 104, 105],
+            completion_token_ids=[203, 204, 205],
             logprobs=[-0.04, -0.05],
         ),
     ],
@@ -168,29 +184,39 @@ TRAJECTORY_RAW_CONTENT_MULTI_CMD = _make_trajectory(
     steps=[
         _make_step_user(1, "Create hello.txt with Hello, world!"),
         _make_step_agent(
-            2, _raw_msg("I need to create the file.", "Write and verify the file.", [
-                {"keystrokes": "echo 'Hello, world!' > hello.txt\n", "duration": 0.1},
-                {"keystrokes": "cat hello.txt\n", "duration": 0.1},
-            ]),
+            2,
+            _raw_msg(
+                "I need to create the file.",
+                "Write and verify the file.",
+                [
+                    {"keystrokes": "echo 'Hello, world!' > hello.txt\n", "duration": 0.1},
+                    {"keystrokes": "cat hello.txt\n", "duration": 0.1},
+                ],
+            ),
             observation_content="Hello, world!\n",
-            prompt_tokens=300, completion_tokens=60,
+            prompt_tokens=300,
+            completion_tokens=60,
         ),
     ],
-    total_prompt=300, total_completion=60,
+    total_prompt=300,
+    total_completion=60,
 )
 
 TRAJECTORY_NO_TOKEN_DETAILS = _make_trajectory(
     steps=[
         _USER_STEP,
         _make_step_agent(
-            2, "Analysis: I will look at foo.py.\nPlan: Read the file and fix the bug.",
+            2,
+            "Analysis: I will look at foo.py.\nPlan: Read the file and fix the bug.",
             tool_calls=[_bash_tool_call("call_0_1", "cat foo.py\n")],
             observation_content="def foo():\n    return 1 + '2'\n",
         ),
         _make_step_agent(
-            3, "Analysis: Found the bug. Fixing it now.\nPlan: Change '2' to 2.",
+            3,
+            "Analysis: Found the bug. Fixing it now.\nPlan: Change '2' to 2.",
             tool_calls=[_bash_tool_call("call_1_1", "sed -i 's/+ '2'/+ 2/' foo.py\n")],
-            prompt_tokens=700, completion_tokens=80,
+            prompt_tokens=700,
+            completion_tokens=80,
         ),
     ],
 )
@@ -204,7 +230,11 @@ TRAJECTORY_NO_TOKEN_DETAILS = _make_trajectory(
 def _make_server(**config_overrides) -> HarborAgent:
     """Create Harbor agent server with test defaults."""
     defaults: Dict[str, Any] = dict(
-        name="harbor_agent", host="0.0.0.0", port=8080, entrypoint="", concurrency=1,
+        name="harbor_agent",
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        concurrency=1,
         model_server={"type": "responses_api_models", "name": "test_model_server"},
         harbor_agent_name="terminus-2",
         harbor_local_dataset_path="/tmp/test_dataset",
@@ -214,7 +244,9 @@ def _make_server(**config_overrides) -> HarborAgent:
     defaults.update(config_overrides)
     config = HarborAgentConfig(**defaults)
     return HarborAgent.model_construct(
-        config=config, server_client=MagicMock(), sem=Semaphore(config.concurrency),
+        config=config,
+        server_client=MagicMock(),
+        sem=Semaphore(config.concurrency),
     )
 
 
@@ -229,9 +261,7 @@ def _make_run_request(instance_id="test_task_123", **kwargs) -> HarborRunRequest
 
 _GLOBAL_CONFIG = {
     "policy_model_name": "test_model",
-    "test_model_server": {
-        "responses_api_models": {"vllm_model": {"host": "policy-host", "port": 9000}}
-    },
+    "test_model_server": {"responses_api_models": {"vllm_model": {"host": "policy-host", "port": 9000}}},
 }
 
 
@@ -316,11 +346,14 @@ class TestApp:
         assert response.responses_create_params.temperature == 0.3
         assert response.responses_create_params.input == []
 
-    @pytest.mark.parametrize("model_name, expected", [
-        ("/lustre/models/nano-v3-sft-hf", "nano-v3-sft-hf"),
-        ("Qwen/Qwen3-8B", "Qwen3-8B"),
-        ("my-model", "my-model"),
-    ])
+    @pytest.mark.parametrize(
+        "model_name, expected",
+        [
+            ("/lustre/models/nano-v3-sft-hf", "nano-v3-sft-hf"),
+            ("Qwen/Qwen3-8B", "Qwen3-8B"),
+            ("my-model", "my-model"),
+        ],
+    )
     def test_extract_model_name(self, model_name, expected) -> None:
         assert HarborAgent._extract_model_name(model_name) == expected
 
@@ -350,12 +383,14 @@ class TestExtractInputFromTrajectory:
         assert HarborAgentUtils.extract_input_from_trajectory(trajectory) == []
 
     def test_stops_at_first_agent_step(self) -> None:
-        trajectory = {"steps": [
-            {"step_id": 1, "source": "user", "message": "System prompt"},
-            {"step_id": 2, "source": "user", "message": "Task description"},
-            {"step_id": 3, "source": "agent", "message": "OK"},
-            {"step_id": 4, "source": "user", "message": "Follow-up"},
-        ]}
+        trajectory = {
+            "steps": [
+                {"step_id": 1, "source": "user", "message": "System prompt"},
+                {"step_id": 2, "source": "user", "message": "Task description"},
+                {"step_id": 3, "source": "agent", "message": "OK"},
+                {"step_id": 4, "source": "user", "message": "Follow-up"},
+            ]
+        }
         msgs = HarborAgentUtils.extract_input_from_trajectory(trajectory)
         assert len(msgs) == 2
         assert msgs[1].content == "Task description"
@@ -382,23 +417,29 @@ class TestTrialResultToResponses:
 
 
 class TestExtractUsage:
-    @pytest.mark.parametrize("trial_result, trajectory, expected_total", [
-        (DEFAULT_TRIAL_RESULT, DEFAULT_TRAJECTORY, 1380),
-        (DEFAULT_TRIAL_RESULT, None, 150),
-        ({"agent_result": None}, None, 0),
-    ])
+    @pytest.mark.parametrize(
+        "trial_result, trajectory, expected_total",
+        [
+            (DEFAULT_TRIAL_RESULT, DEFAULT_TRAJECTORY, 1380),
+            (DEFAULT_TRIAL_RESULT, None, 150),
+            ({"agent_result": None}, None, 0),
+        ],
+    )
     def test_extract_usage(self, trial_result, trajectory, expected_total) -> None:
         assert HarborAgentUtils.extract_usage(trial_result, trajectory)["total_tokens"] == expected_total
 
 
 class TestExtractReward:
-    @pytest.mark.parametrize("verifier_result, expected", [
-        ({"rewards": {"reward": 1.0}}, 1.0),
-        ({"rewards": {"reward": 0.0}}, 0.0),
-        (None, 0.0),
-        ({}, 0.0),
-        ({"rewards": {"accuracy": 0.75}}, 0.75),
-    ])
+    @pytest.mark.parametrize(
+        "verifier_result, expected",
+        [
+            ({"rewards": {"reward": 1.0}}, 1.0),
+            ({"rewards": {"reward": 0.0}}, 0.0),
+            (None, 0.0),
+            ({}, 0.0),
+            ({"rewards": {"accuracy": 0.75}}, 0.75),
+        ],
+    )
     def test_extract_reward(self, verifier_result, expected) -> None:
         assert HarborAgentUtils.extract_reward(verifier_result) == expected
 
@@ -424,7 +465,8 @@ class TestExtractJsonObject:
 class TestParseRawContentToolCalls:
     def test_single_command(self) -> None:
         calls = HarborAgentUtils._parse_raw_content_tool_calls(
-            _raw_msg("test", "test", [{"keystrokes": "cat foo.py\n", "duration": 0.1}]), 0,
+            _raw_msg("test", "test", [{"keystrokes": "cat foo.py\n", "duration": 0.1}]),
+            0,
         )
         assert len(calls) == 1
         assert calls[0]["tool_call_id"] == "call_0_1"
@@ -433,13 +475,15 @@ class TestParseRawContentToolCalls:
 
     def test_multiple_commands(self) -> None:
         calls = HarborAgentUtils._parse_raw_content_tool_calls(
-            _raw_msg("test", "test", [{"keystrokes": "echo hi\n"}, {"keystrokes": "cat f\n"}]), 2,
+            _raw_msg("test", "test", [{"keystrokes": "echo hi\n"}, {"keystrokes": "cat f\n"}]),
+            2,
         )
         assert [c["tool_call_id"] for c in calls] == ["call_2_1", "call_2_2"]
 
     def test_task_complete(self) -> None:
         calls = HarborAgentUtils._parse_raw_content_tool_calls(
-            _raw_msg("Done", "done", [{"keystrokes": "echo done\n"}], task_complete=True), 3,
+            _raw_msg("Done", "done", [{"keystrokes": "echo done\n"}], task_complete=True),
+            3,
         )
         assert len(calls) == 1
         assert calls[0]["function_name"] == "bash_command"
@@ -451,7 +495,8 @@ class TestParseRawContentToolCalls:
 
     def test_missing_duration_defaults(self) -> None:
         calls = HarborAgentUtils._parse_raw_content_tool_calls(
-            _raw_msg("test", "test", [{"keystrokes": "ls\n"}]), 0,
+            _raw_msg("test", "test", [{"keystrokes": "ls\n"}]),
+            0,
         )
         assert calls[0]["arguments"]["duration"] == 1.0
 
@@ -463,9 +508,17 @@ class TestParseRawContentToolCalls:
         assert HarborAgentUtils._parse_raw_content_tool_calls(text, 0) == []
 
     def test_skips_invalid_commands(self) -> None:
-        msg = json.dumps({"analysis": "t", "plan": "t", "commands": [
-            "not a dict", {"no_keystrokes": True}, {"keystrokes": "ls\n", "duration": 0.1},
-        ]})
+        msg = json.dumps(
+            {
+                "analysis": "t",
+                "plan": "t",
+                "commands": [
+                    "not a dict",
+                    {"no_keystrokes": True},
+                    {"keystrokes": "ls\n", "duration": 0.1},
+                ],
+            }
+        )
         calls = HarborAgentUtils._parse_raw_content_tool_calls(msg, 0)
         assert len(calls) == 1
         assert calls[0]["tool_call_id"] == "call_0_3"

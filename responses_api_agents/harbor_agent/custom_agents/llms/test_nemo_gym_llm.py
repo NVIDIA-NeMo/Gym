@@ -1,19 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 import logging
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
-
 from harbor.llms.base import (
     ContextLengthExceededError,
     OutputLengthExceededError,
 )
+
 from responses_api_agents.harbor_agent.custom_agents.llms.nemo_gym_llm import NemoGymLLM
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_llm(**kwargs) -> NemoGymLLM:
     defaults = dict(model_name="test-model", api_base="http://localhost:8000/v1")
@@ -53,13 +68,17 @@ async def _call(llm, mock_json, **call_kwargs):
 async def test_extracts_openai_shape():
     """prompt_token_ids top-level, generation_token_ids in message, logprobs in choice."""
     llm = _make_llm(collect_rollout_details=True)
-    response, _ = await _call(llm, _mock_response(
-        content="hello",
-        extra_message={"generation_token_ids": [7, 8]},
-        extra_choice={"logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]}},
-        prompt_token_ids=[1, 2, 3],
-        usage={"prompt_tokens": 10, "completion_tokens": 2, "prompt_tokens_details": {"cached_tokens": 4}},
-    ), prompt="hello")
+    response, _ = await _call(
+        llm,
+        _mock_response(
+            content="hello",
+            extra_message={"generation_token_ids": [7, 8]},
+            extra_choice={"logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]}},
+            prompt_token_ids=[1, 2, 3],
+            usage={"prompt_tokens": 10, "completion_tokens": 2, "prompt_tokens_details": {"cached_tokens": 4}},
+        ),
+        prompt="hello",
+    )
 
     assert response.content == "hello"
     assert response.prompt_token_ids == [1, 2, 3]
@@ -73,14 +92,18 @@ async def test_extracts_openai_shape():
 async def test_extracts_nemo_proxy_shape():
     """Token IDs and logprobs embedded in the message dict, string token_id format."""
     llm = _make_llm(collect_rollout_details=True)
-    response, _ = await _call(llm, _mock_response(
-        content="proxy output",
-        extra_message={
-            "prompt_token_ids": [11, 12],
-            "generation_token_ids": ["token_id:13", "token_id:14"],
-            "generation_log_probs": [-0.3, -0.4],
-        },
-    ), prompt="hello")
+    response, _ = await _call(
+        llm,
+        _mock_response(
+            content="proxy output",
+            extra_message={
+                "prompt_token_ids": [11, 12],
+                "generation_token_ids": ["token_id:13", "token_id:14"],
+                "generation_log_probs": [-0.3, -0.4],
+            },
+        ),
+        prompt="hello",
+    )
 
     assert response.prompt_token_ids == [11, 12]
     assert response.completion_token_ids == [13, 14]
@@ -102,10 +125,14 @@ async def test_no_token_data_in_response():
 async def test_collect_rollout_details_false_skips_extraction():
     """Token IDs are not extracted when collect_rollout_details=False."""
     llm = _make_llm(collect_rollout_details=False)
-    response, _ = await _call(llm, _mock_response(
-        extra_message={"generation_token_ids": [7, 8]},
-        prompt_token_ids=[1, 2, 3],
-    ), prompt="hello")
+    response, _ = await _call(
+        llm,
+        _mock_response(
+            extra_message={"generation_token_ids": [7, 8]},
+            prompt_token_ids=[1, 2, 3],
+        ),
+        prompt="hello",
+    )
 
     assert response.prompt_token_ids is None
     assert response.completion_token_ids is None
@@ -117,17 +144,26 @@ async def test_on_policy_correction_attaches_token_ids():
     llm = _make_llm(collect_rollout_details=True)
 
     # First call — stores token IDs.
-    await _call(llm, _mock_response(
-        content="first",
-        extra_message={"generation_token_ids": [10, 11]},
-        prompt_token_ids=[1, 2, 3],
-    ), prompt="hello")
+    await _call(
+        llm,
+        _mock_response(
+            content="first",
+            extra_message={"generation_token_ids": [10, 11]},
+            prompt_token_ids=[1, 2, 3],
+        ),
+        prompt="hello",
+    )
 
     # Second call — includes prior assistant in history.
-    _, mock_post = await _call(llm, _mock_response(content="second"), prompt="follow up", message_history=[
-        {"role": "user", "content": "hello"},
-        {"role": "assistant", "content": "first"},
-    ])
+    _, mock_post = await _call(
+        llm,
+        _mock_response(content="second"),
+        prompt="follow up",
+        message_history=[
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "first"},
+        ],
+    )
 
     payload = mock_post.call_args[0][0]
     assistant_msg = [m for m in payload["messages"] if m["role"] == "assistant"][0]
@@ -156,11 +192,13 @@ async def test_context_length_error_from_http_400():
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
-    mock_client.post = AsyncMock(return_value=httpx.Response(
-        status_code=400,
-        text="maximum context length exceeded",
-        request=httpx.Request("POST", "http://localhost:8000/v1/chat/completions"),
-    ))
+    mock_client.post = AsyncMock(
+        return_value=httpx.Response(
+            status_code=400,
+            text="maximum context length exceeded",
+            request=httpx.Request("POST", "http://localhost:8000/v1/chat/completions"),
+        )
+    )
 
     with patch("httpx.AsyncClient", return_value=mock_client):
         with pytest.raises(ContextLengthExceededError):
@@ -211,9 +249,14 @@ async def test_unmatched_close_tag():
 async def test_server_reasoning_content_takes_precedence():
     """Server-provided reasoning_content skips tag parsing."""
     llm = _make_llm()
-    response, _ = await _call(llm, _mock_response(
-        content="answer", extra_message={"reasoning_content": "server rc"},
-    ), prompt="q")
+    response, _ = await _call(
+        llm,
+        _mock_response(
+            content="answer",
+            extra_message={"reasoning_content": "server rc"},
+        ),
+        prompt="q",
+    )
     assert response.reasoning_content == "server rc"
     assert response.content == "answer"
 
@@ -273,9 +316,12 @@ def test_output_limit_none_when_missing():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(("api_base", "expected"), [
-    ("http://localhost:8000", "http://localhost:8000/v1/chat/completions"),
-    ("http://localhost:8000/v1", "http://localhost:8000/v1/chat/completions"),
-])
+@pytest.mark.parametrize(
+    ("api_base", "expected"),
+    [
+        ("http://localhost:8000", "http://localhost:8000/v1/chat/completions"),
+        ("http://localhost:8000/v1", "http://localhost:8000/v1/chat/completions"),
+    ],
+)
 def test_chat_completions_endpoint(api_base, expected):
     assert _make_llm(api_base=api_base)._chat_completions_endpoint() == expected
