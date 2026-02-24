@@ -58,6 +58,7 @@ from responses_api_models.vllm_model.app import (
     VLLMModel,
     VLLMModelConfig,
 )
+from responses_api_models.vllm_model.routing_policy import CacheAwareRoutingPolicyConfig
 
 
 # Used for mocking created_at timestamp generation
@@ -2038,6 +2039,95 @@ class TestApp:
         ]
         actual_messages = mock_method.call_args.kwargs["messages"]
         assert expected_messages == actual_messages
+
+
+class TestCacheAwareRoutingIntegration:
+    def test_cache_aware_routing_delegates_to_external_router(self, monkeypatch: MonkeyPatch):
+        """Integration test: cache-aware routing passes request body to external router,
+        routes to the correct client, and calls lifecycle callbacks."""
+        mock_router = MagicMock()
+        mock_router.route.return_value = 1  # Route to second client
+
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            base_url=["http://api.openai.com/v1", "http://api.openai.com/v2"],
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            routing_policy=CacheAwareRoutingPolicyConfig(
+                router_class="unittest.mock.MagicMock",
+            ),
+        )
+
+        get_global_config_dict_mock = MagicMock()
+        get_global_config_dict_mock.return_value = dict()
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
+
+        server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+        # Replace the auto-created external router with our controlled mock
+        server._routing_policy._external_router = mock_router
+
+        app = server.setup_webserver()
+
+        mock_chat_completion = NeMoGymChatCompletion(
+            id="chtcmpl",
+            object="chat.completion",
+            created=FIXED_TIME,
+            model="dummy_model",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="stop",
+                    message=NeMoGymChatCompletionMessage(
+                        role="assistant",
+                        content="routed to client 2",
+                        tool_calls=[],
+                    ),
+                )
+            ],
+        )
+
+        # Mock chat completion on both clients
+        mock_method_1 = AsyncMock(return_value=mock_chat_completion.model_dump())
+        mock_method_2 = AsyncMock(return_value=mock_chat_completion.model_dump())
+        server._clients[0].create_chat_completion = mock_method_1
+        server._clients[1].create_chat_completion = mock_method_2
+
+        input_messages = [
+            NeMoGymEasyInputMessage(
+                type="message",
+                role="user",
+                content=[NeMoGymResponseInputText(text="Hello", type="input_text")],
+                status="completed",
+            ),
+        ]
+        request_body = NeMoGymResponseCreateParamsNonStreaming(input=input_messages)
+
+        test_client = TestClient(app)
+        response = test_client.post(
+            "/v1/responses",
+            json=request_body.model_dump(exclude_unset=True, mode="json"),
+        )
+        assert response.status_code == 200
+
+        # Verify the external router received the request body dict
+        mock_router.route.assert_called_once()
+        route_arg = mock_router.route.call_args[0][0]
+        assert isinstance(route_arg, dict)
+        assert "model" in route_arg
+        assert "messages" in route_arg
+
+        # Verify chat completion was called on client 2 (index 1), not client 1
+        mock_method_1.assert_not_called()
+        mock_method_2.assert_called_once()
+
+        # Verify lifecycle callbacks were invoked
+        mock_router.prefill_complete.assert_called_once()
+        mock_router.generation_complete.assert_called_once()
 
 
 class TestVLLMConverter:
