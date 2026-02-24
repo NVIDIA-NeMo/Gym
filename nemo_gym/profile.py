@@ -40,6 +40,7 @@ class RewardProfileConfig(BaseNeMoGymCLIConfig):
 class RewardProfiler:
     def describe_dataframe(self, df: DataFrame) -> DataFrame:
         stat_index = ["mean", "max", "min", "median", "std", "histogram"]
+        df = df.dropna(axis=1, how="all")
         d = [
             df.mean(),
             df.max(),
