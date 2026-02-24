@@ -193,8 +193,8 @@ class RolloutCollectionHelper(BaseModel):
         with config.materialized_jsonl_fpath.open() as f:
             original_input_rows = list(map(orjson.loads, f))
         with Path(config.output_jsonl_fpath).open() as f:
-            results_strs = [[line.strip()] for line in f]
-        results = [orjson.loads(p[0]) for p in results_strs]
+            result_strs = [[line.strip()] for line in f]
+        results = [orjson.loads(p[0]) for p in result_strs]
 
         get_key = lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
 
@@ -211,7 +211,7 @@ class RolloutCollectionHelper(BaseModel):
 - {len(rows)} rows that have already been run"""
         )
 
-        return input_rows, rows, results, results_strs
+        return input_rows, rows, results, result_strs
 
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
@@ -221,7 +221,7 @@ class RolloutCollectionHelper(BaseModel):
                 input_rows,
                 rows,
                 results,
-                results_strs,
+                result_strs,
             ) = self._load_from_cache(config)
         else:
             rows: List[Dict] = []
