@@ -256,6 +256,7 @@ class RolloutCollectionHelper(BaseModel):
             results.append(result)
             result_strs.append([orjson.dumps(result)])
             results_file.write(result_strs[-1][0] + b"\n")
+        results_file.close()
 
         if get_wandb_run():  # pragma: no cover
             get_wandb_run().log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
