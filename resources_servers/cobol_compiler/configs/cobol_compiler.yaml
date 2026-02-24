@@ -28,7 +28,7 @@ cobol_compiler_simple_agent:
         jsonl_fpath: resources_servers/cobol_compiler/data/cobol_multipl_eval.jsonl
         gitlab_identifier:
           dataset_name: cobol_multipl_eval
-          version: 0.0.1
+          version: 0.0.2
           artifact_fpath: cobol_multipl_eval.jsonl
         license: MIT
         num_repeats: 1
