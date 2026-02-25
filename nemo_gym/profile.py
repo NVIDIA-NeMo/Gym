@@ -13,10 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import orjson
-from pandas import DataFrame
+from pandas import DataFrame, Series
 from pandas.core.groupby.generic import DataFrameGroupBy
 from pydantic import Field
 
@@ -38,21 +38,34 @@ class RewardProfileConfig(BaseNeMoGymCLIConfig):
 
 
 class RewardProfiler:
+    def histogram(self, data: Series) -> Optional[Histogram]:
+        # W&B doesn't accept empty histograms
+        data = data.dropna()
+        if data.empty:
+            return
+
+        return Histogram(data)
+
     def describe_dataframe(self, df: DataFrame) -> DataFrame:
         stat_index = ["mean", "max", "min", "median", "std", "histogram"]
-        df = df.dropna(axis=1, how="all")
         d = [
             df.mean(),
             df.max(),
             df.min(),
             df.median(),
             df.std(),
-            df.apply(Histogram, axis=0),
+            df.apply(self.histogram, axis=0),
         ]
+
+        # Std is nore interpretable using 0 rather than NaN for no std
         if df.std().isna().all():
             d[4].fillna(0, inplace=True)
 
-        return DataFrame(d, index=stat_index).stack()
+        # We use future_stack=True due to:
+        # FutureWarning: The previous implementation of stack is deprecated and will be removed in a future version of pandas. See the What's New notes for pandas 2.1.0 for details. Specify future_stack=True to adopt the new implementation and silence this warning.
+        # Critically here, we need to return a valid result for all rows even if one row is null
+        # dropna must be unspecified with future_stack=True as the new implementation does not introduce rows of NA values. This argument will be removed in a future version of pandas.
+        return DataFrame(d, index=stat_index).stack(future_stack=True)
 
     def calculate_metrics_single_df(self, grouped_df: DataFrameGroupBy) -> List[Dict[str, Any]]:
         grouped_metrics_df = grouped_df.apply(self.describe_dataframe, include_groups=False)

@@ -249,20 +249,45 @@ class TestProfile:
                 "_ng_task_index": 0,
                 "_ng_rollout_index": 0,
                 "response": {"usage": {"abc usage": 1}},
-                "None": None,
             },
             {
                 "_ng_task_index": 0,
                 "_ng_rollout_index": 1,
                 "response": {"usage": {"abc usage": 1}},
-                "None": None,
             },
             {
                 "_ng_task_index": 1,
                 "_ng_rollout_index": 0,
                 "response": {"usage": {"abc usage": 1}},
-                "None": None,
             },
+        ]
+
+        # We just check that this doesn't error
+        RewardProfiler().profile_from_data(rows, results)
+
+    def test_profile_from_data_mismatched_keys(self) -> None:
+        rows = [
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                "agent_ref": {"name": "my_agent"},
+            },
+            {
+                "_ng_task_index": 1,
+                "_ng_rollout_index": 0,
+                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                "agent_ref": {"name": "my_agent"},
+            },
+        ]
+        results = [
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "response": {"usage": {"abc usage": 1}},
+                "first_col": 1,
+            },
+            {"_ng_task_index": 1, "_ng_rollout_index": 0, "response": {"usage": {"abc usage": 1}}, "second_col": 2},
         ]
 
         # We just check that this doesn't error
