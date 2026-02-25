@@ -72,7 +72,9 @@ class RewardProfiler:
         grouped_metrics_df.columns = grouped_metrics_df.columns.map("/".join)
         grouped_metrics_df = grouped_metrics_df.reset_index()
         grouped_metrics = grouped_metrics_df.to_dict("records")
-        return grouped_metrics
+
+        # Filter for None in the result
+        return [{k: v for k, v in group_metrics.items() if v is not None} for group_metrics in grouped_metrics]
 
     def profile_from_data(
         self,
