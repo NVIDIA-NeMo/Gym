@@ -15,7 +15,6 @@
 from io import StringIO
 from pathlib import Path
 from subprocess import run
-from sys import platform, stderr, stdout
 from typing import Optional
 
 import yappi
@@ -35,35 +34,18 @@ class Profiler(BaseModel):
         assert " " not in self.name, f"Spaces are not allowed in profiler name, but got `{repr(self.name)}`"
         return super().model_post_init(context)
 
-    def _maybe_install_dot(self) -> None:
+    def _check_for_dot_installation(self) -> None:  # pragma: no cover
         res = run("dot -h", shell=True, check=False)
         if res.returncode == 0:
             return
 
-        print("Installing dot for profiling")
-        if "darwin" in platform:
-            run("brew install graphviz", shell=True, check=True, stdout=stdout, stderr=stderr)
-        elif "linux" in platform:
-            run("apt update && apt install -y graphviz", shell=True, check=True, stdout=stdout, stderr=stderr)
-        else:
-            raise NotImplementedError(f"Profiling not supported on {platform} platform!")
-
-        # Check that it is available
-        # TODO remove environ
-        import os
-
-        run(
-            ["dot", "-h"],
-            check=True,
-            env={
-                "PATH": os.environ.get("PATH", ""),
-                "LD_LIBRARY_PATH": os.environ.get("LD_LIBRARY_PATH", ""),
-                "SYSTEMROOT": os.environ.get("SYSTEMROOT", ""),
-            },
-        )
+        raise RuntimeError("""You must install dot in order to use this profiling too.
+Please install dot using:
+- Mac: `brew install graphviz`
+- Linux: `apt update && apt install -y graphviz`""")
 
     def start(self) -> None:
-        self._maybe_install_dot()
+        self._check_for_dot_installation()
 
         yappi.set_clock_type("CPU")
         yappi.start()

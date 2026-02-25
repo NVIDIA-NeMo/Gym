@@ -13,15 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from pathlib import Path
+from unittest.mock import MagicMock
 
 from pydantic import ValidationError
-from pytest import raises
+from pytest import MonkeyPatch, raises
 
+import nemo_gym.profiling
 from nemo_gym.profiling import Profiler
 
 
 class TestProfiling:
-    def test_sanity(self, tmp_path: Path) -> None:
+    def test_sanity(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.profiling, "graph_from_dot_file", MagicMock(return_value=(MagicMock(),)))
+
+        monkeypatch.setattr(Profiler, "_check_for_dot_installation", MagicMock())
+
         profiler = Profiler(name="test_name", base_profile_dir=tmp_path / "profile")
         profiler.start()
         profiler.stop()
