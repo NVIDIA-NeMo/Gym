@@ -49,7 +49,19 @@ class Profiler(BaseModel):
             raise NotImplementedError(f"Profiling not supported on {platform} platform!")
 
         # Check that it is available
-        run("dot -h", shell=True, check=True)
+        # TODO remove environ
+        import os
+
+        run(
+            "dot -h",
+            shell=True,
+            check=True,
+            env={
+                "PATH": os.environ.get("PATH", ""),
+                "LD_LIBRARY_PATH": os.environ.get("LD_LIBRARY_PATH", ""),
+                "SYSTEMROOT": os.environ.get("SYSTEMROOT", ""),
+            },
+        )
 
     def start(self) -> None:
         yappi.set_clock_type("CPU")
