@@ -319,11 +319,11 @@ def generate_training_table(servers: list[ServerInfo]) -> str:  # pragma: no cov
     """Generate table for training resource servers."""
     col_names = [
         "Resource Server",
+        "Config",
         "Domain",
         "Dataset",
         "Description",
         "Value",
-        "Config",
         "Train",
         "Validation",
         # TODO: Add back in when we can verify resource servers
@@ -342,11 +342,11 @@ def generate_training_table(servers: list[ServerInfo]) -> str:  # pragma: no cov
         rows.append(
             [
                 server.display_name,
+                server.get_config_link(use_filename=True),
                 server.get_domain_or_empty(),
                 server.get_dataset_link(),
                 server.get_description_or_dash(),
                 server.get_value_or_dash(),
-                server.get_config_link(use_filename=False),
                 server.get_train_mark(),
                 server.get_validation_mark(),
                 # TODO: Add back in when we can verify resource servers
@@ -358,7 +358,8 @@ def generate_training_table(servers: list[ServerInfo]) -> str:  # pragma: no cov
     rows.sort(
         key=lambda r: (
             normalize_str(r[0]),  # resource server name
-            normalize_str(r[1]),  # domain
+            normalize_str(r[1]),  # config filename
+            normalize_str(r[2]),  # domain
             # TODO: Add back in when we can verify resource servers
             # 0 if "✓" in r[8] else 1,  # verified first (reverse order for checkmarks...hyphens)
             tuple(normalize_str(cell) for cell in r),
