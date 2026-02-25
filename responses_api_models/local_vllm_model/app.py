@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import ray
 import requests
 from huggingface_hub import snapshot_download
+from pydantic import Field
 from ray import available_resources, cluster_resources
 from ray._private.state import available_resources_per_node
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
@@ -46,8 +47,9 @@ from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 class LocalVLLMModelConfig(VLLMModelConfig):
     # We inherit these configs from VLLMModelConfig, but they are set to optional since they will be set later on after we spin up a model endpoint.
-    base_url: Optional[Union[str, List[str]]] = None
-    api_key: Optional[str] = None
+    base_url: Union[str, List[str]] = Field(default_factory=list)
+    # Not used on local deployments
+    api_key: str = "dummy"  # pragma: allowlist secret
 
     hf_home: Optional[str] = None
     vllm_serve_kwargs: Dict[str, Any]
@@ -299,7 +301,6 @@ Total Ray cluster resources: {cluster_resources()}""")
         ).remote(server_args, env_vars, self.config.name, self.config.debug)
 
         self.config.base_url = [ray.get(self._local_vllm_model_actor.base_url.remote())]
-        self.config.api_key = "dummy_key"  # pragma: allowlist secret
 
         self.await_server_ready()
 
