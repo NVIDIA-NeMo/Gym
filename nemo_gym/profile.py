@@ -49,6 +49,9 @@ class RewardProfiler:
             df.std(),
             df.apply(Histogram, axis=0),
         ]
+        if df.std().isna().all():
+            d[4].fillna(0, inplace=True)
+
         return DataFrame(d, index=stat_index).stack()
 
     def calculate_metrics_single_df(self, grouped_df: DataFrameGroupBy) -> List[Dict[str, Any]]:
