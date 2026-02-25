@@ -191,6 +191,13 @@ dependencies = [
     # Updated: Tue Feb 17, 2026 with wandb==0.25.0
     # License: MIT https://github.com/wandb/wandb/blob/f8acf479342b6aa8217dd0833bb32190b11c14bc/LICENSE
     "wandb",
+
+    # gprof2dot and pydot: Used for outputting dot graphs for profiling.
+    # Updated: Wed Feb 25, 2026 with gprof2dot==2025.4.14 and pydot==4.0.1
+    # gprof2dot License: GNU Lesser General Public License v3.0 https://github.com/jamielennox/requests-mock/blob/9742d02a8cad17276dbeba7b300b6d27ae1b6fb1/LICENSE
+    # pydot License: MIT https://github.com/pydot/pydot/blob/a2bee1e770698867332516fb2878fac262b4ffc5/LICENSES/MIT.txt
+    "gprof2dot",
+    "pydot",
 ]
 
 [dependency-groups]
@@ -275,7 +282,6 @@ exclude-dependencies = [
     "matplotlib",
     "pillow",
     "prettytable",
-    "pyparsing",
     "scikit-learn",
     "scipy",
     "skops",
@@ -319,8 +325,8 @@ nemo_gym_e2e_collect_rollouts = "nemo_gym.cli:e2e_rollout_collection"
 ng_e2e_collect_rollouts = "nemo_gym.cli:e2e_rollout_collection"
 
 # Reward profiling
-nemo_gym_profile = "nemo_gym.profile:profile"
-ng_profile = "nemo_gym.profile:profile"
+nemo_gym_reward_profile = "nemo_gym.reward_profile:reward_profile"
+ng_reward_profile = "nemo_gym.reward_profile:reward_profile"
 
 # Dataset management
 nemo_gym_upload_dataset_to_gitlab = "nemo_gym.gitlab_utils:upload_jsonl_dataset_cli"
@@ -435,7 +441,7 @@ directory = "results/htmlcov"
 [tool.coverage.report]
 skip_covered = true
 sort = "miss"
-fail_under = 95.0
+fail_under = 96.0
 exclude_also = [
     "def __repr__",
     "if self.debug:",
