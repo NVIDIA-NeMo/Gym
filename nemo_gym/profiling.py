@@ -15,7 +15,7 @@
 from io import StringIO
 from pathlib import Path
 from subprocess import run
-from sys import platform
+from sys import platform, stderr, stdout
 from typing import Optional
 
 import yappi
@@ -42,9 +42,9 @@ class Profiler(BaseModel):
 
         print("Installing dot for profiling")
         if "darwin" in platform:
-            run("brew install graphviz", shell=True, check=True)
+            run("brew install graphviz", shell=True, check=True, stdout=stdout, stderr=stderr)
         elif "linux" in platform:
-            run("apt update && apt install -y graphviz", shell=True, check=True)
+            run("apt update && apt install -y graphviz", shell=True, check=True, stdout=stdout, stderr=stderr)
         else:
             raise NotImplementedError(f"Profiling not supported on {platform} platform!")
 
