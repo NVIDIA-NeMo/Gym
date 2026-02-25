@@ -190,7 +190,7 @@ class LocalVLLMModel(VLLMModel):
             "download_dir": cache_dir,
         }
 
-        env_vars = dict()
+        env_vars = {"HF_HUB_ENABLE_HF_TRANSFER": 1}
         # vLLM accepts a `hf_token` parameter but it's not used everywhere. We need to set HF_TOKEN environment variable here.
         maybe_hf_token = self.get_hf_token()
         if maybe_hf_token:
