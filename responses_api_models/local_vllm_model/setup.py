@@ -36,7 +36,7 @@ dependencies = [
 
     # hf_transfer is used by vLLM for super fast downloads
     # Updated Tue Feb 24, 2026 with hf_transfer==0.1.9
-    # License: BSD 3-Clause https://github.com/Kludex/uvicorn/blob/9ff60042a53cd1bbfd5580ab0a91ea2d1d8f2f8c/LICENSE.md
+    # License: Apache 2.0 https://github.com/huggingface/hf_transfer/blob/51499cc4ff0fe218082e13f27881a06811913751/LICENSE
     "hf_transfer",
 ]
 
