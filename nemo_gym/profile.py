@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import orjson
-from pandas import DataFrame, Series
+from pandas import DataFrame, Series, notna
 from pandas.core.groupby.generic import DataFrameGroupBy
 from pydantic import Field
 
@@ -48,7 +48,7 @@ class RewardProfiler:
 
     def describe_dataframe(self, df: DataFrame) -> DataFrame:
         stat_index = ["mean", "max", "min", "median", "std", "histogram"]
-        d = [
+        d: List[Series] = [
             df.mean(),
             df.max(),
             df.min(),
@@ -58,8 +58,9 @@ class RewardProfiler:
         ]
 
         # Std is nore interpretable using 0 rather than NaN for no std
-        if df.std().isna().all():
-            d[4].fillna(0, inplace=True)
+        if d[4].isna().all():
+            not_na_columns = df.columns[df.notna().all()]
+            d[4][not_na_columns] = d[4][not_na_columns].fillna(0)
 
         # We use future_stack=True due to:
         # FutureWarning: The previous implementation of stack is deprecated and will be removed in a future version of pandas. See the What's New notes for pandas 2.1.0 for details. Specify future_stack=True to adopt the new implementation and silence this warning.
@@ -68,13 +69,15 @@ class RewardProfiler:
         return DataFrame(d, index=stat_index).stack(future_stack=True)
 
     def calculate_metrics_single_df(self, grouped_df: DataFrameGroupBy) -> List[Dict[str, Any]]:
-        grouped_metrics_df = grouped_df.apply(self.describe_dataframe, include_groups=False)
+        grouped_metrics_df: DataFrame = grouped_df.apply(self.describe_dataframe, include_groups=False)
         grouped_metrics_df.columns = grouped_metrics_df.columns.map("/".join)
-        grouped_metrics_df = grouped_metrics_df.reset_index()
+        grouped_metrics_df: DataFrame = grouped_metrics_df.reset_index()
         grouped_metrics = grouped_metrics_df.to_dict("records")
 
         # Filter for None in the result
-        return [{k: v for k, v in group_metrics.items() if v is not None} for group_metrics in grouped_metrics]
+        return [
+            {k: v for k, v in group_metrics.items() if v is not None and notna(v)} for group_metrics in grouped_metrics
+        ]
 
     def profile_from_data(
         self,

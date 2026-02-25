@@ -18,6 +18,12 @@ from nemo_gym.profile import RewardProfiler
 
 
 class TestProfile:
+    def _clean_metrics(self, metrics: list[dict]) -> None:
+        for row in metrics:
+            for key in list(row):
+                if key.startswith("histogram"):
+                    row[key] = None
+
     def test_profile_from_data(self) -> None:
         rows = [
             {
@@ -110,14 +116,8 @@ class TestProfile:
 
         actual_group_level_metrics, actual_agent_level_metrics = RewardProfiler().profile_from_data(rows, results)
 
-        def _clean_metrics(metrics: list[dict]):
-            for row in metrics:
-                for key in list(row):
-                    if key.startswith("histogram"):
-                        row[key] = None
-
-        _clean_metrics(actual_group_level_metrics)
-        _clean_metrics(actual_agent_level_metrics)
+        self._clean_metrics(actual_group_level_metrics)
+        self._clean_metrics(actual_agent_level_metrics)
 
         expected_group_level_metrics = [
             {
@@ -290,5 +290,70 @@ class TestProfile:
             {"_ng_task_index": 1, "_ng_rollout_index": 0, "response": {"usage": {"abc usage": 1}}, "second_col": 2},
         ]
 
-        # We just check that this doesn't error
-        RewardProfiler().profile_from_data(rows, results)
+        actual_group_level_metrics, actual_agent_level_metrics = RewardProfiler().profile_from_data(rows, results)
+
+        self._clean_metrics(actual_group_level_metrics)
+        self._clean_metrics(actual_agent_level_metrics)
+
+        expected_group_level_metrics = [
+            {
+                "mean/first_col": 1.0,
+                "mean/abc usage": 1.0,
+                "max/first_col": 1.0,
+                "max/abc usage": 1.0,
+                "min/first_col": 1.0,
+                "min/abc usage": 1.0,
+                "median/first_col": 1.0,
+                "median/abc usage": 1.0,
+                "std/first_col": 0.0,
+                "std/abc usage": 0.0,
+                "histogram/first_col": None,
+                "histogram/abc usage": None,
+                "sample": {
+                    "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                    "agent_ref": {"name": "my_agent"},
+                },
+            },
+            {
+                "mean/abc usage": 1.0,
+                "mean/second_col": 2.0,
+                "max/abc usage": 1.0,
+                "max/second_col": 2.0,
+                "min/abc usage": 1.0,
+                "min/second_col": 2.0,
+                "median/abc usage": 1.0,
+                "median/second_col": 2.0,
+                "std/abc usage": 0.0,
+                "std/second_col": 0.0,
+                "histogram/abc usage": None,
+                "histogram/second_col": None,
+                "sample": {
+                    "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                    "agent_ref": {"name": "my_agent"},
+                },
+            },
+        ]
+        assert expected_group_level_metrics == actual_group_level_metrics
+
+        expected_agent_level_metrics = [
+            {
+                "mean/first_col": 1.0,
+                "mean/abc usage": 1.0,
+                "mean/second_col": 2.0,
+                "max/first_col": 1.0,
+                "max/abc usage": 1.0,
+                "max/second_col": 2.0,
+                "min/first_col": 1.0,
+                "min/abc usage": 1.0,
+                "min/second_col": 2.0,
+                "median/first_col": 1.0,
+                "median/abc usage": 1.0,
+                "median/second_col": 2.0,
+                "std/abc usage": 0.0,
+                "histogram/first_col": None,
+                "histogram/abc usage": None,
+                "histogram/second_col": None,
+                "agent_ref": {"name": "my_agent"},
+            }
+        ]
+        assert expected_agent_level_metrics == actual_agent_level_metrics
