@@ -441,7 +441,7 @@ directory = "results/htmlcov"
 [tool.coverage.report]
 skip_covered = true
 sort = "miss"
-fail_under = 95.0
+fail_under = 96.0
 exclude_also = [
     "def __repr__",
     "if self.debug:",
