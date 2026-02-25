@@ -20,7 +20,7 @@ from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
 from aiohttp.client_exceptions import ClientResponseError
-from fastapi import FastAPI, Request, Response
+from fastapi import Request, Response
 from pydantic import BaseModel, Field
 
 from nemo_gym.base_responses_api_model import (
@@ -111,11 +111,6 @@ class VLLMModel(SimpleResponsesAPIModel):
         )
 
         return super().model_post_init(context)
-
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-        app.post("/weights_updated")(self.weights_updated)
-        return app
 
     async def weights_updated(self) -> Response:
         """Notify the routing policy that model weights have been updated."""
