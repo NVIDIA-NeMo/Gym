@@ -15,6 +15,10 @@ class Profiler(BaseModel):
     # Used to clean up and filter out unnecessary information in the yappi log
     required_str: Optional[str] = None
 
+    def model_post_init(self, context):
+        assert " " not in self.name, f"Spaces are not allowed in profiler name, but got `{repr(self.name)}`"
+        return super().model_post_init(context)
+
     def start(self) -> None:
         yappi.set_clock_type("CPU")
         yappi.start()
@@ -33,6 +37,7 @@ class Profiler(BaseModel):
         callgrind_graph_path = self.base_profile_dir / f"{self.name}.png"
 
         yappi.get_func_stats().save(callgrind_path, type="CALLGRIND")
+        print(f"--format=callgrind --output={callgrind_dotfile_path} -e 5 -n 5 {callgrind_path}".split())
         gprof2dot_main(argv=f"--format=callgrind --output={callgrind_dotfile_path} -e 5 -n 5 {callgrind_path}".split())
 
         (graph,) = graph_from_dot_file(callgrind_dotfile_path)
