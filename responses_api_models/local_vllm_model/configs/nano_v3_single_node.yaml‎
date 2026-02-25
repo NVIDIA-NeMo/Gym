@@ -33,7 +33,3 @@ policy_model:
         model_loader_extra_config:
           enable_multithread_load: true
           num_threads: 16
-
-responses_create_params:
-  temperature: 1.0
-  top_p: 0.95
