@@ -102,16 +102,13 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             output = model_response.output
             new_outputs.extend(output)
 
+            if not usage:
+                usage = model_response.usage
+
             if usage:
                 usage.input_tokens += model_response.usage.input_tokens
                 usage.output_tokens += model_response.usage.output_tokens
                 usage.total_tokens += model_response.usage.total_tokens
-
-                # TODO support more advanced token details
-                # usage.input_tokens_details.cached_tokens += model_response.input_tokens_details.cached_tokens
-                # usage.output_tokens_details.reasoning_tokens += model_response.output_tokens_details.reasoning_tokens
-            else:
-                usage = model_response.usage
 
                 # TODO support more advanced token details
                 usage.input_tokens_details.cached_tokens = 0
