@@ -641,6 +641,49 @@ NeMo Gym Server Status:
 
 ---
 
+### `ng_stop` / `nemo_gym_stop`
+
+Provides a clean way to stop servers without having to manually kill processes, or use Ctrl+C on multiple terminals.
+
+**Examples**
+```bash
+# Stop all servers
+ng_stop +all=true
+
+# Stop specific server by name
+ng_stop +name=example_single_tool_call
+
+# Stop server on port 8001
+ng_stop +port=8001
+
+# Force stop all servers
+ng_stop +all=true +force=true
+```
+
+**Parameters**
+
+```{list-table}
+:header-rows: 1
+:widths: 25 10 65
+
+* - Parameter
+  - Type
+  - Description
+* - `all`
+  - bool
+  - Stop all servers.
+* - `name`
+  - str
+  - Stop specific server by name.
+* - `port`
+  - int
+  - Stop specific server by port.
+* - `force`
+  - bool
+  - Force stop the specified server(s).
+```
+
+
 ## Getting Help
 
 For detailed help on any command, run it with `+help=true` or `+h=true`:

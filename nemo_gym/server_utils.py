@@ -521,6 +521,25 @@ repr(e): {repr(e)}"""
                     e,
                 )
 
+    def setup_shutdown_message(self, app: FastAPI) -> None:  # pragma: no cover
+        """Wrap lifespan to print shutdown message before uvicorn logs"""
+        main_app_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan_wrapper(app):
+            # Startup
+            async with main_app_lifespan(app) as maybe_state:
+                yield maybe_state
+
+            # Shutdown
+            print(f"\n{'#' * 100}")
+            print(f"Shutting down {self.config.name}...")
+            print(f"{'#' * 100}\n")
+
+            sys.stdout.flush()
+
+        app.router.lifespan_context = lifespan_wrapper
+
     def prefix_server_logs(self) -> None:  # pragma: no cover
         # Adapted from https://github.com/vllm-project/vllm/blob/ab74b2a27a4eb88b90356bfb4b452d29edf05574/vllm/utils/system_utils.py#L205
 
@@ -579,6 +598,7 @@ repr(e): {repr(e)}"""
         server.set_ulimit()
         server.prefix_server_logs()
         server.setup_exception_middleware(app)
+        server.setup_shutdown_message(app)
 
         @app.exception_handler(RequestValidationError)
         async def validation_exception_handler(request: Request, exc):
