@@ -14,10 +14,10 @@
 # limitations under the License.
 
 
-from nemo_gym.profile import RewardProfiler
+from nemo_gym.reward_profile import RewardProfiler
 
 
-class TestProfile:
+class TestRewardProfile:
     def _clean_metrics(self, metrics: list[dict]) -> None:
         for row in metrics:
             for key in list(row):

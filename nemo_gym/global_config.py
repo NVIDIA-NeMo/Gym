@@ -25,7 +25,7 @@ import hydra
 import rich
 import wandb
 import wandb.util
-from omegaconf import DictConfig, OmegaConf, open_dict
+from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
 from openai import __version__ as openai_version
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from ray import __version__ as ray_version
@@ -231,9 +231,9 @@ class GlobalConfigDictParser(BaseModel):
         for k, v in list(dict_config.items()):
             if isinstance(v, (DictConfig, dict)):
                 self._recursively_hide_secrets_helper(v)
-            elif isinstance(v, list):
+            elif isinstance(v, (ListConfig, list)):
                 for inner_v in v:
-                    if isinstance(v, (DictConfig, dict)):
+                    if isinstance(inner_v, (DictConfig, dict)):
                         self._recursively_hide_secrets_helper(inner_v)
             else:
                 if "token" in k or "key" in k:
