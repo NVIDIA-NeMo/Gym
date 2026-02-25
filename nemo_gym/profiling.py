@@ -53,8 +53,7 @@ class Profiler(BaseModel):
         import os
 
         run(
-            "dot -h",
-            shell=True,
+            ["dot", "-h"],
             check=True,
             env={
                 "PATH": os.environ.get("PATH", ""),
