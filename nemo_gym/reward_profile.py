@@ -159,7 +159,7 @@ class RewardProfiler:
         return reward_profiling_fpath, agent_level_metrics_fpath
 
 
-def profile():  # pragma: no cover
+def reward_profile():  # pragma: no cover
     config = RewardProfileConfig.model_validate(get_global_config_dict())
 
     with open(config.materialized_inputs_jsonl_fpath) as f:
