@@ -30,7 +30,7 @@ from ray import __version__ as ray_version
 
 import wandb
 import wandb.util
-from nemo_gym import CACHE_DIR, PARENT_DIR
+from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR
 from nemo_gym.config_types import (
     ServerInstanceConfig,
     WANDBConfig,
@@ -370,6 +370,7 @@ class GlobalConfigDictParser(BaseModel):
             _WANDB_RUN = wandb.init(
                 project=wandb_config.wandb_project,
                 name=wandb_config.wandb_name,
+                dir=str(RESULTS_DIR / "wandb"),
             )
 
             # Log params
