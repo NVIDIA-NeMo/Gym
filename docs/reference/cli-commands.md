@@ -255,7 +255,7 @@ ng_e2e_collect_rollouts \
 
 ---
 
-### `ng_profile` / `nemo_gym_profile`
+### `ng_reward_profile` / `nemo_gym_reward_profile`
 
 Computes statistics on rewards and task difficulty for rollouts collected with `ng_collect_rollouts` with `num_repeats` > 1. This outputs a new "reward profiled" dataset, where each task in the dataset has metrics like the average reward, standard deviation, min/max, and pass rate. This is useful in filtering tasks before training for difficulty, variance, or creating a curriculum. 
 
@@ -295,7 +295,7 @@ Each output row contains all original task fields plus:
 **Example**
 
 ```bash
-ng_profile \
+ng_reward_profile \
     +input_jsonl_fpath=tasks.jsonl \
     +rollouts_jsonl_fpath=rollouts.jsonl \
     +output_jsonl_fpath=profiled_tasks.jsonl \

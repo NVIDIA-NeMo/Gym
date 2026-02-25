@@ -34,7 +34,7 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     get_wandb_run,
 )
-from nemo_gym.profile import RewardProfiler
+from nemo_gym.reward_profile import RewardProfiler
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
@@ -144,7 +144,7 @@ class RolloutCollectionHelper(BaseModel):
         rows_iterator: Iterator[str] = tqdm(rows_iterator, desc="Reading rows")
         rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
 
-        # For ng_profile to match rollouts to tasks
+        # For ng_reward_profile to match rollouts to tasks
         row_to_task_idx: Dict[str, int] = dict()
         task_idx_to_rollout_idx: Dict[int, int] = Counter()
         row_idxs_missing_agent_ref: List[int] = []
