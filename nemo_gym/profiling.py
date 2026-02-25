@@ -63,6 +63,8 @@ class Profiler(BaseModel):
         )
 
     def start(self) -> None:
+        self._maybe_install_dot()
+
         yappi.set_clock_type("CPU")
         yappi.start()
         print(f"🔍 Enabled profiling for {self.name}")
