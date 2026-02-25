@@ -58,6 +58,7 @@ from responses_api_models.vllm_model.app import (
     VLLMModel,
     VLLMModelConfig,
 )
+from responses_api_models.vllm_model.routing_policy import RoutingPolicy
 
 
 # Used for mocking created_at timestamp generation
@@ -2038,6 +2039,206 @@ class TestApp:
         ]
         actual_messages = mock_method.call_args.kwargs["messages"]
         assert expected_messages == actual_messages
+
+
+class TestCacheAwareRoutingIntegration:
+    def _make_server(self, monkeypatch: MonkeyPatch, num_backends: int = 2):
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            base_url=[f"http://api.openai.com/v{i + 1}" for i in range(num_backends)],
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+        )
+        get_global_config_dict_mock = MagicMock()
+        get_global_config_dict_mock.return_value = dict()
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
+        return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+
+    def test_cache_aware_routing_delegates_to_external_router(self, monkeypatch: MonkeyPatch):
+        """Integration test: an external RoutingPolicy subclass routes requests,
+        receives the raw request body, and gets lifecycle callbacks."""
+        server = self._make_server(monkeypatch, num_backends=2)
+
+        # Inject a mock RoutingPolicy that routes everything to client index 1
+        mock_policy = MagicMock(spec=RoutingPolicy)
+        mock_policy.select_client.return_value = 1
+        server._routing_policy = mock_policy
+
+        app = server.setup_webserver()
+
+        mock_chat_completion = NeMoGymChatCompletion(
+            id="chtcmpl",
+            object="chat.completion",
+            created=FIXED_TIME,
+            model="dummy_model",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="stop",
+                    message=NeMoGymChatCompletionMessage(
+                        role="assistant",
+                        content="routed to client 2",
+                        tool_calls=[],
+                    ),
+                )
+            ],
+        )
+
+        mock_method_1 = AsyncMock(return_value=mock_chat_completion.model_dump())
+        mock_method_2 = AsyncMock(return_value=mock_chat_completion.model_dump())
+        mock_client_0 = MagicMock()
+        mock_client_0.create_chat_completion = mock_method_1
+        mock_client_1 = MagicMock()
+        mock_client_1.create_chat_completion = mock_method_2
+        server._clients = [mock_client_0, mock_client_1]
+
+        input_messages = [
+            NeMoGymEasyInputMessage(
+                type="message",
+                role="user",
+                content=[NeMoGymResponseInputText(text="Hello", type="input_text")],
+                status="completed",
+            ),
+        ]
+        request_body = NeMoGymResponseCreateParamsNonStreaming(input=input_messages)
+
+        test_client = TestClient(app)
+        response = test_client.post(
+            "/v1/responses",
+            json=request_body.model_dump(exclude_unset=True, mode="json"),
+        )
+        assert response.status_code == 200
+
+        # Verify select_client was called with the raw request body dict
+        mock_policy.select_client.assert_called_once()
+        call_kwargs = mock_policy.select_client.call_args.kwargs
+        assert isinstance(call_kwargs["request_body"], dict)
+        assert "model" in call_kwargs["request_body"]
+        assert "messages" in call_kwargs["request_body"]
+
+        # Verify chat completion was routed to client 2 (index 1), not client 1
+        mock_method_1.assert_not_called()
+        mock_method_2.assert_called_once()
+
+        # Verify lifecycle callbacks were invoked
+        mock_policy.on_prefill_complete.assert_called_once()
+        mock_policy.on_generation_complete.assert_called_once()
+
+    def test_weights_updated_notifies_routing_policy(self, monkeypatch: MonkeyPatch):
+        """POST /weights_updated should call on_weights_updated() on the routing policy."""
+        server = self._make_server(monkeypatch)
+
+        mock_policy = MagicMock(spec=RoutingPolicy)
+        server._routing_policy = mock_policy
+
+        app = server.setup_webserver()
+        test_client = TestClient(app)
+
+        response = test_client.post("/weights_updated")
+        assert response.status_code == 200
+        mock_policy.on_weights_updated.assert_called_once()
+
+    def test_weights_updated_resets_counter(self, monkeypatch: MonkeyPatch):
+        """POST /weights_updated resets the stale-routing-policy warning counter."""
+        server = self._make_server(monkeypatch)
+
+        mock_policy = MagicMock(spec=RoutingPolicy)
+        server._routing_policy = mock_policy
+        server._requests_since_weights_updated = 500
+
+        app = server.setup_webserver()
+        test_client = TestClient(app)
+
+        test_client.post("/weights_updated")
+        assert server._requests_since_weights_updated == 0
+
+    def test_stale_weights_warning_emitted(self, monkeypatch: MonkeyPatch, caplog):
+        """A warning is logged every _WEIGHTS_UPDATE_WARNING_INTERVAL requests when
+        using a non-default routing policy and /weights_updated has not been called."""
+        import logging
+
+        from responses_api_models.vllm_model.app import _WEIGHTS_UPDATE_WARNING_INTERVAL
+
+        server = self._make_server(monkeypatch)
+
+        mock_policy = MagicMock(spec=RoutingPolicy)
+        mock_policy.select_client.return_value = 0
+        server._routing_policy = mock_policy
+
+        mock_chat = AsyncMock(
+            return_value=NeMoGymChatCompletion(
+                id="chtcmpl",
+                object="chat.completion",
+                created=FIXED_TIME,
+                model="dummy_model",
+                choices=[
+                    NeMoGymChoice(
+                        index=0,
+                        finish_reason="stop",
+                        message=NeMoGymChatCompletionMessage(role="assistant", content="hi", tool_calls=[]),
+                    )
+                ],
+            ).model_dump()
+        )
+        server._clients[0].create_chat_completion = mock_chat
+
+        app = server.setup_webserver()
+        test_client = TestClient(app)
+
+        request_body = NeMoGymResponseCreateParamsNonStreaming(
+            input=[NeMoGymEasyInputMessage(type="message", role="user", content="hello")]
+        )
+
+        with caplog.at_level(logging.WARNING, logger="responses_api_models.vllm_model.app"):
+            # Send exactly enough requests to cross the warning threshold
+            for _ in range(_WEIGHTS_UPDATE_WARNING_INTERVAL):
+                test_client.post("/v1/responses", json=request_body.model_dump(exclude_unset=True, mode="json"))
+
+        assert any("weights_updated" in record.message for record in caplog.records)
+
+    def test_no_warning_for_round_robin_policy(self, monkeypatch: MonkeyPatch, caplog):
+        """No stale-weights warning is emitted when using the default round-robin policy."""
+        import logging
+
+        from responses_api_models.vllm_model.app import _WEIGHTS_UPDATE_WARNING_INTERVAL
+
+        server = self._make_server(monkeypatch)
+        # Default policy is RoundRobinRoutingPolicy — no mock needed
+
+        mock_chat = AsyncMock(
+            return_value=NeMoGymChatCompletion(
+                id="chtcmpl",
+                object="chat.completion",
+                created=FIXED_TIME,
+                model="dummy_model",
+                choices=[
+                    NeMoGymChoice(
+                        index=0,
+                        finish_reason="stop",
+                        message=NeMoGymChatCompletionMessage(role="assistant", content="hi", tool_calls=[]),
+                    )
+                ],
+            ).model_dump()
+        )
+        server._clients[0].create_chat_completion = mock_chat
+
+        app = server.setup_webserver()
+        test_client = TestClient(app)
+
+        request_body = NeMoGymResponseCreateParamsNonStreaming(
+            input=[NeMoGymEasyInputMessage(type="message", role="user", content="hello")]
+        )
+
+        with caplog.at_level(logging.WARNING, logger="responses_api_models.vllm_model.app"):
+            for _ in range(_WEIGHTS_UPDATE_WARNING_INTERVAL):
+                test_client.post("/v1/responses", json=request_body.model_dump(exclude_unset=True, mode="json"))
+
+        assert not any("weights_updated" in record.message for record in caplog.records)
 
 
 class TestVLLMConverter:

@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
 import re
 from copy import deepcopy
 from time import time
@@ -19,7 +20,7 @@ from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
 from aiohttp.client_exceptions import ClientResponseError
-from fastapi import Request
+from fastapi import Request, Response
 from pydantic import BaseModel, Field
 
 from nemo_gym.base_responses_api_model import (
@@ -56,6 +57,16 @@ from nemo_gym.openai_utils import (
     TokenIDLogProbMixin,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_worker
+from responses_api_models.vllm_model.routing_policy import (
+    RoundRobinRoutingPolicy,
+    RoundRobinRoutingPolicyConfig,
+    RoutingPolicyConfig,
+    create_routing_policy,
+)
+
+logger = logging.getLogger(__name__)
+
+_WEIGHTS_UPDATE_WARNING_INTERVAL = 1000
 
 
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
@@ -71,6 +82,8 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     # Corresponds to the extra_body of OpenAI Client.
     extra_body: Optional[Dict[str, Any]] = None
+
+    routing_policy: RoutingPolicyConfig = Field(default_factory=RoundRobinRoutingPolicyConfig)
 
     def model_post_init(self, context):
         if isinstance(self.base_url, str):
@@ -90,13 +103,20 @@ class VLLMModel(SimpleResponsesAPIModel):
             for base_url in self.config.base_url
         ]
 
-        self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
+        self._routing_policy = create_routing_policy(self.config.routing_policy, self._clients)
+        self._requests_since_weights_updated: int = 0
 
         self._converter = VLLMConverter(
             return_token_id_information=self.config.return_token_id_information,
         )
 
         return super().model_post_init(context)
+
+    async def weights_updated(self) -> Response:
+        """Notify the routing policy that model weights have been updated."""
+        self._routing_policy.on_weights_updated()
+        self._requests_since_weights_updated = 0
+        return Response(status_code=200)
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
@@ -144,6 +164,15 @@ class VLLMModel(SimpleResponsesAPIModel):
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
+        if not isinstance(self._routing_policy, RoundRobinRoutingPolicy):
+            self._requests_since_weights_updated += 1
+            if self._requests_since_weights_updated % _WEIGHTS_UPDATE_WARNING_INTERVAL == 0:
+                logger.warning(
+                    f"Server '{self.config.name}' has served {self._requests_since_weights_updated} requests "
+                    f"since the last POST /weights_updated. If model weights have been updated, "
+                    f"call POST /weights_updated so the routing policy can adapt."
+                )
+
         if self.config.replace_developer_role_with_system:
             for message in body.messages:
                 if message["role"] == "developer":
@@ -156,12 +185,12 @@ class VLLMModel(SimpleResponsesAPIModel):
             body_dict["chat_template_kwargs"] = deepcopy(self.config.chat_template_kwargs)
 
         session_id = request.session[SESSION_ID_KEY]
-        if session_id not in self._session_id_to_client:
-            # There is probably a better way to select the endpoint for this request. But this will do for now.
-            client_idx = len(self._session_id_to_client) % len(self._clients)
-            client = self._clients[client_idx]
-            self._session_id_to_client[session_id] = client
-        client = self._session_id_to_client[session_id]
+        request_id = str(uuid4())
+
+        client_idx = self._routing_policy.select_client(
+            request_body=body_dict, request_id=request_id, session_id=session_id
+        )
+        client = self._clients[client_idx]
 
         create_params = body_dict
 
@@ -250,6 +279,10 @@ class VLLMModel(SimpleResponsesAPIModel):
                 )
             else:
                 raise e
+
+        # Notify routing policy of request lifecycle events (non-streaming: both happen at response return)
+        self._routing_policy.on_prefill_complete(request_id)
+        self._routing_policy.on_generation_complete(request_id)
 
         choice_dict = chat_completion_dict["choices"][0]
         if self.config.uses_reasoning_parser:

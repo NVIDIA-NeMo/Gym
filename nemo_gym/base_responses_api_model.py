@@ -14,7 +14,7 @@
 # limitations under the License.
 from abc import abstractmethod
 
-from fastapi import Body, FastAPI
+from fastapi import Body, FastAPI, Response
 
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
@@ -43,7 +43,13 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         app.post("/v1/responses")(self.responses)
 
+        app.post("/weights_updated")(self.weights_updated)
+
         return app
+
+    async def weights_updated(self) -> Response:
+        """Called after model weights are updated. Default no-op."""
+        return Response(status_code=200)
 
     @abstractmethod
     async def chat_completions(
