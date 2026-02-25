@@ -19,6 +19,7 @@ import orjson
 from pandas import DataFrame, Series, notna
 from pandas.core.groupby.generic import DataFrameGroupBy
 from pydantic import Field
+from wandb import Histogram
 
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
@@ -27,7 +28,6 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     get_global_config_dict,
 )
-from wandb import Histogram
 
 
 class RewardProfileConfig(BaseNeMoGymCLIConfig):

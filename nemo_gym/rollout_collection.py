@@ -24,6 +24,7 @@ from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 import orjson
 from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
+from wandb import Table
 
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig
 from nemo_gym.global_config import (
@@ -43,7 +44,6 @@ from nemo_gym.server_utils import (
     raise_for_status,
     set_global_aiohttp_client,
 )
-from wandb import Table
 
 
 class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):

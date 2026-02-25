@@ -23,13 +23,14 @@ from typing import ClassVar, List, Optional, Tuple, Type
 
 import hydra
 import rich
+import wandb
+import wandb.util
 from omegaconf import DictConfig, OmegaConf, open_dict
 from openai import __version__ as openai_version
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from ray import __version__ as ray_version
+from wandb import Run
 
-import wandb
-import wandb.util
 from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR
 from nemo_gym.config_types import (
     ServerInstanceConfig,
@@ -38,7 +39,6 @@ from nemo_gym.config_types import (
     is_server_ref,
     maybe_get_server_instance_config,
 )
-from wandb import Run
 
 
 _GLOBAL_CONFIG_DICT = None
