@@ -188,7 +188,7 @@ def grade_assistant_response(assistant_response, exp_cal_state, allow_no_json_li
             for event_id in exp_cal_state.keys():
                 if not is_constraint_satisfied(events_dict[event_id], exp_cal_state[event_id]):
                     return 0, "constraint_violated"
-        except:
+        except Exception:
             return 0, "error_in_grading"
 
     return 1, "pass"

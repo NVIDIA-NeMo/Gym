@@ -74,7 +74,7 @@ with open("resources_servers/code_gen/data/opencodereasoning_filtered_25k_train.
     for d in ds:
         try:
             UnitTests.model_validate_json(d["unit_tests"])
-        except:
+        except Exception:
             from collections import Counter
 
             unit_tests = json.loads(d["unit_tests"])

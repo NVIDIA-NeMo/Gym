@@ -442,7 +442,7 @@ Formatted exception: {format_exc()}
 repr(e): {repr(e)}"""
                 )
                 return JSONResponse(content=repr(e), status_code=500)
-            except:
+            except Exception:
                 print_exc()
                 print(
                     f"""🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"""

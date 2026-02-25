@@ -72,7 +72,7 @@ def checkout_commit(repo_name, repo_playground, commit_id, reset=False):
         subprocess.run(["git", "-C", repo_path, "checkout", commit_id], check=True)
         print("Commit checked out successfully.")
         return True
-    except:
+    except Exception:
         print("An error occurred while checking out the commit")
         return False
 
@@ -325,7 +325,7 @@ def create_structure(directory_path):
                 try:
                     with open(os.path.join(root, file_name), "r") as f:
                         content = f.read().splitlines()
-                except:
+                except Exception:
                     content = "[BINARY FILE]"
                 curr_struct[file_name] = {
                     "text": content,
