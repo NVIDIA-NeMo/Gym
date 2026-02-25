@@ -186,6 +186,11 @@ dependencies = [
     # Updated: Mon Feb 10, 2026 with python-multipart>=0.0.22
     # License: Apache 2.0 https://github.com/andrew-d/python-multipart/blob/master/LICENSE.txt
     "python-multipart>=0.0.22",
+
+    # wandb: E2E rollout collection data and metrics upload
+    # Updated: Tue Feb 17, 2026 with wandb==0.25.0
+    # License: MIT https://github.com/wandb/wandb/blob/f8acf479342b6aa8217dd0833bb32190b11c14bc/LICENSE
+    "wandb",
 ]
 
 [dependency-groups]
@@ -310,6 +315,8 @@ ng_init_resources_server = "nemo_gym.cli:init_resources_server"
 # Rollout collection
 nemo_gym_collect_rollouts = "nemo_gym.rollout_collection:collect_rollouts"
 ng_collect_rollouts = "nemo_gym.rollout_collection:collect_rollouts"
+nemo_gym_e2e_collect_rollouts = "nemo_gym.cli:e2e_rollout_collection"
+ng_e2e_collect_rollouts = "nemo_gym.cli:e2e_rollout_collection"
 
 # Reward profiling
 nemo_gym_profile = "nemo_gym.profile:profile"
@@ -356,6 +363,10 @@ ng_pip_list = "nemo_gym.cli:pip_list"
 # Display version
 nemo_gym_version = "nemo_gym.cli:version"
 ng_version = "nemo_gym.cli:version"
+
+# Re-install Gym and dependencies
+nemo_gym_reinstall = "nemo_gym.cli:reinstall"
+ng_reinstall = "nemo_gym.cli:reinstall"
 
 [tool.setuptools.packages.find]
 where = ["."]

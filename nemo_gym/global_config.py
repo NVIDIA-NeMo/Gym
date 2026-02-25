@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from collections import defaultdict
+from copy import deepcopy
 from os import environ, getenv
 from pathlib import Path
 from platform import python_version
@@ -22,14 +23,18 @@ from typing import ClassVar, List, Optional, Tuple, Type
 
 import hydra
 import rich
+import wandb
+import wandb.util
 from omegaconf import DictConfig, OmegaConf, open_dict
 from openai import __version__ as openai_version
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from ray import __version__ as ray_version
+from wandb import Run
 
-from nemo_gym import CACHE_DIR, PARENT_DIR
+from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR
 from nemo_gym.config_types import (
     ServerInstanceConfig,
+    WANDBConfig,
     is_almost_server,
     is_server_ref,
     maybe_get_server_instance_config,
@@ -52,7 +57,6 @@ UV_PIP_SET_PYTHON_KEY_NAME = "uv_pip_set_python"
 SKIP_VENV_IF_PRESENT_KEY_NAME = "skip_venv_if_present"
 HF_TOKEN_KEY_NAME = "hf_token"
 RAY_HEAD_NODE_ADDRESS_KEY_NAME = "ray_head_node_address"
-TASK_INDEX_KEY_NAME = "_task_index"
 PORT_RANGE_LOW_KEY_NAME = "port_range_low"
 PORT_RANGE_HIGH_KEY_NAME = "port_range_high"
 DRY_RUN_KEY_NAME = "dry_run"
@@ -79,11 +83,28 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     UV_VENV_DIR_KEY_NAME,
 ]
 
+# Data keys
+TASK_INDEX_KEY_NAME = "_ng_task_index"
+ROLLOUT_INDEX_KEY_NAME = "_ng_rollout_index"
+RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
+RESPONSE_KEY_NAME = "response"
+AGENT_REF_KEY_NAME = "agent_ref"
+
 POLICY_BASE_URL_KEY_NAME = "policy_base_url"
 POLICY_API_KEY_KEY_NAME = "policy_api_key"  # pragma: allowlist secret
 POLICY_MODEL_NAME_KEY_NAME = "policy_model_name"
 
 DEFAULT_HEAD_SERVER_PORT = 11000
+
+
+# W&B
+# Increase row limit since some of our rollouts are pretty hefty
+wandb.util.VALUE_BYTES_LIMIT = 10_000_000
+_WANDB_RUN: Optional[Run] = None
+
+
+def get_wandb_run() -> Optional[Run]:
+    return _WANDB_RUN
 
 
 class GlobalConfigDictParserConfig(BaseModel):
@@ -339,6 +360,23 @@ class GlobalConfigDictParser(BaseModel):
 
         if parse_config.hide_secrets:
             self._recursively_hide_secrets(global_config_dict)
+
+        # Set up W&B
+        wandb_config = WANDBConfig.model_validate(global_config_dict)
+        if wandb_config.is_available:  # pragma: no cover
+            environ["WANDB_API_KEY"] = wandb_config.wandb_api_key
+
+            global _WANDB_RUN
+            _WANDB_RUN = wandb.init(
+                project=wandb_config.wandb_project,
+                name=wandb_config.wandb_name,
+                dir=str(RESULTS_DIR / "wandb"),
+            )
+
+            # Log params
+            config_dict_to_log = deepcopy(global_config_dict)
+            self._recursively_hide_secrets(config_dict_to_log)
+            _WANDB_RUN.config.update(OmegaConf.to_container(config_dict_to_log))
 
         return global_config_dict
 

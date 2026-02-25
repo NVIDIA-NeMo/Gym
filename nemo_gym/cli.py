@@ -19,13 +19,14 @@ import platform
 import shlex
 import sys
 import tomllib
+from copy import deepcopy
 from glob import glob
 from importlib.metadata import version as md_version
 from os import makedirs
 from os.path import exists
 from pathlib import Path
 from signal import SIGINT
-from subprocess import Popen
+from subprocess import Popen, TimeoutExpired
 from threading import Thread
 from time import sleep, time
 from typing import Dict, List, Optional, Tuple
@@ -34,7 +35,7 @@ import psutil
 import rich
 import uvicorn
 from devtools import pprint
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import Field
 from tqdm.auto import tqdm
 
@@ -49,6 +50,7 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
+from nemo_gym.rollout_collection import E2ERolloutCollectionConfig, RolloutCollectionConfig, RolloutCollectionHelper
 from nemo_gym.server_status import StatusCommand
 from nemo_gym.server_utils import (
     HEAD_SERVER_KEY_NAME,
@@ -58,6 +60,7 @@ from nemo_gym.server_utils import (
     ServerStatus,
     initialize_ray,
 )
+from nemo_gym.train_data_utils import TrainDataProcessor
 
 
 class RunConfig(BaseNeMoGymCLIConfig):
@@ -314,9 +317,22 @@ Process `{process_name}` stderr:
             process.send_signal(SIGINT)
 
         print("Waiting for processes to finish...")
-        for process in self._processes.values():
-            process.wait()
+        killed_process_names: List[str] = []
+        for process_name, process in self._processes.items():
+            try:
+                process.wait(timeout=1)
+            except TimeoutExpired:
+                process.kill()
+                killed_process_names.append(process_name)
 
+        if killed_process_names:
+            print(
+                f"""Some processes ({", ".join(killed_process_names)}) didn't shutdown within the 5s timeout, killing instead. You may see messages like:
+```bash
+rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been killed. It's either GCS is terminated by `ray stop` or is killed unexpectedly. If it is killed unexpectedly, see the log file gcs_server.out. https://docs.ray.io/en/master/ray-observability/user-guides/configure-logging.html#logging-directory-structure. The program will terminate.
+```
+"""
+            )
         self._processes = dict()
 
         self._head_server.should_exit = True
@@ -388,6 +404,56 @@ def run(
     rh = RunHelper()
     rh.start(global_config_dict_parser_config)
     rh.run_forever()
+
+
+def e2e_rollout_collection():  # pragma: no cover
+    global_config_dict = get_global_config_dict()
+
+    # Ensure we have the right config first thing
+    e2e_rollout_collection_config = E2ERolloutCollectionConfig.model_validate(global_config_dict)
+
+    # Prepare data
+    data_processor_config_dict = deepcopy(global_config_dict)
+    with open_dict(data_processor_config_dict):
+        data_processor_config_dict["should_download"] = True
+        data_processor_config_dict["mode"] = "train_preparation"
+
+        output_fpath = Path(e2e_rollout_collection_config.output_jsonl_fpath)
+        data_process_output_dir = output_fpath.parent / "preprocessed_datasets"
+        data_processor_config_dict["output_dirpath"] = str(data_process_output_dir)
+
+    data_processor = TrainDataProcessor()
+    data_processor.run(data_processor_config_dict)
+
+    # Convert to RolloutCollectionConfig
+    rollout_collection_config_dict = deepcopy(global_config_dict)
+    with open_dict(rollout_collection_config_dict):
+        input_jsonl_fpath = data_process_output_dir / f"{e2e_rollout_collection_config.split}.jsonl"
+        assert input_jsonl_fpath.exists()
+        rollout_collection_config_dict["input_jsonl_fpath"] = str(input_jsonl_fpath)
+
+    rollout_collection_config = RolloutCollectionConfig.model_validate(
+        OmegaConf.to_container(rollout_collection_config_dict)
+    )
+
+    rh = RunHelper()
+    rh.start(None)
+
+    rch = RolloutCollectionHelper()
+
+    print(
+        f"""Output artifacts:
+1. Preprocessed datasets: {data_processor_config_dict["output_dirpath"]}
+2. Dataset file used for rollout collection: {rollout_collection_config_dict["input_jsonl_fpath"]}
+3. Rollout collection results file: {output_fpath}
+"""
+    )
+    try:
+        asyncio.run(rch.run_from_config(rollout_collection_config))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        rh.shutdown()
 
 
 def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover
@@ -923,3 +989,11 @@ System:
   Memory: {sys_info["memory_gb"]} GB"""
 
         print(output)
+
+
+def reinstall():  # pragma: no cover
+    global_config_dict = get_global_config_dict()
+    # Just here for help
+    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+
+    Popen("uv sync --extra dev --group docs", shell=True).communicate()
