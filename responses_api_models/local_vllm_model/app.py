@@ -22,7 +22,6 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import ray
 import requests
-from huggingface_hub import snapshot_download
 from pydantic import Field
 from ray import available_resources, cluster_resources
 from ray._private.state import available_resources_per_node
@@ -165,11 +164,6 @@ class LocalVLLMModel(VLLMModel):
     _local_vllm_model_actor: LocalVLLMModelActor
 
     def setup_webserver(self):
-        print(
-            f"Downloading {self.config.model}. If the model has been downloaded previously, the cached version will be used."
-        )
-        self.download_model()
-
         print("Starting vLLM server. This will take a couple of minutes...")
         self.start_vllm_server()
 
@@ -181,12 +175,6 @@ class LocalVLLMModel(VLLMModel):
     def get_cache_dir(self) -> str:
         # We need to reconstruct the cache dir as HF does it given HF_HOME. See https://github.com/huggingface/huggingface_hub/blob/b2723cad81f530e197d6e826f194c110bf92248e/src/huggingface_hub/constants.py#L146
         return str(Path(self.config.hf_home) / "hub")
-
-    def download_model(self) -> None:
-        maybe_hf_token = self.get_hf_token()
-        cache_dir = self.get_cache_dir()
-
-        snapshot_download(repo_id=self.config.model, token=maybe_hf_token, cache_dir=cache_dir)
 
     def _configure_vllm_serve(self) -> Tuple[Namespace, Dict[str, str]]:
         server_args = self.config.vllm_serve_kwargs
