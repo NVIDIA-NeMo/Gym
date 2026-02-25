@@ -656,7 +656,7 @@ class TrainDataProcessor(BaseModel):
                 if maybe_conflicting_metrics_fpath is not None:
                     conflicting_fpaths.append(str(maybe_conflicting_metrics_fpath))
 
-                    if maybe_conflicting_metrics_fpath:
+                    if overwrite_metrics_conflicts:
                         pass
                     else:
                         continue
