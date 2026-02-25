@@ -14,6 +14,8 @@
 # limitations under the License.
 from io import StringIO
 from pathlib import Path
+from subprocess import run
+from sys import platform
 from typing import Optional
 
 import yappi
@@ -32,6 +34,19 @@ class Profiler(BaseModel):
     def model_post_init(self, context):
         assert " " not in self.name, f"Spaces are not allowed in profiler name, but got `{repr(self.name)}`"
         return super().model_post_init(context)
+
+    def _maybe_install_dot(self) -> None:
+        res = run("dot -h", shell=True, check=False)
+        if res.returncode == 0:
+            return
+
+        print("Installing dot for profiling")
+        if "darwin" in platform:
+            run("brew install graphviz", shell=True, check=True)
+        elif "linux" in platform:
+            run("apt update && apt install -y graphviz", shell=True, check=True)
+        else:
+            raise NotImplementedError(f"Profiling not supported on {platform} platform!")
 
     def start(self) -> None:
         yappi.set_clock_type("CPU")
