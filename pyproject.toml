@@ -282,7 +282,6 @@ exclude-dependencies = [
     "matplotlib",
     "pillow",
     "prettytable",
-    "pyparsing",
     "scikit-learn",
     "scipy",
     "skops",
