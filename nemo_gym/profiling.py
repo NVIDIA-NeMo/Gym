@@ -48,6 +48,9 @@ class Profiler(BaseModel):
         else:
             raise NotImplementedError(f"Profiling not supported on {platform} platform!")
 
+        # Check that it is available
+        run("dot -h", shell=True, check=True)
+
     def start(self) -> None:
         yappi.set_clock_type("CPU")
         yappi.start()
