@@ -216,7 +216,7 @@ class RolloutCollectionHelper(BaseModel):
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
 
-        if config.resume_from_cache:
+        if config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
             (
                 input_rows,
                 rows,
