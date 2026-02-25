@@ -17,8 +17,9 @@ import re
 import shutil
 import subprocess
 import tempfile
-from typing import Dict, List
+import uuid
 
+from typing import Dict, List
 from fastapi import FastAPI
 from pathlib import Path
 from pydantic import BaseModel, Field
@@ -28,6 +29,8 @@ from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    BaseSeedSessionRequest,
+    BaseSeedSessionResponse,
 )
 
 SHELL_TIMEOUT = 30
@@ -54,9 +57,10 @@ class SessionManager:
     def get_session(self, session_id: str) -> Session:
         return self.id_to_session[session_id]
 
-    def maybe_start_session(self, session_id: str) -> Session:
-        if not self.session_exists(session_id):
-            self.id_to_session[session_id] = Session(temp_dir_base=self.temp_dir_base)
+    def start_session(self, session_id: str) -> Session:
+        if self.session_exists(session_id):
+            raise ValueError(f"Session {session_id} already exists")
+        self.id_to_session[session_id] = Session(temp_dir_base=self.temp_dir_base)
         return self.get_session(session_id)
 
     def end_session(self, session_id: str) -> None:
@@ -83,6 +87,20 @@ class SavedFile:
 class BashSandboxResourcesServerConfig(BaseResourcesServerConfig):
     temp_dir_base: Path = Field(default_factory=lambda: Path("/tmp/nemo_gym_bash_sandboxes"))
     allowlist: List[str] = Field(default_factory=list)
+
+class SeedSessionRequest(BaseSeedSessionRequest):
+    """
+    session_id: str
+    """
+    session_id: str | None = None
+
+class SeedSessionResponse(BaseSeedSessionResponse):
+    """
+    session_id: str
+    """
+    session_id: str
+    success: bool
+    error_message: str | None = None
 
 class RunCommandRequest(BaseModel):
     command: str
@@ -150,6 +168,13 @@ class EndSessionResponse(BaseModel):
     saved: List[SavedFile] = Field(default_factory=list)
     failed: List[str, str] = Field(default_factory=dict)
     error_message: str | None = None
+
+class VerifyRequest(BaseVerifyRequest):
+    """
+    session_id: str
+    """
+    session_id: str
+    paths: List[str]
 
 class BashSandboxResourcesServer(SimpleResourcesServer):
     config: BashSandboxResourcesServerConfig
@@ -245,6 +270,19 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
                     ),
                 )
         return None
+
+    async def seed_session(self, body: SeedSessionRequest) -> SeedSessionResponse:
+        if body.session_id is None:
+            session_id = str(uuid.uuid4())
+        else:
+            session_id = body.session_id
+
+        try:
+            self.session_manager.start_session(session_id)
+        except Exception as e:
+            return SeedSessionResponse(session_id=session_id, success=False, error_message=str(e))
+
+        return SeedSessionResponse(session_id=session_id, success=True)
 
     async def run_command(self, body: RunCommandRequest) -> RunCommandResponse:
         """Execute command in the temp directory for the session specified by the session ID.
@@ -392,7 +430,7 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
                             result.uploaded.append(
                                 UploadedFile(
                                     source_path=file_path,
-                                    dest_path=str(dest_file.relative_to(self._temp_dir)),
+                                    dest_path=str(dest_file.relative_to(session.temp_dir)),
                                     size=file_path.stat().st_size,
                                 ),
                             )
@@ -436,7 +474,7 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
 
                 # Security: ensure path is within temp directory
                 try:
-                    source_path.resolve().relative_to(self._temp_dir.resolve())
+                    source_path.resolve().relative_to(session.temp_dir.resolve())
                 except ValueError:
                     result.failed[source_path_str] = "Path is outside execution environment directory"
                     continue
@@ -505,7 +543,8 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
             error_message=f"File Save Errors: {result.error_message}",
         )
 
-    async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+    async def verify(self, body: VerifyRequest) -> BaseVerifyResponse:
+        #TODO: Do some verification on task output files here.
         return BaseVerifyResponse(**body.model_dump(), reward=1.0)
 
 if __name__ == "__main__":

@@ -52,6 +52,7 @@ class GDPValAgentConfig(BaseResponsesAPIAgentConfig):
 
 
 class GDPValAgentRunRequest(BaseRunRequest):
+    session_id: str
     model_config = ConfigDict(extra="allow")
 
 
@@ -244,6 +245,7 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         )
         await raise_for_status(seed_session_response)
         cookies = seed_session_response.cookies
+        session_id = seed_session_response.json()["session_id"]
 
         response = await self.server_client.post(
             server_name=self.config.name,
