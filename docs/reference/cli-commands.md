@@ -212,12 +212,45 @@ Spin up all necessary servers and perform a batch of rollout collection using ea
   - Overrides for the `responses_create_params`, such as `temperature` and `max_output_tokens`.
 ```
 
-**Example**
+**Examples**
 
 ```bash
 ng_e2e_collect_rollouts \
     +output_jsonl_fpath=weather_rollouts.jsonl \
     +num_samples_in_parallel=10
+```
+
+```bash
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/math_with_judge/configs/math_with_judge.yaml"
+ng_e2e_collect_rollouts \
+    "+config_paths=[${config_paths}]" \
+    ++wandb_project= \
+    ++wandb_name= \
+    ++wandb_dir= \
+    ++output_jsonl_fpath=results/test_e2e_rollout_collection/aime24.jsonl \
+    ++split=validation
+```
+
+Example using GPT-OSS 120B remote vLLM endpoint
+```bash
+experiment_name=rollouts/test_001
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/math_with_judge/configs/math_with_judge.yaml"
+ng_e2e_collect_rollouts \
+    "+config_paths=[${config_paths}]" \
+    +skip_venv_if_present=true \
+    +wandb_project=gym-dev \
+    +wandb_name=$(date +%Y%m%d)/$experiment_name \
+    ++output_jsonl_fpath=results/$experiment_name.jsonl \
+    ++overwrite_metrics_conflicts=true \
+    ++split=validation \
+    ++policy_model_name=openai/gpt-oss-120b \
+    ++policy_api_key=dummy_key \
+    ++policy_base_url=http://0.0.0.0:10240/v1 \
+    ++responses_create_params.reasoning.effort=low \
+    ++responses_create_params.temperature=1.0 \
+    ++responses_create_params.top_p=1.0 &> eval_gptoss120b.log &
 ```
 
 ---
