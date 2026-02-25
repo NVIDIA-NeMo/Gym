@@ -46,6 +46,9 @@ class RoutingPolicy(ABC):
     def on_generation_complete(self, request_id: str) -> None:
         """Called when generation is complete for a request. Default no-op."""
 
+    def on_weights_updated(self) -> None:
+        """Called when model weights have been updated. Default no-op."""
+
 
 class RoundRobinRoutingPolicy(RoutingPolicy):
     """Round-robin routing with session stickiness.

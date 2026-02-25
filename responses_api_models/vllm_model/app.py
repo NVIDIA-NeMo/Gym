@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
 import re
 from copy import deepcopy
 from time import time
@@ -19,7 +20,7 @@ from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
 from aiohttp.client_exceptions import ClientResponseError
-from fastapi import Request
+from fastapi import FastAPI, Request, Response
 from pydantic import BaseModel, Field
 
 from nemo_gym.base_responses_api_model import (
@@ -57,10 +58,15 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_worker
 from responses_api_models.vllm_model.routing_policy import (
+    RoundRobinRoutingPolicy,
     RoundRobinRoutingPolicyConfig,
     RoutingPolicyConfig,
     create_routing_policy,
 )
+
+logger = logging.getLogger(__name__)
+
+_WEIGHTS_UPDATE_WARNING_INTERVAL = 1000
 
 
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
@@ -98,12 +104,24 @@ class VLLMModel(SimpleResponsesAPIModel):
         ]
 
         self._routing_policy = create_routing_policy(self.config.routing_policy, self._clients)
+        self._requests_since_weights_updated: int = 0
 
         self._converter = VLLMConverter(
             return_token_id_information=self.config.return_token_id_information,
         )
 
         return super().model_post_init(context)
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        app.post("/weights_updated")(self.weights_updated)
+        return app
+
+    async def weights_updated(self) -> Response:
+        """Notify the routing policy that model weights have been updated."""
+        self._routing_policy.on_weights_updated()
+        self._requests_since_weights_updated = 0
+        return Response(status_code=200)
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
@@ -151,6 +169,15 @@ class VLLMModel(SimpleResponsesAPIModel):
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
+        if not isinstance(self._routing_policy, RoundRobinRoutingPolicy):
+            self._requests_since_weights_updated += 1
+            if self._requests_since_weights_updated % _WEIGHTS_UPDATE_WARNING_INTERVAL == 0:
+                logger.warning(
+                    f"Server '{self.config.name}' has served {self._requests_since_weights_updated} requests "
+                    f"since the last POST /weights_updated. If model weights have been updated, "
+                    f"call POST /weights_updated so the routing policy can adapt."
+                )
+
         if self.config.replace_developer_role_with_system:
             for message in body.messages:
                 if message["role"] == "developer":
