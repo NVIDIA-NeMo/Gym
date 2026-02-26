@@ -117,7 +117,11 @@ def compare_result_sets(
     num_gold_cols = len(gold[0])
     num_pred_cols = len(pred[0])
 
-    cols = list(condition_cols) if condition_cols else list(range(num_gold_cols))
+    if condition_cols:
+        valid_cols = [i for i in condition_cols if i < num_gold_cols]
+        cols = valid_cols if valid_cols else list(range(num_gold_cols))
+    else:
+        cols = list(range(num_gold_cols))
 
     gold_vecs = [_col_vector(gold, i) for i in cols]
     pred_vecs = [_col_vector(pred, j) for j in range(num_pred_cols)]
@@ -142,7 +146,7 @@ def compare_multi_result_sets(
     n = len(gold_sets)
     if not multi_condition_cols:
         cols_per_set: list[list[int]] = [[] for _ in range(n)]
-    elif n > 1 and not all(isinstance(c, list) for c in multi_condition_cols):
+    elif not all(isinstance(c, list) for c in multi_condition_cols):
         cols_per_set = [list(multi_condition_cols)] * n
     else:
         cols_per_set = [list(c) if isinstance(c, list) else [] for c in multi_condition_cols]
@@ -173,5 +177,7 @@ async def execute_and_compare(
     except Exception as e:
         return False, gold_rows, None, f"pred_sql_error: {e}"
 
-    match = compare_result_sets(gold_rows, pred_rows, condition_cols=condition_cols, ignore_order=ignore_order)
+    match = compare_multi_result_sets(
+        [gold_rows], pred_rows, multi_condition_cols=condition_cols, ignore_order=ignore_order
+    )
     return match, gold_rows, pred_rows, None
