@@ -124,13 +124,20 @@ class AviaryResourcesServer(SimpleResourcesServer, Generic[TEnv, TDataset], ABC)
         try:
             env = self.env_id_to_env[body.env_id]
 
-            action = ToolRequestMessage(
-                content=None,
-                tool_calls=[
+            try:
+                tool_calls = [
                     ToolCall(id=a.call_id, function=ToolCallFunction(name=a.name, arguments=json.loads(a.arguments)))
                     for a in body.action
-                ],
-            )
+                ]
+            except json.decoder.JSONDecodeError as e:
+                logger.warning("Failed to parse tool call arguments as JSON: %s", e)
+                return AviaryStepResponse(
+                    obs=[NeMoGymEasyInputMessage(role="user", content=f"Invalid tool call arguments (not valid JSON): {e}")],
+                    reward=0.0,
+                    done=True,
+                )
+
+            action = ToolRequestMessage(content=None, tool_calls=tool_calls)
             obs, reward, done, _ = await env.step(action)
 
             self.env_id_to_total_reward[body.env_id] += reward
