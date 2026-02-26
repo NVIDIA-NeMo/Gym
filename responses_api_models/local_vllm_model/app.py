@@ -93,6 +93,7 @@ class LocalVLLMModelActor:
         self._patch_uvicorn_logger()
         self._maybe_patch_engine_stats()
         self._patch_colocated_placement_group_logic()
+        self._patch_nonunique_placement_group_name_logic()
 
         for k, v in self.env_vars.items():
             environ[k] = v
@@ -190,6 +191,41 @@ class LocalVLLMModelActor:
                 return result
 
             state.available_resources_per_node = new_available_resources_per_node
+
+            result = original_create_dp_placement_groups(*args, **kwargs)
+
+            return result
+
+        CoreEngineActorManager.create_dp_placement_groups = new_create_dp_placement_groups
+
+    def _patch_nonunique_placement_group_name_logic(self) -> None:
+        """
+        When running multiple local vLLM model instances, the Ray placement group names aren't unique.
+
+        (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)   File "vllm/v1/engine/utils.py", line 832, in launch_core_engines
+        (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)     engine_actor_manager = CoreEngineActorManager(
+        (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)                            ^^^^^^^^^^^^^^^^^^^^^^^
+        (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)   File "vllm/v1/engine/utils.py", line 287, in __init__
+        (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)     CoreEngineActorManager.create_dp_placement_groups(vllm_config)
+        (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)   File "vllm/v1/engine/utils.py", line 526, in create_dp_placement_groups
+        (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)     assert len(placement_groups) == dp_size, (
+        (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842) AssertionError: Created 4 DP placement groups, expected 2
+        """
+        from vllm.v1.engine.utils import CoreEngineActorManager
+
+        original_create_dp_placement_groups = CoreEngineActorManager.create_dp_placement_groups
+
+        def new_create_dp_placement_groups(*args, **kwargs):
+            import ray
+
+            original_ray_util_placement_group = ray.util.placement_group
+
+            def new_ray_util_placement_group(*args, **kwargs):
+                kwargs["name"] = f"{self.server_name}_{kwargs['name']}"
+                return original_ray_util_placement_group(*args, **kwargs)
+
+            ray.util.placement_group = new_ray_util_placement_group
 
             result = original_create_dp_placement_groups(*args, **kwargs)
 
