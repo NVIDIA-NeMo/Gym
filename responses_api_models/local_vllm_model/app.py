@@ -309,8 +309,8 @@ class LocalVLLMModelActor:
                     "Zero or multiple node IP keys found in node resources: %s",
                     node_ip_keys,
                 )
-                # node_ip_key = node_ip_keys[0]
-                # node_ip = node_ip_key.split(":")[1]
+                node_ip_key = node_ip_keys[0]
+                node_ip = node_ip_key.split(":")[1]
 
                 n_device_on_node = int(node_resources.get(device_str, 0))
                 if pack_strategy == "span" and n_device_on_node != 0:
@@ -351,15 +351,14 @@ class LocalVLLMModelActor:
                 """
 
                 if pack_strategy == "strict":
-                    # TODO undo
-                    # if dp_size_available < dp_size_local:
-                    #     logger.info(
-                    #         "Skipping node %s as %s DP ranks could not fit, possible to fit %s DP ranks",
-                    #         node_ip,
-                    #         dp_size_local,
-                    #         dp_size_available,
-                    #     )
-                    #     continue
+                    if dp_size_available < dp_size_local:
+                        logger.info(
+                            "Skipping node %s as %s DP ranks could not fit, possible to fit %s DP ranks",
+                            node_ip,
+                            dp_size_local,
+                            dp_size_available,
+                        )
+                        continue
                     dp_size_to_allocate = dp_size_local
                 else:
                     # for "pack_strategy" in "fill" and "span"
@@ -367,9 +366,7 @@ class LocalVLLMModelActor:
                     dp_size_to_allocate = dp_size_available
 
                 for i in range(dp_size_to_allocate):
-                    # TODO remove
-                    # device_bundle = [{device_str: 1.0, "node:" + node_ip: 0.001}]
-                    device_bundle = [{device_str: 1.0}]
+                    device_bundle = [{device_str: 1.0, "node:" + node_ip: 0.001}]
 
                     if pack_strategy == "span":
                         collected_bundles += device_bundle * n_device_on_node
