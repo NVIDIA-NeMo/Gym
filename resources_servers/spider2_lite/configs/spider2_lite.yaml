@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Spider 2.0-Lite resource server configuration.
+# Execution-based text-to-SQL evaluation on 135 local SQLite tasks.
+
+spider2_lite_resources_server:
+  resources_servers:
+    spider2_lite:
+      entrypoint: app.py
+      spider2_lite_dir: resources_servers/spider2_lite/.spider2_lite
+      max_concurrency: 32
+      sql_execution_timeout_s: 30.0
+      domain: coding
+      verified: false
+      description: >
+        Text-to-SQL with execution-based evaluation on Spider 2.0-Lite (135 SQLite tasks).
+        Binary reward based on result-set equivalence.
+      value: >
+        Improve text-to-SQL capabilities for real-world enterprise queries
+        using execution-based binary reward without an LLM judge.
+
+spider2_lite_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: spider2_lite_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/spider2_lite/data/example.jsonl
+          license: CC BY-SA 4.0
