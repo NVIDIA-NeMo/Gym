@@ -1,0 +1,496 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""
+FastAPI server that runs inside a Singularity container to execute commands.
+
+This server provides an HTTP interface for command execution, allowing
+the harbor harness to interact with Singularity containers similar to
+how it interacts with Docker containers.
+
+Usage (inside container):
+    python server.py --port 8000 --workdir /app
+"""
+
+import argparse
+import inspect
+import logging
+import os
+import re
+import shutil
+import subprocess
+import sys
+from contextlib import asynccontextmanager
+from typing import Dict, Optional
+
+import uvicorn
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+
+class CommandRequest(BaseModel):
+    command: str
+    cwd: Optional[str] = None
+    env: Optional[Dict[str, str]] = None
+    timeout_sec: Optional[int] = None
+
+
+class CommandResult(BaseModel):
+    stdout: Optional[str] = None
+    stderr: Optional[str] = None
+    return_code: int
+
+
+logger = logging.getLogger("singularity_server")
+
+
+def setup_logging() -> None:
+    """Configure logging to stdout (captured by singularity.py into trial.log).
+
+    Also configures uvicorn's logger to use our handler so errors are captured.
+    """
+    # Configure our logger
+    logger.setLevel(logging.INFO)
+
+    # Console handler - outputs to stdout, captured by parent process
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)  # Set level that is logged to trial.log
+    console_formatter = logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s", datefmt="%H:%M:%S")
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+
+    # Route uvicorn/fastapi errors through our handler too
+    for uvicorn_logger_name in ["uvicorn", "uvicorn.error", "uvicorn.access"]:
+        uv_logger = logging.getLogger(uvicorn_logger_name)
+        uv_logger.handlers = []  # Remove default handlers
+        uv_logger.addHandler(console_handler)
+
+
+def _warm_tmux_server():
+    """Pre-start tmux server to reduce load during agent setup.
+
+    This is optional - tmux new-session auto-starts the server anyway.
+    But pre-starting may help under heavy load by having the server
+    ready before the agent's first tmux command.
+
+    Never crashes - just logs and continues.
+    """
+    tmux_path = shutil.which("tmux") or "/usr/bin/tmux"
+    try:
+        result = subprocess.run(
+            [tmux_path, "start-server"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env={**os.environ, "PATH": "/usr/bin:/usr/local/bin:" + os.environ.get("PATH", "/bin")},
+        )
+        if result.returncode == 0:
+            logger.debug("Pre-started tmux server")
+        else:
+            # Log at warning level so it appears in server.log
+            logger.warning(f"tmux start-server returned {result.returncode}: {result.stderr}")
+    except Exception as e:
+        logger.warning(f"Could not pre-start tmux server: {e}")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Handle startup and shutdown events."""
+    logger.debug("Singularity FastAPI server starting up...")
+    _warm_tmux_server()  # Optional pre-start, never crashes
+    yield
+    logger.debug("Singularity FastAPI server shutting down...")
+    try:
+        _tmux = shutil.which("tmux") or "/usr/bin/tmux"
+        subprocess.run([_tmux, "kill-server"], capture_output=True, timeout=5)
+        logger.debug("Stopped tmux server")
+    except Exception as e:
+        logger.warning(f"Could not stop tmux server: {e}")
+
+
+# =============================================================================
+# FastAPI App & Routes
+# =============================================================================
+
+app = FastAPI(lifespan=lifespan)
+
+
+_BLACKLISTED_COMMAND_PATTERNS = [
+    # Process-killing commands that could escape the container and kill vLLM workers
+    re.compile(r"\bkillall\b"),
+    re.compile(r"\bpkill\b"),
+    re.compile(r"\bkill\s+.*\$\("),  # kill $(...)
+    re.compile(r"\bkill\s+.*`"),  # kill `...`
+    re.compile(r"\bkill\s+(-\d+\s+|-[A-Z]+\s+|-SIG[A-Z]+\s+)*\$\w+"),  # kill $VAR
+    re.compile(r"\bkill\s+(-\d+\s+|-[A-Z]+\s+|-SIG[A-Z]+\s+)*-1\b"),  # kill -1 (all user procs)
+    re.compile(r"\bkill\s+(-\d+\s+|-[A-Z]+\s+|-SIG[A-Z]+\s+)*0\b"),  # kill 0 (process group)
+    # System shutdown / reboot
+    re.compile(r"\b(shutdown|reboot|poweroff|halt|init\s+[06])\b"),
+    # Destructive disk writes
+    re.compile(r"\bdd\s+.*of=\s*/dev/"),
+    # Filesystem destruction of critical paths
+    re.compile(r"\brm\s+(-\w+\s+)*(/\s*$|/\*)"),
+    re.compile(r"\brm\s+(-\w+\s+)*(/(bin|usr|etc|var|home|root|opt|lib|lib64|sbin|boot|dev|proc|sys))\b"),
+]
+
+
+def _is_blacklisted(command: str) -> str | None:
+    """Return a reason string if the command matches a blacklisted pattern, else None."""
+    for pattern in _BLACKLISTED_COMMAND_PATTERNS:
+        if pattern.search(command):
+            return f"Command blocked by safety filter (matched: {pattern.pattern})"
+    return None
+
+
+@app.post("/exec", response_model=CommandResult)
+def exec_command(req: CommandRequest):
+    """Execute a command in the container (using sync subprocess).
+
+    Uses the Unix `timeout` command for timeout handling (like Daytona).
+    This ensures all output produced before timeout is captured, unlike
+    Python's subprocess timeout which may lose buffered output.
+
+    Exceptions propagate to crash the trial (aligned with Docker/Daytona).
+    """
+    blocked_reason = _is_blacklisted(req.command)
+    if blocked_reason:
+        logger.warning(f"Blocked command: {req.command[:200]} — {blocked_reason}")
+        return CommandResult(
+            stdout=blocked_reason,
+            stderr=None,
+            return_code=1,
+        )
+
+    # Set up environment
+    env = os.environ.copy()
+    # Ensure PATH includes standard locations so apt-installed tools (e.g. tmux) are found
+    env["PATH"] = "/usr/bin:/usr/local/bin:" + env.get("PATH", "/bin")
+    if req.env:
+        env.update(req.env)
+
+    # Determine working directory
+    cwd = req.cwd if req.cwd else os.environ.get("SINGULARITY_WORKDIR", "/app")
+
+    # Wrap command with Unix `timeout` if timeout specified (Daytona-style)
+    # This preserves all output produced before timeout, unlike Python subprocess timeout
+    if req.timeout_sec:
+        # Use timeout with --signal=TERM to allow graceful shutdown
+        # The command is wrapped in bash -c to handle complex commands
+        actual_command = f"timeout --signal=TERM {req.timeout_sec} bash -c {_shell_quote(req.command)}"
+    else:
+        actual_command = req.command
+
+    logger.debug(f"Executing command: {req.command[:100]}")
+
+    # Use synchronous subprocess.Popen
+    # This avoids async pipe-wait issues with background processes like tmux
+    process = subprocess.Popen(
+        actual_command,
+        shell=True,
+        executable="/bin/bash",
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,  # Merge stderr into stdout
+        cwd=cwd,
+        env=env,
+    )
+
+    # No Python-level timeout - let Unix `timeout` handle it
+    # This ensures all output is captured even on timeout
+    stdout, _ = process.communicate()
+    actual_output = stdout.strip() if stdout else None
+
+    # Exit code 124 means the `timeout` command killed the process
+    if process.returncode == 124:
+        logger.warning(f"Command timed out after {req.timeout_sec} seconds (timeout exit code 124)")
+    else:
+        logger.debug(f"Command result: returncode={process.returncode}")
+
+    return CommandResult(
+        stdout=actual_output,
+        stderr=None,  # stderr merged into stdout
+        return_code=process.returncode or 0,
+    )
+
+
+def _shell_quote(s: str) -> str:
+    """Quote a string for safe use in shell commands.
+
+    Uses single quotes and escapes any embedded single quotes.
+    """
+    return "'" + s.replace("'", "'\"'\"'") + "'"
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint."""
+    return {"status": "ok"}
+
+
+# =============================================================================
+# Singularity Environment Setup
+# =============================================================================
+# These functions configure the container environment to work around
+# Singularity's fakeroot + overlay filesystem limitations.
+
+
+def setup_workdir(workdir: str) -> None:
+    """Create and verify workdir is writable.
+
+    Singularity's --writable-tmpfs creates an overlay, but we need to
+    explicitly create directories to make them writable.
+    """
+    logger.debug(f"Setting up workdir: {workdir}")
+
+    try:
+        os.makedirs(workdir, exist_ok=True)
+    except Exception as e:
+        logger.warning(f"Could not create workdir: {e}")
+        return
+
+    # Verify it's writable
+    if os.path.isdir(workdir):
+        test_file = os.path.join(workdir, ".write_test")
+        try:
+            with open(test_file, "w") as f:
+                f.write("test")
+            os.remove(test_file)
+            logger.debug(f"Workdir is writable: {workdir}")
+        except Exception as e:
+            logger.warning(f"Workdir not writable: {workdir} - {e}")
+    else:
+        logger.warning(f"Workdir does not exist: {workdir}")
+
+
+def setup_dpkg_for_overlay() -> None:
+    """Recreate /etc/dpkg in overlay to fix cross-device rename errors.
+
+    Configure dpkg to allow overwrites (fixes package conflicts under fakeroot).
+    This is needed because Singularity's fakeroot + overlay is stricter than Docker.
+    We need to fully recreate /etc/dpkg in the overlay to avoid cross-device link errors.
+
+    dpkg uses rename() which fails across filesystem boundaries (base image -> overlay).
+    We recreate the directory fresh in the overlay to avoid this.
+    """
+    dpkg_dir = "/etc/dpkg"
+    dpkg_cfg_dir = f"{dpkg_dir}/dpkg.cfg.d"
+
+    try:
+        # Save existing contents
+        saved_contents = {}
+        if os.path.isdir(dpkg_dir):
+            for root, _, files in os.walk(dpkg_dir):
+                for filename in files:
+                    src = os.path.join(root, filename)
+                    rel_path = os.path.relpath(src, dpkg_dir)
+                    try:
+                        with open(src, "rb") as f:
+                            saved_contents[rel_path] = f.read()
+                    except Exception:
+                        pass
+
+            # Delete and recreate (creates "whiteout" in overlay)
+            shutil.rmtree(dpkg_dir, ignore_errors=True)
+
+        # Recreate fresh in overlay
+        os.makedirs(dpkg_cfg_dir, exist_ok=True)
+
+        # Restore saved contents
+        for rel_path, content in saved_contents.items():
+            dest = os.path.join(dpkg_dir, rel_path)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            try:
+                with open(dest, "wb") as f:
+                    f.write(content)
+            except Exception:
+                pass
+
+        # Add force options for overlay compatibility
+        force_options = ["force-overwrite", "force-overwrite-dir", "force-unsafe-io"]
+        with open(f"{dpkg_cfg_dir}/singularity-compat", "w") as f:
+            f.write("\n".join(force_options) + "\n")
+
+        logger.debug("Configured dpkg for overlay filesystem")
+    except Exception as e:
+        logger.warning(f"Could not configure dpkg: {e}")
+
+
+def setup_common_directories() -> None:
+    """Create common directories that tasks might need.
+
+    These may exist in base image but need overlay promotion.
+    """
+    directories = [
+        # apt
+        "/etc/apt",
+        "/etc/apt/apt.conf.d",
+        "/etc/apt/preferences.d",
+        "/etc/apt/sources.list.d",
+        "/etc/apt/trusted.gpg.d",
+        "/var/lib/apt/lists/partial",
+        "/var/cache/apt/archives/partial",
+        "/var/log/apt",
+        # temp
+        "/tmp",
+        "/var/tmp",
+        # user
+        "/root",
+        "/root/.cache",
+        "/root/.local/bin",
+        "/home",
+        # bin
+        "/usr/local/bin",
+    ]
+
+    for directory in directories:
+        try:
+            os.makedirs(directory, exist_ok=True)
+        except FileExistsError:
+            # Path exists but is not a directory (e.g. some R2E-Gym / Singularity images)
+            logger.debug("Skip creating %s (exists and is not a directory)", directory)
+
+    logger.debug("Created common directories")
+
+
+def setup_fake_sudo() -> None:
+    """Create a fake sudo that just runs the command.
+
+    Singularity fakeroot already runs as "root", so sudo is unnecessary
+    but some scripts expect it to exist.
+    """
+    sudo_path = "/usr/local/bin/sudo"
+    os.makedirs(os.path.dirname(sudo_path), exist_ok=True)
+
+    with open(sudo_path, "w") as f:
+        f.write("#!/bin/bash\n")
+        f.write("# Fake sudo for Singularity fakeroot\n")
+        f.write('exec "$@"\n')
+    os.chmod(sudo_path, 0o755)
+
+    logger.debug("Created fake sudo")
+
+
+def setup_apt_sources() -> None:
+    """Configure apt sources.list with deb-src lines.
+
+    Some packages need source repos for build-dep.
+    Skips if sources.list is a directory (some images use sources.list.d only).
+    """
+    sources_file = "/etc/apt/sources.list"
+    if not os.path.isfile(sources_file):
+        logger.debug("/etc/apt/sources.list is not a regular file (e.g. is a directory), skipping apt sources setup")
+        return
+
+    # Read existing content
+    content = ""
+    try:
+        with open(sources_file, "r") as f:
+            content = f.read()
+    except OSError as e:
+        logger.warning(f"Could not read {sources_file}: {e}")
+        return
+
+    if "deb-src" in content:
+        return  # Already has source repos
+
+    # Add deb-src for each deb line
+    deb_lines = [line for line in content.split("\n") if line.strip().startswith("deb ")]
+    for deb_line in deb_lines:
+        src_line = deb_line.replace("deb ", "deb-src ", 1)
+        if src_line not in content:
+            content += f"\n{src_line}"
+
+    # If still no deb-src, add defaults based on distro
+    if "deb-src" not in content:
+        distro, codename = "debian", "stable"
+        if os.path.exists("/etc/os-release"):
+            with open("/etc/os-release", "r") as f:
+                for line in f:
+                    if line.startswith("ID="):
+                        distro = line.split("=")[1].strip().strip('"')
+                    elif line.startswith("VERSION_CODENAME="):
+                        codename = line.split("=")[1].strip().strip('"')
+
+        if distro == "debian":
+            content += f"\ndeb-src http://deb.debian.org/debian {codename} main"
+            content += f"\ndeb-src http://deb.debian.org/debian {codename}-updates main"
+        elif distro == "ubuntu":
+            content += f"\ndeb-src http://archive.ubuntu.com/ubuntu {codename} main universe"
+            content += f"\ndeb-src http://archive.ubuntu.com/ubuntu {codename}-updates main universe"
+
+        logger.debug(f"Added deb-src lines for {distro}/{codename}")
+    try:
+        with open(sources_file, "w") as f:
+            f.write(content)
+    except OSError as e:
+        logger.warning(f"Could not write {sources_file}: {e}")
+
+
+def setup_singularity_environment(workdir: str) -> None:
+    """Run all Singularity environment setup."""
+    setup_workdir(workdir)
+    setup_dpkg_for_overlay()
+    setup_common_directories()
+    setup_fake_sudo()
+
+    try:
+        setup_apt_sources()
+    except Exception as e:
+        logger.warning(f"Could not setup apt sources: {e}")
+
+    os.environ["SINGULARITY_WORKDIR"] = workdir
+    logger.debug("Singularity environment setup complete")
+
+
+# =============================================================================
+# Main Entry Point
+# =============================================================================
+
+
+def main():
+    parser = argparse.ArgumentParser(description="FastAPI server for Singularity container")
+    parser.add_argument("--port", type=int, required=True, help="Port to listen on")
+    parser.add_argument("--workdir", type=str, default="/app", help="Working directory")
+    args = parser.parse_args()
+
+    # Setup logging first so all subsequent messages are captured
+    setup_logging()
+
+    logger.debug(f"Starting server on port {args.port}, workdir={args.workdir}")
+
+    setup_singularity_environment(args.workdir)
+
+    # Build uvicorn kwargs; R2E-Gym images may have old uvicorn (0.15) without these args
+    uvicorn_kwargs = {
+        "host": "127.0.0.1",
+        "port": args.port,
+        "access_log": False,
+        "server_header": False,
+    }
+    try:
+        sig = inspect.signature(uvicorn.Config.__init__)
+        params = sig.parameters
+        if "timeout_graceful_shutdown" in params:
+            uvicorn_kwargs["timeout_graceful_shutdown"] = 5
+        if "timeout_keep_alive" in params:
+            uvicorn_kwargs["timeout_keep_alive"] = 120
+    except (ValueError, TypeError):
+        pass
+    uvicorn.run(app, **uvicorn_kwargs)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,65 @@
+harbor_agent:
+  responses_api_agents:
+    harbor_agent:
+      # Python module entrypoint loaded by NeMo Gym.
+      entrypoint: app.py
+      # Max concurrent requests handled by this agent server process.
+      concurrency: 50
+
+      # Dataset routing map.
+      # Each alias must define exactly one source:
+      # - local_dataset_path
+      # - or dataset_name (+ optional dataset_version)
+     # Optional per-alias workdir can override global harbor_environment_kwargs.workdir.
+      # Requests must provide instance_id as "<dataset_alias>::<task_name>".
+      harbor_datasets:
+        scientific:
+          local_dataset_path: "responses_api_agents/harbor_agent/data/nemotron_terminal_synthetic_tasks/skill_based/mixed/scientific_computing"
+          workdir: "/app"
+
+      # Agent – which Harbor agent to use (set name or import_path)
+      harbor_agent_name: null
+      # Python import path for a custom agent class (e.g. "my_pkg.my_mod:MyAgent").
+      harbor_agent_import_path: "responses_api_agents.harbor_agent.custom_agents.terminus_2_nemo_gym:Terminus2NemoGym"
+
+      # Extra kwargs forwarded to the Harbor AgentConfig
+      harbor_agent_kwargs:
+        # Hard stop on number of turns per episode. Remove to enable unlimited turns.
+        max_turns: 20
+        # Include reasoning content in chat history for each turn.
+        interleaved_thinking: true
+        # Keep off for RL so the model is not asked to compress context mid-trajectory.
+        enable_summarize: false
+        # Required for RL: includes per-token ids/logprobs used downstream by training.
+        collect_rollout_details: true
+        trajectory_config:
+          # Preserve raw JSON model response output.
+          raw_content: true
+        model_info:
+          max_input_tokens: 49152
+          max_output_tokens: 49152
+          input_cost_per_token: 0.0
+          output_cost_per_token: 0.0
+
+      # Environment – which Harbor environment to use (set name or import_path)
+      harbor_environment_type: null
+      # Use custom Singularity backend for HPC clusters.
+      harbor_environment_import_path: "responses_api_agents.harbor_agent.custom_envs.singularity.singularity:SingularityEnvironment"
+      harbor_environment_kwargs:
+        # Shared host cache for converted .sif images (avoid repeated pulls/conversions across jobs).
+        singularity_image_cache_dir: "responses_api_agents/harbor_agent/singularity_cache"
+
+      # Model routing: points agent LLM calls at the NeMo Gym model server alias.
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+      # Timeout controls:
+      # - null values defer to Harbor task defaults
+      # - multiplier scales task-defined timeouts globally
+      harbor_agent_timeout: null               # Agent timeout override in seconds
+      harbor_verifier_timeout: null            # Verifier timeout override in seconds
+      harbor_timeout_multiplier: null          # null behaves as 1.0
+
+      # Output root directory for Harbor job artifacts.
+      harbor_jobs_dir: "/path/to/Gym/responses_api_agents/harbor_agent/jobs"
