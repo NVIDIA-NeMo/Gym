@@ -1,5 +1,5 @@
 policy_api_key: ???
-policy_model:
+gpt-5-nano-2025-08-07:
   responses_api_models:
     openai_model:
       entrypoint: app.py

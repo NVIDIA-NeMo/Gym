@@ -1,4 +1,4 @@
-policy_model:
+gpt-oss-20b-reasoning-high:
   responses_api_models:
     local_vllm_model:
       entrypoint: app.py
