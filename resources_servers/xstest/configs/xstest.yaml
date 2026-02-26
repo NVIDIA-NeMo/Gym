@@ -1,0 +1,41 @@
+xstest:
+  resources_servers:
+    xstest:
+      entrypoint: app.py
+      domain: safety
+      verified: false
+      description: XSTest safety benchmark - exaggerated safety (over-refusal) evaluation
+      value: Evaluate model safety calibration between helpfulness and harmlessness
+      use_judge: false  # Set to true to use LLM judge (fields below only active when true)
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 16
+        temperature: 0.0
+      judge_endpoint_max_concurrency: 64
+      judge_prompt_template_fpath: prompt_templates/xstest_judge.txt
+judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${judge_base_url}
+      api_key: ${judge_api_key}
+      model: ${judge_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: false
+xstest_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: xstest
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/xstest/data/example.jsonl
