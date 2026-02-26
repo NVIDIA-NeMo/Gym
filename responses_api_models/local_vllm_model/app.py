@@ -479,8 +479,6 @@ class LocalVLLMModelActor:
         original__init__ = CoreEngineActorManager.__init__
 
         def new__init__(self, *args, **kwargs):
-            print("HIT INSIDE NEW CoreEngineActorManager.__init__", file=sys.stderr)
-
             from vllm.v1.engine.core import DPEngineCoreActor
 
             original_DPEngineCoreActor__init__ = DPEngineCoreActor.__init__
@@ -491,8 +489,6 @@ class LocalVLLMModelActor:
                 original_DPEngineCoreProc__init__ = DPEngineCoreProc.__init__
 
                 def new_DPEngineCoreProc__init__(self, *args, **kwargs):
-                    print("HIT INSIDE NEW DPEngineCoreProc.__init__", file=sys.stderr)
-
                     from vllm.v1.engine.core import (
                         EngineCore,
                         EngineCoreOutputs,
@@ -516,8 +512,6 @@ class LocalVLLMModelActor:
                         client_handshake_address: str | None = None,
                         engine_index: int = 0,
                     ):
-                        print("HIT INSIDE NEW EngineCoreProc INIT", file=sys.stderr)
-
                         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
                         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
                         executor_fail_callback = lambda: self.input_queue.put_nowait(
@@ -528,7 +522,6 @@ class LocalVLLMModelActor:
                         identity = self.engine_index.to_bytes(length=2, byteorder="little")
                         self.engines_running = False
 
-                        print("HIT BEFORE _perform_handshakes", file=sys.stderr)
                         with self._perform_handshakes(
                             handshake_address,
                             identity,
@@ -536,7 +529,6 @@ class LocalVLLMModelActor:
                             vllm_config,
                             client_handshake_address,
                         ) as addresses:
-                            print("HIT INSIDE _perform_handshakes", file=sys.stderr)
                             self.client_count = len(addresses.outputs)
 
                             # Set up data parallel environment.
