@@ -412,6 +412,13 @@ class LocalVLLMModelActor:
                         strategy=placement_strategy,
                         bundles=bundles,
                     )
+                    # TODO remove
+                    from time import time
+
+                    start_time = time()
+                    ray.get(pg.ready())
+                    print(f"PLACEMENT GROUP RESERVATION TOOK {time() - start_time:.3f}s")
+
                     print(f"MODIFIED placement group name: {pg_name}", file=sys.stderr)
 
                     """
