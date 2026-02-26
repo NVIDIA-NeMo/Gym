@@ -471,10 +471,20 @@ class LocalVLLMModelActor:
         CoreEngineActorManager.create_dp_placement_groups = new_create_dp_placement_groups
 
     def _patch_CoreEngineActorManager_init(self) -> None:
+        import vllm.distributed.utils
         from vllm.v1.engine.utils import (
             CoreEngineActorManager,
             logger,
         )
+
+        original_sitdpg = vllm.distributed.utils.stateless_init_torch_distributed_process_group
+
+        def new_sitdpg(*args, **kwargs):
+            print("HIT INSIDE NEW stateless_init_torch_distributed_process_group", file=sys.stderr)
+
+            return original_sitdpg(*args, **kwargs)
+
+        vllm.distributed.utils.stateless_init_torch_distributed_process_group = new_sitdpg
 
         original__init__ = CoreEngineActorManager.__init__
 
