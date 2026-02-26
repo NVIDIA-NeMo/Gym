@@ -314,7 +314,7 @@ Agent-level metrics: {agent_level_metrics_fpath}""")
                         timeout=ROLLOUT_ROW_TIMEOUT_SECONDS,
                     )
                     await asyncio.wait_for(raise_for_status(res), timeout=ROLLOUT_ROW_TIMEOUT_SECONDS)
-                    return row, await asyncio.wait_for(res.json(), timeout=ROLLOUT_ROW_TIMEOUT_SECONDS)
+                    return row, await asyncio.wait_for(get_response_json(res), timeout=ROLLOUT_ROW_TIMEOUT_SECONDS)
                 except Exception as e:
                     print(
                         f"[WARNING] Rollout failed for row {row.get('_rowidx', '?')}: {e}.\n"
