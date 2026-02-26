@@ -177,7 +177,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             raise NotImplementedError
         if self.config.replace_developer_role_with_system:
             raise NotImplementedError
-        if self.config.sequential_reasoning_allowed:
+        if not self.config.sequential_reasoning_allowed:
             raise NotImplementedError
 
         body_dict = body.model_dump(exclude_unset=True)
