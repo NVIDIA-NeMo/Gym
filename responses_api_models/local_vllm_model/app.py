@@ -309,8 +309,8 @@ class LocalVLLMModelActor:
                     "Zero or multiple node IP keys found in node resources: %s",
                     node_ip_keys,
                 )
-                node_ip_key = node_ip_keys[0]
-                node_ip = node_ip_key.split(":")[1]
+                # node_ip_key = node_ip_keys[0]
+                # node_ip = node_ip_key.split(":")[1]
 
                 n_device_on_node = int(node_resources.get(device_str, 0))
                 if pack_strategy == "span" and n_device_on_node != 0:
@@ -349,15 +349,17 @@ class LocalVLLMModelActor:
                 """
                 END Remove special handling for DP master node
                 """
+
                 if pack_strategy == "strict":
-                    if dp_size_available < dp_size_local:
-                        logger.info(
-                            "Skipping node %s as %s DP ranks could not fit, possible to fit %s DP ranks",
-                            node_ip,
-                            dp_size_local,
-                            dp_size_available,
-                        )
-                        continue
+                    # TODO undo
+                    # if dp_size_available < dp_size_local:
+                    #     logger.info(
+                    #         "Skipping node %s as %s DP ranks could not fit, possible to fit %s DP ranks",
+                    #         node_ip,
+                    #         dp_size_local,
+                    #         dp_size_available,
+                    #     )
+                    #     continue
                     dp_size_to_allocate = dp_size_local
                 else:
                     # for "pack_strategy" in "fill" and "span"
