@@ -6,14 +6,16 @@ harbor_agent:
       # Max concurrent requests handled by this agent server process.
       concurrency: 50
 
-      # Dataset source:
-      # - Registry mode: set harbor_dataset_name (+ optional harbor_dataset_version)
-      # - Local mode: set harbor_local_dataset_path
-      # Exactly one mode should be configured. Task selection still happens per request via instance_id.
-      harbor_dataset_name: null                # Registry dataset name (e.g., "terminal-bench")
-      harbor_dataset_version: null             # Registry dataset version (e.g., "2.0")
-      # Filesystem path to local Harbor task dataset
-      harbor_local_dataset_path: "responses_api_agents/harbor_agent/data/nemotron_terminal_synthetic_tasks/skill_based/mixed/scientific_computing"
+      # Dataset routing map.
+      # Each alias must define exactly one source:
+      # - local_dataset_path
+      # - or dataset_name (+ optional dataset_version)
+     # Optional per-alias workdir can override global harbor_environment_kwargs.workdir.
+      # Requests must provide instance_id as "<dataset_alias>::<task_name>".
+      harbor_datasets:
+        scientific:
+          local_dataset_path: "responses_api_agents/harbor_agent/data/nemotron_terminal_synthetic_tasks/skill_based/mixed/scientific_computing"
+          workdir: "/app"
 
       # Agent – which Harbor agent to use (set name or import_path)
       harbor_agent_name: null
@@ -46,8 +48,6 @@ harbor_agent:
       harbor_environment_kwargs:
         # Shared host cache for converted .sif images (avoid repeated pulls/conversions across jobs).
         singularity_image_cache_dir: "responses_api_agents/harbor_agent/singularity_cache"
-        # Container cwd used by command execution and server startup.
-        workdir: "/app"
 
       # Model routing: points agent LLM calls at the NeMo Gym model server alias.
       model_server:
@@ -62,4 +62,4 @@ harbor_agent:
       harbor_timeout_multiplier: null          # null behaves as 1.0
 
       # Output root directory for Harbor job artifacts.
-      harbor_jobs_dir: "jobs"
+      harbor_jobs_dir: "/path/to/Gym/responses_api_agents/harbor_agent/jobs"

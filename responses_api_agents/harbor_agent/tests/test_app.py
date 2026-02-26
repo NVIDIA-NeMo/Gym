@@ -237,7 +237,7 @@ def _make_server(**config_overrides) -> HarborAgent:
         concurrency=1,
         model_server={"type": "responses_api_models", "name": "test_model_server"},
         harbor_agent_name="terminus-2",
-        harbor_local_dataset_path="/tmp/test_dataset",
+        harbor_datasets={"scientific": {"local_dataset_path": "/tmp/test_dataset"}},
         harbor_environment_type="docker",
         harbor_jobs_dir="/tmp/harbor_jobs",
     )
@@ -250,7 +250,7 @@ def _make_server(**config_overrides) -> HarborAgent:
     )
 
 
-def _make_run_request(instance_id="test_task_123", **kwargs) -> HarborRunRequest:
+def _make_run_request(instance_id="scientific::test_task_123", **kwargs) -> HarborRunRequest:
     params: Dict[str, Any] = dict(temperature=1.0, top_p=1.0, input=[])
     params.update(kwargs)
     return HarborRunRequest(
@@ -339,7 +339,9 @@ class TestApp:
     async def test_run_failed_execution(self):
         server = _make_server()
         with _harbor_run_mocks(side_effect=Exception("Harbor job failed")):
-            response = await server.run(_make_run_request(instance_id="fail_task", temperature=0.3, top_p=0.95))
+            response = await server.run(
+                _make_run_request(instance_id="scientific::fail_task", temperature=0.3, top_p=0.95)
+            )
 
         assert response.reward == 0.0
         assert len(response.response.output) == 0
@@ -358,12 +360,31 @@ class TestApp:
         assert HarborAgent._extract_model_name(model_name) == expected
 
     def test_path_sanitization(self) -> None:
-        server = _make_server(harbor_dataset_name="terminal-bench", harbor_dataset_version="2.0")
+        server = _make_server()
         ts = datetime(2026, 2, 10, 12, 34, 56, tzinfo=timezone.utc)
 
-        assert server._get_results_output_dir("deepseek-ai/DeepSeek-V3.2", ts).parts[-1] == "DeepSeek-V3.2"
-        assert server._get_jobs_output_dir("deepseek-ai/DeepSeek-V3.2", ts).parts[-1] == "DeepSeek-V3.2"
-        assert server._get_results_output_dir("my-plain-model", ts).parts[-1] == "my-plain-model"
+        assert (
+            server._get_results_output_dir("deepseek-ai/DeepSeek-V3.2", "scientific", ts).parts[-1] == "DeepSeek-V3.2"
+        )
+        assert server._get_jobs_output_dir("deepseek-ai/DeepSeek-V3.2", "scientific", ts).parts[-1] == "DeepSeek-V3.2"
+        assert server._get_results_output_dir("my-plain-model", "scientific", ts).parts[-1] == "my-plain-model"
+
+    @pytest.mark.parametrize(
+        "instance_id, expected_alias, expected_task",
+        [
+            ("scientific::task_001", "scientific", "task_001"),
+            ("terminal_bench::tb2_math_7", "terminal_bench", "tb2_math_7"),
+        ],
+    )
+    def test_parse_instance_id(self, instance_id: str, expected_alias: str, expected_task: str) -> None:
+        alias, task = HarborAgent._parse_instance_id(instance_id)
+        assert alias == expected_alias
+        assert task == expected_task
+
+    @pytest.mark.parametrize("instance_id", ["", "scientific", "::task", "scientific::"])
+    def test_parse_instance_id_rejects_invalid_values(self, instance_id: str) -> None:
+        with pytest.raises(ValueError, match="instance_id must be in the form"):
+            HarborAgent._parse_instance_id(instance_id)
 
 
 # ===========================================================================

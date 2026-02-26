@@ -24,7 +24,7 @@ from uuid import uuid4
 
 import ray
 from fastapi import Body, FastAPI
-from pydantic import ConfigDict
+from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
@@ -46,6 +46,13 @@ from nemo_gym.openai_utils import (
 from responses_api_agents.harbor_agent.utils import HarborAgentUtils
 
 
+class HarborDatasetSourceConfig(BaseModel):
+    local_dataset_path: Optional[str] = None
+    dataset_name: Optional[str] = None
+    dataset_version: Optional[str] = None
+    workdir: Optional[str] = None
+
+
 class HarborAgentConfig(BaseResponsesAPIAgentConfig):
     concurrency: int
 
@@ -59,13 +66,13 @@ class HarborAgentConfig(BaseResponsesAPIAgentConfig):
     # model_info). See harbor_agent.yaml for examples.
     harbor_agent_kwargs: Optional[dict[str, Any]] = None
 
-    # --- Dataset ---
-    # Registry dataset identifier (e.g. "terminal-bench@2.0"). Mutually exclusive
-    # with harbor_local_dataset_path.
-    harbor_dataset_name: Optional[str] = None
-    harbor_dataset_version: Optional[str] = None
-    # Absolute path to a local task directory. Mutually exclusive with harbor_dataset_name.
-    harbor_local_dataset_path: Optional[str] = None
+    # --- Dataset routing ---
+    # Map of dataset aliases to source definitions. Each alias must define exactly
+    # one source:
+    # 1) local: {"local_dataset_path": "..."}
+    # 2) registry: {"dataset_name": "...", "dataset_version": "..."} (version optional)
+    # Requests must provide instance_id in the form "<dataset_alias>::<task_name>".
+    harbor_datasets: dict[str, HarborDatasetSourceConfig]
 
     # --- Environment ---
     # Harbor environment type: "singularity", "docker", "daytona", "modal", etc.
@@ -201,9 +208,10 @@ class HarborAgent(SimpleResponsesAPIAgent):
             run_id = self._build_run_id(run_timestamp)
 
             instance_id = body.instance_id
+            dataset_alias, task_name = self._parse_instance_id(instance_id)
 
-            output_file_dir = self._get_results_output_dir(policy_model_name, run_timestamp)
-            jobs_dir = self._get_jobs_output_dir(policy_model_name, run_timestamp)
+            output_file_dir = self._get_results_output_dir(policy_model_name, dataset_alias, run_timestamp)
+            jobs_dir = self._get_jobs_output_dir(policy_model_name, dataset_alias, run_timestamp)
             job_name = self._build_job_name(run_id)
 
             responses_create_params = body.responses_create_params.model_dump(
@@ -212,7 +220,8 @@ class HarborAgent(SimpleResponsesAPIAgent):
             )
 
             job_config_dict = self._build_job_config(
-                instance_id,
+                dataset_alias,
+                task_name,
                 policy_model_name,
                 base_url,
                 job_name=job_name,
@@ -287,31 +296,33 @@ class HarborAgent(SimpleResponsesAPIAgent):
             output_path = output_file_dir / run_id
             output_path.mkdir(parents=True, exist_ok=True)
 
-            with open(output_path / f"{instance_id}.json", "w") as f:
+            safe_instance_id = self._sanitize_path_component(instance_id)
+            with open(output_path / f"{safe_instance_id}.json", "w") as f:
                 json.dump(verify_response.model_dump(), f, indent=2)
 
             return verify_response
 
-    def _get_results_output_dir(self, policy_model_name: str, run_timestamp: datetime) -> Path:
+    def _get_results_output_dir(self, policy_model_name: str, dataset_alias: str, run_timestamp: datetime) -> Path:
         """Build immutable run output directory grouped by dataset/model."""
-        dataset_key = self._sanitize_path_component(self._get_dataset_key())
+        dataset_key = self._sanitize_path_component(dataset_alias)
         model_key = self._sanitize_path_component(self._extract_model_name(policy_model_name))
         return Path.cwd() / "results" / "runs" / dataset_key / model_key
 
-    def _get_jobs_output_dir(self, policy_model_name: str, run_timestamp: datetime) -> Path:
+    def _get_jobs_output_dir(self, policy_model_name: str, dataset_alias: str, run_timestamp: datetime) -> Path:
         """Build Harbor jobs directory grouped by dataset/model."""
-        dataset_key = self._sanitize_path_component(self._get_dataset_key())
+        dataset_key = self._sanitize_path_component(dataset_alias)
         model_key = self._sanitize_path_component(self._extract_model_name(policy_model_name))
         return Path(self.config.harbor_jobs_dir) / dataset_key / model_key
 
-    def _get_dataset_key(self) -> str:
-        """Derive a stable dataset key for folder naming."""
-        if self.config.harbor_dataset_name:
-            version = self.config.harbor_dataset_version or "latest"
-            return f"{self.config.harbor_dataset_name}@{version}"
-        if self.config.harbor_local_dataset_path:
-            return Path(self.config.harbor_local_dataset_path).name
-        return "unknown_dataset"
+    @staticmethod
+    def _parse_instance_id(instance_id: str) -> tuple[str, str]:
+        """Parse instance id in the required form: <dataset_alias>::<task_name>."""
+        dataset_alias, sep, task_name = instance_id.partition("::")
+        dataset_alias = dataset_alias.strip()
+        task_name = task_name.strip()
+        if not sep or not dataset_alias or not task_name:
+            raise ValueError(f"instance_id must be in the form '<dataset_alias>::<task_name>' (got: {instance_id!r})")
+        return dataset_alias, task_name
 
     def _build_run_id(self, run_timestamp: datetime) -> str:
         """Build a compact, sortable run id for immutable file naming."""
@@ -334,7 +345,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
 
     def _sanitize_path_component(self, value: str) -> str:
         """Sanitize path components to avoid accidental nested directories."""
-        sanitized = value.replace("/", "__").replace("\\", "__")
+        sanitized = value.replace("/", "__").replace("\\", "__").replace(":", "__")
         sanitized = re.sub(r"\s+", "_", sanitized)
         sanitized = sanitized.strip("._")
         return sanitized or "unknown"
@@ -350,7 +361,8 @@ class HarborAgent(SimpleResponsesAPIAgent):
 
     def _build_job_config(
         self,
-        instance_id: str,
+        dataset_alias: str,
+        task_name: str,
         model_name: str,
         api_base: str,
         job_name: str,
@@ -390,9 +402,27 @@ class HarborAgent(SimpleResponsesAPIAgent):
             kwargs=agent_kwargs,
         )
 
+        dataset_source = self.config.harbor_datasets.get(dataset_alias)
+        if dataset_source is None:
+            available = ", ".join(sorted(self.config.harbor_datasets.keys()))
+            raise ValueError(
+                f"Unknown dataset alias in instance_id: {dataset_alias!r}. Available aliases: [{available}]"
+            )
+
+        has_local = bool(dataset_source.local_dataset_path)
+        has_registry = bool(dataset_source.dataset_name)
+        if has_local == has_registry:
+            raise ValueError(
+                f"Dataset alias {dataset_alias!r} must define exactly one source: "
+                "local_dataset_path OR dataset_name[/dataset_version]."
+            )
+
         environment_kwargs = {}
         if self.config.harbor_environment_kwargs:
             environment_kwargs.update(self.config.harbor_environment_kwargs)
+        # Dataset alias-level workdir overrides global harbor_environment_kwargs.workdir.
+        if dataset_source.workdir is not None:
+            environment_kwargs["workdir"] = dataset_source.workdir
 
         environment_config = EnvironmentConfig(
             type=self.config.harbor_environment_type if not self.config.harbor_environment_import_path else None,
@@ -411,22 +441,17 @@ class HarborAgent(SimpleResponsesAPIAgent):
             quiet=True,
         )
 
-        # Build dataset config — exactly one source must be configured
-        if self.config.harbor_dataset_name:
+        if has_registry:
             dataset_config = RegistryDatasetConfig(
                 registry=RemoteRegistryInfo(),
-                name=self.config.harbor_dataset_name,
-                version=self.config.harbor_dataset_version,
-                task_names=[instance_id],
-            )
-        elif self.config.harbor_local_dataset_path:
-            dataset_config = LocalDatasetConfig(
-                path=Path(self.config.harbor_local_dataset_path),
-                task_names=[instance_id],
+                name=dataset_source.dataset_name,
+                version=dataset_source.dataset_version,
+                task_names=[task_name],
             )
         else:
-            raise ValueError(
-                "Harbor agent requires a dataset. Set either harbor_dataset_name or harbor_local_dataset_path."
+            dataset_config = LocalDatasetConfig(
+                path=Path(dataset_source.local_dataset_path),
+                task_names=[task_name],
             )
 
         job_config = JobConfig(

@@ -27,7 +27,7 @@ async def main():
             "responses_create_params": {
                 "input": [],
             },
-            "instance_id": "scientific_computing_task_0001",
+            "instance_id": "scientific::scientific_computing_task_0001",
         },
     )
     data = await result.json()

@@ -37,17 +37,21 @@ The default Harbor environments are not sufficient for HPC training, so this rep
 includes a custom Singularity environment implementation.
 It is designed around task-local setup, staged task files, and predictable runtime
 paths used by Harbor jobs.
-For Singularity installation, image preparation (`docker_image` as `.sif` path vs
-registry reference), and optional registry auth, see [Quick Start: 2) Set up dependencies and task images](#2-set-up-dependencies-and-task-images).
+For Singularity installation and image preparation (`docker_image` as `.sif` path vs.
+registry reference), see [Quick Start: 2) Set up dependencies and task images](#2-set-up-dependencies-and-task-images).
 
 Any additional task files needed by the environment should be placed under
 `environment/files/`. This directory is bind-mounted into the container staging
 area and copied into the runtime filesystem during bootstrap, so scripts/assets are
-available before agent execution.
+available before agent execution. For a quick refresher on standard Harbor task
+structure, see the [Harbor task docs](https://harborframework.com/docs/tasks).
 
 For task setup, this environment supports an optional `environment/files/setup.sh`
-script. When present, it is run during environment initialization and is the right
-place for per-task dependency/setup steps.
+script. When present, it is executed during Singularity environment initialization
+before agent execution, and is the right place for per-task dependency/setup
+steps. In practice, ensure `uvicorn` and `fastapi` are available (for Harbor's
+runtime server path in this Singularity flow), either baked into the image or
+installed from this setup script.
 
 Common `harbor_environment_kwargs` for this environment:
 - `singularity_image_cache_dir`: cache directory for converted `.sif` images.
@@ -126,7 +130,23 @@ python responses_api_agents/harbor_agent/custom_envs/singularity/scripts/rewrite
   --manifest-in responses_api_agents/harbor_agent/data/manifests/scientific_computing_manifest.json
 ```
 
+- Optional: write minimal task setup.sh files
+
+As noted in [Custom environments](#custom-environments), if tasks need only the
+Harbor server dependency bootstrap (`uvicorn` + `fastapi`) and those dependencies
+are not already baked into the image, you can
+auto-generate `environment/files/setup.sh` with:
+
+```bash
+# Write to all discovered tasks (use --force to overwrite existing setup.sh files)
+python responses_api_agents/harbor_agent/custom_envs/singularity/scripts/write_min_setup_sh.py \
+  --task-root responses_api_agents/harbor_agent/data/nemotron_terminal_synthetic_tasks/skill_based/mixed/scientific_computing
+```
+
 ### 3) Configure the vLLM model server
+
+Before starting NeMo Gym, launch your vLLM server and update `env.yaml` with the
+corresponding `policy_base_url`, `policy_api_key`, and `policy_model_name` values.
 
 If using the harbor agent for RL training, the companion vLLM model server config
 must enable token ID information and disable thinking history truncation. Use
@@ -158,6 +178,14 @@ The provided config `configs/harbor_agent.yaml` is already set up for this examp
 `Terminus2NemoGym` + `SingularityEnvironment` with training-oriented kwargs),
 but you can modify any fields as needed for your environment.
 
+Dataset selection is alias-based via `harbor_datasets`, and each request must use
+`instance_id` in the form `<dataset_alias>::<task_name>`. Example:
+`scientific::scientific_computing_task_0001`.
+If different datasets require different container working directories, set
+`workdir` per alias in `harbor_datasets` (e.g., `/app` vs `/testbed`).
+In this integration, alias-level `workdir` is intended for the custom
+`SingularityEnvironment`.
+
 ### 5) Start NeMo Gym servers
 
 If your task `docker_image` values are private registry references, export
@@ -182,18 +210,24 @@ ng_run "+config_paths=[${config_paths}]"
 python responses_api_agents/harbor_agent/client.py
 ```
 
+After a test run, inspect NeMo Gym rollout outputs under `results/`. For Harbor-
+specific trial artifacts, use `harbor_jobs_dir` (configured in
+`configs/harbor_agent.yaml`, default `jobs/`), where each Harbor run writes a
+timestamped job directory containing per-trial outputs and a top-level
+`result.json` summary.
+
 ### 7) Collect rollouts
 
 ```bash
 ng_collect_rollouts +agent_name=harbor_agent \
-  +input_jsonl_fpath=responses_api_agents/harbor_agent/data/example_input.jsonl \
-  +output_jsonl_fpath=responses_api_agents/harbor_agent/data/example_output.jsonl
+  +input_jsonl_fpath=responses_api_agents/harbor_agent/example/example_input.jsonl \
+  +output_jsonl_fpath=responses_api_agents/harbor_agent/example/example_output.jsonl
 ```
 
 ### 8) View trajectories
 
 ```bash
-ng_viewer +jsonl_fpath=responses_api_agents/harbor_agent/data/example_output.jsonl
+ng_viewer +jsonl_fpath=responses_api_agents/harbor_agent/example/example_output.jsonl
 ```
 
 ## NeMo RL Training

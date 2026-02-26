@@ -71,35 +71,12 @@ def update_task_toml_docker_image(task_toml_path: Path, image_ref: str) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Rewrite task.toml docker_image values from manifest.")
     parser.add_argument("--manifest-in", type=Path, required=True, help="Manifest JSON from build_and_push_images.py.")
-    parser.add_argument(
-        "--path-prefix-from",
-        type=str,
-        default=None,
-        help="Optional source Gym-path prefix in manifest paths (build machine).",
-    )
-    parser.add_argument(
-        "--path-prefix-to",
-        type=str,
-        default=None,
-        help="Destination Gym repo path prefix on the machine running this script.",
-    )
     parser.add_argument("--dry-run", action="store_true", help="Show planned rewrites only.")
     return parser.parse_args()
 
 
-def remap_path(path_str: str, prefix_from: str | None, prefix_to: str | None) -> Path:
-    if prefix_from is None or prefix_to is None:
-        return Path(path_str)
-    if path_str.startswith(prefix_from):
-        return Path(prefix_to + path_str[len(prefix_from) :])
-    return Path(path_str)
-
-
 def main() -> None:
     args = parse_args()
-    if (args.path_prefix_from is None) ^ (args.path_prefix_to is None):
-        print("Error: --path-prefix-from and --path-prefix-to must be provided together.", file=sys.stderr)
-        sys.exit(2)
     if not args.manifest_in.is_file():
         print(f"Error: manifest not found: {args.manifest_in}", file=sys.stderr)
         sys.exit(2)
@@ -113,11 +90,12 @@ def main() -> None:
     rewrites: list[tuple[str, Path, str, bool, str | None]] = []
     for item in tasks:
         task_name = item.get("task_name")
-        task_toml_path = remap_path(item.get("task_toml_path"), args.path_prefix_from, args.path_prefix_to)
+        task_toml_path_raw = item.get("task_toml_path")
+        task_toml_path = Path(task_toml_path_raw) if task_toml_path_raw else None
         docker_image = item.get("docker_image")
         success = bool(item.get("success"))
         error = item.get("error")
-        if not task_name or not docker_image:
+        if not task_name or not docker_image or task_toml_path is None:
             continue
         rewrites.append((task_name, task_toml_path, docker_image, success, error))
 
