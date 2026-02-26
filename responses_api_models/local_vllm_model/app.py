@@ -222,7 +222,9 @@ class LocalVLLMModelActor:
             original_ray_util_placement_group = ray.util.placement_group
 
             def new_ray_util_placement_group(*args, **kwargs):
+                print(f"ORIGINAL placement group name: {kwargs['name']}", file=sys.stderr)
                 kwargs["name"] = f"{self.server_name}_{kwargs['name']}"
+                print(f"MODIFIED placement group name: {kwargs['name']}", file=sys.stderr)
                 return original_ray_util_placement_group(*args, **kwargs)
 
             ray.util.placement_group = new_ray_util_placement_group
