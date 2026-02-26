@@ -482,6 +482,18 @@ class LocalVLLMModelActor:
 
         CoreEngineActorManager.create_dp_placement_groups = new_create_dp_placement_groups
 
+        original_init = CoreEngineActorManager.__init__
+
+        def new_init(self, *args, **kwargs):
+            print("HIT BEFORE INIT")
+            res = original_init(self, *args, *kwargs)
+
+            print("HIT AFTER INIT")
+
+            return res
+
+        CoreEngineActorManager.__init__ = new_init
+
     def base_url(self) -> str:
         return self._base_url
 
