@@ -486,8 +486,7 @@ class LocalVLLMModelActor:
 
         def new_init(CoreEngineActorManager_self, *args, **kwargs):
             print("HIT BEFORE INIT", file=sys.stderr)
-            print("ARGS", CoreEngineActorManager_self, args, kwargs, file=sys.stderr)
-            res = original_init(CoreEngineActorManager_self, *args, *kwargs)
+            res = original_init(CoreEngineActorManager_self, *args, **kwargs)
 
             print("HIT AFTER INIT", file=sys.stderr)
 
