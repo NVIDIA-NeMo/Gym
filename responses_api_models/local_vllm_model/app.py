@@ -153,19 +153,6 @@ class LocalVLLMModelActor:
             metrics_logger.setLevel(ERROR)
 
     def _patch_nonunique_placement_group_name_logic(self) -> None:
-        """
-        When running multiple local vLLM model instances, the Ray placement group names aren't unique.
-
-        (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)   File "vllm/v1/engine/utils.py", line 832, in launch_core_engines
-        (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)     engine_actor_manager = CoreEngineActorManager(
-        (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)                            ^^^^^^^^^^^^^^^^^^^^^^^
-        (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)   File "vllm/v1/engine/utils.py", line 287, in __init__
-        (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)     CoreEngineActorManager.create_dp_placement_groups(vllm_config)
-        (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)   File "vllm/v1/engine/utils.py", line 526, in create_dp_placement_groups
-        (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)     assert len(placement_groups) == dp_size, (
-        (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842) AssertionError: Created 4 DP placement groups, expected 2
-        """
         from vllm.v1.engine.utils import CoreEngineActorManager
 
         original_create_dp_placement_groups = CoreEngineActorManager.create_dp_placement_groups
@@ -176,9 +163,6 @@ class LocalVLLMModelActor:
             original_ray_util_placement_group = ray.util.placement_group
 
             def new_ray_util_placement_group(*args, **kwargs):
-                print(f"ORIGINAL placement group name: {kwargs['name']}", file=sys.stderr)
-                kwargs["name"] = f"{self.server_name}_{kwargs['name']}"
-                print(f"MODIFIED placement group name: {kwargs['name']}", file=sys.stderr)
                 return original_ray_util_placement_group(*args, **kwargs)
 
             ray.util.placement_group = new_ray_util_placement_group
@@ -380,11 +364,40 @@ class LocalVLLMModelActor:
                     else:
                         bundles = device_bundle * world_size + [{"CPU": 1.0}]
 
+                    """
+                    START Patch nonunique placement group name logic
+                    When running multiple local vLLM model instances, the Ray placement group names aren't unique.
+
+                    (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)   File "vllm/v1/engine/utils.py", line 832, in launch_core_engines
+                    (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)     engine_actor_manager = CoreEngineActorManager(
+                    (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)                            ^^^^^^^^^^^^^^^^^^^^^^^
+                    (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)   File "vllm/v1/engine/utils.py", line 287, in __init__
+                    (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)     CoreEngineActorManager.create_dp_placement_groups(vllm_config)
+                    (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)   File "vllm/v1/engine/utils.py", line 526, in create_dp_placement_groups
+                    (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)     assert len(placement_groups) == dp_size, (
+                    (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                    (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842) AssertionError: Created 4 DP placement groups, expected 2
+                    """
+                    # Original code:
+                    # pg = ray.util.placement_group(
+                    #     name=f"dp_rank_{len(placement_groups)}",
+                    #     strategy=placement_strategy,
+                    #     bundles=bundles,
+                    # )
+
+                    # New code:
+                    pg_name = f"{self.server_name}_dp_rank_{len(placement_groups)}"
                     pg = ray.util.placement_group(
-                        name=f"dp_rank_{len(placement_groups)}",
+                        name=pg_name,
                         strategy=placement_strategy,
                         bundles=bundles,
                     )
+                    print(f"MODIFIED placement group name: {pg_name}", file=sys.stderr)
+
+                    """
+                    END Patch nonunique placement group name logic
+                    """
+
                     placement_groups.append(pg)
                     local_dp_ranks.append(i)
                     if len(placement_groups) == dp_size:
