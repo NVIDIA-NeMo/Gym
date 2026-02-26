@@ -494,6 +494,7 @@ class LocalVLLMModelActor:
                     print("HIT INSIDE NEW DPEngineCoreProc.__init__", file=sys.stderr)
 
                     from vllm.v1.engine.core import (
+                        EngineCore,
                         EngineCoreOutputs,
                         EngineCoreProc,
                         EngineCoreRequestType,
@@ -558,7 +559,7 @@ class LocalVLLMModelActor:
                             print("HIT BEFORE __init__", file=sys.stderr)
                             # Original code:
                             # super().__init__(vllm_config, executor_class, log_stats, executor_fail_callback)
-                            super().__init__(self, vllm_config, executor_class, log_stats, executor_fail_callback)
+                            EngineCore.__init__(self, vllm_config, executor_class, log_stats, executor_fail_callback)
 
                             # Background Threads and Queues for IO. These enable us to
                             # overlap ZMQ socket IO with GPU since they release the GIL,
