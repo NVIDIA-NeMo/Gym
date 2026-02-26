@@ -500,8 +500,6 @@ class LocalVLLMModelActor:
             placement_groups: list["PlacementGroup"] | None = None,
             local_dp_ranks: list[int] | None = None,
         ):
-            print("HIT BEFORE INIT", file=sys.stderr)
-
             import copy
 
             import ray
@@ -585,14 +583,10 @@ class LocalVLLMModelActor:
                 self.placement_group_is_local.append(local_client)
                 refs.append(actor.wait_for_init.remote())
 
-            print("HIT BEFORE RAY GET REFS", file=sys.stderr)
             ray.get(refs)
-            print("HIT AFTER RAY GET REFS", file=sys.stderr)
             self.run_refs = []
             for actor in self.local_engine_actors + self.remote_engine_actors:
                 self.run_refs.append(actor.run.remote())
-
-            print("HIT AFTER INIT", file=sys.stderr)
 
         CoreEngineActorManager.__init__ = new__init__
 
