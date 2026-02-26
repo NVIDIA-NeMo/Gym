@@ -18,11 +18,6 @@ Environment variables:
 """
 
 import json
-import os
-import shutil
-import socket
-import subprocess
-import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -36,84 +31,7 @@ from resources_servers.spider2_lite.setup_spider2 import _DEFAULT_DIR
 
 pytestmark = pytest.mark.e2e_llm
 
-_VLLM_BIN = shutil.which("vllm") or "/home/rlempka/code/.venv/bin/vllm"
-_DEFAULT_MODEL = "openai/gpt-oss-20b"
-_DEFAULT_PORT = 18765
 _EXAMPLE_JSONL = Path(__file__).parent.parent / "data" / "example.jsonl"
-
-
-def _is_port_open(host: str, port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.settimeout(1)
-        return s.connect_ex((host, port)) == 0
-
-
-def _wait_for_vllm(port: int, timeout_s: int = 240) -> bool:
-    """Poll until vLLM /health returns 200 or timeout."""
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        if _is_port_open("localhost", port):
-            try:
-                r = requests.get(f"http://localhost:{port}/health", timeout=2)
-                if r.status_code == 200:
-                    return True
-            except requests.RequestException:
-                pass
-        time.sleep(3)
-    return False
-
-
-@pytest.fixture(scope="module")
-def vllm_url():
-    """Yield the vLLM base URL, starting the server if needed."""
-    # Allow pointing at a pre-running server
-    if url := os.environ.get("SPIDER2_LLM_URL"):
-        yield url
-        return
-
-    if not Path(_VLLM_BIN).is_file():
-        pytest.skip(f"vllm binary not found at {_VLLM_BIN}")
-
-    model = os.environ.get("SPIDER2_LLM_MODEL", _DEFAULT_MODEL)
-    port = int(os.environ.get("SPIDER2_LLM_PORT", _DEFAULT_PORT))
-    gpu = os.environ.get("SPIDER2_LLM_GPU", "0")
-    base_url = f"http://localhost:{port}/v1"
-
-    if _is_port_open("localhost", port):
-        # Server already running — just use it
-        yield base_url
-        return
-
-    cmd = [
-        _VLLM_BIN, "serve", model,
-        "--port", str(port),
-        "--dtype", "bfloat16",
-        "--max-model-len", "8192",
-        "--trust-remote-code",
-    ]
-    env = {**os.environ, "CUDA_VISIBLE_DEVICES": gpu}
-    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-
-    if not _wait_for_vllm(port):
-        out = proc.stdout.read().decode(errors="replace") if proc.stdout else ""
-        proc.terminate()
-        pytest.fail(f"vLLM did not become ready within 240s. Output:\n{out[-3000:]}")
-
-    yield base_url
-
-    proc.terminate()
-    try:
-        proc.wait(timeout=15)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-
-
-@pytest.fixture(scope="module")
-def llm_model(vllm_url):
-    """Return the model name registered with the running vLLM server."""
-    r = requests.get(f"{vllm_url}/models", timeout=10)
-    r.raise_for_status()
-    return r.json()["data"][0]["id"]
 
 
 @pytest.fixture(scope="module")

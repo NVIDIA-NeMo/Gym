@@ -34,4 +34,4 @@ spider2_lite_simple_agent:
         - name: example
           type: example
           jsonl_fpath: resources_servers/spider2_lite/data/example.jsonl
-          license: CC BY-SA 4.0
+          license: Creative Commons Attribution-ShareAlike 4.0 International
