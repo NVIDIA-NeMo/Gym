@@ -50,6 +50,7 @@ class FailureCode(str, Enum):
     """Enumeration of possible failure reasons."""
 
     NONE = "none"
+    NO_RESPONSE = "no_response"
     NO_CODE_EXTRACTED = "no_code_extracted"
     JUDGE_EVALUATION_FAILED = "judge_evaluation_failed"
     UNKNOWN_ERROR = "unknown_error"
@@ -198,8 +199,6 @@ class ScienceCodeResourcesServer(SimpleResourcesServer):
 
         # Get model output text directly from response
         generated = body.response.output_text or ""
-        if not generated:
-            raise ValueError("No assistant response found/extracted to verify")
 
         reward = 0.0
         failure_reason = None
@@ -208,45 +207,50 @@ class ScienceCodeResourcesServer(SimpleResourcesServer):
         extracted_code = None
 
         try:
-            # Extract code from model output
-            extracted_code = extract_code_from_response(generated)
-
-            if not extracted_code:
-                failure_reason = FailureCode.NO_CODE_EXTRACTED
+            # Handle empty response gracefully
+            if not generated:
+                failure_reason = FailureCode.NO_RESPONSE
                 reward = 0.0
             else:
-                # Run LLM judge evaluation
-                first_equal, first_eval = await self._generate_judge_evaluation(
-                    problem=problem,
-                    expected_solution=reference_solution,
-                    generated_solution=extracted_code,
-                )
-                judge_evaluations.append(first_eval)
+                # Extract code from model output
+                extracted_code = extract_code_from_response(generated)
 
-                if first_equal:
-                    if self.config.check_twice_swap:
-                        # Run swap check
-                        second_equal, second_eval = await self._generate_judge_evaluation(
-                            problem=problem,
-                            expected_solution=extracted_code,
-                            generated_solution=reference_solution,
-                        )
-                        judge_evaluations.append(second_eval)
+                if not extracted_code:
+                    failure_reason = FailureCode.NO_CODE_EXTRACTED
+                    reward = 0.0
+                else:
+                    # Run LLM judge evaluation
+                    first_equal, first_eval = await self._generate_judge_evaluation(
+                        problem=problem,
+                        expected_solution=reference_solution,
+                        generated_solution=extracted_code,
+                    )
+                    judge_evaluations.append(first_eval)
 
-                        if second_equal:
+                    if first_equal:
+                        if self.config.check_twice_swap:
+                            # Run swap check
+                            second_equal, second_eval = await self._generate_judge_evaluation(
+                                problem=problem,
+                                expected_solution=extracted_code,
+                                generated_solution=reference_solution,
+                            )
+                            judge_evaluations.append(second_eval)
+
+                            if second_equal:
+                                judge_passed = True
+                                reward = 1.0
+                                failure_reason = FailureCode.NONE
+                            else:
+                                reward = self.config.reward_if_swap_fails
+                                failure_reason = FailureCode.JUDGE_EVALUATION_FAILED
+                        else:
                             judge_passed = True
                             reward = 1.0
                             failure_reason = FailureCode.NONE
-                        else:
-                            reward = self.config.reward_if_swap_fails
-                            failure_reason = FailureCode.JUDGE_EVALUATION_FAILED
                     else:
-                        judge_passed = True
-                        reward = 1.0
-                        failure_reason = FailureCode.NONE
-                else:
-                    failure_reason = FailureCode.JUDGE_EVALUATION_FAILED
-                    reward = 0.0
+                        failure_reason = FailureCode.JUDGE_EVALUATION_FAILED
+                        reward = 0.0
 
         except Exception as e:
             failure_reason = FailureCode.UNKNOWN_ERROR
