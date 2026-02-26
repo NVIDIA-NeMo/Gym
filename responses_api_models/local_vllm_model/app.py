@@ -556,7 +556,9 @@ class LocalVLLMModelActor:
                             self._init_data_parallel(vllm_config)
 
                             print("HIT BEFORE __init__", file=sys.stderr)
-                            super().__init__(vllm_config, executor_class, log_stats, executor_fail_callback)
+                            # Original code:
+                            # super().__init__(vllm_config, executor_class, log_stats, executor_fail_callback)
+                            super().__init__(self, vllm_config, executor_class, log_stats, executor_fail_callback)
 
                             # Background Threads and Queues for IO. These enable us to
                             # overlap ZMQ socket IO with GPU since they release the GIL,
