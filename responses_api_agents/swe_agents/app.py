@@ -156,7 +156,7 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
     )
 
     run_with_mixed_prompts: bool = Field(
-        default=False,
+        default=True,
         description="Whether to run with mixed prompts",
     )
 
