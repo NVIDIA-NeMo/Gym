@@ -482,6 +482,109 @@ class LocalVLLMModelActor:
 
         CoreEngineActorManager.create_dp_placement_groups = new_create_dp_placement_groups
 
+        from vllm.v1.engine.core import (
+            EngineCoreOutputs,
+            EngineCoreProc,
+            EngineCoreRequestType,
+            Executor,
+            VllmConfig,
+            enable_envs_cache,
+            maybe_attach_gc_debug_callback,
+            queue,
+            threading,
+        )
+
+        def new__init__(
+            self,
+            vllm_config: VllmConfig,
+            local_client: bool,
+            handshake_address: str,
+            executor_class: type[Executor],
+            log_stats: bool,
+            client_handshake_address: str | None = None,
+            engine_index: int = 0,
+        ):
+            self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
+            self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
+            executor_fail_callback = lambda: self.input_queue.put_nowait((EngineCoreRequestType.EXECUTOR_FAILED, b""))
+
+            self.engine_index = engine_index
+            identity = self.engine_index.to_bytes(length=2, byteorder="little")
+            self.engines_running = False
+
+            with self._perform_handshakes(
+                handshake_address,
+                identity,
+                local_client,
+                vllm_config,
+                client_handshake_address,
+            ) as addresses:
+                self.client_count = len(addresses.outputs)
+
+                # Set up data parallel environment.
+                self.has_coordinator = addresses.coordinator_output is not None
+                self.frontend_stats_publish_address = addresses.frontend_stats_publish_address
+                logger.debug(
+                    "Has DP Coordinator: %s, stats publish address: %s",
+                    self.has_coordinator,
+                    self.frontend_stats_publish_address,
+                )
+                # Only publish request queue stats to coordinator for "internal"
+                # and "hybrid" LB modes .
+                self.publish_dp_lb_stats = (
+                    self.has_coordinator and not vllm_config.parallel_config.data_parallel_external_lb
+                )
+
+                self._init_data_parallel(vllm_config)
+
+                super().__init__(vllm_config, executor_class, log_stats, executor_fail_callback)
+
+                # Background Threads and Queues for IO. These enable us to
+                # overlap ZMQ socket IO with GPU since they release the GIL,
+                # and to overlap some serialization/deserialization with the
+                # model forward pass.
+                # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
+                ready_event = threading.Event()
+                input_thread = threading.Thread(
+                    target=self.process_input_sockets,
+                    args=(
+                        addresses.inputs,
+                        addresses.coordinator_input,
+                        identity,
+                        ready_event,
+                    ),
+                    daemon=True,
+                )
+                input_thread.start()
+
+                self.output_thread = threading.Thread(
+                    target=self.process_output_sockets,
+                    args=(
+                        addresses.outputs,
+                        addresses.coordinator_output,
+                        self.engine_index,
+                    ),
+                    daemon=True,
+                )
+                self.output_thread.start()
+
+                # Don't complete handshake until DP coordinator ready message is
+                # received.
+                while not ready_event.wait(timeout=10):
+                    if not input_thread.is_alive():
+                        raise RuntimeError("Input socket thread died during startup")
+                    assert addresses.coordinator_input is not None
+                    logger.info("Waiting for READY message from DP Coordinator...")
+
+            # If enable, attach GC debugger after static variable freeze.
+            maybe_attach_gc_debug_callback()
+
+            # Enable environment variable cache (e.g. assume no more
+            # environment variable overrides after this point)
+            enable_envs_cache()
+
+        EngineCoreProc.__init__ = new__init__
+
     def base_url(self) -> str:
         return self._base_url
 
