@@ -290,6 +290,8 @@ Total Ray cluster resources: {cluster_resources()}""")
 
         self.config.base_url = [ray.get(self._local_vllm_model_actor.base_url.remote())]
 
+        self._post_init()
+
         self.await_server_ready()
 
     def await_server_ready(self) -> None:

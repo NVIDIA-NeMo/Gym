@@ -91,6 +91,10 @@ class VLLMModel(SimpleResponsesAPIModel):
     config: VLLMModelConfig
 
     def model_post_init(self, context):
+        self._post_init()
+        return super().model_post_init(context)
+
+    def _post_init(self) -> None:
         self._clients = [
             NeMoGymAsyncOpenAI(
                 base_url=base_url,
@@ -104,8 +108,6 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._converter = VLLMConverter(
             return_token_id_information=self.config.return_token_id_information,
         )
-
-        return super().model_post_init(context)
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
