@@ -93,6 +93,7 @@ class LocalVLLMModelActor:
         self._patch_uvicorn_logger()
         self._maybe_patch_engine_stats()
         self._patch_create_dp_placement_groups()
+        self._patch_init_data_parallel()
 
         for k, v in self.env_vars.items():
             environ[k] = v
@@ -152,26 +153,35 @@ class LocalVLLMModelActor:
             )
             metrics_logger.setLevel(ERROR)
 
-    def _patch_nonunique_placement_group_name_logic(self) -> None:
-        from vllm.v1.engine.utils import CoreEngineActorManager
+    def _patch_init_data_parallel(self) -> None:
+        from vllm.v1.engine.core import DPEngineCoreProc, logger
 
-        original_create_dp_placement_groups = CoreEngineActorManager.create_dp_placement_groups
+        def new_init_data_parallel(self, vllm_config):
+            # Configure GPUs and stateless process group for data parallel.
+            dp_rank = vllm_config.parallel_config.data_parallel_rank
+            dp_size = vllm_config.parallel_config.data_parallel_size
+            local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
 
-        def new_create_dp_placement_groups(*args, **kwargs):
-            import ray
+            # TODO remove this
+            # assert dp_size > 1
+            assert local_dp_rank is not None
+            assert 0 <= local_dp_rank <= dp_rank < dp_size
 
-            original_ray_util_placement_group = ray.util.placement_group
+            if vllm_config.kv_transfer_config is not None:
+                # modify the engine_id and append the local_dp_rank to it to ensure
+                # that the kv_transfer_config is unique for each DP rank.
+                vllm_config.kv_transfer_config.engine_id = (
+                    f"{vllm_config.kv_transfer_config.engine_id}_dp{local_dp_rank}"
+                )
+                logger.debug(
+                    "Setting kv_transfer_config.engine_id to %s",
+                    vllm_config.kv_transfer_config.engine_id,
+                )
 
-            def new_ray_util_placement_group(*args, **kwargs):
-                return original_ray_util_placement_group(*args, **kwargs)
+            self.dp_rank = dp_rank
+            self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
 
-            ray.util.placement_group = new_ray_util_placement_group
-
-            result = original_create_dp_placement_groups(*args, **kwargs)
-
-            return result
-
-        CoreEngineActorManager.create_dp_placement_groups = new_create_dp_placement_groups
+        DPEngineCoreProc._init_data_parallel = new_init_data_parallel
 
     def _patch_create_dp_placement_groups(self) -> None:
         from ray.util.placement_group import PlacementGroup
