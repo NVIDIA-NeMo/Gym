@@ -174,9 +174,9 @@ class LocalVLLMModelActor:
         CoreEngineActorManager.create_dp_placement_groups = new_create_dp_placement_groups
 
     def _patch_create_dp_placement_groups(self) -> None:
+        from ray.util.placement_group import PlacementGroup
         from vllm.v1.engine.utils import (
             CoreEngineActorManager,
-            PlacementGroup,
             current_platform,
             envs,
             logger,
