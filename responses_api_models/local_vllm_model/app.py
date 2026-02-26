@@ -92,7 +92,7 @@ class LocalVLLMModelActor:
         self._patch_signal_handler()
         self._patch_uvicorn_logger()
         self._maybe_patch_engine_stats()
-        # self._patch_colocated_placement_group_logic()
+        self._patch_colocated_placement_group_logic()
         self._patch_nonunique_placement_group_name_logic()
 
         for k, v in self.env_vars.items():
