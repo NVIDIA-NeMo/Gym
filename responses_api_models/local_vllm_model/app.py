@@ -365,7 +365,10 @@ class LocalVLLMModelActor:
                     dp_size_to_allocate = dp_size_available
 
                 for i in range(dp_size_to_allocate):
-                    device_bundle = [{device_str: 1.0, "node:" + node_ip: 0.001}]
+                    # TODO remove
+                    # device_bundle = [{device_str: 1.0, "node:" + node_ip: 0.001}]
+                    device_bundle = [{device_str: 1.0}]
+
                     if pack_strategy == "span":
                         collected_bundles += device_bundle * n_device_on_node
                         assert len(collected_bundles) <= world_size, (
