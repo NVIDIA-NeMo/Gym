@@ -227,14 +227,12 @@ class LocalVLLMModelActor:
             (LocalVLLMModelActor pid=504531) (APIServer pid=504531) AssertionError: Zero or multiple node IP keys found in node resources: ['node:10.65.9.15_group_a036a448bf98d155cd0d6a8991f902000000', 'node:10.65.9.15_group_1_8786b4bfb840f7ba7af007e7e41602000000', 'node:10.65.9.15', 'node:10.65.9.15_group_8786b4bfb840f7ba7af007e7e41602000000', 'node:10.65.9.15_group_1_a036a448bf98d155cd0d6a8991f902000000', 'node:10.65.9.15_group_0_8786b4bfb840f7ba7af007e7e41602000000', 'node:10.65.9.15_group_0_a036a448bf98d155cd0d6a8991f902000000']
             """
 
-            print(f"ORIGINAL available resources: {available_resources}", file=sys.stderr)
             for node_hex_id, node_resources in list(available_resources.items()):
                 available_resources[node_hex_id] = {
                     resource_id: resource
                     for resource_id, resource in node_resources.items()
                     if "_group_" not in resource_id
                 }
-            print(f"MODIFIED available resources: {available_resources}", file=sys.stderr)
 
             """
             END Patch colocated placement group logic
@@ -422,17 +420,6 @@ class LocalVLLMModelActor:
                         strategy=placement_strategy,
                         bundles=bundles,
                     )
-                    # TODO remove
-                    from time import time
-
-                    start_time = time()
-                    ray.get(pg.ready())
-                    print(
-                        f"PLACEMENT GROUP RESERVATION FOR {self.server_name} ON NODE IP {node_ip} WITH BUNDLES {bundles} TOOK {time() - start_time:.3f}s",
-                        file=sys.stderr,
-                    )
-
-                    print(f"MODIFIED placement group name: {pg_name}", file=sys.stderr)
 
                     """
                     END Patch nonunique placement group name logic
