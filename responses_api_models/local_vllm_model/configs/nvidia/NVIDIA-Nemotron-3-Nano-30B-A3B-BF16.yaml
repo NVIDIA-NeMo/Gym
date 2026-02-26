@@ -18,9 +18,8 @@ NVIDIA-Nemotron-3-Nano-30B-A3B-BF16:
       # If a hf_token is present in the env.yaml, it will be prepended to the hf download.
       vllm_serve_kwargs:
         # vLLM serving is a bit quirky at the moment. These parallelism configs are fairly sensitive and need to always be set properly!
-        data_parallel_size: 2
-        data_parallel_size_local: 2
-        tensor_parallel_size: 4
+        data_parallel_size: 1
+        tensor_parallel_size: 8
         pipeline_parallel_size: 1
 
         trust_remote_code: true

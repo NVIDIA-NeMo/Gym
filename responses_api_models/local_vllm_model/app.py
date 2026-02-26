@@ -649,11 +649,14 @@ class LocalVLLMModel(VLLMModel):
 
         env_vars.update(self.config.vllm_serve_env_vars)
 
+        # With our vLLM patches, this assert is no longer necessary
         # Ray backend only works if dp_size > 1
-        # TODO revert
         # assert server_args.get("data_parallel_size") is None or server_args.get("data_parallel_size") > 1, (
         #     "Ray backend only works with data parallel size > 1!"
         # )
+
+        # With our vLLM patches, this is no longer necessary for people to set.
+        server_args["data_parallel_size_local"] = 1
 
         # TODO multi-node model instances still need to be properly supported
         # We get a vLLM error: Exception: Error setting CUDA_VISIBLE_DEVICES: local range: [0, 16) base value: "0,1,2,3,4,5,6,7"
