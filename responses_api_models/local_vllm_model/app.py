@@ -321,17 +321,35 @@ class LocalVLLMModelActor:
                 else:
                     dp_size_available = n_device_on_node // world_size
 
-                if node_ip == dp_master_ip:
-                    if dp_size_available < dp_size_local:
-                        raise ValueError(
-                            "Not enough resources to allocate %s DP ranks "
-                            "on DP master node %s, possible to fit %s DP ranks",
-                            dp_size_local,
-                            dp_master_ip,
-                            dp_size_available,
-                        )
-                    dp_size_to_allocate = dp_size_local
-                elif pack_strategy == "strict":
+                """
+                START Remove special handling for DP master node
+
+                When running multiple local vLLM model instances, the master node is hard to
+                (LocalVLLMModelActor pid=4088775, ip=10.65.15.35) (APIServer pid=4088775)     engine_actor_manager = CoreEngineActorManager(
+                (LocalVLLMModelActor pid=4088775, ip=10.65.15.35) (APIServer pid=4088775)                            ^^^^^^^^^^^^^^^^^^^^^^^
+                (LocalVLLMModelActor pid=4088775, ip=10.65.15.35) (APIServer pid=4088775)   File "/lustre/fsw/portfolios/llmservice/projects/llmservice_modelalignment_ppo/use
+                rs/bxyu/customer-eval-dev/nemo-gym/responses_api_models/local_vllm_model/.venv/lib/python3.12/site-packages/vllm/v1/engine/utils.py", line 287, in __init__
+                (LocalVLLMModelActor pid=4088775, ip=10.65.15.35) (APIServer pid=4088775)     CoreEngineActorManager.create_dp_placement_groups(vllm_config)
+                (LocalVLLMModelActor pid=4088775, ip=10.65.15.35) (APIServer pid=4088775)   File "/lustre/fsw/portfolios/llmservice/projects/llmservice_modelalignment_ppo/use
+                rs/bxyu/customer-eval-dev/nemo-gym/responses_api_models/local_vllm_model/app.py", line 326, in new_create_dp_placement_groups
+                (LocalVLLMModelActor pid=4088775, ip=10.65.15.35) (APIServer pid=4088775)     raise ValueError(
+                (LocalVLLMModelActor pid=4088775, ip=10.65.15.35) (APIServer pid=4088775) ValueError: ('Not enough resources to allocate %s DP ranks on DP master node %s, possible to fit %s DP ranks', 2, '10.65.15.35', 1)
+                """
+                # Original code:
+                # if node_ip == dp_master_ip:
+                #     if dp_size_available < dp_size_local:
+                #         raise ValueError(
+                #             "Not enough resources to allocate %s DP ranks "
+                #             "on DP master node %s, possible to fit %s DP ranks",
+                #             dp_size_local,
+                #             dp_master_ip,
+                #             dp_size_available,
+                #         )
+                #     dp_size_to_allocate = dp_size_local
+                """
+                END Remove special handling for DP master node
+                """
+                if pack_strategy == "strict":
                     if dp_size_available < dp_size_local:
                         logger.info(
                             "Skipping node %s as %s DP ranks could not fit, possible to fit %s DP ranks",
