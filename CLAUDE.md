@@ -155,9 +155,27 @@ Additional fields depend on the resource server's `VerifyResponse` class.
 ### Dataset types and where they live
 
 - **`example`** datasets (5 entries for smoke testing) are committed directly to git in `data/example.jsonl`.
-- **`train`** and **`validation`** datasets are hosted in the GitLab dataset registry. They must NOT be committed to git.
+- **`train`** and **`validation`** datasets are stored remotely and must NOT be committed to git.
+  - **Public benchmarks** — use HuggingFace (`ng_upload_dataset_to_hf` / `ng_download_dataset_from_hf`). HF repo naming convention: `{organization}/{prefix}-{domain}-{resource_server}`.
+  - **NVIDIA-internal benchmarks** — use the internal GitLab MLflow registry (`ng_upload_dataset_to_gitlab` / `ng_download_dataset_from_gitlab`). Requires NVIDIA-internal credentials; not accessible outside NVIDIA.
 
-### GitLab dataset registry
+### HuggingFace dataset registry (public benchmarks)
+
+Upload a JSONL dataset (repo name is derived from domain + resource server name):
+```bash
+ng_upload_dataset_to_hf \
+    +dataset_name=my_benchmark \
+    +input_jsonl_fpath=resources_servers/my_benchmark/data/my_dataset.jsonl \
+    +resource_config_path=resources_servers/my_benchmark/configs/my_benchmark.yaml \
+    +hf_token=<token> \
+    +hf_organization=<org> \
+    +hf_collection_name=<collection> \
+    +hf_collection_slug=<slug>
+```
+
+### GitLab dataset registry (NVIDIA-internal benchmarks only)
+
+> **Note:** GitLab infrastructure is NVIDIA-internal and not publicly accessible. Use HuggingFace for any benchmark with a public dataset.
 
 Upload a JSONL dataset:
 ```bash
@@ -175,10 +193,20 @@ mlflow_tracking_token: <your-gitlab-api-token>
 
 The tracking URI format is `https://<gitlab-host>/api/v4/projects/<PROJECT_ID>/ml/mlflow`.
 
-### YAML config: gitlab_identifier + jsonl_fpath
+### YAML config: huggingface_identifier / gitlab_identifier + jsonl_fpath
 
-Both fields coexist. `jsonl_fpath` is the local download destination; `gitlab_identifier` tells the system where to fetch from:
+Both fields coexist with `jsonl_fpath` (the local download destination). Use `huggingface_identifier` for public datasets, `gitlab_identifier` for internal ones:
 ```yaml
+# Public dataset on HuggingFace
+- name: my_dataset
+  type: validation
+  jsonl_fpath: resources_servers/my_benchmark/data/my_dataset.jsonl
+  huggingface_identifier:
+    repo_id: my-org/my-repo
+    artifact_fpath: my_dataset.jsonl  # omit to use HF load_dataset with split
+  license: MIT
+
+# NVIDIA-internal dataset on GitLab
 - name: my_dataset
   type: validation
   jsonl_fpath: resources_servers/my_benchmark/data/my_dataset.jsonl
@@ -209,8 +237,13 @@ Validate example data (for PR submission):
 ng_prepare_data "+config_paths=[...]" +output_dirpath=/tmp/prepare +mode=example_validation
 ```
 
-Download and prepare train/validation from GitLab:
+Download and prepare train/validation:
 ```bash
+# From HuggingFace (public)
+ng_prepare_data "+config_paths=[...]" +output_dirpath=data/my_benchmark \
+    +mode=train_preparation +should_download=true +data_source=hf
+
+# From GitLab (NVIDIA-internal)
 ng_prepare_data "+config_paths=[...]" +output_dirpath=data/my_benchmark \
     +mode=train_preparation +should_download=true +data_source=gitlab
 ```
@@ -266,9 +299,9 @@ A single YAML file in `configs/` typically defines both the resource server and 
 
 Input JSONL has one problem per line. System prompt goes in the `input` messages. Task-specific verification data goes in `verifier_metadata`.
 
-If converting from another format, write the conversion script in the source repo (e.g. your dataset source repo) — conversion scripts and prompt files do not belong in the NeMo-Gym repo. Upload only the converted JSONL to the GitLab registry.
+If converting from another format, write the conversion script in the source repo (e.g. your dataset source repo) — conversion scripts and prompt files do not belong in the NeMo-Gym repo. Upload only the converted JSONL to the dataset registry.
 
-Generate `data/example.jsonl` with 5 entries (committed to git). Upload `train`/`validation` datasets with `ng_upload_dataset_to_gitlab`. Add `gitlab_identifier` to the YAML config. See "Dataset Management" above for the full workflow.
+Generate `data/example.jsonl` with 5 entries (committed to git). Upload `train`/`validation` datasets with `ng_upload_dataset_to_hf` (public benchmarks) or `ng_upload_dataset_to_gitlab` (NVIDIA-internal). Add the corresponding `hf_identifier` or `gitlab_identifier` to the YAML config. See "Dataset Management" above for the full workflow.
 
 Validate your data:
 ```bash
