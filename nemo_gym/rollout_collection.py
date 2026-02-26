@@ -39,6 +39,7 @@ from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
     get_global_config_dict,
+    get_response_json,
     is_global_aiohttp_client_setup,
     raise_for_status,
     set_global_aiohttp_client,
