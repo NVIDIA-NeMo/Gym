@@ -94,6 +94,7 @@ class LocalVLLMModelActor:
         self._maybe_patch_engine_stats()
         self._patch_create_dp_placement_groups()
         self._patch_init_data_parallel()
+        self._patch_CoreEngineActorManager_init()
 
         for k, v in self.env_vars.items():
             environ[k] = v
@@ -468,6 +469,12 @@ class LocalVLLMModelActor:
             return placement_groups, local_dp_ranks
 
         CoreEngineActorManager.create_dp_placement_groups = new_create_dp_placement_groups
+
+    def _patch_CoreEngineActorManager_init(self) -> None:
+        from vllm.v1.engine.utils import (
+            CoreEngineActorManager,
+            logger,
+        )
 
         original__init__ = CoreEngineActorManager.__init__
 
