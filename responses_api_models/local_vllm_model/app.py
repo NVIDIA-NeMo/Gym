@@ -504,6 +504,8 @@ class LocalVLLMModelActor:
             client_handshake_address: str | None = None,
             engine_index: int = 0,
         ):
+            print("HIT INSIDE INIT", file=sys.stderr)
+
             self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
             self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
             executor_fail_callback = lambda: self.input_queue.put_nowait((EngineCoreRequestType.EXECUTOR_FAILED, b""))
@@ -512,6 +514,7 @@ class LocalVLLMModelActor:
             identity = self.engine_index.to_bytes(length=2, byteorder="little")
             self.engines_running = False
 
+            print("HIT BEFORE _perform_handshakes", file=sys.stderr)
             with self._perform_handshakes(
                 handshake_address,
                 identity,
@@ -519,6 +522,7 @@ class LocalVLLMModelActor:
                 vllm_config,
                 client_handshake_address,
             ) as addresses:
+                print("HIT INSIDE _perform_handshakes", file=sys.stderr)
                 self.client_count = len(addresses.outputs)
 
                 # Set up data parallel environment.
@@ -535,8 +539,10 @@ class LocalVLLMModelActor:
                     self.has_coordinator and not vllm_config.parallel_config.data_parallel_external_lb
                 )
 
+                print("HIT BEFORE _init_data_parallel", file=sys.stderr)
                 self._init_data_parallel(vllm_config)
 
+                print("HIT BEFORE __init__", file=sys.stderr)
                 super().__init__(vllm_config, executor_class, log_stats, executor_fail_callback)
 
                 # Background Threads and Queues for IO. These enable us to
@@ -568,6 +574,7 @@ class LocalVLLMModelActor:
                 )
                 self.output_thread.start()
 
+                print("HIT BEFORE ready_event.wait", file=sys.stderr)
                 # Don't complete handshake until DP coordinator ready message is
                 # received.
                 while not ready_event.wait(timeout=10):
@@ -576,6 +583,7 @@ class LocalVLLMModelActor:
                     assert addresses.coordinator_input is not None
                     logger.info("Waiting for READY message from DP Coordinator...")
 
+            print("HIT BEFORE maybe_attach_gc_debug_callback", file=sys.stderr)
             # If enable, attach GC debugger after static variable freeze.
             maybe_attach_gc_debug_callback()
 
