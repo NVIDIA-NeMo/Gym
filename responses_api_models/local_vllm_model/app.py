@@ -485,10 +485,10 @@ class LocalVLLMModelActor:
         original_init = CoreEngineActorManager.__init__
 
         def new_init(self, *args, **kwargs):
-            print("HIT BEFORE INIT")
+            print("HIT BEFORE INIT", file=sys.stderr)
             res = original_init(self, *args, *kwargs)
 
-            print("HIT AFTER INIT")
+            print("HIT AFTER INIT", file=sys.stderr)
 
             return res
 
