@@ -111,7 +111,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:
         if self.config.is_responses_native:
-            return self._responses_native(request, body)
+            return await self._responses_native(request, body)
 
         # Response Create Params -> Chat Completion Create Params
         chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(body)
