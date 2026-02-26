@@ -292,7 +292,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 metadata=trial_result if trial_result else {},
             )
 
-            # Save result to disk (folder = run_id/date, file = task name)
+            # Save result to disk (folder = run_id, file = task name)
             output_path = output_file_dir / run_id
             output_path.mkdir(parents=True, exist_ok=True)
 
@@ -303,16 +303,18 @@ class HarborAgent(SimpleResponsesAPIAgent):
             return verify_response
 
     def _get_results_output_dir(self, policy_model_name: str, dataset_alias: str, run_timestamp: datetime) -> Path:
-        """Build immutable run output directory grouped by dataset/model."""
+        """Build immutable run output directory grouped by date/dataset/model."""
+        date_key = run_timestamp.strftime("%Y%m%d")
         dataset_key = self._sanitize_path_component(dataset_alias)
         model_key = self._sanitize_path_component(self._extract_model_name(policy_model_name))
-        return Path.cwd() / "results" / "runs" / dataset_key / model_key
+        return Path.cwd() / "results" / "runs" / date_key / dataset_key / model_key
 
     def _get_jobs_output_dir(self, policy_model_name: str, dataset_alias: str, run_timestamp: datetime) -> Path:
-        """Build Harbor jobs directory grouped by dataset/model."""
+        """Build Harbor jobs directory grouped by date/dataset/model."""
+        date_key = run_timestamp.strftime("%Y%m%d")
         dataset_key = self._sanitize_path_component(dataset_alias)
         model_key = self._sanitize_path_component(self._extract_model_name(policy_model_name))
-        return Path(self.config.harbor_jobs_dir) / dataset_key / model_key
+        return Path(self.config.harbor_jobs_dir) / date_key / dataset_key / model_key
 
     @staticmethod
     def _parse_instance_id(instance_id: str) -> tuple[str, str]:
@@ -325,8 +327,8 @@ class HarborAgent(SimpleResponsesAPIAgent):
         return dataset_alias, task_name
 
     def _build_run_id(self, run_timestamp: datetime) -> str:
-        """Build a compact, sortable run id for immutable file naming."""
-        time_key = run_timestamp.strftime("%Y%m%d_%H%M%S")
+        """Build a compact run id (time + short hash) for immutable file naming."""
+        time_key = run_timestamp.strftime("%H%M%S")
         return f"{time_key}_{uuid4().hex[:8]}"
 
     def _build_job_name(self, run_id: str) -> str:

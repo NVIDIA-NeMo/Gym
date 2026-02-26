@@ -305,6 +305,9 @@ Harbor writes each rollout to a subdirectory under `harbor_jobs_dir`. A practica
 way to debug is to inspect trajectories by run timestamp: start from the relevant
 timestamped job directory, then drill into per-rollout subdirectories and compare
 `trajectory.json`, verifier outputs, and exception files across nearby runs.
+Because each rollout can produce several artifacts, file counts can grow quickly
+on long-running cluster jobs. Job outputs are grouped by day in `harbor_jobs_dir`
+(for example `jobs/YYYYMMDD/...`), so cleanup is simple.
 
 ### Known failure cases during RL training
 
