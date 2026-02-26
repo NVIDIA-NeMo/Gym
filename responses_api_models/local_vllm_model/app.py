@@ -417,7 +417,7 @@ class LocalVLLMModelActor:
 
                     start_time = time()
                     ray.get(pg.ready())
-                    print(f"PLACEMENT GROUP RESERVATION TOOK {time() - start_time:.3f}s")
+                    print(f"PLACEMENT GROUP RESERVATION TOOK {time() - start_time:.3f}s", file=sys.stderr)
 
                     print(f"MODIFIED placement group name: {pg_name}", file=sys.stderr)
 
