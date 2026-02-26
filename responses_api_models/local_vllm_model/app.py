@@ -505,7 +505,7 @@ class LocalVLLMModelActor:
                         threading,
                     )
 
-                    def new__init__(
+                    def new_EngineCoreProc__init__(
                         self,
                         vllm_config: VllmConfig,
                         local_client: bool,
@@ -604,7 +604,7 @@ class LocalVLLMModelActor:
                         # environment variable overrides after this point)
                         enable_envs_cache()
 
-                    EngineCoreProc.__init__ = new__init__
+                    EngineCoreProc.__init__ = new_EngineCoreProc__init__
 
                     return original_DPEngineCoreProc__init__(self, *args, **kwargs)
 
