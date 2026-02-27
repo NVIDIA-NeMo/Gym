@@ -35,8 +35,8 @@ ng_run "+config_paths=[$config_paths]"
 
 Build a dataset that contains data for both servers. Add the agent ref used to route requests to the correct agent server to each record.
 ```bash
-jq -c '. + {"agent_ref": {"name": "example_single_tool_call_simple_agent"}}' resources_servers/example_single_tool_call/data/example.jsonl >> results/test_multiverifier_input.jsonl
-jq -c '. + {"agent_ref": {"name": "example_multi_step_simple_agent"}}' resources_servers/example_multi_step/data/example.jsonl >> results/test_multiverifier_input.jsonl
+jq -c '. + {"agent_ref": {"type": "responses_api_agents", "name": "example_single_tool_call_simple_agent"}}' resources_servers/example_single_tool_call/data/example.jsonl >> results/test_multiverifier_input.jsonl
+jq -c '. + {"agent_ref": {"type": "responses_api_agents", "name": "example_multi_step_simple_agent"}}' resources_servers/example_multi_step/data/example.jsonl >> results/test_multiverifier_input.jsonl
 ```
 
 ## Rollout Collection
