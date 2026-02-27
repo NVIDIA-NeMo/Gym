@@ -57,6 +57,21 @@ GRPO training on instruction following and reasoning environments.
 
 ::::
 
+## Data Generation
+
+::::{grid} 1 1 2 2
+:gutter: 1 1 1 2
+
+:::{grid-item-card} {octicon}`beaker;1.5em;sd-mr-1` Generating Multi-Step Tool-Calling Data
+:link: multistep-toolcalling-datagen
+:link-type: doc
+Generate synthetic training data for multi-step tool-calling agents using NVIDIA Data Designer.
++++
+{bdg-secondary}`data-generation` {bdg-secondary}`tool-calling` {bdg-secondary}`notebook`
+:::
+
+::::
+
 ## SFT & DPO
 
 ::::{grid} 1 1 2 2
