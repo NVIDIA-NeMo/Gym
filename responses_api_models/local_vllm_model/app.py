@@ -179,6 +179,18 @@ class LocalVLLMModelActor:
                 )
 
             self.dp_rank = dp_rank
+
+            import vllm.distributed.utils
+
+            original_sitdpg = vllm.distributed.utils.stateless_init_torch_distributed_process_group
+
+            def new_sitdpg(*args, **kwargs):
+                print("HIT INSIDE NEW stateless_init_torch_distributed_process_group", file=sys.stderr)
+
+                return original_sitdpg(*args, **kwargs)
+
+            vllm.distributed.utils.stateless_init_torch_distributed_process_group = new_sitdpg
+
             self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
 
         DPEngineCoreProc._init_data_parallel = new_init_data_parallel
