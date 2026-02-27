@@ -54,7 +54,7 @@ Below are a subset of rollout structures and core capabilities found across NeMo
 Implement tools, define verification logic, and test your environment end-to-end.
 
 +++
-{bdg-primary}`start here` {bdg-secondary}`45-90 min`
+{bdg-primary}`start here` {bdg-secondary}`30 min`
 :::
 
 :::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Multi-Environment Training
