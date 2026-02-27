@@ -88,8 +88,6 @@ class TestTuringVIFApp:
         """Test that VIF validators can be imported."""
         from resources_servers.turing_vif.vif_validators.validator import (
             validate_instruction,
-            validate_instruction_schema,
-            check_contradicting_instructions,
         )
         from resources_servers.turing_vif.vif_validators.data_loader import (
             LLM_INSTRUCTIONS,
@@ -406,88 +404,6 @@ class TestTuringVIFApp:
             response_content="This is not JSON format.",
         )
         self._run_verify_test(request, False, 0.0, [False])
-
-
-class TestSchemaValidation:
-    """Tests for instruction schema validation."""
-
-    def test_validate_instruction_schema_valid(self):
-        """Test schema validation with valid instructions."""
-        from resources_servers.turing_vif.vif_validators.validator import validate_instruction_schema
-
-        instructions = {
-            "metadata": ["add"],
-            "instructions": [
-                {"instruction_id": "length_constraints:number_words", "relation": "at least", "num_words": 50},
-                {"instruction_id": "keywords:existence", "keywords": ["test"]},
-            ]
-        }
-        mismatches = validate_instruction_schema(instructions)
-        assert len(mismatches) == 0
-
-    def test_validate_instruction_schema_missing_args(self):
-        """Test schema validation with missing arguments."""
-        from resources_servers.turing_vif.vif_validators.validator import validate_instruction_schema
-
-        instructions = {
-            "metadata": ["add"],
-            "instructions": [
-                {"instruction_id": "length_constraints:number_words"},  # Missing relation and num_words
-            ]
-        }
-        mismatches = validate_instruction_schema(instructions)
-        assert len(mismatches) > 0
-
-    def test_validate_instruction_schema_extra_args(self):
-        """Test schema validation with extra arguments."""
-        from resources_servers.turing_vif.vif_validators.validator import validate_instruction_schema
-
-        instructions = {
-            "metadata": ["add"],
-            "instructions": [
-                {"instruction_id": "punctuation:no_comma", "extra_arg": "should not be here"},
-            ]
-        }
-        mismatches = validate_instruction_schema(instructions)
-        assert len(mismatches) > 0
-
-
-class TestContradictionDetection:
-    """Tests for detecting contradicting instructions."""
-
-    def test_no_contradictions(self):
-        """Test with no contradicting instructions."""
-        from resources_servers.turing_vif.vif_validators.validator import check_contradicting_instructions
-
-        instructions = [
-            {"instruction_id": "length_constraints:number_words", "relation": "at least", "num_words": 50},
-            {"instruction_id": "keywords:existence", "keywords": ["test"]},
-        ]
-        errors = check_contradicting_instructions(instructions)
-        assert len(errors) == 0
-
-    def test_detect_case_contradictions(self):
-        """Test detection of contradicting case instructions."""
-        from resources_servers.turing_vif.vif_validators.validator import check_contradicting_instructions
-
-        instructions = [
-            {"instruction_id": "change_case:all_caps"},
-            {"instruction_id": "change_case:lowercase"},  # Contradicts all_caps
-        ]
-        errors = check_contradicting_instructions(instructions)
-        assert len(errors) > 0
-        assert any("all_caps" in err and "lowercase" in err for err in errors)
-
-    def test_detect_quotation_contradictions(self):
-        """Test detection of contradicting quotation/wrap instructions."""
-        from resources_servers.turing_vif.vif_validators.validator import check_contradicting_instructions
-
-        instructions = [
-            {"instruction_id": "startend:quotation"},
-            {"instruction_id": "startend:wrap_checker", "wrap_phrase": "***"},
-        ]
-        errors = check_contradicting_instructions(instructions)
-        assert len(errors) > 0
 
 
 class TestEdgeCases:

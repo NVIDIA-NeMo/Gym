@@ -2,41 +2,24 @@ from fractions import Fraction
 import re
 import string
 import json
-from typing import Dict, List, Literal, Tuple, Any
-import copy
-import json
-import re
 import os
-import unicodedata
+from typing import Dict, List, Literal, Tuple, Any
 
-from collections import (Counter, defaultdict)
+from collections import Counter
 
 import requests
-from data_loader import DEFINITION_GENERATOR_SYSTEM_PROMPT, JUDGE_SYSTEM_PROMPT, PROMPT_VALIDATION_JUDGE_SYSTEM_PROMPT, THINKING_VALIDATION_JUDGE_SYSTEM_PROMPT, template_json, conflict_dict, LLM_INSTRUCTIONS, eval_modes, subinst_def, inst_def, LLM_JUDGE_QUESTION_PROMPT
+from ..data_loader import DEFINITION_GENERATOR_SYSTEM_PROMPT, JUDGE_SYSTEM_PROMPT, eval_modes, subinst_def, inst_def, LLM_JUDGE_QUESTION_PROMPT
 
-import validators.validator as base_validator
+from .. import validator as base_validator
 
 from pydantic import BaseModel, ValidationError, Field
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
 
-from notebook_processing.processor import NotebookParsingError
-
-load_dotenv()
-
-# French language configuration
-FRENCH_LANGUAGE = "fre"
-
-_FRE_LETTERS = "A-Za-zÀÂÄÇÉÈÊËÎÏÔÖÙÛÜŸàâäçéèêëîïôöùûüÿ"
-
-
-def _unicode_boundary_phrase_pattern(phrase: str) -> str:
-    """
-    Creates a regex pattern to match a phrase with word boundaries,
-    allowing for multi-token phrases with flexible whitespace.
-    """
-    escaped = [re.escape(part) for part in phrase.split()]
-    joined = r"\s+".join(escaped)
-    return rf"(?<![{_FRE_LETTERS}]){joined}(?![{_FRE_LETTERS}])"
+if load_dotenv:
+    load_dotenv()
 
 class JudgeResponse(BaseModel):
     """
@@ -51,110 +34,6 @@ class DefintionResponse(BaseModel):
     """
     status: Literal["PASS", "FAIL"] = Field(..., description="The binary decision from the generator.")
     definition: str = Field(..., description="The definition of the term.")
-
-
-# Map of expected kwargs for each instruction ID
-EXPECTED_ARGUMENTS = {
-    # --- PRIORITY (must be first, before any other instruction entries) ---
-    # "length_constraints:number_characters": ["relation", "num_chars"],
-    # "length_constraints:number_words": ["relation", "num_words"],
-    # "change_case:lowercase_word_frequency": ["lowercase_relation", "lowercase_frequency"],
-    # "keywords:letter_frequency": ["letter", "let_relation", "let_frequency"],
-    # "change_case:capital_word_frequency": ["capital_relation", "capital_frequency"],
-    # "change_case:vowel_consonant_balance": ["min_fraction", "max_fraction"],
-    # "detectable_format:max_paragraph_length": ["max_chars"],
-    # "length_constraints:sentence_length": ["max_words"],
-    # "punctuation:question_exclaim": ["relation", "num_marks"],
-    # "keywords:alliteration": ["target_letter", "relation", "num_alliteration"],
-    # "keywords:palindrome_word": ["min_length"],
-    # "keywords:positioning": ["keyword", "position"],
-    # "length_constraints:word_length": ["min_length", "max_length"],
-    # "length_constraints:avg_word_length": ["min_ratio", "max_ratio"],
-    # "length_constraints:paragraph_length": ["relation", "words_per_paragraph"],
-    # "detectable_content:numeric_inclusion": ["relation", "num_numbers"],
-    # "keywords:vowel_count": ["relation", "num_vowels"],
-    # "keywords:consonant_count": ["relation", "num_consonants"],
-
-    # --- NON-PRIORITY (original order, with priority keys NOT repeated) ---
-    "change_case:all_caps": [],
-    "change_case:lowercase": [],
-    "change_case:alternating": [],
-    "change_case:first_letter_cap": [],
-    "change_case:all_caps_target": ["target_string"],
-    "change_case:lowercase_target": ["target_string"],
-    "change_case:alternating_target": ["target_string"],
-    "change_case:first_letter_cap_target": ["target_string"],
-
-    "detectable_content:number_placeholders": ["relation", "num_placeholders"],
-    "detectable_content:postscript": ["postscript_marker"],
-    "detectable_format:json_format": [],
-    "detectable_format:multiple_sections": ["section_splitter", "relation", "num_sections"],
-    "detectable_format:numbered_list": ["relation", "num_numbered_items"],
-    "detectable_format:number_bullet_lists": ["relation", "num_bullets"],
-    "detectable_format:title": [],
-    "keywords:existence": ["keywords"],
-    "keywords:frequency": ["keyword", "relation", "frequency"],
-    "keywords:forbidden_words": ["forbidden_words"],
-    "punctuation:no_comma": [],
-    "length:max_word_count": ["max_words"],
-    "startend:start_checker": ["start_phrase"],
-    "startend:end_checker": ["end_phrase"],
-    "startend:wrap_checker": ["wrap_phrase"],
-    "startend:quotation": [],
-
-    # New VIF Instructions (excluding any priority duplicates)
-    "change_case:case_ratio": ["min_fraction", "max_fraction"],
-    "change_case:first_letter_sentence": [],
-    "change_case:last_letter": ["case"],
-
-    "detectable_format:number_paragraphs": ["relation", "num_paragraphs"],
-    "detectable_format:sentences_per_paragraph": ["relation", "num_sentences"],
-    "detectable_format:indentation": ["indent_type", "size"],
-    "length_constraints:word_repetition": ["max_repeats"],
-    "length_constraints:unique_words": ["relation", "num_unique"],
-    "punctuation:frequency": ["punctuation", "relation", "frequency"],
-    "punctuation:balance": [],
-    "punctuation:no_period": [],
-    "punctuation:end_rule": ["allowed"],
-    "detectable_format:nested_list": ["min_depth", "num_subitems"],
-    "detectable_format:table": ["min_rows", "min_cols"],
-    "detectable_format:heading_depth": ["levels"],
-    "detectable_format:section_balance": ["element_type", "count"],
-    "detectable_format:sentence_count": ["relation", "num_sentences"],
-    "punctuation:variety": ["min_types"],
-    "detectable_format:sentence_endings": ["min_variants"],
-
-    # New LLM Judge Instructions
-    "stylistic:tone_formality": ["tone_level"],
-    "stylistic:emotional_tone": ["emotion_type"],
-    "stylistic:politeness": ["politeness_degree"],
-    "stylistic:descriptive_level": ["description_degree"],
-    "stylistic:literary_style": ["style_type"],
-    "stylistic:sentence_tone_consistency": ["tone_type"],
-    "stylistic:voice": ["voice_type"],
-    "stylistic:figurative_language": ["figure_type", "relation", "num_occurrences"],
-    "stylistic:tone_transition": ["from_tone", "to_tone", "transition_position"],
-    "stylistic:emotive_adjectives": ["relation", "num_adjectives"],
-    "stylistic:sensory_detail": ["sense_type", "relation", "num_details"],
-    "stylistic:rhythm_pattern": ["rhythm_type"],
-    "linguistic:pragmatic_context": ["context_type"],
-    "linguistic:speech_act": ["act_type"],
-    "linguistic:syntactic_pattern": ["pattern_type"],
-    "linguistic:grammatical_mood": ["mood_type"],
-    "linguistic:morphological_form": ["form_type"],
-    "linguistic:phonological_pattern": ["phonology_type"],
-    "linguistic:sound_symbolism": ["relation", "num_symbolisms"],
-    "situation:role_based": ["role_type"],
-    "situation:task_specific": ["task_type"],
-    "situation:audience_alignment": ["audience_type"],
-    "situation:contextual_scenario": ["scenario_type"],
-    "situation:perspective": ["perspective_type"],
-    "situation:emotional_alignment": ["emotion_type"],
-    "situation:cultural_context": ["culture_type", "adaptation_level"],
-    "situation:temporal_context": ["time_frame"],
-    "situation:environment_setting": ["environment_type"],
-}
-
 
 
 def judge_llm_api(user_content, system_content="You are a chatbot", temperature=0.7, seed=42, top_p=1, top_k=40,
@@ -273,86 +152,36 @@ def count_lowercase_words(response: str) -> int:
     """Count number of lowercase words in response."""
     return sum(1 for w in response.split() if w.islower())
 
-def word_frequency(response: str, word: str) -> int:
-    """Count frequency of a word in response."""
-    words = re.findall(r'[^\s]+', response.lower())
-    return words.count(word.lower())
-
-def _get_strategy_fre():
-    """Get French language strategy."""
-    class FrenchStrategy:
-        code = "fre"
-        has_case = True
-        supports_case_rules = True
-        supports_vowel_rules = True
-        sentence_delims = ".!?"
-        punctuation_marks = ".!?"
-        vowels = set("aàâäeéèêëiîïoôöuùûüAEÉÈÊËÀÂÄÎÏÔÖÙÛÜ")
-        word_script = "latin"
-        
-        def normalize(self, text: str) -> str:
-            return unicodedata.normalize("NFKC", text)
-        
-        def casefold(self, text: str) -> str:
-            return self.normalize(text).casefold()
-        
-        def tokenize_words(self, text: str) -> List[str]:
-            text_without_lists = re.sub(r'^\s*\d+\.\s', '', text, flags=re.MULTILINE)
-            return re.findall(r"[^\W_]+(?:['-][^\W_]+)*", text_without_lists, flags=re.UNICODE)
-    return FrenchStrategy()
-
-_fre_strategy = _get_strategy_fre()
-
 def keyword_frequency(response: str, keyword: str) -> int:
-    """Count frequency of a keyword in response, using Unicode-aware boundaries for French."""
-    strategy = _fre_strategy
-    keyword = strategy.casefold(keyword.strip())
-    
-    # French uses Latin script, so use phrase pattern matching
+    """Count frequency of a keyword in response, allowing any Unicode tokens (Hindi)."""
+    keyword = keyword.strip()
     escaped_tokens = [re.escape(part) for part in keyword.split()]
     phrase_pattern = r"\s+".join(escaped_tokens)
-    pattern = rf"(?<![\w]){phrase_pattern}(?![\w])"
-    
-    return len(re.findall(pattern, strategy.casefold(response), flags=re.UNICODE))
+
+    pattern = rf"(?<![\w\'\-\\u0964\\u0965]){phrase_pattern}(?![\w\'\-\\u0964\\u0965])"
+
+    return len(re.findall(pattern, response, flags=re.IGNORECASE | re.UNICODE))
 
 def is_first_letter_cap(token: str) -> bool:
-    """Check if a token has first letter capitalized and the rest lowercase,
-    allowing an extra uppercase after an apostrophe (e.g., D'Effectuer, D’Effectuer)."""
-    if not token:
-        return True  # or False, depending on how you want to treat empty tokens
-
     first_alpha_seen = False
     first = token[0]
-
-    # If the token starts with a digit, all later alphabetic characters must be lowercase
     if first.isdigit():
         return all((not ch.isalpha()) or ch.islower() for ch in token[1:])
-
-    # Single-character token
     if len(token) == 1:
-        if first.isalpha():
+        if token.isalpha():
             return first.isupper()
         else:
             return True
 
-    APOSTROPHES = {"'", "’"}  # handle straight and curly apostrophes
-
-    prev_char = None
     for ch in token:
         if ch.isalpha():
             if not first_alpha_seen:
-                # First alphabetic character must be uppercase
                 if not ch.isupper():
                     return False
                 first_alpha_seen = True
             else:
-                # Allow uppercase immediately after an apostrophe
-                if prev_char in APOSTROPHES and ch.isupper():
-                    pass
-                elif not ch.islower():
+                if not ch.islower():
                     return False
-        prev_char = ch
-
     return True
 
 def parse_fraction_or_inf(input_str: str):
@@ -379,10 +208,10 @@ def parse_fraction_or_inf(input_str: str):
 def extract_clean_sentences(text: str) -> List[str]:
     """
     Takes a raw text string and returns a clean list of sentences.
-    Uses French language-specific sentence delimiters.
+    This version correctly handles list items that do not end with punctuation
+    by treating each cleaned line as a source for one or more sentences.
+    Treats Devanagari Danda (।) and Double Danda (॥) as sentence delimiters.
     """
-    strategy = _fre_strategy
-    delims = strategy.sentence_delims
 
     # Remove markdown tables
     table_pattern = r'(?:^\s*\|.*\|.*\n){2,}'
@@ -391,6 +220,9 @@ def extract_clean_sentences(text: str) -> List[str]:
     # Remove horizontal rules
     rule_pattern = r'^\s*([*_-])\s*\1\s*\1+\s*$'
     text = re.sub(rule_pattern, '', cleaned_text, flags=re.MULTILINE)
+    
+    
+    # print(text)
     
     all_sentences = []
     
@@ -403,22 +235,34 @@ def extract_clean_sentences(text: str) -> List[str]:
         if not cleaned_line:
             continue
 
-        # Split the individual cleaned line into sentences using French delimiters
-        line_parts = re.split(f"[{re.escape(delims)}]+", cleaned_line)
+        # Split the individual cleaned line into sentences.
+        # This handles both multi-sentence lines and single-sentence list items.
+        # Include Devanagari Danda (। U+0964) and Double Danda (॥ U+0965) as sentence delimiters
+        # Also include ! and ? which are commonly used in Hindi
+        line_parts = re.split(r'[!?\u0964\u0965]+', cleaned_line)
 
-        # Add the resulting parts to our main list after cleaning them
+        # 3. Add the resulting parts to our main list after cleaning them.
         for sentence in line_parts:
             stripped_sentence = sentence.strip()
             if stripped_sentence:
                 all_sentences.append(stripped_sentence)
+        
+    # print(all_sentences)
                 
     return all_sentences
 
 def extract_clean_words(response: str)-> List[str]:
-    """Extract words using French language tokenization."""
-    strategy = _fre_strategy
     text_without_lists = re.sub(r'^\s*\d+\.\s', '', response, flags=re.MULTILINE)
-    return strategy.tokenize_words(text_without_lists)
+    
+    # Replace Danda characters with spaces to create word boundaries
+    text_with_word_boundaries = re.sub(r'[\u0964\u0965]+', ' ', text_without_lists)
+    
+    # Match contiguous Devanagari characters (U+0900 to U+097F)
+    # EXCLUDING Danda (U+0964) and Double Danda (U+0965) to prevent punctuation being counted as words
+    words = re.findall(r"[\u0900-\u0963\u0966-\u097F]+", text_with_word_boundaries)
+    
+    return words
+
 
 def analyze_lists(text: str, pattern: str) -> list[dict]:
     """
@@ -526,11 +370,12 @@ def find_markdown_tables(text: str) -> list[dict]:
     return tables_found
 
 def find_punctuations(text: str)-> list[str]:
-    """Find punctuation marks using French language-specific punctuation."""
-    strategy = _fre_strategy
-    delims = strategy.punctuation_marks
     cleaned_text = re.sub(r'^\s*(?:[\-\*\+]\s+|\d+\.\s+|#+\s+)', '', text, flags=re.MULTILINE)
-    punctuations = re.findall(f"[{re.escape(delims)}]+", cleaned_text)
+    
+    # [!?\u0964\u0965]+ matches one or more characters that are '!', '?', Danda (।), or Double Danda (॥).
+    # Period (.) is excluded as it's not used as sentence-ending punctuation in Hindi.
+    punctuations = re.findall(r'[!?\u0964\u0965]+', cleaned_text)
+    
     return punctuations
 
 def extract_clean_paragraphs(text: str) -> List[str]:
@@ -573,57 +418,70 @@ def extract_clean_paragraphs(text: str) -> List[str]:
     
     return clean_paragraphs
 
+def normalize_hindi_digits(text: str) -> str:
+    """
+    Replaces Hindi Devanagari digits (०-९) with standard Arabic digits (0-9).
+    """
+    hindi_digits = "०१२३४५६७८९"
+    english_digits = "0123456789"
+    
+    # Create a translation table
+    translation_table = str.maketrans(hindi_digits, english_digits)
+    
+    return text.translate(translation_table)
+
 def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], all_instructions: Dict = None) -> Tuple[bool, str]:
-    """Validate a response against a specific instruction type and its kwargs for French text."""
+    """Validate a response against a specific instruction type and its kwargs."""
     try:
         response = response.strip()
-        language = FRENCH_LANGUAGE
-        if inst_type == "change_case:all_caps":
-            return (response.isupper(), "No error" if response.isupper() else "Response is not all uppercase.")
+        response = normalize_hindi_digits(response) 
+        # if inst_type == "change_case:all_caps":
+        #     return (response.isupper(), "No error" if response.isupper() else "Response is not all uppercase.")
 
-        if inst_type == "change_case:lowercase":
-            return (response.islower(), "No error" if response.islower() else "Response is not all lowercase.")
+        # if inst_type == "change_case:lowercase":
+        #     return (response.islower(), "No error" if response.islower() else "Response is not all lowercase.")
 
-        if inst_type == "change_case:alternating":
-            valid = all(is_strict_alternating(w) for w in response.split() if w.isalpha())
-            return (valid, "No error" if valid else "Response is not strictly alternating.")
+        # if inst_type == "change_case:alternating":
+        #     valid = all(is_strict_alternating(w) for w in response.split() if w.isalpha())
+        #     return (valid, "No error" if valid else "Response is not strictly alternating.")
 
-        if inst_type == "change_case:first_letter_cap":
-            valid = all(is_first_letter_cap(tok) for tok in response.split())
-            return (valid, "No error" if valid else "Each word must start with one uppercase letter followed only by lowercase letters.")
+        # if inst_type == "change_case:first_letter_cap":
+        #     valid = all(is_first_letter_cap(tok) for tok in response.split())
+        #     return (valid, "No error" if valid else "Each word must start with one uppercase letter followed only by lowercase letters.")
 
-        if inst_type == "change_case:capital_word_frequency":
-            count = count_all_caps_words(response)
-            rel, val = kwargs['capital_relation'], kwargs['capital_frequency']
-            valid = eval(f"{count} {'>=' if rel == 'at least' else '==' if rel == 'equal to' else '<'} {val}")
-            return (valid, "No error" if valid else f"Expected {rel} {val} all-cap words, found {count}.")
+        # if inst_type == "change_case:capital_word_frequency":
+        #     count = count_all_caps_words(response)
+        #     rel, val = kwargs['capital_relation'], kwargs['capital_frequency']
+        #     valid = eval(f"{count} {'>=' if rel == 'at least' else '==' if rel == 'equal to' else '<'} {val}")
+        #     return (valid, "No error" if valid else f"Expected {rel} {val} all-cap words, found {count}.")
 
-        if inst_type == "change_case:lowercase_word_frequency":
-            count = count_lowercase_words(response)
-            rel, val = kwargs['lowercase_relation'], kwargs['lowercase_frequency']
-            valid = eval(f"{count} {'>=' if rel == 'at least' else '==' if rel == 'equal to' else '<'} {val}")
-            return (valid, "No error" if valid else f"Expected {rel} {val} lowercase words, found {count}.")
+        # if inst_type == "change_case:lowercase_word_frequency":
+        #     count = count_lowercase_words(response)
+        #     rel, val = kwargs['lowercase_relation'], kwargs['lowercase_frequency']
+        #     valid = eval(f"{count} {'>=' if rel == 'at least' else '==' if rel == 'equal to' else '<'} {val}")
+        #     return (valid, "No error" if valid else f"Expected {rel} {val} lowercase words, found {count}.")
 
-        if "_target" in inst_type:
-            target = kwargs["target_string"].strip()
-            pattern = _unicode_boundary_phrase_pattern(target)
-            matches = re.findall(pattern, response, re.IGNORECASE)
+        # if "_target" in inst_type:
+        #     target = kwargs["target_string"].strip().lower()
+        #     target_escaped = re.escape(target)
+        #     pattern = rf'\b{target_escaped}\b'
+        #     matches = re.findall(pattern, response, re.IGNORECASE)
 
-            if not matches:
-                return (False, f"Target '{target}' not found in response.")
+        #     if not matches:
+        #         return (False, f"Target '{target}' not found in response.")
 
-            for match in matches:
-                raw_text = match.strip('"').strip("'")
-                if inst_type == "change_case:all_caps_target" and not raw_text.isupper():
-                    return (False, f"'{raw_text}' should be ALL CAPS.")
-                elif inst_type == "change_case:lowercase_target" and not raw_text.islower():
-                    return (False, f"'{raw_text}' should be all lowercase.")
-                elif inst_type == "change_case:alternating_target" and not is_strict_alternating(raw_text):
-                    return (False, f"'{raw_text}' is not in alternating caps.")
-                elif inst_type == "change_case:first_letter_cap_target" and not raw_text.istitle():
-                    return (False, f"'{raw_text}' is not first-letter capitalized.")
+        #     for match in matches:
+        #         raw_text = match.strip('"').strip("'")
+        #         if inst_type == "change_case:all_caps_target" and not raw_text.isupper():
+        #             return (False, f"'{raw_text}' should be ALL CAPS.")
+        #         elif inst_type == "change_case:lowercase_target" and not raw_text.islower():
+        #             return (False, f"'{raw_text}' should be all lowercase.")
+        #         elif inst_type == "change_case:alternating_target" and not is_strict_alternating(raw_text):
+        #             return (False, f"'{raw_text}' is not in alternating caps.")
+        #         elif inst_type == "change_case:first_letter_cap_target" and not raw_text.istitle():
+        #             return (False, f"'{raw_text}' is not first-letter capitalized.")
 
-            return (True, "No error")
+        #     return (True, "No error")
 
         if inst_type == "detectable_content:number_placeholders":
             count = count_placeholders(response)
@@ -751,7 +609,7 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
             return (valid, "No error" if valid else f"Expected {rel} {val} characters, found {count}.")
 
         if inst_type == "length_constraints:number_words":
-            count = len(re.compile(r'\b(?=\S*[A-Za-z0-9])\S+\b').findall(response))
+            count = len(extract_clean_words(response))
             rel, val = kwargs["relation"], kwargs["num_words"]
             valid = eval(f"{count} {'>=' if rel == 'at least' else '==' if rel == 'equal to' else '<'} {val}")
             return (valid, "No error" if valid else f"Expected {rel} {val} words, found {count}.")
@@ -794,161 +652,161 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
         if inst_type == "startend:wrap_checker":
             wrap = kwargs["wrap_phrase"]
             return (response.startswith(wrap) and response.endswith(wrap),
-                    "No error" if response.startswith(wrap)and response.endswith(wrap) else f"Not wrapped with: {wrap}")
+                    "No error" if response.startswith(wrap) and response.endswith(wrap) else f"Not wrapped with: {wrap}")
 
         if inst_type == "startend:quotation":
-            return (response.startswith('« ') and response.endswith(' »'),
-                    "No error" if response.startswith('« ') and response.endswith(' »') else "Response not wrapped in double quotes.")
+            return (response.startswith('"') and response.endswith('"'),
+                    "No error" if response.startswith('"') and response.endswith('"') else "Response not wrapped in double quotes.")
             
-        if inst_type == "change_case:case_ratio":
-            """
-            Returns True if the ratio of lowercase to uppercase letters lies between
-            minR and maxR (inclusive). Otherwise, returns False.
+        # if inst_type == "change_case:case_ratio":
+        #     """
+        #     Returns True if the ratio of lowercase to uppercase letters lies between
+        #     minR and maxR (inclusive). Otherwise, returns False.
 
-            If there are no letters, returns False.
-            If there are no uppercase letters, ratio is considered float('inf').
-            """
+        #     If there are no letters, returns False.
+        #     If there are no uppercase letters, ratio is considered float('inf').
+        #     """
             
-            try:
-                minR = parse_fraction_or_inf(kwargs["min_fraction"])
-                maxR = parse_fraction_or_inf(kwargs["max_fraction"])
-            except (ValueError, ZeroDivisionError) as e:
-                raise ValueError(f"Invalid fraction input: {e}")
+        #     try:
+        #         minR = parse_fraction_or_inf(kwargs["min_fraction"])
+        #         maxR = parse_fraction_or_inf(kwargs["max_fraction"])
+        #     except (ValueError, ZeroDivisionError) as e:
+        #         raise ValueError(f"Invalid fraction input: {e}")
             
-            if minR>maxR:
-                return (False, "Validation failed: Minimum ratio greater than maximum ratio.")
-            lower_count = sum(1 for ch in response if ch.islower())
-            upper_count = sum(1 for ch in response if ch.isupper())
+        #     if minR>maxR:
+        #         return (False, "Validation failed: Minimum ratio greater than maximum ratio.")
+        #     lower_count = sum(1 for ch in response if ch.islower())
+        #     upper_count = sum(1 for ch in response if ch.isupper())
 
-            if lower_count == 0 and upper_count == 0:
-                print("Validation failed: No letters found in the string.")
-                return False
+        #     if lower_count == 0 and upper_count == 0:
+        #         print("Validation failed: No letters found in the string.")
+        #         return False
             
 
-            # The ratio variable will hold either a Fraction object or float('inf')
-            if upper_count == 0:
-                ratio = float('inf')
-                ratio_str = "inf"
-            else:
-                # Convert the calculated ratio directly into a Fraction
-                ratio = Fraction(lower_count, upper_count)
-                ratio_str = f"{ratio.numerator}/{ratio.denominator}"
+        #     # The ratio variable will hold either a Fraction object or float('inf')
+        #     if upper_count == 0:
+        #         ratio = float('inf')
+        #         ratio_str = "inf"
+        #     else:
+        #         # Convert the calculated ratio directly into a Fraction
+        #         ratio = Fraction(lower_count, upper_count)
+        #         ratio_str = f"{ratio.numerator}/{ratio.denominator}"
 
-            valid = minR <= ratio <= maxR
+        #     valid = minR <= ratio <= maxR
             
-            # Construct a detailed message for both pass and fail cases
-            message = (
-                f"Lowercase count: {lower_count}, Uppercase count: {upper_count}. "
-                f"Ratio is {ratio_str}({float(ratio):.2f}). Required range: [{minR}({float(minR):.2f}), {maxR}({float(maxR):.2f})]."
-            )
-            return (
-                valid,
-                "No error" if valid else f"{message}"
-            )
+        #     # Construct a detailed message for both pass and fail cases
+        #     message = (
+        #         f"Lowercase count: {lower_count}, Uppercase count: {upper_count}. "
+        #         f"Ratio is {ratio_str}({float(ratio):.2f}). Required range: [{minR}({float(minR):.2f}), {maxR}({float(maxR):.2f})]."
+        #     )
+        #     return (
+        #         valid,
+        #         "No error" if valid else f"{message}"
+        #     )
 
-        if inst_type == "change_case:first_letter_sentence":
-            """
-            Checks if all sentences in the text start with an uppercase alphabet.
-            Paragraphs are separated by newlines.
-            Sentences are split using '.', '!', or '?' as delimiters.
-            """
+        # if inst_type == "change_case:first_letter_sentence":
+        #     """
+        #     Checks if all sentences in the text start with an uppercase alphabet.
+        #     Paragraphs are separated by newlines.
+        #     Sentences are split using '.', '!', or '?' as delimiters.
+        #     """
 
-            sentences = extract_clean_sentences(response)
+        #     sentences = extract_clean_sentences(response)
 
-            if not sentences:
-                return (True, "No sentences found to validate.")
+        #     if not sentences:
+        #         return (True, "No sentences found to validate.")
 
-            # print(sentences)
-            for sentence in sentences:
-                sentence = sentence.strip("()[]{}\"'")
+        #     # print(sentences)
+        #     for sentence in sentences:
+        #         sentence = sentence.strip("()[]{}\"'")
                 
-                if not sentence[0].isupper():  # check first char
-                    return (False, f"Fails at: '{sentence}'")
+        #         if not sentence[0].isupper():  # check first char
+        #             return (False, f"Fails at: '{sentence}'")
             
-            return (True, "No error.")
+        #     return (True, "No error.")
 
-        if inst_type == "change_case:last_letter":
-            """
-            Checks if the last character of the last word in the text matches the given case.
-            The last word may contain letters, numbers, or symbols (e.g., '45%').
-            Trailing sentence-ending punctuation (.!? ) and wrapping symbols ()[]{},"' are ignored.
-            """
+        # if inst_type == "change_case:last_letter":
+        #     """
+        #     Checks if the last character of the last word in the text matches the given case.
+        #     The last word may contain letters, numbers, or symbols (e.g., '45%').
+        #     Trailing sentence-ending punctuation (.!? ) and wrapping symbols ()[]{},"' are ignored.
+        #     """
 
-            cleaned_text = re.sub(r'[.!?]+$', '', response.strip())
+        #     cleaned_text = re.sub(r'[.!?]+$', '', response.strip())
 
-            if not cleaned_text:
-                return (False, "Empty response")  # Empty after cleaning
+        #     if not cleaned_text:
+        #         return (False, "Empty response")  # Empty after cleaning
 
-            # Extract last word
-            words = cleaned_text.split()
-            last_word = words[-1]
+        #     # Extract last word
+        #     words = cleaned_text.split()
+        #     last_word = words[-1]
 
-            # Strip wrapping punctuation like (), [] , {} , quotes
-            last_word = last_word.strip("()[]{}\"'")
+        #     # Strip wrapping punctuation like (), [] , {} , quotes
+        #     last_word = last_word.strip("()[]{}\"'")
 
-            if not last_word:
-                return False
+        #     if not last_word:
+        #         return False
 
-            last_char = last_word[-1]
-            valid=True
+        #     last_char = last_word[-1]
+        #     valid=True
 
-            # print(sentences)
-            match(kwargs["case"]):
-                case "uppercase":
-                    valid= last_char.isupper()
+        #     # print(sentences)
+        #     match(kwargs["case"]):
+        #         case "uppercase":
+        #             valid= last_char.isupper()
                         
-                case "lowercase":
-                    valid= last_char.islower()
+        #         case "lowercase":
+        #             valid= last_char.islower()
                     
-                case "digit":
-                    valid= last_char.isdigit()
+        #         case "digit":
+        #             valid= last_char.isdigit()
                 
-                case "special":
-                    valid= not last_char.isalnum()
+        #         case "special":
+        #             valid= not last_char.isalnum()
                     
             
-            return (valid, "No error." if valid else f"Last character of the response: {last_char}")
+        #     return (valid, "No error." if valid else f"Last character of the response: {last_char}")
 
-        if inst_type == "change_case:vowel_consonant_balance":
-            try:
-                minR = parse_fraction_or_inf(kwargs["min_fraction"])
-                maxR = parse_fraction_or_inf(kwargs["max_fraction"])
-            except (ValueError, ZeroDivisionError) as e:
-                raise ValueError(f"Invalid fraction input: {e}")
+        # if inst_type == "change_case:vowel_consonant_balance":
+        #     try:
+        #         minR = parse_fraction_or_inf(kwargs["min_fraction"])
+        #         maxR = parse_fraction_or_inf(kwargs["max_fraction"])
+        #     except (ValueError, ZeroDivisionError) as e:
+        #         raise ValueError(f"Invalid fraction input: {e}")
             
-            if minR>maxR:
-                return (False, "Validation failed: Minimum ratio greater than maximum ratio.")
+        #     if minR>maxR:
+        #         return (False, "Validation failed: Minimum ratio greater than maximum ratio.")
             
-            vowels = _fre_strategy.vowels
-            vowel_count = sum(1 for ch in response if ch.isalpha() and ch in vowels)
-            consonant_count = sum(1 for ch in response if ch.isalpha() and ch not in vowels)
+        #     vowels = set("aeiouAEIOU")
+        #     vowel_count = sum(1 for ch in response if ch.isalpha() and ch in vowels)
+        #     consonant_count = sum(1 for ch in response if ch.isalpha() and ch not in vowels)
 
-            # Handle the case where there are no letters at all
-            if vowel_count == 0 and consonant_count == 0:
-                return (False, "Validation failed: No letters found in the response.")
+        #     # Handle the case where there are no letters at all
+        #     if vowel_count == 0 and consonant_count == 0:
+        #         return (False, "Validation failed: No letters found in the response.")
             
 
-            # Handle the case where there are no consonants (infinite ratio)
-            if consonant_count == 0:
-                ratio = float('inf')
-                ratio_str = "inf"
-            else:
-                # Convert the calculated ratio directly into a Fraction
-                ratio = Fraction(vowel_count, consonant_count)
-                ratio_str = f"{ratio.numerator}/{ratio.denominator}"
+        #     # Handle the case where there are no consonants (infinite ratio)
+        #     if consonant_count == 0:
+        #         ratio = float('inf')
+        #         ratio_str = "inf"
+        #     else:
+        #         # Convert the calculated ratio directly into a Fraction
+        #         ratio = Fraction(vowel_count, consonant_count)
+        #         ratio_str = f"{ratio.numerator}/{ratio.denominator}"
 
-            valid = minR <= ratio <= maxR
+        #     valid = minR <= ratio <= maxR
             
-            # Create a detailed message for both pass and fail cases
-            message = (
-                f"Vowel count: {vowel_count}, Consonant count: {consonant_count}. "
-                f"Ratio is {ratio_str}({float(ratio):.2f}). Required range: [{minR}({float(minR):.2f}), {maxR}({float(maxR):.2f})]."
-            )
-            # print(message)
-            return (
-                valid,
-                "No error" if valid else f"{message}"
-            )
+        #     # Create a detailed message for both pass and fail cases
+        #     message = (
+        #         f"Vowel count: {vowel_count}, Consonant count: {consonant_count}. "
+        #         f"Ratio is {ratio_str}({float(ratio):.2f}). Required range: [{minR}({float(minR):.2f}), {maxR}({float(maxR):.2f})]."
+        #     )
+        #     # print(message)
+        #     return (
+        #         valid,
+        #         "No error" if valid else f"{message}"
+        #     )
 
         if inst_type == "detectable_format:number_paragraphs":
             """
@@ -1159,8 +1017,8 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
                     
             return (True, "No error.")   
 
-        if inst_type == "punctuation:no_period":
-            return ('.' not in response, "No error" if '.' not in response else "Periods found in response.")
+        # if inst_type == "punctuation:no_period":
+        #     return ('.' not in response, "No error" if '.' not in response else "Periods found in response.")
 
         if inst_type == "punctuation:end_rule":
             allowed = kwargs["allowed"]
@@ -1427,57 +1285,57 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
             
             return (True, "No error.")
 
-        if inst_type == "keywords:vowel_count":
+        # if inst_type == "keywords:vowel_count":
             
-            num_vowels=kwargs["num_vowels"]
-            relation=kwargs["relation"]
+        #     num_vowels=kwargs["num_vowels"]
+        #     relation=kwargs["relation"]
             
-            vowels = set("aeiouAEIOU")
-            vowel_count = sum(1 for ch in response if ch in vowels)
+        #     vowels = set("aeiouAEIOU")
+        #     vowel_count = sum(1 for ch in response if ch in vowels)
 
-            # print("Vowel count:", vowel_count)
-            if relation == "equal to":
-                is_valid = vowel_count == num_vowels
-            elif relation == "at least":
-                is_valid = vowel_count >= num_vowels
-            elif relation == "less than":
-                is_valid = vowel_count < num_vowels
-            else:
-                return (False, "Invalid 'relation' argument. Use 'equal to', 'at least', or 'less than'.")
+        #     # print("Vowel count:", vowel_count)
+        #     if relation == "equal to":
+        #         is_valid = vowel_count == num_vowels
+        #     elif relation == "at least":
+        #         is_valid = vowel_count >= num_vowels
+        #     elif relation == "less than":
+        #         is_valid = vowel_count < num_vowels
+        #     else:
+        #         return (False, "Invalid 'relation' argument. Use 'equal to', 'at least', or 'less than'.")
             
-            if not is_valid:
-                message = (
-                    f"Found {vowel_count} vowels. Expected {relation} {num_vowels}"
-                )
-                return (False, message)
+        #     if not is_valid:
+        #         message = (
+        #             f"Found {vowel_count} vowels. Expected {relation} {num_vowels}"
+        #         )
+        #         return (False, message)
                     
-            return (True, "No error.")
+        #     return (True, "No error.")
 
-        if inst_type == "keywords:consonant_count":
-            num_consonants=kwargs["num_consonants"]
-            relation=kwargs["relation"]
+        # if inst_type == "keywords:consonant_count":
+        #     num_consonants=kwargs["num_consonants"]
+        #     relation=kwargs["relation"]
             
-            vowels = _fre_strategy.vowels
-            consonants = set(string.ascii_letters) - vowels
-            consonant_count = sum(1 for ch in response if ch in consonants)
+        #     vowels = set("aeiouAEIOU")
+        #     consonants = set(string.ascii_letters) - vowels
+        #     consonant_count = sum(1 for ch in response if ch in consonants)
 
-            # print("consonant count:", consonant_count)
-            if relation == "equal to":
-                is_valid = consonant_count == num_consonants
-            elif relation == "at least":
-                is_valid = consonant_count >= num_consonants
-            elif relation == "less than":
-                is_valid = consonant_count < num_consonants
-            else:
-                return (False, "Invalid 'relation' argument. Use 'equal to', 'at least', or 'less than'.")
+        #     # print("consonant count:", consonant_count)
+        #     if relation == "equal to":
+        #         is_valid = consonant_count == num_consonants
+        #     elif relation == "at least":
+        #         is_valid = consonant_count >= num_consonants
+        #     elif relation == "less than":
+        #         is_valid = consonant_count < num_consonants
+        #     else:
+        #         return (False, "Invalid 'relation' argument. Use 'equal to', 'at least', or 'less than'.")
             
-            if not is_valid:
-                message = (
-                    f"Found {consonant_count} consonants. Expected {relation} {num_consonants}"
-                )
-                return (False, message)
+        #     if not is_valid:
+        #         message = (
+        #             f"Found {consonant_count} consonants. Expected {relation} {num_consonants}"
+        #         )
+        #         return (False, message)
                     
-            return (True, "No error.")
+        #     return (True, "No error.")
 
     except Exception as e:
         return (False, f"Validation error: {str(e)}")
@@ -1546,410 +1404,9 @@ def _get_dynamic_definition(inst_type: str, term: str, cache: Dict[Tuple[str, st
         return (f"Error parsing definition response: {e}. Raw: '{evaluation}'", False)
     except Exception as e:
         return (f"Error in _get_dynamic_definition: {e}", False)
-   
-def validate_llm_instruction(
-    response: str,
-    inst_type: str,
-    kwargs: Dict[str, Any],
-    all_instructions: Dict = None,
-    definition_cache: Dict[Tuple[str, str], Tuple[bool, str]] = None,
-) -> Tuple[bool, str]:
-    if inst_type not in LLM_INSTRUCTIONS:
-        return False, f"Instruction '{inst_type}' is not an LLM instruction."
-    return base_validator.validate_llm_instruction(
-        response, inst_type, kwargs, all_instructions, definition_cache, language="fre"
-    )
-
+ 
 def validate_prompt_against_instructions(user_prompt: str, turn_instructions: Dict) -> Tuple[bool, str]:
     return base_validator.validate_prompt_against_instructions(
-        user_prompt, turn_instructions, language="fre"
+        user_prompt, turn_instructions, language="hi"
     )
-
-def validate_thinking_against_instructions(thinking: str, turn_instructions: Dict) -> Tuple[bool, str]:
-    return base_validator.validate_thinking_against_instructions(
-        thinking, turn_instructions, language="fre"
-    ) 
-
-def check_contradicting_instructions(instructions_list: List[Dict]) -> List[Dict]:
-    """Check for contradicting instruction IDs in the list (order-insensitive)."""
-    errors, seen_pairs = set(), set()
-    # Collect all instruction IDs
-    ids = {inst["instruction_id"] for inst in instructions_list if isinstance(inst, dict) and "instruction_id" in inst}
-
-    # Check each instruction for conflicts
-    for instr_id in ids:
-        for conflicting_id in conflict_dict.get(instr_id, []):
-            pair = frozenset([instr_id, conflicting_id])
-            if conflicting_id in ids and pair not in seen_pairs:
-                errors.add(f"{instr_id} and {conflicting_id} are contradicting")
-                seen_pairs.add(pair)
-    return errors
-
-def validate_instruction_schema(instructions: Dict) -> List[Dict]:
-    """Validate the schema of instructions against expected arguments and check for contradicting instructions."""
-    mismatches = []
-    
-    # Validate metadata field
-    metadata = instructions.get("metadata", [])
-    if not isinstance(metadata, list):
-        mismatches.append({
-            "field": "metadata",
-            "expected": "list",
-            "actual": type(metadata).__name__
-        })
-    
-    # Validate instructions array
-    instructions_list = instructions.get("instructions", [])
-    if not isinstance(instructions_list, list):
-        mismatches.append({
-            "field": "instructions",
-            "expected": "list",
-            "actual": type(instructions_list).__name__
-        })
-        return mismatches
-
-    # Check for contradicting instructions
-    contradiction_errors = check_contradicting_instructions(instructions_list)
-    mismatches.extend(contradiction_errors)
-
-
-    # Validate each instruction object
-    for i, inst in enumerate(instructions_list):
-        if not isinstance(inst, dict):
-            mismatches.append({
-                "instruction_index": i,
-                "expected": "dict",
-                "actual": type(inst).__name__
-            })
-            continue
-
-        # Check for required instruction_id field
-        if "instruction_id" not in inst:
-            mismatches.append({
-                "instruction_index": i,
-                "missing_field": "instruction_id"
-            })
-            continue
-
-        # Validate kwargs against expected arguments
-        expected_args = set(EXPECTED_ARGUMENTS.get(inst["instruction_id"], []))
-        actual_args = set(k for k in inst.keys() if k != "instruction_id")
-
-        if expected_args != actual_args:
-            mismatches.append({
-                "instruction": inst["instruction_id"],
-                "expected_args": sorted(expected_args),
-                "actual_args": sorted(actual_args)
-            })
-
-    return mismatches 
-
-def extract_notebook_sections_as_dict(ipynb_path):
-    with open(ipynb_path, 'r', encoding='utf-8') as file:
-        notebook_data = json.load(file)
-
-    result = defaultdict(list)
-
-    for cell_idx, cell in enumerate(notebook_data.get('cells', [])):
-        if cell.get('cell_type') != 'markdown':
-            continue
-
-        content = ''.join(cell.get('source', [])).strip()
-        split_lines = content.splitlines()
-        if split_lines[0] == '# Metadata':
-            result['task_metadata'].append(content)
-            continue
-        elif cell_idx == 0:
-            raise NotebookParsingError("The first cell must be a markdown cell with the title '# Metadata'.")
-
-        match = re.search(r'\*\*\[([\w.]+)]\*\*', split_lines[0])
-        title = match.group(1)
-
-        result[title].append('\n'.join(split_lines[1:]))
-
-    return result
-
-
-def validate_notebook_schema(notebook, template_json, log_filename):
-    logs = []
-    try:
-        dict_turn_metadata = turn_metadata_json_to_dict(notebook['turn_metadata'])
-        correct_turn_metadata = compare_consecutive_metadata_items(dict_turn_metadata)
-        
-        conflicting_instructions = find_conflicting_instructions(dict_turn_metadata)
-        issues_in_keys_against_template = validate_keys_against_template(template_json, dict_turn_metadata)
-        issues_in_instruction_kwargs_datatype = validate_instruction_kwargs_datatype(dict_turn_metadata)
-
-        logs.append(f'CONFLICTING INSTRUCTIONS FOUND - {conflicting_instructions}')
-        logs.append(f'INSTRUCTION ARGUMENT MISMATCHES IN TURN JSON - {issues_in_keys_against_template}')
-        logs.append(f'VALIDATING JSON SCHEMA - {issues_in_instruction_kwargs_datatype}')
-
-        i, flag = 1, False
-        for t, f in zip(correct_turn_metadata, dict_turn_metadata):
-            if t['metadata'] != f['metadata']:
-                logs.append(f"TURN {i} METADATA SHOULD BE {t['metadata']}, BUT IS {f['metadata']}")
-                flag = True
-            i += 1
-        if not flag:
-            logs.append("TURN METADATA IS CORRECT")
-            if any([conflicting_instructions, issues_in_keys_against_template, issues_in_instruction_kwargs_datatype]):
-                logs.append('False')
-            else:
-                logs.append('True')
-        else:
-            logs.append('False')
-    except Exception as e:
-        logs.append(f'Some error occurred while validating the notebook - {e}')
-    finally:
-        with open(log_filename, "w", encoding="utf-8") as f:
-            f.writelines(line + '\n' for line in logs)
-
-
-def turn_metadata_json_to_dict(turn_metadata):
-    parsed_json_metadata = []
-    for item in turn_metadata:
-        # Extract the JSON block between triple backticks
-        match = re.search(r"```(?:\w+)?\n(.*?)```", item, re.DOTALL)
-        if match:
-            json_str = match.group(1).strip()
-            # Parse the JSON string into a dictionary
-            data = json.loads(json_str)
-            data['metadata'] = set(data['metadata'])
-            parsed_json_metadata.append(data)
-        else:
-            raise "No JSON found in item."
-    return parsed_json_metadata
-
-
-def compare_consecutive_metadata_items(dict_turn_metadata):
-    def to_dict(instructions):
-        return {instr['instruction_id']: instr for instr in instructions}
-
-    updated = []
-
-    for idx, current_turn in enumerate(dict_turn_metadata):
-        if idx == 0:
-            updated.append(copy.deepcopy(current_turn))  # Keep the first as-is
-            continue
-
-        prev_instr = to_dict(dict_turn_metadata[idx - 1]['instructions'])
-        curr_instr = to_dict(current_turn['instructions'])
-
-        metadata = set()
-
-        # Check for additions and modifications
-        for instr_id, instr in curr_instr.items():
-            if instr_id not in prev_instr:
-                metadata.add("add")
-            elif instr != prev_instr[instr_id]:
-                metadata.add("modify")
-
-        # Check for removals
-        for instr_id in prev_instr:
-            if instr_id not in curr_instr:
-                metadata.add("remove")
-
-        # Avoid duplicates
-        current_copy = copy.deepcopy(current_turn)
-        current_copy['metadata'] = metadata
-        updated.append(current_copy)
-
-    return updated
-
-
-def find_conflicting_instructions(dict_turn_metadata):
-    conflicts_found = []
-
-    for data in dict_turn_metadata:
-        instruction_ids = {instr["instruction_id"] for instr in data.get("instructions", [])}
-        current_conflicts = []
-
-        for instr_id in instruction_ids:
-            if instr_id in conflict_dict:
-                for conflicting_id in conflict_dict[instr_id]:
-                    if conflicting_id in instruction_ids:
-                        pair = tuple(sorted((instr_id, conflicting_id)))
-                        if pair not in current_conflicts:
-                            current_conflicts.append(pair)
-
-        if current_conflicts:
-            conflicts_found.append(current_conflicts)
-
-    return conflicts_found
-
-
-def validate_keys_against_template(template_json, dict_turn_metadata):
-    # Map template instruction_id to expected key set
-    template_keys = {
-        instr["instruction_id"]: set(instr.keys())
-        for instr in template_json.get("instructions", [])
-    }
-    idx, res = 1, []
-
-    for input_json in dict_turn_metadata:
-        mismatches = {}
-
-        # Check each instruction in input_json
-        for instr in input_json.get("instructions", []):
-            instr_id = instr.get("instruction_id")
-            input_keys = set(instr.keys())
-
-            if instr_id not in template_keys:
-                mismatches[instr_id] = {
-                    "error": "instruction_id not in template"
-                }
-            elif input_keys != template_keys[instr_id]:
-                mismatches[instr_id] = {
-                    "missing_keys": list(template_keys[instr_id] - input_keys),
-                    "extra_keys": list(input_keys - template_keys[instr_id])
-                }
-        res.append({f"TURN {idx}": mismatches}) if mismatches else ''
-        idx += 1
-    return res
-
-
-# def is_valid_str(val):
-    return isinstance(val, str)
-
-def is_valid_str(val):
-    return isinstance(val, str)
-
-def is_valid_int(val):
-    return isinstance(val, int)
-
-def is_valid_float(val):
-    return isinstance(val, float)
-
-def is_valid_list_str(val):
-    return isinstance(val, list) and all(isinstance(i, str) for i in val)
-
-def is_valid_list_int(val):
-    return isinstance(val, list) and all(isinstance(i, int) for i in val)
-
-def is_valid_relation(val):
-    return val in {"at least", "equal to", "less than"}
-
-# Map type names to the validation functions
-TYPE_VALIDATORS = {
-    "str": is_valid_str,
-    "int": is_valid_int,
-    "float": is_valid_float,
-    "list_int": is_valid_list_int,
-    "list_str": is_valid_list_str,
-    "relation": is_valid_relation,
-}
-
-type_map = {
-        "int": "int",
-        "float": "float",
-        "str": "str",
-        "list(str)": "list_str",
-        "list(int)": "list_int",
-        "{at least, equal to, less than}": "relation"
-    }
-
-def generate_schema_from_template(template):
-    """Dynamically creates the validation schema from the template_json."""
-    schema = {}
-    for instruction in template.get("instructions", []):
-        iid = instruction.get("instruction_id")
-        if not iid:
-            continue
-        args = {}
-        for key, value in instruction.items():
-            if key == "instruction_id":
-                continue
-            expected_type = type_map.get(value)
-            if expected_type:
-                args[key] = expected_type
-        
-        if args:
-            schema[iid] = args
-    return schema
-
-
-def validate_instruction_kwargs_datatype(dict_turn_metadata):
-    # Dynamically generate the validation rules from the imported template
-    validation_schema = generate_schema_from_template(template_json)
-    
-    turn, issues = 1, []
-    for data in dict_turn_metadata:
-        errors = []
-        instructions = data.get("instructions", [])
-
-        for inst in instructions:
-            iid = inst.get("instruction_id")
-            if not iid or iid not in validation_schema:
-                continue
-
-            expected_args = validation_schema[iid]
-            
-            for arg_name, expected_type in expected_args.items():
-                validator_func = TYPE_VALIDATORS.get(expected_type)
-                # Check if the validator exists and if the argument value is valid
-                if not validator_func or not validator_func(inst.get(arg_name)):
-                    errors.append(f"{iid}: Argument '{arg_name}' must be a valid {expected_type}.")
-
-        if errors:
-            issues.append({f'TURN {turn}': errors})
-        turn += 1
-        
-    return issues
-
-def analyze_instruction_statuses_by_turn(data):
-    results_per_turn, frontier_fail_rates = [], []
-    task_fail, nova_fail, resp = False, None, []
-
-    for item in data:
-        turn_index = item.get('turn_index')
-        response_type = item.get('response_type')
-        results = item.get('results', [])
-
-        passed = sum(r.get('status') == 'Passed' for r in results)
-        failed = sum(r.get('status') == 'Failed' for r in results)
-        total = passed + failed
-
-        results_per_turn.append({
-            'turn_index': turn_index,
-            'response_type': response_type,
-            'total': total,
-            'passed': passed,
-            'failed': failed
-        })
-
-        if response_type == 'response' and failed > 0:
-            resp.append(f'❗FINAL TURN FAILING ON {failed} INSTRUCTIONS ❗')
-            task_fail = True
-
-        classification = 'Failure for each frontier model should be >= 50%'
-        min_fail = 100
-        if total > 0 and response_type != 'response' and response_type != 'prompt_validation':
-            fail_rate = (failed * 100 / total)
-            min_fail = min(min_fail, fail_rate)
-            # if response_type == 'nova_response':
-            #     nova_fail = fail_rate
-            # elif response_type.endswith('_response'):
-            #     frontier_fail_rates.append(fail_rate)
-            if fail_rate < 50:
-                task_fail = True
-            elif fail_rate > 50:
-                classification = 'EXPERT'
-            elif classification != 'EXPERT':
-                classification = 'HARD'
-
-    # frontier_fail = round(sum(frontier_fail_rates) / len(frontier_fail_rates)) if frontier_fail_rates else 0
-
-    # Classification logic
-
-    # if frontier_fail >= 50:
-    #     if frontier_fail > 50:
-    #         classification = 'EXPERT'
-    #     else:
-    #         classification = 'HARD'
-    # else:
-    #     task_fail = True
-
-    resp.append(f"Minimum Frontier Fail: {round(min_fail, 2)}%")
-    result = {'task_fail': task_fail, 'text': resp, 'results_per_turn': results_per_turn, 'classification': classification}
-    return result
 

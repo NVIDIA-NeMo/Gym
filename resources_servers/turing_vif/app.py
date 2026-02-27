@@ -29,8 +29,6 @@ from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
 try:
     from .vif_validators.validator import (
         validate_instruction,
-        validate_instruction_schema,
-        check_contradicting_instructions,
         SUPPORTED_LANGS,
         is_instruction_supported,
     )
@@ -49,8 +47,6 @@ except ImportError:
     sys.path.insert(0, str(Path(__file__).parent))
     from vif_validators.validator import (
         validate_instruction,
-        validate_instruction_schema,
-        check_contradicting_instructions,
         SUPPORTED_LANGS,
         is_instruction_supported,
     )
