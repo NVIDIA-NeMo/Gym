@@ -297,6 +297,9 @@ Download from Hugging Face <data/download-huggingface>
 
 Overview <environment-tutorials/index>
 Creating Training Environment <environment-tutorials/creating-training-environment>
+Integrate external libraries <environment-tutorials/integrate-external-environments>
+Add a benchmark <environment-tutorials/adding-a-benchmark>
+Design a customer evaluation <environment-tutorials/designing-customer-evaluation>
 Multi-Environment Training <environment-tutorials/multi-environment-training>
 ```
 

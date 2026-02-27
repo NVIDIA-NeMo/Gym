@@ -57,6 +57,33 @@ Implement tools, define verification logic, and test your environment end-to-end
 {bdg-primary}`start here` {bdg-secondary}`45-90 min`
 :::
 
+:::{grid-item-card} {octicon}`repo;1.5em;sd-mr-1` Integrate external libraries
+:link: integrate-external-environments
+:link-type: doc
+Best practices guidance on integrating external training environments, benchmarks, or agents into NeMo Gym.
+
++++
+{bdg-secondary}`benchmark`
+:::
+
+:::{grid-item-card} {octicon}`repo;1.5em;sd-mr-1` Add a benchmark
+:link: adding-a-benchmark
+:link-type: doc
+Best practices guidance on integrating benchmarks into NeMo Gym.
+
++++
+{bdg-secondary}`benchmark`
+:::
+
+:::{grid-item-card} {octicon}`repo;1.5em;sd-mr-1` Design a customer evaluation
+:link: designing-customer-evaluation
+:link-type: doc
+Best practices guidance on designing a customer evaluation benchmark.
+
++++
+{bdg-secondary}`benchmark`
+:::
+
 :::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Multi-Environment Training
 :link: multi-environment-training
 :link-type: doc
