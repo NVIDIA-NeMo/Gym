@@ -8,6 +8,7 @@ math_with_judge:
         input: []
       should_use_judge: true
       verified: false
+      domain: math
 qwen3_30ba3b_instruct_2507_model_server:
   responses_api_models:
     local_vllm_model:
