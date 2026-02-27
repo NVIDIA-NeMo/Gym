@@ -89,8 +89,6 @@ vllm serve \
     --port 10240
 ```
 
-> Note: Do **not** pass any `--reasoning-parser` flag to vLLM. NeMo Gym's `vllm_model` handles extraction of reasoning traces (e.g., `<think>...</think>`) itself.
-
 ### Launch servers
 ```bash
 config_paths="resources_servers/newton_bench/configs/newton_bench.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml"
