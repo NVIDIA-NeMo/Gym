@@ -499,6 +499,14 @@ def test():  # pragma: no cover
     _validate_data_single(test_config)
 
 
+def _entrypoints_skipped_on_platform() -> List[str]:  # pragma: no cover
+    """Entrypoints to skip on current platform (e.g. no CUDA wheels on macOS ARM)."""
+    skip = []
+    if sys.platform == "darwin" and platform.machine().lower() in ("arm64", "aarch64"):
+        skip.append("responses_api_models/vllm_model")
+    return skip
+
+
 def _display_list_of_paths(paths: List[Path]) -> str:  # pragma: no cover
     paths = list(map(str, paths))
     return "".join(f"\n- {p}" for p in paths)
@@ -538,6 +546,10 @@ def test_all():  # pragma: no cover
     print(f"Found {len(candidate_dir_paths)} total modules:{_display_list_of_paths(candidate_dir_paths)}\n")
     dir_paths: List[Path] = list(map(Path, candidate_dir_paths))
     dir_paths = [p for p in dir_paths if (p / "README.md").exists()]
+    skipped_platform = [p for p in dir_paths if str(p) in _entrypoints_skipped_on_platform()]
+    dir_paths = [p for p in dir_paths if str(p) not in _entrypoints_skipped_on_platform()]
+    if skipped_platform:
+        print(f"Skipped (platform) {len(skipped_platform)}:{_display_list_of_paths(skipped_platform)}\n")
     print(f"Found {len(dir_paths)} modules to test:{_display_list_of_paths(dir_paths)}\n")
 
     tests_passed: List[Path] = []

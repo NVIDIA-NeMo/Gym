@@ -331,7 +331,12 @@ norecursedirs = [
 log_cli = true
 log_cli_level = "INFO"
 cache_dir = "cache/.pytest_cache"
-filterwarnings = "ignore::DeprecationWarning"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore:invalid escape sequence:SyntaxWarning:swegym.harness.constants",
+    "ignore::requests.exceptions.RequestsDependencyWarning",
+    "ignore::FutureWarning:ray._private.worker",
+]
 asyncio_mode = "auto"
 # markers to select tests, use `pytest --markers` to see all available markers, `pytest -m "<marker>"` to select tests
 markers = [
