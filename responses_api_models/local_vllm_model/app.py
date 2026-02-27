@@ -164,8 +164,9 @@ class LocalVLLMModelActor:
             dp_size = vllm_config.parallel_config.data_parallel_size
             local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
 
-            # TODO remove this
+            # This allows the vLLM DP Ray flow to be run even with a single DP instance.
             # assert dp_size > 1
+
             assert local_dp_rank is not None
             assert 0 <= local_dp_rank <= dp_rank < dp_size
 
