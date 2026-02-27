@@ -556,7 +556,7 @@ class LocalVLLMModelActor:
                                 self.has_coordinator and not vllm_config.parallel_config.data_parallel_external_lb
                             )
 
-                            print("HIT BEFORE _init_data_parallel", file=sys.stderr)
+                            print("HIT BEFORE _init_data_parallel", self._init_data_parallel, file=sys.stderr)
                             self._init_data_parallel(vllm_config)
 
                             print("HIT BEFORE __init__", file=sys.stderr)
