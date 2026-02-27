@@ -181,13 +181,52 @@ class LocalVLLMModelActor:
             self.dp_rank = dp_rank
 
             import vllm.distributed.utils
+            from vllm.distributed.utils import (
+                Backend,
+                PrefixStore,
+                _get_default_timeout,
+                get_tcp_uri,
+                init_gloo_process_group,
+                rendezvous,
+            )
 
-            original_sitdpg = vllm.distributed.utils.stateless_init_torch_distributed_process_group
+            # original_sitdpg = vllm.distributed.utils.stateless_init_torch_distributed_process_group
 
-            def new_sitdpg(*args, **kwargs):
+            def new_sitdpg(host: str, port: int, rank: int, world_size: int, backend: str):
                 print("HIT INSIDE NEW stateless_init_torch_distributed_process_group", file=sys.stderr)
 
-                return original_sitdpg(*args, **kwargs)
+                init_method = get_tcp_uri(host, port)
+                backend = Backend(backend)  # it is basically string
+                timeout = _get_default_timeout(backend)
+
+                store, rank, world_size = next(rendezvous(init_method, rank, world_size, timeout=timeout))
+                store.set_timeout(timeout)
+
+                group_rank = rank
+                group_size = world_size
+
+                # Use a PrefixStore to avoid accidental overrides of keys used by
+                # different systems (e.g. RPC) in case the store is multi-tenant.
+                prefix_store = PrefixStore(init_method, store)
+                try:
+                    from vllm.platforms import current_platform
+
+                    return current_platform.stateless_init_device_torch_dist_pg(
+                        backend=backend,
+                        prefix_store=prefix_store,
+                        group_rank=group_rank,
+                        group_size=group_size,
+                        timeout=timeout,
+                    )
+                except NotImplementedError:
+                    # If platform doesn't implement stateless_init_device_torch_dist_pg, it
+                    # will raise a NotImplementedError. In this case, we fall back to gloo.
+                    return init_gloo_process_group(
+                        prefix_store=prefix_store,
+                        group_rank=group_rank,
+                        group_size=group_size,
+                        timeout=timeout,
+                    )
 
             vllm.distributed.utils.stateless_init_torch_distributed_process_group = new_sitdpg
 
