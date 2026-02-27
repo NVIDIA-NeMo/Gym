@@ -3,11 +3,7 @@ VIF Validators adapted for NeMo Gym integration.
 Includes both fast rule-based validators and async LLM judge validators.
 """
 
-"""
-VIF Validators adapted for NeMo Gym integration.
-Includes both fast rule-based validators and async LLM judge validators.
-"""
-
+import importlib
 from fractions import Fraction
 import re
 import string
@@ -15,7 +11,7 @@ import json
 import unicodedata
 from typing import Dict, List, Literal, Tuple, Any, Optional
 
-from collections import Counter, defaultdict
+from collections import Counter
 from pydantic import BaseModel, ValidationError, Field
 
 from .data_loader import (
@@ -249,6 +245,45 @@ LANG_STRATEGIES: Dict[str, LanguageStrategy] = {
 }
 
 SUPPORTED_LANGS = set(LANG_STRATEGIES.keys())
+
+# Maps language codes to their subpackage module names.
+# The key is the language code used in LANG_STRATEGIES (e.g. "pt-BR"),
+# the value is the Python subpackage name under vif_validators/ (e.g. "pt_br").
+_LANG_MODULE_MAP: Dict[str, str] = {
+    "en": "en",
+    "fre": "fre",
+    "es": "es",
+    "it": "it",
+    "de": "de",
+    "pt-BR": "pt_br",
+    "ja": "ja",
+    "zh": "zh",
+    "ko": "ko",
+    "hi": "hi",
+    "ar": "ar",
+}
+
+_lang_validator_cache: Dict[str, Any] = {}
+
+
+def _get_lang_validator(language: str):
+    """Lazily import and cache a language-specific validator module.
+    Returns the module if it exists, or None."""
+    if language in _lang_validator_cache:
+        return _lang_validator_cache[language]
+
+    module_name = _LANG_MODULE_MAP.get(language)
+    if module_name is None:
+        _lang_validator_cache[language] = None
+        return None
+
+    try:
+        mod = importlib.import_module(f".{module_name}.validator", package=__package__)
+        _lang_validator_cache[language] = mod
+        return mod
+    except ImportError:
+        _lang_validator_cache[language] = None
+        return None
 
 
 def _get_strategy(language: str) -> LanguageStrategy:
@@ -620,21 +655,25 @@ def extract_clean_paragraphs(text: str) -> List[str]:
 def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], all_instructions: Dict = None, language: str = "en") -> Tuple[bool, str]:
     """
     Validate a response against a specific instruction type and its kwargs.
-    
-    Args:
-        response: The text response to validate
-        inst_type: The instruction type ID (e.g., "change_case:all_caps")
-        kwargs: Dictionary of instruction arguments
-        all_instructions: Optional dictionary of all instructions for context
-        language: Language code for multi-language support (default: "en")
-        
-    Returns:
-        Tuple of (is_valid, error_message)
+
+    Dispatches to a language-specific validator module when one exists
+    (e.g. ``vif_validators.de.validator``).  Falls back to the generic,
+    strategy-based implementation in ``validate_instruction_generic``.
     """
+    lang_mod = _get_lang_validator(language)
+    if lang_mod is not None:
+        return lang_mod.validate_instruction(response, inst_type, kwargs, all_instructions)
+
+    return validate_instruction_generic(response, inst_type, kwargs, all_instructions, language)
+
+
+def validate_instruction_generic(response: str, inst_type: str, kwargs: Dict[str, Any], all_instructions: Dict = None, language: str = "en") -> Tuple[bool, str]:
+    """Generic strategy-based validator. Language-specific modules may call
+    this to delegate instruction types they don't handle themselves."""
     try:
         response = response.strip()
         strategy = _get_strategy(language)
-        
+
         # Note: Language compatibility is pre-validated at the app level.
         # Unsupported instructions should never reach here as the rollout is skipped.
         
@@ -1216,59 +1255,4 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
         return (False, f"Validation error: {str(e)}")
 
     return (False, f"Unknown instruction: {inst_type}")
-
-
-def validate_instruction_schema(instructions: Dict) -> List[Dict]:
-    """Validate the schema of instructions against expected arguments."""
-    mismatches = []
-    
-    metadata = instructions.get("metadata", [])
-    if not isinstance(metadata, list):
-        mismatches.append({"field": "metadata", "expected": "list", "actual": type(metadata).__name__})
-    
-    instructions_list = instructions.get("instructions", [])
-    if not isinstance(instructions_list, list):
-        mismatches.append({"field": "instructions", "expected": "list", "actual": type(instructions_list).__name__})
-        return mismatches
-
-    contradiction_errors = check_contradicting_instructions(instructions_list)
-    mismatches.extend(contradiction_errors)
-
-    for i, inst in enumerate(instructions_list):
-        if not isinstance(inst, dict):
-            mismatches.append({"instruction_index": i, "expected": "dict", "actual": type(inst).__name__})
-            continue
-
-        if "instruction_id" not in inst:
-            mismatches.append({"instruction_index": i, "missing_field": "instruction_id"})
-            continue
-
-        expected_args = set(EXPECTED_ARGUMENTS.get(inst["instruction_id"], []))
-        actual_args = set(k for k in inst.keys() if k != "instruction_id")
-
-        if expected_args != actual_args:
-            mismatches.append({
-                "instruction": inst["instruction_id"],
-                "expected_args": sorted(expected_args),
-                "actual_args": sorted(actual_args)
-            })
-
-    return mismatches
-
-
-def check_contradicting_instructions(instructions_list: List[Dict]) -> List[str]:
-    """Check for contradicting instruction IDs in the list."""
-    from .data_loader import conflict_dict
-    
-    errors = set()
-    seen_pairs = set()
-    ids = {inst["instruction_id"] for inst in instructions_list if isinstance(inst, dict) and "instruction_id" in inst}
-
-    for instr_id in ids:
-        for conflicting_id in conflict_dict.get(instr_id, []):
-            pair = frozenset([instr_id, conflicting_id])
-            if conflicting_id in ids and pair not in seen_pairs:
-                errors.add(f"{instr_id} and {conflicting_id} are contradicting")
-                seen_pairs.add(pair)
-    return list(errors)
 

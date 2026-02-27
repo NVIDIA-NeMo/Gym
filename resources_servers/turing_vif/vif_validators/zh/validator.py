@@ -2,80 +2,15 @@ import json
 import re
 from typing import Any, Dict, List, Tuple
 
-import validators.validator as base_validator
-from validators.validator import LLM_INSTRUCTIONS, _normalize_casefold, find_punctuations
+from .. import validator as base_validator
+from ..validator import find_punctuations
 
-# Only expose the instructions requested for Chinese; all others are omitted.
-EXPECTED_ARGUMENTS: Dict[str, List[str]] = {
-    # --- PRIORITY (must be first, before any other instruction entries; do not repeat later) ---
-    # "length_constraints:number_characters": ["relation", "num_chars"],
-    # "length_constraints:number_words": ["relation", "num_words"],
-    # "keywords:letter_frequency": ["letter", "let_relation", "let_frequency"],
-    # "detectable_format:max_paragraph_length": ["max_chars"],
-    # "length_constraints:sentence_length": ["max_words"],
-    # "punctuation:question_exclaim": ["relation", "num_marks"],
-    # "length_constraints:word_length": ["min_length", "max_length"],
-    # "length_constraints:avg_word_length": ["min_ratio", "max_ratio"],
-    # "detectable_content:numeric_inclusion": ["relation", "num_numbers"],
+from ..data_loader import EXPECTED_ARGUMENTS
 
-    # --- NON-PRIORITY (original order, with priority keys NOT repeated) ---
-    "detectable_content:number_placeholders": ["relation", "num_placeholders"],
-    "detectable_content:postscript": ["postscript_marker"],
-    "detectable_format:json_format": [],
-    "detectable_format:multiple_sections": ["section_splitter", "relation", "num_sections"],
-    "detectable_format:numbered_list": ["relation", "num_numbered_items"],
-    "detectable_format:number_bullet_lists": ["relation", "num_bullets"],
-    "detectable_format:title": [],
-    "keywords:existence": ["keywords"],
-    "keywords:frequency": ["keyword", "relation", "frequency"],
-    "keywords:forbidden_words": ["forbidden_words"],
-    "punctuation:no_comma": [],
-    "startend:start_checker": ["start_phrase"],
-    "startend:wrap_checker": ["wrap_phrase"],
-    "startend:end_checker": ["end_phrase"],
-    "startend:quotation": [],
-    "detectable_format:number_paragraphs": ["relation", "num_paragraphs"],
-    "detectable_format:sentences_per_paragraph": ["relation", "num_sentences"],
-    "length_constraints:word_repetition": ["max_repeats"],
-    "length_constraints:unique_words": ["relation", "num_unique"],
-    "punctuation:no_period": [],
-    "punctuation:end_rule": ["allowed"],
-    "detectable_format:nested_list": ["min_depth", "num_subitems"],
-    "detectable_format:table": ["min_rows", "min_cols"],
-    "detectable_format:sentence_count": ["relation", "num_sentences"],
-    "length_constraints:paragraph_length": ["relation", "words_per_paragraph"],
-    "detectable_format:sentence_endings": ["min_variants"],
 
-    # New LLM Judge Instructions
-    "stylistic:tone_formality": ["tone_level"],
-    "stylistic:emotional_tone": ["emotion_type"],
-    "stylistic:politeness": ["politeness_degree"],
-    "stylistic:descriptive_level": ["description_degree"],
-    "stylistic:literary_style": ["style_type"],
-    "stylistic:sentence_tone_consistency": ["tone_type"],
-    "stylistic:voice": ["voice_type"],
-    "stylistic:figurative_language": ["figure_type", "relation", "num_occurrences"],
-    "stylistic:tone_transition": ["from_tone", "to_tone", "transition_position"],
-    "stylistic:emotive_adjectives": ["relation", "num_adjectives"],
-    "stylistic:sensory_detail": ["sense_type", "relation", "num_details"],
-    "stylistic:rhythm_pattern": ["rhythm_type"],
-    "linguistic:pragmatic_context": ["context_type"],
-    "linguistic:speech_act": ["act_type"],
-    "linguistic:syntactic_pattern": ["pattern_type"],
-    "linguistic:grammatical_mood": ["mood_type"],
-    "linguistic:morphological_form": ["form_type"],
-    "linguistic:phonological_pattern": ["phonology_type"],
-    "linguistic:sound_symbolism": ["relation", "num_symbolisms"],
-    "situation:role_based": ["role_type"],
-    "situation:task_specific": ["task_type"],
-    "situation:audience_alignment": ["audience_type"],
-    "situation:contextual_scenario": ["scenario_type"],
-    "situation:perspective": ["perspective_type"],
-    "situation:emotional_alignment": ["emotion_type"],
-    "situation:cultural_context": ["culture_type", "adaptation_level"],
-    "situation:temporal_context": ["time_frame"],
-    "situation:environment_setting": ["environment_type"],
-}
+def _normalize_casefold(text: str, lang: str) -> str:
+    """Normalize and casefold text using the base validator's language strategy."""
+    return base_validator._get_strategy(lang).casefold(text)
 
 
 CHINESE_COMMA_SET = {",", "，", "、"}
@@ -118,7 +53,7 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
     response = response.strip()
 
     if inst_type == "detectable_format:json_format":
-        return base_validator.validate_instruction(response, inst_type, kwargs, all_instructions, language="zh")
+        return base_validator.validate_instruction_generic(response, inst_type, kwargs, all_instructions, language="zh")
 
     if inst_type == "detectable_content:number_placeholders":
         count = _count_placeholders(response)
@@ -287,34 +222,11 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
                 return True, "No error"
         return False, "Response not wrapped in accepted quotation marks."
 
-    return base_validator.validate_instruction(response, inst_type, kwargs, all_instructions, language="zh")
-
-
-def validate_llm_instruction(
-    response: str,
-    inst_type: str,
-    kwargs: Dict[str, Any],
-    all_instructions: Dict = None,
-    definition_cache: Dict[Tuple[str, str], Tuple[bool, str]] = None,
-) -> Tuple[bool, str]:
-    if inst_type not in LLM_INSTRUCTIONS:
-        return False, f"Instruction '{inst_type}' is not an LLM instruction."
-    return base_validator.validate_llm_instruction(
-        response, inst_type, kwargs, all_instructions, definition_cache, language="zh"
-    )
+    return base_validator.validate_instruction_generic(response, inst_type, kwargs, all_instructions, language="zh")
 
 
 def validate_prompt_against_instructions(user_prompt: str, turn_instructions: Dict) -> Tuple[bool, str]:
     return base_validator.validate_prompt_against_instructions(
         user_prompt, turn_instructions, language="zh"
     )
-
-def validate_thinking_against_instructions(thinking: str, turn_instructions: Dict) -> Tuple[bool, str]:
-    return base_validator.validate_thinking_against_instructions(
-        thinking, turn_instructions, language="zh"
-    )
-
-# Re-export generic helpers used elsewhere
-validate_instruction_schema = base_validator.validate_instruction_schema
-analyze_instruction_statuses_by_turn = base_validator.analyze_instruction_statuses_by_turn
 
