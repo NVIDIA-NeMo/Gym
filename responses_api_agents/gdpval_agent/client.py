@@ -95,17 +95,9 @@ SYSTEM_PROMPT = (
     "If you created output files you want to keep, pass their paths to finish."
 )
 
-PROMPT_TEMPLATE_PATH = Path(__file__).parent / "prompts" / "gdpval_user_prompt.txt"
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _load_prompt_template() -> str:
-    """Load the instruction prompt template from disk."""
-    return PROMPT_TEMPLATE_PATH.read_text()
-
 
 def _load_hf_dataset(split: str):
     """Lazily import datasets and load the openai/gdpval dataset."""
@@ -124,8 +116,12 @@ def _filter_dataset(dataset, task_ids: list[str] | None, limit: int | None):
     return rows
 
 
-def _build_run_request(row: dict, instruction_prompt_template: str, output_dir: str) -> dict:
-    """Build a GDPValAgentRunRequest-compatible dict from an HF dataset row."""
+def _build_run_request(row: dict, output_dir: str) -> dict:
+    """Build a GDPValAgentRunRequest-compatible dict from an HF dataset row.
+
+    Note: instruction_prompt_template is intentionally omitted — the agent
+    loads it from its own prompts/ directory when the field is None.
+    """
     return {
         "responses_create_params": {
             "input": "",
@@ -133,7 +129,6 @@ def _build_run_request(row: dict, instruction_prompt_template: str, output_dir: 
         },
         "task_prompt": row["prompt"],
         "system_prompt": SYSTEM_PROMPT,
-        "instruction_prompt_template": instruction_prompt_template,
         "output_dir": output_dir,
         "task_id": row["task_id"],
         "reference_file_urls": row.get("reference_file_urls", []) or [],
@@ -147,7 +142,6 @@ def _build_run_request(row: dict, instruction_prompt_template: str, output_dir: 
 
 def cmd_prepare(args: argparse.Namespace) -> None:
     """Convert HF dataset rows to JSONL for ng_collect_rollouts."""
-    instruction_prompt_template = _load_prompt_template()
     dataset = _load_hf_dataset(args.split)
     rows = _filter_dataset(dataset, args.task_ids, args.limit)
 
@@ -160,7 +154,7 @@ def cmd_prepare(args: argparse.Namespace) -> None:
 
     with open(output_path, "w") as f:
         for row in rows:
-            request = _build_run_request(row, instruction_prompt_template, args.output_dir)
+            request = _build_run_request(row, args.output_dir)
             f.write(json.dumps(request) + "\n")
 
     print(f"Wrote {len(rows)} row(s) to {output_path}")
@@ -191,7 +185,6 @@ def _validate_jsonl(path: Path) -> None:
 
 async def _cmd_run_async(args: argparse.Namespace) -> None:
     """Run tasks directly against the agent server (for dev/debug)."""
-    instruction_prompt_template = _load_prompt_template()
     dataset = _load_hf_dataset(args.split)
     rows = _filter_dataset(dataset, args.task_ids, args.limit)
 
@@ -205,7 +198,7 @@ async def _cmd_run_async(args: argparse.Namespace) -> None:
         task_id = row["task_id"]
         print(f"\n[{i}/{len(rows)}] Running task {task_id} ...")
 
-        request = _build_run_request(row, instruction_prompt_template, args.output_dir)
+        request = _build_run_request(row, args.output_dir)
         response = await server_client.post(
             server_name="bash_sandbox_agent",
             url_path="/run",
