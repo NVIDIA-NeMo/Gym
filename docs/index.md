@@ -310,6 +310,7 @@ NeMo RL <training-tutorials/nemo-rl-grpo/index.md>
 TRL <training-tutorials/trl>
 Unsloth <training-tutorials/unsloth>
 Offline Training (SFT/DPO) <training-tutorials/offline-training-w-rollouts>
+Data Generation <training-tutorials/multistep-toolcalling-datagen>
 ```
 
 ```{toctree}
