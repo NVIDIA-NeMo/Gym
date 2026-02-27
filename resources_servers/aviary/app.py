@@ -136,7 +136,7 @@ class AviaryResourcesServer(SimpleResourcesServer, Generic[TEnv, TDataset], ABC)
                         NeMoGymEasyInputMessage(role="user", content="Invalid tool call arguments (not a valid JSON)")
                     ],
                     reward=0.0,
-                    done=True,
+                    done=False,
                 )
 
             action = ToolRequestMessage(content=None, tool_calls=tool_calls)
