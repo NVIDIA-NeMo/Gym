@@ -34,6 +34,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    JudgeTruncationConfigMixin,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
@@ -45,7 +46,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.server_utils import get_response_json
 
 
-class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
+class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig, JudgeTruncationConfigMixin):
     """Configuration for the LLM judge server.
 
     - judge_model_server: target model server to use as the judge.
@@ -270,6 +271,21 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         app = super().setup_webserver()
         return app
 
+    @staticmethod
+    def _truncate_answer_for_judge(text: str, budget_chars: int) -> str:
+        """Truncate while preserving end-of-answer content (usually where final answer appears)."""
+        if budget_chars <= 0:
+            return ""
+        if len(text) <= budget_chars:
+            return text
+        marker = "\n... [truncated for judge context limit]\n"
+        marker_len = len(marker)
+        if budget_chars <= marker_len + 16:
+            return text[-budget_chars:]
+        head_chars = max(0, int(budget_chars * 0.2))
+        tail_chars = budget_chars - head_chars - marker_len
+        return text[:head_chars] + marker + text[-tail_chars:]
+
     def _should_skip_for_length(self, body: LLMJudgeVerifyRequest, expected: str) -> bool:
         """Check if length threshold should skip second evaluation (rescue or swap).
 
@@ -438,6 +454,42 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         responses_create_params = cfg.judge_responses_create_params.model_copy(deep=True)
         prompt_template = self._judge_prompt_template
         system_message = cfg.judge_system_message
+
+        ### Truncation logic to prevent exceeding context length ###
+        if cfg.max_judge_input_tokens is not None:
+            cpt = cfg.chars_per_token_estimate
+            # Estimate token count of the non-answer portions of the prompt
+            # by rendering the template with an empty generated_answer
+            scaffold = prompt_template.format(question=question, expected_answer=expected_answer, generated_answer="")
+            system_chars = len(system_message) if system_message else 0
+            overhead_chars = len(scaffold) + system_chars
+            overhead_tokens_est = overhead_chars / cpt
+
+            # Budget remaining for the generated_answer
+            max_answer_tokens = cfg.max_judge_input_tokens - overhead_tokens_est
+            if max_answer_tokens <= 0:
+                print(
+                    "[WARNING] - equivalence_llm_judge - No token budget for generated_answer "
+                    f"(max_answer_tokens={max_answer_tokens}). Returning not-equal."
+                )
+                eval_record = JudgeEvaluation(
+                    responses_create_params=responses_create_params,
+                    response=NeMoGymResponse(
+                        id="truncated",
+                        created_at=0,
+                        model="",
+                        object="response",
+                        output=[],
+                        parallel_tool_calls=True,
+                        tool_choice="auto",
+                        tools=[],
+                    ),
+                    verdict_label=None,
+                )
+                return False, eval_record
+
+            max_answer_chars = max(64, int(max_answer_tokens * cpt))
+            generated_answer = self._truncate_answer_for_judge(generated_answer, max_answer_chars)
 
         user_prompt = prompt_template.format(
             question=question, expected_answer=expected_answer, generated_answer=generated_answer
