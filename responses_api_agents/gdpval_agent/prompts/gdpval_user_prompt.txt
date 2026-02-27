@@ -1,0 +1,141 @@
+You are tasked with completing a specific assignment.
+
+## Environment
+
+The `run_shell` tool provides access to a Linux-based execution environment that includes a full file system where you can create, read, and modify files.
+
+Your environment comes preinstalled with a comprehensive set of Python packages and system tools:
+
+**Jupyter Ecosystem:**
+- jupyter-client 8.8.0, jupyter-core 5.9.1, jupyter-server 2.17.0
+- jupyterlab 4.5.2, jupyterlab-pygments 0.3.0, jupyterlab-server 2.28.0
+- notebook 7.5.2, nbclassic 1.3.3
+
+**Web Frameworks:**
+- aiohttp 3.13.3, hypercorn 0.18.0, fastapi 0.128.0, websockets 16.0
+- pydantic 2.12.5, gradio 6.3.0
+
+**Core Data Science:**
+- numpy 2.3.5, numpy-financial 1.0.0, scipy 1.17.0, pandas 2.3.3
+- matplotlib 3.10.8, matplotlib-venn 1.1.2, seaborn 0.13.2
+- plotly 6.5.2, plotnine 0.15.2, bokeh 3.8.2
+
+**Statistics & Machine Learning:**
+- statsmodels 0.14.6, scikit-learn 1.8.0, scikit-image 0.26.0
+- xgboost 3.1.3, catboost 1.2.8, lightgbm 4.6.0
+- imbalanced-learn 0.14.1, shap 0.50.0
+
+**NLP:**
+- nltk 3.9.2, gensim 4.4.0, spacy 3.8.11, textblob 0.19.0
+
+**Computer Vision:**
+- opencv-python 4.11.0.86, Pillow 11.3.0
+- pytesseract 0.3.13, qrcode 8.2, pyzbar 0.1.9, imgkit 1.2.3
+
+**Audio Processing:**
+- ffmpeg-python 0.2.0, pydub 0.25.1, moviepy 2.2.1, soundfile 0.13.1
+- librosa 0.11.0, mutagen 1.47.0, gtts 2.5.4, pyttsx3 2.99
+- pedalboard 0.9.21, pyloudnorm 0.2.0, mne 1.11.0
+
+**Document Processing:**
+- python-docx 1.2.0, python-pptx 1.0.2, openpyxl 3.1.5, xlrd 2.0.2
+- pymupdf 1.26.7, pdf2image 1.17.0, pdfplumber 0.11.9, pdfkit 1.0.0
+- pypandoc 1.16.2, docx2txt 0.9, odfpy 1.4.1, pyxlsb 1.0.10
+- tabula 1.0.5, camelot-py 1.0.9
+
+**PDF Generation:**
+- fpdf2 2.8.5, reportlab 4.4.9, weasyprint 67.0, pdfrw 0.4
+
+**Graphics & Visualization:**
+- graphviz 0.21, pydot 4.0.1, networkx 3.6.1
+- svglib 1.6.0, svgwrite 1.4.3, cairosvg 2.8.2, trimesh 4.11.0
+- wordcloud 1.9.5, folium 0.20.0
+
+**Geospatial:**
+- shapely 2.1.2, fiona 1.10.1, geopandas 1.1.2
+- geopy 2.4.1, rasterio 1.5.0, basemap 2.0.0
+- GDAL system libraries
+
+**Scientific Computing:**
+- sympy 1.14.0, pymc 5.27.0, h5py 3.15.1, tables 3.10.2
+
+**3D & CAD:**
+- cadquery 2.6.1, cadquery-ocp 7.8.1.1.post1
+
+**Chemistry & Biology:**
+- rdkit 2025.9.3, biopython 1.86
+
+**Data Utilities:**
+- xml-python 0.4.3, markdownify 1.2.2, anytree 2.13.0
+- rarfile 4.2, chardet 5.2.0, srt 3.5.3
+
+**General Utilities:**
+- tqdm 4.67.1, tabulate 0.9.0, faker 40.1.2, loguru 0.7.3
+- fuzzywuzzy 0.18.0, rapidfuzz 3.14.3, einops 0.8.1
+- pycountry 24.6.1, countryinfo 0.1.2, pronouncing 0.2.0
+- kerykeion 5.6.1, exchange-calendars 4.12
+
+**Math & Logic:**
+- pylog 1.1, pyprover 0.6.2, nashpy 0.0.43
+
+**Semantic Web:**
+- rdflib 7.5.0
+
+**Security & Networking:**
+- cryptography 46.0.3, pyopenssl 25.3.0, requests 2.32.5
+
+**Database Connectors:**
+- snowflake-connector-python 4.2.0, databricks-sql-connector 4.2.4
+
+**Testing & Monitoring:**
+- pytest 9.0.2, pytest-cov 7.0.0, pytest-json-report 1.5.0
+- coverage 7.13.1, pytest-asyncio 1.3.0
+- ddtrace 4.2.1, datadog 0.52.1
+
+**Document Generation:**
+- aspose-words 25.12.0
+
+**Other:**
+- typing-extensions 4.15.0, pyth3 0.7
+
+
+**System Tools:**
+- Python 3.12 (base environment)
+- LibreOffice + LibreOffice Writer (for office document conversion, includes fonts-dejavu-core)
+- Tesseract OCR (text extraction from images)
+- Pandoc (universal document converter)
+- Poppler utilities (PDF tools such as `pdftotext`, `pdfimages`)
+- Ghostscript (PostScript/PDF processing)
+- FFmpeg (complete audio/video processing suite with all codecs)
+- Graphviz (graph visualization with DOT language)
+- OpenJDK 21 JRE (Java runtime for Tabula and other Java-based tools)
+- GDAL/GEOS/Proj (geospatial data libraries and utilities)
+- Build tools: gcc, g++, cmake, pkg-config, make
+
+## Reference Files Location
+
+The reference files for the task are available in your environment's file system.
+
+Here are their paths:
+
+<reference_files>
+{references}
+</reference_files>
+
+## Completing Your Work
+
+In order to complete the task you must use the `finish` tool to submit your work.  If you do not use the `finish` tool you will fail this task!
+
+**Required in your finish call:**
+1. A brief summary of what you accomplished
+2. A list of **ABSOLUTE file paths** for all files you want to submit (Do not submit folders).
+
+## Task
+
+Here is the task you need to complete:
+
+<task>
+{task}
+</task>
+
+Please begin working on the task now.
