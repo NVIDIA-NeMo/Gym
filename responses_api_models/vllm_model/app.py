@@ -190,6 +190,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         client_idx = self._routing_policy.select_client(
             request_body=body_dict, request_id=request_id, session_id=session_id
         )
+        self._routing_policy.on_prefill_complete(request_id)
         client = self._clients[client_idx]
 
         create_params = body_dict
@@ -281,7 +282,6 @@ class VLLMModel(SimpleResponsesAPIModel):
                 raise e
 
         # Notify routing policy of request lifecycle events (non-streaming: both happen at response return)
-        self._routing_policy.on_prefill_complete(request_id)
         self._routing_policy.on_generation_complete(request_id)
 
         choice_dict = chat_completion_dict["choices"][0]
