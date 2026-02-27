@@ -86,6 +86,8 @@ class LocalVLLMModelActor:
         node_ip = ray._private.services.get_node_ip_address()
         self._base_url = f"http://{node_ip}:{self.server_args.port}/v1"
 
+        print(f"Spinning up local vLLM server at {self._base_url}", file=sys.stderr)
+
         # vLLM doesn't expose a config for this yet, so we need to pass via environment variable.
         self.env_vars["VLLM_DP_MASTER_IP"] = node_ip  # This is the master node.
 
@@ -197,14 +199,6 @@ class LocalVLLMModelActor:
 
             def new_sitdpg(host: str, port: int, rank: int, world_size: int, backend: str):
                 print("HIT INSIDE NEW stateless_init_torch_distributed_process_group", file=sys.stderr)
-
-                # TODO remove
-                if server_name == "gpt-oss-20b-reasoning-high":
-                    port = 0
-                elif server_name == "gpt-oss-120b-reasoning-high":
-                    port = 1
-                else:
-                    raise NotImplementedError
 
                 init_method = get_tcp_uri(host, port)
                 backend = Backend(backend)  # it is basically string
