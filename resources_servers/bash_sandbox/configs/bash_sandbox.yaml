@@ -3,7 +3,7 @@ bash_sandbox_resources_server:
     bash_sandbox:
       entrypoint: app.py
       domain: agent
-bash_sandbox_simple_agent:
+bash_sandbox_agent:
   responses_api_agents:
     gdpval_agent:
       entrypoint: app.py

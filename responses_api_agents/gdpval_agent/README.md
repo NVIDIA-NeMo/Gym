@@ -7,13 +7,13 @@ GDPVal responses-api agent for running tool-augmented task rollouts and delegati
 cd /lustre/fsw/portfolios/llmservice/users/vadams/Gym
 source .venv/bin/activate
 
-# Define which servers to start
-RESOURCE_SERVER_CONFIG=resources_servers/bash_sandbox/configs/bash_sandbox.yaml
-AGENT_SERVER_CONFIG=responses_api_agents/gdpval_agent/configs/gdpval_agent.yaml
+# bash_sandbox.yaml starts: bash_sandbox_resources_server + bash_sandbox_agent
+# nano_v3_single_node.yaml starts: policy_model (local vLLM Nemotron)
+RESOURCE_AND_AGENT_CONFIG=resources_servers/bash_sandbox/configs/bash_sandbox.yaml
 MODEL_SERVER_CONFIG=responses_api_models/local_vllm_model/configs/nano_v3_single_node.yaml
 
 # Start all servers
-ng_run "+config_paths=[${RESOURCE_SERVER_CONFIG},${AGENT_SERVER_CONFIG},${MODEL_SERVER_CONFIG}]"
+ng_run "+config_paths=[${RESOURCE_AND_AGENT_CONFIG},${MODEL_SERVER_CONFIG}]"
 ```
 
 # Terminal 2: Running the agent
