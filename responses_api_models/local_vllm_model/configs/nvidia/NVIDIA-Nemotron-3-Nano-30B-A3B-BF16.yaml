@@ -36,3 +36,4 @@ NVIDIA-Nemotron-3-Nano-30B-A3B-BF16:
 responses_create_params:
   temperature: 1.0
   top_p: 1.0
+  max_output_tokens: null

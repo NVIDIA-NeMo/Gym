@@ -34,3 +34,4 @@ gpt-oss-20b-reasoning-high:
 responses_create_params:
   reasoning:
     effort: high
+  max_output_tokens: null

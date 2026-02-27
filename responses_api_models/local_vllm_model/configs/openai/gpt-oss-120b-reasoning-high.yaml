@@ -35,5 +35,6 @@ responses_create_params:
   # From https://huggingface.co/openai/gpt-oss-120b/discussions/21#6892bbe3342676ebf6ba7428
   temperature: 1.0
   top_p: 1.0
+  max_output_tokens: null
   reasoning:
     effort: high

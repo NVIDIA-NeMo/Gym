@@ -34,3 +34,4 @@ Qwen3-30B-A3B-Instruct-2507:
 responses_create_params:
   temperature: 0.7
   top_p: 0.8
+  max_output_tokens: null

@@ -35,3 +35,4 @@ Qwen3-30B-A3B-Thinking-2507:
 responses_create_params:
   temperature: 0.6
   top_p: 0.95
+  max_output_tokens: null

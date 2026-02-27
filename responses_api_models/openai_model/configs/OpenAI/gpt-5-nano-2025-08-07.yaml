@@ -6,3 +6,6 @@ gpt-5-nano-2025-08-07:
       openai_base_url: https://api.openai.com/v1
       openai_api_key: ${policy_api_key}
       openai_model: gpt-5-nano-2025-08-07
+
+responses_create_params:
+  max_output_tokens: null
