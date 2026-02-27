@@ -154,6 +154,8 @@ class LocalVLLMModelActor:
             metrics_logger.setLevel(ERROR)
 
     def _patch_init_data_parallel(self) -> None:
+        LocalVLLMModelActor_self = self
+
         from vllm.v1.engine.core import DPEngineCoreProc, logger
 
         def new_init_data_parallel(self, vllm_config):
@@ -222,7 +224,10 @@ class LocalVLLMModelActor:
                     print("HIT AFTER current_platform.stateless_init_device_torch_dist_pg", file=sys.stderr)
                     return res
                 except NotImplementedError:
-                    print("HIT BEFORE init_gloo_process_group", file=sys.stderr)
+                    print(
+                        f"HIT BEFORE init_gloo_process_group in {LocalVLLMModelActor_self.server_name}",
+                        file=sys.stderr,
+                    )
                     # If platform doesn't implement stateless_init_device_torch_dist_pg, it
                     # will raise a NotImplementedError. In this case, we fall back to gloo.
                     return init_gloo_process_group(
