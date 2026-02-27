@@ -89,7 +89,7 @@ class LocalVLLMModelActor:
         print(f"Spinning up local vLLM server at {self._base_url}", file=sys.stderr)
 
         # vLLM doesn't expose a config for this yet, so we need to pass via environment variable.
-        self.env_vars["VLLM_DP_MASTER_IP"] = node_ip  # This is the master node.
+        # self.env_vars["VLLM_DP_MASTER_IP"] = node_ip  # This is the master node.
 
         self._patch_signal_handler()
         self._patch_uvicorn_logger()
@@ -435,7 +435,17 @@ class LocalVLLMModelActor:
                     dp_size_to_allocate = dp_size_available
 
                 for i in range(dp_size_to_allocate):
-                    device_bundle = [{device_str: 1.0, "node:" + node_ip: 0.001}]
+                    """
+                    START Scheduling by nodes is very brittle
+                    """
+                    # Original code:
+                    # device_bundle = [{device_str: 1.0, "node:" + node_ip: 0.001}]
+
+                    # Modified code:
+                    device_bundle = [{device_str: 1.0}]
+                    """
+                    END Scheduling by nodes is very brittle
+                    """
 
                     if pack_strategy == "span":
                         collected_bundles += device_bundle * n_device_on_node
@@ -526,6 +536,7 @@ class LocalVLLMModelActor:
             assert len(local_dp_ranks) == dp_size, (
                 f"local_dp_ranks length {len(local_dp_ranks)} does not match expected {dp_size}"
             )
+
             return placement_groups, local_dp_ranks
 
         CoreEngineActorManager.create_dp_placement_groups = new_create_dp_placement_groups
