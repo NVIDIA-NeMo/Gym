@@ -45,7 +45,7 @@ Depending on your workflow, you may also find these libraries useful:
 | [NeMo RL](https://github.com/NVIDIA-NeMo/RL) | Scalable post-training with GRPO, DPO, and SFT |
 | **[NeMo Gym](https://github.com/NVIDIA-NeMo/Gym)** | RL environment infrastructure and rollout collection *(this project)* |
 | [NeMo Curator](https://github.com/NVIDIA-NeMo/Curator) | Data preprocessing and curation |
-| [NeMo Data Designer](https://github.com/NVIDIA-NeMo/DataDesigner) | Synthetic data generation |
+| [NeMo Data Designer](https://github.com/NVIDIA-NeMo/DataDesigner) | High-quality Synthetic data generation from scratch or seed data |
 | [NeMo Evaluator](https://github.com/NVIDIA-NeMo/Evaluator) | Model evaluation and benchmarking |
 | [NeMo Guardrails](https://github.com/NVIDIA-NeMo/Guardrails) | Programmable safety guardrails |
 | [NeMo Skills](https://github.com/NVIDIA-NeMo/NeMo-Skills) | Convenience pipelines used by LLM researchers across SDG, evaluation and training |
