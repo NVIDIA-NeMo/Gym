@@ -612,17 +612,17 @@ class LocalVLLMModelActor:
 
                     EngineCoreProc.__init__ = new_EngineCoreProc__init__
 
+                    original_EngineCoreProc_init_data_parallel = EngineCoreProc._init_data_parallel
+
+                    def new_EngineCoreProc_init_data_parallel(*args, **kwargs):
+                        print("HIT INSIDE NEW new EngineCoreProc._init_data_parallel", file=sys.stderr)
+                        return original_EngineCoreProc_init_data_parallel(*args, **kwargs)
+
+                    EngineCoreProc._init_data_parallel = new_EngineCoreProc_init_data_parallel
+
                     return original_DPEngineCoreProc__init__(self, *args, **kwargs)
 
                 DPEngineCoreProc.__init__ = new_DPEngineCoreProc__init__
-
-                original_DPEngineCoreProc_init_data_parallel = DPEngineCoreProc._init_data_parallel
-
-                def new_DPEngineCoreProc_init_data_parallel(*args, **kwargs):
-                    print("HIT INSIDE NEW new DPEngineCoreProc._init_data_parallel", file=sys.stderr)
-                    return original_DPEngineCoreProc_init_data_parallel(*args, **kwargs)
-
-                DPEngineCoreProc._init_data_parallel = new_DPEngineCoreProc_init_data_parallel
 
                 return original_DPEngineCoreActor__init__(self, *args, **kwargs)
 
