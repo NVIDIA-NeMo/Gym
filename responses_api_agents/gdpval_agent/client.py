@@ -12,63 +12,128 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+"""
+Example client for the GDPVal agent with a bash sandbox resources server.
+
+Prerequisites:
+    - The head server, model server, resources server, and agent server must all
+      be running. See the configs/ directory for example YAML configurations.
+
+Usage:
+    python client.py
+"""
+import asyncio
 import json
-from asyncio import run
 
-from nemo_gym.base_resources_server import BaseRunRequest
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import ServerClient, get_response_json
 
 
-server_client = ServerClient.load_from_global_config()
-task = server_client.post(
-    server_name="bash_sandbox_agent",
-    url_path="/run",
-    json=BaseRunRequest(
-        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
-            input=[
-                {
-                    "role": "developer",
-                    "content": (
-                        "You are a capable coding assistant. Use tools when helpful and call finish when done."
-                    ),
+# Tool definitions exposed to the model.
+# NOTE: session_id and output_dir are injected by the agent — they should NOT
+# appear in these definitions since the model doesn't manage sessions.
+TOOLS = [
+    {
+        "type": "function",
+        "name": "run_command",
+        "description": "Execute a bash command in the sandbox environment.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "The bash command to execute.",
                 },
-                {
-                    "role": "user",
-                    "content": "Run `echo hello` using run_shell, then call finish with a short summary.",
+                "timeout": {
+                    "type": "integer",
+                    "description": "Maximum seconds to wait for the command (default 30).",
                 },
-            ],
-            tools=[
-                {
-                    "type": "function",
-                    "name": "run_shell",
-                    "description": "Execute a shell command in the sandbox.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "command": {"type": "string"},
-                            "timeout": {"type": "integer"},
-                        },
-                        "required": ["command"],
-                        "additionalProperties": False,
-                    },
-                    "strict": True,
+            },
+            "required": ["command"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "finish",
+        "description": (
+            "Mark the task as complete and end the session. "
+            "Optionally provide a list of file paths (relative to the sandbox working directory) "
+            "to save as permanent output files."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "File paths in the sandbox to save as output.",
                 },
-                {
-                    "type": "function",
-                    "name": "finish",
-                    "description": "Mark the task complete.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"message": {"type": "string"}},
-                        "required": [],
-                        "additionalProperties": False,
-                    },
-                    "strict": True,
-                },
-            ],
-        )
-    ),
+            },
+            "required": [],
+        },
+    },
+]
+
+SYSTEM_PROMPT = (
+    "You are a capable coding assistant with access to a bash sandbox. "
+    "Use the run_command tool to execute bash commands. "
+    "When you have completed the task, call the finish tool. "
+    "If you created output files you want to keep, pass their paths to finish."
 )
-result = run(task)
-print(json.dumps(run(result.json()), indent=4))
+
+TASK_PROMPT = (
+    "Write a Python script called hello.py that prints 'Hello, World!'. "
+    "Run it to verify it works, then finish the task and save hello.py as output."
+)
+
+
+async def main():
+    # Connect to the running NeMo Gym infrastructure
+    server_client = ServerClient.load_from_global_config()
+
+    # Build the run request body matching GDPValAgentRunRequest
+    run_request = {
+        # NeMoGymResponseCreateParamsNonStreaming — the model server params
+        "responses_create_params": {
+            "input": "",  # Overridden by the agent with system + task prompts
+            "tools": TOOLS,
+        },
+        # GDPVal agent-specific fields
+        "task_prompt": TASK_PROMPT,
+        "system_prompt": SYSTEM_PROMPT,
+        "output_dir": "/tmp/gdpval_output",
+        "task_id": "hello_world_task",
+    }
+
+    print("Submitting task to GDPVal agent...")
+    print(f"  Task: {TASK_PROMPT}")
+    print(f"  Output dir: {run_request['output_dir']}")
+    print()
+
+    # POST to the agent's /run endpoint
+    response = await server_client.post(
+        server_name="bash_sandbox_agent",
+        url_path="/run",
+        json=run_request,
+    )
+
+    result = await get_response_json(response)
+
+    print("=" * 60)
+    print("Task Result:")
+    print("=" * 60)
+    print(json.dumps(result, indent=2, default=str))
+
+    # Print a summary of saved files
+    saved_files = result.get("output_files", [])
+    if saved_files:
+        print()
+        print(f"Saved {len(saved_files)} output file(s):")
+        for f in saved_files:
+            print(f"  -> {f.get('output_path', 'unknown')} ({f.get('size', '?')} bytes)")
+    else:
+        print("\nNo output files were saved.")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

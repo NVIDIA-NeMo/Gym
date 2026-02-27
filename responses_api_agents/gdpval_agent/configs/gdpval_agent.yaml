@@ -4,7 +4,7 @@ gdpval_agent:
       entrypoint: app.py
       resources_server:
         type: resources_servers
-        name: ???
+        name: bash_sandbox_resources_server
       model_server:
         type: responses_api_models
         name: policy_model
@@ -12,3 +12,26 @@ gdpval_agent:
       max_tokens: 10000
       context_summarization_cutoff: 0.7
       step_warning_threshold: 80
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/bash_sandbox/data/train.jsonl
+        num_repeats: 1
+        gitlab_identifier:
+          dataset_name: bash_sandbox
+          version: 0.0.1
+          artifact_fpath: train.jsonl
+        license: Apache 2.0
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/bash_sandbox/data/validation.jsonl
+        num_repeats: 1
+        gitlab_identifier:
+          dataset_name: bash_sandbox
+          version: 0.0.1
+          artifact_fpath: validation.jsonl
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/bash_sandbox/data/example.jsonl
+        num_repeats: 1

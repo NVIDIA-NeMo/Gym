@@ -22,7 +22,7 @@ import uuid
 from typing import Dict, List
 from fastapi import FastAPI
 from pathlib import Path
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
@@ -36,12 +36,14 @@ from nemo_gym.base_resources_server import (
 SHELL_TIMEOUT = 30
 
 class Session(BaseModel):
-    # All code execution and file access happens in the temp directory
+    """All code execution and file access happens in the temp directory."""
     temp_dir: Path
 
-    def __init__(self, temp_dir_base: Path):
+    @classmethod
+    def create(cls, temp_dir_base: Path) -> "Session":
         temp_dir_base.mkdir(parents=True, exist_ok=True)
-        self.temp_dir = Path(tempfile.mkdtemp(prefix="local_sandbox_", dir=temp_dir_base))
+        temp_dir = Path(tempfile.mkdtemp(prefix="local_sandbox_", dir=temp_dir_base))
+        return cls(temp_dir=temp_dir)
 
 class SessionManager:
     id_to_session: Dict[str, Session]
@@ -60,26 +62,22 @@ class SessionManager:
     def start_session(self, session_id: str) -> Session:
         if self.session_exists(session_id):
             raise ValueError(f"Session {session_id} already exists")
-        self.id_to_session[session_id] = Session(temp_dir_base=self.temp_dir_base)
+        self.id_to_session[session_id] = Session.create(temp_dir_base=self.temp_dir_base)
         return self.get_session(session_id)
 
     def end_session(self, session_id: str) -> None:
         session = self.id_to_session.pop(session_id, None)
         if session:
-            shutil.rmtree(session.temp_dir_path)
+            shutil.rmtree(session.temp_dir)
 
-@dataclass
-class UploadedFile:
+class UploadedFile(BaseModel):
     """Information about a file uploaded to the execution environment."""
-
     source_path: Path  # Original path on local filesystem
     dest_path: str  # Path in the execution environment
     size: int
 
-@dataclass
-class SavedFile:
+class SavedFile(BaseModel):
     """Information about a file saved from the execution environment."""
-
     source_path: str  # Original path in execution environment
     output_path: Path  # Path where file was saved
     size: int
@@ -89,15 +87,9 @@ class BashSandboxResourcesServerConfig(BaseResourcesServerConfig):
     allowlist: List[str] = Field(default_factory=list)
 
 class SeedSessionRequest(BaseSeedSessionRequest):
-    """
-    session_id: str
-    """
     session_id: str | None = None
 
 class SeedSessionResponse(BaseSeedSessionResponse):
-    """
-    session_id: str
-    """
     session_id: str
     success: bool
     error_message: str | None = None
@@ -114,71 +106,45 @@ class RunCommandResponse(BaseModel):
     error_kind: str | None = None
     advice: str | None = None
     
-class UploadFilesRequest(BaseModel):
-    """
-    paths: File or directory paths to upload.
-    session_id: ID of the session to upload files to.
-    """
-   
+class UploadFilesRequest(BaseModel): 
     paths: List[str]
     session_id: str
     dest_dir: str | None = None
 
 class UploadFilesResponse(BaseModel):
-    """
-    uploaded: List[UploadedFile]
-    failed: List[str]
-    """
     uploaded: List[UploadedFile]
     failed: Dict[str, str]
 
 class SaveOutputFilesRequest(BaseModel):
-    """
-    paths: List[str]
-    session_id: str
-    output_dir: str
-    """
     paths: List[str]
     session_id: str
     output_dir: str
 
 class SaveOutputFilesResponse(BaseModel):
-    """
     saved: List[SavedFile]
-    failed: List[str]
-    """
-    saved: List[SavedFile]
-    failed: List[str, str]
+    failed: Dict[str, str]
     error_message: str | None = None
 
-class EndSessionRequest(BaseModel):
-    """
-    session_id: str
-    """
+class FinishRequest(BaseModel):
     session_id: str
     paths: List[str] | None = None
     output_dir: str | None = None
 
-class EndSessionResponse(BaseModel):
-    """
-    success: bool
-    failed: List[str]
-    """
+class FinishResponse(BaseModel):
     session_deleted: bool
     saved: List[SavedFile] = Field(default_factory=list)
-    failed: List[str, str] = Field(default_factory=dict)
+    failed: Dict[str, str] = Field(default_factory=dict)
     error_message: str | None = None
 
 class VerifyRequest(BaseVerifyRequest):
-    """
-    session_id: str
-    """
     session_id: str
     paths: List[str]
 
 class BashSandboxResourcesServer(SimpleResourcesServer):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     config: BashSandboxResourcesServerConfig
-    session_manager: SessionManager
+    session_manager: SessionManager = None  # type: ignore[assignment]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -188,11 +154,11 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
         app = super().setup_webserver()
 
         # Register tool endpoints
-        # These will be called via /{tool_name} pattern from GDPValAgent
+        # Tool endpoints called via /{tool_name} pattern from GDPValAgent
         app.post("/run_command")(self.run_command)
         app.post("/upload_files")(self.upload_files)
         app.post("/save_files")(self.save_output_files)
-        app.post("/end_session")(self.end_session)  # Finish tool for task completion
+        app.post("/finish")(self.finish)  # Finish tool for task completion
         # app.post("/web_search")(self.web_search) # TODO: Implement web search
 
         return app
@@ -204,9 +170,18 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
             True if the command is allowed, False otherwise.
 
         """
-        if self.config.allowlist is None:
-            return True  # No allowlist = allow all
-        return any(p.search(cmd) for p in self.config.allowlist)
+        # No allowlist configured means allow all commands.
+        if not self.config.allowlist:
+            return True
+
+        for pattern in self.config.allowlist:
+            try:
+                if re.search(pattern, cmd):
+                    return True
+            except re.error:
+                # Ignore invalid regex entries instead of crashing command execution.
+                continue
+        return False
 
     def _resolve_and_validate_path(self, path: str, session: Session) -> Path:
         """Resolve a path and validate it's within the temp directory.
@@ -294,7 +269,16 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
             RunCommandResponse with exit_code, stdout, stderr, and optional error info.
 
         """
-        session = self.session_manager.get_session(body.session_id)
+        try:
+            session = self.session_manager.get_session(body.session_id)
+        except KeyError:
+            return RunCommandResponse(
+                exit_code=1,
+                stdout="",
+                stderr=f"Session not found: {body.session_id}",
+                error_kind="session_not_found",
+                advice="Create a session first via the seed_session endpoint.",
+            )
 
         if session.temp_dir is None:
             raise RuntimeError(
@@ -381,7 +365,13 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
             UploadFilesResult containing lists of uploaded files and any failures.
 
         """
-        session = self.session_manager.get_session(body.session_id)
+        try:
+            session = self.session_manager.get_session(body.session_id)
+        except KeyError:
+            return UploadFilesResponse(
+                uploaded=[],
+                failed={f"session:{body.session_id}": "Session not found"},
+            )
         # Local filesystem - use optimized copy operation
         dest_base = session.temp_dir / body.dest_dir if body.dest_dir else session.temp_dir
         dest_base.mkdir(parents=True, exist_ok=True)
@@ -506,14 +496,14 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
 
         return result
 
-    async def end_session(self, body: EndSessionRequest) -> EndSessionResponse:
-        """End the session.
+    async def finish(self, body: FinishRequest) -> FinishResponse:
+        """Finish the task: optionally save output files, then end the session.
 
         Args:
-            body: EndSessionRequest containing the session ID.
+            body: FinishRequest containing the session ID and optional file save info.
 
         Returns:
-            EndSessionResponse containing the session ID.
+            FinishResponse with session deletion status and saved file details.
         """
         if body.paths is not None and body.output_dir is not None:
             result = await self.save_output_files(
@@ -529,18 +519,21 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
         try:
             self.session_manager.end_session(body.session_id)
         except Exception as e:
-            return EndSessionResponse(
+            errors = [f"Error ending session: {str(e)}"]
+            if result.error_message:
+                errors.append(result.error_message)
+            return FinishResponse(
                 session_deleted=False,
                 saved=result.saved,
                 failed=result.failed,
-                error_message=f"Error ending session: {str(e)}\nFile Save Errors: {result.error_message}",
+                error_message="; ".join(errors),
             )
         
-        return EndSessionResponse(
+        return FinishResponse(
             session_deleted=True,
             saved=result.saved,
             failed=result.failed,
-            error_message=f"File Save Errors: {result.error_message}",
+            error_message=result.error_message,
         )
 
     async def verify(self, body: VerifyRequest) -> BaseVerifyResponse:
