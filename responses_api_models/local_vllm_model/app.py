@@ -24,9 +24,8 @@ import ray
 import requests
 from pydantic import Field
 from ray import available_resources, cluster_resources
-from ray._private.state import available_resources_per_node
-from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
-from ray.util.state import list_nodes
+from ray.util.placement_group import PlacementGroup
+from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from requests.exceptions import ConnectionError
 from vllm.entrypoints.openai.api_server import (
     FlexibleArgumentParser,
@@ -73,23 +72,23 @@ def _vllm_asyncio_task(server_args: Namespace):
 
 @ray.remote
 class LocalVLLMModelActor:
-    def __init__(self, server_args: Namespace, env_vars: Dict[str, str], server_name: str, debug: bool) -> None:
+    def __init__(
+        self,
+        head_node_placement_group: PlacementGroup,
+        server_args: Namespace,
+        env_vars: Dict[str, str],
+        server_name: str,
+        debug: bool,
+    ) -> None:
         from os import environ
 
+        self.head_node_placement_group = head_node_placement_group
         self.server_args = server_args
         self.env_vars = env_vars
         self.server_name = server_name
         self.debug = debug
 
         self.env_vars.pop("CUDA_VISIBLE_DEVICES", None)
-
-        node_ip = ray._private.services.get_node_ip_address()
-        self._base_url = f"http://{node_ip}:{self.server_args.port}/v1"
-
-        print(f"Spinning up local vLLM server at {self._base_url}", file=sys.stderr)
-
-        # vLLM doesn't expose a config for this yet, so we need to pass via environment variable.
-        # self.env_vars["VLLM_DP_MASTER_IP"] = node_ip  # This is the master node.
 
         self._patch_signal_handler()
         self._patch_uvicorn_logger()
@@ -245,6 +244,8 @@ class LocalVLLMModelActor:
         DPEngineCoreProc._init_data_parallel = new_init_data_parallel
 
     def _patch_create_dp_placement_groups(self) -> None:
+        head_node_placement_group = self.head_node_placement_group
+
         from ray.util.placement_group import PlacementGroup
         from vllm.v1.engine.utils import (
             CoreEngineActorManager,
@@ -300,7 +301,7 @@ class LocalVLLMModelActor:
             """
 
             world_size = vllm_config.parallel_config.world_size
-            placement_groups: list[PlacementGroup] = []
+            placement_groups: list[PlacementGroup] = [head_node_placement_group]
             local_dp_ranks: list[int] = []
 
             dp_master_ip_key = f"node:{dp_master_ip}"
@@ -541,11 +542,13 @@ class LocalVLLMModelActor:
 
         CoreEngineActorManager.create_dp_placement_groups = new_create_dp_placement_groups
 
-    def base_url(self) -> str:
-        return self._base_url
-
     def is_alive(self) -> bool:
         return self.server_thread.is_alive()
+
+
+@ray.remote
+def get_node_ip():
+    return ray._private.services.get_node_ip_address()
 
 
 class LocalVLLMModel(VLLMModel):
@@ -588,6 +591,13 @@ class LocalVLLMModel(VLLMModel):
 
         env_vars.update(self.config.vllm_serve_env_vars)
 
+        assert "VLLM_RAY_DP_PACK_STRATEGY" in env_vars, (
+            f"Please provide a value for `VLLM_RAY_DP_PACK_STRATEGY` for `{self.config.name}`"
+        )
+        assert "data_parallel_size" in server_args
+        assert "tensor_parallel_size" in server_args
+        assert "pipeline_parallel_size" in server_args
+
         # With our vLLM patches, this assert is no longer necessary
         # Ray backend only works if dp_size > 1
         # assert server_args.get("data_parallel_size") is None or server_args.get("data_parallel_size") > 1, (
@@ -618,51 +628,42 @@ Environment variables: {env_vars_to_print}""")
 
         return final_args, env_vars
 
-    def _select_vllm_server_head_node(self) -> NodeAffinitySchedulingStrategy:
+    def _select_vllm_server_head_node(
+        self, server_args: Namespace, env_vars: Dict[str, str]
+    ) -> tuple[PlacementGroup, str]:
         """
-        There are a few params vLLM has:
-        - data parallel size
-        - data parallel size local
-        - tensor parallel size
-        - pipeline parallel size
-        - vllm ray dp pack strategy
-
-        As of vLLM 0.11.2, the way vLLM + Ray works is:
-        1. allocate (tensor parallel size * pipeline parallel size)-sized placement groups
-        2. for vllm ray dp pack strategy
-            - span (not relevant for my tp * pp within one node)
-            - fill: basically as many as possible
-                - this will clash if there are > 1 endpoints or the compute necessary is less than what is available (mismatch throws an error in vllm)
-            - strict: data parallel size local * num nodes placement groups
-
-        Now the problem is that for `strict`, if we spin up the head server on the same node, we need to set data parallel size local to 0. So `fill` and `strict` don't work out of the box.
-
-        Here, we fix `strict` by spinning things up on not the head server node. We find a currently available GPU node and star the vLLM server there so the head node address is propagated properly.
+        Our LocalVLLMModelActor Ray actor scheduling strategy is as follows:
+        1. We estimate the size of a single placement group vLLM will make using TP * PP
+        2. We pre-maturely create one placement group of this size which will server as the master node for the vLLM instance
+        3. This placement group is also provided on input to the LocalVLLMModelActor, which will schedule (DP - 1) additional placement groups of size TP * PP
         """
-        alive_gpu_nodes = [n for n in list_nodes() if n.state == "ALIVE" and n.resources_total.get("GPU", 0) > 0]
-        assert alive_gpu_nodes
+        # This mirrors the placement group logic above
+        pack_strategy = env_vars["VLLM_RAY_DP_PACK_STRATEGY"]
+        if pack_strategy in ("strict", "fill"):
+            placement_strategy = "STRICT_PACK"
+        else:
+            placement_strategy = "PACK"
 
-        node_id_to_available_resources = available_resources_per_node()
-
-        selected_node = None
-        partial_node = None
-        for node in alive_gpu_nodes:
-            total_gpus = node.resources_total["GPU"]
-            # We use .get("GPU") here since if there are no available GPUs, the property won't be set.
-            available_gpus = node_id_to_available_resources[node.node_id].get("GPU", 0)
-
-            if total_gpus == available_gpus:
-                selected_node = node
-                break
-
-            if available_gpus != 0:
-                partial_node = node
-
-        selected_node = selected_node or partial_node
-        return NodeAffinitySchedulingStrategy(
-            node_id=selected_node.node_id,
-            soft=False,  # Hard constraint - must run on this node
+        device_str = "GPU"
+        device_bundle = [{device_str: 1.0}]
+        world_size = server_args.pipeline_parallel_size * server_args.tensor_parallel_size
+        bundles = device_bundle * world_size + [{"CPU": 1.0}]
+        head_node_placement_group = ray.util.placement_group(
+            name=f"{self.config.name}_dp_rank_0",
+            strategy=placement_strategy,
+            bundles=bundles,
         )
+        ray.get(head_node_placement_group.ready())
+
+        node_ip = ray.get(
+            get_node_ip.options(
+                scheduling_strategy=PlacementGroupSchedulingStrategy(
+                    placement_group=head_node_placement_group,
+                )
+            ).remote()
+        )
+
+        return head_node_placement_group, node_ip
 
     def start_vllm_server(self) -> None:
         if self.config.debug:
@@ -670,9 +671,12 @@ Environment variables: {env_vars_to_print}""")
 Total Ray cluster resources: {cluster_resources()}""")
 
         server_args, env_vars = self._configure_vllm_serve()
+        head_node_placement_group, node_ip = self._select_vllm_server_head_node()
 
         self._local_vllm_model_actor = LocalVLLMModelActor.options(
-            scheduling_strategy=self._select_vllm_server_head_node(),
+            scheduling_strategy=PlacementGroupSchedulingStrategy(
+                placement_group=head_node_placement_group,
+            ),
             runtime_env=dict(
                 py_executable=sys.executable,
                 env_vars={
@@ -682,8 +686,12 @@ Total Ray cluster resources: {cluster_resources()}""")
             ),
         ).remote(server_args, env_vars, self.config.name, self.config.debug)
 
-        self.config.base_url = [ray.get(self._local_vllm_model_actor.base_url.remote())]
+        base_url = f"http://{node_ip}:{server_args.port}/v1"
+        print(f"Spinning up local vLLM server at {self._base_url}", file=sys.stderr)
 
+        self.config.base_url = [base_url]
+
+        # Reset clients after base_url config
         self._post_init()
 
         self.await_server_ready()
