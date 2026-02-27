@@ -202,7 +202,10 @@ class LocalVLLMModelActor:
                 backend = Backend(backend)  # it is basically string
                 timeout = _get_default_timeout(backend)
 
-                print(f"HIT BEFORE rendezvous {init_method=}, {rank=}, {world_size=}, {timeout=}", file=sys.stderr)
+                print(
+                    f"HIT BEFORE rendezvous {server_name=} {init_method=}, {rank=}, {world_size=}, {timeout=}",
+                    file=sys.stderr,
+                )
                 store, rank, world_size = next(rendezvous(init_method, rank, world_size, timeout=timeout))
                 store.set_timeout(timeout)
 
@@ -222,13 +225,8 @@ class LocalVLLMModelActor:
                         group_size=group_size,
                         timeout=timeout,
                     )
-                    print("HIT AFTER current_platform.stateless_init_device_torch_dist_pg", file=sys.stderr)
                     return res
                 except NotImplementedError:
-                    print(
-                        f"HIT BEFORE init_gloo_process_group in {server_name}",
-                        file=sys.stderr,
-                    )
                     # If platform doesn't implement stateless_init_device_torch_dist_pg, it
                     # will raise a NotImplementedError. In this case, we fall back to gloo.
                     return init_gloo_process_group(
