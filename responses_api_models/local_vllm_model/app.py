@@ -593,7 +593,6 @@ class LocalVLLMModelActor:
                             )
                             self.output_thread.start()
 
-                            print("HIT BEFORE ready_event.wait", file=sys.stderr)
                             # Don't complete handshake until DP coordinator ready message is
                             # received.
                             while not ready_event.wait(timeout=10):
@@ -602,7 +601,6 @@ class LocalVLLMModelActor:
                                 assert addresses.coordinator_input is not None
                                 logger.info("Waiting for READY message from DP Coordinator...")
 
-                        print("HIT BEFORE maybe_attach_gc_debug_callback", file=sys.stderr)
                         # If enable, attach GC debugger after static variable freeze.
                         maybe_attach_gc_debug_callback()
 
