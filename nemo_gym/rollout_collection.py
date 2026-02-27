@@ -74,6 +74,7 @@ class RolloutCollectionConfig(BaseNeMoGymCLIConfig):
 
 
 class RolloutCollectionHelper(BaseModel):  # pragma: no cover
+    # pragma: no cover
     async def run_from_config(self, config: RolloutCollectionConfig):
         range_iterator = repeat(0)
         if config.limit:
@@ -104,89 +105,74 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
         if config.responses_create_params:
             print(f"Overriding responses_create_params fields with {config.responses_create_params}")
 
-        # =====================================================================
-        # Schema Validation Error Handling
-        # =====================================================================
-        # Rollouts that fail schema validation in the resource server are
-        # not written to the main output file. Instead, they are:
-        #   1. Skipped from the results (not included in output_jsonl_fpath)
-        #   2. Logged to a separate errors.json file with the rollout ID
-        #   3. Counted separately for summary statistics
-        #
-        # Schema validation errors occur when:
-        #   - Instructions are missing required fields (instruction_id, uid, source, is_misalignment_check)
-        #   - Instructions have unknown instruction_id values
-        #   - Instructions are missing expected arguments for their instruction_id
-        #   - There are duplicate uid values across instructions/llm_judge items
-        #   - llm_judge items are missing required fields (uid, content, source, is_misalignment_check)
-        # =====================================================================
-        
         metrics = Counter()
-        skipped_count = 0      # Count of rollouts skipped due to schema errors
-        successful_count = 0   # Count of rollouts that passed validation
-        
-        # Derive errors file path from output path (e.g., results/errors.json)
+        skipped_count = 0
+        successful_count = 0
+
         output_path = Path(config.output_jsonl_fpath)
         errors_fpath = output_path.parent / "errors.json"
-        
-        # Accumulate schema errors here; written to errors.json at the end
         schema_errors: List[Dict[str, Any]] = []
-        
-        with open(config.output_jsonl_fpath, "a") as f:
+
+        with open(config.output_jsonl_fpath, "ab") as f:
 
             async def _post_coroutine(row: dict) -> None:
                 nonlocal skipped_count, successful_count
-                
-                # Extract rollout ID for error logging (defaults to "unknown" if not present)
+
                 row_id = row.get("id", "unknown")
-                row["responses_create_params"] = row["responses_create_params"] | config.responses_create_params
-                
+
+                # Safe merge even if either side is None/missing
+                row_params = row.get("responses_create_params") or {}
+                cfg_params = config.responses_create_params or {}
+                row["responses_create_params"] = {**row_params, **cfg_params}
+
                 async with semaphore:
                     response = await server_client.post(server_name=config.agent_name, url_path="/run", json=row)
                     await raise_for_status(response)
                     result = await response.json()
-                    
-                    # Check for schema validation errors in the response
-                    # The resource server returns validation_results with instruction="schema_validation"
-                    # and status="Failed" when schema validation fails
+
                     validation_results = result.get("validation_results", [])
                     schema_validation_errors = [
-                        vr for vr in validation_results 
+                        vr
+                        for vr in validation_results
                         if vr.get("instruction") == "schema_validation" and vr.get("status") == "Failed"
                     ]
-                    
-                    if schema_validation_errors:
-                        # Skip this rollout - do NOT write to output file
-                        # Instead, collect errors for the errors.json file
+                    language_compatibility_errors = [
+                        vr
+                        for vr in validation_results
+                        if vr.get("instruction") == "language_compatibility"
+                        and vr.get("status") in ("Failed", "Skipped")
+                    ]
+                    skip_errors = schema_validation_errors or language_compatibility_errors
+
+                    if skip_errors:
                         skipped_count += 1
-                        schema_errors.append({
-                            "id": row_id,
-                            "errors": [err.get("message") for err in schema_validation_errors]
-                        })
-                    else:
-                        # Rollout passed validation - write to output file
-                        successful_count += 1
-                        f.write(json.dumps(result) + "\n")
-                        metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
+                        schema_errors.append({"id": row_id, "errors": [err.get("message") for err in skip_errors]})
+                        return
+
+                    successful_count += 1
+
+                    # ensure_ascii=True guarantees ASCII-only JSON output (non-ASCII becomes \uXXXX)
+                    line = json.dumps(result, ensure_ascii=True, default=str) + "\n"
+                    f.write(line.encode("utf-8"))  # bytes are ASCII-only due to ensure_ascii=True
+
+                    metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
 
             await tqdm.gather(*map(_post_coroutine, rows), desc="Collecting rollouts", miniters=tqdm_miniters)
 
-        # Write accumulated schema errors to errors.json (only if there are errors)
         if schema_errors:
-            with open(errors_fpath, "w") as ef:
-                json.dump(schema_errors, ef, indent=2)
-            print(f"\n{skipped_count} rollout(s) skipped due to schema validation errors. See {errors_fpath}")
-        
-        # Print summary statistics
+            err_str = json.dumps(schema_errors, indent=2, ensure_ascii=True, default=str)
+            with open(errors_fpath, "wb") as ef:
+                ef.write(err_str.encode("utf-8"))  # ASCII-only bytes due to ensure_ascii=True
+            print(f"\n{skipped_count} rollout(s) skipped due to validation errors. See {errors_fpath}")
+
         print(f"\n{successful_count} rollout(s) completed successfully.")
-        
-        # Calculate average metrics only from successful rollouts
+
         if successful_count > 0:
             avg_metrics = {k: v / successful_count for k, v in metrics.items()}
         else:
             avg_metrics = {}
         avg_metrics.setdefault("reward", 0.0)
-        print(json.dumps(avg_metrics, indent=4))
+        print(json.dumps(avg_metrics, indent=4, ensure_ascii=True, default=str))
 
     def run_examples(
         self, examples: List[Dict], head_server_config: Optional[BaseServerConfig] = None

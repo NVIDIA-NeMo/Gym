@@ -12,6 +12,19 @@ from resources_servers.turing_vif.app import (
 )
 
 
+def _normalize_instructions(instructions):
+    """Ensure each instruction has uid, source, is_misalignment_check for schema validation."""
+    normalized = []
+    for i, inst in enumerate(instructions):
+        if isinstance(inst, dict):
+            inst = dict(inst)
+            inst.setdefault("uid", i + 1)
+            inst.setdefault("source", "system")
+            inst.setdefault("is_misalignment_check", False)
+        normalized.append(inst)
+    return normalized
+
+
 class TestTuringVIFApp:
     """Test suite for the Turing VIF Resource Server."""
 
@@ -26,7 +39,14 @@ class TestTuringVIFApp:
         return TuringVIFResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
     def _create_real_request(self, instructions, response_content, request_id=1, llm_judge=None):
-        """Helper to create real request with NeMoGymResponse."""
+        """Helper to create real request with NeMoGymResponse.
+
+        Normalizes instructions so each has required schema fields (uid, source,
+        is_misalignment_check) for validate_instructions_schema.
+        """
+        # Ensure each instruction has uid, source, is_misalignment_check so schema validation passes
+        normalized = _normalize_instructions(instructions)
+
         response = NeMoGymResponse(
             id=f"resp_test_{request_id}",
             created_at=0.0,
@@ -54,7 +74,7 @@ class TestTuringVIFApp:
 
         return TuringVIFVerifyRequest(
             id=request_id,
-            instructions=instructions,
+            instructions=normalized,
             llm_judge=llm_judge or [],
             responses_create_params={"input": []},
             response=response,
@@ -86,12 +106,9 @@ class TestTuringVIFApp:
 
     def test_validator_imports(self) -> None:
         """Test that VIF validators can be imported."""
-        from resources_servers.turing_vif.vif_validators.validator import (
-            validate_instruction,
-        )
         from resources_servers.turing_vif.vif_validators.data_loader import (
-            LLM_INSTRUCTIONS,
             EXPECTED_ARGUMENTS,
+            LLM_INSTRUCTIONS,
         )
 
         assert len(LLM_INSTRUCTIONS) > 0
@@ -138,9 +155,7 @@ class TestTuringVIFApp:
     def test_keywords_existence_positive(self):
         """Test keywords:existence instruction - should pass."""
         request = self._create_real_request(
-            instructions=[
-                {"instruction_id": "keywords:existence", "keywords": ["hello", "world"]}
-            ],
+            instructions=[{"instruction_id": "keywords:existence", "keywords": ["hello", "world"]}],
             response_content="Hello there! Welcome to the world of programming.",
         )
         self._run_verify_test(request, True, 1.0, [True])
@@ -148,9 +163,7 @@ class TestTuringVIFApp:
     def test_keywords_existence_negative(self):
         """Test keywords:existence instruction - should fail."""
         request = self._create_real_request(
-            instructions=[
-                {"instruction_id": "keywords:existence", "keywords": ["python", "java"]}
-            ],
+            instructions=[{"instruction_id": "keywords:existence", "keywords": ["python", "java"]}],
             response_content="Hello there! Welcome to the world.",
         )
         self._run_verify_test(request, False, 0.0, [False])
@@ -158,9 +171,7 @@ class TestTuringVIFApp:
     def test_keywords_forbidden_positive(self):
         """Test keywords:forbidden_words instruction - should pass (no forbidden words)."""
         request = self._create_real_request(
-            instructions=[
-                {"instruction_id": "keywords:forbidden_words", "forbidden_words": ["secret", "hidden"]}
-            ],
+            instructions=[{"instruction_id": "keywords:forbidden_words", "forbidden_words": ["secret", "hidden"]}],
             response_content="This is a public message with no restricted content.",
         )
         self._run_verify_test(request, True, 1.0, [True])
@@ -168,9 +179,7 @@ class TestTuringVIFApp:
     def test_keywords_forbidden_negative(self):
         """Test keywords:forbidden_words instruction - should fail (contains forbidden word)."""
         request = self._create_real_request(
-            instructions=[
-                {"instruction_id": "keywords:forbidden_words", "forbidden_words": ["secret", "hidden"]}
-            ],
+            instructions=[{"instruction_id": "keywords:forbidden_words", "forbidden_words": ["secret", "hidden"]}],
             response_content="This is a secret message.",
         )
         self._run_verify_test(request, False, 0.0, [False])
@@ -331,7 +340,7 @@ class TestTuringVIFApp:
             instructions=[
                 {"instruction_id": "detectable_format:title"},
                 {"instruction_id": "punctuation:no_comma"},
-                {"instruction_id": "length_constraints:number_words", "relation": "at least", "num_words": 5}
+                {"instruction_id": "length_constraints:number_words", "relation": "at least", "num_words": 5},
             ],
             response_content="<<My Title>>\n\nThis response has no commas and enough words.",
         )
@@ -343,7 +352,7 @@ class TestTuringVIFApp:
             instructions=[
                 {"instruction_id": "detectable_format:title"},
                 {"instruction_id": "punctuation:no_comma"},
-                {"instruction_id": "length_constraints:number_words", "relation": "at least", "num_words": 5}
+                {"instruction_id": "length_constraints:number_words", "relation": "at least", "num_words": 5},
             ],
             response_content="<<My Title>>\n\nThis response has commas, which should fail.",
         )
@@ -420,7 +429,8 @@ class TestEdgeCases:
         return TuringVIFResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
     def _create_real_request(self, instructions, response_content, request_id=1):
-        """Helper to create real request with NeMoGymResponse."""
+        """Helper to create real request with NeMoGymResponse. Normalizes instructions for schema."""
+        normalized = _normalize_instructions(instructions)
         response = NeMoGymResponse(
             id=f"resp_test_{request_id}",
             created_at=0.0,
@@ -448,7 +458,7 @@ class TestEdgeCases:
 
         return TuringVIFVerifyRequest(
             id=request_id,
-            instructions=instructions,
+            instructions=normalized,
             llm_judge=[],
             responses_create_params={"input": []},
             response=response,
@@ -483,9 +493,7 @@ class TestEdgeCases:
         """Test with unicode characters in response - validators should work with ASCII keywords."""
         server = self._create_server()
         request = self._create_real_request(
-            instructions=[
-                {"instruction_id": "keywords:existence", "keywords": ["contains", "characters"]}
-            ],
+            instructions=[{"instruction_id": "keywords:existence", "keywords": ["contains", "characters"]}],
             response_content="This response contains 日本語 and emoji 🎉 characters.",
         )
         result = asyncio.run(server.verify(request))
@@ -510,9 +518,7 @@ class TestEdgeCases:
         """Test with unknown instruction ID - should fail gracefully."""
         server = self._create_server()
         request = self._create_real_request(
-            instructions=[
-                {"instruction_id": "unknown:fake_instruction"}
-            ],
+            instructions=[{"instruction_id": "unknown:fake_instruction"}],
             response_content="This should handle unknown instructions.",
         )
         result = asyncio.run(server.verify(request))
@@ -534,7 +540,8 @@ class TestAgentPipelineFlow:
         return TuringVIFResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
     def _create_real_request(self, instructions, response_content, request_id=1, prompt=None):
-        """Helper to create real request with NeMoGymResponse."""
+        """Helper to create real request with NeMoGymResponse. Normalizes instructions for schema."""
+        normalized = _normalize_instructions(instructions)
         response = NeMoGymResponse(
             id=f"resp_test_{request_id}",
             created_at=0.0,
@@ -562,7 +569,7 @@ class TestAgentPipelineFlow:
 
         return TuringVIFVerifyRequest(
             id=request_id,
-            instructions=instructions,
+            instructions=normalized,
             llm_judge=[],
             prompt=prompt,
             responses_create_params={"input": [{"role": "user", "content": prompt or "Test prompt"}]},
@@ -574,6 +581,7 @@ class TestAgentPipelineFlow:
         server = self._create_server()
         # The default seed_session should return successfully
         from nemo_gym.base_resources_server import BaseSeedSessionRequest
+
         request = BaseSeedSessionRequest()
         result = asyncio.run(server.seed_session(request))
         assert result is not None
@@ -620,12 +628,13 @@ class TestAgentPipelineFlow:
         """Test that validation results contain helpful messages."""
         server = self._create_server()
         request = self._create_real_request(
-            instructions=[
-                {"instruction_id": "keywords:existence", "keywords": ["missing_keyword"]}
-            ],
+            instructions=[{"instruction_id": "keywords:existence", "keywords": ["missing_keyword"]}],
             response_content="This response does not contain the required word.",
         )
         result = asyncio.run(server.verify(request))
         assert len(result.validation_results) == 1
         assert result.validation_results[0].status == "Failed"
-        assert "missing" in result.validation_results[0].message.lower() or "keyword" in result.validation_results[0].message.lower()
+        assert (
+            "missing" in result.validation_results[0].message.lower()
+            or "keyword" in result.validation_results[0].message.lower()
+        )

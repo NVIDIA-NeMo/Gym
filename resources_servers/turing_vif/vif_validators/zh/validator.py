@@ -1,11 +1,55 @@
-import json
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from .. import validator as base_validator
-from ..validator import find_punctuations
-
 from ..data_loader import EXPECTED_ARGUMENTS
+
+
+def check_relation(count, relation: str, expected: int) -> Tuple[bool, Optional[str]]:
+    """
+    Check if a count satisfies a relation against an expected value.
+
+    Args:
+        count: The actual count to check (must be numeric)
+        relation: One of "at least", "equal to", "less than"
+        expected: The expected value to compare against (must be numeric)
+
+    Returns:
+        Tuple of (is_valid, error_message). error_message is None if valid,
+        or an error string if validation fails.
+    """
+    # Validate count is numeric
+    if not isinstance(count, (int, float)):
+        return (False, f"Invalid count type: expected numeric, got {type(count).__name__}.")
+
+    # Validate expected is numeric
+    if not isinstance(expected, (int, float)):
+        return (False, f"Invalid expected value type: expected numeric, got {type(expected).__name__}.")
+
+    # Validate relation
+    if relation == "at least":
+        return (count >= expected, None)
+    elif relation == "equal to":
+        return (count == expected, None)
+    elif relation == "less than":
+        return (count < expected, None)
+    else:
+        return (False, f"Invalid relation: '{relation}'. Must be 'at least', 'equal to', or 'less than'.")
 
 
 def _normalize_casefold(text: str, lang: str) -> str:
@@ -46,14 +90,18 @@ def _count_placeholders(text: str) -> int:
     return len(curly) + len(square)
 
 
-def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], all_instructions: Dict = None) -> Tuple[bool, str]:
+def validate_instruction(
+    response: str, inst_type: str, kwargs: Dict[str, Any], all_instructions: Dict = None
+) -> Tuple[bool, str]:
     if inst_type not in EXPECTED_ARGUMENTS:
         return False, f"Instruction '{inst_type}' is not supported for language 'zh'."
 
     response = response.strip()
 
     if inst_type == "detectable_format:json_format":
-        return base_validator.validate_instruction_generic(response, inst_type, kwargs, all_instructions, language="zh")
+        return base_validator.validate_instruction_generic(
+            response, inst_type, kwargs, all_instructions, language="zh"
+        )
 
     if inst_type == "detectable_content:number_placeholders":
         count = _count_placeholders(response)
@@ -89,15 +137,9 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
             if splitter and len(parts) > 1 and any(splitter in p for p in parts):
                 count = len(parts)
 
-        if rel in ("at least", ">="):
-            valid = count >= val
-        elif rel in ("equal to", "==", "equals"):
-            valid = count == val
-        elif rel in ("less than", "<"):
-            valid = count < val
-        else:
-            valid = count == val
-
+        valid, err = check_relation(count, rel, val)
+        if err is not None:
+            return False, err
         return valid, ("No error" if valid else f"Expected {rel} {val} sections, found {count}.")
 
     if inst_type == "detectable_format:number_bullet_lists":
@@ -125,7 +167,9 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
         count = _keyword_count(response, kwargs["keyword"])
         relation, target = kwargs["relation"], kwargs["frequency"]
         valid = _relation_ok(count, relation, target)
-        return valid, ("No error" if valid else f"Expected {relation} {target} of '{kwargs['keyword']}', found {count}.")
+        return valid, (
+            "No error" if valid else f"Expected {relation} {target} of '{kwargs['keyword']}', found {count}."
+        )
 
     if inst_type == "keywords:forbidden_words":
         present = [kw for kw in kwargs["forbidden_words"] if _keyword_count(response, kw) > 0]
@@ -157,7 +201,9 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
         relation, target = kwargs.get("relation", "at least"), kwargs.get("frequency", 0)
         count = response.count(punct)
         valid = _relation_ok(count, relation, target)
-        return valid, ("No error" if valid else f"Found {count} occurrences of '{punct}'. Expected {relation} {target}.")
+        return valid, (
+            "No error" if valid else f"Found {count} occurrences of '{punct}'. Expected {relation} {target}."
+        )
 
     if inst_type == "punctuation:end_rule":
         allowed = kwargs["allowed"]
@@ -175,19 +221,28 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
     if inst_type == "startend:wrap_checker":
         wrap = kwargs["wrap_phrase"]
         WRAP_PAIRS = [
-            ("《", "》"), ("〈", "〉"), ("「", "」"), ("『", "』"),
-            ("【", "】"), ("[", "]"), ("(", ")"), ("（", "）"),
-            ("{", "}"), ("<", ">"),
+            ("《", "》"),
+            ("〈", "〉"),
+            ("「", "」"),
+            ("『", "』"),
+            ("【", "】"),
+            ("[", "]"),
+            ("(", ")"),
+            ("（", "）"),
+            ("{", "}"),
+            ("<", ">"),
         ]
         if len(wrap) == 1:
-            return (response.startswith(wrap) and response.endswith(wrap),
-                    "No error" if response.startswith(wrap) and response.endswith(wrap) else f"Not wrapped with: {wrap}")
+            return (
+                response.startswith(wrap) and response.endswith(wrap),
+                "No error" if response.startswith(wrap) and response.endswith(wrap) else f"Not wrapped with: {wrap}",
+            )
         if len(wrap) == 2:
             left, right = wrap[0], wrap[1]
             if response.startswith(left) and response.endswith(right):
                 return True, "No error"
-        for l, r in WRAP_PAIRS:
-            if response.startswith(l) and response.endswith(r):
+        for left_delim, right_delim in WRAP_PAIRS:
+            if response.startswith(left_delim) and response.endswith(right_delim):
                 return True, "No error"
         return False, f"Not wrapped with: {wrap}"
 
@@ -223,10 +278,3 @@ def validate_instruction(response: str, inst_type: str, kwargs: Dict[str, Any], 
         return False, "Response not wrapped in accepted quotation marks."
 
     return base_validator.validate_instruction_generic(response, inst_type, kwargs, all_instructions, language="zh")
-
-
-def validate_prompt_against_instructions(user_prompt: str, turn_instructions: Dict) -> Tuple[bool, str]:
-    return base_validator.validate_prompt_against_instructions(
-        user_prompt, turn_instructions, language="zh"
-    )
-
