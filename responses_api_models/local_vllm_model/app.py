@@ -199,7 +199,7 @@ class LocalVLLMModelActor:
                 backend = Backend(backend)  # it is basically string
                 timeout = _get_default_timeout(backend)
 
-                print("HIT BEFORE rendezvous", file=sys.stderr)
+                print(f"HIT BEFORE rendezvous {init_method=}, {rank=}, {world_size=}, {timeout=}", file=sys.stderr)
                 store, rank, world_size = next(rendezvous(init_method, rank, world_size, timeout=timeout))
                 store.set_timeout(timeout)
 
