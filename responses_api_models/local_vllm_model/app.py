@@ -198,6 +198,14 @@ class LocalVLLMModelActor:
             def new_sitdpg(host: str, port: int, rank: int, world_size: int, backend: str):
                 print("HIT INSIDE NEW stateless_init_torch_distributed_process_group", file=sys.stderr)
 
+                # TODO remove
+                if server_name == "gpt-oss-20b-reasoning-high":
+                    port = 0
+                elif server_name == "gpt-oss-120b-reasoning-high":
+                    port = 1
+                else:
+                    raise NotImplementedError
+
                 init_method = get_tcp_uri(host, port)
                 backend = Backend(backend)  # it is basically string
                 timeout = _get_default_timeout(backend)
