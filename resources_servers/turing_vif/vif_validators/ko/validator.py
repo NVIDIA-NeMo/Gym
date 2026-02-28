@@ -538,7 +538,6 @@ def validate_instruction(
     """Validate a response against a specific instruction type and its kwargs."""
     try:
         response = response.strip()
-        strategy = _get_strategy("ko")
 
         NOT_APPLICABLE_FOR_KOREAN = {
             "change_case:all_caps",
@@ -561,78 +560,6 @@ def validate_instruction(
 
         if inst_type in NOT_APPLICABLE_FOR_KOREAN:
             return (False, "Invalid Instruction")
-
-        # Korean doesn't support case rules - return False for all case-related instructions
-        if inst_type.startswith("change_case:"):
-            if not strategy.supports_case_rules:
-                return (
-                    False,
-                    f"Korean language does not support case-related instructions. '{inst_type}' is not applicable.",
-                )
-            # If somehow case rules are supported, continue with normal validation
-            if inst_type == "change_case:all_caps":
-                return (response.isupper(), "No error" if response.isupper() else "Response is not all uppercase.")
-            if inst_type == "change_case:lowercase":
-                return (response.islower(), "No error" if response.islower() else "Response is not all lowercase.")
-            if inst_type == "change_case:alternating":
-                valid = all(is_strict_alternating(w) for w in response.split() if w.isalpha())
-                return (valid, "No error" if valid else "Response is not strictly alternating.")
-            if inst_type == "change_case:first_letter_cap":
-                valid = all(is_first_letter_cap(tok) for tok in response.split())
-                return (
-                    valid,
-                    "No error"
-                    if valid
-                    else "Each word must start with one uppercase letter followed only by lowercase letters.",
-                )
-            if inst_type == "change_case:capital_word_frequency":
-                count = count_all_caps_words(response)
-                rel, val = kwargs["capital_relation"], kwargs["capital_frequency"]
-                valid, err = check_relation(count, rel, val)
-                if err is not None:
-                    return (False, err)
-                return (valid, "No error" if valid else f"Expected {rel} {val} all-cap words, found {count}.")
-            if inst_type == "change_case:lowercase_word_frequency":
-                count = count_lowercase_words(response)
-                rel, val = kwargs["lowercase_relation"], kwargs["lowercase_frequency"]
-                valid, err = check_relation(count, rel, val)
-                if err is not None:
-                    return (False, err)
-                return (valid, "No error" if valid else f"Expected {rel} {val} lowercase words, found {count}.")
-
-        if "_target" in inst_type and inst_type.startswith("change_case:"):
-            if not strategy.supports_case_rules:
-                return (
-                    False,
-                    f"Korean language does not support case-related instructions. '{inst_type}' is not applicable.",
-                )
-            target = kwargs["target_string"].strip()
-            strategy_ko = _get_strategy("ko")
-            response_normalized = strategy_ko.casefold(response)
-
-            # For CJK, use substring matching
-            if strategy_ko.word_script == "cjk":
-                if target not in response:
-                    return (False, f"Target '{target}' not found in response.")
-                # For CJK, we can't validate case, so just check existence
-                return (True, "No error")
-            else:
-                target_escaped = re.escape(target)
-                pattern = rf"\b{target_escaped}\b"
-                matches = re.findall(pattern, response, re.IGNORECASE)
-                if not matches:
-                    return (False, f"Target '{target}' not found in response.")
-                for match in matches:
-                    raw_text = match.strip('"').strip("'")
-                    if inst_type == "change_case:all_caps_target" and not raw_text.isupper():
-                        return (False, f"'{raw_text}' should be ALL CAPS.")
-                    elif inst_type == "change_case:lowercase_target" and not raw_text.islower():
-                        return (False, f"'{raw_text}' should be all lowercase.")
-                    elif inst_type == "change_case:alternating_target" and not is_strict_alternating(raw_text):
-                        return (False, f"'{raw_text}' is not in alternating caps.")
-                    elif inst_type == "change_case:first_letter_cap_target" and not raw_text.istitle():
-                        return (False, f"'{raw_text}' is not first-letter capitalized.")
-                return (True, "No error")
 
         if inst_type == "detectable_content:number_placeholders":
             count = count_placeholders(response)
@@ -879,179 +806,6 @@ def validate_instruction(
                 "No error" if response.startswith('"') else "Response not wrapped in double quotes.",
             )
 
-        if inst_type == "change_case:case_ratio":
-            """
-            Returns True if the ratio of lowercase to uppercase letters lies between
-            minR and maxR (inclusive). Otherwise, returns False.
-            Korean doesn't support case rules.
-            """
-            if not strategy.supports_case_rules:
-                return (
-                    False,
-                    "Korean language does not support case-related instructions. 'change_case:case_ratio' is not applicable.",
-                )
-
-            try:
-                minR = parse_fraction_or_inf(kwargs["min_fraction"])
-                maxR = parse_fraction_or_inf(kwargs["max_fraction"])
-            except (ValueError, ZeroDivisionError) as e:
-                raise ValueError(f"Invalid fraction input: {e}")
-
-            if minR > maxR:
-                return (False, "Validation failed: Minimum ratio greater than maximum ratio.")
-            lower_count = sum(1 for ch in response if ch.islower())
-            upper_count = sum(1 for ch in response if ch.isupper())
-
-            if lower_count == 0 and upper_count == 0:
-                print("Validation failed: No letters found in the string.")
-                return False
-
-            # The ratio variable will hold either a Fraction object or float('inf')
-            if upper_count == 0:
-                ratio = float("inf")
-                ratio_str = "inf"
-            else:
-                # Convert the calculated ratio directly into a Fraction
-                ratio = Fraction(lower_count, upper_count)
-                ratio_str = f"{ratio.numerator}/{ratio.denominator}"
-
-            valid = minR <= ratio <= maxR
-
-            # Construct a detailed message for both pass and fail cases
-            message = (
-                f"Lowercase count: {lower_count}, Uppercase count: {upper_count}. "
-                f"Ratio is {ratio_str}({float(ratio):.2f}). Required range: [{minR}({float(minR):.2f}), {maxR}({float(maxR):.2f})]."
-            )
-            return (valid, "No error" if valid else f"{message}")
-
-        if inst_type == "change_case:first_letter_sentence":
-            """
-            Checks if all sentences in the text start with an uppercase alphabet.
-            Korean doesn't support case rules.
-            """
-            if not strategy.supports_case_rules:
-                return (
-                    False,
-                    "Korean language does not support case-related instructions. 'change_case:first_letter_sentence' is not applicable.",
-                )
-
-            sentences = extract_clean_sentences(response, "ko")
-
-            if not sentences:
-                return (True, "No sentences found to validate.")
-
-            # print(sentences)
-            for sentence in sentences:
-                sentence = sentence.strip("()[]{}\"'")
-
-                if not sentence[0].isupper():  # check first char
-                    return (False, f"Fails at: '{sentence}'")
-
-            return (True, "No error.")
-
-        if inst_type == "change_case:last_letter":
-            """
-            Checks if the last character of the last word in the text matches the given case.
-            For Korean, we support digit and special checks, but not uppercase/lowercase.
-            """
-            strategy_ko = _get_strategy("ko")
-            delims = strategy_ko.sentence_delims
-            # Remove sentence-ending punctuation
-            cleaned_text = re.sub(f"[{re.escape(delims)}]+$", "", response.strip())
-
-            if not cleaned_text:
-                return (False, "Empty response")  # Empty after cleaning
-
-            # For Korean, get the last space-separated word
-            # Split on whitespace to get words (spacing-based)
-            words = cleaned_text.split()
-            if not words:
-                return (False, "No words found in response")
-
-            last_word = words[-1]
-
-            # Strip wrapping punctuation like (), [] , {} , quotes
-            last_word = last_word.strip("()[]{}\"'")
-
-            if not last_word:
-                return (False, "Last word is empty after cleaning")
-
-            last_char = last_word[-1]
-            valid = True
-            case_type = kwargs["case"]
-
-            if case_type == "uppercase":
-                if not strategy_ko.supports_case_rules:
-                    return (
-                        False,
-                        "Korean language does not support case-related instructions. 'uppercase' case check is not applicable.",
-                    )
-                valid = last_char.isupper()
-            elif case_type == "lowercase":
-                if not strategy_ko.supports_case_rules:
-                    return (
-                        False,
-                        "Korean language does not support case-related instructions. 'lowercase' case check is not applicable.",
-                    )
-                valid = last_char.islower()
-            elif case_type == "digit":
-                valid = last_char.isdigit()
-            elif case_type == "special":
-                # For Korean, special includes punctuation and non-alphanumeric
-                # Korean characters (Hangul) are considered alphanumeric
-                valid = not (last_char.isalnum() or "\uac00" <= last_char <= "\ud7af")
-            else:
-                return (False, f"Invalid case type: {case_type}")
-
-            return (valid, "No error." if valid else f"Last character of the response: {last_char}")
-
-        if inst_type == "change_case:vowel_consonant_balance":
-            """
-            Korean doesn't support vowel rules.
-            """
-            if not strategy.supports_vowel_rules:
-                return (
-                    False,
-                    "Korean language does not support vowel/consonant balance instructions. 'change_case:vowel_consonant_balance' is not applicable.",
-                )
-
-            try:
-                minR = parse_fraction_or_inf(kwargs["min_fraction"])
-                maxR = parse_fraction_or_inf(kwargs["max_fraction"])
-            except (ValueError, ZeroDivisionError) as e:
-                raise ValueError(f"Invalid fraction input: {e}")
-
-            if minR > maxR:
-                return (False, "Validation failed: Minimum ratio greater than maximum ratio.")
-
-            # Use Korean vowels from language strategy (though Korean doesn't support this)
-            vowels = strategy.vowels
-            vowel_count = sum(1 for ch in response if ch.isalpha() and ch in vowels)
-            consonant_count = sum(1 for ch in response if ch.isalpha() and ch not in vowels)
-
-            # Handle the case where there are no letters at all
-            if vowel_count == 0 and consonant_count == 0:
-                return (False, "Validation failed: No letters found in the response.")
-
-            # Handle the case where there are no consonants (infinite ratio)
-            if consonant_count == 0:
-                ratio = float("inf")
-                ratio_str = "inf"
-            else:
-                # Convert the calculated ratio directly into a Fraction
-                ratio = Fraction(vowel_count, consonant_count)
-                ratio_str = f"{ratio.numerator}/{ratio.denominator}"
-
-            valid = minR <= ratio <= maxR
-
-            # Create a detailed message for both pass and fail cases
-            message = (
-                f"Vowel count: {vowel_count}, Consonant count: {consonant_count}. "
-                f"Ratio is {ratio_str}({float(ratio):.2f}). Required range: [{minR}({float(minR):.2f}), {maxR}({float(maxR):.2f})]."
-            )
-            # print(message)
-            return (valid, "No error" if valid else f"{message}")
-
         if inst_type == "detectable_format:number_paragraphs":
             """
             Checks if the number of paragraphs in the given text
@@ -1126,10 +880,6 @@ def validate_instruction(
 
             return (True, "No error.")
 
-        if inst_type == "detectable_format:indentation":
-            # Logic for this instruction to be added here
-            return (False, "Invalid Instruction")
-
         if inst_type == "length_constraints:sentence_length":
             """
             Checks if the number of words in each sentence (including bullet list items: '-' and numbered lists '1.')
@@ -1190,14 +940,6 @@ def validate_instruction(
                 message = f"Found {unique_words_count} unique words. Expected {relation} {num_unique}."
                 return (False, message)
             return (True, "No error.")
-
-        if inst_type == "punctuation:frequency":
-            # Logic for this instruction to be added here
-            return (False, "Invalid Instruction")
-
-        if inst_type == "punctuation:balance":
-            # Logic for this instruction to be added here
-            return (False, "Invalid Instruction")
 
         if inst_type == "punctuation:question_exclaim":
             is_valid = True
@@ -1383,10 +1125,6 @@ def validate_instruction(
 
             return (True, "No error.")
 
-        if inst_type == "detectable_format:section_balance":
-            # Logic for this instruction to be added here
-            return (False, "Invalid Instruction")
-
         if inst_type == "length_constraints:word_length":
             """
             For Korean: word counting is based on spacing.
@@ -1511,10 +1249,6 @@ def validate_instruction(
 
             return (True, "No error.")
 
-        if inst_type == "punctuation:variety":
-            # Logic for this instruction to be added here
-            return (False, "Invalid Instruction")
-
         if inst_type == "detectable_content:numeric_inclusion":
             num_numbers = kwargs["num_numbers"]
             relation = kwargs["relation"]
@@ -1541,59 +1275,6 @@ def validate_instruction(
                     False,
                     f"Found {len(punctuations)} types of punctuations. Expected at least {min_variants}.\n {punctuations}",
                 )
-
-            return (True, "No error.")
-
-        if inst_type == "keywords:vowel_count":
-            """
-            Korean doesn't support vowel rules, but we can still count Latin vowels if present.
-            """
-            if not strategy.supports_vowel_rules:
-                # Still allow counting Latin vowels in mixed text, but warn that Korean vowels aren't counted
-                pass
-
-            num_vowels = kwargs["num_vowels"]
-            relation = kwargs["relation"]
-
-            # Use Korean vowels from language strategy (though Korean doesn't support this)
-            # For Korean, we'll count Latin vowels only
-            vowels = set("aeiouAEIOU")
-            vowel_count = sum(1 for ch in response if ch in vowels)
-
-            # print("Vowel count:", vowel_count)
-            valid, err = check_relation(vowel_count, relation, num_vowels)
-            if err is not None:
-                return (False, err)
-            if not valid:
-                message = f"Found {vowel_count} vowels. Expected {relation} {num_vowels}"
-                return (False, message)
-
-            return (True, "No error.")
-
-        if inst_type == "keywords:consonant_count":
-            """
-            Korean doesn't support vowel rules, but we can still count Latin consonants if present.
-            """
-            if not strategy.supports_vowel_rules:
-                # Still allow counting Latin consonants in mixed text, but warn that Korean consonants aren't counted
-                pass
-
-            num_consonants = kwargs["num_consonants"]
-            relation = kwargs["relation"]
-
-            # Use Korean vowels from language strategy (though Korean doesn't support this)
-            # For Korean, we'll count Latin consonants only
-            vowels = set("aeiouAEIOU")
-            consonants = set(string.ascii_letters) - vowels
-            consonant_count = sum(1 for ch in response if ch in consonants)
-
-            # print("consonant count:", consonant_count)
-            valid, err = check_relation(consonant_count, relation, num_consonants)
-            if err is not None:
-                return (False, err)
-            if not valid:
-                message = f"Found {consonant_count} consonants. Expected {relation} {num_consonants}"
-                return (False, message)
 
             return (True, "No error.")
 

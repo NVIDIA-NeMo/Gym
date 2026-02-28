@@ -196,15 +196,6 @@ def validate_instruction(
         valid = _relation_ok(count, relation, target)
         return valid, ("No error" if valid else f"Found {count} marks. Expected {relation} {target}.")
 
-    if inst_type == "punctuation:frequency":
-        punct = kwargs.get("punctuation", "")
-        relation, target = kwargs.get("relation", "at least"), kwargs.get("frequency", 0)
-        count = response.count(punct)
-        valid = _relation_ok(count, relation, target)
-        return valid, (
-            "No error" if valid else f"Found {count} occurrences of '{punct}'. Expected {relation} {target}."
-        )
-
     if inst_type == "punctuation:end_rule":
         allowed = kwargs["allowed"]
         stripped = response.rstrip()

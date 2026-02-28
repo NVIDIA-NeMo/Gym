@@ -800,10 +800,6 @@ def validate_instruction(
 
             return (True, "No error.")
 
-        if inst_type == "detectable_format:section_balance":
-            # Logic for this instruction to be added here
-            return (False, "Invalid Instruction")
-
         if inst_type == "detectable_format:sentence_count":
             relation = kwargs["relation"]
             num_sentences = kwargs["num_sentences"]
@@ -817,33 +813,22 @@ def validate_instruction(
                 return (False, message)
             return (True, "No error.")
 
-        if inst_type == "length_constraints:paragraph_length":
+        if inst_type == "detectable_format:max_paragraph_length":
             """
-            Checks if the number of words in each paragraph satisfies relation with a given number.
+            Checks if the number of characters in each paragraph (including spaces and special characters)
+            is at most the given expected_count.
             """
-            words_per_paragraph = kwargs["words_per_paragraph"]
-            relation = kwargs["relation"]
-
-            # Treat multiple "Enters" as a single paragraph break.
+            max_chars = kwargs["max_chars"]
             paragraphs = extract_clean_paragraphs(response)
 
             for p in paragraphs:
-                words = extract_clean_words(p)
-
-                word_count = len([s for s in words if s.strip()])
-
-                valid, err = check_relation(word_count, relation, words_per_paragraph)
-                if err is not None:
-                    return (False, err)
-                if not valid:
-                    message = f"Found {word_count} words. Expected {relation} {words_per_paragraph}\n '{p}'"
-                    return (False, message)
+                p = re.sub(r"^\s*(?:[\-\*\+]\s+|\d+\.\s+|#+\s+)", "", p.lstrip())
+                # print(p)
+                char_count = len(p.strip())
+                if char_count > max_chars:
+                    return (False, f"Found a paragraph containing {char_count} characters.\n '{p}'")
 
             return (True, "No error.")
-
-        if inst_type == "punctuation:variety":
-            # Logic for this instruction to be added here
-            return (False, "Invalid Instruction")
 
         if inst_type == "detectable_content:numeric_inclusion":
             num_numbers = kwargs["num_numbers"]
