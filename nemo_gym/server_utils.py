@@ -16,22 +16,22 @@ import asyncio
 import atexit
 import json
 import resource
+import sys
 from abc import abstractmethod
 from contextlib import asynccontextmanager
-from io import StringIO
 from logging import Filter as LoggingFilter
 from logging import LogRecord, getLogger
-from os import getenv
+from os import environ, getenv
 from pathlib import Path
 from threading import Thread
-from traceback import print_exc
-from typing import List, Literal, Optional, Tuple, Type, Union, Unpack
+from traceback import format_exc, print_exc
+from typing import Any, List, Literal, Optional, TextIO, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
+import orjson
 import ray
 import requests
 import uvicorn
-import yappi
 from aiohttp import (
     ClientResponse,
     ClientResponseError,
@@ -57,13 +57,16 @@ from nemo_gym.config_types import (
     BaseServerConfig,
 )
 from nemo_gym.global_config import (
+    DRY_RUN_KEY_NAME,
     HEAD_SERVER_KEY_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
+    RAY_HEAD_NODE_ADDRESS_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
     get_global_config_dict,
 )
+from nemo_gym.profiling import Profiler
 
 
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
@@ -142,6 +145,12 @@ MAX_NUM_TRIES = 3
 async def request(
     method: str, url: str, _internal: bool = False, **kwargs: Unpack[_RequestOptions]
 ) -> ClientResponse:  # pragma: no cover
+    # Faster JSON dumps than the default aiohttp json
+    if kwargs.get("json"):
+        kwargs["data"] = orjson.dumps(kwargs.pop("json"))
+        kwargs.setdefault("headers", dict())
+        kwargs["headers"]["Content-Type"] = "application/json"
+
     client = get_global_aiohttp_client()
     num_tries = 1
     while True:
@@ -171,7 +180,8 @@ Sleeping 0.5s and retrying...
 async def raise_for_status(response: ClientResponse) -> None:  # pragma: no cover
     if not response.ok:
         content = await response.content.read()
-        print(f"""Request info: {response.request_info}
+        if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
+            print(f"""Request info: {response.request_info}
 Response content: {content}""")
 
         try:
@@ -180,6 +190,10 @@ Response content: {content}""")
             # Set the response content here so we have access to it down the line.
             e.response_content = content
             raise e
+
+
+async def get_response_json(response: ClientResponse) -> Any:
+    return orjson.loads(await response.read())
 
 
 DEFAULT_HEAD_SERVER_PORT = 11000
@@ -336,6 +350,9 @@ class UvicornLoggingConfig(BaseModel):
     uvicorn_logging_show_200_ok: bool = False
 
 
+_NEMO_GYM_STARTED_RAY_CLUSTER: bool = False
+
+
 def initialize_ray() -> None:
     """
     Initialize ray cluster in a process.
@@ -349,14 +366,16 @@ def initialize_ray() -> None:
         return
 
     global_config_dict = get_global_config_dict()
-    ray_head_node_address = global_config_dict.get("ray_head_node_address")
+    ray_head_node_address = global_config_dict.get(RAY_HEAD_NODE_ADDRESS_KEY_NAME)
     ray_init_kwargs = dict(ignore_reinit_error=True)
 
     if ray_head_node_address:
         print(f"Connecting to Ray cluster at specified address: {ray_head_node_address}")
         ray_init_kwargs["address"] = ray_head_node_address
     else:
-        print("Starting Ray cluster...")
+        print("NeMo Gym is starting a new Ray cluster...")
+        global _NEMO_GYM_STARTED_RAY_CLUSTER
+        _NEMO_GYM_STARTED_RAY_CLUSTER = True
 
     ray.init(**ray_init_kwargs)
 
@@ -364,6 +383,32 @@ def initialize_ray() -> None:
         with open_dict(global_config_dict):
             global_config_dict["ray_head_node_address"] = ray.get_runtime_context().gcs_address
         print(f"Started Ray cluster at {global_config_dict['ray_head_node_address']}")
+
+
+def maybe_ray_cluster_exit():  # pragma: no cover
+    global _NEMO_GYM_STARTED_RAY_CLUSTER
+
+    if not _NEMO_GYM_STARTED_RAY_CLUSTER:
+        return
+
+    print("Shutting down Ray cluster spun up by NeMo Gym...")
+    ray.shutdown()
+
+    _NEMO_GYM_STARTED_RAY_CLUSTER = False
+
+
+atexit.register(maybe_ray_cluster_exit)
+
+
+IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME = "IS_NEMO_GYM_FASTAPI_WORKER"
+
+
+def is_nemo_gym_fastapi_worker() -> bool:
+    return getenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME) == "1"
+
+
+def set_is_nemo_gym_fastapi_worker() -> None:
+    environ[IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME] = "1"
 
 
 class SimpleServer(BaseServer):
@@ -402,72 +447,51 @@ class SimpleServer(BaseServer):
         async def exception_handling_middleware(request: Request, call_next):
             try:
                 return await call_next(request)
+            except ClientResponseError as e:
+                assert hasattr(e, "response_content"), (
+                    "Please use `nemo_gym.server_utils.raise_for_status` for HTTP exceptions!"
+                )
+
+                response_content = f"Hit an exception in {self.get_session_middleware_key()} calling an inner server: {e.response_content}"
+                if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
+                    print(response_content)
+
+                return JSONResponse(content=response_content, status_code=500)
             except Exception as e:
-                print_exc()
                 print(
-                    f"🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"
+                    f"""🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception
+Formatted exception: {format_exc()}
+repr(e): {repr(e)}"""
                 )
                 return JSONResponse(content=repr(e), status_code=500)
             except:
                 print_exc()
                 print(
-                    f"🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"
+                    f"""🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"""
                 )
                 return JSONResponse(content="An unknown error occurred", status_code=500)
 
     def setup_profiling(self, app: FastAPI, profiling_config: ProfilingMiddlewareConfig) -> None:  # pragma: no cover
-        base_profile_dir = Path(PARENT_DIR) / profiling_config.profiling_results_dirpath
-        server_profile_path = (base_profile_dir / self.get_session_middleware_key()).with_suffix(".log")
-
-        base_profile_dir.mkdir(parents=True, exist_ok=True)
+        base_profile_dir = PARENT_DIR / profiling_config.profiling_results_dirpath / self.get_session_middleware_key()
+        profiler = Profiler(name=self.config.name, base_profile_dir=base_profile_dir)
 
         main_app_lifespan = app.router.lifespan_context
 
-        def _dump_yappi_stats() -> str:
-            buffer = StringIO()
-            yappi.get_func_stats().print_all(
-                out=buffer,
-                columns={
-                    0: ("name", 200),
-                    1: ("ncall", 10),
-                    2: ("tsub", 8),
-                    3: ("ttot", 8),
-                    4: ("tavg", 8),
-                },
-            )
-
-            buffer.seek(0)
-            res = ""
-            past_header = False
-            for line in buffer:
-                if not past_header or self.config.entrypoint in line:
-                    res += line
-
-                if line.startswith("name"):
-                    past_header = True
-
-            return res
-
         @asynccontextmanager
         async def lifespan_wrapper(app):
-            yappi.set_clock_type("CPU")
-            yappi.start()
-            print(f"🔍 Enabled profiling for {self.config.name}")
+            profiler.start()
 
             async with main_app_lifespan(app) as maybe_state:
                 yield maybe_state
 
-            print(f"🛑 Stopping profiler for {self.config.name}. Check {server_profile_path} for the metrics!")
-            yappi.stop()
-
-            with open(server_profile_path, "w") as f:
-                f.write(_dump_yappi_stats())
+            profiler.stop()
 
         app.router.lifespan_context = lifespan_wrapper
 
         @app.get("/stats")
         def stats():
-            return Response(_dump_yappi_stats())
+            profiler.dump()
+            return Response()
 
     def set_ulimit(self, target_soft_limit: int = 65535):  # pragma: no cover
         # From https://github.com/vllm-project/vllm/blob/fed8a9b107df3e27d57728c6911c7d308b871477/vllm/utils/__init__.py#L2790
@@ -487,11 +511,49 @@ class SimpleServer(BaseServer):
                     e,
                 )
 
+    def prefix_server_logs(self) -> None:  # pragma: no cover
+        # Adapted from https://github.com/vllm-project/vllm/blob/ab74b2a27a4eb88b90356bfb4b452d29edf05574/vllm/utils/system_utils.py#L205
+
+        def _add_prefix(file: TextIO) -> None:
+            prefix = f"({self.config.name}) "
+            file_write = file.write
+
+            def write_with_prefix(s: str):
+                if not s:
+                    return
+
+                if file.start_new_line:
+                    file_write(prefix)
+
+                idx = 0
+                while (next_idx := s.find("\n", idx)) != -1:
+                    next_idx += 1
+                    file_write(s[idx:next_idx])
+                    if next_idx == len(s):
+                        file.start_new_line = True
+                        return
+
+                    file_write(prefix)
+                    idx = next_idx
+
+                file_write(s[idx:])
+                file.start_new_line = False
+
+            file.start_new_line = True
+            file.write = write_with_prefix
+
+        is_main_fastapi_proc = not is_nemo_gym_fastapi_worker()
+        if is_main_fastapi_proc:
+            _add_prefix(sys.stdout)
+            _add_prefix(sys.stderr)
+
     @classmethod
-    def run_webserver(cls) -> None:  # pragma: no cover
+    def run_webserver(cls) -> Optional[FastAPI]:  # pragma: no cover
         global_config_dict = get_global_config_dict()
 
         initialize_ray()
+
+        is_main_fastapi_proc = not is_nemo_gym_fastapi_worker()
 
         server_config = cls.load_config_from_global_config()
         server_client = ServerClient(
@@ -500,8 +562,12 @@ class SimpleServer(BaseServer):
         )
         server = cls(config=server_config, server_client=server_client)
 
+        if global_config_dict[DRY_RUN_KEY_NAME]:
+            return
+
         app = server.setup_webserver()
         server.set_ulimit()
+        server.prefix_server_logs()
         server.setup_exception_middleware(app)
 
         @app.exception_handler(RequestValidationError)
@@ -528,17 +594,37 @@ Full body: {json.dumps(exc.body, indent=4)}
             uvicorn_logger = getLogger("uvicorn.access")
             uvicorn_logger.addFilter(No200Filter())
 
-            print(
-                "Adding a uvicorn logging filter so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
-            )
+            if is_main_fastapi_proc:
+                print(
+                    "Adding a uvicorn logging filter so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
+                )
 
-        uvicorn.run(
-            app,
+        uvicorn_kwargs = dict(
             host=server.config.host,
             port=server.config.port,
             # We add a very small graceful shutdown timeout so when we shutdown we cancel all inflight requests and there are no lingering requests (requests are cancelled)
             timeout_graceful_shutdown=0.5,
         )
+
+        if server.config.num_workers and server.config.num_workers > 1:
+            set_is_nemo_gym_fastapi_worker()
+
+            # TODO this is very dirty. We need a cleaner way to populate this information in the configs data structures.
+            server_instance_config_dict = global_config_dict[server.config.name]
+            first_level_key = list(server_instance_config_dict.keys())[0]
+            second_level_key = list(server_instance_config_dict[first_level_key].keys())[0]
+            relative_fpath = f"{first_level_key}/{second_level_key}/{server.config.entrypoint}"
+            module_import_str = relative_fpath.replace(".py", "").replace("/", ".")
+
+            uvicorn_kwargs["app"] = f"{module_import_str}:app"
+            uvicorn_kwargs["workers"] = server.config.num_workers
+        else:
+            uvicorn_kwargs["app"] = app
+
+        if is_main_fastapi_proc:
+            uvicorn.run(**uvicorn_kwargs)
+
+        return app
 
 
 class HeadServer(BaseServer):
@@ -596,3 +682,14 @@ class ServerInstanceDisplayConfig(BaseModel):
     status: Optional[ServerStatus] = None
     uptime_seconds: Optional[float] = None
     url: Optional[str] = None
+
+
+def get_server_url(server_name: str) -> str:
+    global_config_dict = get_global_config_dict()
+
+    model_server_config = get_first_server_config_dict(
+        global_config_dict,
+        server_name,
+    )
+
+    return f"http://{model_server_config['host']}:{model_server_config['port']}"

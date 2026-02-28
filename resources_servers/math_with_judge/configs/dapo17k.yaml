@@ -39,3 +39,4 @@ math_with_judge_simple_agent:
           version: 0.0.1
           artifact_fpath: aime24.jsonl
         license: Apache 2.0
+        num_repeats: 32  # mean@32

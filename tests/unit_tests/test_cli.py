@@ -33,7 +33,7 @@ class TestCLI:
         RunConfig(entrypoint="", name="")
 
     def test_pyproject_scripts(self) -> None:
-        pyproject_path = Path(PARENT_DIR) / "pyproject.toml"
+        pyproject_path = PARENT_DIR / "pyproject.toml"
         with pyproject_path.open("rb") as f:
             pyproject_data = tomllib.load(f)
 
