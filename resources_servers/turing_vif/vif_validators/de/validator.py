@@ -918,10 +918,6 @@ def validate_instruction(
 
             return (True, "No error.")
 
-        if inst_type == "detectable_format:indentation":
-            # Logic for this instruction to be added here
-            return (False, "Invalid Instruction")
-
         if inst_type == "length_constraints:sentence_length":
             """
             Checks if the number of words in each sentence (including bullet list items: '-' and numbered lists '1.')
@@ -971,14 +967,6 @@ def validate_instruction(
                 message = f"Found {unique_words_count} unique words. Expected {relation} {num_unique}."
                 return (False, message)
             return (True, "No error.")
-
-        if inst_type == "punctuation:frequency":
-            # Logic for this instruction to be added here
-            return (False, "Invalid Instruction")
-
-        if inst_type == "punctuation:balance":
-            # Logic for this instruction to be added here
-            return (False, "Invalid Instruction")
 
         if inst_type == "punctuation:question_exclaim":
             is_valid = True
@@ -1101,10 +1089,6 @@ def validate_instruction(
 
             return (True, "No error.")
 
-        if inst_type == "detectable_format:section_balance":
-            # Logic for this instruction to be added here
-            return (False, "Invalid Instruction")
-
         if inst_type == "length_constraints:word_length":
             max_length = kwargs["max_length"]
             min_length = kwargs["min_length"]
@@ -1195,10 +1179,6 @@ def validate_instruction(
                     message = f"Found {word_count} words. Expected {relation} {words_per_paragraph}\n '{p}'"
                     return (False, message)
             return (True, "No error.")
-
-        if inst_type == "punctuation:variety":
-            # Logic for this instruction to be added here
-            return (False, "Invalid Instruction")
 
         if inst_type == "detectable_content:numeric_inclusion":
             num_numbers = kwargs["num_numbers"]
