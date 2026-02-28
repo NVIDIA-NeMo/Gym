@@ -18,7 +18,6 @@ from pytest import MonkeyPatch, raises
 
 import nemo_gym.global_config
 import nemo_gym.server_utils
-from nemo_gym import PARENT_DIR
 from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
 )
@@ -195,11 +194,7 @@ class TestServerUtils:
 
         ray_is_initialized_mock.assert_called_once()
         get_global_config_dict_mock.assert_called_once()
-        ray_init_mock.assert_called_once_with(
-            address="ray://test-address:10001",
-            ignore_reinit_error=True,
-            runtime_env={"working_dir": str(PARENT_DIR)},
-        )
+        ray_init_mock.assert_called_once_with(address="ray://test-address:10001", ignore_reinit_error=True)
 
     def test_initialize_ray_without_address(self, monkeypatch: MonkeyPatch) -> None:
         ray_is_initialized_mock = self._mock_ray_return_value(monkeypatch, False)
@@ -222,8 +217,5 @@ class TestServerUtils:
 
         ray_is_initialized_mock.assert_called_once()
         get_global_config_dict_mock.assert_called_once()
-        ray_init_mock.assert_called_once_with(
-            ignore_reinit_error=True,
-            runtime_env={"working_dir": str(PARENT_DIR)},
-        )
+        ray_init_mock.assert_called_once_with(ignore_reinit_error=True)
         ray_get_runtime_context_mock.assert_called_once()
