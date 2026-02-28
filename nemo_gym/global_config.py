@@ -151,9 +151,10 @@ class GlobalConfigDictParser(BaseModel):
         extra_configs: List[DictConfig] = []
         for config_path in config_paths:
             config_path = Path(config_path)
-            # Assume relative to the parent dir
+            # Check cwd first for user's local configs, then install location
             if not config_path.is_absolute():
-                config_path = PARENT_DIR / config_path
+                cwd_path = Path.cwd() / config_path
+                config_path = cwd_path if cwd_path.exists() else PARENT_DIR / config_path
 
             extra_config = OmegaConf.load(config_path)
             for new_config_path in extra_config.get(CONFIG_PATHS_KEY_NAME) or []:
@@ -252,7 +253,13 @@ class GlobalConfigDictParser(BaseModel):
         global_config_dict: DictConfig = OmegaConf.merge(initial_global_config_dict, global_config_dict)
 
         # Load the env.yaml config. We load it early so that people can use it to conveniently store config paths.
-        dotenv_path = parse_config.dotenv_path or PARENT_DIR / "env.yaml"
+        # Check cwd first for user's local env.yaml, then fall back to PARENT_DIR
+        if parse_config.dotenv_path:
+            dotenv_path = parse_config.dotenv_path
+        else:
+            cwd_env_yaml = Path.cwd() / "env.yaml"
+            dotenv_path = cwd_env_yaml if cwd_env_yaml.exists() else PARENT_DIR / "env.yaml"
+
         dotenv_extra_config = DictConfig({})
         if dotenv_path.exists() and not parse_config.skip_load_from_dotenv:
             dotenv_extra_config = OmegaConf.load(dotenv_path)
