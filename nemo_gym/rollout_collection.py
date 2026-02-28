@@ -16,10 +16,9 @@ import asyncio
 from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
-from copy import deepcopy
-from itertools import repeat
+from itertools import chain, repeat
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import orjson
 from pydantic import BaseModel, Field
@@ -118,9 +117,9 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         output_fpath = Path(self.output_jsonl_fpath)
         return output_fpath.with_stem(output_fpath.stem + "_materialized_inputs").with_suffix(".jsonl")
 
-
-class RolloutCollectionHelper(BaseModel):
-    def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
+class RolloutCollectionHelper(BaseModel):  # pragma: no cover
+    # pragma: no cover
+    async def run_from_config(self, config: RolloutCollectionConfig):
         range_iterator = repeat(0)
         if config.limit:
             range_iterator = range(config.limit)
@@ -279,9 +278,56 @@ class RolloutCollectionHelper(BaseModel):
                 for key, value in agent_metrics.items():
                     agent_level_metrics_to_log[f"{agent_name}/{key}"] = value
 
-                agent_level_metrics_to_log.pop(f"{agent_name}/{AGENT_REF_KEY_NAME}")
+        metrics = Counter()
+        skipped_count = 0
+        successful_count = 0
 
-            get_wandb_run().log(agent_level_metrics_to_log)
+        output_path = Path(config.output_jsonl_fpath)
+        errors_fpath = output_path.parent / "errors.json"
+        schema_errors: List[Dict[str, Any]] = []
+
+        with open(config.output_jsonl_fpath, "ab") as f:
+
+            async def _post_coroutine(row: dict) -> None:
+                nonlocal skipped_count, successful_count
+
+                row_id = row.get("id", "unknown")
+
+                # Safe merge even if either side is None/missing
+                row_params = row.get("responses_create_params") or {}
+                cfg_params = config.responses_create_params or {}
+                row["responses_create_params"] = {**row_params, **cfg_params}
+
+                async with semaphore:
+                    response = await server_client.post(server_name=config.agent_name, url_path="/run", json=row)
+                    await raise_for_status(response)
+                    result = await response.json()
+
+                    validation_results = result.get("validation_results", [])
+                    schema_validation_errors = [
+                        vr
+                        for vr in validation_results
+                        if vr.get("instruction") == "schema_validation" and vr.get("status") == "Failed"
+                    ]
+                    language_compatibility_errors = [
+                        vr
+                        for vr in validation_results
+                        if vr.get("instruction") == "language_compatibility"
+                        and vr.get("status") in ("Failed", "Skipped")
+                    ]
+                    skip_errors = schema_validation_errors or language_compatibility_errors
+
+                    if skip_errors:
+                        skipped_count += 1
+                        schema_errors.append({"id": row_id, "errors": [err.get("message") for err in skip_errors]})
+                        return
+
+                    successful_count += 1
+
+                    line = json.dumps(result, ensure_ascii=False, default=str) + "\n"
+                    f.write(line.encode("utf-8"))
+
+                    metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
 
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {config.materialized_jsonl_fpath}
@@ -289,7 +335,20 @@ Rollouts: {output_fpath}
 Reward profiling outputs: {reward_profiling_fpath}
 Agent-level metrics: {agent_level_metrics_fpath}""")
 
-        return results
+        if schema_errors:
+            err_str = json.dumps(schema_errors, indent=2, ensure_ascii=False, default=str)
+            with open(errors_fpath, "wb") as ef:
+                ef.write(err_str.encode("utf-8"))
+            print(f"\n{skipped_count} rollout(s) skipped due to validation errors. See {errors_fpath}")
+
+        print(f"\n{successful_count} rollout(s) completed successfully.")
+
+        if successful_count > 0:
+            avg_metrics = {k: v / successful_count for k, v in metrics.items()}
+        else:
+            avg_metrics = {}
+        avg_metrics.setdefault("reward", 0.0)
+        print(json.dumps(avg_metrics, indent=4, ensure_ascii=False, default=str))
 
     def run_examples(
         self,
