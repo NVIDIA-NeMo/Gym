@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Text-to-SQL environment configuration
+# Uses LLM-as-judge to compare generated SQL queries against ground truth.
+#
+# Supported SQL dialects: MySQL, PostgreSQL, SQLite (more to come - TODO)
+
+text_to_sql_resources_server:
+  resources_servers:
+    text_to_sql:
+      entrypoint: app.py
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_responses_create_params:
+        input: []
+      judge_endpoint_max_concurrency: null
+      judge_equal_label: "[[A=B]]"
+      judge_not_equal_label: "[[A!=B]]"
+
+      # Swap check: Run second judge pass with swapped expected/generated to detect positional bias
+      check_twice_swap: true
+      # Reward when the second (swap) pass fails; default 0.0, can be -1.0
+      reward_if_swap_fails: 0.0
+
+      domain: coding
+      verified: false
+      description: Text-to-SQL generation with LLM-as-a-judge equivalence checking
+      value: Improve text-to-SQL capabilities across multiple dialects
+
+text_to_sql_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: text_to_sql_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/text_to_sql/data/example.jsonl
+        license: Creative Commons Attribution 4.0 International

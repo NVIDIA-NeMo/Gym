@@ -56,7 +56,7 @@ class TestLoadAndValidateServerInstanceConfigs:
         # Fix the port returned
         find_open_port_mock = MagicMock()
         find_open_port_mock.return_value = 12345
-        monkeypatch.setattr(nemo_gym.global_config, "find_open_port", find_open_port_mock)
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
 
         config = TrainDataProcessorConfig(
             output_dirpath="",
@@ -77,6 +77,7 @@ class TestLoadAndValidateServerInstanceConfigs:
                         "host": "127.0.0.1",
                         "port": 12345,
                         "entrypoint": "app.py",
+                        "num_workers": None,
                         "datasets": [
                             {
                                 "name": "example",
@@ -300,7 +301,7 @@ class TestLoadDatasets:
             }
         }
 
-        with raises(SystemExit) as exc_info:
+        with raises(AssertionError, match="GitLab backend selected but missing credentials"):
             processor.load_datasets(
                 config=config,
                 server_instance_configs=[
@@ -311,7 +312,6 @@ class TestLoadDatasets:
                     ),
                 ],
             )
-        assert exc_info.value.code == 1
 
     def test_validate_backend_credentials_missing(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(
@@ -401,6 +401,7 @@ class TestValidateSamplesAndAggregateMetrics:
                     responses_api_agents=server_type_config_dict["responses_api_agents"],
                 ),
             ],
+            overwrite_metrics_conflicts=False,
         )
 
         expected_dataset_type_to_aggregate_metrics = {
@@ -413,7 +414,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     average=0,
                     min=2.0,
                     max=2.0,
-                    median=0,
                     stddev=0,
                 ),
                 json_dumped_number_of_words=AvgMinMax(
@@ -422,7 +422,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     average=0,
                     min=1499.0,
                     max=1509.0,
-                    median=0,
                     stddev=0,
                 ),
                 number_of_turns=AvgMinMax(
@@ -431,7 +430,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     average=0,
                     min=1.0,
                     max=1.0,
-                    median=0,
                     stddev=0,
                 ),
                 temperature=AvgMinMax(
@@ -440,7 +438,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     average=0,
                     min=float("inf"),
                     max=float("-inf"),
-                    median=0,
                     stddev=0,
                 ),
                 id=AvgMinMax(
@@ -449,7 +446,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     average=2.0,
                     min=0.0,
                     max=4.0,
-                    median=2.0,
                     stddev=1.58,
                 ),
                 expected_synonym_values=AvgMinMax(
@@ -458,7 +454,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     average=559.0,
                     min=407.0,
                     max=711.0,
-                    median=559.0,
                     stddev=160.22,
                 ),
                 minefield_label_value=AvgMinMax(
@@ -467,7 +462,6 @@ class TestValidateSamplesAndAggregateMetrics:
                     average=299.0,
                     min=299.0,
                     max=299.0,
-                    median=299.0,
                     stddev=0.0,
                 ),
                 expected_synonyms=StringMetrics(unique_count=2, total_count=10),
@@ -546,6 +540,7 @@ class TestValidateSamplesAndAggregateMetrics:
                         responses_api_agents=server_type_config_dict["responses_api_agents"],
                     ),
                 ],
+                overwrite_metrics_conflicts=False,
             )
 
         assert write_filenames == [Path("resources_servers/example_multi_step/data/example_metrics_conflict.json")]
@@ -586,7 +581,6 @@ class TestValidateSamplesAndAggregateMetrics:
                 average=0,
                 min=float("inf"),
                 max=float("-inf"),
-                median=0,
                 stddev=0,
             ),
             json_dumped_number_of_words=AvgMinMax(
@@ -595,7 +589,6 @@ class TestValidateSamplesAndAggregateMetrics:
                 average=0,
                 min=2.0,
                 max=2.0,
-                median=0,
                 stddev=0,
             ),
             number_of_turns=AvgMinMax(
@@ -604,7 +597,6 @@ class TestValidateSamplesAndAggregateMetrics:
                 average=0,
                 min=float("inf"),
                 max=float("-inf"),
-                median=0,
                 stddev=0,
             ),
             temperature=AvgMinMax(
@@ -613,7 +605,6 @@ class TestValidateSamplesAndAggregateMetrics:
                 average=0,
                 min=float("inf"),
                 max=float("-inf"),
-                median=0,
                 stddev=0,
             ),
         )

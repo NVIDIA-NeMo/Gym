@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-import sys
 from abc import abstractmethod
 from collections import Counter, defaultdict
 from math import sqrt
@@ -24,7 +23,6 @@ from typing import Any, Dict, List, Literal, Optional, Self, Tuple, Union
 from devtools import pprint
 from omegaconf import DictConfig
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from tdigest import TDigest
 from tqdm.auto import tqdm
 
 from nemo_gym.base_resources_server import BaseRunRequest
@@ -40,6 +38,7 @@ from nemo_gym.config_types import (
 )
 from nemo_gym.gitlab_utils import download_jsonl_dataset
 from nemo_gym.global_config import (
+    HF_TOKEN_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
@@ -75,6 +74,9 @@ class TrainDataProcessorConfig(BaseNeMoGymCLIConfig):
     data_source: Literal["gitlab", "huggingface"] = Field(
         default="huggingface",
         description="Where to download missing datasets from: 'gitlab' (NVIDIA internal) or 'huggingface' (external).",
+    )
+    overwrite_metrics_conflicts: bool = Field(
+        default=False, description="Whether or not to overwrite metrics conflicts."
     )
 
     @property
@@ -115,15 +117,10 @@ class AvgMinMax(Accumulator):
     average: float = Field(serialization_alias="Average", default=0)
     min: float = Field(serialization_alias="Min", default=float("inf"))
     max: float = Field(serialization_alias="Max", default=float("-inf"))
-    median: float = Field(serialization_alias="Median", default=0)
     stddev: float = Field(serialization_alias="Standard deviation", default=0)
     # Internal state
     mean: float = Field(default=0, exclude=True)  # running value (before final average)
     M2: float = Field(default=0, exclude=True)  # sum of squared differences (for variance)
-    tdigest: TDigest = Field(default_factory=TDigest, exclude=True)
-    """
-    T-Digest is used to estimate the Median without storing and sorting all values. The Median is essentially an approximation using the 50th percentile, which is very close to the true Median.
-    """
 
     def observe(self, x: float) -> None:
         if x < self.min:
@@ -137,9 +134,6 @@ class AvgMinMax(Accumulator):
         self.mean += delta / self.total
         self.M2 += delta * (x - self.mean)
 
-        # Update quantile estimator (for median)
-        self.tdigest.update(x)
-
     def _add(self: Self, other: Self) -> None:
         # Merge accumulators
         if other.total == 0:
@@ -150,8 +144,6 @@ class AvgMinMax(Accumulator):
             self.M2 = other.M2
             self.min = other.min
             self.max = other.max
-            self.tdigest = TDigest()
-            self.tdigest = self.tdigest + other.tdigest
             return
 
         # Merge mean and variance
@@ -167,9 +159,6 @@ class AvgMinMax(Accumulator):
         if other.max > self.max:
             self.max = other.max
 
-        # Merge t-digests for quantiles/median
-        self.tdigest = self.tdigest + other.tdigest
-
     def _aggregate(self: Self) -> Self:
         def round_metric(x: float) -> float:
             if x >= 1 or x <= -1:
@@ -179,14 +168,12 @@ class AvgMinMax(Accumulator):
         n = self.total
         mean = self.mean if n > 0 else 0.0
         stddev = sqrt(self.M2 / (n - 1)) if n > 1 else 0.0
-        med = float(self.tdigest.percentile(50)) if n > 0 and self.tdigest.n > 0 else 0.0
 
         params = {
             "total": self.total,
             "average": mean,
             "min": self.min if n > 0 else 0.0,
             "max": self.max if n > 0 else 0.0,
-            "median": med,
             "stddev": stddev,
         }
 
@@ -347,7 +334,9 @@ class TrainDataProcessor(BaseModel):
         self.load_datasets(config, server_instance_configs)
 
         self._print_title("Validate samples and aggregate metrics")
-        dataset_type_to_aggregate_metrics = self.validate_samples_and_aggregate_metrics(server_instance_configs)
+        dataset_type_to_aggregate_metrics = self.validate_samples_and_aggregate_metrics(
+            server_instance_configs, config.overwrite_metrics_conflicts
+        )
 
         self._print_title("Collate samples and aggregate metrics")
         self.collate_samples(config, server_instance_configs, dataset_type_to_aggregate_metrics)
@@ -462,54 +451,49 @@ class TrainDataProcessor(BaseModel):
 
         if not local_datasets_not_found:
             return
-        backend = config.data_source
-        is_valid, error_msg = validate_backend_credentials(backend)
+
+        hf_backend_ok, hf_error_msg = validate_backend_credentials("huggingface")
+        gitlab_backend_ok, gitlab_error_msg = validate_backend_credentials("gitlab")
+
         global_config = get_global_config_dict()
-        if not is_valid:
-            print(f"Cannot download datasets: {error_msg}")
-            sys.exit(1)
 
         for (
             server_name,
             datasets,
         ) in local_datasets_not_found.items():  # pragma: no cover
             for d in datasets:
-                try:
-                    if backend == "gitlab":
-                        if d.gitlab_identifier is None:
-                            print(f"Dataset `{d.name}` missing gitlab_identifier for GitLab backend")
-                            continue
+                if d.gitlab_identifier and d.huggingface_identifier:
+                    backend = config.data_source
+                elif not d.gitlab_identifier:
+                    assert hf_backend_ok, hf_error_msg
+                    backend = "huggingface"
+                elif not d.huggingface_identifier:
+                    assert gitlab_backend_ok, gitlab_error_msg
+                    backend = "gitlab"
+                else:
+                    raise NotImplementedError
 
-                        download_config = DownloadJsonlDatasetGitlabConfig.model_validate(
-                            d.gitlab_identifier.model_dump() | {"output_fpath": d.jsonl_fpath}
-                        )
-                        print(
-                            f"Downloading dataset `{d.name}` for `{server_name}` from {backend} using {download_config}"
-                        )
-                        download_jsonl_dataset(download_config)
+                if backend == "gitlab":
+                    download_config = DownloadJsonlDatasetGitlabConfig.model_validate(
+                        d.gitlab_identifier.model_dump() | {"output_fpath": d.jsonl_fpath}
+                    )
+                    print(f"Downloading dataset `{d.name}` for `{server_name}` from {backend} using {download_config}")
+                    download_jsonl_dataset(download_config)
 
-                    elif backend == "huggingface":
-                        hf_identifier = d.huggingface_identifier
-
-                        if hf_identifier is None:
-                            print(f"Dataset `{d.name}` missing huggingface_identifier for HuggingFace backend")
-                            continue
-
-                        download_config = DownloadJsonlDatasetHuggingFaceConfig.model_validate(
-                            {
-                                "repo_id": hf_identifier.repo_id,
-                                "artifact_fpath": hf_identifier.artifact_fpath,
-                                "output_fpath": d.jsonl_fpath,
-                                # Only pass split if artifact_fpath is not set
-                                **({"split": d.type} if not hf_identifier.artifact_fpath else {}),
-                                "hf_token": global_config.get("hf_token"),
-                            }
-                        )
-                        print(f"Downloading '{d.type}' split from {hf_identifier.repo_id} to {d.jsonl_fpath}...")
-                        download_hf_dataset_as_jsonl(download_config)
-
-                except Exception as e:
-                    print(f"Failed to download dataset `{d.name}` from {backend}: {e}")
+                elif backend == "huggingface":
+                    hf_identifier = d.huggingface_identifier
+                    download_config = DownloadJsonlDatasetHuggingFaceConfig.model_validate(
+                        {
+                            "repo_id": hf_identifier.repo_id,
+                            "artifact_fpath": hf_identifier.artifact_fpath,
+                            "output_fpath": d.jsonl_fpath,
+                            # Only pass split if artifact_fpath is not set
+                            **({"split": d.type} if not hf_identifier.artifact_fpath else {}),
+                            HF_TOKEN_KEY_NAME: global_config.get(HF_TOKEN_KEY_NAME),
+                        }
+                    )
+                    print(f"Downloading '{d.type}' split from {hf_identifier.repo_id} to {d.jsonl_fpath}...")
+                    download_hf_dataset_as_jsonl(download_config)
 
     ########################################
     # Validate samples and aggregate metrics
@@ -648,7 +632,7 @@ class TrainDataProcessor(BaseModel):
             return conflicting_metrics_fpath
 
     def validate_samples_and_aggregate_metrics(
-        self, server_instance_configs: List[ServerInstanceConfig]
+        self, server_instance_configs: List[ServerInstanceConfig], overwrite_metrics_conflicts: bool
     ) -> Dict[str, DatasetMetrics]:
         conflicting_fpaths: List[str] = []
         dataset_type_to_aggregate_metrics: Dict[str, DatasetMetrics] = defaultdict(DatasetMetrics)
@@ -671,7 +655,11 @@ class TrainDataProcessor(BaseModel):
                 )
                 if maybe_conflicting_metrics_fpath is not None:
                     conflicting_fpaths.append(str(maybe_conflicting_metrics_fpath))
-                    continue
+
+                    if overwrite_metrics_conflicts:
+                        pass
+                    else:
+                        continue
 
                 with open(metrics_fpath, "w") as f:
                     json.dump(aggregate_metrics_dict, f, indent=4)
@@ -684,11 +672,16 @@ class TrainDataProcessor(BaseModel):
             target_fpaths_str = "\n- ".join(
                 [""] + [fp.replace("_conflict.json", ".json") for fp in conflicting_fpaths]
             )
-            raise ValueError(f"""
+            print_str = f"""
 Found conflicting aggregate metrics that need to be corrected:{conflicting_fpaths_str}
 
 This could be due to a change in how metrics are calculated, leading to outdated metrics. Try deleting the below file(s) and rerunning data preparation:{target_fpaths_str}
-""")
+"""
+
+            if overwrite_metrics_conflicts:
+                print(print_str)
+            else:
+                raise ValueError(print_str)
 
         return dict(dataset_type_to_aggregate_metrics)
 
@@ -735,9 +728,15 @@ This could be due to a change in how metrics are calculated, leading to outdated
             aggregate_metrics = aggregate_metrics.aggregate()
 
             aggregate_metrics_dict = aggregate_metrics.model_dump(mode="json", by_alias=True)
+            d = next(
+                (dataset for c in server_instance_configs for dataset in c.datasets if dataset.type == type),
+                None,
+            )
+            if d is not None:
+                aggregate_metrics_dict = d.model_dump() | aggregate_metrics_dict
 
             parent = Path(config.output_dirpath)
-            parent.mkdir(exist_ok=True)
+            parent.mkdir(exist_ok=True, parents=True)
             metrics_fpath = parent / f"{type}_metrics.json"
             maybe_conflicting_metrics_fpath = self._validate_aggregate_metrics(
                 aggregate_metrics_dict=aggregate_metrics_dict,
@@ -745,7 +744,11 @@ This could be due to a change in how metrics are calculated, leading to outdated
             )
             if maybe_conflicting_metrics_fpath is not None:
                 conflicting_fpaths.append(str(maybe_conflicting_metrics_fpath))
-                continue
+
+                if config.overwrite_metrics_conflicts:
+                    pass
+                else:
+                    continue
 
             with open(metrics_fpath, "w") as f:
                 json.dump(aggregate_metrics_dict, f, indent=4)
@@ -770,11 +773,15 @@ This could be due to a change in how metrics are calculated, leading to outdated
             target_fpaths_str = "\n- ".join(
                 [""] + [fp.replace("_conflict.json", ".json") for fp in conflicting_fpaths]
             )
-            raise ValueError(f"""
+            print_str = f"""
 Found conflicting aggregate metrics that need to be corrected:{conflicting_fpaths_str}
 
 This could be due to a change in how metrics are calculated, leading to outdated metrics. Try deleting the below file(s) and rerunning data preparation:{target_fpaths_str}
-""")
+"""
+            if config.overwrite_metrics_conflicts:
+                print(print_str)
+            else:
+                raise ValueError(print_str)
 
         final_fpaths_str = "\n- ".join([""] + [f"{type}: {fpath}" for type, fpath in final_fpaths.items()])
         print(f"View your final data!{final_fpaths_str}")
@@ -796,13 +803,13 @@ def validate_backend_credentials(backend: str) -> tuple[bool, str]:
             )
 
     elif backend == "huggingface":
-        required = ["hf_token"]
+        required = [HF_TOKEN_KEY_NAME]
         missing = [k for k in required if k not in global_config or not global_config[k]]
         if missing:
             return False, (
                 f"HuggingFace backend selected but missing credentials: {missing}\n"
                 f"Add to env.yaml:\n"
-                f"  hf_token: <your_hf_token>\n"
+                f"  {HF_TOKEN_KEY_NAME}: <your_hf_token>\n"
             )
 
     return True, ""
