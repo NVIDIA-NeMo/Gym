@@ -202,8 +202,8 @@ def assert_run_response(
     assert len(response.responses_create_params.input) == expected_input_length
 
     if expected_input_length >= 2:
-        assert response.responses_create_params.input[0].role == "system"
-        assert response.responses_create_params.input[1].role == "user"
+        assert response.responses_create_params.input[0]["role"] == "system"
+        assert response.responses_create_params.input[1]["role"] == "user"
 
 
 def assert_run_swegym_called(
