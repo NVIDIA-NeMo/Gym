@@ -102,11 +102,17 @@ def apply_vllm_dp_placement_groups_patch() -> None:
             node_ip_keys = [
                 key for key in node_resources if key != "node:__internal_head__" and key.startswith("node:")
             ]
-            assert len(node_ip_keys) == 1, (
-                "Zero or multiple node IP keys found in node resources: %s",
-                node_ip_keys,
-            )
-            node_ip_key = node_ip_keys[0]
+            # Ray may expose additional synthetic keys like
+            # "node:<ip>_group_*". Prefer the canonical "node:<ip>" key.
+            canonical_node_ip_keys = [key for key in node_ip_keys if "_group_" not in key]
+            if len(canonical_node_ip_keys) == 1:
+                node_ip_key = canonical_node_ip_keys[0]
+            elif len(node_ip_keys) == 1:
+                node_ip_key = node_ip_keys[0]
+            else:
+                raise ValueError(
+                    f"Could not infer canonical node IP key from node resources. node_ip_keys={node_ip_keys}"
+                )
             node_ip = node_ip_key.split(":")[1]
             n_device_on_node = int(node_resources.get(device_str, 0))
             if pack_strategy == "span" and n_device_on_node != 0:

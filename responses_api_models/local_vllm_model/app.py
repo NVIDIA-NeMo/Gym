@@ -19,6 +19,7 @@ from pathlib import Path
 from threading import Thread
 from time import sleep
 from typing import Any, Dict, List, Optional, Tuple, Union
+from uuid import uuid4
 
 import ray
 import requests
@@ -161,10 +162,34 @@ class LocalVLLMModelActor:
         return self.server_thread.is_alive()
 
 
+@ray.remote(num_cpus=0)
+class _LocalVLLMStartupLockActor:
+    """
+    Cluster-wide cooperative lock to serialize local vLLM endpoint startup.
+    """
+
+    def __init__(self) -> None:
+        self._owner: Optional[str] = None
+
+    def try_acquire(self, owner: str) -> bool:
+        if self._owner is None:
+            self._owner = owner
+            return True
+        return False
+
+    def release(self, owner: str) -> bool:
+        if self._owner == owner:
+            self._owner = None
+            return True
+        return False
+
+
 class LocalVLLMModel(VLLMModel):
     config: LocalVLLMModelConfig
 
     _local_vllm_model_actor: LocalVLLMModelActor
+    _startup_lock_namespace = "nemo_gym_local_vllm"
+    _startup_lock_name = "local_vllm_startup_lock"
 
     def setup_webserver(self):
         print("Starting vLLM server. This will take a couple of minutes...")
@@ -227,7 +252,9 @@ Environment variables: {env_vars_to_print}""")
 
         return final_args, env_vars
 
-    def _select_vllm_server_head_node(self) -> NodeAffinitySchedulingStrategy:
+    def _select_vllm_server_head_node(
+        self, server_args: Namespace, env_vars: Dict[str, str]
+    ) -> NodeAffinitySchedulingStrategy:
         """
         There are a few params vLLM has:
         - data parallel size
@@ -246,32 +273,78 @@ Environment variables: {env_vars_to_print}""")
 
         Now the problem is that for `strict`, if we spin up the head server on the same node, we need to set data parallel size local to 0. So `fill` and `strict` don't work out of the box.
 
-        Here, we fix `strict` by spinning things up on not the head server node. We find a currently available GPU node and star the vLLM server there so the head node address is propagated properly.
+        Here, we fix `strict` by spinning things up on not the head server node. We find a currently available GPU node and start the vLLM server there so the head node address is propagated properly.
         """
         alive_gpu_nodes = [n for n in list_nodes() if n.state == "ALIVE" and n.resources_total.get("GPU", 0) > 0]
         assert alive_gpu_nodes
 
         node_id_to_available_resources = available_resources_per_node()
 
-        selected_node = None
-        partial_node = None
+        world_size = server_args.tensor_parallel_size * server_args.pipeline_parallel_size
+        pack_strategy = env_vars.get("VLLM_RAY_DP_PACK_STRATEGY", "strict")
+        if pack_strategy == "span":
+            required_gpus_on_master = 1
+        else:
+            required_gpus_on_master = world_size * server_args.data_parallel_size_local
+
+        candidate_nodes = []
         for node in alive_gpu_nodes:
             total_gpus = node.resources_total["GPU"]
             # We use .get("GPU") here since if there are no available GPUs, the property won't be set.
             available_gpus = node_id_to_available_resources[node.node_id].get("GPU", 0)
+            if available_gpus >= required_gpus_on_master:
+                candidate_nodes.append((node, total_gpus, available_gpus))
 
-            if total_gpus == available_gpus:
-                selected_node = node
-                break
+        if not candidate_nodes:
+            raise ValueError(
+                "Could not find a node with enough free GPUs for the local vLLM DP master. "
+                f"Required GPUs on master={required_gpus_on_master}, "
+                f"world_size={world_size}, pack_strategy={pack_strategy}, "
+                f"available_resources_per_node={node_id_to_available_resources}"
+            )
 
-            if available_gpus != 0:
-                partial_node = node
-
-        selected_node = selected_node or partial_node
+        # Prefer fully free nodes first, then highest available GPU count.
+        selected_node, _, _ = max(
+            candidate_nodes,
+            key=lambda item: (item[1] == item[2], item[2]),
+        )
         return NodeAffinitySchedulingStrategy(
             node_id=selected_node.node_id,
             soft=False,  # Hard constraint - must run on this node
         )
+
+    def _get_startup_lock_actor(self):
+        try:
+            return ray.get_actor(self._startup_lock_name, namespace=self._startup_lock_namespace)
+        except ValueError:
+            try:
+                return _LocalVLLMStartupLockActor.options(
+                    name=self._startup_lock_name,
+                    namespace=self._startup_lock_namespace,
+                    lifetime="detached",
+                ).remote()
+            except ValueError:
+                # Another process created the actor concurrently.
+                return ray.get_actor(self._startup_lock_name, namespace=self._startup_lock_namespace)
+
+    def _acquire_startup_lock(self, owner: str, timeout_s: int = 1200, poll_s: int = 2) -> None:
+        lock_actor = self._get_startup_lock_actor()
+        waited_s = 0
+        while True:
+            if ray.get(lock_actor.try_acquire.remote(owner)):
+                return
+            if waited_s % 30 == 0:
+                print(f"Waiting for local vLLM startup lock for {self.config.name} ({waited_s}s elapsed)...")
+            sleep(poll_s)
+            waited_s += poll_s
+            if waited_s >= timeout_s:
+                raise TimeoutError(
+                    f"Timed out acquiring local vLLM startup lock after {timeout_s}s for {self.config.name}."
+                )
+
+    def _release_startup_lock(self, owner: str) -> None:
+        lock_actor = self._get_startup_lock_actor()
+        ray.get(lock_actor.release.remote(owner))
 
     def start_vllm_server(self) -> None:
         if self.config.debug:
@@ -279,21 +352,25 @@ Environment variables: {env_vars_to_print}""")
 Total Ray cluster resources: {cluster_resources()}""")
 
         server_args, env_vars = self._configure_vllm_serve()
+        lock_owner = f"{self.config.name}-{uuid4()}"
+        self._acquire_startup_lock(lock_owner)
+        try:
+            self._local_vllm_model_actor = LocalVLLMModelActor.options(
+                scheduling_strategy=self._select_vllm_server_head_node(server_args, env_vars),
+                runtime_env=dict(
+                    py_executable=sys.executable,
+                    env_vars={
+                        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+                        **env_vars,
+                    },
+                ),
+            ).remote(server_args, env_vars, self.config.name, self.config.debug)
 
-        self._local_vllm_model_actor = LocalVLLMModelActor.options(
-            scheduling_strategy=self._select_vllm_server_head_node(),
-            runtime_env=dict(
-                py_executable=sys.executable,
-                env_vars={
-                    "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
-                    **env_vars,
-                },
-            ),
-        ).remote(server_args, env_vars, self.config.name, self.config.debug)
+            self.config.base_url = [ray.get(self._local_vllm_model_actor.base_url.remote())]
 
-        self.config.base_url = [ray.get(self._local_vllm_model_actor.base_url.remote())]
-
-        self.await_server_ready()
+            self.await_server_ready()
+        finally:
+            self._release_startup_lock(lock_owner)
 
     def await_server_ready(self) -> None:
         poll_count = 0
