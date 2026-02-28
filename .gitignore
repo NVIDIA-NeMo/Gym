@@ -243,3 +243,6 @@ env.yaml
 
 # Backup files
 *.backup
+
+# how to start
+how_to_start.md
