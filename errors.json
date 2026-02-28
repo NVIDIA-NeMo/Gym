@@ -1,8 +1,0 @@
-[
-  {
-    "id": 2,
-    "errors": [
-      "Instruction 'stylistic:tone_formality': must have a 'source' field"
-    ]
-  }
-]
