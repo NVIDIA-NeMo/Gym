@@ -1,0 +1,42 @@
+# Judge model server (OpenAI or local — configured via env.yaml)
+search_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${search_judge_model_base_url}
+      openai_api_key: ${search_judge_model_api_key}
+      openai_model: ${search_judge_model_name}
+
+# Finance agent: SEC filing search with optional web search (via tavily_api_key in env.yaml)
+finance_agent_resources_server:
+  resources_servers:
+    finance_agent:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: SEC EDGAR filing search for financial analysis questions
+      value: Enable LLMs to search and analyze SEC filings
+      cache_dir: cache
+      retrieval_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_model_server:
+        type: responses_api_models
+        name: search_judge_model
+      judge_responses_create_params:
+        input: []
+
+finance_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: finance_agent_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/finance_agent/data/example.jsonl
