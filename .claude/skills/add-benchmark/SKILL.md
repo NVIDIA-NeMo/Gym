@@ -203,7 +203,7 @@ ng_collect_rollouts +agent_name=my_benchmark_simple_agent \
   "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
 
 # Compute per-task pass rates
-ng_profile +input_jsonl_fpath=resources_servers/my_benchmark/data/my_dataset.jsonl \
+ng_reward_profile +input_jsonl_fpath=resources_servers/my_benchmark/data/my_dataset.jsonl \
   +rollouts_jsonl_fpath=results/rollouts.jsonl \
   +output_jsonl_fpath=results/profiled.jsonl \
   +pass_threshold=1.0

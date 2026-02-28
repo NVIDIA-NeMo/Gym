@@ -16,6 +16,7 @@ from contextlib import nullcontext as does_not_raise
 from socket import gethostbyname, gethostname
 from unittest.mock import MagicMock
 
+from omegaconf import OmegaConf
 from pytest import MonkeyPatch, raises
 
 import nemo_gym.global_config
@@ -24,6 +25,7 @@ from nemo_gym import CACHE_DIR, PARENT_DIR
 from nemo_gym.global_config import (
     DEFAULT_HEAD_SERVER_PORT,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
+    GlobalConfigDictParser,
     find_open_port,
     get_first_server_config_dict,
     get_global_config_dict,
@@ -33,7 +35,7 @@ from nemo_gym.server_utils import (
 )
 
 
-class TestServerUtils:
+class TestGlobalConfig:
     def _mock_versions_for_testing(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(nemo_gym.global_config, "openai_version", "test openai version")
         monkeypatch.setattr(nemo_gym.global_config, "ray_version", "test ray version")
@@ -663,3 +665,25 @@ class TestServerUtils:
 
         assert global_config_dict["head_server"]["host"] == expected_ip
         assert global_config_dict["test_resource"]["responses_api_models"]["test_model"]["host"] == expected_ip
+
+    def test_recursively_hide_secrets(self) -> None:
+        dict_config = DictConfig(
+            {
+                "dict": {
+                    "key": "key",
+                    "not": "not",
+                },
+                "list": [
+                    {"key": "key", "not": "not"},
+                ],
+                "key": "key",
+                "not": "not",
+            }
+        )
+        GlobalConfigDictParser()._recursively_hide_secrets(dict_config)
+        assert OmegaConf.to_container(dict_config) == {
+            "dict": {"key": "****", "not": "not"},
+            "list": [{"key": "****", "not": "not"}],
+            "key": "****",
+            "not": "not",
+        }

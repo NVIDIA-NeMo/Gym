@@ -188,9 +188,74 @@ ng_collect_rollouts \
     +num_samples_in_parallel=10
 ```
 
+### `ng_e2e_collect_rollouts` / `nemo_gym_e2e_collect_rollouts`
+
+Spin up all necessary servers and perform a batch of rollout collection using each dataset inside the provided configs.
+
+**Parameters**
+
+```{list-table}
+:header-rows: 1
+:widths: 25 15 60
+
+* - Parameter
+  - Type
+  - Description
+* - `output_jsonl_fpath`
+  - str
+  - The output data JSONL file path.
+* - `num_samples_in_parallel`
+  - Optional[int]
+  - Limit the number of concurrent samples running at once.
+* - `responses_create_params`
+  - Dict
+  - Overrides for the `responses_create_params`, such as `temperature` and `max_output_tokens`.
+```
+
+**Examples**
+
+```bash
+ng_e2e_collect_rollouts \
+    +output_jsonl_fpath=weather_rollouts.jsonl \
+    +num_samples_in_parallel=10
+```
+
+```bash
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/math_with_judge/configs/math_with_judge.yaml"
+ng_e2e_collect_rollouts \
+    "+config_paths=[${config_paths}]" \
+    ++wandb_project= \
+    ++wandb_name= \
+    ++wandb_dir= \
+    ++output_jsonl_fpath=results/test_e2e_rollout_collection/aime24.jsonl \
+    ++split=validation
+```
+
+Example using GPT-OSS 120B remote vLLM endpoint
+```bash
+experiment_name=rollouts/test_001
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/math_with_judge/configs/math_with_judge.yaml"
+ng_e2e_collect_rollouts \
+    "+config_paths=[${config_paths}]" \
+    +skip_venv_if_present=true \
+    +wandb_project=gym-dev \
+    +wandb_name=$(date +%Y%m%d)/$experiment_name \
+    ++output_jsonl_fpath=results/$experiment_name.jsonl \
+    ++overwrite_metrics_conflicts=true \
+    ++split=validation \
+    ++policy_model_name=openai/gpt-oss-120b \
+    ++policy_api_key=dummy_key \
+    ++policy_base_url=http://0.0.0.0:10240/v1 \
+    ++responses_create_params.reasoning.effort=low \
+    ++responses_create_params.temperature=1.0 \
+    ++responses_create_params.top_p=1.0 &> eval_gptoss120b.log &
+```
+
 ---
 
-### `ng_profile` / `nemo_gym_profile`
+### `ng_reward_profile` / `nemo_gym_reward_profile`
 
 Computes statistics on rewards and task difficulty for rollouts collected with `ng_collect_rollouts` with `num_repeats` > 1. This outputs a new "reward profiled" dataset, where each task in the dataset has metrics like the average reward, standard deviation, min/max, and pass rate. This is useful in filtering tasks before training for difficulty, variance, or creating a curriculum. 
 
@@ -230,7 +295,7 @@ Each output row contains all original task fields plus:
 **Example**
 
 ```bash
-ng_profile \
+ng_reward_profile \
     +input_jsonl_fpath=tasks.jsonl \
     +rollouts_jsonl_fpath=rollouts.jsonl \
     +output_jsonl_fpath=profiled_tasks.jsonl \
@@ -265,6 +330,9 @@ Prepare and validate training data, generating metrics and statistics for datase
 * - `should_download`
   - bool
   - Whether to automatically download missing datasets from remote registries. Default: `False`.
+* - `overwrite_metrics_conflicts`
+  - bool
+  - Whether or not to overwrite metrics conflicts. Default: `False`.
 ```
 
 **Example**
@@ -651,3 +719,12 @@ ng_collect_rollouts +h=true
 ```
 
 This will display all available configuration parameters and their descriptions.
+
+---
+
+## Re-install Gym and dependencies
+```bash
+ng_reinstall
+```
+
+This will re-install Gym and its dependencies into the currently activated Python virtual environment.

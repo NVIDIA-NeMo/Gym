@@ -13,7 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+from asyncio import Future
 from pathlib import Path
+
+import orjson
 
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
@@ -37,10 +40,224 @@ class TestRolloutCollection:
 
         rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
         assert rows == [
-            {"_task_index": 0, "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1}, "x": 0},
-            {"_task_index": 0, "responses_create_params": {"input": [], "seed": 1, "temperature": 0.1}, "x": 0},
-            {"_task_index": 1, "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1}, "x": 1},
-            {"_task_index": 1, "responses_create_params": {"input": [], "seed": 1, "temperature": 0.1}, "x": 1},
-            {"_task_index": 2, "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1}, "x": 2},
-            {"_task_index": 2, "responses_create_params": {"input": [], "seed": 1, "temperature": 0.1}, "x": 2},
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                "x": 0,
+                "agent_ref": {"name": "my_agent"},
+            },
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 1,
+                "responses_create_params": {"input": [], "seed": 1, "temperature": 0.1},
+                "x": 0,
+                "agent_ref": {"name": "my_agent"},
+            },
+            {
+                "_ng_task_index": 1,
+                "_ng_rollout_index": 0,
+                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                "x": 1,
+                "agent_ref": {"name": "my_agent"},
+            },
+            {
+                "_ng_task_index": 1,
+                "_ng_rollout_index": 1,
+                "responses_create_params": {"input": [], "seed": 1, "temperature": 0.1},
+                "x": 1,
+                "agent_ref": {"name": "my_agent"},
+            },
+            {
+                "_ng_task_index": 2,
+                "_ng_rollout_index": 0,
+                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
+                "x": 2,
+                "agent_ref": {"name": "my_agent"},
+            },
+            {
+                "_ng_task_index": 2,
+                "_ng_rollout_index": 1,
+                "responses_create_params": {"input": [], "seed": 1, "temperature": 0.1},
+                "x": 2,
+                "agent_ref": {"name": "my_agent"},
+            },
         ]
+
+    async def test_run_from_config_sanity(self, tmp_path: Path) -> None:
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        samples = [
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}, "x": i})
+            for i in range(10)
+        ]
+        input_jsonl_fpath.write_text("\n".join(samples) + "\n")
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            limit=3,
+            num_repeats=2,
+        )
+
+        class TestRolloutCollectionHelper(RolloutCollectionHelper):
+            def run_examples(
+                self,
+                examples: list[dict],
+                *args,
+                **kwargs,
+            ):
+                futures = []
+                for example in examples:
+                    future = Future()
+                    # (row, result)
+                    future.set_result((example, {"response": {"usage": {"abc usage": 1}}}))
+                    futures.append(future)
+
+                return futures
+
+        actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
+
+        expected_results = [
+            {"_ng_task_index": 0, "_ng_rollout_index": 0, "response": {"usage": {"abc usage": 1}}},
+            {"_ng_task_index": 0, "_ng_rollout_index": 1, "response": {"usage": {"abc usage": 1}}},
+            {"_ng_task_index": 1, "_ng_rollout_index": 0, "response": {"usage": {"abc usage": 1}}},
+            {"_ng_task_index": 1, "_ng_rollout_index": 1, "response": {"usage": {"abc usage": 1}}},
+            {"_ng_task_index": 2, "_ng_rollout_index": 0, "response": {"usage": {"abc usage": 1}}},
+            {"_ng_task_index": 2, "_ng_rollout_index": 1, "response": {"usage": {"abc usage": 1}}},
+        ]
+
+        assert expected_results == actual_returned_results
+
+        expected_materialized_inputs_len = 6
+        with (tmp_path / "output_materialized_inputs.jsonl").open() as f:
+            actual_materialized_inputs_len = len(list(f))
+        assert expected_materialized_inputs_len == actual_materialized_inputs_len
+
+        with output_jsonl_fpath.open() as f:
+            actual_written_results = [json.loads(line) for line in f]
+        assert expected_results == actual_written_results
+
+        expected_reward_profiling_output_len = 3
+        reward_profiling_fpath = tmp_path / "output_reward_profiling.jsonl"
+        with reward_profiling_fpath.open() as f:
+            actual_reward_profiling_output_len = len(list(f))
+        assert expected_reward_profiling_output_len == actual_reward_profiling_output_len
+
+        agent_level_metrics_fpath = tmp_path / "output_agent_metrics.json"
+        actual_agent_level_metrics = json.loads(agent_level_metrics_fpath.read_text())
+        expected_agent_level_metrics = [
+            {
+                "mean/abc usage": 1.0,
+                "max/abc usage": 1,
+                "min/abc usage": 1,
+                "median/abc usage": 1.0,
+                "std/abc usage": 0.0,
+                "agent_ref": {"name": "my agent name"},
+            }
+        ]
+        assert expected_agent_level_metrics == actual_agent_level_metrics
+
+    async def test_run_from_config_sorted(self, tmp_path: Path) -> None:
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        samples = [
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}, "x": i})
+            for i in range(10)
+        ]
+        input_jsonl_fpath.write_text("\n".join(samples) + "\n")
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            limit=3,
+            num_repeats=2,
+        )
+
+        class TestRolloutCollectionHelper(RolloutCollectionHelper):
+            def run_examples(
+                self,
+                examples: list[dict],
+                *args,
+                **kwargs,
+            ):
+                futures = []
+                for example in examples:
+                    future = Future()
+                    # (row, result)
+                    future.set_result((example, {"response": {"usage": {"abc usage": 1}}}))
+                    futures.append(future)
+
+                # Reverse!
+                futures = reversed(futures)
+
+                return futures
+
+        actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
+
+        expected_results = [
+            {"_ng_task_index": 0, "_ng_rollout_index": 0, "response": {"usage": {"abc usage": 1}}},
+            {"_ng_task_index": 0, "_ng_rollout_index": 1, "response": {"usage": {"abc usage": 1}}},
+            {"_ng_task_index": 1, "_ng_rollout_index": 0, "response": {"usage": {"abc usage": 1}}},
+            {"_ng_task_index": 1, "_ng_rollout_index": 1, "response": {"usage": {"abc usage": 1}}},
+            {"_ng_task_index": 2, "_ng_rollout_index": 0, "response": {"usage": {"abc usage": 1}}},
+            {"_ng_task_index": 2, "_ng_rollout_index": 1, "response": {"usage": {"abc usage": 1}}},
+        ]
+
+        assert expected_results == actual_returned_results
+
+    def test_load_from_cache(self, tmp_path: Path) -> None:
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        materialized_inputs_jsonl_fpath = tmp_path / "output_materialized_inputs.jsonl"
+
+        materialized_inputs = [
+            {"_ng_task_index": 0, "_ng_rollout_index": 0, "input": True},
+            {"_ng_task_index": 0, "_ng_rollout_index": 1, "input": True},
+            {"_ng_task_index": 1, "_ng_rollout_index": 0, "input": True},
+            {"_ng_task_index": 1, "_ng_rollout_index": 1, "input": True},
+            {"_ng_task_index": 2, "_ng_rollout_index": 0, "input": True},
+            {"_ng_task_index": 2, "_ng_rollout_index": 1, "input": True},
+        ]
+        materialized_inputs_jsonl_fpath.write_bytes(b"\n".join(map(orjson.dumps, materialized_inputs)) + b"\n")
+
+        outputs = [
+            {"_ng_task_index": 0, "_ng_rollout_index": 0, "output": True},
+            {"_ng_task_index": 0, "_ng_rollout_index": 1, "output": True},
+            {"_ng_task_index": 1, "_ng_rollout_index": 1, "output": True},
+        ]
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        output_jsonl_fpath.write_bytes(b"\n".join(map(orjson.dumps, outputs)) + b"\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            limit=3,
+            num_repeats=2,
+        )
+
+        actual_returned_results = RolloutCollectionHelper()._load_from_cache(config)
+
+        expected_results = (
+            [
+                {"_ng_task_index": 1, "_ng_rollout_index": 0, "input": True},
+                {"_ng_task_index": 2, "_ng_rollout_index": 0, "input": True},
+                {"_ng_task_index": 2, "_ng_rollout_index": 1, "input": True},
+            ],
+            [
+                {"_ng_task_index": 0, "_ng_rollout_index": 0, "input": True},
+                {"_ng_task_index": 0, "_ng_rollout_index": 1, "input": True},
+                {"_ng_task_index": 1, "_ng_rollout_index": 1, "input": True},
+            ],
+            [
+                {"_ng_task_index": 0, "_ng_rollout_index": 0, "output": True},
+                {"_ng_task_index": 0, "_ng_rollout_index": 1, "output": True},
+                {"_ng_task_index": 1, "_ng_rollout_index": 1, "output": True},
+            ],
+            [
+                [orjson.dumps({"_ng_task_index": 0, "_ng_rollout_index": 0, "output": True})],
+                [orjson.dumps({"_ng_task_index": 0, "_ng_rollout_index": 1, "output": True})],
+                [orjson.dumps({"_ng_task_index": 1, "_ng_rollout_index": 1, "output": True})],
+            ],
+        )
+
+        assert expected_results == actual_returned_results

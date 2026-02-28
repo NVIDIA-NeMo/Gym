@@ -40,7 +40,7 @@ pre-commit run --all-files
 ng_collect_rollouts +agent_name=<agent> +input_jsonl_fpath=<data.jsonl> +output_jsonl_fpath=<output.jsonl> +num_repeats=5 "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
 
 # Profile results (compute per-task pass rates)
-ng_profile +input_jsonl_fpath=<data.jsonl> +rollouts_jsonl_fpath=<rollouts.jsonl> +output_jsonl_fpath=<profiled.jsonl> +pass_threshold=1.0
+ng_reward_profile +input_jsonl_fpath=<data.jsonl> +rollouts_jsonl_fpath=<rollouts.jsonl> +output_jsonl_fpath=<profiled.jsonl> +pass_threshold=1.0
 
 # Check server health
 ng_status
@@ -288,7 +288,7 @@ ng_run "+config_paths=[resources_servers/my_server/configs/my_server.yaml,respon
 ng_collect_rollouts +agent_name=my_agent +input_jsonl_fpath=<data.jsonl> +output_jsonl_fpath=results/rollouts.jsonl +num_repeats=5 "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
 
 # Compute per-task pass rates
-ng_profile +input_jsonl_fpath=<data.jsonl> +rollouts_jsonl_fpath=results/rollouts.jsonl +output_jsonl_fpath=results/profiled.jsonl +pass_threshold=1.0
+ng_reward_profile +input_jsonl_fpath=<data.jsonl> +rollouts_jsonl_fpath=results/rollouts.jsonl +output_jsonl_fpath=results/profiled.jsonl +pass_threshold=1.0
 
 # Aggregate metrics (pass@1 = avg_reward, pass@k from max_reward)
 python scripts/print_aggregate_results.py +jsonl_fpath=results/profiled.jsonl
