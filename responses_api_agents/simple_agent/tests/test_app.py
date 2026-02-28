@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 from unittest.mock import AsyncMock, MagicMock, call
 
 from fastapi.testclient import TestClient
@@ -95,7 +96,7 @@ class TestApp:
         }
 
         dotjson_mock = AsyncMock()
-        dotjson_mock.json.return_value = mock_response_data
+        dotjson_mock.read.return_value = json.dumps(mock_response_data)
         dotjson_mock.cookies = MagicMock()
         server.server_client.post.return_value = dotjson_mock
 
@@ -229,7 +230,7 @@ class TestApp:
         }
 
         dotjson_mock = AsyncMock()
-        dotjson_mock.json.side_effect = [mock_response_reasoning_data, mock_response_chat_data]
+        dotjson_mock.read.side_effect = [json.dumps(mock_response_reasoning_data), json.dumps(mock_response_chat_data)]
         dotjson_mock.cookies = MagicMock()
         server.server_client.post.return_value = dotjson_mock
 
@@ -247,7 +248,7 @@ class TestApp:
                 cookies=None,
             ),
             call().ok.__bool__(),
-            call().json(),
+            call().read(),
             call(
                 server_name="my server name",
                 url_path="/v1/responses",
@@ -266,7 +267,7 @@ class TestApp:
                 cookies=dotjson_mock.cookies,
             ),
             call().ok.__bool__(),
-            call().json(),
+            call().read(),
             call().cookies.items(),
             call().cookies.items().__iter__(),
             call().cookies.items().__len__(),

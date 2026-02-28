@@ -15,7 +15,6 @@
         "Average": 0.0,
         "Min": 0.0,
         "Max": 0.0,
-        "Median": 0.0,
         "Standard deviation": 0.0
     },
     "Json-dumped number of words (proxy for token count)": {
@@ -23,7 +22,6 @@
         "Average": 51.46,
         "Min": 20.0,
         "Max": 1186.0,
-        "Median": 46.78,
         "Standard deviation": 22.03
     },
     "Number of turns": {
@@ -31,7 +29,6 @@
         "Average": 1.0,
         "Min": 1.0,
         "Max": 1.0,
-        "Median": 1.0,
         "Standard deviation": 0.0
     },
     "Temperature": {
@@ -39,7 +36,6 @@
         "Average": 0.0,
         "Min": 0.0,
         "Max": 0.0,
-        "Median": 0.0,
         "Standard deviation": 0.0
     },
     "question": {

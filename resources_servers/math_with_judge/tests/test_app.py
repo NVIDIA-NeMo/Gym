@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 from copy import deepcopy
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -119,12 +120,12 @@ class TestApp:
         resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=server_mock)
         response_mock = AsyncMock()
         post_mock = MagicMock()
-        post_mock.json = response_mock
+        post_mock.read = response_mock
         server_mock.post = AsyncMock(return_value=post_mock)
         not_equal_item = self._create_response_output_message(
             f"{LibraryJudgeMathResourcesServer.JUDGE_NOT_EQUAL_LABEL} done"
         )
-        response_mock.return_value = self._create_response("verify_not_equal_id", not_equal_item)
+        response_mock.return_value = json.dumps(self._create_response("verify_not_equal_id", not_equal_item))
 
         question = "Simplify the expression x + 7 - 6"
         expected_answer = "x + 1"
@@ -216,7 +217,7 @@ class TestApp:
         resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=server_mock)
         response_mock = AsyncMock()
         post_mock = MagicMock()
-        post_mock.json = response_mock
+        post_mock.read = response_mock
         server_mock.post = AsyncMock(return_value=post_mock)
 
         (
@@ -233,7 +234,7 @@ class TestApp:
         not_equal_item = self._create_response_output_message(
             f"Conclusion: {LibraryJudgeMathResourcesServer.JUDGE_NOT_EQUAL_LABEL}"
         )
-        response_mock.side_effect = [self._create_response("verify_answer_not_equal_id", not_equal_item)]
+        response_mock.side_effect = [json.dumps(self._create_response("verify_answer_not_equal_id", not_equal_item))]
         not_equal_question = "What is 1 + 1?"
         not_equal_expected_answer = "2"
         not_equal_generated_answer = "3"
@@ -268,8 +269,8 @@ class TestApp:
             LibraryJudgeMathResourcesServer.JUDGE_EQUAL_LABEL
         )
         response_mock.side_effect = [
-            self._create_response("verify_answer_first_judge_equal_id", first_judge_equal_item),
-            self._create_response("verify_answer_second_judge_equal_id", second_judge_equal_item),
+            json.dumps(self._create_response("verify_answer_first_judge_equal_id", first_judge_equal_item)),
+            json.dumps(self._create_response("verify_answer_second_judge_equal_id", second_judge_equal_item)),
         ]
         judge_equal_question = "What is 14 divided by 10?"
         judge_equal_expected_answer = "1.4"
@@ -348,13 +349,13 @@ class TestApp:
         resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=server_mock)
         response_mock = AsyncMock()
         post_mock = MagicMock()
-        post_mock.json = response_mock
+        post_mock.read = response_mock
         server_mock.post = AsyncMock(return_value=post_mock)
 
         first_not_equal_item = self._create_response_output_message(
             f"{LibraryJudgeMathResourcesServer.JUDGE_NOT_EQUAL_LABEL} is the evaluation"
         )
-        response_mock.side_effect = [self._create_response("first_not_equal_id", first_not_equal_item)]
+        response_mock.side_effect = [json.dumps(self._create_response("first_not_equal_id", first_not_equal_item))]
         first_not_equal_question = "What is 2 + 2?"
         first_not_equal_expected_answer = "4"
         first_not_equal_generated_answer = "5"
@@ -383,8 +384,8 @@ class TestApp:
             f"I conclude that {LibraryJudgeMathResourcesServer.JUDGE_EQUAL_LABEL}"
         )
         response_mock.side_effect = [
-            self._create_response("second_equal_first_id", first_equal_item),
-            self._create_response("second_equal_second_id", second_equal_item),
+            json.dumps(self._create_response("second_equal_first_id", first_equal_item)),
+            json.dumps(self._create_response("second_equal_second_id", second_equal_item)),
         ]
         second_equal_question = "What is 3 divided by 6?"
         second_equal_expected_answer = "1/2"
@@ -422,8 +423,8 @@ class TestApp:
             LibraryJudgeMathResourcesServer.JUDGE_NOT_EQUAL_LABEL
         )
         response_mock.side_effect = [
-            self._create_response("second_not_equal_first_id", second_equal_item),
-            self._create_response("second_not_equal_second_id", second_not_equal_item),
+            json.dumps(self._create_response("second_not_equal_first_id", second_equal_item)),
+            json.dumps(self._create_response("second_not_equal_second_id", second_not_equal_item)),
         ]
         second_not_equal_question = "What is 4 times 5?"
         second_not_equal_expected_answer = "20"
@@ -489,15 +490,15 @@ class TestApp:
         resources_server = LibraryJudgeMathResourcesServer(config=judge_config, server_client=server_mock)
         response_mock = AsyncMock()
         post_mock = MagicMock()
-        post_mock.json = response_mock
+        post_mock.read = response_mock
         server_mock.post = AsyncMock(return_value=post_mock)
 
-        response_mock.return_value = {}
+        response_mock.return_value = json.dumps({})
         with raises(ValidationError, match="Field required"):
             await resources_server._generate_judge_evaluation("invalid_response", "invalid_1", "invalid_2")
 
         reasoning_item = NeMoGymResponseReasoningItem(id="reasoning_item", summary=[], type="reasoning")
-        response_mock.return_value = self._create_response("reasoning_id", reasoning_item)
+        response_mock.return_value = json.dumps(self._create_response("reasoning_id", reasoning_item))
         await self._generate_and_check_judge_evaluation(
             resources_server,
             "reasoning_question",
@@ -515,13 +516,13 @@ class TestApp:
             status="completed",
             type="message",
         )
-        response_mock.return_value = self._create_response("refusal_id", refusal_item)
+        response_mock.return_value = json.dumps(self._create_response("refusal_id", refusal_item))
         await self._generate_and_check_judge_evaluation(
             resources_server, "refusal_question", False, "refusal_id", refusal_item
         )
 
         no_evaluation_item = self._create_response_output_message("no evaluation")
-        response_mock.return_value = self._create_response("no_evaluation_id", no_evaluation_item)
+        response_mock.return_value = json.dumps(self._create_response("no_evaluation_id", no_evaluation_item))
         await self._generate_and_check_judge_evaluation(
             resources_server,
             "no_evaluation_question",
@@ -533,7 +534,7 @@ class TestApp:
         not_equal_item = self._create_response_output_message(
             f"Evaluation: {LibraryJudgeMathResourcesServer.JUDGE_NOT_EQUAL_LABEL}"
         )
-        response_mock.return_value = self._create_response("not_equal_id", not_equal_item)
+        response_mock.return_value = json.dumps(self._create_response("not_equal_id", not_equal_item))
         await self._generate_and_check_judge_evaluation(
             resources_server,
             "not_equal_question",
@@ -545,7 +546,7 @@ class TestApp:
         equal_item = self._create_response_output_message(
             f"The evaluation is {LibraryJudgeMathResourcesServer.JUDGE_EQUAL_LABEL}"
         )
-        response_mock.return_value = self._create_response("equal_id", equal_item)
+        response_mock.return_value = json.dumps(self._create_response("equal_id", equal_item))
         await self._generate_and_check_judge_evaluation(
             resources_server, "equal_question", True, "equal_id", equal_item
         )
@@ -554,7 +555,7 @@ class TestApp:
             f"First {LibraryJudgeMathResourcesServer.JUDGE_EQUAL_LABEL}, "
             f"then {LibraryJudgeMathResourcesServer.JUDGE_NOT_EQUAL_LABEL}"
         )
-        response_mock.return_value = self._create_response("equal_first_id", equal_first_item)
+        response_mock.return_value = json.dumps(self._create_response("equal_first_id", equal_first_item))
         await self._generate_and_check_judge_evaluation(
             resources_server,
             "equal_first_question",
@@ -567,7 +568,7 @@ class TestApp:
             f"{LibraryJudgeMathResourcesServer.JUDGE_NOT_EQUAL_LABEL} "
             f"{LibraryJudgeMathResourcesServer.JUDGE_EQUAL_LABEL}"
         )
-        response_mock.return_value = self._create_response("not_equal_first_id", not_equal_first_item)
+        response_mock.return_value = json.dumps(self._create_response("not_equal_first_id", not_equal_first_item))
         await self._generate_and_check_judge_evaluation(
             resources_server,
             "not_equal_first_question",
