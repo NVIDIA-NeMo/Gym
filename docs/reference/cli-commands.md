@@ -165,6 +165,9 @@ Perform a batch of rollout collection.
 * - `num_repeats`
   - Optional[int]
   - The number of times to repeat each example to run. Useful if you want to calculate mean@k, such as mean@4 or mean@16.
+* - `num_repeats_add_seed`
+  - bool
+  - When num_repeats > 1, add a "seed" parameter on the Responses create params.
 * - `num_samples_in_parallel`
   - Optional[int]
   - Limit the number of concurrent samples running at once.
@@ -183,6 +186,120 @@ ng_collect_rollouts \
     +limit=100 \
     +num_repeats=4 \
     +num_samples_in_parallel=10
+```
+
+### `ng_e2e_collect_rollouts` / `nemo_gym_e2e_collect_rollouts`
+
+Spin up all necessary servers and perform a batch of rollout collection using each dataset inside the provided configs.
+
+**Parameters**
+
+```{list-table}
+:header-rows: 1
+:widths: 25 15 60
+
+* - Parameter
+  - Type
+  - Description
+* - `output_jsonl_fpath`
+  - str
+  - The output data JSONL file path.
+* - `num_samples_in_parallel`
+  - Optional[int]
+  - Limit the number of concurrent samples running at once.
+* - `responses_create_params`
+  - Dict
+  - Overrides for the `responses_create_params`, such as `temperature` and `max_output_tokens`.
+```
+
+**Examples**
+
+```bash
+ng_e2e_collect_rollouts \
+    +output_jsonl_fpath=weather_rollouts.jsonl \
+    +num_samples_in_parallel=10
+```
+
+```bash
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/math_with_judge/configs/math_with_judge.yaml"
+ng_e2e_collect_rollouts \
+    "+config_paths=[${config_paths}]" \
+    ++wandb_project= \
+    ++wandb_name= \
+    ++wandb_dir= \
+    ++output_jsonl_fpath=results/test_e2e_rollout_collection/aime24.jsonl \
+    ++split=validation
+```
+
+Example using GPT-OSS 120B remote vLLM endpoint
+```bash
+experiment_name=rollouts/test_001
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/math_with_judge/configs/math_with_judge.yaml"
+ng_e2e_collect_rollouts \
+    "+config_paths=[${config_paths}]" \
+    +skip_venv_if_present=true \
+    +wandb_project=gym-dev \
+    +wandb_name=$(date +%Y%m%d)/$experiment_name \
+    ++output_jsonl_fpath=results/$experiment_name.jsonl \
+    ++overwrite_metrics_conflicts=true \
+    ++split=validation \
+    ++policy_model_name=openai/gpt-oss-120b \
+    ++policy_api_key=dummy_key \
+    ++policy_base_url=http://0.0.0.0:10240/v1 \
+    ++responses_create_params.reasoning.effort=low \
+    ++responses_create_params.temperature=1.0 \
+    ++responses_create_params.top_p=1.0 &> eval_gptoss120b.log &
+```
+
+---
+
+### `ng_reward_profile` / `nemo_gym_reward_profile`
+
+Computes statistics on rewards and task difficulty for rollouts collected with `ng_collect_rollouts` with `num_repeats` > 1. This outputs a new "reward profiled" dataset, where each task in the dataset has metrics like the average reward, standard deviation, min/max, and pass rate. This is useful in filtering tasks before training for difficulty, variance, or creating a curriculum. 
+
+**Parameters**
+
+```{list-table}
+:header-rows: 1
+:widths: 25 15 60
+
+* - Parameter
+  - Type
+  - Description
+* - `input_jsonl_fpath`
+  - str
+  - Path to the original task dataset JSONL file.
+* - `rollouts_jsonl_fpath`
+  - str
+  - Path to the rollouts file from `ng_collect_rollouts` (must have been run with `num_repeats` > 1).
+* - `output_jsonl_fpath`
+  - str
+  - Output file path for the reward profiled dataset.
+* - `pass_threshold`
+  - Optional[float]
+  - Reward threshold for computing pass rate. If not specified, pass rate metrics are not included.
+```
+
+**Output Fields**
+
+Each output row contains all original task fields plus:
+- `avg_reward`: Average reward across all rollouts
+- `std_reward`: Standard deviation of rewards
+- `min_reward`: Minimum reward observed
+- `max_reward`: Maximum reward observed
+- `total_samples`: Number of rollout samples
+- `pass_rate`, `pass_rate_total`, `pass_rate_passed`, `pass_threshold`: (Only if `pass_threshold` is specified)
+
+**Example**
+
+```bash
+ng_reward_profile \
+    +input_jsonl_fpath=tasks.jsonl \
+    +rollouts_jsonl_fpath=rollouts.jsonl \
+    +output_jsonl_fpath=profiled_tasks.jsonl \
+    +pass_threshold=1.0
 ```
 
 ---
@@ -213,6 +330,9 @@ Prepare and validate training data, generating metrics and statistics for datase
 * - `should_download`
   - bool
   - Whether to automatically download missing datasets from remote registries. Default: `False`.
+* - `overwrite_metrics_conflicts`
+  - bool
+  - Whether or not to overwrite metrics conflicts. Default: `False`.
 ```
 
 **Example**
@@ -223,45 +343,6 @@ responses_api_models/openai_model/configs/openai_model.yaml"
 ng_prepare_data "+config_paths=[${config_paths}]" \
     +output_dirpath=data/example_multi_step \
     +mode=example_validation
-```
-
----
-
-### `ng_viewer` / `nemo_gym_viewer`
-
-Launch a Gradio interface to view and explore dataset rollouts interactively.
-
-**Parameters**
-
-```{list-table}
-:header-rows: 1
-:widths: 20 10 70
-
-* - Parameter
-  - Type
-  - Description
-* - `jsonl_fpath`
-  - str
-  - Filepath to a local JSONL file to view.
-* - `server_host`
-  - str
-  - Network address where the viewer accepts requests. Defaults to `"127.0.0.1"` (localhost only). Set to `"0.0.0.0"` to accept requests from anywhere.
-* - `server_port`
-  - int
-  - Port where the viewer accepts requests. Defaults to `7860`. If the specified port is unavailable, Gradio will search for the next available port.
-```
-
-**Examples**
-
-```bash
-# Launch viewer with default settings (accessible from localhost only)
-ng_viewer +jsonl_fpath=weather_rollouts.jsonl
-
-# Accept requests from anywhere (e.g., for remote access)
-ng_viewer +jsonl_fpath=weather_rollouts.jsonl +server_host=0.0.0.0
-
-# Use a custom port
-ng_viewer +jsonl_fpath=weather_rollouts.jsonl +server_port=8080
 ```
 
 ---
@@ -638,3 +719,12 @@ ng_collect_rollouts +h=true
 ```
 
 This will display all available configuration parameters and their descriptions.
+
+---
+
+## Re-install Gym and dependencies
+```bash
+ng_reinstall
+```
+
+This will re-install Gym and its dependencies into the currently activated Python virtual environment.

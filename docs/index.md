@@ -8,6 +8,7 @@ tags:
   - llm-training
   - rollout-collection
   - agent-environments
+  - rl-environments
 personas:
   - Data Scientists
   - Machine Learning Engineers
@@ -33,7 +34,7 @@ A training environment consists of three server components: **Agents** orchestra
 Quickstart
 ```
 
-```{button-ref} tutorials/index
+```{button-ref} environment-tutorials/index
 :ref-type: doc
 :color: secondary
 :class: sd-rounded-pill
@@ -64,15 +65,15 @@ Motivation and benefits of NeMo Gym.
 :link-type: doc
 Core components, configuration, verification and RL terminology.
 +++
-{bdg-secondary}`agents` {bdg-secondary}`models` {bdg-secondary}`resources`
+{bdg-secondary}`environments` {bdg-secondary}`agents` {bdg-secondary}`models` {bdg-secondary}`resources`
 :::
 
 :::{grid-item-card} {octicon}`globe;1.5em;sd-mr-1` Ecosystem
 :link: about/ecosystem
 :link-type: doc
-Understand how NeMo Gym fits within the NVIDIA NeMo Framework.
+Understand how NeMo Gym fits within the RL environment ecosystem.
 +++
-{bdg-secondary}`nemo-framework`
+{bdg-secondary}`ecosystem` {bdg-secondary}`integrations`
 :::
 
 ::::
@@ -87,65 +88,133 @@ Install and run NeMo Gym to start collecting rollouts.
 :::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` Quickstart
 :link: get-started/index
 :link-type: doc
-Run a training environment and start collecting rollouts in under 5 minutes.
+Install, start servers, and collect your first rollouts in one page.
++++
+{bdg-primary}`start here` {bdg-secondary}`5 min`
 :::
 
 :::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Detailed Setup Guide
 :link: get-started/detailed-setup
 :link-type: doc
-Detailed walkthrough of running your first training environment.
+Step-by-step installation with requirements, configuration, and troubleshooting.
 +++
-{bdg-secondary}`environment` {bdg-secondary}`configuration`
+{bdg-secondary}`15 min` {bdg-secondary}`environment` {bdg-secondary}`configuration`
 :::
 
 :::{grid-item-card} {octicon}`iterations;1.5em;sd-mr-1` Rollout Collection
 :link: get-started/rollout-collection
 :link-type: doc
-Collect and view rollouts
+Generate batches of scored interactions and view them with the rollout viewer.
 +++
-{bdg-secondary}`rollouts` {bdg-secondary}`training-data`
+{bdg-secondary}`10 min` {bdg-secondary}`rollouts` {bdg-secondary}`training-data`
 :::
 
 ::::
 
-<!-- This section needs to match the content in docs/tutorials/index.md -->
-## Tutorials
+## Environment Configuration
 
-Hands-on tutorials to build and customize your training environments.
+Configure and customize environment components and prepare datasets.
 
 ::::{grid} 1 2 2 2
 :gutter: 1 1 1 2
 
-:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build a Resource Server
-:link: tutorials/creating-resource-server
+:::{grid-item-card} {octicon}`cpu;1.5em;sd-mr-1` Model Server
+:link: model-server/index
 :link-type: doc
-Implement or integrate existing tools and define task verification logic.
+Configure LLM inference backends including vLLM.
 +++
-{bdg-primary}`beginner` {bdg-secondary}`30 min` {bdg-secondary}`custom-environments` {bdg-secondary}`tools`
+{bdg-secondary}`inference` {bdg-secondary}`vllm`
 :::
 
-:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` Offline Training with Rollouts
+:::{grid-item-card} {octicon}`database;1.5em;sd-mr-1` Data
+:link: data/index
+:link-type: doc
+Prepare and validate training datasets.
++++
+{bdg-secondary}`datasets` {bdg-secondary}`jsonl`
+:::
+
+::::
+
+## Environment Tutorials
+
+Learn how to build custom training environments for various RL scenarios.
+
+::::{grid} 1 2 2 2
+:gutter: 1 1 1 2
+
+:::{grid-item-card} {octicon}`plus-circle;1.5em;sd-mr-1` Creating Environments
+:link: environment-tutorials/creating-training-environment
+:link-type: doc
+Build a complete training environment from scratch.
++++
+{bdg-primary}`beginner` {bdg-secondary}`foundational`
+:::
+
+:::{grid-item-card} {octicon}`stack;1.5em;sd-mr-1` Multi-Environment Training
+:link: environment-tutorials/multi-environment-training
+:link-type: doc
+Run multiple training environments simultaneously for rollout collection.
++++
+{bdg-secondary}`multi-environment` {bdg-secondary}`multi-verifier`
+:::
+
+::::
+
+```{button-ref} environment-tutorials/index
+:ref-type: doc
+:color: secondary
+:class: sd-rounded-pill
+
+View all environment tutorials →
+```
+
+## Training Tutorials
+
+Train models using NeMo Gym with your preferred RL framework.
+
+::::{grid} 1 2 2 2
+:gutter: 1 1 1 2
+
+:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` RL (GRPO)
+:link: training-tutorials/index
+:link-type: doc
+Hands-on tutorials with NeMo RL, TRL, Unsloth, and more.
++++
+{bdg-secondary}`grpo`
+:::
+
+:::{grid-item-card} {octicon}`file;1.5em;sd-mr-1` SFT & DPO
 :link: offline-training-w-rollouts
 :link-type: ref
-Transform rollouts into training data for {term}`supervised fine-tuning (SFT) <SFT (Supervised Fine-Tuning)>` and {term}`direct preference optimization (DPO) <DPO (Direct Preference Optimization)>`.
+Transform rollouts into SFT and DPO format.
 +++
 {bdg-secondary}`sft` {bdg-secondary}`dpo`
 :::
 
-:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` GRPO with NeMo RL
-:link: training-nemo-rl-grpo-index
-:link-type: ref
-Learn how to set up NeMo Gym and NeMo RL training environments, run tests, prepare data, and launch single-node and multi-node training runs.
-+++
-{bdg-primary}`training` {bdg-secondary}`rl` {bdg-secondary}`grpo` {bdg-secondary}`multi-step`
-:::
+::::
 
-:::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Unsloth
-:link: training-unsloth
-:link-type: ref
-Fast, memory-efficient fine-tuning for single-step tasks: math, structured outputs, instruction following, reasoning gym and more.
+```{button-ref} training-tutorials/index
+:ref-type: doc
+:color: secondary
+:class: sd-rounded-pill
+
+View all training tutorials →
+```
+
+## Infrastructure
+
+Deploy NeMo Gym and plan cluster resources for training.
+
+::::{grid} 1 2 2 2
+:gutter: 1 1 1 2
+
+:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` Deployment Topology
+:link: infrastructure/deployment-topology
+:link-type: doc
+Production deployment patterns and configurations.
 +++
-{bdg-primary}`training` {bdg-secondary}`unsloth` {bdg-secondary}`single-step`
+{bdg-secondary}`deployment` {bdg-secondary}`topology`
 :::
 
 ::::
@@ -203,15 +272,63 @@ Rollout Collection <get-started/rollout-collection.md>
 ```
 
 ```{toctree}
-:caption: Tutorials
+:caption: Model Server
 :hidden:
 :maxdepth: 1
 
-tutorials/index.md
-tutorials/creating-resource-server
-tutorials/offline-training-w-rollouts
-tutorials/nemo-rl-grpo/index.md
-tutorials/unsloth-training
+Overview <model-server/index>
+vLLM <model-server/vllm>
+```
+
+```{toctree}
+:caption: Data
+:hidden:
+:maxdepth: 1
+
+Overview <data/index>
+Prepare and Validate <data/prepare-validate>
+Download from Hugging Face <data/download-huggingface>
+```
+
+```{toctree}
+:caption: Environment Tutorials
+:hidden:
+:maxdepth: 1
+
+Overview <environment-tutorials/index>
+Creating Training Environment <environment-tutorials/creating-training-environment>
+Multi-Environment Training <environment-tutorials/multi-environment-training>
+```
+
+```{toctree}
+:caption: Training Tutorials
+:hidden:
+:maxdepth: 1
+
+Overview <training-tutorials/index>
+NeMo RL <training-tutorials/nemo-rl-grpo/index.md>
+TRL <training-tutorials/trl>
+Unsloth <training-tutorials/unsloth>
+Offline Training (SFT/DPO) <training-tutorials/offline-training-w-rollouts>
+```
+
+```{toctree}
+:caption: Model Recipes
+:hidden:
+:maxdepth: 1
+
+Overview <model-recipes/index>
+Nemotron 3 Nano <model-recipes/nemotron-3-nano>
+```
+
+```{toctree}
+:caption: Infrastructure
+:hidden:
+:maxdepth: 1
+
+Overview <infrastructure/index>
+Deployment Topology <infrastructure/deployment-topology>
+Engineering Notes <infrastructure/engineering-notes/index>
 ```
 
 ```{toctree}
