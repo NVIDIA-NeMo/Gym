@@ -1,0 +1,25 @@
+openenv_chess_resources_server:
+  resources_servers:
+    openenv:
+      entrypoint: app.py
+      domain: games
+      verified: false
+      description: "Chess environment via OpenEnv. Agent plays chess against moonfish engine."
+      env_class: "chess_env.server.chess_environment.ChessEnvironment"
+      action_class: "chess_env.models.ChessAction"
+      is_mcp: false
+
+openenv_chess_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: openenv_chess_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/openenv/data/chess/example.jsonl
