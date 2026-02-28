@@ -969,10 +969,6 @@ def validate_instruction(
                     return (False, f"Found {sentence_count} sentences. Expected {num_sentences}\n '{p}'")
             return (True, "No error.")
 
-        if inst_type == "detectable_format:indentation":
-            # Maintain previous behavior (not implemented)
-            return (False, "Invalid Instruction")
-
         if inst_type == "length_constraints:sentence_length":
             """
             Checks if the number of words in each sentence (including bullet list items)
@@ -1008,68 +1004,6 @@ def validate_instruction(
             if not valid:
                 message = f"Found {unique_words_count} unique words. Expected {relation} {num_unique}."
                 return (False, message)
-            return (True, "No error.")
-
-        if inst_type == "punctuation:frequency":
-            """
-            Checks if a specific punctuation mark appears with the specified frequency.
-            Accepts Spanish punctuation (e.g., '¿', '¡', '…') as 'punctuation' argument.
-            """
-            punctuation = kwargs.get("punctuation", "")
-            relation = kwargs.get("relation", "at least")
-            frequency = kwargs.get("frequency", 0)
-            if not isinstance(punctuation, str) or len(punctuation) == 0:
-                return (False, "Invalid 'punctuation' argument.")
-            count = response.count(punctuation)
-            valid, err = check_relation(count, relation, frequency)
-            if err is not None:
-                return (False, err)
-            if not valid:
-                return (False, f"Found {count} occurrences of '{punctuation}'. Expected {relation} {frequency}.")
-            return (True, "No error.")
-
-        if inst_type == "punctuation:balance":
-            """
-            Checks if opening and closing punctuation marks are balanced.
-            Validates pairs: () [] {} "" '' «»
-            """
-            pairs = {
-                "(": ")",
-                "[": "]",
-                "{": "}",
-                '"': '"',
-                "'": "'",
-                "«": "»",
-            }
-            stack = []
-            in_double_quote = False
-            in_single_quote = False
-            for char in response:
-                if char == '"' and not in_single_quote:
-                    if in_double_quote and stack and stack[-1] == '"':
-                        stack.pop()
-                        in_double_quote = False
-                    else:
-                        stack.append('"')
-                        in_double_quote = True
-                elif char == "'" and not in_double_quote:
-                    if in_single_quote and stack and stack[-1] == "'":
-                        stack.pop()
-                        in_single_quote = False
-                    else:
-                        stack.append("'")
-                        in_single_quote = True
-                elif char in pairs and char not in ['"', "'"]:
-                    stack.append(char)
-                elif char in pairs.values() and char not in ['"', "'"]:
-                    if not stack:
-                        return (False, f"Unmatched closing '{char}' found.")
-                    opening = stack.pop()
-                    if pairs[opening] != char:
-                        return (False, f"Mismatched punctuation: expected '{pairs[opening]}', found '{char}'.")
-            if stack:
-                unmatched = stack[0]
-                return (False, f"Unmatched opening '{unmatched}' found.")
             return (True, "No error.")
 
         if inst_type == "punctuation:question_exclaim":
@@ -1172,10 +1106,6 @@ def validate_instruction(
                     return (False, f"Heading of level {level} not found")
             return (True, "No error.")
 
-        if inst_type == "detectable_format:section_balance":
-            # Not implemented (kept consistent with original Spanish file)
-            return (False, "Invalid Instruction")
-
         if inst_type == "length_constraints:word_length":
             max_length = kwargs["max_length"]
             min_length = kwargs["min_length"]
@@ -1244,25 +1174,6 @@ def validate_instruction(
                 if not valid:
                     return (False, f"Found {word_count} words. Expected {relation} {words_per_paragraph}\n '{p}'")
             return (True, "No error.")
-
-        if inst_type == "punctuation:variety":
-            """
-            Checks if text contains at least min_types distinct punctuation marks.
-            Includes Spanish punctuation ¿ ¡ « » “ ” and ellipsis …
-            """
-            min_types = kwargs.get("min_types", 1)
-            all_punct = ".,;:!?¿¡…—–-()[]{}\"'«»“”"
-            found_punctuation = set()
-            for char in response:
-                if char in all_punct:
-                    found_punctuation.add(char)
-            is_valid = len(found_punctuation) >= min_types
-            return (
-                is_valid,
-                "No error"
-                if is_valid
-                else f"Found {len(found_punctuation)} distinct punctuation types. Expected at least {min_types}.",
-            )
 
         if inst_type == "detectable_content:numeric_inclusion":
             num_numbers = kwargs["num_numbers"]

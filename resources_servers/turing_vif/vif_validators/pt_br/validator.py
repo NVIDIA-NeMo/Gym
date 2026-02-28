@@ -890,8 +890,7 @@ def validate_instruction(
                 if not valid:
                     return (False, f"Found {sentence_count} sentences. Expected {num_sentences}\n '{p}'")
             return (True, "No error.")
-        if inst_type == "detectable_format:indentation":
-            return (False, "Invalid Instruction")
+
         if inst_type == "length_constraints:sentence_length":
             sentences = extract_clean_sentences(response)
             max_words = kwargs["max_words"]
@@ -924,13 +923,6 @@ def validate_instruction(
                 message = f"Found {unique_words_count} unique words. Expected {relation} {num_unique}."
                 return (False, message)
             return (True, "No error.")
-
-        if inst_type == "punctuation:frequency":
-            # Logic for this instruction to be added here
-            return (False, "Invalid Instruction")
-
-        if inst_type == "punctuation:balance":
-            return (False, "Invalid Instruction")
 
         if inst_type == "punctuation:question_exclaim":
             is_valid = True
@@ -1025,9 +1017,6 @@ def validate_instruction(
                     return (False, f"Heading of level {level} not found")
             return (True, "No error.")
 
-        if inst_type == "detectable_format:section_balance":
-            return (False, "Invalid Instruction")
-
         if inst_type == "length_constraints:word_length":
             max_length = kwargs["max_length"]
             min_length = kwargs["min_length"]
@@ -1091,12 +1080,6 @@ def validate_instruction(
                 if not valid:
                     return (False, f"Found {word_count} words. Expected {relation} {words_per_paragraph}\n '{p}'")
             return (True, "No error.")
-
-        if inst_type == "punctuation:variety":
-            """
-            Checks if text contains at least min_types distinct punctuation marks.
-            """
-            return (False, "Invalid Instruction")
 
         if inst_type == "detectable_content:numeric_inclusion":
             num_numbers = kwargs["num_numbers"]

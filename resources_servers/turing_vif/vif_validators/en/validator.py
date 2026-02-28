@@ -885,8 +885,6 @@ def validate_instruction(
             max_chars = kwargs["max_chars"]
             paragraphs = extract_clean_paragraphs(response)
 
-            # print(paragraphs)
-
             for p in paragraphs:
                 p = re.sub(r"^\s*(?:[\-\*\+]\s+|\d+\.\s+|#+\s+)", "", p.lstrip())
                 # print(p)
@@ -925,10 +923,6 @@ def validate_instruction(
                     return (False, message)
 
             return (True, "No error.")
-
-        if inst_type == "detectable_format:indentation":
-            # Logic for this instruction to be added here
-            return (False, "Invalid Instruction")
 
         if inst_type == "length_constraints:sentence_length":
             """
@@ -983,14 +977,6 @@ def validate_instruction(
                 message = f"Found {unique_words_count} unique words. Expected {relation} {num_unique}."
                 return (False, message)
             return (True, "No error.")
-
-        if inst_type == "punctuation:frequency":
-            # Logic for this instruction to be added here
-            return (False, "Invalid Instruction")
-
-        if inst_type == "punctuation:balance":
-            # Logic for this instruction to be added here
-            return (False, "Invalid Instruction")
 
         if inst_type == "punctuation:question_exclaim":
             is_valid = True
@@ -1113,10 +1099,6 @@ def validate_instruction(
 
             return (True, "No error.")
 
-        if inst_type == "detectable_format:section_balance":
-            # Logic for this instruction to be added here
-            return (False, "Invalid Instruction")
-
         if inst_type == "length_constraints:word_length":
             max_length = kwargs["max_length"]
             min_length = kwargs["min_length"]
@@ -1213,10 +1195,6 @@ def validate_instruction(
                     return (False, message)
 
             return (True, "No error.")
-
-        if inst_type == "punctuation:variety":
-            # Logic for this instruction to be added here
-            return (False, "Invalid Instruction")
 
         if inst_type == "detectable_content:numeric_inclusion":
             num_numbers = kwargs["num_numbers"]
