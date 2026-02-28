@@ -419,6 +419,8 @@ markers = [
     "docs: mark tests related to documentation (deselect with '-m \"not docs\"')",
     "skipduringci: marks tests that are skipped during ci as they are addressed by Jenkins jobs but should be run to test user setups",
     "pleasefixme: marks tests that are broken and need fixing",
+    "e2e: end-to-end tests requiring downloaded databases and Spider2 reference repo",
+    "e2e_llm: end-to-end tests requiring a local vLLM server and GPU",
 ]
 
 [tool.coverage.run]
