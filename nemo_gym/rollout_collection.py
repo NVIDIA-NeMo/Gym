@@ -151,18 +151,17 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
 
                     successful_count += 1
 
-                    # ensure_ascii=True guarantees ASCII-only JSON output (non-ASCII becomes \uXXXX)
-                    line = json.dumps(result, ensure_ascii=True, default=str) + "\n"
-                    f.write(line.encode("utf-8"))  # bytes are ASCII-only due to ensure_ascii=True
+                    line = json.dumps(result, ensure_ascii=False, default=str) + "\n"
+                    f.write(line.encode("utf-8"))
 
                     metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
 
             await tqdm.gather(*map(_post_coroutine, rows), desc="Collecting rollouts", miniters=tqdm_miniters)
 
         if schema_errors:
-            err_str = json.dumps(schema_errors, indent=2, ensure_ascii=True, default=str)
+            err_str = json.dumps(schema_errors, indent=2, ensure_ascii=False, default=str)
             with open(errors_fpath, "wb") as ef:
-                ef.write(err_str.encode("utf-8"))  # ASCII-only bytes due to ensure_ascii=True
+                ef.write(err_str.encode("utf-8"))
             print(f"\n{skipped_count} rollout(s) skipped due to validation errors. See {errors_fpath}")
 
         print(f"\n{successful_count} rollout(s) completed successfully.")
@@ -172,7 +171,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
         else:
             avg_metrics = {}
         avg_metrics.setdefault("reward", 0.0)
-        print(json.dumps(avg_metrics, indent=4, ensure_ascii=True, default=str))
+        print(json.dumps(avg_metrics, indent=4, ensure_ascii=False, default=str))
 
     def run_examples(
         self, examples: List[Dict], head_server_config: Optional[BaseServerConfig] = None
