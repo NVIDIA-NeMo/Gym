@@ -1,0 +1,33 @@
+# Proof judge resource: verifier + meta-verifier (DeepSeek Math style).
+# In env.nemo_gym add proof_judge_model (responses_api_models.vllm_model with spinup_server: true)
+# and reference it here as judge_model_server.
+proof_judge:
+  resources_servers:
+    proof_judge:
+      entrypoint: app.py
+      judge_model_server:
+        type: responses_api_models
+        name: proof_judge_model
+      judge_model_name: ""  # set via override to match proof_judge_model.model
+      alpha: 1.0
+      beta: 0.0
+      temperature: 0.6
+      top_p: 0.95
+      max_tokens: 100000
+      assert_think_end: false
+      domain: proof
+      description: Theorem proving with verifier + meta-verifier judge
+
+# Agent that uses policy for generation and proof_judge for verification.
+# Use this agent_ref.name in your training data rows.
+proof_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: proof_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets: []
