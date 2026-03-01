@@ -308,8 +308,14 @@ class LocalVLLMModelActor:
             """
 
             world_size = vllm_config.parallel_config.world_size
+            """
+            START Use our initial placement group
+            """
             placement_groups: list[PlacementGroup] = [head_node_placement_group]
-            local_dp_ranks: list[int] = []
+            local_dp_ranks: list[int] = [0]
+            """
+            END Use our initial placement group
+            """
 
             dp_master_ip_key = f"node:{dp_master_ip}"
             nodes = sorted(available_resources.values(), key=lambda x: dp_master_ip_key not in x)
