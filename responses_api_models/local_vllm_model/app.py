@@ -325,7 +325,10 @@ class LocalVLLMModelActor:
 
                 # if we need multiple nodes per dp group, we require for now that
                 # available nodes are homogenous
-                assert set(n_node_devices) == {max_device_per_node}, f"Nodes are not homogenous, {nodes}"
+                if dp_size == 1:
+                    assert set(total_n_node_devices) == {max_device_per_node}, f"Nodes are not homogenous, {nodes}"
+                else:
+                    assert set(n_node_devices) == {max_device_per_node}, f"Nodes are not homogenous, {nodes}"
                 assert world_size % max_device_per_node == 0, (
                     f"For multi-node data parallel groups, world_size ({world_size}) must "
                     f"be a multiple of number of devices per node ({max_device_per_node})."
