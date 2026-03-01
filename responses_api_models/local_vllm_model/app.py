@@ -602,11 +602,19 @@ class LocalVLLMModelActor:
             def new_DPEngineCoreActor_set_cuda_visible_devices(
                 self, vllm_config: VllmConfig, local_dp_rank: int, device_control_env_var: str
             ):
+                print(
+                    f"CURRENT DPEngineCoreActor_set_cuda_visible_devices: {os.environ[device_control_env_var]}",
+                    file=sys.stderr,
+                )
                 world_size = vllm_config.parallel_config.world_size
                 # Set CUDA_VISIBLE_DEVICES or equivalent.
                 try:
                     value = get_device_indices(device_control_env_var, local_dp_rank, world_size)
                     os.environ[device_control_env_var] = value
+                    print(
+                        f"NEW DPEngineCoreActor_set_cuda_visible_devices: {os.environ[device_control_env_var]}",
+                        file=sys.stderr,
+                    )
                 except IndexError as e:
                     raise Exception(
                         f"Error setting {device_control_env_var}: "
