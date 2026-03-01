@@ -403,7 +403,7 @@ class LocalVLLMModelActor:
                 self, vllm_config: VllmConfig, local_dp_rank: int, device_control_env_var: str
             ):
                 print(
-                    f"CURRENT DPEngineCoreActor_set_cuda_visible_devices: {os.environ[device_control_env_var]}",
+                    f"CURRENT DPEngineCoreActor_set_cuda_visible_devices: {os.environ[device_control_env_var]}. RAY SET CUDA_VISIBLE_DEVICES: {ray.get_gpu_ids()}",
                     file=sys.stderr,
                 )
                 world_size = vllm_config.parallel_config.world_size
