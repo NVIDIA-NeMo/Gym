@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-config_paths="responses_api_models/local_vllm_model/configs/openai/gpt-oss-20b-reasoning-high.yaml"
+config_paths="responses_api_models/local_vllm_model/configs/Qwen/Qwen3-30B-A3B-Instruct-2507.yaml"
 ng_run "+config_paths=[${config_paths}]" \
-    ++gpt-oss-20b-reasoning-high.responses_api_models.local_vllm_model.vllm_serve_kwargs.pipeline_parallel_size=2 \
-    ++gpt-oss-20b-reasoning-high.responses_api_models.local_vllm_model.vllm_serve_env_vars.VLLM_RAY_DP_PACK_STRATEGY=span
+    ++Qwen3-30B-A3B-Instruct-2507.responses_api_models.local_vllm_model.vllm_serve_kwargs.pipeline_parallel_size=2 \
+    ++Qwen3-30B-A3B-Instruct-2507.responses_api_models.local_vllm_model.vllm_serve_env_vars.VLLM_RAY_DP_PACK_STRATEGY=span
