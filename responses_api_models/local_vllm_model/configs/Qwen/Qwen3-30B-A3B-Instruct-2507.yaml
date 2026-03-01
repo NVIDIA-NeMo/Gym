@@ -8,6 +8,12 @@ Qwen3-30B-A3B-Instruct-2507:
       replace_developer_role_with_system: false
       debug: false
 
+      # Recommended in https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507#best-practices
+      extra_body:
+        temperature: 0.7
+        top_p: 0.8
+        max_output_tokens: null
+
       # For example, if your model is downloaded at ~/.cache/huggingface/hub/models--Qwen--Qwen3-235B-A22B-Instruct-2507, your hf_home here would be `~/.cache/huggingface`
       hf_home: null
 
@@ -29,9 +35,3 @@ Qwen3-30B-A3B-Instruct-2507:
         model_loader_extra_config:
           enable_multithread_load: true
           num_threads: 16
-
-# Recommended in https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507#best-practices
-responses_create_params:
-  temperature: 0.7
-  top_p: 0.8
-  max_output_tokens: null

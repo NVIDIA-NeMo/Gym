@@ -8,6 +8,12 @@ NVIDIA-Nemotron-3-Nano-30B-A3B-BF16:
       replace_developer_role_with_system: false
       debug: false
 
+      # Recommended in https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16#use-it-with-transformers
+      extra_body:
+        temperature: 1.0
+        top_p: 1.0
+        max_output_tokens: null
+
       # For example, if your model is downloaded at ~/.cache/huggingface/hub/models--Qwen--Qwen3-235B-A22B-Instruct-2507, your hf_home here would be `~/.cache/huggingface`
       hf_home: null
 
@@ -31,9 +37,3 @@ NVIDIA-Nemotron-3-Nano-30B-A3B-BF16:
         model_loader_extra_config:
           enable_multithread_load: true
           num_threads: 16
-
-# Recommended in https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16#use-it-with-transformers
-responses_create_params:
-  temperature: 1.0
-  top_p: 1.0
-  max_output_tokens: null

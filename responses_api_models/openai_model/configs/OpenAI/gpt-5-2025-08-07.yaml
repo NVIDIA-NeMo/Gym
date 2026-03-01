@@ -7,5 +7,5 @@ gpt-5-2025-08-07:
       openai_api_key: ${policy_api_key}
       openai_model: gpt-5-2025-08-07
 
-responses_create_params:
-  max_output_tokens: null
+      extra_body:
+        max_output_tokens: null

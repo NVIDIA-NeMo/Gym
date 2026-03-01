@@ -9,6 +9,13 @@ gpt-oss-20b-reasoning-high:
       is_responses_native: true
       debug: false
 
+      extra_body:
+        temperature: 1.0
+        top_p: 1.0
+        max_output_tokens: null
+        reasoning:
+          effort: high
+
       # For example, if your model is downloaded at ~/.cache/huggingface/hub/models--Qwen--Qwen3-235B-A22B-Instruct-2507, your hf_home here would be `~/.cache/huggingface`
       hf_home: null
 
@@ -30,8 +37,3 @@ gpt-oss-20b-reasoning-high:
         model_loader_extra_config:
           enable_multithread_load: true
           num_threads: 16
-
-responses_create_params:
-  reasoning:
-    effort: high
-  max_output_tokens: null
