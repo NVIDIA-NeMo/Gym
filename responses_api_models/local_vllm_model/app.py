@@ -417,6 +417,7 @@ class LocalVLLMModelActor:
                 """
                 START Patch missing placement group break
                 Stop when we've reached enough placement groups
+                We also need this first thing in the for loop so we exit in case we already have enough placement groups from the initial placement group i.e. DP == 1
 
                 (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)   File "vllm/v1/engine/utils.py", line 832, in launch_core_engines
                 (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)     engine_actor_manager = CoreEngineActorManager(
