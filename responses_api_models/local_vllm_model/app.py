@@ -684,7 +684,13 @@ Total Ray cluster resources: {cluster_resources()}""")
                     **env_vars,
                 },
             ),
-        ).remote(server_args, env_vars, self.config.name, self.config.debug)
+        ).remote(
+            head_node_placement_group=head_node_placement_group,
+            server_args=server_args,
+            env_vars=env_vars,
+            server_name=self.config.name,
+            debug=self.config.debug,
+        )
 
         base_url = f"http://{node_ip}:{server_args.port}/v1"
         print(f"Spinning up local vLLM server at {self._base_url}", file=sys.stderr)
