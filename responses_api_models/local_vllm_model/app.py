@@ -590,7 +590,7 @@ class LocalVLLMModel(VLLMModel):
     _local_vllm_model_actor: LocalVLLMModelActor
 
     def setup_webserver(self):
-        print("Starting vLLM server. This will take a couple of minutes...")
+        print("Starting vLLM server. This will take a few minutes...")
         self.start_vllm_server()
 
         return super().setup_webserver()
