@@ -693,7 +693,7 @@ Total Ray cluster resources: {cluster_resources()}""")
         )
 
         base_url = f"http://{node_ip}:{server_args.port}/v1"
-        print(f"Spinning up local vLLM server at {self._base_url}", file=sys.stderr)
+        print(f"Spinning up local vLLM server at {base_url}", file=sys.stderr)
 
         self.config.base_url = [base_url]
 
