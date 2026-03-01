@@ -271,7 +271,7 @@ class LocalVLLMModelActor:
             """
 
             import ray
-            from ray._private.state import available_resources_per_node
+            from ray._private.state import available_resources_per_node, total_resources_per_node
 
             logger.info("Creating placement groups for data parallel")
             dp_master_ip = vllm_config.parallel_config.data_parallel_master_ip
@@ -319,11 +319,29 @@ class LocalVLLMModelActor:
                 dp_master_ip,
             )
             device_str = current_platform.ray_device_key
+
             n_node_devices: list[int] = [
                 int(node_resources[device_str]) for node_resources in nodes if device_str in node_resources
             ]
-            assert n_node_devices, f"No {device_str} found in Ray cluster."
-            max_device_per_node = max(n_node_devices)
+            """
+            START Account for cases when the initial placement groups we create i.e. DP == 1 are already sufficient
+            """
+            # Original code:
+            # assert n_node_devices, f"No {device_str} found in Ray cluster."
+
+            # Modified code:
+            if dp_size == 1:
+                total_nodes = total_resources_per_node().values()
+                total_n_node_devices: list[int] = [
+                    int(node_resources[device_str]) for node_resources in total_nodes if device_str in node_resources
+                ]
+                max_device_per_node = max(total_n_node_devices)
+            else:
+                assert n_node_devices, f"No {device_str} found in Ray cluster."
+                max_device_per_node = max(n_node_devices)
+            """
+            END Account for cases when the initial placement groups we create i.e. DP == 1 are already sufficient
+            """
 
             pack_strategy = envs.VLLM_RAY_DP_PACK_STRATEGY
             _supported_pack_strategies = ("strict", "fill", "span")
@@ -363,12 +381,22 @@ class LocalVLLMModelActor:
                     f"For multi-node data parallel groups, world_size ({world_size}) must "
                     f"be a multiple of number of devices per node ({max_device_per_node})."
                 )
-                assert len(n_node_devices) * max_device_per_node >= world_size * dp_size, (
+                """
+                START Fix required GPU compute necessary calculation given we already reserve one placement group
+                """
+                # Original code:
+                # assert len(n_node_devices) * max_device_per_node >= world_size * dp_size, (
+
+                # Modified code:
+                assert len(n_node_devices) * max_device_per_node >= world_size * (dp_size - 1), (
                     f"Not enough total available nodes ({len(n_node_devices)}) "
                     f"and devices per node ({max_device_per_node}) "
                     f"to satisfy required world size {world_size} and data parallel size "
                     f"{dp_size}"
                 )
+                """
+                END Fix required GPU compute necessary calculation given we already reserve one placement group
+                """
                 assert dp_size_local == 1, (
                     f"data-parallel-size-local {dp_size_local} should be set as the "
                     "default (1) for VLLM_RAY_DP_PACK_STRATEGY=span. "
