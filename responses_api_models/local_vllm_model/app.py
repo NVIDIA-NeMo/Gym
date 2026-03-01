@@ -415,13 +415,24 @@ class LocalVLLMModelActor:
             collected_bundles = []
             for node_resources in nodes:
                 """
-                START Break if we already have enough placement groups from the initial placement group i.e. DP == 1
+                START Patch missing placement group break
+                Stop when we've reached enough placement groups
+
+                (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)   File "vllm/v1/engine/utils.py", line 832, in launch_core_engines
+                (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)     engine_actor_manager = CoreEngineActorManager(
+                (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)                            ^^^^^^^^^^^^^^^^^^^^^^^
+                (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)   File "vllm/v1/engine/utils.py", line 287, in __init__
+                (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)     CoreEngineActorManager.create_dp_placement_groups(vllm_config)
+                (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)   File "vllm/v1/engine/utils.py", line 526, in create_dp_placement_groups
+                (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)     assert len(placement_groups) == dp_size, (
+                (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842) AssertionError: Created 4 DP placement groups, expected 2
                 """
                 if len(placement_groups) == dp_size:
                     break
 
                 """
-                END Break if we already have enough placement groups
+                END Patch missing placement group break
                 """
 
                 node_ip_keys = [
@@ -553,27 +564,6 @@ class LocalVLLMModelActor:
                     local_dp_ranks.append(i)
                     if len(placement_groups) == dp_size:
                         break
-
-                """
-                START Patch missing placement group break
-                Stop when we've reached enough placement groups
-
-                (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)   File "vllm/v1/engine/utils.py", line 832, in launch_core_engines
-                (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)     engine_actor_manager = CoreEngineActorManager(
-                (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)                            ^^^^^^^^^^^^^^^^^^^^^^^
-                (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)   File "vllm/v1/engine/utils.py", line 287, in __init__
-                (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)     CoreEngineActorManager.create_dp_placement_groups(vllm_config)
-                (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)   File "vllm/v1/engine/utils.py", line 526, in create_dp_placement_groups
-                (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)     assert len(placement_groups) == dp_size, (
-                (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842) AssertionError: Created 4 DP placement groups, expected 2
-                """
-                if len(placement_groups) == dp_size:
-                    break
-
-                """
-                END Patch missing placement group break
-                """
 
             if len(placement_groups) < dp_size:
                 raise ValueError(
