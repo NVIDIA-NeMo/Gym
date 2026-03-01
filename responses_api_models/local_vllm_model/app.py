@@ -410,161 +410,18 @@ class LocalVLLMModelActor:
                     "The actual data-parallel-size-local will be auto determined."
                 )
 
-            # bundles collected for a single DP rank from multiple nodes,
-            # for "span" pack strategy
-            collected_bundles = []
-            for node_resources in nodes:
-                """
-                START Patch missing placement group break
-                Stop when we've reached enough placement groups
-                We also need this first thing in the for loop so we exit in case we already have enough placement groups from the initial placement group i.e. DP == 1
+            for _ in range(dp_size - 1):
+                bundles = [{device_str: 1.0}] * world_size + [{"CPU": 1.0}]
 
-                (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)   File "vllm/v1/engine/utils.py", line 832, in launch_core_engines
-                (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)     engine_actor_manager = CoreEngineActorManager(
-                (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)                            ^^^^^^^^^^^^^^^^^^^^^^^
-                (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)   File "vllm/v1/engine/utils.py", line 287, in __init__
-                (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)     CoreEngineActorManager.create_dp_placement_groups(vllm_config)
-                (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)   File "vllm/v1/engine/utils.py", line 526, in create_dp_placement_groups
-                (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)     assert len(placement_groups) == dp_size, (
-                (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842) AssertionError: Created 4 DP placement groups, expected 2
-                """
-                if len(placement_groups) == dp_size:
-                    break
-
-                """
-                END Patch missing placement group break
-                """
-
-                node_ip_keys = [
-                    key for key in node_resources if key != "node:__internal_head__" and key.startswith("node:")
-                ]
-                assert len(node_ip_keys) == 1, (
-                    "Zero or multiple node IP keys found in node resources: %s",
-                    node_ip_keys,
+                pg_name = f"{self.server_name}_dp_rank_{len(placement_groups)}"
+                pg = ray.util.placement_group(
+                    name=pg_name,
+                    strategy=placement_strategy,
+                    bundles=bundles,
                 )
-                node_ip_key = node_ip_keys[0]
-                node_ip = node_ip_key.split(":")[1]
 
-                n_device_on_node = int(node_resources.get(device_str, 0))
-                if pack_strategy == "span" and n_device_on_node != 0:
-                    # Strictly speaking,
-                    # dp_size_available = n_device_on_node / world_size
-                    # and is a fraction, but we use 1 for easier processing
-                    dp_size_available = 1
-                else:
-                    dp_size_available = n_device_on_node // world_size
-
-                """
-                START Remove special handling for DP master node
-
-                When running multiple local vLLM model instances, the master node is hard to
-                (LocalVLLMModelActor pid=4088775, ip=10.65.15.35) (APIServer pid=4088775)     engine_actor_manager = CoreEngineActorManager(
-                (LocalVLLMModelActor pid=4088775, ip=10.65.15.35) (APIServer pid=4088775)                            ^^^^^^^^^^^^^^^^^^^^^^^
-                (LocalVLLMModelActor pid=4088775, ip=10.65.15.35) (APIServer pid=4088775)   File "/lustre/fsw/portfolios/llmservice/projects/llmservice_modelalignment_ppo/use
-                rs/bxyu/customer-eval-dev/nemo-gym/responses_api_models/local_vllm_model/.venv/lib/python3.12/site-packages/vllm/v1/engine/utils.py", line 287, in __init__
-                (LocalVLLMModelActor pid=4088775, ip=10.65.15.35) (APIServer pid=4088775)     CoreEngineActorManager.create_dp_placement_groups(vllm_config)
-                (LocalVLLMModelActor pid=4088775, ip=10.65.15.35) (APIServer pid=4088775)   File "/lustre/fsw/portfolios/llmservice/projects/llmservice_modelalignment_ppo/use
-                rs/bxyu/customer-eval-dev/nemo-gym/responses_api_models/local_vllm_model/app.py", line 326, in new_create_dp_placement_groups
-                (LocalVLLMModelActor pid=4088775, ip=10.65.15.35) (APIServer pid=4088775)     raise ValueError(
-                (LocalVLLMModelActor pid=4088775, ip=10.65.15.35) (APIServer pid=4088775) ValueError: ('Not enough resources to allocate %s DP ranks on DP master node %s, possible to fit %s DP ranks', 2, '10.65.15.35', 1)
-                """
-                # Original code:
-                # if node_ip == dp_master_ip:
-                #     if dp_size_available < dp_size_local:
-                #         raise ValueError(
-                #             "Not enough resources to allocate %s DP ranks "
-                #             "on DP master node %s, possible to fit %s DP ranks",
-                #             dp_size_local,
-                #             dp_master_ip,
-                #             dp_size_available,
-                #         )
-                #     dp_size_to_allocate = dp_size_local
-                """
-                END Remove special handling for DP master node
-                """
-
-                if pack_strategy == "strict":
-                    if dp_size_available < dp_size_local:
-                        logger.info(
-                            "Skipping node %s as %s DP ranks could not fit, possible to fit %s DP ranks",
-                            node_ip,
-                            dp_size_local,
-                            dp_size_available,
-                        )
-                        continue
-                    dp_size_to_allocate = dp_size_local
-                else:
-                    # for "pack_strategy" in "fill" and "span"
-                    # we always take everything that's available
-                    dp_size_to_allocate = dp_size_available
-
-                for i in range(dp_size_to_allocate):
-                    """
-                    START Scheduling by nodes is very brittle
-                    """
-                    # Original code:
-                    # device_bundle = [{device_str: 1.0, "node:" + node_ip: 0.001}]
-
-                    # Modified code:
-                    device_bundle = [{device_str: 1.0}]
-                    """
-                    END Scheduling by nodes is very brittle
-                    """
-
-                    if pack_strategy == "span":
-                        collected_bundles += device_bundle * n_device_on_node
-                        assert len(collected_bundles) <= world_size, (
-                            "collected_bundles should be <= world_size, "
-                            f"but got {len(collected_bundles)=} and {world_size=}"
-                        )
-
-                        # we only create a placement group if we collected enough devices
-                        if len(collected_bundles) < world_size:
-                            continue
-
-                        bundles = collected_bundles + [{"CPU": 1.0}]
-                        collected_bundles = []
-                    else:
-                        bundles = device_bundle * world_size + [{"CPU": 1.0}]
-
-                    """
-                    START Patch nonunique placement group name logic
-                    When running multiple local vLLM model instances, the Ray placement group names aren't unique.
-
-                    (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)   File "vllm/v1/engine/utils.py", line 832, in launch_core_engines
-                    (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)     engine_actor_manager = CoreEngineActorManager(
-                    (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)                            ^^^^^^^^^^^^^^^^^^^^^^^
-                    (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)   File "vllm/v1/engine/utils.py", line 287, in __init__
-                    (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)     CoreEngineActorManager.create_dp_placement_groups(vllm_config)
-                    (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)   File "vllm/v1/engine/utils.py", line 526, in create_dp_placement_groups
-                    (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)     assert len(placement_groups) == dp_size, (
-                    (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                    (LocalVLLMModelActor pid=2811842) (APIServer pid=2811842) AssertionError: Created 4 DP placement groups, expected 2
-                    """
-                    # Original code:
-                    # pg = ray.util.placement_group(
-                    #     name=f"dp_rank_{len(placement_groups)}",
-                    #     strategy=placement_strategy,
-                    #     bundles=bundles,
-                    # )
-
-                    # New code:
-                    pg_name = f"{self.server_name}_dp_rank_{len(placement_groups)}"
-                    pg = ray.util.placement_group(
-                        name=pg_name,
-                        strategy=placement_strategy,
-                        bundles=bundles,
-                    )
-
-                    """
-                    END Patch nonunique placement group name logic
-                    """
-
-                    placement_groups.append(pg)
-                    local_dp_ranks.append(i)
-                    if len(placement_groups) == dp_size:
-                        break
+                placement_groups.append(pg)
+                local_dp_ranks.append(0)
 
             if len(placement_groups) < dp_size:
                 raise ValueError(
