@@ -219,7 +219,7 @@ custom_simple_agent:
 Run data preparation:
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,custom_data.yaml"
+config_paths="custom_data.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml"
 ng_prepare_data "+config_paths=[${config_paths}]" +mode=train_preparation +output_dirpath=data
 ```
 
@@ -237,7 +237,7 @@ This validates your data and adds the `agent_ref` field to each row, routing sam
 ### Example Validation
 
 ```bash
-ng_prepare_data "+config_paths=[resources_servers/example_multi_step/configs/example_multi_step.yaml]" \
+ng_prepare_data "+config_paths=[resources_servers/example_multi_step/configs/example_multi_step.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" \
     +output_dirpath=data/example_multi_step \
     +mode=example_validation
 ```
@@ -245,7 +245,7 @@ ng_prepare_data "+config_paths=[resources_servers/example_multi_step/configs/exa
 ### Training Preparation
 
 ```bash
-ng_prepare_data "+config_paths=[resources_servers/workplace_assistant/configs/workplace_assistant.yaml]" \
+ng_prepare_data "+config_paths=[resources_servers/workplace_assistant/configs/workplace_assistant.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" \
     +output_dirpath=data/workplace_assistant \
     +mode=train_preparation \
     +should_download=true
