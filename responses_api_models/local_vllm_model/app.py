@@ -414,6 +414,16 @@ class LocalVLLMModelActor:
             # for "span" pack strategy
             collected_bundles = []
             for node_resources in nodes:
+                """
+                START Break if we already have enough placement groups from the initial placement group i.e. DP == 1
+                """
+                if len(placement_groups) == dp_size:
+                    break
+
+                """
+                END Break if we already have enough placement groups
+                """
+
                 node_ip_keys = [
                     key for key in node_resources if key != "node:__internal_head__" and key.startswith("node:")
                 ]
