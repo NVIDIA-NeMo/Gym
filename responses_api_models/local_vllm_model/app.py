@@ -91,6 +91,9 @@ class LocalVLLMModelActor:
         self.env_vars.pop("CUDA_VISIBLE_DEVICES", None)
 
         node_ip = ray._private.services.get_node_ip_address()
+        self._base_url = f"http://{node_ip}:{self.server_args.port}/v1"
+        print(f"Spinning up local vLLM server at {self._base_url}", file=sys.stderr)
+
         # vLLM doesn't expose a config for this yet, so we need to pass via environment variable.
         self.env_vars["VLLM_DP_MASTER_IP"] = node_ip  # This is the master node.
 
@@ -546,6 +549,9 @@ class LocalVLLMModelActor:
 
         CoreEngineActorManager.create_dp_placement_groups = new_create_dp_placement_groups
 
+    def base_url(self) -> str:
+        return self._base_url
+
     def is_alive(self) -> bool:
         return self.server_thread.is_alive()
 
@@ -696,10 +702,7 @@ Total Ray cluster resources: {cluster_resources()}""")
             debug=self.config.debug,
         )
 
-        base_url = f"http://{node_ip}:{server_args.port}/v1"
-        print(f"Spinning up local vLLM server at {base_url}", file=sys.stderr)
-
-        self.config.base_url = [base_url]
+        self.config.base_url = [ray.get(self._local_vllm_model_actor.base_url.remote())]
 
         # Reset clients after base_url config
         self._post_init()
