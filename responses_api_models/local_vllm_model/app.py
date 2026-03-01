@@ -671,7 +671,7 @@ Environment variables: {env_vars_to_print}""")
 Total Ray cluster resources: {cluster_resources()}""")
 
         server_args, env_vars = self._configure_vllm_serve()
-        head_node_placement_group, node_ip = self._select_vllm_server_head_node()
+        head_node_placement_group, node_ip = self._select_vllm_server_head_node(server_args, env_vars)
 
         self._local_vllm_model_actor = LocalVLLMModelActor.options(
             scheduling_strategy=PlacementGroupSchedulingStrategy(
