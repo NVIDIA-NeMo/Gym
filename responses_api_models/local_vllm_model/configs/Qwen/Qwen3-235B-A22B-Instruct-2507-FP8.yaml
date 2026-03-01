@@ -28,6 +28,7 @@ Qwen3-235B-A22B-Instruct-2507-FP8:
         tensor_parallel_size: 8
         pipeline_parallel_size: 1
 
+        enable_expert_parallel: true
         trust_remote_code: true
         gpu_memory_utilization: 0.9
         enable_auto_tool_choice: true
