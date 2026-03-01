@@ -90,6 +90,10 @@ class LocalVLLMModelActor:
 
         self.env_vars.pop("CUDA_VISIBLE_DEVICES", None)
 
+        node_ip = ray._private.services.get_node_ip_address()
+        # vLLM doesn't expose a config for this yet, so we need to pass via environment variable.
+        self.env_vars["VLLM_DP_MASTER_IP"] = node_ip  # This is the master node.
+
         self._patch_signal_handler()
         self._patch_uvicorn_logger()
         self._maybe_patch_engine_stats()
