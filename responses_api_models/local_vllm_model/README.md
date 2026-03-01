@@ -36,6 +36,6 @@ See the following scripts:
   - [Not supported yet] responses_api_models/local_vllm_model/test_scripts/2_nodes/1_instance_1x16.sh
 - 4 nodes
   - [Not supported yet] responses_api_models/local_vllm_model/test_scripts/4_nodes/1_instance_2x16.sh
-  - [Untested] responses_api_models/local_vllm_model/test_scripts/4_nodes/2_instances_1x16.sh
+  - [Not supported yet] responses_api_models/local_vllm_model/test_scripts/4_nodes/2_instances_1x16.sh
 - 8 nodes
   - [Not supported yet] responses_api_models/local_vllm_model/test_scripts/8_nodes/2_instances_2x16.sh
