@@ -556,11 +556,6 @@ class LocalVLLMModelActor:
         return self.server_thread.is_alive()
 
 
-@ray.remote
-def get_node_ip():
-    return ray._private.services.get_node_ip_address()
-
-
 class LocalVLLMModel(VLLMModel):
     config: LocalVLLMModelConfig
 
@@ -638,9 +633,7 @@ Environment variables: {env_vars_to_print}""")
 
         return final_args, env_vars
 
-    def _select_vllm_server_head_node(
-        self, server_args: Namespace, env_vars: Dict[str, str]
-    ) -> tuple[PlacementGroup, str]:
+    def _select_vllm_server_head_node(self, server_args: Namespace, env_vars: Dict[str, str]) -> PlacementGroup:
         """
         Our LocalVLLMModelActor Ray actor scheduling strategy is as follows:
         1. We estimate the size of a single placement group vLLM will make using TP * PP
@@ -665,15 +658,7 @@ Environment variables: {env_vars_to_print}""")
         )
         ray.get(head_node_placement_group.ready())
 
-        node_ip = ray.get(
-            get_node_ip.options(
-                scheduling_strategy=PlacementGroupSchedulingStrategy(
-                    placement_group=head_node_placement_group,
-                )
-            ).remote()
-        )
-
-        return head_node_placement_group, node_ip
+        return head_node_placement_group
 
     def start_vllm_server(self) -> None:
         if self.config.debug:
@@ -681,7 +666,7 @@ Environment variables: {env_vars_to_print}""")
 Total Ray cluster resources: {cluster_resources()}""")
 
         server_args, env_vars = self._configure_vllm_serve()
-        head_node_placement_group, node_ip = self._select_vllm_server_head_node(server_args, env_vars)
+        head_node_placement_group = self._select_vllm_server_head_node(server_args, env_vars)
 
         self._local_vllm_model_actor = LocalVLLMModelActor.options(
             scheduling_strategy=PlacementGroupSchedulingStrategy(
