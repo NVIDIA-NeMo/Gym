@@ -102,7 +102,6 @@ class LocalVLLMModelActor:
         self._maybe_patch_engine_stats()
         self._patch_create_dp_placement_groups()
         self._patch_init_data_parallel()
-        self._patch_DPEngineCoreActor_set_cuda_visible_devices()
 
         for k, v in self.env_vars.items():
             environ[k] = v
@@ -386,51 +385,6 @@ class LocalVLLMModelActor:
             return placement_groups, local_dp_ranks
 
         CoreEngineActorManager.create_dp_placement_groups = new_create_dp_placement_groups
-
-    def _patch_DPEngineCoreActor_set_cuda_visible_devices(self) -> None:
-        from vllm.v1.engine.utils import (
-            CoreEngineActorManager,
-        )
-
-        original__init__ = CoreEngineActorManager.__init__
-
-        def new__init__(self, *args, **kwargs):
-            from vllm.v1.engine.core import (
-                DPEngineCoreActor,
-                VllmConfig,
-            )
-
-            def new_DPEngineCoreActor_set_cuda_visible_devices(
-                self, vllm_config: VllmConfig, local_dp_rank: int, device_control_env_var: str
-            ):
-                # TODO revert
-                pass
-                # print(
-                #     f"CURRENT DPEngineCoreActor_set_cuda_visible_devices: {os.environ[device_control_env_var]}. RAY SET CUDA_VISIBLE_DEVICES: {ray.get_gpu_ids()}",
-                #     file=sys.stderr,
-                # )
-                # world_size = vllm_config.parallel_config.world_size
-                # # Set CUDA_VISIBLE_DEVICES or equivalent.
-                # try:
-                #     value = get_device_indices(device_control_env_var, local_dp_rank, world_size)
-                #     os.environ[device_control_env_var] = value
-                #     print(
-                #         f"NEW DPEngineCoreActor_set_cuda_visible_devices: {os.environ[device_control_env_var]}",
-                #         file=sys.stderr,
-                #     )
-                # except IndexError as e:
-                #     raise Exception(
-                #         f"Error setting {device_control_env_var}: "
-                #         f"local range: [{local_dp_rank * world_size}, "
-                #         f"{(local_dp_rank + 1) * world_size}) "
-                #         f'base value: "{os.getenv(device_control_env_var)}"'
-                #     ) from e
-
-            DPEngineCoreActor._set_cuda_visible_devices = new_DPEngineCoreActor_set_cuda_visible_devices
-
-            return original__init__(self, *args, **kwargs)
-
-        CoreEngineActorManager.__init__ = new__init__
 
     def base_url(self) -> str:
         return self._base_url
