@@ -26,7 +26,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 
 def update_task_toml_docker_image(task_toml_path: Path, image_ref: str) -> None:
@@ -68,10 +68,25 @@ def update_task_toml_docker_image(task_toml_path: Path, image_ref: str) -> None:
     task_toml_path.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
+def remap_path(path_str: str, remaps: list[tuple[str, str]]) -> str:
+    """Apply path prefix remappings in order. First match wins."""
+    for src, dst in remaps:
+        if path_str.startswith(src):
+            return dst + path_str[len(src) :]
+    return path_str
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Rewrite task.toml docker_image values from manifest.")
     parser.add_argument("--manifest-in", type=Path, required=True, help="Manifest JSON from build_and_push_images.py.")
     parser.add_argument("--dry-run", action="store_true", help="Show planned rewrites only.")
+    parser.add_argument(
+        "--path-remap",
+        metavar="SRC:DST",
+        action="append",
+        default=[],
+        help="Remap path prefixes in manifest (e.g. /home/user:/lustre/.../user). Can be repeated.",
+    )
     return parser.parse_args()
 
 
@@ -81,16 +96,27 @@ def main() -> None:
         print(f"Error: manifest not found: {args.manifest_in}", file=sys.stderr)
         sys.exit(2)
 
+    remaps: list[tuple[str, str]] = []
+    for remap_str in args.path_remap:
+        if ":" not in remap_str:
+            print(f"Error: --path-remap must be SRC:DST, got: {remap_str}", file=sys.stderr)
+            sys.exit(2)
+        src, dst = remap_str.split(":", 1)
+        remaps.append((src, dst))
+        print(f"Path remap: {src} -> {dst}")
+
     manifest: dict[str, Any] = json.loads(args.manifest_in.read_text(encoding="utf-8"))
     tasks = manifest.get("tasks", [])
     if not tasks:
         print("No tasks found in manifest.")
         return
 
-    rewrites: list[tuple[str, Path, str, bool, str | None]] = []
+    rewrites: list[tuple[str, Path, str, bool, Optional[str]]] = []
     for item in tasks:
         task_name = item.get("task_name")
         task_toml_path_raw = item.get("task_toml_path")
+        if task_toml_path_raw and remaps:
+            task_toml_path_raw = remap_path(task_toml_path_raw, remaps)
         task_toml_path = Path(task_toml_path_raw) if task_toml_path_raw else None
         docker_image = item.get("docker_image")
         success = bool(item.get("success"))
