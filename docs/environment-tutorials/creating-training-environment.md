@@ -7,7 +7,7 @@ Learn how to create a custom resource server to implement tools, verifiers, and 
 
 **Goal**: Build a custom resource server with tools and verification logic.
 
-**Time**: ~30 minutes
+**Time**: ~30 minutes | **Cost**: ~$0.05 (OpenAI API)
 
 ^^^
 
