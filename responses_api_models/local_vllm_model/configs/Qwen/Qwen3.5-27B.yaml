@@ -1,4 +1,4 @@
-Qwen3.5-27B:
+Qwen3_5-27B:
   responses_api_models:
     local_vllm_model:
       entrypoint: app.py
