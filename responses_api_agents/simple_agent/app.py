@@ -73,6 +73,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
         new_outputs = []
+        usage = None
         step = 0
         model_server_cookies = None  # update the cookies on every model response
         resources_server_cookies = request.cookies  # update the cookies on every resources server response
@@ -100,6 +101,18 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
             output = model_response.output
             new_outputs.extend(output)
+
+            if not usage:
+                usage = model_response.usage
+
+            if usage:
+                usage.input_tokens += model_response.usage.input_tokens
+                usage.output_tokens += model_response.usage.output_tokens
+                usage.total_tokens += model_response.usage.total_tokens
+
+                # TODO support more advanced token details
+                usage.input_tokens_details.cached_tokens = 0
+                usage.output_tokens_details.reasoning_tokens = 0
 
             if model_response.incomplete_details and model_response.incomplete_details.reason == "max_output_tokens":
                 break
@@ -137,6 +150,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             response.set_cookie(k, v)
 
         model_response.output = new_outputs
+        model_response.usage = usage
         return model_response
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:

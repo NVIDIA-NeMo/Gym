@@ -67,4 +67,4 @@ ARC-AGI-2 example rollouts:
 ng_collect_rollouts +agent_name=arc_agi_simple_agent +input_jsonl_fpath=resources_servers/arc_agi/data/example_2.jsonl +output_jsonl_fpath=resources_servers/arc_agi/data/example_2_rollouts.jsonl
 ```
 
-For training, see the [docs](https://docs.nvidia.com/nemo/gym/latest/tutorials/nemo-rl-grpo/index.html).
+For training, see the [docs](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/nemo-rl-grpo/index.html).
