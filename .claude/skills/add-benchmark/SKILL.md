@@ -188,11 +188,19 @@ ng_collect_rollouts +agent_name=my_benchmark_simple_agent \
 
 ### Step 7: Baseline (reward profiling)
 
-Run against multiple models to validate correctness. Recommended suite:
+**Goal**: Validate software correctness by running against a range of models and inspecting results.
+
+**Model selection**: Start with a 30B-class open-source model. If it scores below ~30%, the benchmark may be too hard for that size — move up to a larger model until you get a meaningful score. If no open-source model achieves meaningful performance, this likely indicates a software bug.
+
+Recommended suite (as of Feb 2026):
 - Your policy model of interest
-- At least one open-source instruct model (e.g. Qwen 3 30B A3B Instruct)
-- At least one open-source thinking model (e.g. Qwen 3 30B A3B Thinking)
-- At least one closed-source model (e.g. GPT-5 Nano or GPT-5)
+- **Open-source instruct**: Qwen 3 30B A3B Instruct 2507
+- **Open-source thinking**: Qwen 3 30B A3B Thinking 2507
+- **Closed-source**: GPT-5 Nano and/or GPT-5
+
+If 30B-class Qwen models score too low, escalate to Qwen 3 235B A22B Instruct/Thinking 2507, then Kimi K2 Instruct or GLM-4.7.
+
+**Model-agnostic principle**: Benchmark code must work with any model. Switching between instruct and thinking models should require only a model server config change, not code changes. Verify this by running both types and confirming reasonable scores for each.
 
 ```bash
 # Collect rollouts
@@ -212,11 +220,13 @@ ng_reward_profile +input_jsonl_fpath=resources_servers/my_benchmark/data/my_data
 python scripts/print_aggregate_results.py +jsonl_fpath=results/profiled.jsonl
 ```
 
-Increase `num_repeats` until variance < 1% across runs on the same model.
+**Variance**: Increase `num_repeats` until variance < 1% across runs on the highest-scoring open-source model.
 
-Closed-source models should score at or above open-source models. If not, investigate for bugs. Inspect actual failure cases in the rollout JSONL, not just aggregate numbers.
+**Sanity checks**:
+- Closed-source models should score at or above open-source models. If not, there is likely a software bug.
+- **Inspect actual failure cases in the rollout JSONL** — do not rely on aggregate numbers alone. Looking at individual rollouts catches many bugs that aggregate metrics hide.
 
-For external benchmarks: reproduce the original repo's published numbers first. Then reproduce after Gym integration. Scores should match.
+**For external benchmarks**: Reproduce the original repo's published numbers with the original repo first, before Gym integration. Then reproduce the same scores after integration. Scores must match.
 
 ### Step 8: Pre-commit and PR
 

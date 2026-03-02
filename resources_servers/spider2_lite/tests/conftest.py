@@ -13,7 +13,8 @@ import requests
 
 from resources_servers.spider2_lite.setup_spider2 import ensure_spider2_lite
 
-_VLLM_BIN = shutil.which("vllm") or "/home/rlempka/code/.venv/bin/vllm"
+
+_VLLM_BIN = shutil.which("vllm")
 _DEFAULT_MODEL = "openai/gpt-oss-20b"
 _DEFAULT_PORT = 18765
 
@@ -35,8 +36,8 @@ def vllm_url():
         yield url
         return
 
-    if not Path(_VLLM_BIN).is_file():
-        pytest.skip(f"vllm binary not found at {_VLLM_BIN}")
+    if not _VLLM_BIN or not Path(_VLLM_BIN).is_file():
+        pytest.skip("vllm binary not found on PATH")
 
     model = os.environ.get("SPIDER2_LLM_MODEL", _DEFAULT_MODEL)
     port = int(os.environ.get("SPIDER2_LLM_PORT", _DEFAULT_PORT))
@@ -48,10 +49,15 @@ def vllm_url():
         return
 
     cmd = [
-        _VLLM_BIN, "serve", model,
-        "--port", str(port),
-        "--dtype", "bfloat16",
-        "--max-model-len", "8192",
+        _VLLM_BIN,
+        "serve",
+        model,
+        "--port",
+        str(port),
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "8192",
         "--trust-remote-code",
     ]
     env = {**os.environ, "CUDA_VISIBLE_DEVICES": gpu}
