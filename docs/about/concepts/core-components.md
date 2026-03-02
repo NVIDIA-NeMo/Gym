@@ -1,10 +1,18 @@
 (core-components)=
 
-# Core Components
+# Environment Components
 
-Before diving into code, let's understand the three server components that make up a training environment in NeMo Gym.
+> New to reinforcement learning for LLMs? Start with {ref}`training-approaches` for context on SFT, RL, and RLVR, or refer to {doc}`key-terminology` for a quick glossary.
 
-> If you are new to reinforcement learning for LLMs, we recommend you refer to **[Key Terminology](./key-terminology)** first.
+## What is an Environment?
+
+An environment is defined by the task for the agent to accomplish, the actions the agent can take, and the state of the world the agent observes and acts upon. The environment also determines how the agent's performance is evaluated: what constitutes success and how reward is assigned.
+
+In NeMo Gym, these concepts map to three server components:
+
+- **Agent** servers orchestrate each rollout: calling the model to generate outputs, routing tool calls through resources, and collecting the final reward.
+- **Model** servers handle stateless text generation, producing the model's output each turn (e.g. text, tool calls, or code).
+- **Resources** servers provide tasks, tools, and external state (sandboxes, databases, APIs) the agent interacts with, as well as the verification logic that scores performance.
 
 ```{image} ../../_images/product_overview.svg
 :alt: NeMo Gym Architecture
@@ -13,6 +21,34 @@ Before diving into code, let's understand the three server components that make 
 ```
 
 ::::{tab-set}
+
+:::{tab-item} Agents
+
+Responses API Agent servers {term}`orchestrate <Orchestration>` the rollout lifecycle—the full cycle of task execution and verification.
+
+- Implement multi-step and multi-turn agentic systems
+- Orchestrate the model server and resources server(s) to collect complete trajectories
+
+NeMo Gym provides several agent patterns covering multi-step, multi-turn, and user modeling scenarios.
+
+**Examples:**
+
+- `simple_agent`: Basic agent that coordinates model calls with resource tools
+
+**Configuration Pattern**:
+
+```yaml
+your_agent_name:                     # server ID
+  responses_api_agents:              # server type. corresponds to the folder name in the project root
+    your_agent_name:                 # agent type. name of the folder inside the server type folder 
+      entrypoint: app.py             # server entrypoint path, relative to the agent type folder 
+      resources_server:              # which resource server to use
+        name: example_single_tool_call
+      model_server:                  # which model server to use
+        name: policy_model
+```
+
+:::
 
 :::{tab-item} Model
 
@@ -80,34 +116,6 @@ Each example shows what **task** the agent solves, what **actions** are availabl
   - **Verification logic**: Checks if weather tool was called correctly
 
 **Configuration**: Refer to resource-specific config files in `resources_servers/*/configs/`
-
-:::
-
-:::{tab-item} Agents
-
-Responses API Agent servers {term}`orchestrate <Orchestration>` the rollout lifecycle—the full cycle of task execution and verification.
-
-- Implement multi-step and multi-turn agentic systems
-- Orchestrate the model server and resources server(s) to collect complete trajectories
-
-NeMo Gym provides several agent patterns covering multi-step, multi-turn, and user modeling scenarios.
-
-**Examples:**
-
-- `simple_agent`: Basic agent that coordinates model calls with resource tools
-
-**Configuration Pattern**:
-
-```yaml
-your_agent_name:                     # server ID
-  responses_api_agents:              # server type. corresponds to the folder name in the project root
-    your_agent_name:                 # agent type. name of the folder inside the server type folder 
-      entrypoint: app.py             # server entrypoint path, relative to the agent type folder 
-      resources_server:              # which resource server to use
-        name: example_single_tool_call
-      model_server:                  # which model server to use
-        name: policy_model
-```
 
 :::
 ::::

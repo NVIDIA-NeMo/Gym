@@ -63,9 +63,9 @@ Motivation and benefits of NeMo Gym.
 :::{grid-item-card} {octicon}`gear;1.5em;sd-mr-1` Concepts
 :link: about/concepts/index
 :link-type: doc
-Core components, configuration, verification and RL terminology.
+Training approaches, core components, configuration, verification, and RL terminology.
 +++
-{bdg-secondary}`environments` {bdg-secondary}`agents` {bdg-secondary}`models` {bdg-secondary}`resources`
+{bdg-secondary}`sft` {bdg-secondary}`rl` {bdg-secondary}`rlvr` {bdg-secondary}`environments` {bdg-secondary}`agents` {bdg-secondary}`models` {bdg-secondary}`resources`
 :::
 
 :::{grid-item-card} {octicon}`globe;1.5em;sd-mr-1` Ecosystem
