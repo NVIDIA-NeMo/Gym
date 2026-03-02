@@ -145,7 +145,7 @@ _BLACKLISTED_COMMAND_PATTERNS = [
 ]
 
 
-def _is_blacklisted(command: str) -> str | None:
+def _is_blacklisted(command: str) -> Optional[str]:
     """Return a reason string if the command matches a blacklisted pattern, else None."""
     for pattern in _BLACKLISTED_COMMAND_PATTERNS:
         if pattern.search(command):
