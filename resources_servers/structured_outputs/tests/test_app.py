@@ -77,6 +77,14 @@ class TestApp:
 
         test_schema = {
             "type": "object",
+            "required": [
+                "studentId",
+                "examSubject",
+                "plannedStudyHours",
+                "isFullTimeStudent",
+                "studyMaterials",
+                "studySchedule",
+            ],
             "properties": {
                 "studentId": {"type": "string"},
                 "examSubject": {"type": "string"},
@@ -174,8 +182,7 @@ class TestApp:
         invalid_json_verify_response = await resources_server.verify(invalid_json_request)
         assert invalid_json_verify_response.reward == 0.0
 
-        # --- Test 3: Schema Mismatch (Missing field) ---
-        # `strictify_schema_json` makes all fields required.
+        # --- Test 3: Schema Mismatch (Missing required field) ---
         parsed_completion = json.loads(test_completion)
         del parsed_completion["studentId"]
         missing_field_completion = json.dumps(parsed_completion)
@@ -194,6 +201,27 @@ class TestApp:
 
         missing_field_verify_response = await resources_server.verify(missing_field_request)
         assert missing_field_verify_response.reward == 0.0
+
+        # --- Test 3b: Omitting an optional field should still pass ---
+        # `preparationStatus` is not in the schema's `required` list.
+        parsed_completion = json.loads(test_completion)
+        del parsed_completion["preparationStatus"]
+        optional_omitted_completion = json.dumps(parsed_completion)
+
+        optional_omitted_output_item = self._create_response_output_message(optional_omitted_completion)
+        optional_omitted_response = valid_response.model_copy(
+            deep=True, update={"id": "optional_omitted_id", "output": [optional_omitted_output_item]}
+        )
+
+        optional_omitted_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=optional_omitted_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.JSON,
+        )
+
+        optional_omitted_verify_response = await resources_server.verify(optional_omitted_request)
+        assert optional_omitted_verify_response.reward == 1.0
 
         # --- Test 4: Schema Mismatch (Extra field) ---
         # `strictify_schema_json` sets additionalProperties=False.
