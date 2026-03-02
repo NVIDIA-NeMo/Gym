@@ -34,6 +34,9 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     get_wandb_run,
 )
+
+
+SHOULD_SKIP_ROLLOUT_KEY = "should_skip_rollout"
 from nemo_gym.reward_profile import RewardProfiler
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
@@ -216,6 +219,7 @@ class RolloutCollectionHelper(BaseModel):
 
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
+        errors_fpath = output_fpath.parent / "errors.json"
 
         if config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
             (
@@ -224,10 +228,24 @@ class RolloutCollectionHelper(BaseModel):
                 results,
                 result_strs,
             ) = self._load_from_cache(config)
+
+            # Load already-written errors so we don't re-run those rollouts
+            error_entries: List[Dict] = []
+            if errors_fpath.exists():
+                error_entries = orjson.loads(errors_fpath.read_bytes())
+                errored_keys = {
+                    (e["_ng_task_index"], e["_ng_rollout_index"])
+                    for e in error_entries
+                    if "_ng_task_index" in e and "_ng_rollout_index" in e
+                }
+                input_rows = [
+                    r for r in input_rows if (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) not in errored_keys
+                ]
         else:
             rows: List[Dict] = []
             results: List[Dict] = []
             result_strs: List[List[str]] = []
+            error_entries: List[Dict] = []
 
             input_rows = self._preprocess_rows_from_config(config)
             # Returned rows are sorted by (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
@@ -238,6 +256,7 @@ class RolloutCollectionHelper(BaseModel):
 
             print("Clearing output fpath since `resume_from_cache=False`!")
             output_fpath.unlink(missing_ok=True)
+            errors_fpath.unlink(missing_ok=True)
 
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
@@ -253,11 +272,29 @@ class RolloutCollectionHelper(BaseModel):
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
 
-            rows.append(row)
-            results.append(result)
-            result_strs.append([orjson.dumps(result)])
-            results_file.write(result_strs[-1][0] + b"\n")
+            if result.get(SHOULD_SKIP_ROLLOUT_KEY, False):
+                error_entries.append(
+                    {
+                        "id": row.get("id"),
+                        "_ng_task_index": result[TASK_INDEX_KEY_NAME],
+                        "_ng_rollout_index": result[ROLLOUT_INDEX_KEY_NAME],
+                        "errors": [
+                            vr.get("message", "")
+                            for vr in result.get("validation_results", [])
+                            if isinstance(vr, dict) and vr.get("status") == "Failed"
+                        ],
+                    }
+                )
+            else:
+                rows.append(row)
+                results.append(result)
+                result_strs.append([orjson.dumps(result)])
+                results_file.write(result_strs[-1][0] + b"\n")
         results_file.close()
+
+        if error_entries:
+            errors_fpath.write_bytes(orjson.dumps(error_entries, option=orjson.OPT_INDENT_2))
+            print(f"Skipped rollouts written to: {errors_fpath}")
 
         if get_wandb_run():  # pragma: no cover
             get_wandb_run().log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
@@ -284,7 +321,8 @@ class RolloutCollectionHelper(BaseModel):
 Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
 Reward profiling outputs: {reward_profiling_fpath}
-Agent-level metrics: {agent_level_metrics_fpath}""")
+Agent-level metrics: {agent_level_metrics_fpath}
+Successful rollouts: {len(results)} | Skipped rollouts: {len(error_entries)}""")
 
         return results
 

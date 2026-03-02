@@ -174,6 +174,7 @@ class TuringVIFVerifyResponse(BaseVerifyResponse):
     follow_all_instructions: bool
     follow_instruction_list: List[bool]
     validation_results: List[ValidationResult] = Field(default_factory=list)
+    should_skip_rollout: bool = False
 
 
 class ValidationError(BaseModel):
@@ -674,6 +675,7 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
                 follow_all_instructions=False,
                 follow_instruction_list=is_following_list,
                 validation_results=validation_results,
+                should_skip_rollout=True,
             )
 
         # Get language from request (defaults to "en")
@@ -704,6 +706,7 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
                 follow_all_instructions=False,
                 follow_instruction_list=is_following_list,
                 validation_results=validation_results,
+                should_skip_rollout=True,
             )
 
         # Separate fast validators from LLM validators
