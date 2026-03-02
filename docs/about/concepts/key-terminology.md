@@ -11,6 +11,14 @@ Rollout / Trajectory
 
     **Rollout** (noun) is also used synonymously with **trajectory**: the resulting sequence of states, actions, and rewards: the ordered record of what happened. In practice, many people use "rollout" and "trajectory" interchangeably since a rollout produces exactly one trajectory.
 
+    Rollouts are the data that are fed into downstream training algorithms like SFT, DPO, or GRPO. Rollouts are also the data that are scored during evaluation.
+
+    SFT confusion
+
+    Evaluation confusion?
+
+    
+
 Rollout Batch
     A collection of multiple rollouts generated together, typically for the same task. Used for efficient parallel processing.
 
