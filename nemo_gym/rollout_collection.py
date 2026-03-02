@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import json
 from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
@@ -224,6 +225,14 @@ class RolloutCollectionHelper(BaseModel):
                 result_strs,
             ) = self._load_from_cache(config)
         else:
+            if config.resume_from_cache:
+                if not output_fpath.exists():
+                    print(f"Skipping resume_from_cache because output_fpath {output_fpath} doesn't exist!")
+                if not config.materialized_jsonl_fpath.exists():
+                    print(
+                        f"Skipping resume_from_cache because materialized_jsonl_fpath {config.materialized_jsonl_fpath} doesn't exist!"
+                    )
+
             rows: List[Dict] = []
             results: List[Dict] = []
             result_strs: List[List[str]] = []
@@ -282,6 +291,20 @@ class RolloutCollectionHelper(BaseModel):
                 agent_level_metrics_to_log.pop(f"{agent_name}/{AGENT_REF_KEY_NAME}")
 
             get_wandb_run().log(agent_level_metrics_to_log)
+
+        agent_level_metrics: List[Dict] = orjson.loads(agent_level_metrics_fpath.read_text())
+        agent_level_metrics_to_print: List[Dict] = []
+        for agent_metrics in agent_level_metrics:
+            agent_metrics_to_print = {AGENT_REF_KEY_NAME: agent_metrics[AGENT_REF_KEY_NAME]}
+            for k, v in agent_metrics.items():
+                if not k.startswith("mean/"):
+                    continue
+
+                agent_metrics_to_print[k] = v
+
+            agent_level_metrics_to_print.append(agent_metrics_to_print)
+
+        print("Agent level metrics (mean only):\n" + json.dumps(agent_level_metrics_to_print, indent=4))
 
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {config.materialized_jsonl_fpath}

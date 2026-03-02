@@ -3,6 +3,10 @@
 
 We have hands-on tutorials with supported training frameworks to help you train with NeMo Gym environments. If you're interested in integrating another training framework, see the {doc}`Training Framework Integration Guide <../contribute/rl-framework-integration/index>`.
 
+:::{tip}
+See {ref}`training-approaches` for a refresher on when to use GRPO, SFT, or DPO.
+:::
+
 ## RL (GRPO)
 
 ::::{grid} 1 2 2 2
