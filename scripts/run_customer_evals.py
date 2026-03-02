@@ -712,6 +712,114 @@ vllm serve \
     --host 0.0.0.0 \
     --port 10240""",
     ),
+    ModelEvalConfig(
+        model_short_name_for_upload="qwen3.5-27b",
+        initial_global_config_dict={
+            "policy_base_url": "???",
+            "policy_api_key": "???",
+            "policy_model_name": "Qwen/Qwen3.5-27B",
+            "config_paths": [
+                "responses_api_models/vllm_model/configs/vllm_model.yaml",
+            ],
+            "policy_model": {
+                "responses_api_models": {
+                    "vllm_model": {
+                        "replace_developer_role_with_system": True,
+                        "uses_reasoning_parser": True,
+                    },
+                },
+            },
+            # https://huggingface.co/Qwen/Qwen3.5-27B#using-qwen35-via-the-chat-completions-api
+            "responses_create_params": {
+                "temperature": 1.0,
+                "top_p": 0.95,
+                "max_output_tokens": 131072,
+            },
+        },
+        spinup_command=r"""vllm serve Qwen/Qwen3.5-27B \
+    --trust-remote-code \
+    --tensor-parallel-size 8 \
+    --gpu-memory-utilization 0.9 \
+    --enable-prefix-caching \
+    --reasoning-parser qwen3 \
+    --tool-call-parser qwen3_coder \
+    --enable-auto-tool-choice \
+    --host 0.0.0.0 \
+    --port 10240 \
+    --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'""",
+    ),
+    ModelEvalConfig(
+        model_short_name_for_upload="qwen3.5-35b-a3b",
+        initial_global_config_dict={
+            "policy_base_url": "???",
+            "policy_api_key": "???",
+            "policy_model_name": "Qwen/Qwen3.5-35B-A3B",
+            "config_paths": [
+                "responses_api_models/vllm_model/configs/vllm_model.yaml",
+            ],
+            "policy_model": {
+                "responses_api_models": {
+                    "vllm_model": {
+                        "replace_developer_role_with_system": True,
+                        "uses_reasoning_parser": True,
+                    },
+                },
+            },
+            # https://huggingface.co/Qwen/Qwen3.5-35B-A3B#using-qwen35-via-the-chat-completions-api
+            "responses_create_params": {
+                "temperature": 1.0,
+                "top_p": 0.95,
+                "max_output_tokens": 131072,
+            },
+        },
+        spinup_command=r"""vllm serve Qwen/Qwen3.5-35B-A3B \
+    --trust-remote-code \
+    --tensor-parallel-size 8 \
+    --gpu-memory-utilization 0.9 \
+    --enable-prefix-caching \
+    --reasoning-parser qwen3 \
+    --tool-call-parser qwen3_coder \
+    --enable-auto-tool-choice \
+    --host 0.0.0.0 \
+    --port 10240 \
+    --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'""",
+    ),
+    ModelEvalConfig(
+        model_short_name_for_upload="qwen3.5-122b-a10b",
+        initial_global_config_dict={
+            "policy_base_url": "???",
+            "policy_api_key": "???",
+            "policy_model_name": "Qwen/Qwen3.5-122B-A10B",
+            "config_paths": [
+                "responses_api_models/vllm_model/configs/vllm_model.yaml",
+            ],
+            "policy_model": {
+                "responses_api_models": {
+                    "vllm_model": {
+                        "replace_developer_role_with_system": True,
+                        "uses_reasoning_parser": True,
+                    },
+                },
+            },
+            # https://huggingface.co/Qwen/Qwen3.5-122B-A10B#using-qwen35-via-the-chat-completions-api
+            "responses_create_params": {
+                "temperature": 1.0,
+                "top_p": 0.95,
+                "max_output_tokens": 131072,
+            },
+        },
+        spinup_command=r"""vllm serve Qwen/Qwen3.5-122B-A10B \
+    --trust-remote-code \
+    --tensor-parallel-size 8 \
+    --gpu-memory-utilization 0.9 \
+    --enable-prefix-caching \
+    --reasoning-parser qwen3 \
+    --tool-call-parser qwen3_coder \
+    --enable-auto-tool-choice \
+    --host 0.0.0.0 \
+    --port 10240 \
+    --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'""",
+    ),
 ]
 
 

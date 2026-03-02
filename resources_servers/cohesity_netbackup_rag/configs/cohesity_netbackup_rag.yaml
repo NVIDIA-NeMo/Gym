@@ -6,6 +6,7 @@ cohesity_netbackup_rag_resources_server:
       judge_model:
         type: responses_api_models
         name: cohesity_netbackup_rag_judge_model
+      verified: false
 cohesity_netbackup_rag_judge_model:
   responses_api_models:
     openai_model:
@@ -30,7 +31,7 @@ cohesity_netbackup_rag_simple_agent:
         num_repeats: 4
         gitlab_identifier:
           dataset_name: cohesity_netbackup_rag
-          version: 0.0.1
+          version: 0.0.2
           artifact_fpath: validation.jsonl
         license: Apache 2.0
       - name: example
