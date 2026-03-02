@@ -232,4 +232,4 @@ For multi-step scenarios, the model returns training information on response mes
 
 - {doc}`/environment-tutorials/creating-training-environment` - Introductory tutorial for creating your first resource server
 - {doc}`/about/concepts/task-verification` - Verification and reward concepts
-- {doc}`/about/concepts/core-components` - Resource server architecture
+- {doc}`/about/concepts/core-components` - Environment component architecture
