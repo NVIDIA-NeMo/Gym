@@ -274,9 +274,9 @@ env:
 
           # Limit on how long a single rollout can run (including all turns).
           # You can also set a per-task timeout in task.toml via [agent].timeout_sec.
-          # If harbor_agent_timeout is set here, it is passed as Harbor's
-          # agent.override_timeout_sec and overrides task.toml.
-          harbor_agent_timeout: 900
+          # If harbor_agent_max_timeout is set here, Harbor keeps per-task timeouts
+          # but clamps longer ones to this maximum.
+          harbor_agent_max_timeout: 900
 
           harbor_agent_kwargs:
             max_turns: 20                # Max turns per rollout. Configure this for your dataset.

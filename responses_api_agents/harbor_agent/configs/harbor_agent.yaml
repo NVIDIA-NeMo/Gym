@@ -54,12 +54,18 @@ harbor_agent:
         type: responses_api_models
         name: policy_model
 
-      # Timeout controls:
-      # - null values defer to Harbor task defaults
-      # - multiplier scales task-defined timeouts globally
-      harbor_agent_timeout: null               # Agent timeout override in seconds
-      harbor_verifier_timeout: null            # Verifier timeout override in seconds
-      harbor_timeout_multiplier: null          # null behaves as 1.0
+      # Timeout controls (null = defer to task.toml defaults):
+      #
+      # *_timeout:     Override — replaces the task's timeout entirely.
+      #                All tasks get exactly this value.
+      # *_max_timeout: Cap — uses the task's own timeout but clamps it
+      #                to this maximum. Shorter per-task timeouts are respected.
+      # timeout_multiplier: Multiplied after override/cap resolution.
+      harbor_agent_override_timeout: null               # Override agent timeout (seconds)
+      harbor_agent_max_timeout: null           # Cap agent timeout (seconds)
+      harbor_verifier_override_timeout: null            # Override verifier timeout (seconds)
+      harbor_verifier_max_timeout: null        # Cap verifier timeout (seconds)
+      harbor_timeout_multiplier: null          # Multiplier (null = 1.0)
 
       # Output root directory for Harbor job artifacts.
       harbor_jobs_dir: "/path/to/Gym/responses_api_agents/harbor_agent/jobs"

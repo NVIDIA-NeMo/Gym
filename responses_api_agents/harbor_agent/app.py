@@ -85,11 +85,18 @@ class HarborAgentConfig(BaseResponsesAPIAgentConfig):
     harbor_environment_kwargs: Optional[dict[str, Any]] = None
 
     # --- Timeouts ---
-    # Per-agent timeout in seconds. None = use Harbor's default.
-    harbor_agent_timeout: Optional[int] = None
-    # Per-verifier timeout in seconds. None = use Harbor's default.
-    harbor_verifier_timeout: Optional[int] = None
-    # Multiplier applied to all Harbor timeouts. None = use Harbor's default (1.0).
+    # Override agent timeout (seconds). Replaces the task's own timeout entirely.
+    # Use this to set a fixed timeout for all tasks regardless of task.toml.
+    harbor_agent_override_timeout: Optional[int] = None
+    # Cap agent timeout (seconds). Uses the task's own timeout but clamps it
+    # to this maximum. Respects shorter per-task timeouts unlike harbor_agent_override_timeout.
+    harbor_agent_max_timeout: Optional[int] = None
+    # Override verifier timeout (seconds). Replaces the task's own verifier timeout.
+    harbor_verifier_override_timeout: Optional[int] = None
+    # Cap verifier timeout (seconds). Uses the task's own verifier timeout but
+    # clamps it to this maximum.
+    harbor_verifier_max_timeout: Optional[int] = None
+    # Multiplier applied to all Harbor timeouts after override/cap. None = 1.0.
     harbor_timeout_multiplier: Optional[float] = None
 
     # --- Job output ---
@@ -399,7 +406,14 @@ class HarborAgent(SimpleResponsesAPIAgent):
             import_path=self.config.harbor_agent_import_path,
             model_name=model_name,
             override_timeout_sec=(
-                float(self.config.harbor_agent_timeout) if self.config.harbor_agent_timeout is not None else None
+                float(self.config.harbor_agent_override_timeout)
+                if self.config.harbor_agent_override_timeout is not None
+                else None
+            ),
+            max_timeout_sec=(
+                float(self.config.harbor_agent_max_timeout)
+                if self.config.harbor_agent_max_timeout is not None
+                else None
             ),
             kwargs=agent_kwargs,
         )
@@ -434,7 +448,14 @@ class HarborAgent(SimpleResponsesAPIAgent):
 
         verifier_config = VerifierConfig(
             override_timeout_sec=(
-                float(self.config.harbor_verifier_timeout) if self.config.harbor_verifier_timeout is not None else None
+                float(self.config.harbor_verifier_override_timeout)
+                if self.config.harbor_verifier_override_timeout is not None
+                else None
+            ),
+            max_timeout_sec=(
+                float(self.config.harbor_verifier_max_timeout)
+                if self.config.harbor_verifier_max_timeout is not None
+                else None
             ),
         )
 
