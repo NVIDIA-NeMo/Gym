@@ -93,6 +93,7 @@ AGENT_REF_KEY_NAME = "agent_ref"
 POLICY_BASE_URL_KEY_NAME = "policy_base_url"
 POLICY_API_KEY_KEY_NAME = "policy_api_key"  # pragma: allowlist secret
 POLICY_MODEL_NAME_KEY_NAME = "policy_model_name"
+POLICY_MODEL_KEY_NAME = "policy_model"
 
 DEFAULT_HEAD_SERVER_PORT = 11000
 
@@ -239,6 +240,13 @@ class GlobalConfigDictParser(BaseModel):
                 if "token" in k or "key" in k:
                     dict_config[k] = "****"
 
+    def _reassign_policy_model(self, dict_config: DictConfig) -> None:
+        if not isinstance(dict_config.get(POLICY_MODEL_KEY_NAME), str):
+            return
+
+        with open_dict(dict_config):
+            dict_config[POLICY_MODEL_KEY_NAME] = dict_config.pop(dict_config[POLICY_MODEL_KEY_NAME])
+
     def parse(self, parse_config: Optional[GlobalConfigDictParserConfig] = None) -> DictConfig:
         if parse_config is None:
             parse_config = GlobalConfigDictParserConfig()
@@ -275,6 +283,8 @@ class GlobalConfigDictParser(BaseModel):
         if config_paths:
             with open_dict(global_config_dict):
                 global_config_dict[CONFIG_PATHS_KEY_NAME] = config_paths
+
+        self._reassign_policy_model(global_config_dict)
 
         # Almost-server detection and reporting
         almost_servers = self.detect_and_report_almost_servers(global_config_dict)
