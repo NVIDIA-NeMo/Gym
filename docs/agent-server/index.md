@@ -2,7 +2,7 @@
 
 # Agent Server
 
-The Agent server is the central component of environment design. It defines whether a rollout is single-step or multi-step, single-turn or multi-turn, and orchestrates all interaction logic: calling the model, executing tool calls through resources, and collecting the final reward.
+The Agent server is the central component of environment design. It defines whether a rollout is single-step or multi-step, single-turn or multi-turn, and orchestrates all interaction logic — calling the model, executing tool calls through resources, and collecting the final reward. The Agent server does not run an LLM itself, it is orchestration code that delegates all text generation to the Model server.
 
 ## Rollout Lifecycle
 
@@ -45,7 +45,7 @@ class Agent:
 
 ## Integrate Existing Agents
 
-You can use an existing agent in NeMo Gym, integrate an external one, or build your own from scratch. 
+You can use an existing agent in NeMo Gym, integrate an external one, or build your own from scratch.
 
 [`SimpleAgent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/simple_agent) is a native NeMo Gym agent that handles general-purpose multi-step tool calling with configurable max steps, and works with any Resources server out of the box. NeMo Gym also includes agents that integrate external tools: for example, [`MiniSWEAgent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/mini_swe_agent) wraps an external coding harness running in Docker containers and converts its output back into the NeMo Gym format.
 

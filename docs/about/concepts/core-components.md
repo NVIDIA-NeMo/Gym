@@ -24,11 +24,9 @@ In NeMo Gym, these concepts map to three server components:
 
 :::{tab-item} Agents
 
-The Agent server is the central component of environment design. It orchestrates all interaction logic: calling the model, routing tool calls to resources, and collecting the final reward. The agent manages the conversation loop — send to model, execute tool calls, repeat — until the task is complete.
+The Agent server defines whether a rollout is single-step or multi-step, single-turn or multi-turn, and orchestrates the full rollout lifecycle: calling the model, routing tool calls to resources, and collecting the final reward. It does not run an LLM itself, it delegates all text generation to the Model server.
 
-You can use an existing agent in NeMo Gym, bring your own, or create a completely new one. NeMo Gym provides several agent patterns covering multi-step, multi-turn, and user modeling scenarios.
-
-For a deeper look at the agent loop with pseudocode and examples, see {doc}`/agent-server/index`.
+You can use an existing agent, integrate an external one, or build your own from scratch. See {doc}`/agent-server/index` for details.
 
 :::
 
