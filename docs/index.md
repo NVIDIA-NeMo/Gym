@@ -134,6 +134,14 @@ Configure LLM inference backends including vLLM.
 {bdg-secondary}`inference` {bdg-secondary}`vllm`
 :::
 
+:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Resources Server
+:link: resources-server/index
+:link-type: doc
+Define tasks, tools, and verification logic for your environment.
++++
+{bdg-secondary}`environments` {bdg-secondary}`verification`
+:::
+
 :::{grid-item-card} {octicon}`database;1.5em;sd-mr-1` Data
 :link: data/index
 :link-type: doc
@@ -294,6 +302,14 @@ Overview <agent-server/index>
 
 Overview <model-server/index>
 vLLM <model-server/vllm>
+```
+
+```{toctree}
+:caption: Resources Server
+:hidden:
+:maxdepth: 1
+
+Overview <resources-server/index>
 ```
 
 ```{toctree}

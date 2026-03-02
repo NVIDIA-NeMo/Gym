@@ -40,56 +40,9 @@ See {doc}`/model-server/index` for available implementations and configuration.
 
 :::{tab-item} Resources
 
-Resource servers host the components and logic of environments including multi-step state persistence, tool and reward function implementations. Resource servers are responsible for returning observations, such as tool results or updated environment state, and rewards as a result of actions taken by the policy model. Actions can be moves in a game, tool calls, or anything an agent can do. NeMo Gym contains a variety of NVIDIA and community contributed resource servers that you can use during training. We also have tutorials on how to add your own resource server.
+Resources servers define the environment: the tasks agents solve, the tools and external state they interact with, and the verification logic that scores performance and returns reward signals for training. Each resource server manages isolated per-rollout state via session IDs.
 
-**Examples of Resources**
-
-A resource server usually provides tasks, possible actions, and {term}`verification <Verifier>` logic:
-
-- **Tasks**: Problems or prompts that agents solve during rollouts
-- **Actions**: Actions agents can take during rollouts, including tool calling
-- **Verification logic**: Scoring logic that evaluates performance (returns {term}`reward signals <Reward / Reward Signal>` for training)
-
-**Example Resource Servers**
-
-Each example shows what **task** the agent solves, what **actions** are available, and what **verification logic** measures success:
-
-- **[`google_search`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/google_search)**: Web search with verification
-  - **Task**: Answer knowledge questions using web search
-  - **Actions**: `search()` queries Google API; `browse()` extracts webpage content
-  - **Verification logic**: Checks if final answer matches expected result for MCQA questions
-
-- **[`math_with_code`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_code)**: Mathematical reasoning with code execution
-  - **Task**: Solve math problems using Python
-  - **Actions**: `execute_python()` runs Python code with numpy, scipy, pandas
-  - **Verification logic**: Extracts boxed answer and checks mathematical correctness
-
-- **[`code_gen`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/code_gen)**: Competitive programming problems
-  - **Task**: Implement solutions to coding problems
-  - **Actions**: None (agent generates code directly)
-  - **Verification logic**: Executes generated code against unit test inputs/outputs
-
-- **[`math_with_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_judge)**: Mathematical problem solving
-  - **Task**: Solve math problems
-  - **Actions**: None (or can be combined with `math_with_code`)
-  - **Verification logic**: Uses math library + LLM judge to verify answer equivalence
-
-- **[`mcqa`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/mcqa)**: Multiple choice question answering
-  - **Task**: Answer multiple choice questions
-  - **Actions**: None (knowledge-based reasoning)
-  - **Verification logic**: Checks if selected option matches ground truth
-
-- **[`instruction_following`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/instruction_following)**: Instruction compliance evaluation
-  - **Task**: Follow specified instructions
-  - **Actions**: None (evaluates response format/content)
-  - **Verification logic**: Checks if response follows all specified instructions
-
-- **[`example_single_tool_call`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_single_tool_call)**: Mock weather API
-  - **Task**: Report weather information
-  - **Actions**: `get_weather()` returns mock weather data
-  - **Verification logic**: Checks if weather tool was called correctly
-
-**Configuration**: Refer to resource-specific config files in `resources_servers/*/configs/`
+See {doc}`/resources-server/index` for details.
 
 :::
 ::::
