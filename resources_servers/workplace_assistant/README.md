@@ -24,6 +24,10 @@ ng_collect_rollouts +agent_name=workplace_assistant_simple_agent \
    +limit=1
 ```
 
+## Generating Training Data
+
+To generate your own training JSONL for this environment using NVIDIA Data Designer, see the [multi-step tool-calling data generation example](../../examples/multistep_toolcalling_datagen/).
+
 # Licensing information
 Code: Apache 2.0
 Data: Apache 2.0
