@@ -6,7 +6,7 @@ In the previous tutorial, you set up NeMo Gym and ran your first agent interacti
 
 :::{card}
 
-**Goal**: Generate your first batch of rollouts and understand how they become training data.
+**Goal**: Generate and view your first batch of rollouts.
 
 **Time**: ~10 minutes | **Cost**: ~$0.05 (OpenAI API)
 
@@ -14,9 +14,9 @@ In the previous tutorial, you set up NeMo Gym and ran your first agent interacti
 
 **In this tutorial, you will**:
 
-1. Run batch rollout collection
-2. Examine results with the rollout viewer
-3. Learn key parameters for scaling
+1. Inspect your input data
+2. Run batch rollout collection
+3. Examine the collected rollouts
 
 :::
 
@@ -45,7 +45,7 @@ Make sure you have:
 
 ## 1. Inspect the Data
 
-Look at the example dataset included with the Simple Weather resource server:
+Look at the example dataset included with the Example Single Tool Call resource server:
 
 ```bash
 head -1 resources_servers/example_single_tool_call/data/example.jsonl | python -m json.tool
@@ -127,12 +127,6 @@ Each rollout row should contain:
 - **Input**: The original query and tools
 - **Response**: Tool calls and agent output
 - **Reward**: Verification score (0.0–1.0)
-
-:::{important}
-**Where Do Reward Scores Come From?**
-
-Scores come from the `verify()` function in your resource server. Each rollout is automatically sent to the `/verify` endpoint during collection. The default returns 1.0, but you can implement custom logic to score based on tool usage, response quality, or task completion.
-:::
 
 ---
 
