@@ -118,6 +118,14 @@ Configure and customize environment components and prepare datasets.
 ::::{grid} 1 2 2 2
 :gutter: 1 1 1 2
 
+:::{grid-item-card} {octicon}`hubot;1.5em;sd-mr-1` Agent Server
+:link: agent-server/index
+:link-type: doc
+Orchestrate rollouts, tool calling, and verification.
++++
+{bdg-secondary}`orchestration` {bdg-secondary}`rollouts`
+:::
+
 :::{grid-item-card} {octicon}`cpu;1.5em;sd-mr-1` Model Server
 :link: model-server/index
 :link-type: doc
@@ -269,6 +277,14 @@ Ecosystem <about/ecosystem>
 Quickstart <get-started/index>
 Detailed Setup Guide <get-started/detailed-setup.md>
 Rollout Collection <get-started/rollout-collection.md>
+```
+
+```{toctree}
+:caption: Agent Server
+:hidden:
+:maxdepth: 1
+
+Overview <agent-server/index>
 ```
 
 ```{toctree}

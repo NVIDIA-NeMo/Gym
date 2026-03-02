@@ -24,29 +24,11 @@ In NeMo Gym, these concepts map to three server components:
 
 :::{tab-item} Agents
 
-Responses API Agent servers {term}`orchestrate <Orchestration>` the rollout lifecycle—the full cycle of task execution and verification.
+The Agent server is the central component of environment design. It orchestrates all interaction logic: calling the model, routing tool calls to resources, and collecting the final reward. The agent manages the conversation loop — send to model, execute tool calls, repeat — until the task is complete.
 
-- Implement multi-step and multi-turn agentic systems
-- Orchestrate the model server and resources server(s) to collect complete trajectories
+You can use an existing agent in NeMo Gym, bring your own, or create a completely new one. NeMo Gym provides several agent patterns covering multi-step, multi-turn, and user modeling scenarios.
 
-NeMo Gym provides several agent patterns covering multi-step, multi-turn, and user modeling scenarios.
-
-**Examples:**
-
-- `simple_agent`: Basic agent that coordinates model calls with resource tools
-
-**Configuration Pattern**:
-
-```yaml
-your_agent_name:                     # server ID
-  responses_api_agents:              # server type. corresponds to the folder name in the project root
-    your_agent_name:                 # agent type. name of the folder inside the server type folder 
-      entrypoint: app.py             # server entrypoint path, relative to the agent type folder 
-      resources_server:              # which resource server to use
-        name: example_single_tool_call
-      model_server:                  # which model server to use
-        name: policy_model
-```
+For a deeper look at the agent loop with pseudocode and examples, see {doc}`/agent-server/index`.
 
 :::
 
