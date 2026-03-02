@@ -12,6 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from typing import Any, Dict
+
+from pydantic import Field
 
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
@@ -32,6 +35,8 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
     openai_api_key: str
     openai_model: str
 
+    extra_body: Dict[str, Any] = Field(default_factory=dict())
+
 
 class SimpleModelServer(SimpleResponsesAPIModel):
     config: SimpleModelServerConfig
@@ -45,7 +50,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
         return super().model_post_init(context)
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
-        body_dict = body.model_dump(exclude_unset=True)
+        body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)
         body_dict["model"] = self.config.openai_model
         openai_response_dict = await self._client.create_response(**body_dict)
         return NeMoGymResponse.model_validate(openai_response_dict)
@@ -53,7 +58,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
     async def chat_completions(
         self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
-        body_dict = body.model_dump(exclude_unset=True)
+        body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)
         body_dict["model"] = self.config.openai_model
         openai_response_dict = await self._client.create_chat_completion(**body_dict)
         return NeMoGymChatCompletion.model_validate(openai_response_dict)

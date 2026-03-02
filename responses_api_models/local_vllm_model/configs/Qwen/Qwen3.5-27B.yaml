@@ -1,0 +1,38 @@
+Qwen3_5-27B:
+  responses_api_models:
+    local_vllm_model:
+      entrypoint: app.py
+      model: Qwen/Qwen3.5-27B
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      replace_developer_role_with_system: true
+      debug: false
+
+      # Recommended in https://huggingface.co/Qwen/Qwen3.5-27B#using-qwen35-via-the-chat-completions-api
+      extra_body:
+        temperature: 1.0
+        top_p: 0.95
+        max_output_tokens: null
+
+      # For example, if your model is downloaded at ~/.cache/huggingface/hub/models--Qwen--Qwen3-235B-A22B-Instruct-2507, your hf_home here would be `~/.cache/huggingface`
+      hf_home: null
+
+      vllm_serve_env_vars:
+        # If your tp * pp is greater than one node or one model instance spans more than one node, set this to `span`!
+        VLLM_RAY_DP_PACK_STRATEGY: strict
+
+      # If a hf_token is present in the env.yaml, it will be prepended to the hf download.
+      vllm_serve_kwargs:
+        # vLLM serving is a bit quirky at the moment. These parallelism configs are fairly sensitive and need to always be set properly!
+        data_parallel_size: 1
+        tensor_parallel_size: 8
+        pipeline_parallel_size: 1
+
+        trust_remote_code: true
+        gpu_memory_utilization: 0.9
+        enable_auto_tool_choice: true
+        tool_call_parser: qwen3_coder
+        reasoning_parser: qwen3
+        model_loader_extra_config:
+          enable_multithread_load: true
+          num_threads: 16

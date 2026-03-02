@@ -91,6 +91,10 @@ class VLLMModel(SimpleResponsesAPIModel):
     config: VLLMModelConfig
 
     def model_post_init(self, context):
+        self._post_init()
+        return super().model_post_init(context)
+
+    def _post_init(self) -> None:
         self._clients = [
             NeMoGymAsyncOpenAI(
                 base_url=base_url,
@@ -105,13 +109,11 @@ class VLLMModel(SimpleResponsesAPIModel):
             return_token_id_information=self.config.return_token_id_information,
         )
 
-        return super().model_post_init(context)
-
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:
         if self.config.is_responses_native:
-            return self._responses_native(request, body)
+            return await self._responses_native(request, body)
 
         # Response Create Params -> Chat Completion Create Params
         chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(body)
@@ -177,7 +179,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             raise NotImplementedError
         if self.config.replace_developer_role_with_system:
             raise NotImplementedError
-        if self.config.sequential_reasoning_allowed:
+        if not self.config.sequential_reasoning_allowed:
             raise NotImplementedError
 
         body_dict = body.model_dump(exclude_unset=True)
