@@ -76,10 +76,14 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
 
     # ----- JSON Helpers ----- #
     def strictify_schema_json(self, schema: Dict[str, Any]):
-        """Make a schema strict as per OpenAPI guidelines"""
+        """Disallow additional properties not defined in the schema.
+
+        Only adds ``additionalProperties: false``.  The original ``required``
+        list is preserved so that models are not penalised for correctly
+        omitting optional fields.
+        """
         if isinstance(schema, Dict):
             if "properties" in schema:
-                schema["required"] = list(schema["properties"])
                 schema["additionalProperties"] = False
             for k, v in schema.items():
                 self.strictify_schema_json(v)
