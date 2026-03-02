@@ -7,7 +7,7 @@ Learn how to create a custom resource server to implement tools, verifiers, and 
 
 **Goal**: Build a custom resource server with tools and verification logic.
 
-**Time**: ~30 minutes | **Cost**: ~$0.05 (OpenAI API)
+**Time**: ~30 minutes
 
 ^^^
 
@@ -331,23 +331,17 @@ This starts three servers:
 2. The OpenAI model server (provides LLM responses)
 3. Your weather resource server (provides the `get_weather` tool)
 
-Configure your OpenAI API key in `env.yaml` (located in the repository root):
+Configure your OpenAI API key in `env.yaml` (located in the repository root). The `env.yaml` is never committed to Git and is designed to hold secrets like API keys!
 
 ```yaml
-openai_api_key: ${oc.env:OPENAI_API_KEY}  # Reads from environment variable
+openai_api_key: ???
 policy_api_key: ${openai_api_key}
 policy_base_url: https://api.openai.com/v1
 policy_model_name: gpt-4o-mini
 ```
 
 :::{tip}
-Set your API key as an environment variable before running:
-
-```bash
-export OPENAI_API_KEY="sk-your-key-here"  # pragma: allowlist secret
-```
-
-Never commit API keys directly in YAML files.
+If you don't want to use the OpenAI API, you can try using a local vLLM server (requires GPU access) instead! See {ref}`model-server-vllm`.
 :::
 
 ### Test the resources server
