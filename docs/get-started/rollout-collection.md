@@ -124,6 +124,8 @@ ng_collect_rollouts +agent_name=example_single_tool_call_simple_agent \
 ```
 
 However, using `temperature=0.0` may result in degraded performance in certain use case scenarios. If temperature is not set, the default temperature for that model endpoint will typically be used, which has been tuned to fit the average use case scenario.
+
+Using `temperature=0.0` will still not guarantee the same result when running the same request multiple times, but it will reduce the output variance considerably.
 :::
 
 
