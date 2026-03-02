@@ -53,6 +53,7 @@ You can use an existing agent in NeMo Gym, integrate an external one, or build y
 
 Existing agents may come with predefined tools, allowing you to leverage them directly and use the Resources server to supplement with any additional external tools. When building a new environment, prefer defining tools in the Resources server rather than the Agent server. This separation of concerns allows different agents to share the same Resources server without duplicating tool logic.
 
+## Server Configuration
 :::{seealso}
 [Agent Server Fields](../reference/configuration.md#agent-server-fields) for server configuration syntax and fields.
 :::
