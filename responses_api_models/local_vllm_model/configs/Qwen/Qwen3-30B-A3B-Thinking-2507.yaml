@@ -5,7 +5,7 @@ Qwen3-30B-A3B-Thinking-2507:
       model: Qwen/Qwen3-30B-A3B-Thinking-2507
       return_token_id_information: false
       uses_reasoning_parser: true
-      replace_developer_role_with_system: false
+      replace_developer_role_with_system: true
       debug: false
 
       # Recommended in https://huggingface.co/Qwen/Qwen3-30B-A3B-Thinking-2507#best-practices
