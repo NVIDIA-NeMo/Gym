@@ -32,15 +32,9 @@ You can use an existing agent, integrate an external one, or build your own from
 
 :::{tab-item} Model
 
-Responses API Model servers are stateless model endpoints that perform single-call text generation without conversation memory or orchestration. During training, you will always have at least one active Responses API Model server, typically called the "policy" model.
+Model servers are stateless LLM inference endpoints. They receive a conversation and return the model's next output (text, tool calls, or code) with no memory or orchestration logic. During training, you will always have at least one active Model server, the "policy" model being trained.
 
-**Available Implementations:**
-
-- `openai_model`: Integration with OpenAI's Responses API  
-- `azure_openai_model`: Integration with Azure OpenAI API
-- `vllm_model`: Middleware converting local models (using vLLM) to Responses API format
-
-**Configuration:** Models are configured with API endpoints and credentials using YAML files in `responses_api_models/*/configs/`
+See {doc}`/model-server/index` for available implementations and configuration.
 
 :::
 
