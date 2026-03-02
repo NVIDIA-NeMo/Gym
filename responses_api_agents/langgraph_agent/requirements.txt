@@ -1,0 +1,5 @@
+-e nemo-gym[dev] @ ../../
+langchain-core
+langgraph
+pytest
+pytest-asyncio
