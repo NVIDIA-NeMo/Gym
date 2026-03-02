@@ -1,10 +1,9 @@
-policy_api_key: ???
 gpt-5-nano-2025-08-07:
   responses_api_models:
     openai_model:
       entrypoint: app.py
       openai_base_url: https://api.openai.com/v1
-      openai_api_key: ${policy_api_key}
+      openai_api_key: ???
       openai_model: gpt-5-nano-2025-08-07
 
       extra_body:
