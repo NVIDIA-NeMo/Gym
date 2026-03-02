@@ -224,6 +224,14 @@ class RolloutCollectionHelper(BaseModel):
                 result_strs,
             ) = self._load_from_cache(config)
         else:
+            if config.resume_from_cache:
+                if not output_fpath.exists():
+                    print(f"Skipping resume_from_cache because output_fpath {output_fpath} doesn't exist!")
+                if not config.materialized_jsonl_fpath.exists():
+                    print(
+                        f"Skipping resume_from_cache because materialized_jsonl_fpath {config.materialized_jsonl_fpath} doesn't exist!"
+                    )
+
             rows: List[Dict] = []
             results: List[Dict] = []
             result_strs: List[List[str]] = []
