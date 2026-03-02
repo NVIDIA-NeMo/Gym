@@ -35,7 +35,7 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
     openai_api_key: str
     openai_model: str
 
-    extra_body: Dict[str, Any] = Field(default_factory=dict())
+    extra_body: Dict[str, Any] = Field(default_factory=dict)
 
 
 class SimpleModelServer(SimpleResponsesAPIModel):
