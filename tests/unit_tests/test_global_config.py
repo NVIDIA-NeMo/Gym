@@ -688,8 +688,7 @@ class TestGlobalConfig:
             "not": "not",
         }
 
-    def test_reassign_policy_model(self, monkeypatch: MonkeyPatch) -> None:
-        """Test that use_absolute_ip=True uses machine's hostname ip for default_host."""
+    def test_recursively_replace_keys(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
 
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
@@ -708,8 +707,10 @@ class TestGlobalConfig:
         def hydra_main_wrapper(fn):
             config_dict = DictConfig(
                 {
-                    "policy_model": "test_resource",
+                    "policy_model": "${swap_key:test_resource}",
                     "test_resource": {"responses_api_models": {"test_model": {"entrypoint": "app.py"}}},
+                    "a": {"b": {"c": 3}},
+                    "a_prime": {"b_prime": "${swap_key:a.b.c}"},
                 }
             )
             return lambda: fn(config_dict)
@@ -723,6 +724,8 @@ class TestGlobalConfig:
                 "responses_api_models": {"test_model": {"entrypoint": "app.py", "host": "127.0.0.1", "port": 12345}}
             },
             "disallowed_ports": [11000, 12345],
+            "a": {"b": {}},
+            "a_prime": {"b_prime": 3},
         }
 
         assert expected_global_config_dict == actual_global_config_dict
