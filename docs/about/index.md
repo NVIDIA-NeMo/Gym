@@ -11,8 +11,8 @@ Building and scaling RL training environments for LLMs presents several key chal
 
 - **Decoupling environments from training**: Many RL workflows tightly couple environment logic with the training pipeline, making it difficult to integrate complex agent loops, iterate on environment design, and run controlled ablations.
 - **Representing agentic trajectories consistently**: The community widely uses Chat Completions today, but it was designed for stateless, single-turn interactions. Agentic rollouts include interleaved reasoning, tool calls, and text across multiple turns. Without a schema that natively represents this, custom parsing and serialization is required for every environment.
-- **Resource management**: Environments often depend on external resources such as sandboxed execution, databases, and APIs. Each rollout needs isolated instances that must be reliably initialized and cleaned up.
-- **Scalability**: Training may require thousands of parallel rollouts. Environment instances must scale accordingly with distribution, load balancing, and fault tolerance.
+- **Managing resources**: Environments often depend on external resources such as sandboxed execution, databases, and APIs. Each rollout needs isolated instances that must be reliably initialized and cleaned up.
+- **Scaling rollout collection**: Training may require thousands of parallel rollouts. Environment instances must scale accordingly with distribution, load balancing, and fault tolerance.
 
 ## NeMo Gym
 
