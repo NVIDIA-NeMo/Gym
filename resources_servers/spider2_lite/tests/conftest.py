@@ -20,7 +20,9 @@ _DEFAULT_PORT = 18765
 
 
 def pytest_configure(config):
-    config.addinivalue_line("markers", "e2e: end-to-end tests requiring downloaded databases and Spider2 reference repo")
+    config.addinivalue_line(
+        "markers", "e2e: end-to-end tests requiring downloaded databases and Spider2 reference repo"
+    )
     config.addinivalue_line("markers", "e2e_llm: end-to-end tests requiring a local vLLM server and GPU")
     ensure_spider2_lite()
 
