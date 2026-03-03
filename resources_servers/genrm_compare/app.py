@@ -358,36 +358,27 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         response_1 = extract_output_text(response_obj_1)
         response_2 = extract_output_text(response_obj_2)
 
-        # Build the message list using standard OpenAI roles.
-        # GenRMModelMixin._preprocess_chat_completion_create_params remaps the
-        # trailing messages to the GenRM-specific roles expected by the chat template:
-        #   messages[-2] ("user")   → "response_1"
-        #   messages[-1] ("user")   → "response_2"
-        #   messages[-3] ("system") → "principle"  (only when use_principle=True)
-        messages: List[NeMoGymEasyInputMessage] = []
-        for msg in conversation_history:
-            messages.append(
-                NeMoGymEasyInputMessage(
-                    role=msg.get("role", "user"),
-                    content=msg.get("content", ""),
-                    type="message",
-                )
+        # input carries only the conversation history (standard OpenAI roles).
+        # The comparison payload is passed via metadata so the request schema stays
+        # generic and GenRMModelMixin._preprocess_chat_completion_create_params can
+        # inject the GenRM-specific roles (response_1, response_2, principle) server-side.
+        messages: List[NeMoGymEasyInputMessage] = [
+            NeMoGymEasyInputMessage(
+                role=msg.get("role", "user"),
+                content=msg.get("content", ""),
+                type="message",
             )
+            for msg in conversation_history
+        ]
 
+        metadata = {"response_1": response_1, "response_2": response_2}
         if cfg.use_principle:
-            principle_text = principle if principle else cfg.default_principle
-            messages.append(NeMoGymEasyInputMessage(role="system", content=principle_text, type="message"))
-
-        messages.extend(
-            [
-                NeMoGymEasyInputMessage(role="user", content=response_1, type="message"),
-                NeMoGymEasyInputMessage(role="user", content=response_2, type="message"),
-            ]
-        )
+            metadata["principle"] = principle if principle else cfg.default_principle
 
         # Build the request params
         responses_create_params = cfg.genrm_responses_create_params.model_copy(deep=True)
         responses_create_params.input = messages
+        responses_create_params.metadata = metadata
 
         try:
             # Retry logic for parse failures (not connection errors, which are handled elsewhere)
