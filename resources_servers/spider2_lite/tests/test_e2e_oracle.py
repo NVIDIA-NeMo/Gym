@@ -27,6 +27,7 @@ from nemo_gym.server_utils import ServerClient
 from resources_servers.spider2_lite.app import Spider2LiteResourcesServer, Spider2LiteResourcesServerConfig
 from resources_servers.spider2_lite.setup_spider2 import _DEFAULT_DIR
 
+
 pytestmark = pytest.mark.e2e
 
 _SPIDER2_REF = Path(os.environ.get("SPIDER2_LITE_REF_DIR", "~/code/spider2-lite-ref")).expanduser()
@@ -52,20 +53,22 @@ def client():
 
 
 def _load_oracle_tasks():
-    main = {json.loads(l)["instance_id"]: json.loads(l) for l in open(_MAIN_JSONL)}
-    eval_meta = {json.loads(l)["instance_id"]: json.loads(l) for l in open(_EVAL_JSONL)}
+    main = {json.loads(line)["instance_id"]: json.loads(line) for line in open(_MAIN_JSONL)}
+    eval_meta = {json.loads(line)["instance_id"]: json.loads(line) for line in open(_EVAL_JSONL)}
     tasks = []
     for sql_file in sorted(_GOLD_SQL_DIR.glob("local*.sql")):
         iid = sql_file.stem
         t, e = main[iid], eval_meta[iid]
-        tasks.append({
-            "instance_id": iid,
-            "db_id": t["db"],
-            "question": t["question"],
-            "gold_sql": sql_file.read_text().strip(),
-            "ignore_order": e["ignore_order"],
-            "condition_cols": e["condition_cols"],
-        })
+        tasks.append(
+            {
+                "instance_id": iid,
+                "db_id": t["db"],
+                "question": t["question"],
+                "gold_sql": sql_file.read_text().strip(),
+                "ignore_order": e["ignore_order"],
+                "condition_cols": e["condition_cols"],
+            }
+        )
     return tasks
 
 
@@ -81,10 +84,22 @@ def _verify(client, task, model_output, **overrides):
     body = {
         "responses_create_params": {"input": []},
         "response": {
-            "id": "r", "created_at": 0, "model": "m", "object": "response",
-            "output": [{"id": "msg", "type": "message", "role": "assistant", "status": "completed",
-                        "content": [{"type": "output_text", "text": model_output, "annotations": []}]}],
-            "parallel_tool_calls": True, "tool_choice": "auto", "tools": [],
+            "id": "r",
+            "created_at": 0,
+            "model": "m",
+            "object": "response",
+            "output": [
+                {
+                    "id": "msg",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": model_output, "annotations": []}],
+                }
+            ],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
         },
         "instance_id": task["instance_id"],
         "db_id": task["db_id"],
@@ -139,14 +154,13 @@ def test_gold_result_mode_oracle(client, oracle_tasks, instance_id):
     gold_result = _load_gold_result(instance_id)
     assert gold_result, f"No gold CSV found for {instance_id}"
     result = _verify(
-        client, task,
+        client,
+        task,
         f"```sql\n{task['gold_sql']}\n```",
         gold_sql=None,
         gold_result=gold_result,
     )
-    assert result["reward"] == 1.0, (
-        f"{instance_id}: reward={result['reward']}, failure={result.get('failure_reason')}"
-    )
+    assert result["reward"] == 1.0, f"{instance_id}: reward={result['reward']}, failure={result.get('failure_reason')}"
 
 
 def test_oracle_pass_rate(client, oracle_tasks):
