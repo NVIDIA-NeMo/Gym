@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from abc import abstractmethod
+from typing import Optional
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -25,7 +26,7 @@ from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, Simpl
 
 
 class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
-    pass
+    metrics_type: Optional[str] = None
 
 
 class BaseResourcesServer(BaseServer):

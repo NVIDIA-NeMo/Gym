@@ -12,348 +12,93 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
+from pathlib import Path
+
+import pytest
+
+from nemo_gym.reward_profile import MetricsProfiler
 
 
-from nemo_gym.reward_profile import RewardProfiler
-
-
-class TestRewardProfile:
-    def _clean_metrics(self, metrics: list[dict]) -> None:
-        for row in metrics:
-            for key in list(row):
-                if key.startswith("histogram"):
-                    row[key] = None
-
+class TestMetricsProfiler:
     def test_profile_from_data(self) -> None:
-        rows = [
-            {
-                "_ng_task_index": 0,
-                "_ng_rollout_index": 0,
-                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
-                "x": 0,
-                "agent_ref": {"name": "my_agent"},
-            },
-            {
-                "_ng_task_index": 0,
-                "_ng_rollout_index": 1,
-                "responses_create_params": {"input": [], "seed": 1, "temperature": 0.1},
-                "x": 0,
-                "agent_ref": {"name": "my_agent"},
-            },
-            {
-                "_ng_task_index": 1,
-                "_ng_rollout_index": 0,
-                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
-                "x": 1,
-                "agent_ref": {"name": "my_agent"},
-            },
-            {
-                "_ng_task_index": 1,
-                "_ng_rollout_index": 1,
-                "responses_create_params": {"input": [], "seed": 1, "temperature": 0.1},
-                "x": 1,
-                "agent_ref": {"name": "my_agent"},
-            },
-            {
-                "_ng_task_index": 2,
-                "_ng_rollout_index": 0,
-                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
-                "x": 2,
-                "agent_ref": {"name": "my_agent"},
-            },
-            {
-                "_ng_task_index": 2,
-                "_ng_rollout_index": 1,
-                "responses_create_params": {"input": [], "seed": 1, "temperature": 0.1},
-                "x": 2,
-                "agent_ref": {"name": "my_agent"},
-            },
-        ]
         results = [
-            {
-                "_ng_task_index": 0,
-                "_ng_rollout_index": 0,
-                "response": {"usage": {"abc usage": 1}},
-                "reward": 0,
-                "bool": True,
-            },
-            {
-                "_ng_task_index": 0,
-                "_ng_rollout_index": 1,
-                "response": {"usage": {"abc usage": 1}},
-                "reward": 1,
-                "bool": False,
-            },
-            {
-                "_ng_task_index": 1,
-                "_ng_rollout_index": 0,
-                "response": {"usage": {"abc usage": 1}},
-                "reward": 0,
-                "bool": True,
-            },
-            {
-                "_ng_task_index": 1,
-                "_ng_rollout_index": 1,
-                "response": {"usage": {"abc usage": 1}},
-                "reward": 1,
-                "bool": False,
-            },
-            {
-                "_ng_task_index": 2,
-                "_ng_rollout_index": 0,
-                "response": {"usage": {"abc usage": 1}},
-                "reward": 0,
-                "bool": True,
-            },
-            {
-                "_ng_task_index": 2,
-                "_ng_rollout_index": 1,
-                "response": {"usage": {"abc usage": 1}},
-                "reward": 1,
-                "bool": False,
-            },
+            {"_ng_task_index": 0, "_ng_rollout_index": 0, "response": {"usage": {"abc_usage": 1}}, "reward": 0},
+            {"_ng_task_index": 0, "_ng_rollout_index": 1, "response": {"usage": {"abc_usage": 1}}, "reward": 1},
+            {"_ng_task_index": 1, "_ng_rollout_index": 0, "response": {"usage": {"abc_usage": 1}}, "reward": 0},
+            {"_ng_task_index": 1, "_ng_rollout_index": 1, "response": {"usage": {"abc_usage": 1}}, "reward": 1},
+            {"_ng_task_index": 2, "_ng_rollout_index": 0, "response": {"usage": {"abc_usage": 1}}, "reward": 0},
+            {"_ng_task_index": 2, "_ng_rollout_index": 1, "response": {"usage": {"abc_usage": 1}}, "reward": 1},
         ]
 
-        actual_group_level_metrics, actual_agent_level_metrics = RewardProfiler().profile_from_data(rows, results)
+        mp = MetricsProfiler()
+        output = mp.profile_from_data(results)
 
-        self._clean_metrics(actual_group_level_metrics)
-        self._clean_metrics(actual_agent_level_metrics)
+        # Each task has 1 correct out of 2
+        # pass@1: 1 - C(1,1)/C(2,1) = 0.5 for all tasks -> 50%
+        assert output.aggregate["pass@1"]["reward"] == pytest.approx(50.0)
 
-        expected_group_level_metrics = [
-            {
-                "mean/bool": 0.5,
-                "mean/reward": 0.5,
-                "mean/abc usage": 1.0,
-                "max/bool": True,
-                "max/reward": 1,
-                "max/abc usage": 1,
-                "min/bool": False,
-                "min/reward": 0,
-                "min/abc usage": 1,
-                "median/bool": 0.5,
-                "median/reward": 0.5,
-                "median/abc usage": 1.0,
-                "std/bool": 0.7071067811865476,
-                "std/reward": 0.7071067811865476,
-                "std/abc usage": 0.0,
-                "histogram/bool": None,
-                "histogram/reward": None,
-                "histogram/abc usage": None,
-                "sample": {
-                    "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
-                    "x": 0,
-                    "agent_ref": {"name": "my_agent"},
-                },
-            },
-            {
-                "mean/bool": 0.5,
-                "mean/reward": 0.5,
-                "mean/abc usage": 1.0,
-                "max/bool": True,
-                "max/reward": 1,
-                "max/abc usage": 1,
-                "min/bool": False,
-                "min/reward": 0,
-                "min/abc usage": 1,
-                "median/bool": 0.5,
-                "median/reward": 0.5,
-                "median/abc usage": 1.0,
-                "std/bool": 0.7071067811865476,
-                "std/reward": 0.7071067811865476,
-                "std/abc usage": 0.0,
-                "histogram/bool": None,
-                "histogram/reward": None,
-                "histogram/abc usage": None,
-                "sample": {
-                    "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
-                    "x": 1,
-                    "agent_ref": {"name": "my_agent"},
-                },
-            },
-            {
-                "mean/bool": 0.5,
-                "mean/reward": 0.5,
-                "mean/abc usage": 1.0,
-                "max/bool": True,
-                "max/reward": 1,
-                "max/abc usage": 1,
-                "min/bool": False,
-                "min/reward": 0,
-                "min/abc usage": 1,
-                "median/bool": 0.5,
-                "median/reward": 0.5,
-                "median/abc usage": 1.0,
-                "std/bool": 0.7071067811865476,
-                "std/reward": 0.7071067811865476,
-                "std/abc usage": 0.0,
-                "histogram/bool": None,
-                "histogram/reward": None,
-                "histogram/abc usage": None,
-                "sample": {
-                    "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
-                    "x": 2,
-                    "agent_ref": {"name": "my_agent"},
-                },
-            },
-        ]
-        assert expected_group_level_metrics == actual_group_level_metrics
+        # pass@2: 1 - C(1,2)/C(2,2) = 1.0 for all tasks -> 100%
+        assert output.aggregate["pass@2"]["reward"] == pytest.approx(100.0)
 
-        expected_agent_level_metrics = [
-            {
-                "agent_ref": {"name": "my_agent"},
-                "mean/bool": 0.5,
-                "mean/reward": 0.5,
-                "mean/abc usage": 1.0,
-                "max/bool": True,
-                "max/reward": 1,
-                "max/abc usage": 1,
-                "min/bool": False,
-                "min/reward": 0,
-                "min/abc usage": 1,
-                "median/bool": 0.5,
-                "median/reward": 0.5,
-                "median/abc usage": 1.0,
-                "std/bool": 0.5477225575051661,
-                "std/reward": 0.5477225575051661,
-                "std/abc usage": 0.0,
-                "histogram/bool": None,
-                "histogram/reward": None,
-                "histogram/abc usage": None,
-            }
-        ]
-        assert expected_agent_level_metrics == actual_agent_level_metrics
+        # avg-of-2: (0+1)/2 = 0.5 for all tasks -> 50%
+        assert output.aggregate["pass@1[avg-of-2]"]["reward"] == pytest.approx(50.0)
 
-    def test_profile_from_data_series(self) -> None:
-        rows = [
-            {
-                "_ng_task_index": 0,
-                "_ng_rollout_index": 0,
-                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
-                "agent_ref": {"name": "my_agent"},
-            },
-            {
-                "_ng_task_index": 0,
-                "_ng_rollout_index": 1,
-                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
-                "agent_ref": {"name": "my_agent"},
-            },
-            {
-                "_ng_task_index": 1,
-                "_ng_rollout_index": 0,
-                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
-                "agent_ref": {"name": "my_agent"},
-            },
-        ]
+        # Per sample
+        assert output.per_sample_aggregate["sample_0"]["reward"] == pytest.approx(0.0)
+        assert output.per_sample_aggregate["sample_1"]["reward"] == pytest.approx(100.0)
+
+        # Per task
+        assert len(output.per_task) == 3
+        assert output.per_task[0]["num_rollouts"] == 2
+
+        # Usage
+        assert output.usage["abc_usage"] == pytest.approx(1.0)
+
+    def test_profile_from_data_unsorted(self) -> None:
+        """Results don't need to be pre-sorted; MetricsProfiler groups them."""
         results = [
-            {
-                "_ng_task_index": 0,
-                "_ng_rollout_index": 0,
-                "response": {"usage": {"abc usage": 1}},
-            },
-            {
-                "_ng_task_index": 0,
-                "_ng_rollout_index": 1,
-                "response": {"usage": {"abc usage": 1}},
-            },
-            {
-                "_ng_task_index": 1,
-                "_ng_rollout_index": 0,
-                "response": {"usage": {"abc usage": 1}},
-            },
+            {"_ng_task_index": 1, "_ng_rollout_index": 1, "response": {}, "reward": 1},
+            {"_ng_task_index": 0, "_ng_rollout_index": 0, "response": {}, "reward": 0},
+            {"_ng_task_index": 1, "_ng_rollout_index": 0, "response": {}, "reward": 0},
+            {"_ng_task_index": 0, "_ng_rollout_index": 1, "response": {}, "reward": 1},
         ]
 
-        # We just check that this doesn't error
-        RewardProfiler().profile_from_data(rows, results)
+        mp = MetricsProfiler()
+        output = mp.profile_from_data(results)
 
-    def test_profile_from_data_mismatched_keys(self) -> None:
-        rows = [
-            {
-                "_ng_task_index": 0,
-                "_ng_rollout_index": 0,
-                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
-                "agent_ref": {"name": "my_agent"},
-            },
-            {
-                "_ng_task_index": 1,
-                "_ng_rollout_index": 0,
-                "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
-                "agent_ref": {"name": "my_agent"},
-            },
-        ]
+        assert output.aggregate["pass@1"]["reward"] == pytest.approx(50.0)
+        assert len(output.per_task) == 2
+
+    def test_profile_with_metrics_type(self) -> None:
         results = [
-            {
-                "_ng_task_index": 0,
-                "_ng_rollout_index": 0,
-                "response": {"usage": {"abc usage": 1}},
-                "first_col": 1,
-            },
-            {"_ng_task_index": 1, "_ng_rollout_index": 0, "response": {"usage": {"abc usage": 1}}, "second_col": 2},
+            {"_ng_task_index": 0, "_ng_rollout_index": 0, "response": {}, "reward": 1.0},
+            {"_ng_task_index": 0, "_ng_rollout_index": 1, "response": {}, "reward": 0.0},
         ]
 
-        actual_group_level_metrics, actual_agent_level_metrics = RewardProfiler().profile_from_data(rows, results)
+        mp = MetricsProfiler()
+        output = mp.profile_from_data(results, metrics_type="resources_servers.code_gen.metrics::CodeGenMetrics")
 
-        self._clean_metrics(actual_group_level_metrics)
-        self._clean_metrics(actual_agent_level_metrics)
+        # CodeGenMetrics uses "accuracy" instead of "reward"
+        assert "accuracy" in output.aggregate["pass@1"]
+        assert "reward" not in output.aggregate["pass@1"]
 
-        expected_group_level_metrics = [
-            {
-                "mean/first_col": 1.0,
-                "mean/abc usage": 1.0,
-                "max/first_col": 1.0,
-                "max/abc usage": 1.0,
-                "min/first_col": 1.0,
-                "min/abc usage": 1.0,
-                "median/first_col": 1.0,
-                "median/abc usage": 1.0,
-                "std/first_col": 0.0,
-                "std/abc usage": 0.0,
-                "histogram/first_col": None,
-                "histogram/abc usage": None,
-                "sample": {
-                    "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
-                    "agent_ref": {"name": "my_agent"},
-                },
-            },
-            {
-                "mean/abc usage": 1.0,
-                "mean/second_col": 2.0,
-                "max/abc usage": 1.0,
-                "max/second_col": 2.0,
-                "min/abc usage": 1.0,
-                "min/second_col": 2.0,
-                "median/abc usage": 1.0,
-                "median/second_col": 2.0,
-                "std/abc usage": 0.0,
-                "std/second_col": 0.0,
-                "histogram/abc usage": None,
-                "histogram/second_col": None,
-                "sample": {
-                    "responses_create_params": {"input": [], "seed": 0, "temperature": 0.1},
-                    "agent_ref": {"name": "my_agent"},
-                },
-            },
+    def test_write_to_disk(self, tmp_path: Path) -> None:
+        results = [
+            {"_ng_task_index": 0, "_ng_rollout_index": 0, "response": {}, "reward": 1.0},
+            {"_ng_task_index": 0, "_ng_rollout_index": 1, "response": {}, "reward": 0.0},
         ]
-        assert expected_group_level_metrics == actual_group_level_metrics
 
-        expected_agent_level_metrics = [
-            {
-                "mean/first_col": 1.0,
-                "mean/abc usage": 1.0,
-                "mean/second_col": 2.0,
-                "max/first_col": 1.0,
-                "max/abc usage": 1.0,
-                "max/second_col": 2.0,
-                "min/first_col": 1.0,
-                "min/abc usage": 1.0,
-                "min/second_col": 2.0,
-                "median/first_col": 1.0,
-                "median/abc usage": 1.0,
-                "median/second_col": 2.0,
-                "std/abc usage": 0.0,
-                "histogram/first_col": None,
-                "histogram/abc usage": None,
-                "histogram/second_col": None,
-                "agent_ref": {"name": "my_agent"},
-            }
-        ]
-        assert expected_agent_level_metrics == actual_agent_level_metrics
+        mp = MetricsProfiler()
+        output = mp.profile_from_data(results)
+        metrics_fpath = mp.write_to_disk(output, tmp_path / "rollouts.jsonl")
+
+        assert metrics_fpath.exists()
+        assert metrics_fpath.name == "rollouts_metrics.json"
+
+        data = json.loads(metrics_fpath.read_text())
+        assert "aggregate" in data
+        assert "per_sample_aggregate" in data
+        assert "statistics" in data
+        assert "per_task" in data
+        assert "usage" in data
