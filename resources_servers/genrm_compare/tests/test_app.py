@@ -183,7 +183,7 @@ class TestRunSingleComparison:
         assert metadata["response_2"] == "Four"
 
         # input should contain only the conversation history
-        input_roles = [m["role"] for m in body.input]
+        input_roles = [m.role for m in body.input]
         assert input_roles == ["user"]
         assert "response_1" not in input_roles
         assert "response_2" not in input_roles
