@@ -358,8 +358,12 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         response_1 = extract_output_text(response_obj_1)
         response_2 = extract_output_text(response_obj_2)
 
-        # Format messages for GenRM using special roles 'response_1' and 'response_2'
-        # The GenRM model's chat template handles these custom roles
+        # Build the message list using standard OpenAI roles.
+        # GenRMModelMixin._preprocess_chat_completion_create_params remaps the
+        # trailing messages to the GenRM-specific roles expected by the chat template:
+        #   messages[-2] ("user")   → "response_1"
+        #   messages[-1] ("user")   → "response_2"
+        #   messages[-3] ("system") → "principle"  (only when use_principle=True)
         messages: List[NeMoGymEasyInputMessage] = []
         for msg in conversation_history:
             messages.append(
@@ -370,15 +374,14 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 )
             )
 
-        # Add principle message if enabled
         if cfg.use_principle:
             principle_text = principle if principle else cfg.default_principle
-            messages.append(NeMoGymEasyInputMessage(role="principle", content=principle_text, type="message"))
+            messages.append(NeMoGymEasyInputMessage(role="system", content=principle_text, type="message"))
 
         messages.extend(
             [
-                NeMoGymEasyInputMessage(role="response_1", content=response_1, type="message"),
-                NeMoGymEasyInputMessage(role="response_2", content=response_2, type="message"),
+                NeMoGymEasyInputMessage(role="user", content=response_1, type="message"),
+                NeMoGymEasyInputMessage(role="user", content=response_2, type="message"),
             ]
         )
 
