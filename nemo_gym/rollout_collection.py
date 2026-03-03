@@ -193,7 +193,6 @@ class RolloutCollectionHelper(BaseModel):
                 f"No agent specified for rows {row_idxs_missing_agent_ref}. Either provide +agent_name config or include agent_ref in data."
             )
 
-        rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
         return rows
 
     def _load_from_cache(
