@@ -44,29 +44,36 @@ class GenRMModelMixin:
         )
 
     def _preprocess_chat_completion_create_params(self, request: Request, body_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """Extend base preprocessing to remap standard OpenAI roles to GenRM custom roles.
+        """Extend base preprocessing to inject GenRM custom roles from metadata.
 
-        The resources server sends comparison messages using standard OpenAI roles:
+        The resources server passes the comparison payload via ``metadata`` so
+        that the ``input`` field carries only the conversation history and the
+        request schema stays generic:
 
-        - ``messages[-2]`` (role ``"user"``) → ``"response_1"``
-        - ``messages[-1]`` (role ``"user"``) → ``"response_2"``
-        - ``messages[-3]`` (role ``"system"``, when ``supports_principle_role=True``)
-          → ``"principle"``
+        - ``metadata["response_1"]`` → appended as a ``"response_1"`` message
+        - ``metadata["response_2"]`` → appended as a ``"response_2"`` message
+        - ``metadata["principle"]``  → appended as a ``"principle"`` message
+          (only when ``supports_principle_role=True``)
 
-        This positional convention holds because the resources server always
-        appends the two response messages at the end, after the conversation
-        history (which ends with an ``assistant`` turn).
+        ``metadata`` is consumed here and not forwarded to vLLM.
         """
         body_dict = super()._preprocess_chat_completion_create_params(request, body_dict)
 
-        messages = body_dict.get("messages", [])
-        if len(messages) >= 2:
-            messages[-2]["role"] = "response_1"
-            messages[-1]["role"] = "response_2"
+        metadata = body_dict.pop("metadata", None) or {}
+        response_1 = metadata.get("response_1")
+        response_2 = metadata.get("response_2")
+        principle = metadata.get("principle")
 
-            if self.config.supports_principle_role and len(messages) >= 3:
-                if messages[-3].get("role") == "system":
-                    messages[-3]["role"] = "principle"
+        messages = body_dict["messages"]
+
+        if self.config.supports_principle_role and principle:
+            messages.append({"role": "principle", "content": principle})
+
+        if response_1 is not None:
+            messages.append({"role": "response_1", "content": response_1})
+
+        if response_2 is not None:
+            messages.append({"role": "response_2", "content": response_2})
 
         return body_dict
 

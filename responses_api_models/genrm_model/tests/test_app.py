@@ -84,114 +84,115 @@ class TestGenRMModelConfig:
 class TestGenRMPreprocess:
     """Unit tests for GenRMModelMixin._preprocess_chat_completion_create_params."""
 
-    def test_last_two_user_messages_become_response_roles(self):
-        """The last two messages (user) are remapped to response_1 / response_2."""
+    def _body(self, conversation, metadata=None):
+        return {
+            "messages": _messages(*conversation),
+            **({"metadata": metadata} if metadata is not None else {}),
+        }
+
+    def test_response_messages_appended_from_metadata(self):
+        """response_1 and response_2 from metadata are appended as custom-role messages."""
         server = _TestServer(supports_principle_role=True)
-        body_dict = {
-            "messages": _messages(
+        body_dict = self._body(
+            conversation=[
                 ("user", "What is the capital of France?"),
                 ("assistant", "Paris."),
-                ("user", "Response A"),
-                ("user", "Response B"),
-            )
-        }
+            ],
+            metadata={"response_1": "Response A", "response_2": "Response B"},
+        )
         result = server._preprocess_chat_completion_create_params(None, body_dict)
         msgs = result["messages"]
 
-        assert msgs[-2]["role"] == "response_1"
-        assert msgs[-2]["content"] == "Response A"
-        assert msgs[-1]["role"] == "response_2"
-        assert msgs[-1]["content"] == "Response B"
+        assert msgs[-2] == {"role": "response_1", "content": "Response A"}
+        assert msgs[-1] == {"role": "response_2", "content": "Response B"}
         # Conversation history is untouched
         assert msgs[0]["role"] == "user"
         assert msgs[1]["role"] == "assistant"
 
-    def test_system_message_before_responses_becomes_principle(self):
-        """A system message immediately before the two response messages becomes 'principle'."""
+    def test_principle_from_metadata_inserted_before_responses(self):
+        """metadata['principle'] is appended as a 'principle' message before the responses."""
         server = _TestServer(supports_principle_role=True)
-        body_dict = {
-            "messages": _messages(
-                ("user", "What is the capital of France?"),
-                ("assistant", "Paris."),
-                ("system", "Judge impartially."),
-                ("user", "Response A"),
-                ("user", "Response B"),
-            )
-        }
+        body_dict = self._body(
+            conversation=[("user", "What is the capital of France?")],
+            metadata={
+                "principle": "Judge impartially.",
+                "response_1": "Response A",
+                "response_2": "Response B",
+            },
+        )
         result = server._preprocess_chat_completion_create_params(None, body_dict)
         msgs = result["messages"]
 
-        assert msgs[-3]["role"] == "principle"
-        assert msgs[-3]["content"] == "Judge impartially."
-        assert msgs[-2]["role"] == "response_1"
-        assert msgs[-1]["role"] == "response_2"
+        assert msgs[-3] == {"role": "principle", "content": "Judge impartially."}
+        assert msgs[-2] == {"role": "response_1", "content": "Response A"}
+        assert msgs[-1] == {"role": "response_2", "content": "Response B"}
 
-    def test_non_system_message_before_responses_is_not_converted(self):
-        """Only a 'system' role at position -3 triggers principle conversion."""
-        server = _TestServer(supports_principle_role=True)
-        body_dict = {
-            "messages": _messages(
-                ("user", "What is the capital of France?"),
-                ("assistant", "Paris."),  # assistant, not system
-                ("user", "Response A"),
-                ("user", "Response B"),
-            )
-        }
-        result = server._preprocess_chat_completion_create_params(None, body_dict)
-        msgs = result["messages"]
-
-        assert msgs[-3]["role"] == "assistant"  # unchanged
-        assert msgs[-2]["role"] == "response_1"
-        assert msgs[-1]["role"] == "response_2"
-
-    def test_supports_principle_role_false_skips_principle_conversion(self):
-        """When supports_principle_role=False, the system message is left as-is."""
+    def test_supports_principle_role_false_skips_principle(self):
+        """When supports_principle_role=False, metadata['principle'] is silently ignored."""
         server = _TestServer(supports_principle_role=False)
-        body_dict = {
-            "messages": _messages(
-                ("user", "Prompt"),
-                ("system", "Judge impartially."),
-                ("user", "Response A"),
-                ("user", "Response B"),
-            )
-        }
+        body_dict = self._body(
+            conversation=[("user", "Prompt")],
+            metadata={
+                "principle": "Judge impartially.",
+                "response_1": "Response A",
+                "response_2": "Response B",
+            },
+        )
         result = server._preprocess_chat_completion_create_params(None, body_dict)
         msgs = result["messages"]
 
-        assert msgs[-3]["role"] == "system"  # NOT converted to principle
+        roles = [m["role"] for m in msgs]
+        assert "principle" not in roles
         assert msgs[-2]["role"] == "response_1"
         assert msgs[-1]["role"] == "response_2"
 
-    def test_minimal_two_message_input(self):
-        """Works correctly when the input contains exactly two messages."""
+    def test_metadata_is_consumed_and_not_forwarded(self):
+        """metadata is popped from body_dict so it is not forwarded to vLLM."""
         server = _TestServer()
-        body_dict = {
-            "messages": _messages(
-                ("user", "Response A"),
-                ("user", "Response B"),
-            )
-        }
+        body_dict = self._body(
+            conversation=[("user", "Prompt")],
+            metadata={"response_1": "A", "response_2": "B"},
+        )
+        result = server._preprocess_chat_completion_create_params(None, body_dict)
+
+        assert "metadata" not in result
+
+    def test_no_metadata_leaves_messages_unchanged(self):
+        """When no metadata is present no custom-role messages are appended."""
+        server = _TestServer()
+        body_dict = self._body(
+            conversation=[("user", "Prompt"), ("assistant", "Answer.")],
+        )
         result = server._preprocess_chat_completion_create_params(None, body_dict)
         msgs = result["messages"]
 
-        assert msgs[-2]["role"] == "response_1"
-        assert msgs[-1]["role"] == "response_2"
+        assert len(msgs) == 2
+        assert msgs[0]["role"] == "user"
+        assert msgs[1]["role"] == "assistant"
 
-    def test_single_message_input_is_not_modified(self):
-        """With fewer than two messages no role remapping is performed."""
+    def test_empty_metadata_leaves_messages_unchanged(self):
+        """An empty metadata dict is treated the same as no metadata."""
         server = _TestServer()
-        body_dict = {"messages": _messages(("user", "Only one message"))}
+        body_dict = self._body(
+            conversation=[("user", "Prompt")],
+            metadata={},
+        )
         result = server._preprocess_chat_completion_create_params(None, body_dict)
 
-        assert result["messages"][0]["role"] == "user"
+        assert len(result["messages"]) == 1
+        assert "metadata" not in result
 
-    def test_messages_mutated_in_place(self):
-        """The method mutates the list in-place and also returns it."""
-        server = _TestServer()
-        original_messages = _messages(("user", "A"), ("user", "B"))
-        body_dict = {"messages": original_messages}
+    def test_conversation_system_messages_are_not_misidentified(self):
+        """A system message in the conversation history is never converted to 'principle'."""
+        server = _TestServer(supports_principle_role=True)
+        body_dict = self._body(
+            conversation=[("system", "You are a helpful assistant."), ("user", "Hi")],
+            metadata={"response_1": "A", "response_2": "B"},
+        )
         result = server._preprocess_chat_completion_create_params(None, body_dict)
+        msgs = result["messages"]
 
-        assert result["messages"] is original_messages
-        assert original_messages[-2]["role"] == "response_1"
-        assert original_messages[-1]["role"] == "response_2"
+        assert msgs[0] == {"role": "system", "content": "You are a helpful assistant."}
+        assert msgs[1] == {"role": "user", "content": "Hi"}
+        assert msgs[2] == {"role": "response_1", "content": "A"}
+        assert msgs[3] == {"role": "response_2", "content": "B"}
