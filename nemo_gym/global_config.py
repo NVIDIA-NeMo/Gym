@@ -93,6 +93,7 @@ AGENT_REF_KEY_NAME = "agent_ref"
 POLICY_BASE_URL_KEY_NAME = "policy_base_url"
 POLICY_API_KEY_KEY_NAME = "policy_api_key"  # pragma: allowlist secret
 POLICY_MODEL_NAME_KEY_NAME = "policy_model_name"
+POLICY_MODEL_KEY_NAME = "policy_model"
 
 DEFAULT_HEAD_SERVER_PORT = 11000
 
@@ -105,6 +106,10 @@ _WANDB_RUN: Optional[Run] = None
 
 def get_wandb_run() -> Optional[Run]:
     return _WANDB_RUN
+
+
+# OmegaConf new resolvers
+OmegaConf.register_new_resolver("swap_key", lambda a: f"${{swap_key:{a}}}")
 
 
 class GlobalConfigDictParserConfig(BaseModel):
@@ -239,6 +244,41 @@ class GlobalConfigDictParser(BaseModel):
                 if "token" in k or "key" in k:
                     dict_config[k] = "****"
 
+    def _recursively_swap_keys(self, dict_config: DictConfig) -> None:
+        frozen_dict_config = deepcopy(dict_config)
+        with open_dict(dict_config):
+            self._recursively_swap_keys_helper(dict_config, dict_config, frozen_dict_config)
+
+    def _recursively_swap_keys_helper(
+        self, dict_config: DictConfig, original_dict_config: DictConfig, frozen_dict_config: DictConfig
+    ) -> None:
+        for k, v in list(dict_config.items()):
+            if isinstance(v, (DictConfig, dict)):
+                self._recursively_swap_keys_helper(v, original_dict_config, frozen_dict_config)
+            elif isinstance(v, (ListConfig, list)):
+                for inner_v in v:
+                    if isinstance(inner_v, (DictConfig, dict)):
+                        self._recursively_swap_keys_helper(inner_v, original_dict_config, frozen_dict_config)
+
+            # e.g. ${swap_key:grpo.num_prompts_per_step}
+            is_swap = isinstance(v, str) and v.startswith("${swap_key:")
+            if not is_swap:
+                continue
+
+            path_to_swap = v.removeprefix("${swap_key:").removesuffix("}").split(".")
+            dict_containing_key_to_swap = self._recursive_index_dict_using_path(
+                original_dict_config, path_to_swap[:-1]
+            )
+            dict_containing_key_to_swap.pop(path_to_swap[-1])
+
+            dict_config[k] = self._recursive_index_dict_using_path(frozen_dict_config, path_to_swap)
+
+    def _recursive_index_dict_using_path(self, dict_config: DictConfig, path: List[str]) -> DictConfig:
+        for k in path:
+            dict_config = dict_config[k]
+
+        return dict_config
+
     def parse(self, parse_config: Optional[GlobalConfigDictParserConfig] = None) -> DictConfig:
         if parse_config is None:
             parse_config = GlobalConfigDictParserConfig()
@@ -275,6 +315,8 @@ class GlobalConfigDictParser(BaseModel):
         if config_paths:
             with open_dict(global_config_dict):
                 global_config_dict[CONFIG_PATHS_KEY_NAME] = config_paths
+
+        self._recursively_swap_keys(global_config_dict)
 
         # Almost-server detection and reporting
         almost_servers = self.detect_and_report_almost_servers(global_config_dict)

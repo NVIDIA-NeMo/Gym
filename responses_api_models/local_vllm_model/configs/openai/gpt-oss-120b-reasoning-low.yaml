@@ -1,13 +1,21 @@
-policy_model:
+gpt-oss-120b-reasoning-low:
   responses_api_models:
     local_vllm_model:
       entrypoint: app.py
-      model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      model: openai/gpt-oss-120b
       return_token_id_information: false
-      uses_reasoning_parser: true
+      uses_reasoning_parser: false
       replace_developer_role_with_system: false
-      sequential_reasoning_allowed: false
+      is_responses_native: true
       debug: false
+
+      # From https://huggingface.co/openai/gpt-oss-120b/discussions/21#6892bbe3342676ebf6ba7428
+      extra_body:
+        temperature: 1.0
+        top_p: 1.0
+        max_output_tokens: null
+        reasoning:
+          effort: low
 
       # For example, if your model is downloaded at ~/.cache/huggingface/hub/models--Qwen--Qwen3-235B-A22B-Instruct-2507, your hf_home here would be `~/.cache/huggingface`
       hf_home: null
@@ -19,17 +27,14 @@ policy_model:
       # If a hf_token is present in the env.yaml, it will be prepended to the hf download.
       vllm_serve_kwargs:
         # vLLM serving is a bit quirky at the moment. These parallelism configs are fairly sensitive and need to always be set properly!
-        data_parallel_size: 2
-        data_parallel_size_local: 2
-        tensor_parallel_size: 4
+        data_parallel_size: 1
+        tensor_parallel_size: 8
         pipeline_parallel_size: 1
 
         trust_remote_code: true
-        mamba_ssm_cache_dtype: float32
         gpu_memory_utilization: 0.9
         enable_auto_tool_choice: true
-        tool_call_parser: qwen3_coder
-        reasoning_parser: deepseek_r1
+        tool_call_parser: openai
         model_loader_extra_config:
           enable_multithread_load: true
           num_threads: 16
