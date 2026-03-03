@@ -29,6 +29,7 @@ from nemo_gym.server_utils import ServerClient
 from resources_servers.spider2_lite.app import Spider2LiteResourcesServer, Spider2LiteResourcesServerConfig
 from resources_servers.spider2_lite.setup_spider2 import _DEFAULT_DIR
 
+
 pytestmark = pytest.mark.e2e_llm
 
 _EXAMPLE_JSONL = Path(__file__).parent.parent / "data" / "example.jsonl"
@@ -72,10 +73,22 @@ def _verify(client: TestClient, task: dict, model_output: str) -> dict:
     body = {
         "responses_create_params": {"input": []},
         "response": {
-            "id": "r", "created_at": 0, "model": "m", "object": "response",
-            "output": [{"id": "msg", "type": "message", "role": "assistant", "status": "completed",
-                        "content": [{"type": "output_text", "text": model_output, "annotations": []}]}],
-            "parallel_tool_calls": True, "tool_choice": "auto", "tools": [],
+            "id": "r",
+            "created_at": 0,
+            "model": "m",
+            "object": "response",
+            "output": [
+                {
+                    "id": "msg",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": model_output, "annotations": []}],
+                }
+            ],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
         },
         "instance_id": task.get("instance_id"),
         "db_id": task["db_id"],
@@ -110,12 +123,9 @@ def test_llm_pipeline_no_errors(vllm_url, llm_model, spider2_client, task):
 
     result = _verify(spider2_client, task, model_output)
 
-    assert result["failure_reason"] != "unknown_error", (
-        f"{task['instance_id']}: unexpected server error — {result}"
-    )
+    assert result["failure_reason"] != "unknown_error", f"{task['instance_id']}: unexpected server error — {result}"
     assert result["failure_reason"] != "no_sql_extracted", (
-        f"{task['instance_id']}: model did not produce a ```sql``` block.\n"
-        f"Model output:\n{model_output[:500]}"
+        f"{task['instance_id']}: model did not produce a ```sql``` block.\nModel output:\n{model_output[:500]}"
     )
     assert result["reward"] in (0.0, 1.0)
 
@@ -125,5 +135,3 @@ def test_llm_pipeline_no_errors(vllm_url, llm_model, spider2_client, task):
         f"failure={result['failure_reason']}  "
         f"sql={result.get('extracted_sql', '')[:80]!r}"
     )
-
-

@@ -28,7 +28,6 @@ Requires: vLLM running (or auto-started by the session-scoped vllm_url fixture).
 
 import json
 import os
-import queue
 import signal
 import subprocess
 import threading
@@ -36,6 +35,7 @@ import time
 from pathlib import Path
 
 import pytest
+
 
 pytestmark = pytest.mark.e2e_llm
 
@@ -45,8 +45,7 @@ _NG_COLLECT = _REPO_ROOT / ".venv/bin/ng_collect_rollouts"
 _EXAMPLE_JSONL = Path(__file__).parent.parent / "data/example.jsonl"
 
 _CONFIG_PATHS = (
-    "resources_servers/spider2_lite/configs/spider2_lite.yaml,"
-    "responses_api_models/vllm_model/configs/vllm_model.yaml"
+    "resources_servers/spider2_lite/configs/spider2_lite.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml"
 )
 
 _ALL_SERVERS_READY_MARKER = "servers ready!"
