@@ -201,26 +201,34 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         return NeMoGymResponse.model_validate(response_dict)
 
-    async def chat_completions(
-        self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
-    ) -> NeMoGymChatCompletion:
-        if self.config.replace_developer_role_with_system:
-            for message in body.messages:
-                if message["role"] == "developer":
-                    message["role"] = "system"
+    def _preprocess_chat_completion_create_params(self, request: Request, body_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Preprocess the body dict before issuing a chat completion request.
 
-        body_dict = body.model_dump(exclude_unset=True)
+        Subclasses can override this to apply model-specific transformations
+        (e.g. role remapping, extra sampling params).  The base implementation
+        handles the features driven by ``VLLMModelConfig``.
+
+        Args:
+            request: The originating FastAPI request (available for session /
+                client resolution if needed by subclasses).
+            body_dict: Mutable dict produced by ``body.model_dump(exclude_unset=True)``.
+
+        Returns:
+            The (possibly mutated) ``body_dict`` that will be forwarded to
+            ``client.create_chat_completion``.
+        """
+        if self.config.replace_developer_role_with_system:
+            for message_dict in body_dict["messages"]:
+                if message_dict.get("role") == "developer":
+                    message_dict["role"] = "system"
+
         body_dict["model"] = self.config.model
 
         if self.config.chat_template_kwargs:
             body_dict["chat_template_kwargs"] = deepcopy(self.config.chat_template_kwargs)
 
-        client = self._resolve_client(request)
-
-        create_params = body_dict
-
         if self.config.return_token_id_information:
-            create_params |= dict(
+            body_dict |= dict(
                 logprobs=True,
                 # Typically passed via OpenAI client extra_body.
                 return_tokens_as_token_ids=True,
@@ -262,16 +270,26 @@ class VLLMModel(SimpleResponsesAPIModel):
                 else:
                     raise NotImplementedError
 
+        if self.config.extra_body:
+            body_dict = self.config.extra_body | body_dict
+
+        return body_dict
+
+    async def chat_completions(
+        self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
+    ) -> NeMoGymChatCompletion:
+        body_dict = body.model_dump(exclude_unset=True)
+        body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
+
+        client = self._resolve_client(request)
+
         if not self.config.sequential_reasoning_allowed:
             last_message = body_dict["messages"][-1]
-            if last_message["role"] == "assistant" and not (last_message["content"] or last_message["tool_calls"]):
+            if last_message["role"] == "assistant" and not (last_message["content"] or last_message.get("tool_calls")):
                 return self._create_empty_chat_completion()
 
-        if self.config.extra_body:
-            create_params = self.config.extra_body | create_params
-
         try:
-            chat_completion_dict = await client.create_chat_completion(**create_params)
+            chat_completion_dict = await client.create_chat_completion(**body_dict)
         except ClientResponseError as e:
             """
             Example messages for out of context length:

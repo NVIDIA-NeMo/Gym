@@ -157,13 +157,13 @@ class NeMoGymResponseOutputMessage(BaseModel):
 
 class NeMoGymEasyInputMessage(BaseModel):
     content: Union[str, ResponseInputMessageContentListParam]
-    role: Literal["user", "assistant", "system", "developer", "response_1", "response_2", "principle"]
+    role: Literal["user", "assistant", "system", "developer"]
     type: Literal["message"] = "message"
 
 
 class NeMoGymMessage(BaseModel):
     content: ResponseInputMessageContentListParam
-    role: Literal["user", "system", "developer", "response_1", "response_2", "principle"]
+    role: Literal["user", "system", "developer"]
     status: Literal["in_progress", "completed", "incomplete"] = "completed"
     type: Literal["message"] = "message"
 
