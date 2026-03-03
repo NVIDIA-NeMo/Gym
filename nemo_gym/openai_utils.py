@@ -393,24 +393,12 @@ class NeMoGymFunctionToolParam(FunctionToolParam):
     pass
 
 
-class NeMoGymChatCompletionCustomRoleMessageParam(TypedDict):
-    """Message param for custom roles not in standard OpenAI API.
-
-    Used by specialized models like GenRM that need custom roles
-    (e.g., response_1, response_2, principle).
-    """
-
-    role: Required[str]
-    content: Required[str]
-
-
 NeMoGymChatCompletionMessageParam: TypeAlias = Union[
     NeMoGymChatCompletionDeveloperMessageParam,
     NeMoGymChatCompletionSystemMessageParam,
     NeMoGymChatCompletionUserMessageParam,
     NeMoGymChatCompletionAssistantMessageParam,
     NeMoGymChatCompletionToolMessageParam,
-    NeMoGymChatCompletionCustomRoleMessageParam,  # For GenRM and similar
     # Don't add deprecated.
     # NeMoGymChatCompletionFunctionMessageParam,
     # Training:
