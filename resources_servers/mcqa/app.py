@@ -35,7 +35,7 @@ class MCQARunRequest(BaseRunRequest):
     # Preferred dataset format: top-level `metadata` carries arbitrary data and
     # is not interpreted by the verifier. Only the fields below are used for
     # grading.
-    options: Optional[list[dict[str, str]]] = None
+    options: Optional[list[dict[str, Optional[str]]]] = None
     expected_answer: Optional[str] = None
     # Optional additional metadata for the request; if provided, may contain
     # fields like options/expected_answer as an alternative location.
@@ -140,9 +140,9 @@ def _match_option_text(text: str, options: list[dict[str, str]], allowed_letters
     normalized_options: list[tuple[str, str]] = []
     for entry in options or []:
         for k, v in entry.items():
-            if isinstance(k, str) and len(k) == 1 and k.upper() in allowed_letters:
+            # Skip null values and only include valid letter keys with string values
+            if v is not None and isinstance(k, str) and len(k) == 1 and k.upper() in allowed_letters:
                 normalized_options.append((k.upper(), _normalize_for_match(v)))
-                break
 
     matched_letters: set[str] = set()
     for cand in normalized_candidates:
@@ -193,7 +193,7 @@ def _parse_answer_with_custom_regex(
         normalized_captured = _normalize_for_match(captured)
         for entry in options or []:
             for k, v in entry.items():
-                if k.upper() in allowed_letters and _normalize_for_match(v) == normalized_captured:
+                if v is not None and k.upper() in allowed_letters and _normalize_for_match(v) == normalized_captured:
                     return k.upper()
 
         return None
@@ -276,10 +276,10 @@ def _get_allowed_letters_from_options(
     letters: set[str] = set()
     if options:
         for entry in options:
-            for k in entry.keys():
-                if isinstance(k, str) and len(k) == 1 and k.isalpha():
+            # Exclude null values
+            for k, v in entry.items():
+                if isinstance(k, str) and len(k) == 1 and k.isalpha() and v is not None:
                     letters.add(k.upper())
-                break
     return letters
 
 
