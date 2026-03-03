@@ -93,3 +93,7 @@ class GenRMModel(GenRMModelMixin, LocalVLLMModel):
     """
 
     config: GenRMModelConfig
+
+
+if __name__ == "__main__":
+    GenRMModel.run_webserver()

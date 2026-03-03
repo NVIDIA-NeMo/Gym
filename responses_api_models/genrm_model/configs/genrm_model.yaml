@@ -2,9 +2,9 @@ genrm_model:
   responses_api_models:
     genrm_model:
       entrypoint: app.py
-      model: ${genrm_model_name}
+      model: nvidia/Qwen3-Nemotron-235B-A22B-GenRM-2603
       return_token_id_information: false
-      uses_reasoning_parser: false  # GenRM outputs structured JSON, not reasoning
+      uses_reasoning_parser: true  # GenRM outputs structured JSON, not reasoning
       supports_principle_role: true
 
       hf_home: null
