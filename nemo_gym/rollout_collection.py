@@ -37,6 +37,10 @@ from nemo_gym.global_config import (
 )
 
 
+# turing_vif change: key that a verify response can set to True to indicate the rollout should be
+# excluded from results.jsonl and reward profiling entirely (e.g. the task's instructions are
+# malformed, or the requested language has no validator for those instructions). Skipped rollouts
+# are written to errors.json instead so they can be inspected without polluting training data.
 SHOULD_SKIP_ROLLOUT_KEY = "should_skip_rollout"
 from nemo_gym.reward_profile import RewardProfiler
 from nemo_gym.server_utils import (
@@ -220,6 +224,8 @@ class RolloutCollectionHelper(BaseModel):
 
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
+        # turing_vif change: sidecar file that collects rollouts excluded from the main output
+        # (e.g. bad task data or unsupported language/instruction combinations)
         errors_fpath = output_fpath.parent / "errors.json"
 
         if config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
@@ -230,7 +236,8 @@ class RolloutCollectionHelper(BaseModel):
                 result_strs,
             ) = self._load_from_cache(config)
 
-            # Load already-written errors so we don't re-run those rollouts
+            # turing_vif change: on resume, read errors.json and exclude those rollouts from the
+            # remaining work so we don't re-run tasks that were already determined to be unskippable
             error_entries: List[Dict] = []
             if errors_fpath.exists():
                 error_entries = orjson.loads(errors_fpath.read_bytes())
@@ -254,7 +261,7 @@ class RolloutCollectionHelper(BaseModel):
             rows: List[Dict] = []
             results: List[Dict] = []
             result_strs: List[List[str]] = []
-            error_entries: List[Dict] = []
+            error_entries: List[Dict] = []  # turing_vif change: holds rollouts excluded from the main output
 
             input_rows = self._preprocess_rows_from_config(config)
             # Returned rows are sorted by (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
@@ -265,7 +272,9 @@ class RolloutCollectionHelper(BaseModel):
 
             print("Clearing output fpath since `resume_from_cache=False`!")
             output_fpath.unlink(missing_ok=True)
-            errors_fpath.unlink(missing_ok=True)
+            errors_fpath.unlink(
+                missing_ok=True
+            )  # turing_vif change: clear any previous errors.json on a fresh (non-resume) run
 
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
@@ -281,6 +290,9 @@ class RolloutCollectionHelper(BaseModel):
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
 
+            # turing_vif change: if the verify response signals the rollout should be skipped (e.g.
+            # the task's instructions were malformed, or the language has no validator for them),
+            # record it in errors.json instead of writing it to the main results file
             if result.get(SHOULD_SKIP_ROLLOUT_KEY, False):
                 error_entries.append(
                     {
@@ -301,6 +313,8 @@ class RolloutCollectionHelper(BaseModel):
                 results_file.write(result_strs[-1][0] + b"\n")
         results_file.close()
 
+        # turing_vif change: persist all skipped rollouts to errors.json so they can be reviewed
+        # without affecting reward profiling or agent metrics
         if error_entries:
             errors_fpath.write_bytes(orjson.dumps(error_entries, option=orjson.OPT_INDENT_2))
             print(f"Skipped rollouts written to: {errors_fpath}")
@@ -349,7 +363,7 @@ Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
 Reward profiling outputs: {reward_profiling_fpath}
 Agent-level metrics: {agent_level_metrics_fpath}
-Successful rollouts: {len(results)} | Skipped rollouts: {len(error_entries)}""")
+Successful rollouts: {len(results)} | Skipped rollouts: {len(error_entries)}""")  # turing_vif change: added skipped count to finish summary
 
         return results
 
