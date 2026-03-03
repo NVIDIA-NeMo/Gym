@@ -51,6 +51,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
 FINISH_TOOL_NAME = "finish"
+PROMPT_TEMPLATE_PATH = Path(__file__).parent / "prompts" / "gdpval_user_prompt.txt"
 
 
 @dataclass
@@ -175,15 +176,20 @@ class GDPValAgent(SimpleResponsesAPIAgent):
 
     async def init_message_history(self, body: GDPValAgentRunRequest) -> NeMoGymResponseInput:
         if isinstance(body.task_prompt, str):
-            if body.instruction_prompt_template is not None and body.uploaded_reference_files is not None:
+            # Load the prompt template from disk if not provided in the request.
+            instruction_template = body.instruction_prompt_template
+            if instruction_template is None and PROMPT_TEMPLATE_PATH.exists():
+                instruction_template = PROMPT_TEMPLATE_PATH.read_text()
+
+            if instruction_template is not None and body.uploaded_reference_files is not None:
                 reference_files_str = "\n".join(
                     [f"[{file.dest_path}]" for file in body.uploaded_reference_files]
                 )
-                task_prompt = body.instruction_prompt_template.format(
+                task_prompt = instruction_template.format(
                     task=body.task_prompt, references=reference_files_str
                 )
-            elif body.instruction_prompt_template is not None:
-                task_prompt = body.instruction_prompt_template.format(
+            elif instruction_template is not None:
+                task_prompt = instruction_template.format(
                     task=body.task_prompt, references="None"
                 )
             else:
@@ -458,9 +464,21 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         # For now call /verify as a placeholder — the bash_sandbox verify
         # returns reward=1.0 unconditionally.
         verify_request = {
+            "responses_create_params": body.responses_create_params.model_dump(),
+            "response": {
+                "id": "placeholder",
+                "created_at": 0,
+                "model": "placeholder",
+                "object": "response",
+                "output": response_json.get("output", []),
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            },
             "task_id": body.task_id,
             "output_files": [f.model_dump() for f in saved_files],
-            "response": response_json,
+            "session_id": body.session_id or "",
+            "paths": [f.output_path for f in saved_files],
         }
 
         verify_response = await self.server_client.post(
