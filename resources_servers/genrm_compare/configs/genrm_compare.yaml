@@ -1,0 +1,116 @@
+# GenRM Pairwise Comparison Resources Server Config
+#
+# This server compares multiple candidate responses using a GenRM model.
+# The GenRM model uses a special chat template with roles 'response_1', 'response_2',
+# and optionally 'principle' (see use_principle and default_principle below).
+#
+# The GenRM model server is defined by the top-level "genrm_model" block below (same
+# structure as responses_api_models/genrm_model/configs/genrm_model.yaml). Override
+# genrm_model_server.name to use a different model server (e.g. from another config).
+#
+# Expected GenRM output format (JSON):
+# {
+#     "score_1": <1-5>,  # Individual helpfulness score for response 1
+#     "score_2": <1-5>,  # Individual helpfulness score for response 2
+#     "ranking": <1-6>   # 1=R1 much better, 6=R2 much better
+# }
+
+# GenRM model server (local vLLM). Same structure as responses_api_models/genrm_model/configs/genrm_model.yaml.
+# Uses ${genrm_model_name} from env. Load this block when running genrm_compare, or load that file instead.
+genrm_model:
+  responses_api_models:
+    genrm_model:
+      entrypoint: app.py
+      model: ${genrm_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: false  # GenRM outputs structured JSON, not reasoning
+      supports_principle_role: true
+      hf_home: null
+      vllm_serve_env_vars:
+        VLLM_RAY_DP_PACK_STRATEGY: strict
+      vllm_serve_kwargs:
+        data_parallel_size: 2
+        data_parallel_size_local: 2
+        tensor_parallel_size: 4
+        pipeline_parallel_size: 1
+        trust_remote_code: true
+        gpu_memory_utilization: 0.9
+      debug: false
+
+genrm_compare_resources_server:
+  resources_servers:
+    genrm_compare:
+      entrypoint: app.py
+      
+      # GenRM model server: points to the "genrm_model" block above (or another config with that name)
+      genrm_model_server:
+        type: responses_api_models
+        name: genrm_model
+      
+      # Cohort-based verify (Difference 1): number of rollouts per prompt before running comparison.
+      # When > 1, verify() buffers by prompt and returns relative rewards when cohort is full.
+      # Ensure rollout data has this many rows per prompt (e.g. num_repeats in rollout collection).
+      num_rollouts_per_prompt: 16
+      
+      # Generation params for GenRM calls
+      genrm_responses_create_params:
+        input: []
+        max_output_tokens: 16384
+        temperature: 0.6
+        top_p: 0.95
+      
+      # Comparison strategy: "all_pairs" (C(n,2) comparisons) or "circular" (n comparisons)
+      comparison_strategy: circular
+      
+      # Number of judge passes per pair (for majority voting)
+      num_judges_per_comparison: 1
+      
+      # Principle-based comparison
+      use_principle: false
+      # default_principle: "..." (see code for full default text)
+      
+      # Aggregator method (only "simple_tiebreaker" is currently supported)
+      aggregator_method: simple_tiebreaker
+      
+      # Bonus for shortest reasoning trace if in top percentile
+      reasoning_bonus: 0.0
+      # Bonus for shortest final answer if in top percentile
+      answer_bonus: 0.0
+      # Top percentile threshold (e.g., 0.2 = top 20%)
+      top_percentile: 0.2
+      # Group-relative length penalty coefficients
+      # Shorter responses get bonus, longer get penalty (mean-centered)
+      group_reasoning_length_penalty_coeff: 0.0
+      group_answer_length_penalty_coeff: 0.0
+      
+      # Default scores when parsing fails
+      default_score: 3.0
+      default_ranking: 3.5
+      
+      # Debug logging
+      debug_logging: false
+      
+      # Parse retry configuration
+      genrm_parse_retries: 3
+      genrm_parse_retry_sleep_s: 0.2
+      
+      # Server metadata
+      domain: rlhf
+      verified: false
+      description: GenRM pairwise comparison for RLHF training
+      value: Compare multiple candidate responses using GenRM model
+
+genrm_compare_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: genrm_compare_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/genrm_compare/data/example.jsonl
