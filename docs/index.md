@@ -173,14 +173,6 @@ Build a complete training environment from scratch.
 {bdg-primary}`beginner` {bdg-secondary}`foundational`
 :::
 
-:::{grid-item-card} {octicon}`stack;1.5em;sd-mr-1` Multi-Environment Training
-:link: environment-tutorials/multi-environment-training
-:link-type: doc
-Run multiple training environments simultaneously for rollout collection.
-+++
-{bdg-secondary}`multi-environment` {bdg-secondary}`multi-verifier`
-:::
-
 ::::
 
 ```{button-ref} environment-tutorials/index
@@ -204,6 +196,14 @@ Train models using NeMo Gym with your preferred RL framework.
 Hands-on tutorials with NeMo RL, TRL, Unsloth, and more.
 +++
 {bdg-secondary}`grpo`
+:::
+
+:::{grid-item-card} {octicon}`stack;1.5em;sd-mr-1` Multi-Environment Training
+:link: training-tutorials/multi-environment-training
+:link-type: doc
+Run multiple training environments simultaneously for rollout collection.
++++
+{bdg-secondary}`multi-environment` {bdg-secondary}`multi-verifier`
 :::
 
 :::{grid-item-card} {octicon}`file;1.5em;sd-mr-1` SFT & DPO
@@ -338,7 +338,6 @@ Creating Training Environment <environment-tutorials/creating-training-environme
 Integrate external libraries <environment-tutorials/integrate-external-environments>
 Add a benchmark <environment-tutorials/adding-a-benchmark>
 Design a customer evaluation <environment-tutorials/designing-customer-evaluation>
-Multi-Environment Training <environment-tutorials/multi-environment-training>
 ```
 
 ```{toctree}
@@ -350,6 +349,7 @@ Overview <training-tutorials/index>
 NeMo RL <training-tutorials/nemo-rl-grpo/index.md>
 TRL <training-tutorials/trl>
 Unsloth <training-tutorials/unsloth>
+Multi-Environment Training <training-tutorials/multi-environment-training>
 Offline Training (SFT/DPO) <training-tutorials/offline-training-w-rollouts>
 ```
 

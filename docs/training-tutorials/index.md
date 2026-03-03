@@ -61,6 +61,21 @@ GRPO training on instruction following and reasoning environments.
 
 ::::
 
+### Multi-Environment Training
+
+::::{grid} 1 1 2 2
+:gutter: 1 1 1 2
+
+:::{grid-item-card} {octicon}`stack;1.5em;sd-mr-1` Multi-Environment Training
+:link: multi-environment-training
+:link-type: doc
+Run multiple training environments simultaneously for rollout collection.
++++
+{bdg-secondary}`multi-environment` {bdg-secondary}`multi-verifier`
+:::
+
+::::
+
 ## SFT & DPO
 
 ::::{grid} 1 1 2 2
