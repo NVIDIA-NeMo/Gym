@@ -585,4 +585,5 @@ class WANDBConfig(BaseModel):
 
     @property
     def is_available(self) -> bool:
-        return self.wandb_project and self.wandb_name and self.wandb_api_key
+        # If global_config recursively hide secrets is called, the api key will be set to ****
+        return self.wandb_project and self.wandb_name and self.wandb_api_key and self.wandb_api_key != "****"

@@ -88,7 +88,7 @@ class RewardProfiler:
         task_idx_to_row: Dict[int, Dict] = dict()
         for row, result in zip(rows, results):
             # Add additional helpful information
-            result = result | result["response"].get("usage", None)
+            result = result | result["response"].get("usage", dict())
 
             # agent_name is a temporary column used for aggregations below
             numeric_result = {"agent_name": row["agent_ref"]["name"]}
