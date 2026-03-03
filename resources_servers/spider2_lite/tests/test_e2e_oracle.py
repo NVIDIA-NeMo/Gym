@@ -72,7 +72,10 @@ def _load_oracle_tasks():
     return tasks
 
 
-ORACLE_TASKS = _load_oracle_tasks()
+try:
+    ORACLE_TASKS = _load_oracle_tasks()
+except (FileNotFoundError, OSError):
+    ORACLE_TASKS = []
 
 
 @pytest.fixture(scope="module")
