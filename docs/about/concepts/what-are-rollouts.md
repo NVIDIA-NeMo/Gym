@@ -1,6 +1,9 @@
 (what-are-rollouts)=
 
-# What are rollouts?
+# What is data?
+Data is a core component of machine learning, used across training 
+
+
 {term}`Rollouts <Rollout / Trajectory>` are 
 
 
