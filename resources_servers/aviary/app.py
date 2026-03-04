@@ -130,7 +130,7 @@ class AviaryResourcesServer(SimpleResourcesServer, Generic[TEnv, TDataset], ABC)
                     for a in body.action
                 ]
             except json.decoder.JSONDecodeError as e:
-                logger.warning("Failed to parse tool call arguments as JSON: %s", e)
+                logger.warning(f"Failed to parse tool call arguments as JSON: {e}")
                 return AviaryStepResponse(
                     obs=[
                         NeMoGymEasyInputMessage(role="user", content="Invalid tool call arguments (not a valid JSON)")
