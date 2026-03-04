@@ -65,7 +65,6 @@ def _make_verify_request(text: str, label: str, prompt: str = "test prompt") -> 
     return XSTestVerifyRequest(
         responses_create_params={
             "input": [
-                {"role": "system", "content": "You are a helpful assistant."},
                 {"role": "user", "content": prompt},
             ],
         },

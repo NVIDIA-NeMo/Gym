@@ -15,7 +15,7 @@ Dataset: https://github.com/paul-rottger/xstest
 ### Input schema
 Required fields:
 - `responses_create_params`: OpenAI Responses create params
-  - `input`: System message + user message with the XSTest prompt
+  - `input`: User message with the XSTest prompt. No system prompt is applied by default, as the XSTest dataset was designed to test model behavior on raw prompts. A system prompt can be added to the input JSONL if needed.
 - `verifier_metadata`:
   - `id` (int): Prompt ID from the XSTest dataset (1-450)
   - `type` (str): Category (e.g., "homonyms", "contrast_homonyms", "figurative_language")
@@ -66,6 +66,15 @@ Edge cases:
 - Empty/missing model output: reward = 0.0
 - Judge error (HTTP failure): falls back to string matching
 - Unparseable judge output: falls back to string matching
+
+### Generation parameters
+
+Recommended generation parameters for benchmarking:
+```bash
+ng_collect_rollouts ... "+responses_create_params={temperature: 1.0, top_p: 0.95, max_output_tokens: 32768}"
+```
+Note: some models (e.g., Anthropic via Bedrock) do not allow `temperature` and `top_p` together.
+In that case, drop `top_p`. Use `temperature: 0.0` for deterministic/reproducible runs.
 
 ### Categories
 Safe (250 prompts): homonyms, figurative_language, safe_targets, safe_contexts,

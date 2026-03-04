@@ -37,6 +37,7 @@ from nemo_gym.server_utils import get_response_json
 
 
 class XSTestResourcesServerConfig(BaseResourcesServerConfig):
+    use_wildguard: bool = False
     use_judge: bool = False
     judge_model_server: Optional[ModelServerRef] = None
     judge_responses_create_params: Optional[NeMoGymResponseCreateParamsNonStreaming] = None
