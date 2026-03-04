@@ -25,7 +25,7 @@ import uuid
 from nemo_gym import PARENT_DIR
 
 
-OUTPUT_PATH = PARENT_DIR / "resources_servers" / "mcqa" / "data" / "gpqa_diamond_validation.jsonl"
+OUTPUT_PATH = PARENT_DIR / "benchmarks" / "gpqa" / "data" / "gpqa_diamond_validation.jsonl"
 
 OPTION_LETTERS = ["A", "B", "C", "D"]
 

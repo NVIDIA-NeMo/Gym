@@ -4,7 +4,7 @@ config_paths:
 
 # Rollout collection defaults — picked up directly by RolloutCollectionConfig
 agent_name: mcqa_simple_agent
-input_jsonl_fpath: resources_servers/mcqa/data/gpqa_diamond_validation.jsonl
+input_jsonl_fpath: benchmarks/gpqa/data/gpqa_diamond_validation.jsonl
 num_repeats: 8
 responses_create_params:
   max_output_tokens: 16384

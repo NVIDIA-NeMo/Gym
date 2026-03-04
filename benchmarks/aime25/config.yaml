@@ -4,7 +4,7 @@ config_paths:
 
 # Rollout collection defaults — picked up directly by RolloutCollectionConfig
 agent_name: math_with_judge_simple_agent
-input_jsonl_fpath: resources_servers/math_with_judge/data/aime25_validation.jsonl
+input_jsonl_fpath: benchmarks/aime25/data/aime25_validation.jsonl
 num_repeats: 32
 responses_create_params:
   max_output_tokens: 16384
