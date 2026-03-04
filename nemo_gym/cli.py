@@ -19,13 +19,14 @@ import platform
 import shlex
 import sys
 import tomllib
+from copy import deepcopy
 from glob import glob
 from importlib.metadata import version as md_version
-from os import environ, makedirs
+from os import makedirs
 from os.path import exists
 from pathlib import Path
 from signal import SIGINT
-from subprocess import Popen
+from subprocess import Popen, TimeoutExpired
 from threading import Thread
 from time import sleep, time
 from typing import Dict, List, Optional, Tuple
@@ -34,23 +35,22 @@ import psutil
 import rich
 import uvicorn
 from devtools import pprint
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import Field
 from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR, __version__
+from nemo_gym.cli_setup_command import run_command, setup_env_command
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
-    HEAD_SERVER_DEPS_KEY_NAME,
+    DRY_RUN_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
-    PIP_INSTALL_VERBOSE_KEY_NAME,
-    PYTHON_VERSION_KEY_NAME,
-    UV_PIP_SET_PYTHON_KEY_NAME,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
+from nemo_gym.rollout_collection import E2ERolloutCollectionConfig, RolloutCollectionConfig, RolloutCollectionHelper
 from nemo_gym.server_commands import StatusCommand, StopCommand
 from nemo_gym.server_utils import (
     HEAD_SERVER_KEY_NAME,
@@ -60,55 +60,7 @@ from nemo_gym.server_utils import (
     ServerStatus,
     initialize_ray,
 )
-
-
-def _setup_env_command(dir_path: Path, global_config_dict: DictConfig) -> str:  # pragma: no cover
-    head_server_deps = global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]
-
-    uv_venv_cmd = f"uv venv --seed --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} .venv"
-
-    has_pyproject_toml = exists(f"{dir_path / 'pyproject.toml'}")
-    has_requirements_txt = exists(f"{dir_path / 'requirements.txt'}")
-
-    # explicitly set python path if specified. In Google colab, ng_run fails due to uv pip install falls back to system python (/usr) without this and errors.
-    # not needed for most clusters. should be safe in all scenarios, but only minimally tested outside of colab.
-    # see discussion and examples here: https://github.com/NVIDIA-NeMo/Gym/pull/526#issuecomment-3676230383
-    uv_pip_set_python = global_config_dict.get(UV_PIP_SET_PYTHON_KEY_NAME, False)
-    uv_pip_python_flag = "--python .venv/bin/python " if uv_pip_set_python else ""
-
-    verbose_flag = "-v " if global_config_dict.get(PIP_INSTALL_VERBOSE_KEY_NAME) else ""
-
-    if has_pyproject_toml and has_requirements_txt:
-        raise RuntimeError(
-            f"Found both pyproject.toml and requirements.txt for uv venv setup in server dir: {dir_path}. Please only use one or the other!"
-        )
-    elif has_pyproject_toml:
-        install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
-    elif has_requirements_txt:
-        install_cmd = (
-            f"""uv pip install {verbose_flag}{uv_pip_python_flag}-r requirements.txt {" ".join(head_server_deps)}"""
-        )
-    else:
-        raise RuntimeError(f"Missing pyproject.toml or requirements.txt for uv venv setup in server dir: {dir_path}")
-
-    cmd = f"""cd {dir_path} \\
-    && {uv_venv_cmd} \\
-    && source .venv/bin/activate \\
-    && {install_cmd} \\
-    """
-
-    return cmd
-
-
-def _run_command(command: str, working_dir_path: Path) -> Popen:  # pragma: no cover
-    work_dir = f"{working_dir_path.absolute()}"
-    custom_env = environ.copy()
-    py_path = custom_env.get("PYTHONPATH", None)
-    if py_path is not None:
-        custom_env["PYTHONPATH"] = f"{work_dir}:{py_path}"
-    else:
-        custom_env["PYTHONPATH"] = work_dir
-    return Popen(command, executable="/bin/bash", shell=True, env=custom_env)
+from nemo_gym.train_data_utils import TrainDataProcessor
 
 
 class RunConfig(BaseNeMoGymCLIConfig):
@@ -220,13 +172,20 @@ class RunHelper:  # pragma: no cover
 
             dir_path = PARENT_DIR / Path(first_key, second_key)
 
-            command = f"""{_setup_env_command(dir_path, global_config_dict)} \\
+            command = f"""{setup_env_command(dir_path, global_config_dict, top_level_path)} \\
     && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
     {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(top_level_path)} \\
     python {str(entrypoint_fpath)}"""
 
-            process = _run_command(command, dir_path)
+            process = run_command(command, dir_path)
             self._processes[top_level_path] = process
+            # In dry run mode, wait for each setup command to finish before starting the next.
+            # This installs uv virtual environments serially, which significantly reduces uv
+            # cache size. For Nemotron's set of environments, parallel installation can produce
+            # a cache 10-20GB larger than serial installation.
+            if global_config_dict[DRY_RUN_KEY_NAME]:
+                print("DRY_RUN enabled: setup commands are run serially")
+                process.communicate()
 
             host = server_config_dict.get("host")
             port = server_config_dict.get("port")
@@ -270,7 +229,10 @@ class RunHelper:  # pragma: no cover
             sleep(3)
 
         print("Waiting for servers to spin up")
-        self.wait_for_spinup()
+        if global_config_dict[DRY_RUN_KEY_NAME]:
+            self.wait_for_dry_run_spinup()
+        else:
+            self.wait_for_spinup()
 
     def display_server_instance_info(self) -> None:
         if not self._server_instance_display_configs:
@@ -333,6 +295,18 @@ class RunHelper:  # pragma: no cover
         if not self._processes:
             raise KeyboardInterrupt()
 
+    def wait_for_dry_run_spinup(self) -> None:
+        sleep_interval = 3
+
+        remaining_processes = list(self._processes.values())
+        while remaining_processes:
+            for i in reversed(range(len(remaining_processes))):
+                process = remaining_processes[i]
+                if process.poll() is not None:
+                    remaining_processes.pop(i)
+
+            sleep(sleep_interval)
+
     def wait_for_spinup(self) -> None:
         sleep_interval = 3
         poll_count = 0
@@ -370,9 +344,22 @@ class RunHelper:  # pragma: no cover
             process.send_signal(SIGINT)
 
         print("Waiting for processes to finish...")
-        for process in self._processes.values():
-            process.wait()
+        killed_process_names: List[str] = []
+        for process_name, process in self._processes.items():
+            try:
+                process.wait(timeout=1)
+            except TimeoutExpired:
+                process.kill()
+                killed_process_names.append(process_name)
 
+        if killed_process_names:
+            print(
+                f"""Some processes ({", ".join(killed_process_names)}) didn't shutdown within the 5s timeout, killing instead. You may see messages like:
+```bash
+rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been killed. It's either GCS is terminated by `ray stop` or is killed unexpectedly. If it is killed unexpectedly, see the log file gcs_server.out. https://docs.ray.io/en/master/ray-observability/user-guides/configure-logging.html#logging-directory-structure. The program will terminate.
+```
+"""
+            )
         self._processes = dict()
 
         self._head_server.should_exit = True
@@ -384,6 +371,10 @@ class RunHelper:  # pragma: no cover
         print("NeMo Gym finished!")
 
     def run_forever(self) -> None:
+        if self._server_client.global_config_dict[DRY_RUN_KEY_NAME]:
+            self.shutdown()
+            return
+
         async def sleep():
             poll_interval = 60
             sleep_interval = 1
@@ -461,6 +452,56 @@ def run(
     rh.run_forever()
 
 
+def e2e_rollout_collection():  # pragma: no cover
+    global_config_dict = get_global_config_dict()
+
+    # Ensure we have the right config first thing
+    e2e_rollout_collection_config = E2ERolloutCollectionConfig.model_validate(global_config_dict)
+
+    # Prepare data
+    data_processor_config_dict = deepcopy(global_config_dict)
+    with open_dict(data_processor_config_dict):
+        data_processor_config_dict["should_download"] = True
+        data_processor_config_dict["mode"] = "train_preparation"
+
+        output_fpath = Path(e2e_rollout_collection_config.output_jsonl_fpath)
+        data_process_output_dir = output_fpath.parent / "preprocessed_datasets"
+        data_processor_config_dict["output_dirpath"] = str(data_process_output_dir)
+
+    data_processor = TrainDataProcessor()
+    data_processor.run(data_processor_config_dict)
+
+    # Convert to RolloutCollectionConfig
+    rollout_collection_config_dict = deepcopy(global_config_dict)
+    with open_dict(rollout_collection_config_dict):
+        input_jsonl_fpath = data_process_output_dir / f"{e2e_rollout_collection_config.split}.jsonl"
+        assert input_jsonl_fpath.exists()
+        rollout_collection_config_dict["input_jsonl_fpath"] = str(input_jsonl_fpath)
+
+    rollout_collection_config = RolloutCollectionConfig.model_validate(
+        OmegaConf.to_container(rollout_collection_config_dict)
+    )
+
+    rh = RunHelper()
+    rh.start(None)
+
+    rch = RolloutCollectionHelper()
+
+    print(
+        f"""Output artifacts:
+1. Preprocessed datasets: {data_processor_config_dict["output_dirpath"]}
+2. Dataset file used for rollout collection: {rollout_collection_config_dict["input_jsonl_fpath"]}
+3. Rollout collection results file: {output_fpath}
+"""
+    )
+    try:
+        asyncio.run(rch.run_from_config(rollout_collection_config))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        rh.shutdown()
+
+
 def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover
     if not test_config.should_validate_data:
         return
@@ -530,7 +571,7 @@ ng_collect_rollouts +agent_name=example_multi_step_simple_agent \
     +limit=null
 
 # View your rollouts
-ng_viewer +jsonl_fpath=resources_servers/example_multi_step/data/example_rollouts.jsonl
+head -1 resources_servers/example_multi_step/data/example_rollouts.jsonl
 ```
 """
     with open(example_rollouts_fpath) as f:
@@ -542,8 +583,9 @@ ng_viewer +jsonl_fpath=resources_servers/example_multi_step/data/example_rollout
 
 def _test_single(test_config: TestConfig, global_config_dict: DictConfig) -> Popen:  # pragma: no cover
     # Eventually we may want more sophisticated testing here, but this is sufficient for now.
-    command = f"""{_setup_env_command(test_config.dir_path, global_config_dict)} && pytest"""
-    return _run_command(command, test_config.dir_path)
+    prefix = test_config.entrypoint.replace("/", "\\/")
+    command = f"""{setup_env_command(test_config.dir_path, global_config_dict, prefix)} && pytest"""
+    return run_command(command, test_config.dir_path)
 
 
 def test():  # pragma: no cover
@@ -908,7 +950,7 @@ def pip_list():  # pragma: no cover
     print(f"Virtual environment: {venv_path.absolute()}")
     print("-" * 72)
 
-    proc = _run_command(command, dir_path)
+    proc = run_command(command, dir_path)
     return_code = proc.wait()
     exit(return_code)
 
@@ -1026,3 +1068,11 @@ def stop():  # pragma: no cover
 
     stop_cmd.display_results(results)
     exit()
+
+
+def reinstall():  # pragma: no cover
+    global_config_dict = get_global_config_dict()
+    # Just here for help
+    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+
+    Popen("uv sync --extra dev --group docs", shell=True).communicate()

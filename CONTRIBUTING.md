@@ -42,8 +42,8 @@ uv sync --extra dev --group docs
 pre-commit install
 ```
 
-**Important:** All commits must be signed with DCO sign-off (`-s`) and cryptographic signature (`-S`):
+**Important:** All commits must be signed with DCO sign-off (`-s`):
 
 ```bash
-git commit -s -S -m "Your commit message"
+git commit -s -m "Your commit message"
 ```
