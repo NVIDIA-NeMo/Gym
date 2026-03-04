@@ -359,3 +359,32 @@ When a benchmark requires an external tool (compiler, runtime, etc.), auto-insta
 - For Ray remote tasks in async code: `result = await future` (Ray futures are directly awaitable). Never call `ray.get()` directly in async context.
 - Decode all subprocess output with `errors="replace"` to handle non-UTF8
 - Guard optional nested fields: `(body.field or {}).get("key", default)`
+
+## Benchmark Evaluation
+
+Official benchmarks live in `benchmarks/` with standardized configs and data preparation scripts.
+
+```bash
+# List available benchmarks
+ng_list_benchmarks
+
+# Prepare benchmark data (downloads from HuggingFace)
+ng_prepare_data +benchmark=livecodebench
+
+# Start servers (benchmark config + model config)
+ng_run +benchmark=livecodebench \
+    "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml]"
+
+# Collect rollouts (agent_name, input path, num_repeats come from benchmark config)
+ng_collect_rollouts +benchmark=livecodebench \
+    "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml]" \
+    +output_jsonl_fpath=results/livecodebench.jsonl
+
+# Override any benchmark default
+ng_collect_rollouts +benchmark=livecodebench \
+    "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml]" \
+    +output_jsonl_fpath=results/livecodebench.jsonl \
+    +num_repeats=5 "+responses_create_params={temperature: 0.7}"
+```
+
+Each benchmark's `config.yaml` chains to existing resource server configs and sets rollout defaults (`agent_name`, `input_jsonl_fpath`, `num_repeats`, `responses_create_params`). Each benchmark's `prepare.py` downloads and converts data from HuggingFace to Gym JSONL format.

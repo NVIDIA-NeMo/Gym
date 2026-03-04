@@ -1,0 +1,11 @@
+# Chain to existing resource server + agent config
+config_paths:
+  - resources_servers/math_with_judge/configs/math_with_judge.yaml
+
+# Rollout collection defaults — picked up directly by RolloutCollectionConfig
+agent_name: math_with_judge_simple_agent
+input_jsonl_fpath: resources_servers/math_with_judge/data/aime25_validation.jsonl
+num_repeats: 32
+responses_create_params:
+  max_output_tokens: 16384
+  temperature: 1.0

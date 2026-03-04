@@ -62,6 +62,7 @@ PORT_RANGE_HIGH_KEY_NAME = "port_range_high"
 DRY_RUN_KEY_NAME = "dry_run"
 UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
 UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
+BENCHMARK_KEY_NAME = "benchmark"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -81,6 +82,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     DRY_RUN_KEY_NAME,
     UV_CACHE_DIR_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
+    BENCHMARK_KEY_NAME,
 ]
 
 # Data keys
@@ -301,6 +303,12 @@ class GlobalConfigDictParser(BaseModel):
         ta = TypeAdapter(List[str])
         config_paths = merged_config_for_config_paths.get(CONFIG_PATHS_KEY_NAME) or []
         config_paths = ta.validate_python(config_paths)
+
+        benchmark_name = merged_config_for_config_paths.get(BENCHMARK_KEY_NAME)
+        if benchmark_name:
+            benchmark_config_path = f"benchmarks/{benchmark_name}/config.yaml"
+            if benchmark_config_path not in config_paths:
+                config_paths.insert(0, benchmark_config_path)
 
         config_paths, extra_configs = self.load_extra_config_paths(config_paths)
 
