@@ -183,7 +183,7 @@ class DynamoKvRoutingPolicy(RoutingPolicy):
         print(f"Generation complete for request {request_id}")
         self._run_async(self._router.free, request_id)
 
-    def on_weights_updated(self) -> None:
+    def on_kv_cache_invalidated(self) -> None:
         from dynamo._core import KvRouter, KvRouterConfig
 
         config = KvRouterConfig(**self._kv_config_kwargs)
@@ -191,5 +191,5 @@ class DynamoKvRoutingPolicy(RoutingPolicy):
             self._block_size, self._num_clients, config,
         )
         self.request_count = 0
-        print("DynamoKvRoutingPolicy: radix tree reset after weight update")
+        print("DynamoKvRoutingPolicy: radix tree reset after KV cache invalidation")
 

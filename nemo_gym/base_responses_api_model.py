@@ -43,12 +43,12 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         app.post("/v1/responses")(self.responses)
 
-        app.post("/weights_updated")(self.weights_updated)
+        app.post("/invalidate_kv_cache")(self.invalidate_kv_cache)
 
         return app
 
-    async def weights_updated(self) -> Response:
-        """Called after model weights are updated. Default no-op."""
+    async def invalidate_kv_cache(self) -> Response:
+        """Called when the KV cache has been invalidated. Default no-op."""
         return Response(status_code=200)
 
     @abstractmethod

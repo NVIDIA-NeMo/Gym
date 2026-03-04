@@ -66,7 +66,7 @@ from responses_api_models.vllm_model.routing_policy import (
 
 logger = logging.getLogger(__name__)
 
-_WEIGHTS_UPDATE_WARNING_INTERVAL = 1000
+_KV_CACHE_INVALIDATION_WARNING_INTERVAL = 1000
 
 
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
@@ -104,7 +104,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         ]
 
         self._routing_policy = create_routing_policy(self.config.routing_policy, self._clients)
-        self._requests_since_weights_updated: int = 0
+        self._requests_since_kv_cache_invalidated: int = 0
 
         self._converter = VLLMConverter(
             return_token_id_information=self.config.return_token_id_information,
@@ -112,10 +112,10 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         return super().model_post_init(context)
 
-    async def weights_updated(self) -> Response:
-        """Notify the routing policy that model weights have been updated."""
-        self._routing_policy.on_weights_updated()
-        self._requests_since_weights_updated = 0
+    async def invalidate_kv_cache(self) -> Response:
+        """Notify the routing policy that the KV cache has been invalidated."""
+        self._routing_policy.on_kv_cache_invalidated()
+        self._requests_since_kv_cache_invalidated = 0
         return Response(status_code=200)
 
     async def responses(
@@ -165,12 +165,12 @@ class VLLMModel(SimpleResponsesAPIModel):
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
         if not isinstance(self._routing_policy, RoundRobinRoutingPolicy):
-            self._requests_since_weights_updated += 1
-            if self._requests_since_weights_updated % _WEIGHTS_UPDATE_WARNING_INTERVAL == 0:
+            self._requests_since_kv_cache_invalidated += 1
+            if self._requests_since_kv_cache_invalidated % _KV_CACHE_INVALIDATION_WARNING_INTERVAL == 0:
                 logger.warning(
-                    f"Server '{self.config.name}' has served {self._requests_since_weights_updated} requests "
-                    f"since the last POST /weights_updated. If model weights have been updated, "
-                    f"call POST /weights_updated so the routing policy can adapt."
+                    f"Server '{self.config.name}' has served {self._requests_since_kv_cache_invalidated} requests "
+                    f"since the last POST /invalidate_kv_cache. If the KV cache has been invalidated, "
+                    f"call POST /invalidate_kv_cache so the routing policy can adapt."
                 )
 
         if self.config.replace_developer_role_with_system:

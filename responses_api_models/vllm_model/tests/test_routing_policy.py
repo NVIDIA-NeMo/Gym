@@ -47,7 +47,7 @@ class _StubCacheAwarePolicy(RoutingPolicy):
         self.route_calls: List[Dict[str, Any]] = []
         self.prefill_calls: List[str] = []
         self.generation_calls: List[str] = []
-        self.weights_updated_count: int = 0
+        self.kv_cache_invalidated_count: int = 0
 
     def select_client(
         self,
@@ -65,8 +65,8 @@ class _StubCacheAwarePolicy(RoutingPolicy):
     def on_generation_complete(self, request_id: str) -> None:
         self.generation_calls.append(request_id)
 
-    def on_weights_updated(self) -> None:
-        self.weights_updated_count += 1
+    def on_kv_cache_invalidated(self) -> None:
+        self.kv_cache_invalidated_count += 1
 
 
 class TestRoundRobinRoutingPolicy:
@@ -123,18 +123,18 @@ class TestExternalRoutingPolicy:
         assert policy.prefill_calls == ["req_42"]
         assert policy.generation_calls == ["req_42"]
 
-    def test_stub_weights_updated(self):
+    def test_stub_kv_cache_invalidated(self):
         clients = _make_mock_clients(2)
         policy = _StubCacheAwarePolicy(clients)
-        assert policy.weights_updated_count == 0
-        policy.on_weights_updated()
-        policy.on_weights_updated()
-        assert policy.weights_updated_count == 2
+        assert policy.kv_cache_invalidated_count == 0
+        policy.on_kv_cache_invalidated()
+        policy.on_kv_cache_invalidated()
+        assert policy.kv_cache_invalidated_count == 2
 
-    def test_round_robin_weights_updated_noop(self):
-        """RoundRobinRoutingPolicy.on_weights_updated() should not raise."""
+    def test_round_robin_kv_cache_invalidated_noop(self):
+        """RoundRobinRoutingPolicy.on_kv_cache_invalidated() should not raise."""
         policy = RoundRobinRoutingPolicy(_make_mock_clients(2))
-        policy.on_weights_updated()  # no-op, should not raise
+        policy.on_kv_cache_invalidated()  # no-op, should not raise
 
 
 class TestCreateRoutingPolicy:

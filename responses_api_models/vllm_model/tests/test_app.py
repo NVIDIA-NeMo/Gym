@@ -2129,8 +2129,8 @@ class TestCacheAwareRoutingIntegration:
         mock_policy.on_prefill_complete.assert_called_once()
         mock_policy.on_generation_complete.assert_called_once()
 
-    def test_weights_updated_notifies_routing_policy(self, monkeypatch: MonkeyPatch):
-        """POST /weights_updated should call on_weights_updated() on the routing policy."""
+    def test_invalidate_kv_cache_notifies_routing_policy(self, monkeypatch: MonkeyPatch):
+        """POST /invalidate_kv_cache should call on_kv_cache_invalidated() on the routing policy."""
         server = self._make_server(monkeypatch)
 
         mock_policy = MagicMock(spec=RoutingPolicy)
@@ -2139,30 +2139,30 @@ class TestCacheAwareRoutingIntegration:
         app = server.setup_webserver()
         test_client = TestClient(app)
 
-        response = test_client.post("/weights_updated")
+        response = test_client.post("/invalidate_kv_cache")
         assert response.status_code == 200
-        mock_policy.on_weights_updated.assert_called_once()
+        mock_policy.on_kv_cache_invalidated.assert_called_once()
 
-    def test_weights_updated_resets_counter(self, monkeypatch: MonkeyPatch):
-        """POST /weights_updated resets the stale-routing-policy warning counter."""
+    def test_invalidate_kv_cache_resets_counter(self, monkeypatch: MonkeyPatch):
+        """POST /invalidate_kv_cache resets the stale-routing-policy warning counter."""
         server = self._make_server(monkeypatch)
 
         mock_policy = MagicMock(spec=RoutingPolicy)
         server._routing_policy = mock_policy
-        server._requests_since_weights_updated = 500
+        server._requests_since_kv_cache_invalidated = 500
 
         app = server.setup_webserver()
         test_client = TestClient(app)
 
-        test_client.post("/weights_updated")
-        assert server._requests_since_weights_updated == 0
+        test_client.post("/invalidate_kv_cache")
+        assert server._requests_since_kv_cache_invalidated == 0
 
-    def test_stale_weights_warning_emitted(self, monkeypatch: MonkeyPatch, caplog):
-        """A warning is logged every _WEIGHTS_UPDATE_WARNING_INTERVAL requests when
-        using a non-default routing policy and /weights_updated has not been called."""
+    def test_stale_kv_cache_warning_emitted(self, monkeypatch: MonkeyPatch, caplog):
+        """A warning is logged every _KV_CACHE_INVALIDATION_WARNING_INTERVAL requests when
+        using a non-default routing policy and /invalidate_kv_cache has not been called."""
         import logging
 
-        from responses_api_models.vllm_model.app import _WEIGHTS_UPDATE_WARNING_INTERVAL
+        from responses_api_models.vllm_model.app import _KV_CACHE_INVALIDATION_WARNING_INTERVAL
 
         server = self._make_server(monkeypatch)
 
@@ -2196,16 +2196,16 @@ class TestCacheAwareRoutingIntegration:
 
         with caplog.at_level(logging.WARNING, logger="responses_api_models.vllm_model.app"):
             # Send exactly enough requests to cross the warning threshold
-            for _ in range(_WEIGHTS_UPDATE_WARNING_INTERVAL):
+            for _ in range(_KV_CACHE_INVALIDATION_WARNING_INTERVAL):
                 test_client.post("/v1/responses", json=request_body.model_dump(exclude_unset=True, mode="json"))
 
-        assert any("weights_updated" in record.message for record in caplog.records)
+        assert any("invalidate_kv_cache" in record.message for record in caplog.records)
 
     def test_no_warning_for_round_robin_policy(self, monkeypatch: MonkeyPatch, caplog):
-        """No stale-weights warning is emitted when using the default round-robin policy."""
+        """No stale-kv-cache warning is emitted when using the default round-robin policy."""
         import logging
 
-        from responses_api_models.vllm_model.app import _WEIGHTS_UPDATE_WARNING_INTERVAL
+        from responses_api_models.vllm_model.app import _KV_CACHE_INVALIDATION_WARNING_INTERVAL
 
         server = self._make_server(monkeypatch)
         # Default policy is RoundRobinRoutingPolicy — no mock needed
@@ -2235,10 +2235,10 @@ class TestCacheAwareRoutingIntegration:
         )
 
         with caplog.at_level(logging.WARNING, logger="responses_api_models.vllm_model.app"):
-            for _ in range(_WEIGHTS_UPDATE_WARNING_INTERVAL):
+            for _ in range(_KV_CACHE_INVALIDATION_WARNING_INTERVAL):
                 test_client.post("/v1/responses", json=request_body.model_dump(exclude_unset=True, mode="json"))
 
-        assert not any("weights_updated" in record.message for record in caplog.records)
+        assert not any("invalidate_kv_cache" in record.message for record in caplog.records)
 
 
 class TestVLLMConverter:
