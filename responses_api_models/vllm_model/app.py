@@ -354,15 +354,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 raise e
 
         choice_dict = chat_completion_dict["choices"][0]
-        # if thinking is disabled and reasoning parse is enabled, deepseek_r1 reasoning parser puts the answer into reasoning instead of content, causing an infinite loop. this put it back
-        _thinking_disabled = body_dict.get("chat_template_kwargs", {}).get("enable_thinking") is False
-        if self.config.uses_reasoning_parser and _thinking_disabled:
-            reasoning = choice_dict["message"].get("reasoning_content") or choice_dict["message"].get("reasoning")
-            if reasoning and not choice_dict["message"].get("content"):
-                choice_dict["message"]["content"] = reasoning
-            choice_dict["message"].pop("reasoning_content", None)
-            choice_dict["message"].pop("reasoning", None)
-        elif self.config.uses_reasoning_parser:
+        if self.config.uses_reasoning_parser:
             # See the TODO wrt reasoning_content above
             reasoning_content = choice_dict["message"].get("reasoning_content") or choice_dict["message"].get(
                 "reasoning"
