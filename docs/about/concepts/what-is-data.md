@@ -5,8 +5,13 @@ Data is a core component of machine learning, used across training and evaluatio
 
 Today, a core component of "state" is typically represented by a sequence of OpenAI Chat Completions messages or Responses items, commonly referred to as {term}`a "rollout" or a "trajectory" <Rollout / Trajectory>`. For more complicated tasks, the rollout is typically augmented by some in-memory or database state specific to that task instance in order to comprehensively represent the current state.
 
+## Example
 Here is an example from modern-day agentic use cases for models. In this example, the model is acting as a personal assistant, conversing with the user.
-The initial state can be represented using Responses create params
+The initial state can be represented using OpenAI Responses create params, an object with two keys: `input` and `tools`.
+- `input` is a sequence of items, where each item corresponds to a particular content type. For example, an item might be a text message from a user, or tool call request from the model.
+  - Here, we have a `developer` message type, that provides the model with additional context on the task it is intended to perform. We also have a `user` message type representing the first query from the user.
+- `tools` is a sequence of tool descriptions. The model can output a tool call request to perform interact with the environment in a structured manner.
+  - Here, we have a single message
 ```json
 {
     "input": [
@@ -46,7 +51,7 @@ The initial state can be represented using Responses create params
 ```
 
 
-
+## Data across training stages
 
 Data takes different shapes through the model training process (see {doc}`training-approaches` for more information on training approaches). Below are some examples of what "state" data corresponds to and how it manifests concretely.
 1. Pre-training: A single datum represents a miniscule-scoped snapshot of the state of the world, and is typically a single document. The model is expected to recall the state of the world, exactly as represented in the datum.
