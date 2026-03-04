@@ -1,26 +1,32 @@
 # Proof judge resource: verifier + meta-verifier (DeepSeek Math style).
-# In env.nemo_gym add proof_judge_model (responses_api_models.vllm_model with spinup_server: true)
-# and reference it here as judge_model_server.
+#
+# Two judge modes:
+#   A) Gym-internal: judge_model_server points to a Gym-managed vllm_model.
+#      Use proof_judge_with_local_judge.yaml for this mode.
+#   B) External (JUDGE_SERVER_ARGS): nemo-skill pipeline starts judge as SLURM het group;
+#      proof_judge reads JUDGE_SERVER_ARGS env and calls judge via AsyncOpenAI.
+#      judge_model_server.name is still required but acts as a fallback / placeholder.
+#
+# Default config: judge uses policy_model (same model for gen + judge).
+# For external judge, the pipeline sets JUDGE_SERVER_ARGS env var, and proof_judge
+# will route to the external servers automatically (no YAML changes needed).
 proof_judge:
   resources_servers:
     proof_judge:
       entrypoint: app.py
       judge_model_server:
         type: responses_api_models
-        name: proof_judge_model
-      judge_model_name: ""  # set via override to match proof_judge_model.model
+        name: policy_model
+      judge_model_name: ""
       alpha: 1.0
       beta: 0.0
       temperature: 0.6
       top_p: 0.95
-      max_tokens: 8192  # must be < max_model_len - input_tokens (vLLM rejects 100000 when context=100000)
+      max_tokens: 8192
       assert_think_end: false
-      # log_jsonl_path: null  # set to a path to append each verify: problem, generated_sequence, verifier_response, meta_response, reward
       domain: math
       description: Theorem proving with verifier + meta-verifier judge
 
-# Agent that uses policy for generation and proof_judge for verification.
-# Use this agent_ref.name in your training data rows.
 proof_simple_agent:
   responses_api_agents:
     simple_agent:
