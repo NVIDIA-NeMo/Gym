@@ -187,7 +187,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         session_id = request.session[SESSION_ID_KEY]
         request_id = str(uuid4())
 
-        client_idx = self._routing_policy.select_client(
+        client_idx = await self._routing_policy.select_client(
             request_body=body_dict, request_id=request_id, session_id=session_id
         )
         self._routing_policy.on_prefill_complete(request_id)

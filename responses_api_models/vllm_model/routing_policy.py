@@ -22,7 +22,7 @@ from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
 
 class RoutingPolicy(ABC):
     @abstractmethod
-    def select_client(
+    async def select_client(
         self,
         *,
         request_body: Dict[str, Any],
@@ -62,7 +62,7 @@ class RoundRobinRoutingPolicy(RoutingPolicy):
         self._session_id_to_client: Dict[str, int] = {}
         self._counter: int = 0
 
-    def select_client(
+    async def select_client(
         self,
         *,
         request_body: Dict[str, Any],
