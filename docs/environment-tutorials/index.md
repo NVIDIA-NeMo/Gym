@@ -84,13 +84,4 @@ Best practices guidance on designing a customer evaluation benchmark.
 {bdg-secondary}`benchmark`
 :::
 
-:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Multi-Environment Training
-:link: multi-environment-training
-:link-type: doc
-
-Run multiple training environments simultaneously for rollout collection.
-
-+++
-:::
-
 ::::
