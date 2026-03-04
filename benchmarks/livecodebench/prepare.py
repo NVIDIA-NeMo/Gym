@@ -24,9 +24,7 @@ import json
 from nemo_gym import PARENT_DIR
 
 
-OUTPUT_PATH = (
-    PARENT_DIR / "resources_servers" / "code_gen" / "data" / "livecodebench_v5_2024-07-01_2025-02-01_validation.jsonl"
-)
+OUTPUT_PATH = PARENT_DIR / "benchmarks" / "livecodebench" / "data" / "livecodebench_v5_validation.jsonl"
 
 SYSTEM_PROMPT = (
     "You are a helpful and harmless assistant. You should think step-by-step before responding to the instruction"

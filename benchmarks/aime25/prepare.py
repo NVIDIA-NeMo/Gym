@@ -24,7 +24,7 @@ import json
 from nemo_gym import PARENT_DIR
 
 
-OUTPUT_PATH = PARENT_DIR / "resources_servers" / "math_with_judge" / "data" / "aime25_validation.jsonl"
+OUTPUT_PATH = PARENT_DIR / "benchmarks" / "aime25" / "data" / "aime25_validation.jsonl"
 
 SYSTEM_PROMPT = (
     "Your task is to solve a math problem.  Make sure to put the answer (and only the answer) inside \\boxed{}."
