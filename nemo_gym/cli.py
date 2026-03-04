@@ -826,7 +826,7 @@ def dump_config():  # pragma: no cover
     print(OmegaConf.to_yaml(global_config_dict, resolve=True))
 
 
-def display_help():  # pragma: no cover
+def display_help():
     """
     Display a list of available NeMo Gym CLI commands.
 
