@@ -36,7 +36,7 @@ def prepare():
     from datasets import load_dataset
 
     print("Downloading AIME 2025 from HuggingFace...")
-    ds = load_dataset("HuggingFaceH4/aime_2025", split="train")
+    ds = load_dataset("MathArena/aime_2025", split="train")
 
     output_path = OUTPUT_PATH
     output_path.parent.mkdir(parents=True, exist_ok=True)

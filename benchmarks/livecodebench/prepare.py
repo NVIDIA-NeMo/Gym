@@ -44,7 +44,12 @@ def prepare():
     from datasets import load_dataset
 
     print("Downloading LiveCodeBench from HuggingFace...")
-    ds = load_dataset("livecodebench/code_generation_lite", split="test")
+    ds = load_dataset(
+        "livecodebench/code_generation_lite",
+        "release_v5",
+        split="test",
+        revision="refs/pr/7",
+    )
 
     output_path = OUTPUT_PATH
     output_path.parent.mkdir(parents=True, exist_ok=True)

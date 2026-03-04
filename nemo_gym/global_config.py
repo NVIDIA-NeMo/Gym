@@ -33,6 +33,7 @@ from wandb import Run
 
 from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR
 from nemo_gym.config_types import (
+    ModelServerRef,
     ServerInstanceConfig,
     WANDBConfig,
     is_almost_server,
@@ -196,6 +197,7 @@ class GlobalConfigDictParser(BaseModel):
         initial_disallowed_ports: Optional[List[int]] = None,
     ) -> List[int]:
         server_refs = [c.get_server_ref() for c in server_instance_configs]
+        has_model_server = any(isinstance(ref, ModelServerRef) for ref in server_refs)
 
         disallowed_ports = initial_disallowed_ports.copy() if initial_disallowed_ports is not None else []
 
@@ -206,6 +208,11 @@ class GlobalConfigDictParser(BaseModel):
             for v in run_server_config_dict.values():
                 maybe_server_ref = is_server_ref(v)
                 if not maybe_server_ref:
+                    continue
+
+                # Model server refs are allowed to be unresolved when no model server config is provided
+                # (e.g. during ng_prepare_data which doesn't need a model server).
+                if isinstance(maybe_server_ref, ModelServerRef) and not has_model_server:
                     continue
 
                 assert maybe_server_ref in server_refs, (
