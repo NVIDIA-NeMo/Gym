@@ -40,6 +40,7 @@ class RolloutCollectionConfig(BaseModel):
     num_repeats: Optional[int] = None
     num_samples_in_parallel: Optional[int] = None
     responses_create_params: Dict[str, Any] = Field(default_factory=dict)
+    prompt_config: Optional[str] = None
 
 
 class RolloutCollectionHelper(BaseModel):  # pragma: no cover
@@ -69,6 +70,13 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
             f"The tqdm progress bar will only update every {tqdm_miniters} samples that finish to ensure that you are not being spammed."
         )
 
+        prompt = None
+        if config.prompt_config:
+            from nemo_gym.prompt import load_prompt
+
+            prompt = load_prompt(config.prompt_config)
+            print(f"Loaded prompt config from {config.prompt_config}")
+
         if config.responses_create_params:
             print(f"Overriding responses_create_params fields with {config.responses_create_params}")
 
@@ -76,6 +84,9 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
         with open(config.output_jsonl_fpath, "a") as f:
 
             async def _post_coroutine(row: dict) -> None:
+                if prompt is not None:
+                    row.setdefault("responses_create_params", {})
+                    row["responses_create_params"]["input"] = prompt.fill(row)
                 row["responses_create_params"] = row["responses_create_params"] | config.responses_create_params
                 async with semaphore:
                     response = await server_client.post(server_name=config.agent_name, url_path="/run", json=row)
