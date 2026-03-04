@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import re
 from copy import deepcopy
 from time import time
@@ -224,8 +225,26 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         body_dict["model"] = self.config.model
 
+        chat_template_kwargs = {}
         if self.config.chat_template_kwargs:
-            body_dict["chat_template_kwargs"] = deepcopy(self.config.chat_template_kwargs)
+            chat_template_kwargs = deepcopy(self.config.chat_template_kwargs)
+
+        metadata = body_dict.get("metadata", dict())
+
+        # Merge global config chat_template_kwargs with per-request overrides in metadata (e.g. per-sample reasoning on/off)
+        metadata_chat_template_kwargs_str = metadata.get("chat_template_kwargs", "{}")
+        chat_template_kwargs.update(json.loads(metadata_chat_template_kwargs_str))
+
+        if chat_template_kwargs:
+            body_dict["chat_template_kwargs"] = chat_template_kwargs
+
+        # Merge global config extra_body with per-request overrides from metadata
+        extra_body = {}
+        if self.config.extra_body:
+            extra_body = deepcopy(self.config.extra_body)
+
+        metadata_extra_body_str = metadata.get("extra_body", "{}")
+        extra_body.update(json.loads(metadata_extra_body_str))
 
         if self.config.return_token_id_information:
             body_dict |= dict(
@@ -276,8 +295,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 else:
                     raise NotImplementedError
 
-        if self.config.extra_body:
-            body_dict = self.config.extra_body | body_dict
+        if extra_body:
+            body_dict = extra_body | body_dict
 
         return body_dict
 
