@@ -14,8 +14,11 @@
 # limitations under the License.
 import asyncio
 import logging
+import os
+from html import escape
 
 import anyio
+import httpx
 import re
 import shutil
 import subprocess
@@ -39,6 +42,19 @@ from nemo_gym.base_resources_server import (
 logger = logging.getLogger(__name__)
 
 SHELL_TIMEOUT = 30
+MAX_LENGTH_WEB_FETCH = 40000
+WEB_REQUEST_TIMEOUT = 60 * 3
+DEFAULT_WEBFETCH_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate",
+    "Connection": "keep-alive",
+}
 
 class Session(BaseModel):
     """All code execution and file access happens in the temp directory."""
@@ -89,7 +105,6 @@ class SavedFile(BaseModel):
 
 class CommitteeModelConfig(BaseModel):
     name: str
-    elo: float
     output_dir: str
 
 
@@ -160,6 +175,22 @@ class FinishResponse(BaseModel):
     failed: Dict[str, str] = Field(default_factory=dict)
     error_message: str | None = None
 
+class WebSearchRequest(BaseModel):
+    query: str
+    session_id: str
+
+class WebSearchResponse(BaseModel):
+    results_xml: str
+    error: str | None = None
+
+class WebFetchRequest(BaseModel):
+    url: str
+    session_id: str
+
+class WebFetchResponse(BaseModel):
+    content: str
+    error: str | None = None
+
 class VerifyRequest(BaseVerifyRequest):
     session_id: str
     paths: List[str]
@@ -169,7 +200,6 @@ class VerifyRequest(BaseVerifyRequest):
 
 class CommitteeModelVerdict(BaseModel):
     committee_model_name: str
-    committee_model_elo: float
     win_count_evaluated: int
     win_count_committee: int
     tie_count: int
@@ -202,7 +232,8 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
         app.post("/upload_files")(self.upload_files)
         app.post("/save_files")(self.save_output_files)
         app.post("/finish")(self.finish)  # Finish tool for task completion
-        # app.post("/web_search")(self.web_search) # TODO: Implement web search
+        app.post("/web_search")(self.web_search)
+        app.post("/web_fetch")(self.web_fetch)
 
         return app
 
@@ -579,6 +610,92 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
             error_message=result.error_message,
         )
 
+    async def _http_request_with_retry(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict | None = None,
+        params: dict | None = None,
+        max_attempts: int = 3,
+    ) -> httpx.Response:
+        """Execute an HTTP request with exponential backoff retry on network errors."""
+        last_exc: Exception | None = None
+        for attempt in range(max_attempts):
+            try:
+                async with httpx.AsyncClient(
+                    timeout=WEB_REQUEST_TIMEOUT, follow_redirects=True
+                ) as client:
+                    response = await client.request(method, url, headers=headers, params=params)
+                    response.raise_for_status()
+                    return response
+            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                last_exc = exc
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(2 ** attempt)
+        raise last_exc  # type: ignore[misc]
+
+    async def web_search(self, body: WebSearchRequest) -> WebSearchResponse:
+        """Search the web using Brave Search API. Returns top 5 results as XML."""
+        brave_api_key = os.getenv("BRAVE_API_KEY")
+        if not brave_api_key:
+            return WebSearchResponse(
+                results_xml="", error="BRAVE_API_KEY environment variable not set"
+            )
+
+        try:
+            response = await self._http_request_with_retry(
+                "GET",
+                "https://api.search.brave.com/res/v1/web/search",
+                headers={
+                    "X-Subscription-Token": brave_api_key,
+                    "Accept": "application/json",
+                },
+                params={"q": body.query, "count": 5},
+            )
+            data = response.json()
+            results = data.get("web", {}).get("results", [])
+            results_xml = (
+                "<results>\n"
+                + "\n".join(
+                    (
+                        "<result>"
+                        f"\n<title>{escape(result.get('title', '') or '')}</title>"
+                        f"\n<url>{escape(result.get('url', '') or '')}</url>"
+                        f"\n<description>{escape(result.get('description', '') or '')}</description>"
+                        "\n</result>"
+                    )
+                    for result in results
+                )
+                + "\n</results>"
+            )
+            return WebSearchResponse(results_xml=results_xml[:MAX_LENGTH_WEB_FETCH])
+        except Exception as exc:
+            return WebSearchResponse(results_xml="", error=str(exc))
+
+    async def web_fetch(self, body: WebFetchRequest) -> WebFetchResponse:
+        """Fetch a web page and extract main content as markdown."""
+        import trafilatura
+
+        try:
+            response = await self._http_request_with_retry(
+                "GET",
+                body.url,
+                headers=DEFAULT_WEBFETCH_HEADERS,
+            )
+            body_md = trafilatura.extract(response.text, output_format="markdown") or ""
+            content = (
+                f"<web_fetch><url>{escape(body.url)}</url>"
+                f"<body>{body_md[:MAX_LENGTH_WEB_FETCH]}</body></web_fetch>"
+            )
+            return WebFetchResponse(content=content)
+        except Exception as exc:
+            content = (
+                f"<web_fetch><url>{escape(body.url)}</url>"
+                f"<error>{escape(str(exc))}</error></web_fetch>"
+            )
+            return WebFetchResponse(content=content, error=str(exc))
+
     def _get_or_create_judge(self):
         """Lazily initialize the GDPValJudge on first verify call."""
         if self._judge is None:
@@ -646,7 +763,6 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
                     committee_output_dir=str(cm_task_dir),
                     refs_dir=refs_dir,
                     committee_model_name=cm.name,
-                    committee_model_elo=cm.elo,
                 )
             )
             committee_configs.append(cm)
@@ -668,7 +784,6 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
                 logger.error("Judge task for %s raised exception: %s", committee_configs[i].name, result)
                 committee_verdicts.append(CommitteeModelVerdict(
                     committee_model_name=committee_configs[i].name,
-                    committee_model_elo=committee_configs[i].elo,
                     win_count_evaluated=0,
                     win_count_committee=0,
                     tie_count=0,
@@ -681,7 +796,6 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
 
             verdict = CommitteeModelVerdict(
                 committee_model_name=result.committee_model_name,
-                committee_model_elo=result.committee_model_elo,
                 win_count_evaluated=result.win_count_evaluated,
                 win_count_committee=result.win_count_committee,
                 tie_count=result.tie_count,

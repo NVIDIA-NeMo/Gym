@@ -69,6 +69,40 @@ TOOLS = [
     },
     {
         "type": "function",
+        "name": "web_search",
+        "strict": True,
+        "description": "Search the web using Brave Search API. Returns top 5 results with title, URL, and description.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Natural language search query.",
+                },
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "type": "function",
+        "name": "web_fetch",
+        "strict": True,
+        "description": "Fetch and extract the main content from a web page as markdown.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "Full HTTP or HTTPS URL of the web page to fetch.",
+                },
+            },
+            "required": ["url"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "type": "function",
         "name": "finish",
         "strict": True,
         "description": (
@@ -128,6 +162,7 @@ def _build_run_request(row: dict, output_dir: str) -> dict:
         "responses_create_params": {
             "input": "",
             "tools": TOOLS,
+            "max_output_tokens": 10000,
         },
         "task_prompt": row["prompt"],
         "system_prompt": SYSTEM_PROMPT,

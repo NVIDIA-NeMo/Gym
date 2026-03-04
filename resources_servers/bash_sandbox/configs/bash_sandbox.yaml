@@ -12,7 +12,6 @@ bash_sandbox_resources_server:
         max_concurrent_judgements: 10
         committee_models:
           - name: "Qwen3-235B-A22B-Thinking-2507"
-            elo: 852
             output_dir: "/path/to/precomputed/Qwen3-235B"
 bash_sandbox_agent:
   responses_api_agents:

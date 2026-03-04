@@ -28,7 +28,6 @@ Key differences from stirrup:
 
 import asyncio
 import logging
-import math
 import os
 import re
 import shutil
@@ -166,18 +165,6 @@ FILE_TYPE_MAP = {
 }
 
 
-# --- ELO calculation (for optional post-hoc analysis) ---
-
-def calculate_elo(win_rate: float, ref_elo: float) -> tuple[float, float]:
-    """Compute ELO and normalized ELO from win rate against a reference model.
-
-    Kept for optional aggregate post-hoc analysis. Not used for per-task reward.
-    """
-    elo = ref_elo - 400.0 * (math.log10(1 - win_rate) - math.log10(win_rate))
-    normalized_elo = (elo - 500) / 2000
-    return elo, normalized_elo
-
-
 # --- Result dataclass ---
 
 @dataclass
@@ -192,7 +179,6 @@ class JudgementResult:
       When swapped: logic inverts.
     """
     committee_model_name: str
-    committee_model_elo: float
     win_count_evaluated: int = 0
     win_count_committee: int = 0
     tie_count: int = 0
@@ -453,7 +439,6 @@ class GDPValJudge:
         committee_output_dir: str,
         refs_dir: str | None,
         committee_model_name: str,
-        committee_model_elo: float,
     ) -> JudgementResult:
         """Judge a single task by comparing evaluated vs committee model outputs.
 
@@ -466,14 +451,12 @@ class GDPValJudge:
             committee_output_dir: Directory with committee model's output files.
             refs_dir: Directory with reference files, or None.
             committee_model_name: Name of the committee model.
-            committee_model_elo: Known ELO of the committee model (informational).
 
         Returns:
             JudgementResult with tallied trial results.
         """
         result = JudgementResult(
             committee_model_name=committee_model_name,
-            committee_model_elo=committee_model_elo,
         )
 
         async with self._semaphore:
