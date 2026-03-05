@@ -189,7 +189,7 @@ def visit_resource_server(data: dict, level: int = 1) -> ResourceServerMetadata:
 def visit_agent_datasets(data: dict) -> AgentDatasetsMetadata:  # pragma: no cover
     agent = AgentDatasetsMetadata()
     for k1, v1 in data.items():
-        if k1.endswith("_simple_agent") and isinstance(v1, dict):
+        if k1.endswith("_agent") and isinstance(v1, dict):
             v2 = v1.get("responses_api_agents")
             if isinstance(v2, dict):
                 # Look for any agent key
@@ -265,9 +265,6 @@ def get_example_and_training_server_info() -> tuple[list[ServerInfo], list[Serve
             server_name = subdir.name
             is_example_only = server_name.startswith("example_")
 
-            if not is_example_only and not yaml_data.huggingface_repo_id:
-                continue
-
             display_name = (
                 (server_name[len("example_") :] if is_example_only else server_name).replace("_", " ").title()
             )
@@ -322,11 +319,11 @@ def generate_training_table(servers: list[ServerInfo]) -> str:  # pragma: no cov
     """Generate table for training resource servers."""
     col_names = [
         "Resource Server",
+        "Config",
         "Domain",
         "Dataset",
         "Description",
         "Value",
-        "Config",
         "Train",
         "Validation",
         # TODO: Add back in when we can verify resource servers
@@ -345,11 +342,11 @@ def generate_training_table(servers: list[ServerInfo]) -> str:  # pragma: no cov
         rows.append(
             [
                 server.display_name,
+                server.get_config_link(use_filename=True),
                 server.get_domain_or_empty(),
                 server.get_dataset_link(),
                 server.get_description_or_dash(),
                 server.get_value_or_dash(),
-                server.get_config_link(use_filename=False),
                 server.get_train_mark(),
                 server.get_validation_mark(),
                 # TODO: Add back in when we can verify resource servers
@@ -360,7 +357,9 @@ def generate_training_table(servers: list[ServerInfo]) -> str:  # pragma: no cov
 
     rows.sort(
         key=lambda r: (
-            normalize_str(r[1]),  # domain
+            normalize_str(r[0]),  # resource server name
+            normalize_str(r[1]),  # config filename
+            normalize_str(r[2]),  # domain
             # TODO: Add back in when we can verify resource servers
             # 0 if "✓" in r[8] else 1,  # verified first (reverse order for checkmarks...hyphens)
             tuple(normalize_str(cell) for cell in r),
