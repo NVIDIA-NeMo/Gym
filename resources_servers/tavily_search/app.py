@@ -19,7 +19,6 @@ from typing import ClassVar, Optional
 from urllib.parse import urlparse
 
 from fastapi import FastAPI
-from judge_prompt import JUDGE_PROMPT_TEMPLATE
 from pydantic import BaseModel, PrivateAttr
 from tavily import AsyncTavilyClient, UsageLimitExceededError
 
@@ -36,6 +35,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from resources_servers.tavily_search.judge_prompt import JUDGE_PROMPT_TEMPLATE
 
 
 class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
