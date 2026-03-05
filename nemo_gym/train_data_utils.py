@@ -38,6 +38,7 @@ from nemo_gym.config_types import (
 )
 from nemo_gym.gitlab_utils import download_jsonl_dataset
 from nemo_gym.global_config import (
+    BENCHMARK_KEY_NAME,
     HF_TOKEN_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
@@ -821,6 +822,14 @@ def prepare_data():  # pragma: no cover
             initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
         )
     )
+
+    benchmark_name = global_config_dict.get(BENCHMARK_KEY_NAME)
+    if benchmark_name:
+        import importlib
+
+        module = importlib.import_module(f"benchmarks.{benchmark_name}.prepare")
+        module.prepare()
+        return
 
     data_processor = TrainDataProcessor()
     data_processor.run(global_config_dict)

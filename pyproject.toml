@@ -374,9 +374,13 @@ ng_version = "nemo_gym.cli:version"
 nemo_gym_reinstall = "nemo_gym.cli:reinstall"
 ng_reinstall = "nemo_gym.cli:reinstall"
 
+# Benchmark listing
+nemo_gym_list_benchmarks = "nemo_gym.benchmark_cli:list_benchmarks"
+ng_list_benchmarks = "nemo_gym.benchmark_cli:list_benchmarks"
+
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["resources_servers", "responses_api_agents", "responses_api_models", "nemo_gym"]
+include = ["resources_servers", "responses_api_agents", "responses_api_models", "nemo_gym", "benchmarks"]
 
 ################################################
 # Testing
