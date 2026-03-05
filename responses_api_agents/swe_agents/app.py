@@ -13,16 +13,15 @@
 # limitations under the License.
 import asyncio
 import json
+import random
 import sys
 import time
 import uuid
 from asyncio import Semaphore
 from pathlib import Path
 from typing import Any, Callable, Dict, Literal, Optional
-import os
+
 import ray
-import hashlib
-import random
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
@@ -39,10 +38,10 @@ from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseOutputMessage,
-    NeMoGymResponseOutputText,
     NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputMessageForTraining,
+    NeMoGymResponseOutputText,
 )
 from responses_api_agents.swe_agents.utils import (
     convert_tools_to_function_format,
@@ -259,7 +258,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         instance_id = problem_info.get("instance_id", "unknown")
         rng = random.Random(instance_id)
         prompt_agent_choice = rng.choice([choice_1, choice_2, choice_3])
-        
 
         try:
             ray_queue_time = time.time()
@@ -287,7 +285,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             }
 
             if self.config.run_with_mixed_prompts:
-                print(f"Instance ID: {instance_id}. Random seed: {rng.seed} Agent choice: {prompt_agent_choice["agent_cls"]}", flush=True)
+                print(
+                    f"Instance ID: {instance_id}. Random seed: {rng.seed} Agent choice: {prompt_agent_choice['agent_cls']}",
+                    flush=True,
+                )
                 params.update(prompt_agent_choice)
 
             future = runner_ray_remote.remote(run_swebench_evaluation, params)

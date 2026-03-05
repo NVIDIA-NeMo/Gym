@@ -17,10 +17,10 @@ import json
 import os
 import shutil
 import subprocess
-from uuid import uuid4
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple
+from uuid import uuid4
 
 from openai.types.responses.function_tool import FunctionTool
 

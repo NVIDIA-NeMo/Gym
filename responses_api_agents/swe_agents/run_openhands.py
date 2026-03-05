@@ -384,7 +384,6 @@ class RunOpenHandsAgent:
         config_file_path: str,
         output_file_path: Optional[str],
     ) -> Optional[str]:
-    
         eval_dir_on_host = Path(self.openhands_setup_dir) / "OpenHands" / eval_dir_in_openhands
         trajectories_root = Path(self.output_dir) / "trajectories" / data_point["instance_id"]
         llm_completions_dir = trajectories_root / "llm_completions" / data_point["instance_id"]
