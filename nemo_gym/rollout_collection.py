@@ -112,6 +112,10 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=False,
         description="If the same command is run multiple times, check the materialized inputs and current outputs and remove the inputs that have already been run",
     )
+    prompt_config: Optional[str] = Field(
+        default=None,
+        description="Path to a YAML prompt config file for prompt-on-the-fly templating.",
+    )
 
     @property
     def materialized_jsonl_fpath(self) -> Path:
@@ -121,6 +125,13 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
 
 class RolloutCollectionHelper(BaseModel):
     def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
+        prompt = None
+        if config.prompt_config:
+            from nemo_gym.prompt import load_prompt
+
+            prompt = load_prompt(config.prompt_config)
+            print(f"Loaded prompt config from {config.prompt_config}")
+
         range_iterator = repeat(0)
         if config.limit:
             range_iterator = range(config.limit)
@@ -157,6 +168,11 @@ class RolloutCollectionHelper(BaseModel):
                 row.setdefault(AGENT_REF_KEY_NAME, {"name": config.agent_name})
             elif not row.get(AGENT_REF_KEY_NAME, dict()).get("name"):
                 row_idxs_missing_agent_ref.append(row_idx)
+
+            # Apply prompt template if configured
+            if prompt is not None:
+                row.setdefault(RESPONSES_CREATE_PARAMS_KEY_NAME, {})
+                row[RESPONSES_CREATE_PARAMS_KEY_NAME]["input"] = prompt.fill(row)
 
             # Responses create params
             row[RESPONSES_CREATE_PARAMS_KEY_NAME] = (
