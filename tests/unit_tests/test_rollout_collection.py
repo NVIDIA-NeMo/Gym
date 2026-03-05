@@ -138,25 +138,14 @@ class TestRolloutCollection:
             actual_written_results = [json.loads(line) for line in f]
         assert expected_results == actual_written_results
 
-        expected_reward_profiling_output_len = 3
-        reward_profiling_fpath = tmp_path / "output_reward_profiling.jsonl"
-        with reward_profiling_fpath.open() as f:
-            actual_reward_profiling_output_len = len(list(f))
-        assert expected_reward_profiling_output_len == actual_reward_profiling_output_len
-
-        agent_level_metrics_fpath = tmp_path / "output_agent_metrics.json"
-        actual_agent_level_metrics = json.loads(agent_level_metrics_fpath.read_text())
-        expected_agent_level_metrics = [
-            {
-                "mean/abc usage": 1.0,
-                "max/abc usage": 1,
-                "min/abc usage": 1,
-                "median/abc usage": 1.0,
-                "std/abc usage": 0.0,
-                "agent_ref": {"name": "my agent name"},
-            }
-        ]
-        assert expected_agent_level_metrics == actual_agent_level_metrics
+        metrics_fpath = tmp_path / "output_metrics.json"
+        assert metrics_fpath.exists()
+        metrics_data = json.loads(metrics_fpath.read_text())
+        assert "aggregate" in metrics_data
+        assert "per_sample_aggregate" in metrics_data
+        assert "per_task" in metrics_data
+        assert "usage" in metrics_data
+        assert metrics_data["usage"]["abc usage"] == 1.0
 
     async def test_run_from_config_sorted(self, tmp_path: Path) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
