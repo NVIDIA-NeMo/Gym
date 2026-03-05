@@ -36,6 +36,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+
 # Hardcoded path for raw Inverse IF data
 DEFAULT_RAW_DATA_DIR = Path("/lustre/fsw/portfolios/llmservice/users/mfathi/data/inverse_if")
 
@@ -255,9 +256,7 @@ def process_directory(data_dir: Path, output_file: Path) -> int:
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Convert raw Inverse IF JSON files to NeMo-Gym JSONL format"
-    )
+    parser = argparse.ArgumentParser(description="Convert raw Inverse IF JSON files to NeMo-Gym JSONL format")
     parser.add_argument(
         "--data-dir",
         type=Path,

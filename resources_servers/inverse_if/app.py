@@ -95,9 +95,7 @@ class InverseIFConfig(BaseResourcesServerConfig):
     name: str = "inverse_if"
 
     # Reference to the judge model server
-    judge_model_server: ModelServerRef = Field(
-        description="Reference to the model server used as the LLM judge"
-    )
+    judge_model_server: ModelServerRef = Field(description="Reference to the model server used as the LLM judge")
 
     # Parameters for judge requests
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming = Field(
@@ -297,8 +295,12 @@ class InverseIFServer(SimpleResourcesServer):
             evaluations = await asyncio.gather(
                 *[
                     self._evaluate_criterion(
-                        item, prompt, generated_response, reference_response,
-                        judge_prompt_template, judge_system_prompt,
+                        item,
+                        prompt,
+                        generated_response,
+                        reference_response,
+                        judge_prompt_template,
+                        judge_system_prompt,
                     )
                     for item in rubric
                 ]
@@ -307,8 +309,12 @@ class InverseIFServer(SimpleResourcesServer):
             evaluations = []
             for item in rubric:
                 result = await self._evaluate_criterion(
-                    item, prompt, generated_response, reference_response,
-                    judge_prompt_template, judge_system_prompt,
+                    item,
+                    prompt,
+                    generated_response,
+                    reference_response,
+                    judge_prompt_template,
+                    judge_system_prompt,
                 )
                 evaluations.append(result)
 

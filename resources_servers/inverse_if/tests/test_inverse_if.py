@@ -149,9 +149,11 @@ class TestRubricNormalisation:
         """Rubrics parsed from response_reference when rubrics array is empty."""
         import json
 
-        criteria_json = json.dumps([
-            {"id": "C1", "criteria": "From response_reference"},
-        ])
+        criteria_json = json.dumps(
+            [
+                {"id": "C1", "criteria": "From response_reference"},
+            ]
+        )
         task = {
             "rubrics": [],
             "messages": [
@@ -165,10 +167,10 @@ class TestRubricNormalisation:
     def test_extract_rubrics_fallback_with_prose_preamble(self):
         """Rubrics extracted from response_reference that has a prose preamble."""
         content = (
-            'For earning 1 point (PASS), the student must PASS:\n\n'
+            "For earning 1 point (PASS), the student must PASS:\n\n"
             '{\n    "id": "C1",\n    "criteria": "First criterion"\n  },\n\n'
             '  {\n    "id": "C2",\n    "criteria": "Second criterion"\n  }\n\n'
-            'End of criteria.'
+            "End of criteria."
         )
         task = {
             "rubrics": [],
