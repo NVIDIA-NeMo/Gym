@@ -20,7 +20,6 @@ Preprocesses MultiChallenge dataset to the format required by NeMo-Gym.
 Supports two input modes:
 1. JSONL mode (default): Reads from pre-compiled .jsonl files
    Input: data/{split}.jsonl  ->  Output: data/{split}_preprocessed.jsonl
-
 2. JSON directory mode: Reads from individual JSON files
    Input: data/{split}/*.json  ->  Output: data/{split}.jsonl
 
@@ -40,7 +39,6 @@ DEFAULT_RAW_DATA_DIR = Path("/lustre/fsw/portfolios/llmservice/users/mfathi/data
 def build_input_messages(task: dict) -> list[dict]:
     """
     Build the input messages for the policy model from the task data.
-
     Excludes 'thinking' role messages and the final user message (which the model should respond to).
     """
     messages = task.get("messages", [])
@@ -94,7 +92,6 @@ def process_task(task: dict, fallback_id: str = "unknown") -> dict[str, Any]:
     """Process a single task dict into the preprocessed JSONL format."""
     metadata = task.get("metadata", {})
     task_id = metadata.get("taskId", fallback_id)
-
     # Build the record for JSONL
     record = {
         "uuid": str(task_id),
@@ -120,7 +117,6 @@ def process_task(task: dict, fallback_id: str = "unknown") -> dict[str, Any]:
             "ground_truth_answer": task.get("ground_truth_answer", None),
         },
     }
-
     return record
 
 
@@ -154,7 +150,6 @@ def process_jsonl_file(input_file: Path, output_file: Path) -> int:
             except Exception as e:
                 print(f"  Error processing line {line_num}: {e}")
                 errors += 1
-
     print(f"  Wrote {count} records to {output_file}" + (f" ({errors} errors)" if errors else ""))
     return count
 
@@ -165,7 +160,6 @@ def process_split_jsonl(data_dir: Path, split: str, output_dir: Path) -> int:
     if not input_file.exists():
         print(f"Warning: JSONL file not found: {input_file}")
         return 0
-
     output_file = output_dir / f"{split}.jsonl"
     return process_jsonl_file(input_file, output_file)
 
@@ -191,7 +185,6 @@ def process_split_json_dir(data_dir: Path, split: str, output_dir: Path) -> int:
                 count += 1
             except Exception as e:
                 print(f"Error processing {filepath}: {e}")
-
     print(f"Wrote {count} records to {output_file}")
     return count
 
@@ -231,14 +224,12 @@ def main():
     print(f"Mode: {args.mode}")
     print(f"Splits: {args.splits}")
     print()
-
     total = 0
     for split in args.splits:
         if args.mode == "jsonl":
             total += process_split_jsonl(args.data_dir, split, args.output_dir)
         else:
             total += process_split_json_dir(args.data_dir, split, args.output_dir)
-
     print(f"\nTotal: {total} records processed")
 
 
