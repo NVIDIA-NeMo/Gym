@@ -34,7 +34,7 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     get_wandb_run,
 )
-from nemo_gym.reward_profile import MetricsProfiler
+from nemo_gym.reward_profile import MetricsProfiler, RewardProfiler
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
@@ -54,6 +54,11 @@ class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
     responses_create_params: Dict[str, Any] = Field(
         default_factory=dict,
         description="Overrides for the responses_create_params e.g. temperature, max_output_tokens, etc.",
+    )
+    metrics_type: Optional[str] = Field(
+        default=None,
+        description="Metrics class path (e.g. 'resources_servers.math_with_judge.metrics::MathMetrics'). "
+        "If not set, defaults to RewardMetrics.",
     )
 
 
@@ -275,7 +280,7 @@ class RolloutCollectionHelper(BaseModel):
         results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
 
         mp = MetricsProfiler()
-        metrics_output = mp.profile_from_data(results)
+        metrics_output = mp.profile_from_data(results, metrics_type=config.metrics_type)
         metrics_fpath = mp.write_to_disk(metrics_output, output_fpath)
 
         if get_wandb_run():  # pragma: no cover
@@ -292,11 +297,20 @@ class RolloutCollectionHelper(BaseModel):
                 scores_str = ", ".join(f"{name}: {val:.2f}" for name, val in scores.items())
                 print(f"  {mode}: {scores_str}")
 
+        # Legacy reward profiling (per-task and per-agent stats over all numeric fields)
+        rp = RewardProfiler()
+        group_level_metrics, agent_level_metrics = rp.profile_from_data(rows, results)
+        reward_profiling_fpath, agent_metrics_fpath = rp.write_to_disk(
+            group_level_metrics, agent_level_metrics, output_fpath
+        )
+
         print(f"""
 Finished rollout collection! View results at:
 Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
-Metrics: {metrics_fpath}""")
+Metrics: {metrics_fpath}
+Reward profiling: {reward_profiling_fpath}
+Agent metrics: {agent_metrics_fpath}""")
 
         return results
 
