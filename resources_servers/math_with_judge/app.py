@@ -22,7 +22,7 @@ from math_verify import grader
 from math_verify.errors import TimeoutException
 from math_verify.metric import math_metric
 from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -49,6 +49,11 @@ class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
 class LibraryJudgeMathRunRequest(BaseRunRequest):
     question: str
     expected_answer: str
+
+    @field_validator("expected_answer", mode="before")
+    @classmethod
+    def coerce_expected_answer(cls, v):
+        return str(v)
 
 
 class LibraryJudgeMathVerifyRequest(LibraryJudgeMathRunRequest, BaseVerifyRequest):
