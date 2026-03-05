@@ -86,23 +86,6 @@ class TestRolloutCollection:
             },
         ]
 
-    def test_prompt_config_field(self) -> None:
-        config = RolloutCollectionConfig(
-            agent_name="agent",
-            input_jsonl_fpath="input.jsonl",
-            output_jsonl_fpath="output.jsonl",
-            prompt_config="prompt_configs/math.yaml",
-        )
-        assert config.prompt_config == "prompt_configs/math.yaml"
-
-    def test_prompt_config_default_none(self) -> None:
-        config = RolloutCollectionConfig(
-            agent_name="agent",
-            input_jsonl_fpath="input.jsonl",
-            output_jsonl_fpath="output.jsonl",
-        )
-        assert config.prompt_config is None
-
     async def test_run_from_config_sanity(self, tmp_path: Path) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
         samples = [
@@ -269,6 +252,143 @@ class TestRolloutCollection:
         )
 
         assert expected_results == actual_returned_results
+
+    def test_prompt_config_field(self) -> None:
+        config = RolloutCollectionConfig(
+            agent_name="agent",
+            input_jsonl_fpath="input.jsonl",
+            output_jsonl_fpath="output.jsonl",
+            prompt_config="prompt_configs/math.yaml",
+        )
+        assert config.prompt_config == "prompt_configs/math.yaml"
+
+    def test_prompt_config_default_none(self) -> None:
+        config = RolloutCollectionConfig(
+            agent_name="agent",
+            input_jsonl_fpath="input.jsonl",
+            output_jsonl_fpath="output.jsonl",
+        )
+        assert config.prompt_config is None
+
+    def test_preprocess_with_cli_prompt_config(self, tmp_path: Path) -> None:
+        prompt_yaml = tmp_path / "prompt.yaml"
+        prompt_yaml.write_text('system: "Solve it."\nuser: "{problem}"\n')
+
+        fpath = tmp_path / "input.jsonl"
+        samples = [json.dumps({"problem": f"problem_{i}", "agent_ref": {"name": "agent"}}) for i in range(3)]
+        fpath.write_text("\n".join(samples) + "\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            limit=2,
+            prompt_config=str(prompt_yaml),
+        )
+
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert len(rows) == 2
+        for row in rows:
+            messages = row["responses_create_params"]["input"]
+            assert messages[0]["role"] == "system"
+            assert messages[0]["content"] == "Solve it."
+            assert messages[1]["role"] == "user"
+
+    def test_preprocess_with_per_row_prompt_config(self, tmp_path: Path) -> None:
+        prompt_yaml = tmp_path / "prompt.yaml"
+        prompt_yaml.write_text('user: "Q: {question}"\n')
+
+        fpath = tmp_path / "input.jsonl"
+        samples = [
+            json.dumps({"question": "2+2", "agent_ref": {"name": "agent"}, "prompt_config": str(prompt_yaml)}),
+            json.dumps(
+                {
+                    "responses_create_params": {"input": [{"role": "user", "content": "prebaked"}]},
+                    "agent_ref": {"name": "agent"},
+                }
+            ),
+        ]
+        fpath.write_text("\n".join(samples) + "\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+        )
+
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert rows[0]["responses_create_params"]["input"] == [{"role": "user", "content": "Q: 2+2"}]
+        assert rows[1]["responses_create_params"]["input"] == [{"role": "user", "content": "prebaked"}]
+
+    def test_cli_prompt_config_overrides_row_prompt_config(self, tmp_path: Path) -> None:
+        cli_prompt = tmp_path / "cli.yaml"
+        cli_prompt.write_text('user: "CLI: {problem}"\n')
+
+        row_prompt = tmp_path / "row.yaml"
+        row_prompt.write_text('user: "ROW: {problem}"\n')
+
+        fpath = tmp_path / "input.jsonl"
+        samples = [json.dumps({"problem": "x", "agent_ref": {"name": "agent"}, "prompt_config": str(row_prompt)})]
+        fpath.write_text("\n".join(samples) + "\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            prompt_config=str(cli_prompt),
+        )
+
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert rows[0]["responses_create_params"]["input"] == [{"role": "user", "content": "CLI: x"}]
+
+    def test_prompt_config_rejects_multi_turn_input(self, tmp_path: Path) -> None:
+        prompt_yaml = tmp_path / "prompt.yaml"
+        prompt_yaml.write_text('user: "{problem}"\n')
+
+        fpath = tmp_path / "input.jsonl"
+        multi_turn_row = json.dumps(
+            {
+                "problem": "x",
+                "agent_ref": {"name": "agent"},
+                "responses_create_params": {
+                    "input": [
+                        {"role": "user", "content": "What is 2+2?"},
+                        {"role": "assistant", "content": "4"},
+                        {"role": "user", "content": "Now what is 3+3?"},
+                    ]
+                },
+            }
+        )
+        fpath.write_text(multi_turn_row + "\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            prompt_config=str(prompt_yaml),
+        )
+
+        with pytest.raises(ValueError, match="prompt_config only supports single-turn"):
+            RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+    def test_prompt_config_allows_single_turn_input(self, tmp_path: Path) -> None:
+        prompt_yaml = tmp_path / "prompt.yaml"
+        prompt_yaml.write_text('user: "{problem}"\n')
+
+        fpath = tmp_path / "input.jsonl"
+        single_turn_row = json.dumps(
+            {
+                "problem": "x",
+                "agent_ref": {"name": "agent"},
+                "responses_create_params": {"input": [{"role": "user", "content": "old prompt"}]},
+            }
+        )
+        fpath.write_text(single_turn_row + "\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            prompt_config=str(prompt_yaml),
+        )
+
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert rows[0]["responses_create_params"]["input"] == [{"role": "user", "content": "x"}]
 
 
 class TestPrompt:

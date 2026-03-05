@@ -114,7 +114,7 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
     )
     prompt_config: Optional[str] = Field(
         default=None,
-        description="Path to a YAML prompt config file for prompt-on-the-fly templating.",
+        description="Path to a YAML prompt config file. When set, builds responses_create_params.input from the template on the fly. Priority: CLI prompt_config > row prompt_config > row responses_create_params.",
     )
 
     @property
@@ -125,13 +125,6 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
 
 class RolloutCollectionHelper(BaseModel):
     def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
-        prompt = None
-        if config.prompt_config:
-            from nemo_gym.prompt import load_prompt
-
-            prompt = load_prompt(config.prompt_config)
-            print(f"Loaded prompt config from {config.prompt_config}")
-
         range_iterator = repeat(0)
         if config.limit:
             range_iterator = range(config.limit)
@@ -142,6 +135,9 @@ class RolloutCollectionHelper(BaseModel):
 
         if config.agent_name:
             print(f"Using `{config.agent_name}` for rows that do not already have an agent ref")
+
+        if config.prompt_config:
+            print(f"Using CLI prompt config: {config.prompt_config}")
 
         if config.responses_create_params:
             print(f"Overriding responses_create_params fields with {config.responses_create_params}")
@@ -169,8 +165,22 @@ class RolloutCollectionHelper(BaseModel):
             elif not row.get(AGENT_REF_KEY_NAME, dict()).get("name"):
                 row_idxs_missing_agent_ref.append(row_idx)
 
-            # Apply prompt template if configured
-            if prompt is not None:
+            # Apply prompt config: CLI prompt_config > row prompt_config > row responses_create_params
+            prompt_config_path = config.prompt_config or row.get("prompt_config")
+            if prompt_config_path:
+                existing_input = row.get(RESPONSES_CREATE_PARAMS_KEY_NAME, {}).get("input", [])
+                num_user_turns = sum(1 for msg in existing_input if msg.get("role") == "user")
+                if num_user_turns > 1:
+                    raise ValueError(
+                        f"Row {row_idx} has {num_user_turns} user turns in responses_create_params.input "
+                        f"but a prompt_config is set ('{prompt_config_path}'). "
+                        f"prompt_config only supports single-turn initial prompts. "
+                        f"Remove prompt_config for this row or use pre-baked responses_create_params."
+                    )
+
+                from nemo_gym.prompt import load_prompt
+
+                prompt = load_prompt(prompt_config_path)
                 row.setdefault(RESPONSES_CREATE_PARAMS_KEY_NAME, {})
                 row[RESPONSES_CREATE_PARAMS_KEY_NAME]["input"] = prompt.fill(row)
 
