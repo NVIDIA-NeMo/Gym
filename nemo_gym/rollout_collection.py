@@ -113,6 +113,10 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=False,
         description="If the same command is run multiple times, check the materialized inputs and current outputs and remove the inputs that have already been run",
     )
+    prompt_config: Optional[str] = Field(
+        default=None,
+        description="Path to a YAML prompt config file. When set, builds responses_create_params.input from the template on the fly. Priority: CLI prompt_config > row prompt_config > row responses_create_params.",
+    )
 
     @property
     def materialized_jsonl_fpath(self) -> Path:
@@ -132,6 +136,9 @@ class RolloutCollectionHelper(BaseModel):
 
         if config.agent_name:
             print(f"Using `{config.agent_name}` for rows that do not already have an agent ref")
+
+        if config.prompt_config:
+            print(f"Using CLI prompt config: {config.prompt_config}")
 
         if config.responses_create_params:
             print(f"Overriding responses_create_params fields with {config.responses_create_params}")
@@ -158,6 +165,15 @@ class RolloutCollectionHelper(BaseModel):
                 row.setdefault(AGENT_REF_KEY_NAME, {"name": config.agent_name})
             elif not row.get(AGENT_REF_KEY_NAME, dict()).get("name"):
                 row_idxs_missing_agent_ref.append(row_idx)
+
+            # Apply prompt config: CLI prompt_config > row prompt_config > row responses_create_params
+            prompt_config_path = config.prompt_config or row.get("prompt_config")
+            if prompt_config_path:
+                from nemo_gym.prompt import load_prompt
+
+                prompt = load_prompt(prompt_config_path)
+                row.setdefault(RESPONSES_CREATE_PARAMS_KEY_NAME, {})
+                row[RESPONSES_CREATE_PARAMS_KEY_NAME]["input"] = prompt.fill(row)
 
             # Responses create params
             row[RESPONSES_CREATE_PARAMS_KEY_NAME] = (

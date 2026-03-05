@@ -17,7 +17,9 @@ from asyncio import Future
 from pathlib import Path
 
 import orjson
+import pytest
 
+from nemo_gym.prompt import FewShotExamplesConfig, Prompt, PromptConfig, load_prompt
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
 
@@ -261,3 +263,145 @@ class TestRolloutCollection:
         )
 
         assert expected_results == actual_returned_results
+
+    def test_prompt_config_field(self) -> None:
+        config = RolloutCollectionConfig(
+            agent_name="agent",
+            input_jsonl_fpath="input.jsonl",
+            output_jsonl_fpath="output.jsonl",
+            prompt_config="prompt_configs/math.yaml",
+        )
+        assert config.prompt_config == "prompt_configs/math.yaml"
+
+    def test_prompt_config_default_none(self) -> None:
+        config = RolloutCollectionConfig(
+            agent_name="agent",
+            input_jsonl_fpath="input.jsonl",
+            output_jsonl_fpath="output.jsonl",
+        )
+        assert config.prompt_config is None
+
+    def test_preprocess_with_cli_prompt_config(self, tmp_path: Path) -> None:
+        prompt_yaml = tmp_path / "prompt.yaml"
+        prompt_yaml.write_text('system: "Solve it."\nuser: "{problem}"\n')
+
+        fpath = tmp_path / "input.jsonl"
+        samples = [json.dumps({"problem": f"problem_{i}", "agent_ref": {"name": "agent"}}) for i in range(3)]
+        fpath.write_text("\n".join(samples) + "\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            limit=2,
+            prompt_config=str(prompt_yaml),
+        )
+
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert len(rows) == 2
+        for row in rows:
+            messages = row["responses_create_params"]["input"]
+            assert messages[0]["role"] == "system"
+            assert messages[0]["content"] == "Solve it."
+            assert messages[1]["role"] == "user"
+
+    def test_preprocess_with_per_row_prompt_config(self, tmp_path: Path) -> None:
+        prompt_yaml = tmp_path / "prompt.yaml"
+        prompt_yaml.write_text('user: "Q: {question}"\n')
+
+        fpath = tmp_path / "input.jsonl"
+        samples = [
+            json.dumps({"question": "2+2", "agent_ref": {"name": "agent"}, "prompt_config": str(prompt_yaml)}),
+            json.dumps(
+                {
+                    "responses_create_params": {"input": [{"role": "user", "content": "prebaked"}]},
+                    "agent_ref": {"name": "agent"},
+                }
+            ),
+        ]
+        fpath.write_text("\n".join(samples) + "\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+        )
+
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert rows[0]["responses_create_params"]["input"] == [{"role": "user", "content": "Q: 2+2"}]
+        assert rows[1]["responses_create_params"]["input"] == [{"role": "user", "content": "prebaked"}]
+
+    def test_cli_prompt_config_overrides_row_prompt_config(self, tmp_path: Path) -> None:
+        cli_prompt = tmp_path / "cli.yaml"
+        cli_prompt.write_text('user: "CLI: {problem}"\n')
+
+        row_prompt = tmp_path / "row.yaml"
+        row_prompt.write_text('user: "ROW: {problem}"\n')
+
+        fpath = tmp_path / "input.jsonl"
+        samples = [json.dumps({"problem": "x", "agent_ref": {"name": "agent"}, "prompt_config": str(row_prompt)})]
+        fpath.write_text("\n".join(samples) + "\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            prompt_config=str(cli_prompt),
+        )
+
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert rows[0]["responses_create_params"]["input"] == [{"role": "user", "content": "CLI: x"}]
+
+
+class TestPrompt:
+    def test_fill_system_and_user(self) -> None:
+        config = PromptConfig(system="You are a math tutor.", user="Solve: {problem}")
+        prompt = Prompt(config)
+        messages = prompt.fill({"problem": "2+2"})
+        assert messages == [
+            {"role": "system", "content": "You are a math tutor."},
+            {"role": "user", "content": "Solve: 2+2"},
+        ]
+
+    def test_fill_user_only(self) -> None:
+        config = PromptConfig(user="{problem}")
+        prompt = Prompt(config)
+        messages = prompt.fill({"problem": "What is 5*3?"})
+        assert messages == [{"role": "user", "content": "What is 5*3?"}]
+
+    def test_fill_with_few_shot_examples(self) -> None:
+        config = PromptConfig(
+            user="Solve: {problem}",
+            few_shot_examples=FewShotExamplesConfig(
+                prefix="Here are some examples:\n",
+                template="Q: {question}\nA: {answer}\n",
+                suffix="\nNow solve the following:\n",
+                examples=[
+                    {"question": "1+1", "answer": "2"},
+                    {"question": "2+3", "answer": "5"},
+                ],
+            ),
+        )
+        prompt = Prompt(config)
+        messages = prompt.fill({"problem": "3+4"})
+        assert len(messages) == 1
+        content = messages[0]["content"]
+        assert content.startswith("Here are some examples:\n")
+        assert "Q: 1+1\nA: 2\n" in content
+        assert "Q: 2+3\nA: 5\n" in content
+        assert content.endswith("Solve: 3+4")
+
+    def test_fill_missing_field_raises_key_error(self) -> None:
+        config = PromptConfig(user="{problem}")
+        prompt = Prompt(config)
+        with pytest.raises(KeyError):
+            prompt.fill({"other_field": "value"})
+
+    def test_load_prompt_from_yaml(self, tmp_path) -> None:
+        yaml_content = 'system: "Be helpful."\nuser: "{question}"'
+        yaml_file = tmp_path / "test_prompt.yaml"
+        yaml_file.write_text(yaml_content)
+
+        prompt = load_prompt(str(yaml_file))
+        messages = prompt.fill({"question": "Hello?"})
+        assert messages == [
+            {"role": "system", "content": "Be helpful."},
+            {"role": "user", "content": "Hello?"},
+        ]
