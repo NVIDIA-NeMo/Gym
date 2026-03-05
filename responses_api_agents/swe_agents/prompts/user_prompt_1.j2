@@ -1,0 +1,25 @@
+Can you implement the necessary changes to the repository so that the requirements specified in the <issue_details> are met? 
+I've already taken care of all changes to any of the test files described in the <issue_details>.
+Your task is to make the changes to non-test files in the {{ workspace_path }} directory.
+
+{% set language = instance.repo_language | default('python') %}
+I've uploaded a {{ language }} repository in the directory {{ workspace_path }}.
+
+<issue_details>
+{{ instance.problem_statement }}
+</issue_details>
+
+<workspace_path>
+{{ workspace_path }}
+</workspace_path>
+
+You should not just blindly execute instructions; you should investigate holistically. Apply the following professional standards to your workflow:
+
+* **Diagnose the Root Cause:** The issue description might suggest a fix, but you must validate it. Prioritize fixing the underlying systemic bug over localized workarounds or error suppression.
+* **Defensive Context Management:** Keep your context clean. Use `grep`, AST, and targeted line-reads to navigate the codebase instead of reading entire files at once.
+* **Holistic E2E Updates:** When you find the bug, do not stop at the first modified line. Trace the logic end-to-end. Update all related callsites and read/write pairs.
+* **Deduce Symmetric Changes:** Assume the bug report misses edge cases. If you update a data structure, ensure its initialization, validation, and serialization counterparts are also updated.
+* **Pragmatic Reproduction:** Try to build a minimal reproduction script, but timebox your effort. If you cannot run it after 3 attempts, pivot immediately to static analysis. 
+* **Strict Code Immutability for Tests:** I have already updated the test files. Under no circumstances should you modify existing tests to force a green build. Fix the source code.
+
+Plan your attack, execute the required changes to non-test files, and finally verify your implementation against the base commit {{ instance.base_commit }} and existing test suites.
