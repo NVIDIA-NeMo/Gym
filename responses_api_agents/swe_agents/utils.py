@@ -19,7 +19,8 @@ import shutil
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
+from uuid import uuid4
 
 from openai.types.responses.function_tool import FunctionTool
 
@@ -32,6 +33,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
+    NeMoGymResponseReasoningItem,
+    NeMoGymSummary,
 )
 from nemo_gym.server_utils import ServerClient, get_first_server_config_dict
 from responses_api_agents.swe_agents.run_openhands import (
@@ -40,6 +43,7 @@ from responses_api_agents.swe_agents.run_openhands import (
     SweBenchGenerationConfig,
     SweBenchInferenceConfig,
 )
+from responses_api_models.vllm_model.app import VLLMConverter
 
 
 ### Trajectory Conversion Utils ###
@@ -128,6 +132,9 @@ def convert_trajectory_to_output_items(
     """
     output_items = []
 
+    # TODO: remove this post refactor
+    vllm_converter = VLLMConverter(return_token_id_information=True)
+
     # For OpenHands, trajectory is already in OpenAI format
     if agent_framework == "openhands" and isinstance(trajectory, list):
         for item in trajectory:
@@ -166,6 +173,20 @@ def convert_trajectory_to_output_items(
                     generation_token_ids = item.get("generation_token_ids", [])
                     generation_log_probs = item.get("generation_log_probs", [])
 
+                    # extract reasoning content
+                    reasoning_matches, text_content = vllm_converter._extract_reasoning_from_content(text_content)
+                    if reasoning_matches:
+                        reasoning_item = NeMoGymResponseReasoningItem(
+                            id=f"rs_{uuid4().hex}",
+                            type="reasoning",
+                            summary=[
+                                NeMoGymSummary(text=reasoning_text, type="summary_text")
+                                for reasoning_text in reasoning_matches
+                            ],
+                            status="completed",
+                        )
+                        output_items.append(reasoning_item)
+
                     output_items.append(
                         NeMoGymResponseOutputMessageForTraining(
                             id=f"msg-{len(output_items)}",
@@ -202,8 +223,6 @@ def convert_trajectory_to_output_items(
                                 )
 
                 elif role == "tool":
-                    # Tool response
-                    content = item.get("content", "")
                     tool_call_id = item.get("tool_call_id")
                     if not tool_call_id and "tool_call_ids" in item:
                         tool_call_ids = item.get("tool_call_ids", [])
@@ -213,92 +232,6 @@ def convert_trajectory_to_output_items(
                             NeMoGymFunctionCallOutput(
                                 call_id=tool_call_id,
                                 output=text_content,
-                                type="function_call_output",
-                                status="completed",
-                            )
-                        )
-
-    # For SWE-agent, trajectory format is similar to OpenAI but with additional fields
-    elif agent_framework == "swe_agent" and isinstance(trajectory, list):
-        for item in trajectory:
-            if isinstance(item, dict):
-                role = item.get("role", "")
-                content = item.get("content", "")
-
-                if role in ["system", "user"]:
-                    # Create input message
-                    if content:
-                        output_items.append(
-                            NeMoGymMessage(
-                                content=[{"type": "input_text", "text": content}],
-                                role="system" if role == "system" else "user",
-                                status="completed",
-                                type="message",
-                            )
-                        )
-
-                elif role == "assistant":
-                    # Handle assistant messages which may have tool calls
-                    tool_calls = item.get("tool_calls", [])
-
-                    prompt_token_ids = item.get("provider_specific_fields", {}).get("prompt_token_ids", [])
-                    generation_token_ids = item.get("provider_specific_fields", {}).get("generation_token_ids", [])
-                    generation_log_probs = item.get("provider_specific_fields", {}).get("generation_log_probs", [])
-                    # Add assistant message if there's content (even if there are also tool calls)
-                    if content:
-                        output_items.append(
-                            NeMoGymResponseOutputMessageForTraining(
-                                id=f"msg-{len(output_items)}",
-                                content=[
-                                    NeMoGymResponseOutputText(
-                                        type="output_text",
-                                        text=content,
-                                        annotations=[],
-                                        logprobs=None,
-                                    )
-                                ],
-                                role="assistant",
-                                status="completed",
-                                type="message",
-                                prompt_token_ids=prompt_token_ids,
-                                generation_token_ids=generation_token_ids,
-                                generation_log_probs=generation_log_probs,
-                            )
-                        )
-
-                    # Also add tool calls if present
-                    if tool_calls:
-                        for tc in tool_calls:
-                            if "function" in tc:
-                                # Handle both dict and string formats for tc["function"]
-                                func = tc["function"]
-                                if isinstance(func, str):
-                                    # If it's a string, try to parse as JSON or use as name
-                                    try:
-                                        func = json.loads(func)
-                                    except (json.JSONDecodeError, TypeError):
-                                        # If not valid JSON, treat the string as the function name
-                                        func = {"name": func, "arguments": ""}
-
-                                output_items.append(
-                                    NeMoGymResponseFunctionToolCall(
-                                        arguments=func.get("arguments", ""),
-                                        call_id=tc.get("id", ""),
-                                        name=func.get("name", ""),
-                                        type="function_call",
-                                        id=tc.get("id"),
-                                        status="completed",
-                                    )
-                                )
-
-                elif role == "tool":
-                    # Tool response
-                    tool_call_ids = item.get("tool_call_ids", [])
-                    if tool_call_ids and content:
-                        output_items.append(
-                            NeMoGymFunctionCallOutput(
-                                call_id=tool_call_ids[0],  # Use first ID
-                                output=content if isinstance(content, str) else json.dumps(content),
                                 type="function_call_output",
                                 status="completed",
                             )
@@ -639,6 +572,14 @@ async def run_swebench_evaluation(
     r2e_gym_setup_dir: Optional[Path] = None,
     dataset_path: Optional[str] = None,
     instance_dir: Optional[str] = None,
+    ray_queue_time: Optional[float] = None,
+    ray_submit_time: Optional[float] = None,
+    apptainer_memory_limit_mb: Optional[int] = None,
+    command_exec_timeout: Optional[int] = None,
+    user_prompt_template: Optional[str] = None,
+    system_prompt_template: Optional[str] = None,
+    system_prompt_long_horizon_template: Optional[str] = None,
+    agent_cls: Optional[Literal["CodeActAgent", "OpenCodeAgent", "CodexAgent"]] = None,
 ) -> Dict:
     # Create persistent directory for I/O and logs in local workspace
     workspace_root = Path(os.path.dirname(os.path.abspath(__file__)))
@@ -673,8 +614,14 @@ async def run_swebench_evaluation(
         agent_max_turns=agent_max_turns,
         swebench_tests_timeout=swebench_tests_timeout,
         swebench_agent_timeout=swebench_agent_timeout,
+        apptainer_memory_limit_mb=apptainer_memory_limit_mb,
+        command_exec_timeout=command_exec_timeout,
         inference=inference_config,
         server=server,
+        user_prompt_template=user_prompt_template,
+        system_prompt_template=system_prompt_template,
+        system_prompt_long_horizon_template=system_prompt_long_horizon_template,
+        agent_cls=agent_cls,
     )
 
     run_oh = RunOpenHandsAgent(
@@ -686,6 +633,9 @@ async def run_swebench_evaluation(
     )
     result = await run_oh.process_single_datapoint(problem_info)
     print(f"Process completed for {instance_id}", flush=True)
+
+    if ray_submit_time and ray_queue_time:
+        result["oh_time_metrics"]["ray_time_in_queue"] = ray_submit_time - ray_queue_time
 
     try:
         with open(output_file, "w") as f:
@@ -706,8 +656,6 @@ async def run_swebench_evaluation(
         agent_framework,
         agent_tools_file if agent_framework == "swe_agent" else None,
     )
-
-    # tools = convert_tools_to_function_format(tools) if tools else []
 
     result["tools"] = tools
     result["trajectory"] = trajectory_data
@@ -921,7 +869,7 @@ def setup_r2e_gym_environment(
         RuntimeError: If setup fails
     """
     if eval_harness_repo is None:
-        eval_harness_repo = "https://github.com/ludwig-n/R2E-Gym.git"
+        eval_harness_repo = "https://github.com/sdevare-nv/nv-R2E-Gym.git"
 
     setup_dir = _resolve_setup_directory(setup_dir, "swe_r2e_gym_setup")
 
@@ -1099,6 +1047,8 @@ mamba --version
 echo "Installing conda packages (this may take 5-10 minutes)..."
 mamba install -y --override-channels conda-forge::python=3.12 conda-forge::nodejs conda-forge::poetry conda-forge::tmux
 
+{miniforge_dir}/bin/python -m pip install -q 'packaging==26.0'
+
 # Verify installations
 echo "Verifying package installations..."
 which python
@@ -1183,7 +1133,7 @@ poetry install --no-interaction --no-root
 
 # Install datasets package
 echo "Installing datasets package..."
-poetry run python -m pip install datasets
+poetry run python -m pip install datasets huggingface_hub 'packaging==26.0'
 
 mkdir -p evaluation/oh
 mkdir -p logs
