@@ -48,6 +48,7 @@ from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
     GlobalConfigDictParserConfig,
+    get_first_server_config_dict,
     get_global_config_dict,
 )
 from nemo_gym.rollout_collection import E2ERolloutCollectionConfig, RolloutCollectionConfig, RolloutCollectionHelper
@@ -431,6 +432,20 @@ def e2e_rollout_collection():  # pragma: no cover
         input_jsonl_fpath = data_process_output_dir / f"{e2e_rollout_collection_config.split}.jsonl"
         assert input_jsonl_fpath.exists()
         rollout_collection_config_dict["input_jsonl_fpath"] = str(input_jsonl_fpath)
+
+        # Auto-extract metrics_type from the resource server config if not already set by the user
+        if (
+            "metrics_type" not in rollout_collection_config_dict
+            or rollout_collection_config_dict["metrics_type"] is None
+        ):
+            non_reserved_keys = [k for k in global_config_dict.keys() if k not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS]
+            for key in non_reserved_keys:
+                server_type_dict = global_config_dict[key]
+                if isinstance(server_type_dict, DictConfig) and "resources_servers" in server_type_dict:
+                    rs_config = get_first_server_config_dict(global_config_dict, key)
+                    if "metrics_type" in rs_config:
+                        rollout_collection_config_dict["metrics_type"] = rs_config["metrics_type"]
+                    break
 
     rollout_collection_config = RolloutCollectionConfig.model_validate(
         OmegaConf.to_container(rollout_collection_config_dict)
