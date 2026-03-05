@@ -15,6 +15,7 @@
 import json
 import os
 import urllib.request
+import uuid
 from dataclasses import dataclass, field
 from typing import List
 
@@ -108,6 +109,7 @@ class GDPValAgentResponse(BaseModel):
     """GDPVal agent response including permanent save locations of output files."""
     output: list
     saved_files: List[SavedFile] = Field(default_factory=list)
+    session_id: str | None = None
 
 
 class GDPValAgent(SimpleResponsesAPIAgent):
@@ -166,6 +168,7 @@ class GDPValAgent(SimpleResponsesAPIAgent):
                     dest_dir="reference_files",
                 ).model_dump(),
                 cookies=cookies.resources_server,
+                affinity_key=body.session_id,
             )
             await raise_for_status(upload_response)
             upload_response_json = await get_response_json(upload_response)
@@ -249,10 +252,21 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         knows which sandbox session to operate on. For the finish tool,
         also injects output_dir so files are saved to the right location.
         """
+        KNOWN_TOOLS = {"run_command", "web_search", "web_fetch", "finish", "upload_files", "save_files"}
+        if call.name not in KNOWN_TOOLS:
+            tool_response = NeMoGymFunctionCallOutput(
+                type="function_call_output",
+                call_id=call.call_id,
+                output=json.dumps({
+                    "error": f"Unknown tool '{call.name}'. Available tools: {', '.join(sorted(KNOWN_TOOLS))}. "
+                             "Use 'run_command' to execute bash commands (including python scripts)."
+                }),
+            )
+            return tool_response, cookies
+
         args = json.loads(call.arguments)
         args["session_id"] = session_id
 
-        # For finish, inject output_dir so files are saved to the permanent location
         if call.name == FINISH_TOOL_NAME and output_dir is not None:
             args.setdefault("output_dir", output_dir)
 
@@ -261,9 +275,8 @@ class GDPValAgent(SimpleResponsesAPIAgent):
             url_path=f"/{call.name}",
             json=args,
             cookies=cookies.resources_server,
+            affinity_key=session_id,
         )
-        # We don't raise for status here since it's a valid return for the API to error e.g. 
-        # if the model outputs an invalid call or something.
         cookies.resources_server = api_response.cookies
 
         tool_response = NeMoGymFunctionCallOutput(
@@ -313,16 +326,19 @@ class GDPValAgent(SimpleResponsesAPIAgent):
             tool_outputs.append(tool_response)
 
             if call.name == FINISH_TOOL_NAME:
-                # Parse saved file locations from the finish tool response
                 finished = []
                 try:
                     finish_data = json.loads(tool_response.output)
                     for file_info in finish_data.get("saved", []):
-                        finished.append((file_info["output_path"], file_info["size"]))
+                        finished.append(SavedFile(
+                            source_path=file_info.get("source_path", ""),
+                            output_path=file_info["output_path"],
+                            size=file_info["size"],
+                        ))
                     if finished:
                         print("Output files saved to permanent locations:")
-                        for output_path, size in finished:
-                            print(f"  {output_path} ({size} bytes)")
+                        for saved_file in finished:
+                            print(f"  {saved_file.output_path} ({saved_file.size} bytes)")
                     else:
                         print("Finish tool called but no output files were saved.")
                 except (json.JSONDecodeError, Exception) as e:
@@ -354,16 +370,42 @@ class GDPValAgent(SimpleResponsesAPIAgent):
     ) -> GDPValAgentResponse:
 
         cookies = Cookies()
+        if request.cookies:
+            cookies.resources_server = dict(request.cookies)
+            cookies.model_server = dict(request.cookies)
 
-        # 1. Prepare reference files (download + upload to sandbox)
-        uploaded_reference_files, cookies = await self.prepare_reference_files(body, cookies)
-        if uploaded_reference_files:
-            body.uploaded_reference_files = uploaded_reference_files
+        # 1. Create session in this handler so the same worker owns the session for the
+        #    whole conversation (avoids run() and responses() being on different agent workers).
+        if body.session_id is None:
+            if body.task_dir is None:
+                body.task_dir = Path(body.output_dir).joinpath(f"task_{body.task_id}")
+            body.task_dir.mkdir(parents=True, exist_ok=True)
+            session_id = body.task_id or str(uuid.uuid4())
+            seed_session_response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/seed_session",
+                json=SeedSessionRequest(session_id=session_id).model_dump(),
+                cookies=cookies.resources_server,
+                affinity_key=session_id,
+            )
+            await raise_for_status(seed_session_response)
+            seed_session_json = await get_response_json(seed_session_response)
+            body.session_id = seed_session_json["session_id"]
+            cookies.resources_server = seed_session_response.cookies
 
-        # 2. Build initial message history from task/system prompts
+        # 2. Prepare reference files (download + upload to sandbox) only if not already uploaded.
+        if not body.uploaded_reference_files:
+            if body.task_dir is None:
+                body.task_dir = Path(body.output_dir).joinpath(f"task_{body.task_id}")
+            body.task_dir.mkdir(parents=True, exist_ok=True)
+            uploaded_reference_files, cookies = await self.prepare_reference_files(body, cookies)
+            if uploaded_reference_files:
+                body.uploaded_reference_files = uploaded_reference_files
+
+        # 3. Build initial message history from task/system prompts
         input_messages = await self.init_message_history(body)
 
-        # 3. Build model params from the responses_create_params, overriding input
+        # 4. Build model params from the responses_create_params, overriding input
         model_params = body.responses_create_params.model_copy(
             update={"input": input_messages}
         )
@@ -376,7 +418,7 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         finished = None
         outputs = []
 
-        # 4. Execute the task
+        # 5. Execute the task
         for step_num in range(max_steps):
             # Add warning message if max steps is near
             if warning_threshold is not None and \
@@ -400,8 +442,8 @@ class GDPValAgent(SimpleResponsesAPIAgent):
             if finished is not None:
                 if finished:
                     print(f"Task completed. {len(finished)} output file(s) saved:")
-                    for output_path, size in finished:
-                        print(f"  {output_path} ({size} bytes)")
+                    for saved_file in finished:
+                        print(f"  {saved_file.output_path} ({saved_file.size} bytes)")
                 else:
                     print("Task completed. No output files were saved.")
                 break
@@ -409,7 +451,7 @@ class GDPValAgent(SimpleResponsesAPIAgent):
             if summary_cutoff is not None:
                 continue # TODO
 
-        # 5. Use cookies to set response cookies
+        # 6. Use cookies to set response cookies
         if cookies.resources_server:
             for k, v in cookies.resources_server.items():
                 response.set_cookie(k, v)
@@ -420,40 +462,36 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         final_response = GDPValAgentResponse(
             output=outputs,
             saved_files=finished if finished is not None else [],
+            session_id=body.session_id,
         )
         return final_response
 
 
     async def run(self, request: Request, body: GDPValAgentRunRequest) -> GDPValAgentVerifyResponse:
-        cookies = request.cookies
+        cookies = Cookies()
+        if request.cookies:
+            cookies.resources_server = dict(request.cookies)
 
         assert len(body.reference_files_to_save) == len(body.reference_file_urls), \
             "Number of reference files and URLs must match."
 
-        # Start a unique session for the task
-        seed_session_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/seed_session",
-            json=SeedSessionRequest(session_id=body.task_id).model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(seed_session_response)
-        seed_session_json = await get_response_json(seed_session_response)
-        cookies = seed_session_response.cookies
-
-        # Update the session ID in the request body to propagate into task execution.
-        body.session_id = seed_session_json["session_id"]
+        # Session is created inside responses() so the same handler (and thus same
+        # agent worker) owns the session for the whole conversation.
+        if body.task_dir is None:
+            body.task_dir = Path(body.output_dir).joinpath(f"task_{body.task_id}")
+        body.task_dir.mkdir(parents=True, exist_ok=True)
 
         # Execute the task by calling the self.responses endpoint
         response = await self.server_client.post(
             server_name=self.config.name,
             url_path="/v1/responses",
-            json=body.model_dump(),
-            cookies=cookies,
+            json=body.model_dump(mode="json"),
+            cookies=cookies.resources_server,
         )
         await raise_for_status(response)
         response_json = await get_response_json(response)
         cookies = response.cookies
+        body.session_id = response_json.get("session_id") or body.session_id
 
         # Extract saved files from the agent response
         saved_files = []
@@ -494,6 +532,7 @@ class GDPValAgent(SimpleResponsesAPIAgent):
             url_path="/verify",
             json=verify_request,
             cookies=cookies,
+            affinity_key=body.session_id or "",
         )
         await raise_for_status(verify_response)
         verify_json = await get_response_json(verify_response)

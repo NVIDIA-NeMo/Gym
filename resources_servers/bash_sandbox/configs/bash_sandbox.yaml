@@ -3,6 +3,8 @@ bash_sandbox_resources_server:
     bash_sandbox:
       entrypoint: app.py
       domain: agent
+      # For multiple workers: set worker_urls (one URL per worker) so the agent routes by session_id.
+      # Example: worker_urls: ["http://host:8001", "http://host:8002"]
       judge:
         enabled: true
         judge_model_name: "gemini-3-pro-preview"

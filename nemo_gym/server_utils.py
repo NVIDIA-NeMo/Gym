@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import atexit
+import hashlib
 import json
 import resource
 import sys
@@ -236,14 +237,29 @@ class ServerClient(BaseModel):
 
         return cls(head_server_config=head_server_config, global_config_dict=global_config_dict)
 
-    def _build_server_base_url(self, server_config_dict: OmegaConf) -> str:
+    def _build_server_base_url(
+        self, server_config_dict: OmegaConf, affinity_key: Optional[str] = None
+    ) -> str:
+        """Build base URL for a server. If affinity_key and worker_urls are set, pick URL by hash for session affinity."""
+        worker_urls = server_config_dict.get("worker_urls")
+        if affinity_key and worker_urls:
+            urls = list(worker_urls)
+            if urls:
+                idx = int(hashlib.sha256(affinity_key.encode()).hexdigest(), 16) % len(urls)
+                return urls[idx].rstrip("/")
         return f"http://{server_config_dict.host}:{server_config_dict.port}"
 
     async def request(
-        self, server_name: str, url_path: str, method: str, **kwargs: Unpack[_RequestOptions]
+        self,
+        server_name: str,
+        url_path: str,
+        method: str,
+        *,
+        affinity_key: Optional[str] = None,
+        **kwargs: Unpack[_RequestOptions],
     ) -> ClientResponse:
         server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
-        base_url = self._build_server_base_url(server_config_dict)
+        base_url = self._build_server_base_url(server_config_dict, affinity_key)
 
         if "json" in kwargs:
             json_obj = kwargs["json"]
@@ -256,6 +272,8 @@ class ServerClient(BaseModel):
         self,
         server_name: str,
         url_path: str,
+        *,
+        affinity_key: Optional[str] = None,
         **kwargs: Unpack[_RequestOptions],
     ) -> ClientResponse:
         """
@@ -270,6 +288,7 @@ class ServerClient(BaseModel):
             server_name=server_name,
             url_path=url_path,
             method="GET",
+            affinity_key=affinity_key,
             **kwargs,
         )
 
@@ -277,6 +296,8 @@ class ServerClient(BaseModel):
         self,
         server_name: str,
         url_path: str,
+        *,
+        affinity_key: Optional[str] = None,
         **kwargs: Unpack[_RequestOptions],
     ) -> ClientResponse:
         """
@@ -291,6 +312,7 @@ class ServerClient(BaseModel):
             server_name=server_name,
             url_path=url_path,
             method="POST",
+            affinity_key=affinity_key,
             **kwargs,
         )
 

@@ -67,6 +67,11 @@ class Session(BaseModel):
         return cls(temp_dir=temp_dir)
 
 class SessionManager:
+    """
+    In-memory session store. For multiple workers, the agent must use session affinity
+    (worker_urls in config + affinity_key=session_id) so all requests for a session
+    hit the same worker.
+    """
     id_to_session: Dict[str, Session]
     temp_dir_base: Path
 
@@ -287,21 +292,27 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
 
         return resolved
 
-    def _check_absolute_paths(self, cmd: str) -> RunCommandResponse | None:
-        """Check if command contains absolute paths that could escape the temp directory.
+    def _check_absolute_paths(self, cmd: str, session: Session) -> RunCommandResponse | None:
+        """Check if command contains absolute paths or other references outside the session directory.
+
+        All execution and file access must stay inside the session directory. Rejects
+        any command that could read/write or list paths outside it.
 
         Returns:
-            CommandResult with error if absolute paths detected, None otherwise.
-
-        Note:
-            This check is specific to LocalCodeExecToolProvider since Docker and E2B
-            providers are already sandboxed and absolute paths are safe within them.
+            RunCommandResponse with error if outside paths detected, None otherwise.
         """
+        session_dir = str(session.temp_dir)
+        session_msg = (
+            f"You can only access and execute commands inside your session directory: {session_dir} "
+            "Use relative paths only (e.g. '.', './reference_files/file.xlsx')."
+        )
         absolute_patterns = [
             r"~/",  # ~/path - home directory shortcut
-            r"/(?:home|Users|tmp|var|etc)/",  # /home/, /Users/, /tmp/, etc.
             r"\$HOME/",  # $HOME/path
             r"\$\{HOME\}/",  # ${HOME}/path
+            # Any absolute path: / at start, or after space/;|& (avoid :// for URLs)
+            r"^/",
+            r"(?:[\s;&|])/(?!/)",  # space/semicolon/pipe/ampersand then / but not //
         ]
         for pattern in absolute_patterns:
             if re.search(pattern, cmd):
@@ -309,14 +320,11 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
                     exit_code=1,
                     stdout="",
                     stderr=(
-                        "Command appears to use absolute paths which could write outside "
-                        "the execution environment. Use relative paths instead."
+                        "Command may access paths outside the session directory. This is not allowed."
+                        + session_msg
                     ),
                     error_kind="absolute_path_detected",
-                    advice=(
-                        "Use relative paths (e.g., './output.txt' instead of '~/output.txt'). "
-                        "For full filesystem access, use DockerCodeExecToolProvider or E2BCodeExecToolProvider."
-                    ),
+                    advice=session_msg,
                 )
         return None
 
@@ -369,8 +377,8 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
                 advice="Only commands matching the allowlist patterns are permitted.",
             )
 
-        # Check for absolute paths (local environment is not sandboxed)
-        absolute_path_error = self._check_absolute_paths(body.command)
+        # Check for absolute paths — restrict all access to session directory only
+        absolute_path_error = self._check_absolute_paths(body.command, session)
         if absolute_path_error:
             return absolute_path_error
 

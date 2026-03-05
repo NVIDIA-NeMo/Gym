@@ -4,25 +4,47 @@ GDPVal responses-api agent for running tool-augmented task rollouts and delegati
 
 # Terminal 1: Starting the servers
 ```bash
+# Start terminal 1
+srun --time 4:00:00 -A llmservice_modelalignment_sft -G 8 -p interactive --pty /bin/bash
+
+# Init Env
 cd /lustre/fsw/portfolios/llmservice/users/vadams/Gym
 source .venv/bin/activate
+
+export NVIDIA_API_KEY=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
 
 # bash_sandbox.yaml starts: bash_sandbox_resources_server + bash_sandbox_agent
 # nano_v3_single_node.yaml starts: policy_model (local vLLM Nemotron)
 RESOURCE_AND_AGENT_CONFIG=resources_servers/bash_sandbox/configs/bash_sandbox.yaml
-MODEL_SERVER_CONFIG=responses_api_models/local_vllm_model/configs/nano_v3_single_node.yaml
+MODEL_SERVER_CONFIG=responses_api_models/vllm_model/configs/vllm_model.yaml
 
 # Start all servers
-ng_run "+config_paths=[${RESOURCE_AND_AGENT_CONFIG},${MODEL_SERVER_CONFIG}]"
+ng_run "+config_paths=[${RESOURCE_AND_AGENT_CONFIG},${MODEL_SERVER_CONFIG}]" \
+      "++policy_base_url=https://integrate.api.nvidia.com/v1" \
+      "++policy_api_key=${NVIDIA_API_KEY}" \
+      "++policy_model_name=nvidia/nemotron-3-nano-30b-a3b"
 ```
 
 # Terminal 2: Running the agent
 ```bash
+# Start terminal 2
+srun --jobid=9811863 --overlap --pty -c 8 --gres=none bash
+
+# Init Env
 cd /lustre/fsw/portfolios/llmservice/users/vadams/Gym
 source .venv/bin/activate
 
 # Test the agent
-python responses_api_agents/gdpval_agent/client.py
+python responses_api_agents/gdpval_agent/client.py prepare \
+    --output-jsonl tmp/single_task.jsonl \
+    --split train \
+    --limit 1
+
+ng_collect_rollouts +agent_name=bash_sandbox_agent \
+    +input_jsonl_fpath=tmp/single_task.jsonl \
+    +output_jsonl_fpath=tmp/single_task_rollout.jsonl \
+    +limit=1 \
+    +num_samples_in_parallel=1
 ```
 
 # Scratchpad
