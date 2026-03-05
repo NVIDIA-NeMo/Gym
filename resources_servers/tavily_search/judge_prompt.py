@@ -59,9 +59,9 @@ These responses are all INCORRECT because of the following reasons:
 
 
 Also note the following things:
-- For grading questions where the correct_answer is a number, the response needs to be correct to the last significant figure in the gold answer. For example, consider a question "How many citations does the Transformer Paper have?" with correct_answer "120k". 
-    - responses "120k", "124k", and 115k" are all CORRECT. 
-    - responses "100k" and "113k" are INCORRECT. 
+- For grading questions where the correct_answer is a number, the response needs to be correct to the last significant figure in the gold answer. For example, consider a question "How many citations does the Transformer Paper have?" with correct_answer "120k".
+    - responses "120k", "124k", and 115k" are all CORRECT.
+    - responses "100k" and "113k" are INCORRECT.
     - responses "around 100k" and "more than 50k" are considered NOT_ATTEMPTED because they neither confirm nor contradict the correct_answer.
 - The correct_answer may contain more information than the question. In such cases, the response only needs to contain the information that is in the question.
     - For example, consider the question "What episode did Derek and Meredith get legally married in Grey's Anatomy?" with correct_answer "Season 7, Episode 20: White Wedding". Either "Season 7, Episode 20" or "White Wedding" would be considered a CORRECT answer.
@@ -70,7 +70,7 @@ Also note the following things:
     - Consider the question "What award did A pretrainer's guide to training data: Measuring the effects of data age, domain coverage, quality, & toxicity win at NAACL '24?", the correct_answer is "Outstanding Paper Award". The response "Outstanding Paper" would be considered CORRECT, because "award" is presumed in the question.
     - For the question "What is the height of Jason Wei in meters?", the correct_answer is "1.73 m". The response "1.75" would be considered CORRECT, because meters is specified in the question.
     - For the question "What is the name of Barack Obama's wife?", the correct_answer is "Michelle Obama". The response "Michelle" would be considered CORRECT, because the last name can be presumed.
-- Do not punish for typos in people's name if it's clearly the same name. 
+- Do not punish for typos in people's name if it's clearly the same name.
     - For example, if the correct_answer is "Hyung Won Chung", you can consider the following responses as correct: "Hyoong Won Choong", "Hyungwon Chung", or "Hyun Won Chung".
 
 """

@@ -3,27 +3,29 @@ tavily_search_resources_server:
     tavily_search:
       entrypoint: app.py
       domain: agent
+      tavily_api_key: ${tavily_api_key}
+      exclude_domains_file_path: ${exclude_domains_file_path}
+      use_judge: true
       judge_model_server:
         type: responses_api_models
         name: judge_model
-      judge_responses_create_params: {
+      judge_responses_create_params:
         input: []
-      }
-judge_model: #TODO: should this be declared here?
+      verified: false
+judge_model:
   responses_api_models:
     openai_model:
       entrypoint: app.py
       openai_base_url: ${search_judge_model_base_url}
       openai_api_key: ${search_judge_model_api_key}
       openai_model: ${search_judge_model_name}
-
 tavily_search_simple_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py
       resources_server:
         type: resources_servers
-        name: tavily_search_resources_server #TODO: given that we declare judge model inside the tavily_search_resources_server, should we declare it here?
+        name: tavily_search_resources_server
       model_server:
         type: responses_api_models
         name: policy_model
@@ -70,4 +72,4 @@ tavily_search_simple_agent:
           dataset_name: tavily_search
           version: 0.0.1
           artifact_fpath: simple_qa_test_set.jsonl
-        license: Apache 2.0      
+        license: Apache 2.0

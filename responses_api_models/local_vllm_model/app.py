@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import ray
 import requests
-from huggingface_hub import snapshot_download
+from pydantic import Field
 from ray import available_resources, cluster_resources
 from ray._private.state import available_resources_per_node
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
@@ -46,8 +46,9 @@ from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 class LocalVLLMModelConfig(VLLMModelConfig):
     # We inherit these configs from VLLMModelConfig, but they are set to optional since they will be set later on after we spin up a model endpoint.
-    base_url: Optional[Union[str, List[str]]] = None
-    api_key: Optional[str] = None
+    base_url: Union[str, List[str]] = Field(default_factory=list)
+    # Not used on local deployments
+    api_key: str = "dummy"  # pragma: allowlist secret
 
     hf_home: Optional[str] = None
     vllm_serve_kwargs: Dict[str, Any]
@@ -163,11 +164,6 @@ class LocalVLLMModel(VLLMModel):
     _local_vllm_model_actor: LocalVLLMModelActor
 
     def setup_webserver(self):
-        print(
-            f"Downloading {self.config.model}. If the model has been downloaded previously, the cached version will be used."
-        )
-        self.download_model()
-
         print("Starting vLLM server. This will take a couple of minutes...")
         self.start_vllm_server()
 
@@ -179,12 +175,6 @@ class LocalVLLMModel(VLLMModel):
     def get_cache_dir(self) -> str:
         # We need to reconstruct the cache dir as HF does it given HF_HOME. See https://github.com/huggingface/huggingface_hub/blob/b2723cad81f530e197d6e826f194c110bf92248e/src/huggingface_hub/constants.py#L146
         return str(Path(self.config.hf_home) / "hub")
-
-    def download_model(self) -> None:
-        maybe_hf_token = self.get_hf_token()
-        cache_dir = self.get_cache_dir()
-
-        snapshot_download(repo_id=self.config.model, token=maybe_hf_token, cache_dir=cache_dir)
 
     def _configure_vllm_serve(self) -> Tuple[Namespace, Dict[str, str]]:
         server_args = self.config.vllm_serve_kwargs
@@ -200,7 +190,7 @@ class LocalVLLMModel(VLLMModel):
             "download_dir": cache_dir,
         }
 
-        env_vars = dict()
+        env_vars = {"HF_HUB_ENABLE_HF_TRANSFER": "1"}
         # vLLM accepts a `hf_token` parameter but it's not used everywhere. We need to set HF_TOKEN environment variable here.
         maybe_hf_token = self.get_hf_token()
         if maybe_hf_token:
@@ -299,7 +289,6 @@ Total Ray cluster resources: {cluster_resources()}""")
         ).remote(server_args, env_vars, self.config.name, self.config.debug)
 
         self.config.base_url = [ray.get(self._local_vllm_model_actor.base_url.remote())]
-        self.config.api_key = "dummy_key"  # pragma: allowlist secret
 
         self.await_server_ready()
 
