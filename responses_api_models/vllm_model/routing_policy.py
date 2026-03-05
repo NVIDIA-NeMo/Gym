@@ -40,10 +40,10 @@ class RoutingPolicy(ABC):
             Index of the client to route the request to.
         """
 
-    def on_prefill_complete(self, request_id: str) -> None:
+    async def on_prefill_complete(self, request_id: str) -> None:
         """Called when prefill is complete for a request. Default no-op."""
 
-    def on_generation_complete(self, request_id: str) -> None:
+    async def on_generation_complete(self, request_id: str) -> None:
         """Called when generation is complete for a request. Default no-op."""
 
     def on_kv_cache_invalidated(self) -> None:

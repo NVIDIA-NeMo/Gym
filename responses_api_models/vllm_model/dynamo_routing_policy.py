@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import logging
 import threading
 import traceback
@@ -12,6 +13,9 @@ import time
 
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
 from responses_api_models.vllm_model.routing_policy import RoutingPolicy
+
+from dynamo._core import KvRouter, KvRouterConfig
+from transformers import AutoTokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +45,6 @@ class DynamoKvRoutingPolicy(RoutingPolicy):
         router_prune_target_ratio: float = 0.8,
         **kwargs: Any,
     ) -> None:
-        from dynamo._core import KvRouter, KvRouterConfig
-        from transformers import AutoTokenizer
-
         self._num_clients = len(clients)
         self._block_size = block_size
         self._tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -56,6 +57,9 @@ class DynamoKvRoutingPolicy(RoutingPolicy):
             router_ttl_secs=router_ttl_secs,
             router_prune_target_ratio=router_prune_target_ratio,
         )
+
+        if os.environ.get("DYN_LOG") is None: # Eliminate log spam from the Router.
+            os.environ["DYN_LOG"] = "DEBUG"
 
         config = KvRouterConfig(**self._kv_config_kwargs)
         self._router = KvRouter.standalone(block_size, self._num_clients, config)
@@ -72,13 +76,6 @@ class DynamoKvRoutingPolicy(RoutingPolicy):
             self._num_clients, block_size, model_name,
         )
 
-    def _run_async(self, coro_fn: Any, *args: Any, **kwargs: Any) -> Any:
-        async def _wrap():
-            return await coro_fn(*args, **kwargs)
-
-        future = asyncio.run_coroutine_threadsafe(_wrap(), self._loop)
-        return future.result()
-
     def _tokenize_request(self, request_body: Dict[str, Any]) -> list[int]:
         """Convert a chat completion request body to token IDs.
 
@@ -87,10 +84,6 @@ class DynamoKvRoutingPolicy(RoutingPolicy):
         """
         messages = request_body.get("messages", [])
         tools = request_body.get("tools")
-
-        for m in messages:
-            if m.get("content") is None:
-                m["content"] = ""
 
         try:
             token_ids = self._tokenizer.apply_chat_template(
@@ -152,40 +145,28 @@ class DynamoKvRoutingPolicy(RoutingPolicy):
         request_id: str,
         session_id: Optional[str] = None,
     ) -> int:
-        start_preprocess = time.perf_counter()
         request_body = self._trim_request_body(request_body)
         token_ids = await asyncio.to_thread(self._tokenize_request, request_body)
-        end_preprocess = time.perf_counter()
-        print(f"Took {end_preprocess-start_preprocess}s to preprocess request")
 
         temp_config_dict = None
         if self.request_count < self._num_clients:
             temp_config_dict = {"overlap_score_weight": 0.0}
             self.request_count += 1
 
-        start_routing = time.perf_counter()
-        worker_id, _dp_rank, _overlap = self._run_async(
-            self._router.best_worker, token_ids, request_id=request_id, router_config_override=temp_config_dict
-        )
-        end_routing = time.perf_counter()
-        print(f"Took {end_routing-start_routing}s to route request")
+        worker_id, _dp_rank, _overlap = await self._router.best_worker(token_ids, request_id=request_id, router_config_override=temp_config_dict)
 
         # Dynamo worker IDs are 1-based; client indices are 0-based.
         client_idx = worker_id - 1
-        print(f"Selected {client_idx} for request {request_id}")
         return client_idx
 
-    def on_prefill_complete(self, request_id: str) -> None:
-        print(f"Prefill complete for request {request_id}")
-        self._run_async(self._router.mark_prefill_complete, request_id)
+    async def on_prefill_complete(self, request_id: str) -> None:
+        await self._router.mark_prefill_complete(request_id)
 
-    def on_generation_complete(self, request_id: str) -> None:
-        print(f"Generation complete for request {request_id}")
-        self._run_async(self._router.free, request_id)
+    async def on_generation_complete(self, request_id: str) -> None:
+        await self._router.free(request_id)
+
 
     def on_kv_cache_invalidated(self) -> None:
-        from dynamo._core import KvRouter, KvRouterConfig
-
         config = KvRouterConfig(**self._kv_config_kwargs)
         self._router = KvRouter.standalone(
             self._block_size, self._num_clients, config,
