@@ -4,3 +4,6 @@
 *validation_prepare.jsonl
 *example_prepare.jsonl
 *.jsonl
+!example.jsonl
+!example_rollouts.jsonl
+!example_metrics.json
