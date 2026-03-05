@@ -2,7 +2,7 @@ You are tasked with completing a specific assignment.
 
 ## Environment
 
-The `run_shell` tool provides access to a Linux-based execution environment that includes a full file system where you can create, read, and modify files.
+The `run_command` tool provides access to a Linux-based execution environment that includes a full file system where you can create, read, and modify files.
 
 Your environment comes preinstalled with a comprehensive set of Python packages and system tools:
 
