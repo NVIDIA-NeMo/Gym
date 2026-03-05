@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
-import json
 from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
@@ -35,7 +34,7 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     get_wandb_run,
 )
-from nemo_gym.reward_profile import RewardProfiler
+from nemo_gym.reward_profile import MetricsProfiler
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
@@ -275,42 +274,29 @@ class RolloutCollectionHelper(BaseModel):
         rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
         results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
 
-        rp = RewardProfiler()
-        group_level_metrics, agent_level_metrics = rp.profile_from_data(rows, results)
-        reward_profiling_fpath, agent_level_metrics_fpath = rp.write_to_disk(
-            group_level_metrics, agent_level_metrics, output_fpath
-        )
+        mp = MetricsProfiler()
+        metrics_output = mp.profile_from_data(results)
+        metrics_fpath = mp.write_to_disk(metrics_output, output_fpath)
 
         if get_wandb_run():  # pragma: no cover
-            agent_level_metrics_to_log = dict()
-            for agent_metrics in agent_level_metrics:
-                agent_name = agent_metrics[AGENT_REF_KEY_NAME]["name"]
-                for key, value in agent_metrics.items():
-                    agent_level_metrics_to_log[f"{agent_name}/{key}"] = value
+            metrics_to_log = {}
+            for mode, scores in metrics_output.aggregate.items():
+                for name, value in scores.items():
+                    metrics_to_log[f"{mode}/{name}"] = value
+            get_wandb_run().log(metrics_to_log)
 
-                agent_level_metrics_to_log.pop(f"{agent_name}/{AGENT_REF_KEY_NAME}")
+        # Print aggregate summary
+        if metrics_output.aggregate:
+            print("\nAggregate metrics:")
+            for mode, scores in metrics_output.aggregate.items():
+                scores_str = ", ".join(f"{name}: {val:.2f}" for name, val in scores.items())
+                print(f"  {mode}: {scores_str}")
 
-            get_wandb_run().log(agent_level_metrics_to_log)
-
-        agent_level_metrics: List[Dict] = orjson.loads(agent_level_metrics_fpath.read_text())
-        agent_level_metrics_to_print: List[Dict] = []
-        for agent_metrics in agent_level_metrics:
-            agent_metrics_to_print = {AGENT_REF_KEY_NAME: agent_metrics[AGENT_REF_KEY_NAME]}
-            for k, v in agent_metrics.items():
-                if not k.startswith("mean/"):
-                    continue
-
-                agent_metrics_to_print[k] = v
-
-            agent_level_metrics_to_print.append(agent_metrics_to_print)
-
-        print("Agent level metrics (mean only):\n" + json.dumps(agent_level_metrics_to_print, indent=4))
-
-        print(f"""Finished rollout collection! View results at:
+        print(f"""
+Finished rollout collection! View results at:
 Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
-Reward profiling outputs: {reward_profiling_fpath}
-Agent-level metrics: {agent_level_metrics_fpath}""")
+Metrics: {metrics_fpath}""")
 
         return results
 

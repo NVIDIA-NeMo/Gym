@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import json
-from collections import Counter
 
 from pydantic import BaseModel
 
@@ -29,14 +28,23 @@ if __name__ == "__main__":
     global_config_dict = get_global_config_dict()
     config = PrintAggregateResultsConfig.model_validate(global_config_dict)
 
-    metrics = Counter()
-    num_rows = 0
-    with open(config.jsonl_fpath) as f:
-        for row in f:
-            result = json.loads(row)
-            metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
-            num_rows += 1
+    # Try loading as new metrics JSON format first
+    fpath = config.jsonl_fpath
+    if fpath.endswith("_metrics.json"):
+        with open(fpath) as f:
+            metrics = json.load(f)
+        print(json.dumps(metrics.get("aggregate", {}), indent=4))
+    else:
+        # Legacy: aggregate from JSONL profiling output
+        from collections import Counter
 
-    avg_metrics = {k: v / num_rows for k, v in metrics.items()}
+        metrics = Counter()
+        num_rows = 0
+        with open(fpath) as f:
+            for row in f:
+                result = json.loads(row)
+                metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
+                num_rows += 1
 
-    print(json.dumps(avg_metrics, indent=4))
+        avg_metrics = {k: v / num_rows for k, v in metrics.items()}
+        print(json.dumps(avg_metrics, indent=4))
