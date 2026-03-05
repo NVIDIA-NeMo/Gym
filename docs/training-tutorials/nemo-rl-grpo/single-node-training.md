@@ -41,6 +41,11 @@ Make sure you have:
 
 ---
 
+## 0. Return to NeMo RL directory
+Since we are running RL training, the following steps will all be run in the NeMo RL root directory, rather than NeMo Gym directory. 
+
+**✅ Success Check**: You should see a yaml file at `examples/nemo_gym/grpo_workplace_assistant_nemotron_nano_v2_9b.yaml` and a Python file at `examples/nemo_gym/run_grpo_nemo_gym.py`.
+
 ## 1. Download the Model
 
 **Estimated time**: ~5-10 minutes

@@ -7,7 +7,9 @@ Essential vocabulary for model training, RL workflows, and NeMo Gym. This glossa
 ## Rollout & Data Collection Terms
 ```{glossary}
 Rollout / Trajectory
-    A complete sequence of model, user, and environment interactions, from initial prompt through tool usage to final reward score. The complete "story" of one attempt at a task.
+    **Rollout** (verb) refers to the process of executing a policy in an environment to generate data: stepping through the environment, taking actions, and recording what happens.
+
+    **Rollout** (noun) is also used synonymously with **trajectory**: the resulting sequence of states, actions, and rewards: the ordered record of what happened. In practice, many people use "rollout" and "trajectory" interchangeably since a rollout produces exactly one trajectory.
 
 Rollout Batch
     A collection of multiple rollouts generated together, typically for the same task. Used for efficient parallel processing.
