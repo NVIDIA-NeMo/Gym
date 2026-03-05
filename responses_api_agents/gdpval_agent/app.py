@@ -96,9 +96,12 @@ class GDPValAgentVerifyRequest(BaseVerifyRequest):
 
 class GDPValAgentVerifyResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
+    responses_create_params: dict = Field(default_factory=dict)
+    response: dict = Field(default_factory=dict)
     reward: float = 0.0
     task_id: str | None = None
     output_files: List[SavedFile] = Field(default_factory=list)
+    committee_verdicts: list = Field(default_factory=list)
 
 
 class GDPValAgentResponse(BaseModel):
@@ -463,6 +466,10 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         # TODO: Implement real verification logic.
         # For now call /verify as a placeholder — the bash_sandbox verify
         # returns reward=1.0 unconditionally.
+        task_prompt_str = (
+            body.task_prompt if isinstance(body.task_prompt, str)
+            else body.task_prompt.content
+        )
         verify_request = {
             "responses_create_params": body.responses_create_params.model_dump(),
             "response": {
@@ -476,6 +483,7 @@ class GDPValAgent(SimpleResponsesAPIAgent):
                 "tools": [],
             },
             "task_id": body.task_id,
+            "task_prompt": task_prompt_str,
             "output_files": [f.model_dump() for f in saved_files],
             "session_id": body.session_id or "",
             "paths": [f.output_path for f in saved_files],
@@ -491,9 +499,21 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         verify_json = await get_response_json(verify_response)
 
         return GDPValAgentVerifyResponse(
+            responses_create_params=body.responses_create_params.model_dump(),
+            response={
+                "id": "placeholder",
+                "created_at": 0,
+                "model": "placeholder",
+                "object": "response",
+                "output": response_json.get("output", []),
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            },
             reward=verify_json.get("reward", 1.0),
             task_id=body.task_id,
             output_files=saved_files,
+            committee_verdicts=verify_json.get("committee_verdicts", []),
         )
 
 

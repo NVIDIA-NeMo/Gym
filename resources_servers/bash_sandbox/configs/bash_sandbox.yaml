@@ -3,6 +3,16 @@ bash_sandbox_resources_server:
     bash_sandbox:
       entrypoint: app.py
       domain: agent
+      judge:
+        enabled: true
+        judge_model_name: "gemini-3-pro-preview"
+        gcp_project_id: "nv-nemoposttrai-20250715184023"
+        gcp_location: "global"
+        num_trials: 4
+        max_concurrent_judgements: 10
+        committee_models:
+          - name: "Qwen3-235B-A22B-Thinking-2507"
+            output_dir: "/path/to/precomputed/Qwen3-235B"
 bash_sandbox_agent:
   responses_api_agents:
     gdpval_agent:
