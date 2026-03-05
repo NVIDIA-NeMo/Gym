@@ -50,7 +50,7 @@ class TestApp:
             port=8080,
             entrypoint="",
             name="",
-            tavily_api_key="test_api_key",
+            tavily_api_key="test_api_key",  # pragma: allowlist secret
             exclude_domains_file_path=os.path.join(_TEST_DIR, "dummy_exclude_domains_file.json"),
             judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
             judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
