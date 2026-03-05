@@ -1,2 +1,2 @@
 system: "Solve the following math problem. Put the answer inside \\boxed{}."
-user: "{problem}"
+user: "{examples}{problem}"
