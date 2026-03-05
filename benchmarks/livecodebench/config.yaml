@@ -1,0 +1,11 @@
+# Chain to existing resource server + agent config
+config_paths:
+  - resources_servers/code_gen/configs/code_gen.yaml
+
+# Rollout collection defaults — picked up directly by RolloutCollectionConfig
+agent_name: code_gen_simple_agent
+input_jsonl_fpath: benchmarks/livecodebench/data/livecodebench_v5_validation.jsonl
+num_repeats: 10
+responses_create_params:
+  max_output_tokens: 16384
+  temperature: 1.0

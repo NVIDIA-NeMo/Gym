@@ -1,0 +1,11 @@
+# Chain to existing resource server + agent config
+config_paths:
+  - resources_servers/mcqa/configs/mcqa.yaml
+
+# Rollout collection defaults — picked up directly by RolloutCollectionConfig
+agent_name: mcqa_simple_agent
+input_jsonl_fpath: benchmarks/gpqa/data/gpqa_diamond_validation.jsonl
+num_repeats: 8
+responses_create_params:
+  max_output_tokens: 16384
+  temperature: 1.0
