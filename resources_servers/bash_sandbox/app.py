@@ -293,10 +293,10 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
         return resolved
 
     def _check_absolute_paths(self, cmd: str, session: Session) -> RunCommandResponse | None:
-        """Check if command contains absolute paths or other references outside the session directory.
+        """Check if command contains absolute paths outside the session directory.
 
-        All execution and file access must stay inside the session directory. Rejects
-        any command that could read/write or list paths outside it.
+        Absolute paths that resolve to the session directory are allowed.
+        All other absolute paths, home-dir shortcuts, and env-var paths are rejected.
 
         Returns:
             RunCommandResponse with error if outside paths detected, None otherwise.
@@ -306,26 +306,42 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
             f"You can only access and execute commands inside your session directory: {session_dir} "
             "Use relative paths only (e.g. '.', './reference_files/file.xlsx')."
         )
-        absolute_patterns = [
-            r"~/",  # ~/path - home directory shortcut
-            r"\$HOME/",  # $HOME/path
-            r"\$\{HOME\}/",  # ${HOME}/path
-            # Any absolute path: / at start, or after space/;|& (avoid :// for URLs)
-            r"^/",
-            r"(?:[\s;&|])/(?!/)",  # space/semicolon/pipe/ampersand then / but not //
+
+        home_patterns = [
+            r"~/",
+            r"\$HOME\b",
+            r"\$\{HOME\}",
         ]
-        for pattern in absolute_patterns:
+        for pattern in home_patterns:
             if re.search(pattern, cmd):
                 return RunCommandResponse(
                     exit_code=1,
                     stdout="",
                     stderr=(
-                        "Command may access paths outside the session directory. This is not allowed."
+                        "Command may access paths outside the session directory. This is not allowed. "
                         + session_msg
                     ),
                     error_kind="absolute_path_detected",
                     advice=session_msg,
                 )
+
+        abs_path_re = re.compile(r"(?:^|[\s;&|\"'=])(/[^\s;&|\"']*)")
+        for match in abs_path_re.finditer(cmd):
+            path = match.group(1)
+            if path.startswith(session_dir):
+                continue
+            if "://" in cmd[max(0, match.start(1) - 8):match.start(1)]:
+                continue
+            return RunCommandResponse(
+                exit_code=1,
+                stdout="",
+                stderr=(
+                    f"Command references path '{path}' outside the session directory. This is not allowed. "
+                    + session_msg
+                ),
+                error_kind="absolute_path_detected",
+                advice=session_msg,
+            )
         return None
 
     async def seed_session(self, body: SeedSessionRequest) -> SeedSessionResponse:

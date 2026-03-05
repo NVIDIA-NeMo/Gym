@@ -126,6 +126,7 @@ class GDPValAgent(SimpleResponsesAPIAgent):
                 print(
                     f"Reference file: [{filename}] already exists at path: [{path}]. Skipping download."
                 )
+                reference_files.append(path)
                 continue
             try:
                 safe_url = quote(url, safe=":/%")
