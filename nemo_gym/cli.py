@@ -611,7 +611,7 @@ def test_all():  # pragma: no cover
         match return_code:
             case 0:
                 tests_passed.append(dir_path)
-            case 1:
+            case 1 | 2:
                 tests_failed.append(dir_path)
             case 5:
                 tests_missing.append(dir_path)
