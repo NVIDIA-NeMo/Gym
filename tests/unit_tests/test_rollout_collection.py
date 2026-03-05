@@ -349,6 +349,58 @@ class TestRolloutCollection:
         rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
         assert rows[0]["responses_create_params"]["input"] == [{"role": "user", "content": "CLI: x"}]
 
+    def test_prompt_config_rejects_multi_turn_input(self, tmp_path: Path) -> None:
+        prompt_yaml = tmp_path / "prompt.yaml"
+        prompt_yaml.write_text('user: "{problem}"\n')
+
+        fpath = tmp_path / "input.jsonl"
+        multi_turn_row = json.dumps(
+            {
+                "problem": "x",
+                "agent_ref": {"name": "agent"},
+                "responses_create_params": {
+                    "input": [
+                        {"role": "user", "content": "What is 2+2?"},
+                        {"role": "assistant", "content": "4"},
+                        {"role": "user", "content": "Now what is 3+3?"},
+                    ]
+                },
+            }
+        )
+        fpath.write_text(multi_turn_row + "\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            prompt_config=str(prompt_yaml),
+        )
+
+        with pytest.raises(ValueError, match="prompt_config only supports single-turn"):
+            RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+    def test_prompt_config_allows_single_turn_input(self, tmp_path: Path) -> None:
+        prompt_yaml = tmp_path / "prompt.yaml"
+        prompt_yaml.write_text('user: "{problem}"\n')
+
+        fpath = tmp_path / "input.jsonl"
+        single_turn_row = json.dumps(
+            {
+                "problem": "x",
+                "agent_ref": {"name": "agent"},
+                "responses_create_params": {"input": [{"role": "user", "content": "old prompt"}]},
+            }
+        )
+        fpath.write_text(single_turn_row + "\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            prompt_config=str(prompt_yaml),
+        )
+
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert rows[0]["responses_create_params"]["input"] == [{"role": "user", "content": "x"}]
+
 
 class TestPrompt:
     def test_fill_system_and_user(self) -> None:

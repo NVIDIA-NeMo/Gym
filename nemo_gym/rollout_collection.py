@@ -169,6 +169,16 @@ class RolloutCollectionHelper(BaseModel):
             # Apply prompt config: CLI prompt_config > row prompt_config > row responses_create_params
             prompt_config_path = config.prompt_config or row.get("prompt_config")
             if prompt_config_path:
+                existing_input = row.get(RESPONSES_CREATE_PARAMS_KEY_NAME, {}).get("input", [])
+                num_user_turns = sum(1 for msg in existing_input if msg.get("role") == "user")
+                if num_user_turns > 1:
+                    raise ValueError(
+                        f"Row {row_idx} has {num_user_turns} user turns in responses_create_params.input "
+                        f"but a prompt_config is set ('{prompt_config_path}'). "
+                        f"prompt_config only supports single-turn initial prompts. "
+                        f"Remove prompt_config for this row or use pre-baked responses_create_params."
+                    )
+
                 from nemo_gym.prompt import load_prompt
 
                 prompt = load_prompt(prompt_config_path)
