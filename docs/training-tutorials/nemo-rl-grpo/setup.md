@@ -128,6 +128,14 @@ HF_HOME=$PWD/.cache/ \
     ./examples/nemo_gym/run_nemo_gym_single_node_sanity_tests.sh
 ```
 
+The script runs a targeted set of tests that verify the full stack required for training with NeMo RL and NeMo Gym:
+
+- **vLLM generation** — Confirms that the vLLM backend can generate text and serve an OpenAI-compatible HTTP endpoint, which NeMo Gym uses for model inference.
+- **Token retokenization** — Tests edge cases in converting between OpenAI schema (text) and token IDs.
+- **Environment step** — Runs a basic NeMo RL environment step to validate that the environment interface works independently of NeMo Gym.
+- **NeMo Gym integration** — Verifies that NeMo Gym correctly integrates into NeMo RL as an Environment.
+- **End-to-end rollout** — Exercises the rollout loop that NeMo Gym uses inside `grpo_train`, confirming that rollout collection works end to end.
+
 **✅ Success Check**: All tests pass without errors.
 
 :::{tip}

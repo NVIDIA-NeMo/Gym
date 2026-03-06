@@ -14,7 +14,7 @@ A NeMo Gym responses API agent that integrates the [Mini-SWE-Agent](https://gith
   - [Usage](#usage)
     - [Download SWE-Gym Images](#download-swe-gym-images)
     - [Server](#server)
-    - [Trajectory Collection Script](#trajectory-collection-script)
+    - [Training Setup and Results](#training-setup-and-results)
   - [Contributing](#contributing)
   - [Licensing Information](#licensing-information)
     - [Dependencies](#dependencies)
@@ -120,9 +120,6 @@ ng_run +config_paths=[$CONFIG_PATHS] \
 ng_collect_rollouts +agent_name=mini_swe_simple_agent \
             +input_jsonl_fpath=data/train.jsonl \
             +output_jsonl_fpath=results/mini_swe_agent_swe_gym.jsonl
-
-# View trajectories
-ng_viewer +jsonl_fpath=results/mini_swe_agent_swe_gym.jsonl
 ```
 
 ### Training Setup and Results

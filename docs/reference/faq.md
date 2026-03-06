@@ -482,3 +482,14 @@ Examples:
 For models with a chat template that drops previous reasoning traces: modify the chat template to retain all thinking, or use the non-thinking model.
 
 For agents with non-monotonic trajectoires, the asserts may need to be disabled. This is not currently supported, but can be experimented with.  
+
+# FAQ: Model responses from inference.nvidia.com have no diversity
+`inference.nvidia.com` uses LiteLLM caching by default which leads to no diversity in model responses (pass@1 similar to pass@5). Please set something like the following flags in order to enable diverse responses:
+```yaml
+policy_model:
+  responses_api_models:
+    vllm_model:
+      extra_body:
+        cache:
+          no-cache: true
+```
