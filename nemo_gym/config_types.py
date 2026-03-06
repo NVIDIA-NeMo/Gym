@@ -396,6 +396,7 @@ class Domain(str, Enum):
     GAMES = "games"
     TRANSLATION = "translation"
     E2E = "e2e"
+    RLHF = "rlhf"
     OTHER = "other"
 
 
@@ -571,3 +572,19 @@ def is_almost_server(server_type_config_dict: Any) -> bool:
 ########################################
 
 AGENT_REF_KEY = "agent_ref"
+
+
+########################################
+# Weights and Biases
+########################################
+
+
+class WANDBConfig(BaseModel):
+    wandb_project: Optional[str] = None
+    wandb_name: Optional[str] = None
+    wandb_api_key: Optional[str] = None
+
+    @property
+    def is_available(self) -> bool:
+        # If global_config recursively hide secrets is called, the api key will be set to ****
+        return self.wandb_project and self.wandb_name and self.wandb_api_key and self.wandb_api_key != "****"

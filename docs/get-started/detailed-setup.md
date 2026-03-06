@@ -215,6 +215,13 @@ If this step fails, you will see a clear error message (like quota exceeded or i
 Check your `env.yaml` file has the correct API key format.
 :::
 
+
+The cost for running rollouts using the OpenAI API can be calculated using the following rough formula: per token API cost × average number of input/output tokens × num_repeats × limit.
+- Per token API cost: See the OpenAI API pricing for more details https://openai.com/api/pricing/.
+- Average number of input/output tokens: After rollouts are run, you can see the input/output token usage in the returned response.
+- Num repeats and limit: These parameters are set in the rollout collection command later.
+
+
 ## 3. Start the Servers
 
 ```bash

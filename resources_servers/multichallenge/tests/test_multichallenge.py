@@ -109,7 +109,6 @@ class TestAggregation:
             judge_model_server=ModelServerRef(type="responses_api_models", name="test"),
             judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
         )
-
         # Create a proper mock that passes pydantic validation
         mock_client = MagicMock(spec=ServerClient)
         server = MultiChallengeServer.model_construct(config=config, server_client=mock_client)

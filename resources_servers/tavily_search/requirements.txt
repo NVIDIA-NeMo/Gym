@@ -1,0 +1,2 @@
+-e nemo-gym[dev] @ ../../
+tavily-python==0.7.21

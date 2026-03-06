@@ -5,8 +5,6 @@
 
 Most open-source models use Chat Completions format, while NeMo Gym uses the Responses API natively. VLLMModel bridges this gap by converting between the two formats automatically. For background on why NeMo Gym chose the Responses API and how the two schemas differ, see {ref}`responses-api-evolution`.
 
-## Use VLLMModel
-
 VLLMModel provides a Responses API to Chat Completions mapping middleware layer via `responses_api_models/vllm_model`. It assumes you are pointing to a vLLM instance since it relies on vLLM-specific endpoints like `/tokenize` and vLLM-specific arguments like `return_tokens_as_token_ids`.
 
 **To use VLLMModel, just change the `responses_api_models/openai_model/configs/openai_model.yaml` in your config paths to `responses_api_models/vllm_model/configs/vllm_model.yaml`!**
@@ -16,32 +14,88 @@ responses_api_models/vllm_model/configs/vllm_model.yaml"
 ng_run "+config_paths=[$config_paths]"
 ```
 
-Here is an e2e example of how to spin up a NeMo Gym compatible vLLM Chat Completions OpenAI server.
-- If you want to use tools, find the appropriate vLLM arguments regarding the tool call parser to use. In this example, we use Qwen3-30B-A3B, which is suggested to use the `hermes` tool call parser.
-- If you are using a reasoning model, find the appropriate vLLM arguments regarding reasoning parser to use. In this example, we use Qwen3-30B-A3B, which is suggested to use the `qwen3` reasoning parser.
+## Use VLLMModel
+Below is an e2e example of how to spin up a NeMo Gym compatible vLLM Chat Completions OpenAI server and run rollout collection with it.
 
+### Install vLLM
+Please run the steps below in a separate terminal than your NeMo Gym terminal! The installation will take a few minutes.
 ```bash
-uv venv --python 3.12 --seed 
+uv venv --python 3.12 --seed .venv
 source .venv/bin/activate
-# hf_transfer for faster model download. datasets for downloading data from HF
-uv pip install hf_transfer datasets vllm --torch-backend=auto
+# hf_transfer for faster model download
+uv pip install hf_transfer vllm --torch-backend=auto
+```
 
-# Qwen/Qwen3-30B-A3B, usable in Nemo RL!
+### Download the model
+This download will take a few minutes.
+```bash
+# Qwen/Qwen3-4B-Thinking-2507, usable in Nemo RL!
 HF_HOME=.cache/ \
 HF_HUB_ENABLE_HF_TRANSFER=1 \
-    hf download Qwen/Qwen3-30B-A3B
+    hf download Qwen/Qwen3-4B-Thinking-2507
+```
 
+:::{tip}
+If you get errors relating to HuggingFace rate limits, please provide your HF token to command above.
+```bash
+HF_TOKEN=... \
+HF_HOME=.cache/ \
+HF_HUB_ENABLE_HF_TRANSFER=1 \
+    hf download Qwen/Qwen3-4B-Thinking-2507
+```
+
+If you do not have a HuggingFace token, please follow the instructions [here](https://huggingface.co/docs/hub/en/security-tokens) to create one!
+:::
+
+### Spin up a vLLM server
+vLLM server configuration
+- If you want to use tools, find the appropriate vLLM arguments regarding the tool call parser to use. In this example, we use `Qwen/Qwen3-4B-Thinking-2507`, which is suggested to use the `hermes` tool call parser.
+- If you are using a reasoning model, find the appropriate vLLM arguments regarding reasoning parser to use. In this example, we use `Qwen/Qwen3-4B-Thinking-2507`, which is suggested to use the `deepseek_r1` reasoning parser.
+- The example below uses `--tensor-parallel-size 1` which requires 1 GPU.
+
+The spinup step will take a few minutes.
+
+```bash
 HF_HOME=.cache/ \
 HOME=. \
 vllm serve \
-    Qwen/Qwen3-30B-A3B \
-    --dtype auto \
+    Qwen/Qwen3-4B-Thinking-2507 \
     --tensor-parallel-size 4 \
-    --gpu-memory-utilization 0.9 \
     --enable-auto-tool-choice --tool-call-parser hermes \
-    --reasoning-parser qwen3 \
+    --reasoning-parser deepseek_r1 \
     --host 0.0.0.0 \
     --port 10240
+```
+
+
+### Configure NeMo Gym to use the local vLLM server
+In a second terminal on the same GPU node that was used to spin up the vLLM server, enter the NeMo Gym Python environment, and start the NeMo Gym servers.
+```bash
+config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\
+responses_api_models/vllm_model/configs/vllm_model.yaml"
+ng_run "+config_paths=[$config_paths]" \
+    ++policy_base_url=http://0.0.0.0:10240/v1 \
+    ++policy_model_name=Qwen/Qwen3-4B-Thinking-2507 \
+    ++policy_api_key=dummy_key
+```
+
+
+:::{tip}
+If you want to run NeMo Gym on a separate machine than the one used to spin up the vLLM server, please get the hostname of the machine used to run the vLLM server.
+```bash
+hostname -i
+```
+
+Then replace the `policy_base_url=http://0.0.0.0:10240/v1` to point to the hostname `policy_base_url=http://{hostname}:10240/v1`.
+:::
+
+
+### Run rollout collection
+In a third terminal on the same GPU node that was used to spin up the vLLM server, enter the NeMo Gym Python environment, and run rollout collection.
+```bash
+ng_collect_rollouts +agent_name=example_multi_step_simple_agent \
+    +input_jsonl_fpath=resources_servers/example_multi_step/data/example.jsonl \
+    +output_jsonl_fpath=results/example_multi_step_rollouts.jsonl
 ```
 
 
