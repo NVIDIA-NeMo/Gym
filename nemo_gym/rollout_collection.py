@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
+from omegaconf import OmegaConf
 from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
 from wandb import Table
@@ -161,7 +162,7 @@ class RolloutCollectionHelper(BaseModel):
 
             # Responses create params
             row[RESPONSES_CREATE_PARAMS_KEY_NAME] = (
-                row[RESPONSES_CREATE_PARAMS_KEY_NAME] | config.responses_create_params
+                row[RESPONSES_CREATE_PARAMS_KEY_NAME] | OmegaConf.to_container(config.responses_create_params, resolve=True)
             )
 
             # Resolve task index
