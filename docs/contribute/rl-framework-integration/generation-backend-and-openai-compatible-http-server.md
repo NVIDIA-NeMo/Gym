@@ -55,9 +55,6 @@ If your framework uses vLLM or SGLang, you can reference these implementations w
 * - VeRL
   - HF, vLLM, SGLang
   - [hf_rollout.py](https://github.com/volcengine/verl/blob/fd893c788dbdb967c6eb62845b09a02e38819ac1/verl/workers/rollout/hf_rollout.py), [vLLM rollout](https://github.com/volcengine/verl/tree/fd893c788dbdb967c6eb62845b09a02e38819ac1/verl/workers/rollout/vllm_rollout), [SGLang rollout](https://github.com/volcengine/verl/tree/fd893c788dbdb967c6eb62845b09a02e38819ac1/verl/workers/rollout/sglang_rollout)
-* - TRL
-  - vLLM, HF
-  - [grpo_trainer.py (vLLM)](https://github.com/huggingface/trl/blob/cbd90d4297a877587a07bdcd82f8fc87338efe5b/trl/trainer/grpo_trainer.py#L557), [grpo_trainer.py (HF)](https://github.com/huggingface/trl/blob/cbd90d4297a877587a07bdcd82f8fc87338efe5b/trl/trainer/grpo_trainer.py#L661)
 * - Slime
   - SGLang
   - [sglang_engine.py](https://github.com/THUDM/slime/blob/0612652a8e6ed7fd670ecc29101d4ca877490bf6/slime/backends/sglang_utils/sglang_engine.py#L87)
