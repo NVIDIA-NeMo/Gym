@@ -1,6 +1,6 @@
 reflection_agent:
   responses_api_agents:
-    langgraph_agent:
+    reflection_agent:
       entrypoint: reflection_agent.py
       resources_server:
         type: resources_servers
