@@ -2,6 +2,7 @@ code_gen:
   resources_servers:
     code_gen:
       entrypoint: app.py
+      metrics_type: "resources_servers.code_gen.metrics::CodeGenMetrics"
       domain: coding
       verified: true
       verified_url: https://wandb.ai/nvidia/bxyu-nemo-gym-rl-integration-20250926/runs/54uzarwq
