@@ -5,7 +5,7 @@ GDPVal responses-api agent for running tool-augmented task rollouts and delegati
 # Terminal 1: Starting the servers
 ```bash
 # Start terminal 1
-srun --time 4:00:00 -A llmservice_modelalignment_sft -G 8 -p interactive --pty /bin/bash
+srun --time 4:00:00 -A llmservice_modelalignment_sft --gres=gpu:8 -p interactive --pty /bin/bash
 
 # Init Env
 cd /lustre/fsw/portfolios/llmservice/users/vadams/Gym
@@ -28,7 +28,7 @@ ng_run "+config_paths=[${RESOURCE_AND_AGENT_CONFIG},${MODEL_SERVER_CONFIG}]" \
 # Terminal 2: Running the agent
 ```bash
 # Start terminal 2
-srun --jobid=9811863 --overlap --pty -c 8 --gres=none bash
+srun --jobid=9836171 --overlap --pty -c 8 --gres=none bash
 
 # Init Env
 cd /lustre/fsw/portfolios/llmservice/users/vadams/Gym

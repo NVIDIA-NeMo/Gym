@@ -303,7 +303,7 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
         """
         session_dir = str(session.temp_dir)
         session_msg = (
-            f"You can only access and execute commands inside your session directory: {session_dir} "
+            f"You can only access and execute commands inside your session directory: {session_dir}. "
             "Use relative paths only (e.g. '.', './reference_files/file.xlsx')."
         )
 
@@ -352,6 +352,7 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
 
         try:
             self.session_manager.start_session(session_id)
+            print(f"seed_session: session_id: {session_id}, session_manager: {self.session_manager.id_to_session}")
         except Exception as e:
             return SeedSessionResponse(session_id=session_id, success=False, error_message=str(e))
 
@@ -367,6 +368,7 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
             RunCommandResponse with exit_code, stdout, stderr, and optional error info.
 
         """
+        print(f"run_command: session_id: {body.session_id}, session_manager: {self.session_manager.id_to_session}")
         try:
             session = self.session_manager.get_session(body.session_id)
         except KeyError:
@@ -463,6 +465,7 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
             UploadFilesResult containing lists of uploaded files and any failures.
 
         """
+        print(f"upload_files: session_id: {body.session_id}, session_manager: {self.session_manager.id_to_session}")
         try:
             session = self.session_manager.get_session(body.session_id)
         except KeyError:
@@ -541,6 +544,7 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
             SaveOutputFilesResponse containing lists of saved files and any failures.
 
         """
+        print(f"save_output_files: session_id: {body.session_id}, session_manager: {self.session_manager.id_to_session}")
         try:
             session = self.session_manager.get_session(body.session_id)
         except Exception as e:
@@ -603,6 +607,7 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
         Returns:
             FinishResponse with session deletion status and saved file details.
         """
+        print(f"finish: session_id: {body.session_id}, session_manager: {self.session_manager.id_to_session}")
         if body.paths is not None and body.output_dir is not None:
             result = await self.save_output_files(
                 SaveOutputFilesRequest(

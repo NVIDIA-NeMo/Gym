@@ -74,7 +74,7 @@ class GDPValAgentConfig(BaseResponsesAPIAgentConfig):
     max_steps: int = 100
     max_tokens: int = 10000
     context_summarization_cutoff: float = 0.7
-    step_warning_threshold: int | None = 80
+    remaining_step_warning_threshold: int | None = 20
 
 
 class GDPValAgentRunRequest(BaseRunRequest):
@@ -414,7 +414,7 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         session_id = body.session_id
         output_dir = str(body.task_dir)
         max_steps = self.config.max_steps
-        warning_threshold = self.config.step_warning_threshold
+        warning_threshold = self.config.remaining_step_warning_threshold
         summary_cutoff = self.config.context_summarization_cutoff
         finished = None
         outputs = []
@@ -509,6 +509,11 @@ class GDPValAgent(SimpleResponsesAPIAgent):
             body.task_prompt if isinstance(body.task_prompt, str)
             else body.task_prompt.content
         )
+        # Use JSON-serializable values: Path must be str for orjson.dumps()
+        output_files_serializable = [
+            {"path": str(f.output_path), "size": f.size}
+            for f in saved_files
+        ]
         verify_request = {
             "responses_create_params": body.responses_create_params.model_dump(),
             "response": {
@@ -523,9 +528,9 @@ class GDPValAgent(SimpleResponsesAPIAgent):
             },
             "task_id": body.task_id,
             "task_prompt": task_prompt_str,
-            "output_files": [f.model_dump() for f in saved_files],
+            "output_files": output_files_serializable,
             "session_id": body.session_id or "",
-            "paths": [f.output_path for f in saved_files],
+            "paths": [str(f.output_path) for f in saved_files],
         }
 
         verify_response = await self.server_client.post(

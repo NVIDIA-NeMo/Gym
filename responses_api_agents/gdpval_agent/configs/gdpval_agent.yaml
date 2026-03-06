@@ -11,7 +11,7 @@ gdpval_agent:
       max_steps: 100
       max_tokens: 10000
       context_summarization_cutoff: 0.7
-      step_warning_threshold: 20
+      remaining_step_warning_threshold: 20
       datasets:
       - name: train
         type: train
