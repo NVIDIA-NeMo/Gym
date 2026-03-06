@@ -113,12 +113,13 @@ class BaseMetrics(ABC):
             if avg_of_k:
                 aggregate[f"pass@1[avg-of-{k_val}]"] = avg_of_k
 
-        # majority@k (only if get_answer() returns non-None for some results)
+        # majority@k for each k value (only if get_answer() returns non-None for some results)
         has_answers = any(any(a is not None for a in task_answers) for task_answers in all_answers)
         if has_answers:
-            majority_at_k = self._compute_majority_at_k(all_score_dicts, all_answers, score_names, k)
-            if majority_at_k:
-                aggregate[f"majority@{k}"] = majority_at_k
+            for k_val in range(1, k + 1):
+                majority_at_k = self._compute_majority_at_k(all_score_dicts, all_answers, score_names, k_val)
+                if majority_at_k:
+                    aggregate[f"majority@{k_val}"] = majority_at_k
 
         # Per-sample aggregate
         per_sample_aggregate = self._compute_per_sample_aggregate(all_score_dicts, score_names, k)
