@@ -2,7 +2,7 @@
 
 # Multi-Step Environment
 
-This environment requires the agent to make multiple tool calls in sequence and extract specific values. The reward function compares the agent's submitted values against ground truth.
+This tutorial focuses on the **Resources Server** implementation for a multi-step tool-calling environment. The full workflow — task data preparation, agent/model configuration, rollout collection, and training — follows the same steps as the {doc}`main guide <index>`. What changes here is the complexity of the tools and verification logic.
 
 :::{button-ref} index
 :color: secondary
@@ -63,7 +63,7 @@ What does synonym_value mean?
 
 ## Implementation
 
-**File (simplified excerpt, source-aligned): `resources_servers/example_multi_step/app.py`**
+**File (simplified from `resources_servers/example_multi_step/app.py`, with added defensive guards):**
 
 ```python
 # simplified
@@ -189,6 +189,10 @@ The `verify()` function parses the agent's tool calls from `body.response.output
 
 :::{tip}
 The `json.loads(output.arguments)` call is wrapped in `try/except` to handle cases where the model produces malformed JSON. Always guard against unparseable model output in your verify function. For more verification patterns, see {ref}`task-verification`.
+:::
+
+:::{tip}
+Multi-step environments where tool outputs depend on earlier calls pair naturally with `parallel_tool_calls: false` in the JSONL data, which forces the model to call tools sequentially rather than in parallel.
 :::
 
 ---
