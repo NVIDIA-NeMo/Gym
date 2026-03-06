@@ -12,6 +12,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""
+See: https://github.com/langchain-ai/langgraph/blob/23961cff61a42b52525f3b20b4094d8d2fba1744/docs/docs/tutorials/reflection/reflection.ipynb
+Reflection agent: generate, critique, revise loop.
+
+Generates an initial answer, critiques it, then revises. Repeats until
+<answer> tag found or max_reflections reached.
+
+Graph: generate -> should_continue? -> reflect -> generate (revised) -> ...
+"""
+
 from typing import Annotated, TypedDict
 
 from app import LangGraphAgentAdapter, LangGraphAgentConfig
