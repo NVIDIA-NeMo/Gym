@@ -44,6 +44,12 @@ Flow (state is stored per session_id inside the ResourcesServer)
 
 ## Implementation
 
+This Resources Server introduces three patterns not seen in the earlier tutorials:
+
+- **Dynamic routing** --- a single `/{path}` catch-all endpoint dispatches to any tool function, so you don't need to register each tool individually.
+- **Per-session toolkit initialization** --- `seed_session()` creates an independent set of toolkits and data for each episode, so concurrent rollouts don't interfere.
+- **State-based verification** --- `verify()` extracts the agent's function calls, replays them in a fresh environment alongside the ground truth, and compares the resulting state rather than the exact call sequence.
+
 **File (simplified from [`resources_servers/workplace_assistant/app.py`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/workplace_assistant/app.py)):**
 
 ```python
