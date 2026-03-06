@@ -18,7 +18,6 @@ import os
 from html import escape
 
 import anyio
-import httpx
 import re
 import shutil
 import subprocess
@@ -29,6 +28,7 @@ from typing import Dict, List
 from fastapi import FastAPI
 from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
+from tavily import TavilyClient
 
 from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
@@ -44,17 +44,7 @@ logger = logging.getLogger(__name__)
 SHELL_TIMEOUT = 30
 MAX_LENGTH_WEB_FETCH = 40000
 WEB_REQUEST_TIMEOUT = 60 * 3
-DEFAULT_WEBFETCH_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate",
-    "Connection": "keep-alive",
-}
+TAVILY_MAX_RESULTS = 5
 
 class Session(BaseModel):
     """All code execution and file access happens in the temp directory."""
@@ -639,51 +629,43 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
             error_message=result.error_message,
         )
 
-    async def _http_request_with_retry(
-        self,
-        method: str,
-        url: str,
-        *,
-        headers: dict | None = None,
-        params: dict | None = None,
-        max_attempts: int = 3,
-    ) -> httpx.Response:
-        """Execute an HTTP request with exponential backoff retry on network errors."""
+    def _get_tavily_client(self):
+        api_key = os.getenv("TAVILY_API_KEY")
+        if not api_key:
+            raise ValueError("TAVILY_API_KEY environment variable not set")
+        return TavilyClient(api_key)
+
+    async def _tavily_call_with_retry(self, func, *args, max_attempts: int = 3, **kwargs):
+        """Call a synchronous Tavily method in a thread with timeout and exponential-backoff retry."""
         last_exc: Exception | None = None
         for attempt in range(max_attempts):
             try:
-                async with httpx.AsyncClient(
-                    timeout=WEB_REQUEST_TIMEOUT, follow_redirects=True
-                ) as client:
-                    response = await client.request(method, url, headers=headers, params=params)
-                    response.raise_for_status()
-                    return response
-            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(func, *args, **kwargs),
+                    timeout=WEB_REQUEST_TIMEOUT,
+                )
+            except (asyncio.TimeoutError, OSError, ConnectionError) as exc:
                 last_exc = exc
                 if attempt < max_attempts - 1:
                     await asyncio.sleep(2 ** attempt)
         raise last_exc  # type: ignore[misc]
 
     async def web_search(self, body: WebSearchRequest) -> WebSearchResponse:
-        """Search the web using Brave Search API. Returns top 5 results as XML."""
-        brave_api_key = os.getenv("BRAVE_API_KEY")
-        if not brave_api_key:
-            return WebSearchResponse(
-                results_xml="", error="BRAVE_API_KEY environment variable not set"
-            )
+        """Search the web using Tavily Search API. Returns top results as XML."""
+        print(f"WEB_SEARCH: session_id: {body.session_id}")
+        try:
+            client = self._get_tavily_client()
+        except ValueError as exc:
+            return WebSearchResponse(results_xml="", error=str(exc))
 
         try:
-            response = await self._http_request_with_retry(
-                "GET",
-                "https://api.search.brave.com/res/v1/web/search",
-                headers={
-                    "X-Subscription-Token": brave_api_key,
-                    "Accept": "application/json",
-                },
-                params={"q": body.query, "count": 5},
+            data = await self._tavily_call_with_retry(
+                client.search,
+                query=body.query,
+                search_depth="advanced",
+                max_results=TAVILY_MAX_RESULTS,
             )
-            data = response.json()
-            results = data.get("web", {}).get("results", [])
+            results = data.get("results", [])
             results_xml = (
                 "<results>\n"
                 + "\n".join(
@@ -691,7 +673,7 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
                         "<result>"
                         f"\n<title>{escape(result.get('title', '') or '')}</title>"
                         f"\n<url>{escape(result.get('url', '') or '')}</url>"
-                        f"\n<description>{escape(result.get('description', '') or '')}</description>"
+                        f"\n<description>{escape(result.get('content', '') or '')}</description>"
                         "\n</result>"
                     )
                     for result in results
@@ -703,19 +685,26 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
             return WebSearchResponse(results_xml="", error=str(exc))
 
     async def web_fetch(self, body: WebFetchRequest) -> WebFetchResponse:
-        """Fetch a web page and extract main content as markdown."""
-        import trafilatura
-
+        """Fetch a web page and extract content using Tavily Extract API."""
+        print(f"WEB_FETCH: session_id: {body.session_id}")
         try:
-            response = await self._http_request_with_retry(
-                "GET",
-                body.url,
-                headers=DEFAULT_WEBFETCH_HEADERS,
-            )
-            body_md = trafilatura.extract(response.text, output_format="markdown") or ""
+            client = self._get_tavily_client()
+        except ValueError as exc:
             content = (
                 f"<web_fetch><url>{escape(body.url)}</url>"
-                f"<body>{body_md[:MAX_LENGTH_WEB_FETCH]}</body></web_fetch>"
+                f"<error>{escape(str(exc))}</error></web_fetch>"
+            )
+            return WebFetchResponse(content=content, error=str(exc))
+
+        try:
+            data = await self._tavily_call_with_retry(
+                client.extract, urls=[body.url],
+            )
+            extracted = data.get("results", [])
+            body_text = extracted[0].get("raw_content", "") if extracted else ""
+            content = (
+                f"<web_fetch><url>{escape(body.url)}</url>"
+                f"<body>{body_text[:MAX_LENGTH_WEB_FETCH]}</body></web_fetch>"
             )
             return WebFetchResponse(content=content)
         except Exception as exc:

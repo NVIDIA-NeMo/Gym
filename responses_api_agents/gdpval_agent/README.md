@@ -11,7 +11,10 @@ srun --time 4:00:00 -A llmservice_modelalignment_sft --gres=gpu:8 -p interactive
 cd /lustre/fsw/portfolios/llmservice/users/vadams/Gym
 source .venv/bin/activate
 
+uv pip install tavily-python
+
 export NVIDIA_API_KEY=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
+export TAVILY_API_KEY="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"
 
 # bash_sandbox.yaml starts: bash_sandbox_resources_server + bash_sandbox_agent
 # nano_v3_single_node.yaml starts: policy_model (local vLLM Nemotron)
@@ -28,7 +31,7 @@ ng_run "+config_paths=[${RESOURCE_AND_AGENT_CONFIG},${MODEL_SERVER_CONFIG}]" \
 # Terminal 2: Running the agent
 ```bash
 # Start terminal 2
-srun --jobid=9836171 --overlap --pty -c 8 --gres=none bash
+srun --jobid=9838726 --overlap --pty -c 8 --gres=none bash
 
 # Init Env
 cd /lustre/fsw/portfolios/llmservice/users/vadams/Gym
@@ -36,14 +39,20 @@ source .venv/bin/activate
 
 # Test the agent
 python responses_api_agents/gdpval_agent/client.py prepare \
-    --output-jsonl tmp/single_task.jsonl \
+    --output-jsonl tmp/gdpval_tasks.jsonl \
     --split train \
-    --limit 1
+    --limit 5
 
 ng_collect_rollouts +agent_name=bash_sandbox_agent \
-    +input_jsonl_fpath=tmp/single_task.jsonl \
-    +output_jsonl_fpath=tmp/single_task_rollout.jsonl \
-    +limit=1 \
+    +input_jsonl_fpath=tmp/gdpval_tasks.jsonl \
+    +output_jsonl_fpath=tmp/gdpval_rollouts.jsonl \
+    +limit=5 \
+    +num_samples_in_parallel=1
+
+ng_collect_rollouts +agent_name=bash_sandbox_agent \
+    +input_jsonl_fpath=tmp/web_search_tst.jsonl \
+    +output_jsonl_fpath=tmp/web_search_rollout.jsonl \
+    +limit=5 \
     +num_samples_in_parallel=1
 ```
 
