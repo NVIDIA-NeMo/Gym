@@ -577,7 +577,7 @@ Train with Unsloth for fast fine-tuning.
 
 ## Next Steps: Progressive Tutorials
 
-These tutorials build on the concepts above with increasingly complex environments:
+These tutorials build on the concepts above with increasingly complex environments. Unlike the hands-on guide above, they are pattern-oriented deep dives --- each explains a key concept through annotated source excerpts and rollout transcripts from existing example servers:
 
 ::::{grid} 1 2 3 3
 :gutter: 2

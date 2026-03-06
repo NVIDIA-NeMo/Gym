@@ -2,7 +2,7 @@
 
 # Stateful Environment
 
-For environments that need to maintain state across multiple tool calls within an episode, NeMo Gym provides session management via middleware.
+This tutorial focuses on the **Resources Server** implementation for environments that maintain state across tool calls within an episode. The full workflow — task data preparation, agent/model configuration, rollout collection, and training — follows the same steps as the {doc}`main guide <index>`. What changes here is the addition of per-episode session state via middleware.
 
 :::{button-ref} multi-step-environment
 :color: secondary
@@ -45,7 +45,7 @@ Flow (state is stored per session_id inside the ResourcesServer)
 
 ## Implementation
 
-**File (simplified excerpt, source-aligned): `resources_servers/example_session_state_mgmt/app.py`**
+**File (simplified from `resources_servers/example_session_state_mgmt/app.py`, with improved `seed_session` pattern):**
 
 ```python
 # simplified
@@ -160,7 +160,7 @@ Use `SESSION_ID_KEY` from the request session middleware to maintain per-episode
 3. Store state in an instance-level dictionary keyed by session ID
 
 :::{note}
-In `seed_session`, use direct assignment (`self.session_id_to_counter[session_id] = body.initial_count`) rather than `setdefault`. Using `setdefault` would silently ignore re-seed attempts if the session already exists, which can cause subtle bugs when the same session ID is reused across episodes.
+In `seed_session`, use direct assignment (`self.session_id_to_counter[session_id] = body.initial_count`) rather than `setdefault`. Using `setdefault` would silently ignore re-seed attempts if the session already exists, which can cause subtle bugs when the same session ID is reused across episodes. Note: the current `example_session_state_mgmt` implementation still uses `setdefault` in `seed_session` --- the direct assignment shown here is the preferred pattern.
 
 In tool methods like `increment_counter` and `get_counter_value`, `setdefault` is appropriate --- it provides a safe fallback of `0` if the session was somehow not initialized.
 :::
