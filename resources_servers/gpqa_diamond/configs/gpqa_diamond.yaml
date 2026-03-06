@@ -1,0 +1,39 @@
+gpqa_diamond:
+  resources_servers:
+    gpqa_diamond:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: GPQA Diamond multiple-choice question answering problems
+      value: Evaluate graduate-level scientific reasoning via MCQ verification
+
+gpqa_diamond_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: gpqa_diamond
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/gpqa_diamond/data/train.jsonl
+        gitlab_identifier:
+          dataset_name: gpqa_diamond
+          version: 1.0.0
+          artifact_fpath: train.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-knowledge-gpqa-diamond
+        license: TBD
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/gpqa_diamond/data/validation.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-knowledge-gpqa-diamond
+        license: TBD
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/gpqa_diamond/data/example.jsonl
