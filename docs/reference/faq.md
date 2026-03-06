@@ -461,6 +461,27 @@ checking consistency... done
 ```
 You may need to reformat some of your docstrings to Napoleon format docstrings https://sphinxcontrib-napoleon.readthedocs.io/en/latest/
 
+# FAQ: Monotonic (Strictly-Increasing) Trajectories
+
+**Monotonicity** means the token sequence in a multi-step rollout only grows, so previous tokens are never modified or dropped between turns. NeMo Gym and NeMo RL currently require this property for training.
+
+NeMo RL enforces monotonicity in two places:
+
+1. **vLLM worker**: Replaces re-tokenized prompt prefixes with the original token IDs from prior turns (the on-policy token ID fix)
+2. **NeMo Gym postprocessing**: Asserts that token IDs across turns form a contiguous, strictly-increasing sequence
+
+Examples: 
+
+- **Reasoning trace removal**: Models like Qwen3 whose chat templates strip reasoning from previous turns
+- **Agent context management**: Agentic harnesses that summarize or truncate prior history as rollouts grow
+- **Sliding window**: Dropping older turns to fit within a context length budget
+- **Environment state pruning**: Dropping past environment observations that are no longer relevant
+
+## Recommended Approaches
+
+For models with a chat template that drops previous reasoning traces: modify the chat template to retain all thinking, or use the non-thinking model.
+
+For agents with non-monotonic trajectoires, the asserts may need to be disabled. This is not currently supported, but can be experimented with.  
 
 # FAQ: Model responses from inference.nvidia.com have no diversity
 `inference.nvidia.com` uses LiteLLM caching by default which leads to no diversity in model responses (pass@1 similar to pass@5). Please set something like the following flags in order to enable diverse responses:
