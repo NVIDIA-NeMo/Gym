@@ -420,6 +420,6 @@ Continue to Rollout Collection →
 :::
 
 :::{note}
-Rollout collection is required before proceeding to tutorials like {doc}`/environment-tutorials/creating-training-environment` or training workflows. Complete it next.
+Rollout collection is required before proceeding to tutorials like {doc}`/environment-tutorials/index` or training workflows. Complete it next.
 :::
 

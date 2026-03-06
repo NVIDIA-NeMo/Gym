@@ -1,8 +1,16 @@
-(building-environments-real-world)=
+(env-real-world-environment)=
 
 # Real-World Environment (Workplace Assistant)
 
 A production environment with multiple tools in a realistic office setting, demonstrating dynamic tool routing and state-based verification.
+
+:::{button-ref} stateful-environment
+:color: secondary
+:outline:
+:ref-type: doc
+
+< Previous: Stateful Environment
+:::
 
 ---
 
@@ -14,7 +22,7 @@ The Workplace Assistant environment simulates an office with email, calendar, an
 
 ```text
 Goal (what the agent is learning)
-  - Learn realistic multi-step tool calling workflows (search → decide → act) with persistent per-episode state.
+  - Learn realistic multi-step tool calling workflows (search -> decide -> act) with persistent per-episode state.
 
 Inputs
   - user instruction + tool schemas (company_directory + email/calendar/analytics/...)
@@ -29,7 +37,7 @@ Flow (state is stored per session_id inside the ResourcesServer)
      - executes the tool against the session's state and returns output/errors
      - agent appends tool outputs back into the conversation
   4) POST ResourcesServer /verify
-     - parses the full trace and grades outcome (often state-based), returning reward ∈ [0, 1]
+     - parses the full trace and grades outcome (often state-based), returning reward in [0, 1]
 ```
 
 ---
@@ -158,6 +166,32 @@ if __name__ == "__main__":
 
 Dynamic routing with `/{path}` allows the environment to expose an arbitrary number of tools without hardcoding each endpoint. The `route_to_python_function` method dispatches incoming requests to Python functions in the per-session `tool_env["functions"]` dictionary.
 
+:::{warning}
+The `/{path}` catch-all route **must be registered after** `super().setup_webserver()`. The parent method registers `/seed_session` and `/verify` --- if your catch-all is registered first, it will intercept those requests and break the server lifecycle.
+:::
+
+:::{admonition} What does `get_tools()` return?
+:class: note
+
+`get_tools(toolkits)` initializes a dictionary containing:
+- `"functions"`: A mapping of tool names (e.g. `"email_search_emails"`) to Python callables
+- Per-toolkit in-memory data (DataFrames for emails, calendar events, analytics, etc.)
+
+Each session gets its own independent copy of this state, so tool calls in one episode cannot affect another.
+:::
+
+:::{admonition} What does `is_correct()` do?
+:class: note
+
+`is_correct(predicted_calls, ground_truth, env)` performs **state-based verification**:
+1. Replays the predicted tool calls against a fresh environment
+2. Replays the ground-truth calls against another fresh environment
+3. Compares the final state (DataFrames) of both environments
+4. Returns `1.0` if states match, `0.0` otherwise
+
+This is more flexible than trajectory matching because it rewards correct outcomes regardless of the specific tool call sequence.
+:::
+
 ---
 
 ## Rollout Transcript
@@ -165,34 +199,34 @@ Dynamic routing with `/{path}` allows the environment to expose an arbitrary num
 ```text
 [Episode start]
 
-Agent → ResourcesServer: POST /seed_session
+Agent -> ResourcesServer: POST /seed_session
   (ResourcesServer initializes a fresh in-memory "workbench" for this session_id:
    company_directory + email/calendar/analytics/project_management/crm toolkits + their data)
 
 User: "Reply to Carlos's last email about 'Task Update' with 'Thanks, I'll follow up tomorrow.'"
 
-Agent → ModelServer: POST /v1/responses (many tools available)
+Agent -> ModelServer: POST /v1/responses (many tools available)
 Model calls tools to reach the goal (one possible path):
   function_call: email_search_emails({"query": "carlos Task Update"})
 
-Agent → ResourcesServer: POST /email_search_emails {"query": "carlos Task Update"}
-ResourcesServer → Agent:
+Agent -> ResourcesServer: POST /email_search_emails {"query": "carlos Task Update"}
+ResourcesServer -> Agent:
   {"emails": [...], "pagination": {...}}
 
-Agent → ModelServer: POST /v1/responses (now includes search results)
+Agent -> ModelServer: POST /v1/responses (now includes search results)
 Model calls:
   function_call: email_reply_email({"email_id": "00000057", "body": "Thanks, I'll follow up tomorrow."})
 
-Agent → ResourcesServer: POST /email_reply_email {"email_id": "00000057", "body": "..."}
-ResourcesServer → Agent:
+Agent -> ResourcesServer: POST /email_reply_email {"email_id": "00000057", "body": "..."}
+ResourcesServer -> Agent:
   "Email replied successfully."
 
-[Episode end → grading]
+[Episode end -> grading]
 
-Agent → ResourcesServer: POST /verify (includes full trace + ground truth calls for this task)
+Agent -> ResourcesServer: POST /verify (includes full trace + ground truth calls for this task)
 ResourcesServer:
   - extracts predicted function calls from the trace
-  - compares against ground truth using deterministic checks (Workplace Assistant uses state-based verification)
+  - compares against ground truth using state-based verification
   - returns reward 1.0 or 0.0
 ```
 
@@ -207,7 +241,7 @@ There are two common ways to grade tool-using agents:
 Compare the *exact* tool call sequence (names + arguments, sometimes order) against a reference trajectory.
 
 - **Pros**: Simple to implement; easy to debug.
-- **Cons**: Brittle — penalizes alternative correct paths (different searches, different ordering, equivalent updates).
+- **Cons**: Brittle --- penalizes alternative correct paths (different searches, different ordering, equivalent updates).
 
 ### 2. State Matching (Outcome Matching)
 
@@ -224,6 +258,16 @@ Execute the agent's predicted calls in a fresh sandbox, execute the ground truth
 
 This choice makes sense because workplace tasks often have **multiple valid tool sequences** that reach the same correct final state.
 
+:::{tip}
+For a deeper dive into verification strategies, reward shaping, and common pitfalls, see {ref}`task-verification`.
+:::
+
 ---
 
-> **Previous**: {ref}`Stateful Environment <building-environments-stateful>` | **Next**: {ref}`Configuration and Training Data <building-environments-configuration>`
+:::{button-ref} index
+:color: secondary
+:outline:
+:ref-type: doc
+
+< Back to Building Environments
+:::

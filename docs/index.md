@@ -165,8 +165,8 @@ Learn how to build custom training environments for various RL scenarios.
 ::::{grid} 1 2 2 2
 :gutter: 1 1 1 2
 
-:::{grid-item-card} {octicon}`plus-circle;1.5em;sd-mr-1` Creating Environments
-:link: environment-tutorials/creating-training-environment
+:::{grid-item-card} {octicon}`plus-circle;1.5em;sd-mr-1` Building Environments
+:link: environment-tutorials/index
 :link-type: doc
 Build a complete training environment from scratch.
 +++
@@ -334,7 +334,9 @@ Download from Hugging Face <data/download-huggingface>
 :maxdepth: 1
 
 Overview <environment-tutorials/index>
-Creating Training Environment <environment-tutorials/creating-training-environment>
+Multi-Step Environment <environment-tutorials/multi-step-environment>
+Stateful Environment <environment-tutorials/stateful-environment>
+Real-World Environment <environment-tutorials/real-world-environment>
 Integrate external libraries <environment-tutorials/integrate-external-environments>
 Add a benchmark <environment-tutorials/adding-a-benchmark>
 Design a customer evaluation <environment-tutorials/designing-customer-evaluation>

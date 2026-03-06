@@ -1,8 +1,16 @@
-(building-environments-stateful)=
+(env-stateful-environment)=
 
 # Stateful Environment
 
 For environments that need to maintain state across multiple tool calls within an episode, NeMo Gym provides session management via middleware.
+
+:::{button-ref} multi-step-environment
+:color: secondary
+:outline:
+:ref-type: doc
+
+< Previous: Multi-Step Environment
+:::
 
 ---
 
@@ -23,10 +31,10 @@ Inputs
 Flow (state is stored per session_id inside the ResourcesServer)
   1) POST ResourcesServer /seed_session {"initial_count": 3}
      - stores session_id_to_counter[session_id] = 3
-  2) POST ModelServer /v1/responses → function_call: increment_counter({"count": 2})
+  2) POST ModelServer /v1/responses -> function_call: increment_counter({"count": 2})
   3) POST ResourcesServer /increment_counter {"count": 2}
      - counter becomes 5 for this session_id
-  4) POST ModelServer /v1/responses → function_call: get_counter_value({})
+  4) POST ModelServer /v1/responses -> function_call: get_counter_value({})
   5) POST ResourcesServer /get_counter_value {}
      - returns {"count": 5}
   6) POST ResourcesServer /verify {"expected_count": 5, ...}
@@ -101,7 +109,7 @@ class StatefulCounterResourcesServer(SimpleResourcesServer):
         body: StatefulCounterSeedSessionRequest
     ) -> BaseSeedSessionResponse:
         session_id = request.session[SESSION_ID_KEY]  # Get unique session ID
-        self.session_id_to_counter.setdefault(session_id, body.initial_count)
+        self.session_id_to_counter[session_id] = body.initial_count
         return BaseSeedSessionResponse()
 
     # Stateful tool - modifies session state
@@ -152,7 +160,9 @@ Use `SESSION_ID_KEY` from the request session middleware to maintain per-episode
 3. Store state in an instance-level dictionary keyed by session ID
 
 :::{note}
-The actual source file (`resources_servers/example_session_state_mgmt/app.py`) contains a local redefinition of `BaseVerifyResponse` that shadows the import. This simplified version removes that redundancy and uses the imported `BaseVerifyResponse` directly, which has the same structure (`reward: float` inheriting from `BaseVerifyRequest`).
+In `seed_session`, use direct assignment (`self.session_id_to_counter[session_id] = body.initial_count`) rather than `setdefault`. Using `setdefault` would silently ignore re-seed attempts if the session already exists, which can cause subtle bugs when the same session ID is reused across episodes.
+
+In tool methods like `increment_counter` and `get_counter_value`, `setdefault` is appropriate --- it provides a safe fallback of `0` if the session was somehow not initialized.
 :::
 
 ---
@@ -162,31 +172,31 @@ The actual source file (`resources_servers/example_session_state_mgmt/app.py`) c
 ```text
 [Episode start]
 
-Agent → ResourcesServer: POST /seed_session {"initial_count": 3}
+Agent -> ResourcesServer: POST /seed_session {"initial_count": 3}
   (ResourcesServer stores session_id_to_counter[session_id] = 3)
 
 User: "Increment the counter by 2, then tell me the current value."
 
-Agent → ModelServer: POST /v1/responses (tools: increment_counter, get_counter_value)
+Agent -> ModelServer: POST /v1/responses (tools: increment_counter, get_counter_value)
 Model calls tool:
   function_call: increment_counter({"count": 2})
 
-Agent → ResourcesServer: POST /increment_counter {"count": 2}
-ResourcesServer → Agent:
+Agent -> ResourcesServer: POST /increment_counter {"count": 2}
+ResourcesServer -> Agent:
   {"success": true}
   (counter is now 5 for this session_id)
 
-Agent → ModelServer: POST /v1/responses
+Agent -> ModelServer: POST /v1/responses
 Model calls tool:
   function_call: get_counter_value({})
 
-Agent → ResourcesServer: POST /get_counter_value {}
-ResourcesServer → Agent:
+Agent -> ResourcesServer: POST /get_counter_value {}
+ResourcesServer -> Agent:
   {"count": 5}
 
-[Episode end → grading]
+[Episode end -> grading]
 
-Agent → ResourcesServer: POST /verify {"expected_count": 5, ...}
+Agent -> ResourcesServer: POST /verify {"expected_count": 5, ...}
 ResourcesServer:
   - reads counter for this session_id
   - reward = 1.0 if counter == expected_count else 0.0
@@ -194,4 +204,10 @@ ResourcesServer:
 
 ---
 
-> **Previous**: {ref}`Multi-Step Environment <building-environments-multi-step>` | **Next**: {ref}`Real-World Environment <building-environments-real-world>`
+:::{button-ref} real-world-environment
+:color: secondary
+:outline:
+:ref-type: doc
+
+Next: Real-World Environment >
+:::

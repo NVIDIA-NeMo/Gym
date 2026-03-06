@@ -1,8 +1,16 @@
-(building-environments-multi-step)=
+(env-multi-step-environment)=
 
 # Multi-Step Environment
 
 This environment requires the agent to make multiple tool calls in sequence and extract specific values. The reward function compares the agent's submitted values against ground truth.
+
+:::{button-ref} index
+:color: secondary
+:outline:
+:ref-type: doc
+
+< Previous: Building Environments
+:::
 
 ---
 
@@ -24,31 +32,31 @@ Inputs (from one JSONL row)
 
 What does synonym_value mean?
   - `synonym_value` is the numeric output returned by the tool `/get_synonym_value`.
-  - In this example implementation, it's computed as the sum of character code points for the synonym string (e.g., "Warm" → 407).
+  - In this example implementation, it's computed as the sum of character code points for the synonym string (e.g., "Warm" -> 407).
 
-┌───────────────────────────── ResponsesAPIAgent (/run) ─────────────────────────────┐
-│                                                                                    │
-│  1) Initialize episode state                                                       │
-│     POST ResourcesServer /seed_session                                              │
-│                                                                                    │
-│  2) Interaction loop (repeat up to max_steps)                                       │
-│     POST ModelServer /v1/responses                                                  │
-│       ├─ if output contains text: keep it in the conversation                       │
-│       └─ if output contains function_call(name=TOOL, arguments=...):                │
-│              POST ResourcesServer /{TOOL}                                           │
-│                - /get_synonym_value(synonym="Warm")   → synonym_value=407           │
-│                - /get_synonym_value(synonym="Blazing")→ synonym_value=711           │
-│              append tool result back into the conversation                          │
-│                                                                                    │
-│     (agent eventually submits)                                                      │
-│       function_call: extract_synonym_values(synonym_values=[407, 711, ...])         │
-│                                                                                    │
-│  3) Grade the rollout (reward)                                                     │
-│     POST ResourcesServer /verify                                                    │
-│       - parse the final extract_synonym_values(...) arguments from the response     │
-│       - compare to expected_synonym_values                                          │
-│       - reward = 1.0 if exact match else 0.0 (plus extra metrics like minefields)   │
-└────────────────────────────────────────────────────────────────────────────────────┘
++--------------------------- ResponsesAPIAgent (/run) ---------------------------+
+|                                                                                |
+|  1) Initialize episode state                                                   |
+|     POST ResourcesServer /seed_session                                         |
+|                                                                                |
+|  2) Interaction loop (repeat up to max_steps)                                  |
+|     POST ModelServer /v1/responses                                             |
+|       +- if output contains text: keep it in the conversation                  |
+|       +- if output contains function_call(name=TOOL, arguments=...):           |
+|              POST ResourcesServer /{TOOL}                                      |
+|                - /get_synonym_value(synonym="Warm")   -> synonym_value=407     |
+|                - /get_synonym_value(synonym="Blazing")-> synonym_value=711     |
+|              append tool result back into the conversation                     |
+|                                                                                |
+|     (agent eventually submits)                                                 |
+|       function_call: extract_synonym_values(synonym_values=[407, 711, ...])    |
+|                                                                                |
+|  3) Grade the rollout (reward)                                                 |
+|     POST ResourcesServer /verify                                               |
+|       - parse the final extract_synonym_values(...) arguments from the response|
+|       - compare to expected_synonym_values                                     |
+|       - reward = 1.0 if exact match else 0.0 (plus extra metrics)              |
++--------------------------------------------------------------------------------+
 ```
 
 ---
@@ -144,18 +152,21 @@ class ExampleMultiStepResourcesServer(SimpleResourcesServer):
     async def verify(
         self, body: ExampleMultiStepVerifyRequest
     ) -> ExampleMultiStepVerifyResponse:
-        expected = body.expected_synonym_values # Pulls the ground truth
+        expected = body.expected_synonym_values  # Pulls the ground truth
 
         # Parse the agent's final answer from its response
         actual = []
         for output in reversed(body.response.output):
             if output.type == "function_call" and output.name == "extract_synonym_values":
-                actual = json.loads(output.arguments)["synonym_values"]
+                try:
+                    actual = json.loads(output.arguments)["synonym_values"]
+                except (json.JSONDecodeError, KeyError):
+                    actual = []
                 break
 
         # Compute reward based on exact match
         accuracy = expected == actual
-        set_overlap = len(set(actual) & set(expected)) / len(expected)
+        set_overlap = len(set(actual) & set(expected)) / len(expected) if expected else 0.0
 
         return ExampleMultiStepVerifyResponse(
             **body.model_dump(),
@@ -176,6 +187,10 @@ if __name__ == "__main__":
 
 The `verify()` function parses the agent's tool calls from `body.response.output` and computes a reward by comparing against ground truth (`body.expected_synonym_values`). The ground truth fields come from the JSONL dataset row and are passed through the `ExampleMultiStepVerifyRequest`.
 
+:::{tip}
+The `json.loads(output.arguments)` call is wrapped in `try/except` to handle cases where the model produces malformed JSON. Always guard against unparseable model output in your verify function. For more verification patterns, see {ref}`task-verification`.
+:::
+
 ---
 
 ## Rollout Transcript
@@ -183,40 +198,46 @@ The `verify()` function parses the agent's tool calls from `body.response.output
 ```text
 [Episode start]
 
-Agent → ResourcesServer: POST /seed_session
+Agent -> ResourcesServer: POST /seed_session
   (environment is initialized for this episode)
 
 User: "For the synonyms ['Warm', 'Blazing'], look up each synonym_value and then submit the list."
 
-Agent → ModelServer: POST /v1/responses (tools available: get_synonym_value, extract_synonym_values)
+Agent -> ModelServer: POST /v1/responses (tools available: get_synonym_value, extract_synonym_values)
 Model decides to call a tool:
   function_call: get_synonym_value({"synonym": "Warm"})
 
-Agent → ResourcesServer: POST /get_synonym_value {"synonym": "Warm"}
-ResourcesServer → Agent:
+Agent -> ResourcesServer: POST /get_synonym_value {"synonym": "Warm"}
+ResourcesServer -> Agent:
   {"synonym_value": 407}
 
-Agent → ModelServer: POST /v1/responses (now includes tool output 407)
+Agent -> ModelServer: POST /v1/responses (now includes tool output 407)
 Model calls next tool:
   function_call: get_synonym_value({"synonym": "Blazing"})
 
-Agent → ResourcesServer: POST /get_synonym_value {"synonym": "Blazing"}
-ResourcesServer → Agent:
+Agent -> ResourcesServer: POST /get_synonym_value {"synonym": "Blazing"}
+ResourcesServer -> Agent:
   {"synonym_value": 711}
 
-Agent → ModelServer: POST /v1/responses (now includes tool output 711)
+Agent -> ModelServer: POST /v1/responses (now includes tool output 711)
 Model submits final answer via the "submit" tool:
   function_call: extract_synonym_values({"synonym_values": [407, 711]})
 
-[Episode end → grading]
+[Episode end -> grading]
 
-Agent → ResourcesServer: POST /verify (includes the full response trace + ground truth fields)
+Agent -> ResourcesServer: POST /verify (includes the full response trace + ground truth fields)
 ResourcesServer:
-  - parses the extract_synonym_values(...) arguments → actual=[407, 711]
+  - parses the extract_synonym_values(...) arguments -> actual=[407, 711]
   - compares to expected_synonym_values from the dataset row
   - returns reward: 1.0 if exact match else 0.0
 ```
 
 ---
 
-> **Previous**: {ref}`Single-Step Environment <building-environments-single-step>` | **Next**: {ref}`Stateful Environment <building-environments-stateful>`
+:::{button-ref} stateful-environment
+:color: secondary
+:outline:
+:ref-type: doc
+
+Next: Stateful Environment >
+:::
