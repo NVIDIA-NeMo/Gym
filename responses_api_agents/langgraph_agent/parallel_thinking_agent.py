@@ -74,10 +74,10 @@ class ParallelThinkingVerifyResponse(BaseVerifyResponse):
 
 class ParallelThinkingState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
-    nemo_outputs: list
+    policy_outputs: list
     cookies: dict
     request_body: NeMoGymResponseCreateParamsNonStreaming
-    last_model_response: NeMoGymResponse
+    last_policy_response: NeMoGymResponse
     task: str
     parallel_results: List[str]
 
@@ -91,7 +91,7 @@ class ParallelThinkingAgent(LangGraphAgentAdapter):
 
     async def _call_model(self, state, prompt):
         input_messages = [NeMoGymEasyInputMessage(role="user", content=prompt)]
-        request_body = state["request_body"].model_copy(update={"input": input_messages + state["nemo_outputs"]})
+        request_body = state["request_body"].model_copy(update={"input": input_messages + state["policy_outputs"]})
         resp = await self.server_client.post(
             server_name=self.config.model_server.name,
             url_path="/v1/responses",
@@ -108,37 +108,34 @@ class ParallelThinkingAgent(LangGraphAgentAdapter):
             task = state["task"]
             num_paths = self.config.num_parallel_paths
             prompts = self.config.perspective_prompts[:num_paths]
-            # Pad with the default prompts if fewer perspective_prompts than num_paths
             while len(prompts) < num_paths:
                 prompts.append(f"Think carefully about this problem and solve it:\n{task}")
 
             async def _single_path(perspective):
                 full_prompt = f"{perspective}\n\nProblem: {task}"
-                nemo_response, cookies = await self._call_model(state, full_prompt)
-                text = _extract_text(nemo_response.output)
-                return text, nemo_response, cookies
+                policy_response, cookies = await self._call_model(state, full_prompt)
+                text = _extract_text(policy_response.output)
+                return text, policy_response, cookies
 
             results = await asyncio.gather(*[_single_path(p) for p in prompts])
 
             parallel_texts = [r[0] for r in results]
-            # Use the last response/cookies for state continuity
             last_response = results[-1][1]
             last_cookies = results[-1][2]
 
-            # Accumulate all nemo_outputs from all paths
-            all_nemo_outputs = list(state["nemo_outputs"])
-            for i, (text, nemo_response, _) in enumerate(results):
+            all_policy_outputs = list(state["policy_outputs"])
+            for i, (text, policy_response, _) in enumerate(results):
                 prompt_msg = NeMoGymEasyInputMessage(role="user", content=f"{prompts[i]}\n\nProblem: {task}")
-                all_nemo_outputs.append(prompt_msg)
-                all_nemo_outputs.extend(nemo_response.output)
+                all_policy_outputs.append(prompt_msg)
+                all_policy_outputs.extend(policy_response.output)
 
             summary = "\n\n".join(f"[Path {i + 1}]: {t}" for i, t in enumerate(parallel_texts))
 
             return {
                 "messages": [AIMessage(content=summary)],
-                "nemo_outputs": all_nemo_outputs,
+                "policy_outputs": all_policy_outputs,
                 "cookies": last_cookies,
-                "last_model_response": last_response,
+                "last_policy_response": last_response,
                 "request_body": state["request_body"],
                 "task": task,
                 "parallel_results": parallel_texts,
@@ -156,14 +153,14 @@ class ParallelThinkingAgent(LangGraphAgentAdapter):
             )
             prompt_msg = NeMoGymEasyInputMessage(role="user", content=prompt)
 
-            nemo_response, cookies = await self._call_model(state, prompt)
-            text = _extract_text(nemo_response.output)
+            policy_response, cookies = await self._call_model(state, prompt)
+            text = _extract_text(policy_response.output)
 
             return {
                 "messages": [HumanMessage(content=prompt), AIMessage(content=text)],
-                "nemo_outputs": state["nemo_outputs"] + [prompt_msg] + nemo_response.output,
+                "policy_outputs": state["policy_outputs"] + [prompt_msg] + policy_response.output,
                 "cookies": cookies,
-                "last_model_response": nemo_response,
+                "last_policy_response": policy_response,
                 "request_body": state["request_body"],
                 "task": state["task"],
                 "parallel_results": state["parallel_results"],
@@ -190,16 +187,16 @@ class ParallelThinkingAgent(LangGraphAgentAdapter):
 
         return {
             "messages": [HumanMessage(content=task)],
-            "nemo_outputs": [],
+            "policy_outputs": [],
             "cookies": cookies,
             "request_body": body,
-            "last_model_response": None,
+            "last_policy_response": None,
             "task": task,
             "parallel_results": [],
         }
 
     def extract_outputs(self, final_state: dict) -> list:
-        return final_state["nemo_outputs"]
+        return final_state["policy_outputs"]
 
     async def run(self, request: Request, body: ParallelThinkingRunRequest) -> ParallelThinkingVerifyResponse:
         cookies = request.cookies

@@ -36,10 +36,11 @@ from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse, NeMo
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
-DECOMPOSE_PROMPT = """Break the following problem into 2-4 independent sub-tasks that can each be solved separately. \
+DECOMPOSE_PROMPT = """Break the following problem into independent sub-tasks that can each be solved separately. \
 For each sub-task, write it as a self-contained question that can be answered without context from the others.
+You may use up to 5 subtasks.
 
-Format your response exactly as:
+Format your response like so:
 SUBTASK 1: <question>
 SUBTASK 2: <question>
 SUBTASK 3: <question>
@@ -63,7 +64,7 @@ SUBTASK_REGEX = r"SUBTASK\s+\d+:\s*(.+)"
 
 
 class OrchestratorAgentConfig(LangGraphAgentConfig):
-    max_subtasks: int = 4
+    max_subtasks: int = 5
 
 
 class OrchestratorRunRequest(BaseRunRequest):
@@ -80,10 +81,10 @@ class OrchestratorVerifyResponse(BaseVerifyResponse):
 
 class OrchestratorState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
-    nemo_outputs: list
+    policy_outputs: list
     cookies: dict
     request_body: NeMoGymResponseCreateParamsNonStreaming
-    last_model_response: NeMoGymResponse
+    last_policy_response: NeMoGymResponse
     task: str
     subtasks: List[str]
     subtask_results: dict
@@ -94,14 +95,13 @@ def _extract_text(outputs):
     return "".join(c.text for o in outputs if o.type == "message" for c in o.content if c.type == "output_text")
 
 
-# TODO: Use LangGraph's Send() API for true parallel worker dispatch instead of
-# sequential loop. See langgraphs workflows.md "Orchestrator-Worker" pattern.
+# TODO: Use LangGraph's Send() API for the parallel worker dispatch, see langgraphs workflows.md Orchestrator-Worker pattern.
 class OrchestratorAgent(LangGraphAgentAdapter):
     config: OrchestratorAgentConfig
 
     async def _call_model(self, state, prompt):
         input_messages = [NeMoGymEasyInputMessage(role="user", content=prompt)]
-        request_body = state["request_body"].model_copy(update={"input": input_messages + state["nemo_outputs"]})
+        request_body = state["request_body"].model_copy(update={"input": input_messages + state["policy_outputs"]})
         resp = await self.server_client.post(
             server_name=self.config.model_server.name,
             url_path="/v1/responses",
@@ -119,8 +119,8 @@ class OrchestratorAgent(LangGraphAgentAdapter):
             prompt = DECOMPOSE_PROMPT.format(task=task)
             prompt_msg = NeMoGymEasyInputMessage(role="user", content=prompt)
 
-            nemo_response, cookies = await self._call_model(state, prompt)
-            text = _extract_text(nemo_response.output)
+            policy_response, cookies = await self._call_model(state, prompt)
+            text = _extract_text(policy_response.output)
 
             matches = re.findall(SUBTASK_REGEX, text)
             subtasks = [m.strip() for m in matches[: self.config.max_subtasks]]
@@ -131,9 +131,9 @@ class OrchestratorAgent(LangGraphAgentAdapter):
 
             return {
                 "messages": [HumanMessage(content=prompt), AIMessage(content=text)],
-                "nemo_outputs": state["nemo_outputs"] + [prompt_msg] + nemo_response.output,
+                "policy_outputs": state["policy_outputs"] + [prompt_msg] + policy_response.output,
                 "cookies": cookies,
-                "last_model_response": nemo_response,
+                "last_policy_response": policy_response,
                 "request_body": state["request_body"],
                 "subtasks": subtasks,
                 "subtask_results": {},
@@ -146,16 +146,16 @@ class OrchestratorAgent(LangGraphAgentAdapter):
             prompt = f"Solve the following sub-task completely. Show your work.\n\nSub-task: {subtask}"
             prompt_msg = NeMoGymEasyInputMessage(role="user", content=prompt)
 
-            nemo_response, cookies = await self._call_model(state, prompt)
-            text = _extract_text(nemo_response.output)
+            policy_response, cookies = await self._call_model(state, prompt)
+            text = _extract_text(policy_response.output)
 
             new_results = {**state["subtask_results"], f"subtask_{idx + 1}": text}
 
             return {
                 "messages": [HumanMessage(content=prompt), AIMessage(content=text)],
-                "nemo_outputs": state["nemo_outputs"] + [prompt_msg] + nemo_response.output,
+                "policy_outputs": state["policy_outputs"] + [prompt_msg] + policy_response.output,
                 "cookies": cookies,
-                "last_model_response": nemo_response,
+                "last_policy_response": policy_response,
                 "request_body": state["request_body"],
                 "subtask_results": new_results,
                 "current_subtask": idx + 1,
@@ -170,14 +170,14 @@ class OrchestratorAgent(LangGraphAgentAdapter):
             prompt = SYNTHESIZE_PROMPT.format(task=task, subtask_results=results_text)
             prompt_msg = NeMoGymEasyInputMessage(role="user", content=prompt)
 
-            nemo_response, cookies = await self._call_model(state, prompt)
-            text = _extract_text(nemo_response.output)
+            policy_response, cookies = await self._call_model(state, prompt)
+            text = _extract_text(policy_response.output)
 
             return {
                 "messages": [HumanMessage(content=prompt), AIMessage(content=text)],
-                "nemo_outputs": state["nemo_outputs"] + [prompt_msg] + nemo_response.output,
+                "policy_outputs": state["policy_outputs"] + [prompt_msg] + policy_response.output,
                 "cookies": cookies,
-                "last_model_response": nemo_response,
+                "last_policy_response": policy_response,
                 "request_body": state["request_body"],
             }
 
@@ -209,10 +209,10 @@ class OrchestratorAgent(LangGraphAgentAdapter):
 
         return {
             "messages": [HumanMessage(content=task)],
-            "nemo_outputs": [],
+            "policy_outputs": [],
             "cookies": cookies,
             "request_body": body,
-            "last_model_response": None,
+            "last_policy_response": None,
             "task": task,
             "subtasks": [],
             "subtask_results": {},
@@ -220,7 +220,7 @@ class OrchestratorAgent(LangGraphAgentAdapter):
         }
 
     def extract_outputs(self, final_state: dict) -> list:
-        return final_state["nemo_outputs"]
+        return final_state["policy_outputs"]
 
     async def run(self, request: Request, body: OrchestratorRunRequest) -> OrchestratorVerifyResponse:
         cookies = request.cookies

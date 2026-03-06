@@ -95,10 +95,10 @@ class ReWOOVerifyResponse(BaseVerifyResponse):
 
 class ReWOOState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
-    nemo_outputs: list
+    policy_outputs: list
     cookies: dict
     request_body: NeMoGymResponseCreateParamsNonStreaming
-    last_model_response: NeMoGymResponse
+    last_policy_response: NeMoGymResponse
     task: str
     plan_string: str
     steps: List
@@ -115,7 +115,7 @@ class ReWOOAgent(LangGraphAgentAdapter):
 
     async def _call_model(self, state, prompt):
         input_messages = [NeMoGymEasyInputMessage(role="user", content=prompt)]
-        request_body = state["request_body"].model_copy(update={"input": input_messages + state["nemo_outputs"]})
+        request_body = state["request_body"].model_copy(update={"input": input_messages + state["policy_outputs"]})
         resp = await self.server_client.post(
             server_name=self.config.model_server.name,
             url_path="/v1/responses",
@@ -133,16 +133,16 @@ class ReWOOAgent(LangGraphAgentAdapter):
             prompt = PLAN_PROMPT.format(task=task)
             prompt_msg = NeMoGymEasyInputMessage(role="user", content=prompt)
 
-            nemo_response, cookies = await self._call_model(state, prompt)
-            text = _extract_text(nemo_response.output)
+            policy_response, cookies = await self._call_model(state, prompt)
+            text = _extract_text(policy_response.output)
 
             matches = re.findall(STEP_REGEX, text)
 
             return {
                 "messages": [HumanMessage(content=prompt), AIMessage(content=text)],
-                "nemo_outputs": state["nemo_outputs"] + [prompt_msg] + nemo_response.output,
+                "policy_outputs": state["policy_outputs"] + [prompt_msg] + policy_response.output,
                 "cookies": cookies,
-                "last_model_response": nemo_response,
+                "last_policy_response": policy_response,
                 "request_body": state["request_body"],
                 "plan_string": text,
                 "steps": matches,
@@ -161,8 +161,8 @@ class ReWOOAgent(LangGraphAgentAdapter):
             prompt = tool_input
             prompt_msg = NeMoGymEasyInputMessage(role="user", content=f"Step {step_name}: {prompt}")
 
-            nemo_response, cookies = await self._call_model(state, prompt)
-            text = _extract_text(nemo_response.output)
+            policy_response, cookies = await self._call_model(state, prompt)
+            text = _extract_text(policy_response.output)
 
             new_results = {**state["results"], step_name: text}
 
@@ -171,9 +171,9 @@ class ReWOOAgent(LangGraphAgentAdapter):
                     HumanMessage(content=f"Step {step_name}: {prompt}"),
                     AIMessage(content=text),
                 ],
-                "nemo_outputs": state["nemo_outputs"] + [prompt_msg] + nemo_response.output,
+                "policy_outputs": state["policy_outputs"] + [prompt_msg] + policy_response.output,
                 "cookies": cookies,
-                "last_model_response": nemo_response,
+                "last_policy_response": policy_response,
                 "request_body": state["request_body"],
                 "results": new_results,
                 "current_step": step_idx + 1,
@@ -190,14 +190,14 @@ class ReWOOAgent(LangGraphAgentAdapter):
             prompt = SOLVE_PROMPT.format(plan=plan_with_evidence, task=state["task"])
             prompt_msg = NeMoGymEasyInputMessage(role="user", content=prompt)
 
-            nemo_response, cookies = await self._call_model(state, prompt)
-            text = _extract_text(nemo_response.output)
+            policy_response, cookies = await self._call_model(state, prompt)
+            text = _extract_text(policy_response.output)
 
             return {
                 "messages": [HumanMessage(content=prompt), AIMessage(content=text)],
-                "nemo_outputs": state["nemo_outputs"] + [prompt_msg] + nemo_response.output,
+                "policy_outputs": state["policy_outputs"] + [prompt_msg] + policy_response.output,
                 "cookies": cookies,
-                "last_model_response": nemo_response,
+                "last_policy_response": policy_response,
                 "request_body": state["request_body"],
             }
 
@@ -230,10 +230,10 @@ class ReWOOAgent(LangGraphAgentAdapter):
 
         return {
             "messages": [HumanMessage(content=task)],
-            "nemo_outputs": [],
+            "policy_outputs": [],
             "cookies": cookies,
             "request_body": body,
-            "last_model_response": None,
+            "last_policy_response": None,
             "task": task,
             "plan_string": "",
             "steps": [],
@@ -242,7 +242,7 @@ class ReWOOAgent(LangGraphAgentAdapter):
         }
 
     def extract_outputs(self, final_state: dict) -> list:
-        return final_state["nemo_outputs"]
+        return final_state["policy_outputs"]
 
     async def run(self, request: Request, body: ReWOORunRequest) -> ReWOOVerifyResponse:
         cookies = request.cookies

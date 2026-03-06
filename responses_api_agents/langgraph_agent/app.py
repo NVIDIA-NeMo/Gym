@@ -51,9 +51,9 @@ class LangGraphAgentAdapter(SimpleResponsesAPIAgent):
         pass
 
     def extract_model_response(self, final_state: dict) -> NeMoGymResponse:
-        if "last_model_response" in final_state:
-            return final_state["last_model_response"]
-        raise NotImplementedError("State must contain 'last_model_response' or override extract_model_response()")
+        if "last_policy_response" in final_state:
+            return final_state["last_policy_response"]
+        raise NotImplementedError("State must contain 'last_policy_response' or override extract_model_response()")
 
     async def responses(
         self, request: Request, response: Response, body: NeMoGymResponseCreateParamsNonStreaming = Body()

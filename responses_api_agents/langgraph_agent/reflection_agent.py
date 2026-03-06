@@ -54,11 +54,11 @@ class ReflectionAgentVerifyResponse(BaseVerifyResponse):
 
 class ReflectionState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
-    nemo_outputs: list
+    policy_outputs: list
     cookies: dict
     reflections: int
     request_body: NeMoGymResponseCreateParamsNonStreaming
-    last_model_response: NeMoGymResponse
+    last_policy_response: NeMoGymResponse
 
 
 class ReflectionAgent(LangGraphAgentAdapter):
@@ -74,7 +74,7 @@ class ReflectionAgent(LangGraphAgentAdapter):
                 for m in state["messages"]
             ]
 
-            request_body = state["request_body"].model_copy(update={"input": input_messages + state["nemo_outputs"]})
+            request_body = state["request_body"].model_copy(update={"input": input_messages + state["policy_outputs"]})
 
             resp = await self.server_client.post(
                 server_name=self.config.model_server.name,
@@ -84,10 +84,10 @@ class ReflectionAgent(LangGraphAgentAdapter):
             )
 
             await raise_for_status(resp)
-            nemo_response = NeMoGymResponse.model_validate(await resp.json())
+            policy_response = NeMoGymResponse.model_validate(await resp.json())
 
-            new_outputs = nemo_response.output
-            all_outputs = state["nemo_outputs"] + new_outputs
+            new_outputs = policy_response.output
+            all_outputs = state["policy_outputs"] + new_outputs
 
             text = "".join(
                 c.text for o in new_outputs if o.type == "message" for c in o.content if c.type == "output_text"
@@ -95,10 +95,10 @@ class ReflectionAgent(LangGraphAgentAdapter):
 
             return {
                 "messages": [AIMessage(content=text)],
-                "nemo_outputs": all_outputs,
+                "policy_outputs": all_outputs,
                 "cookies": resp.cookies,
                 "reflections": state["reflections"],
-                "last_model_response": nemo_response,
+                "last_policy_response": policy_response,
                 "request_body": state["request_body"],
             }
 
@@ -113,7 +113,7 @@ class ReflectionAgent(LangGraphAgentAdapter):
                 for m in state["messages"]
             ] + [reflection_prompt]
 
-            request_body = state["request_body"].model_copy(update={"input": input_messages + state["nemo_outputs"]})
+            request_body = state["request_body"].model_copy(update={"input": input_messages + state["policy_outputs"]})
 
             resp = await self.server_client.post(
                 server_name=self.config.model_server.name,
@@ -123,11 +123,11 @@ class ReflectionAgent(LangGraphAgentAdapter):
             )
 
             await raise_for_status(resp)
-            nemo_response = NeMoGymResponse.model_validate(await resp.json())
+            policy_response = NeMoGymResponse.model_validate(await resp.json())
 
             text = "".join(
                 c.text
-                for o in nemo_response.output
+                for o in policy_response.output
                 if o.type == "message"
                 for c in o.content
                 if c.type == "output_text"
@@ -138,10 +138,10 @@ class ReflectionAgent(LangGraphAgentAdapter):
                     HumanMessage(content="Critique your solution. What could be wrong?"),
                     AIMessage(content=text),
                 ],
-                "nemo_outputs": state["nemo_outputs"] + [reflection_prompt] + nemo_response.output,
+                "policy_outputs": state["policy_outputs"] + [reflection_prompt] + policy_response.output,
                 "cookies": resp.cookies,
                 "reflections": state["reflections"] + 1,
-                "last_model_response": nemo_response,
+                "last_policy_response": policy_response,
                 "request_body": state["request_body"],
             }
 
@@ -162,10 +162,10 @@ class ReflectionAgent(LangGraphAgentAdapter):
     async def get_initial_state(self, body: NeMoGymResponseCreateParamsNonStreaming, cookies: dict) -> dict:
         if isinstance(body.input, str):
             initial_messages = [HumanMessage(content=body.input)]
-            nemo_outputs = []
+            policy_outputs = []
         else:
             initial_messages = []
-            nemo_outputs = []
+            policy_outputs = []
             for msg in body.input:
                 is_output = (
                     hasattr(msg, "type")
@@ -178,7 +178,7 @@ class ReflectionAgent(LangGraphAgentAdapter):
                 is_function_call = hasattr(msg, "type") and msg.type == "function_call"
 
                 if is_output or is_function_call:
-                    nemo_outputs.append(msg)
+                    policy_outputs.append(msg)
                 else:
                     role = getattr(msg, "role", None) or (msg.get("role") if isinstance(msg, dict) else "user")
                     content = getattr(msg, "content", None) or (msg.get("content") if isinstance(msg, dict) else "")
@@ -189,15 +189,15 @@ class ReflectionAgent(LangGraphAgentAdapter):
 
         return {
             "messages": initial_messages,
-            "nemo_outputs": nemo_outputs,
+            "policy_outputs": policy_outputs,
             "cookies": cookies,
             "reflections": 0,
             "request_body": body,
-            "last_model_response": None,
+            "last_policy_response": None,
         }
 
     def extract_outputs(self, final_state: dict) -> list:
-        return final_state["nemo_outputs"]
+        return final_state["policy_outputs"]
 
     async def run(self, request: Request, body: ReflectionAgentRunRequest) -> ReflectionAgentVerifyResponse:
         cookies = request.cookies
