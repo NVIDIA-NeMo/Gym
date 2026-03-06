@@ -2,7 +2,7 @@
 
 LangGraph agent adapter. 
 
-Reflection agent example: generate, critique, revise loop for reasoning tasks.
+Reflection agent example: generate, critique, revise loop
 
 ## Quick Start
 
