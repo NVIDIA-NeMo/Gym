@@ -19,15 +19,15 @@ from pydantic import BaseModel
 
 class FewShotExamplesConfig(BaseModel):
     prefix: str = ""
-    template: str
+    template: str = ""
     suffix: str = ""
-    examples: List[Dict[str, str]]
+    examples: List[Dict[str, str]] = []
 
 
 class PromptConfig(BaseModel):
     user: str
     system: Optional[str] = None
-    few_shot_examples: Optional[FewShotExamplesConfig] = None
+    few_shot_examples: FewShotExamplesConfig = FewShotExamplesConfig()
 
 
 class Prompt:
@@ -40,17 +40,17 @@ class Prompt:
         if self.config.system is not None:
             messages.append({"role": "system", "content": self.config.system.format(**input_dict)})
 
-        user_parts = []
-        if self.config.few_shot_examples is not None:
-            fs = self.config.few_shot_examples
-            examples_str = fs.prefix
-            for example in fs.examples:
-                examples_str += fs.template.format(**example)
-            examples_str += fs.suffix
-            user_parts.append(examples_str)
+        # Build few-shot examples string, available as {examples} in the user template.
+        # Matches NeMo Skills: <prefix><filled_template1><filled_template2>...<suffix>
+        fs = self.config.few_shot_examples
+        if fs.examples:
+            filled = "".join(fs.template.format(**ex) for ex in fs.examples)
+            examples = f"{fs.prefix}{filled}{fs.suffix}"
+        else:
+            examples = ""
 
-        user_parts.append(self.config.user.format(**input_dict))
-        messages.append({"role": "user", "content": "".join(user_parts)})
+        user_content = self.config.user.format(examples=examples, **input_dict)
+        messages.append({"role": "user", "content": user_content})
 
         return messages
 
