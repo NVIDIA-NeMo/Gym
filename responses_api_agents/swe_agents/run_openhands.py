@@ -248,6 +248,12 @@ class RunOpenHandsAgent:
             "chown $uid:$uid /tmp/tmux-$uid || true && "
             "chmod 700 /tmp/tmux-$uid && "
             "tmux -S /tmp/tmux-$uid/default start-server || true && "
+            # Install JQ inside the container if not already present.
+            # curl is not available in all SWE-bench images, so use python3 urllib instead.
+            "which jq > /dev/null 2>&1 || "
+            "python3 -c 'import urllib.request,os; urllib.request.urlretrieve("
+            '"https://github.com/jqlang/jq/releases/download/jq-1.8.1/jq-linux-amd64"'
+            ',"/usr/local/bin/jq"); os.chmod("/usr/local/bin/jq",0o777)\' && '
             # Use pre-built OpenHands
             "cd /openhands_setup/OpenHands && "
             "export RUNTIME=local && "

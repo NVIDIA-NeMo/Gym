@@ -1,0 +1,44 @@
+# SWE-bench wrapper configuration for OpenHands — SWE-Multilingual dataset
+swe_multilingual_openhands:
+  responses_api_agents:
+    swe_agents:
+      entrypoint: app.py
+
+      # Agent framework configuration
+      agent_framework: openhands
+      agent_config: responses_api_agents/swe_agents/configs/oh_config.toml
+      agent_max_turns: 100
+      agent_framework_repo: https://github.com/roclark/nv-OpenHands.git
+      agent_framework_commit: 510de50bf4154a351c8850b2a8f741f7fe1cc077  # pragma: allowlist secret
+
+      # Container configuration
+      # NOTE: Update this path to point to the multilingual container images if they differ
+      # from the SWE-Verified images.
+      container_formatter: ???
+      container_folder_path: null
+      swebench_agent_timeout: 2700  # 45 minutes
+      swebench_tests_timeout: 1800  # 30 minutes
+
+      dataset_path: ???
+
+      # Optional model server reference
+      model_server:
+        name: policy_model
+        type: responses_api_models
+
+      # Dataset configurations
+      datasets:
+        # Validation dataset (SWE-Multilingual, 300 multilingual GitHub issues)
+        - name: validation
+          type: validation
+          jsonl_fpath: responses_api_agents/swe_agents/data/swe_multilingual_for_sweagent_and_openhands.jsonl
+          gitlab_identifier:
+            dataset_name: swe_multilingual_for_sweagent_and_openhands
+            version: 0.0.1
+            artifact_fpath: swe_multilingual_for_sweagent_and_openhands.jsonl
+          license: MIT
+
+        # Example dataset for quick testing
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/swe_agents/data/swe_multilingual_example.jsonl
