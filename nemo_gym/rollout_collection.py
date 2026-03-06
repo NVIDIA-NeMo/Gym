@@ -161,12 +161,8 @@ class RolloutCollectionHelper(BaseModel):
                 row_idxs_missing_agent_ref.append(row_idx)
 
             # Responses create params
-            overrides = OmegaConf.to_container(
-                OmegaConf.create(config.responses_create_params), resolve=True
-            )
-            row[RESPONSES_CREATE_PARAMS_KEY_NAME] = (
-                row[RESPONSES_CREATE_PARAMS_KEY_NAME] | overrides
-            )
+            overrides = OmegaConf.to_container(OmegaConf.create(config.responses_create_params), resolve=True)
+            row[RESPONSES_CREATE_PARAMS_KEY_NAME] = row[RESPONSES_CREATE_PARAMS_KEY_NAME] | overrides
 
             # Resolve task index
             row[TASK_INDEX_KEY_NAME] = row_to_task_idx.setdefault(row_str, len(row_to_task_idx))
