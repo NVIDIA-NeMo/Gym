@@ -8,5 +8,5 @@ input_jsonl_fpath: benchmarks/aime25/data/aime25_validation.jsonl
 num_repeats: 32
 metrics_type: "resources_servers.math_with_judge.metrics::MathMetrics"
 responses_create_params:
-  max_output_tokens: 16384
+  max_output_tokens: 65536
   temperature: 1.0
