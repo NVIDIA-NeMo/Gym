@@ -37,14 +37,14 @@ Flow (state is stored per session_id inside the ResourcesServer)
      - executes the tool against the session's state and returns output/errors
      - agent appends tool outputs back into the conversation
   4) POST ResourcesServer /verify
-     - parses the full trace and grades outcome (often state-based), returning reward in [0, 1]
+     - extracts predicted function calls from the response and grades the replayed outcome, returning reward in [0, 1]
 ```
 
 ---
 
 ## Implementation
 
-**File (simplified excerpt, source-aligned): `resources_servers/workplace_assistant/app.py`**
+**File (simplified from [`resources_servers/workplace_assistant/app.py`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/workplace_assistant/app.py)):**
 
 ```python
 # simplified
@@ -186,8 +186,10 @@ Each session gets its own independent copy of this state, so tool calls in one e
 `is_correct(predicted_calls, ground_truth, env)` performs **state-based verification**:
 1. Replays the predicted tool calls against a fresh environment
 2. Replays the ground-truth calls against another fresh environment
-3. Compares the final state (DataFrames) of both environments
-4. Returns `1.0` if states match, `0.0` otherwise
+3. Compares five specific mutable DataFrames: `email._emails`, `calendar._calendar_events`, `analytics._plots_data`, `project_management._project_tasks`, and `customer_relationship_manager._crm_data` (mostly case-insensitive)
+4. Returns `1.0` if all five match, `0.0` otherwise
+
+Note that read-only state (e.g. `company_directory`) is not compared --- only mutable state that tools can modify. Tool execution errors during replay are caught and skipped rather than treated as immediate failures.
 
 This is more flexible than trajectory matching because it rewards correct outcomes regardless of the specific tool call sequence.
 :::
@@ -211,7 +213,7 @@ Model calls tools to reach the goal (one possible path):
 
 Agent -> ResourcesServer: POST /email_search_emails {"query": "carlos Task Update"}
 ResourcesServer -> Agent:
-  {"emails": [...], "pagination": {...}}
+  {"output": {"emails": [...], "pagination": {...}}}
 
 Agent -> ModelServer: POST /v1/responses (now includes search results)
 Model calls:
@@ -219,14 +221,14 @@ Model calls:
 
 Agent -> ResourcesServer: POST /email_reply_email {"email_id": "00000057", "body": "..."}
 ResourcesServer -> Agent:
-  "Email replied successfully."
+  {"output": "Email replied successfully."}
 
 [Episode end -> grading]
 
-Agent -> ResourcesServer: POST /verify (includes full trace + ground truth calls for this task)
+Agent -> ResourcesServer: POST /verify (includes response + ground truth calls for this task)
 ResourcesServer:
-  - extracts predicted function calls from the trace
-  - compares against ground truth using state-based verification
+  - extracts predicted function calls from the response (ignores text output)
+  - replays predicted and ground-truth calls, compares final state
   - returns reward 1.0 or 0.0
 ```
 
@@ -252,9 +254,9 @@ Execute the agent's predicted calls in a fresh sandbox, execute the ground truth
 
 ### What Workplace Assistant Uses
 
-**Workplace Assistant uses state matching.** Its `verify()` extracts the predicted function calls, then calls `is_correct(...)`, which:
+**Workplace Assistant uses state matching.** Its `verify()` extracts only the `function_call` items from the response (text output is ignored for scoring), then calls `is_correct(...)`, which:
 - Replays predicted calls and ground truth calls separately (fresh tool env each time)
-- Compares the final DataFrames for email/calendar/analytics/project management/CRM (mostly case-insensitive)
+- Compares five mutable DataFrames (email, calendar, analytics plots, project management tasks, CRM data) mostly case-insensitive
 
 This choice makes sense because workplace tasks often have **multiple valid tool sequences** that reach the same correct final state.
 
