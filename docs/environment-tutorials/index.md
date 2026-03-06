@@ -70,7 +70,7 @@ NeMo Gym uses a decoupled three-component architecture: the Agent Server orchest
 
 The **Agent Server** orchestrates the run loop for each episode: it loads the prompt, calls the model, dispatches tool calls to the Resources Server, and triggers verification.
 
-The **Model Server** exposes `responses()`: given a conversation, it produces text, tool calls, code, etc.
+The **Model Server** exposes `responses()`: given a conversation, it produces text, tool calls, code, etc. NeMo Gym ships pre-built model servers (`openai_model`, `vllm_model`) that work out of the box for most use cases --- you just pick one and configure an API key.
 
 The **Resources Server** exposes three types of endpoints:
 - `seed_session()` --- initialize environment state for each episode
@@ -112,7 +112,7 @@ resources_servers/my_weather_tool/
 
 Understanding the task is the first step in designing the environment itself.
 
-Every environment starts with **task data** --- the scenarios your model will practice on. Task data is stored in JSONL format (one JSON object per line), where each line represents a single training example. To get started, it's not atypical for a domain-expert hand-craft a few examples from scratch. Once the environment is developed and tested with these examples, you can scale up by collecting more data or using or synthetic generation with [NeMo Data Designer](https://github.com/NVIDIA-NeMo/Data-Designer).
+Every environment starts with **task data** --- the scenarios your model will practice on. Task data is stored in JSONL format (one JSON object per line), where each line represents a single training example. To get started, it's not atypical for a domain-expert to hand-craft a few examples from scratch. Once the environment is developed and tested with these examples, you can scale up by collecting more data or using synthetic data generation using libraries like [NeMo Data Designer](https://github.com/NVIDIA-NeMo/Data-Designer).
 
 ### JSONL Format
 
@@ -384,69 +384,41 @@ async def test_get_weather(server):
     assert "cold" in response.weather_description.lower()
 
 
-@pytest.mark.asyncio
-async def test_verify_with_tool_call(server):
-    """Test that verify returns reward 1.0 when the model used the tool."""
+def make_verify_request(output):
+    """Helper to build a BaseVerifyRequest with the given model output."""
     from nemo_gym.base_resources_server import BaseVerifyRequest
     from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 
-    verify_request = BaseVerifyRequest(
+    return BaseVerifyRequest(
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
             input=[{"role": "user", "content": "What's the weather?"}]
         ),
         response=NeMoGymResponse(
-            id="",
-            object="response",
-            created_at=0.0,
-            model="",
-            output=[
-                {
-                    "type": "function_call",
-                    "id": "call_1",
-                    "call_id": "call_1",
-                    "name": "get_weather",
-                    "arguments": '{"city": "San Francisco"}',
-                }
-            ],
-            tool_choice="auto",
-            tools=[],
-            parallel_tool_calls=False,
+            id="", object="response", created_at=0.0, model="",
+            output=output, tool_choice="auto", tools=[], parallel_tool_calls=False,
         ),
     )
 
-    response = await server.verify(verify_request)
+
+@pytest.mark.asyncio
+async def test_verify_with_tool_call(server):
+    """Reward 1.0 when the model called the tool."""
+    request = make_verify_request([
+        {"type": "function_call", "id": "c1", "call_id": "c1",
+         "name": "get_weather", "arguments": '{"city": "San Francisco"}'},
+    ])
+    response = await server.verify(request)
     assert response.reward == 1.0
 
 
 @pytest.mark.asyncio
 async def test_verify_without_tool_call(server):
-    """Test that verify returns reward 0.0 when the model did not use the tool."""
-    from nemo_gym.base_resources_server import BaseVerifyRequest
-    from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-
-    verify_request = BaseVerifyRequest(
-        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
-            input=[{"role": "user", "content": "What's the weather?"}]
-        ),
-        response=NeMoGymResponse(
-            id="",
-            object="response",
-            created_at=0.0,
-            model="",
-            output=[
-                {
-                    "role": "assistant",
-                    "id": "",
-                    "content": [{"type": "output_text", "annotations": [], "text": "It's cold."}],
-                }
-            ],
-            tool_choice="auto",
-            tools=[],
-            parallel_tool_calls=False,
-        ),
-    )
-
-    response = await server.verify(verify_request)
+    """Reward 0.0 when the model answered without using the tool."""
+    request = make_verify_request([
+        {"role": "assistant", "id": "",
+         "content": [{"type": "output_text", "annotations": [], "text": "It's cold."}]},
+    ])
+    response = await server.verify(request)
     assert response.reward == 0.0
 ```
 
@@ -474,7 +446,7 @@ source .venv/bin/activate
 
 ---
 
-## 4. Model Training
+## 4. Run & Validate
 
 ### Run the Servers
 
@@ -546,7 +518,9 @@ ng_collect_rollouts +agent_name=my_weather_tool_simple_agent \
 Ensure your servers are running before collecting rollouts. The command processes each input example, runs it through the servers, and saves the complete interaction including tool calls and verification rewards.
 :::
 
-### Train with RL
+---
+
+## 5. Train with RL
 
 Once you've collected rollouts and validated your environment, run training with your preferred RL framework:
 
