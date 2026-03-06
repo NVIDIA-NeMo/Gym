@@ -118,7 +118,7 @@ By default, the concurrency of ng_collect_rollouts is 100. You may want to adjus
 View the collected results:
 
 ```bash
-ng_viewer +jsonl_fpath=swebench-verified.openhands.qwen3-30b-coder.jsonl
+cat swebench-verified.openhands.qwen3-30b-coder.jsonl
 ```
 
 
