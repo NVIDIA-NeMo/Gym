@@ -193,7 +193,7 @@ Train models using NeMo Gym with your preferred RL framework.
 :::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` RL (GRPO)
 :link: training-tutorials/index
 :link-type: doc
-Hands-on tutorials with NeMo RL, TRL, Unsloth, and more.
+Hands-on tutorials with NeMo RL, Unsloth, and more.
 +++
 {bdg-secondary}`grpo`
 :::
@@ -347,7 +347,6 @@ Design a customer evaluation <environment-tutorials/designing-customer-evaluatio
 
 Overview <training-tutorials/index>
 NeMo RL <training-tutorials/nemo-rl-grpo/index.md>
-TRL <training-tutorials/trl>
 Unsloth <training-tutorials/unsloth>
 Multi-Environment Training <training-tutorials/multi-environment-training>
 Offline Training (SFT/DPO) <training-tutorials/offline-training-w-rollouts>
