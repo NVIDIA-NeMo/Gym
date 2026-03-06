@@ -321,7 +321,7 @@ source .venv/bin/activate
 pytest -v
 ```
 
-Return to the root NeMo Gym directory and re-active the root NeMo Gym Python environment.
+Return to the root NeMo Gym directory and re-activate the root NeMo Gym Python environment.
 ```bash
 cd ../..
 deactivate
