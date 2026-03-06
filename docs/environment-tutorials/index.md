@@ -124,24 +124,36 @@ Create `resources_servers/my_weather_tool/data/example.jsonl` with five weather 
 
 NeMo Gym uses a decoupled three-component architecture: the Agent Server orchestrates the loop, the Model Server runs inference, and the Resources Server provides tools and verification.
 
-```{image} environments-design.png
-:alt: Environment Components in NeMo Gym
-:width: 100%
-:align: center
+```text
+                        Environment Components in NeMo Gym
+
+                    +-----------------------------------------+
+                    |            Agent Server                 |
+                    |                                         |
+                    |  run():                                 |
+                    |    1. resources.seed_session()          |
+                    |    2. multi-step/multi-turn agent loop: |
+                    |         model.responses()               |
+                    |         resources.my_tool()             |
+                    |    3. resources.verify()                |
+                    +-----------+-------------+---------------+
+                                |             |
+                                v             v
+            +----------------------+    +------------------------+
+            |    Model Server      |    |   Resources Server     |
+            |                      |    |                        |
+            |  responses():        |    |  seed_session():       |
+            |    conversation      |    |    # init env state    |
+            |    -> text, tool     |    |  my_tool():            |
+            |    calls, code, etc. |    |    # execute action    |
+            |                      |    |  verify():             |
+            |                      |    |    # evaluate -> reward|
+            +----------------------+    +------------------------+
 ```
 
 ### 2.1 Agent Server
 
 The **Agent Server** orchestrates the run loop for each episode: it loads the prompt, calls the model, dispatches tool calls to the Resources Server, and triggers verification.
-
-```text
-run():
-    1. resources.seed_session()          # init env state
-    2. multi-step/multi-turn agent loop:
-           model.responses()             # get model output (text, tool calls, code, etc.)
-           resources.my_tool()           # execute action
-    3. resources.verify()                # evaluate -> reward
-```
 
 The **Model Server** exposes `responses()`: given a conversation, it produces text, tool calls, code, etc.
 
@@ -150,7 +162,7 @@ The **Resources Server** exposes three types of endpoints:
 - `my_tool()` --- execute actions (your custom tool endpoints)
 - `verify()` --- evaluate the rollout and return a reward
 
-Most users use the built-in `simple_agent`, which handles single-turn tool calling out of the box. The `ng_init_resources_server` command automatically creates a paired simple agent configuration.
+The built-in `simple_agent` handles multi-step tool calling (repeated model-tool loops within a single episode) and is a good starting point. The `ng_init_resources_server` command automatically creates a paired simple agent configuration.
 
 ### 2.2 Resources Server
 
