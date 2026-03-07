@@ -34,10 +34,11 @@ Optional flags:
 - `--task-ids id1,id2,...` — restrict to specific task IDs
 - `--validate` — validate the produced JSONL before writing
 
-### Step 2 — Run the committee model
+### Step 2 — Run the committee model (judge disabled)
 
-Start the bash-sandbox resources server plus the GDPVal agent pointed at the **committee**
-model server (not the policy model), then drive the JSONL through `ng_collect_rollouts`.
+Start the bash-sandbox resources server with **`judge.enabled: false`** (or omit the judge
+section entirely) plus the GDPVal agent pointed at the **committee** model server (not the
+policy model), then drive the JSONL through `ng_collect_rollouts`.
 
 The agent config (`gdpval_agent.yaml`) references the policy model server by default.  For
 precomputation you must point it at the committee model's inference endpoint instead.  The
@@ -85,20 +86,6 @@ Two things happen automatically inside the `finish` tool call for each task:
 
 > **LibreOffice must be installed** on the machine running the resources server.  Install it
 > with `apt-get install -y libreoffice` (or equivalent).
-
-### Step 3 (retroactive) — Re-convert office files from older outputs
-
-If you have committee model outputs that were collected **before** the automatic in-place
-conversion was added, run `preconvert_to_pdf.py` once to back-fill the missing PDF siblings:
-
-```bash
-python resources_servers/bash_sandbox/preconvert_to_pdf.py \
-    --root-dir /path/to/committee_outputs/MyCommitteeModel \
-    --max-concurrent-conversions 2 \
-    --log-file preconvert.log
-```
-
-This is idempotent — files that already have a `.pdf` sibling are skipped.
 
 ## Phase 2: Configure and run with the judge
 
