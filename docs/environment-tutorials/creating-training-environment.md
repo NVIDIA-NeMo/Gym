@@ -1,11 +1,11 @@
 (env-creating-training-environment)=
 # Creating a Training Environment
 
-Learn how to create a custom resource server to implement tools, verifiers, and business logic for your training environment.
+Learn how to create a custom resources server to implement tools, verifiers, and business logic for your training environment.
 
 :::{card}
 
-**Goal**: Build a custom resource server with tools and verification logic.
+**Goal**: Build a custom resources server with tools and verification logic.
 
 **Time**: ~30 minutes | **Cost**: ~$0.05 (OpenAI API)
 
@@ -13,7 +13,7 @@ Learn how to create a custom resource server to implement tools, verifiers, and 
 
 **In this tutorial, you will**:
 
-1. Initialize a resource server from template
+1. Initialize a resources server from template
 2. Implement tool endpoints
 3. Add verification logic for rewards
 4. Test with rollout collection
@@ -47,7 +47,7 @@ Run all commands from the **repository root** directory (where `pyproject.toml` 
 
 By the end of this tutorial, you'll have:
 
-- [ ] A runnable resource server with `ng_run`
+- [ ] A runnable resources server with `ng_run`
 - [ ] Unit tests in `tests/test_app.py`
 - [ ] Configuration with required `domain` field
 - [ ] Example data in `data/example.jsonl` (5 examples)
@@ -56,23 +56,23 @@ By the end of this tutorial, you'll have:
 
 ---
 
-## What is a Resource Server?
+## What is a Resources Server?
 
-Resource servers are the backbone of tool-based interactions in NeMo Gym. They provide:
+Resources servers are the backbone of tool-based interactions in NeMo Gym. They provide:
 
 - **Tool implementations**: APIs that models can call to perform actions or retrieve information
 - **Verification logic**: Functions to evaluate model performance and compute rewards
 - **Business logic abstraction**: Clean separation between model logic and domain-specific functionality
 
-Each resource server must implement a `verify` function that evaluates the model's interactions and returns a reward signal for reinforcement learning.
+Each resources server must implement a `verify` function that evaluates the model's interactions and returns a reward signal for reinforcement learning.
 
 **Key term**: A **rollout** is a complete interaction trace—the model's inputs, tool calls, and final outputs—used for training and evaluation.
 
 ---
 
-## 1. Initialize the Resource Server
+## 1. Initialize the Resources Server
 
-Resource servers live in the `resources_servers/` directory. Create a weather server that provides weather information to models.
+Resources servers live in the `resources_servers/` directory. Create a weather server that provides weather information to models.
 
 Run the initialization command from the repository root:
 
@@ -96,7 +96,7 @@ resources_servers/my_weather_tool/
 ```
 
 :::{tip}
-The initialization command also creates a paired simple agent configuration that references your resource server, making it easy to test end-to-end.
+The initialization command also creates a paired simple agent configuration that references your resources server, making it easy to test end-to-end.
 :::
 
 ---
@@ -113,7 +113,7 @@ my_weather_tool_resources_server:
       domain: agent  # Change from 'other' to 'agent' for this use case
 ```
 
-The `domain` field categorizes your resource server and is **required**. Common categories include:
+The `domain` field categorizes your resources server and is **required**. Common categories include:
 
 - `math` — Mathematical problem-solving
 - `coding` — Code generation and programming
@@ -150,7 +150,7 @@ from nemo_gym.base_resources_server import (
 
 # 1. Define the server configuration
 class MyWeatherResourcesServerConfig(BaseResourcesServerConfig):
-    """Configuration for the weather resource server."""
+    """Configuration for the weather resources server."""
 
     pass
 
@@ -169,7 +169,7 @@ class GetWeatherResponse(BaseModel):
     weather_description: str
 
 
-# 3. Implement the resource server
+# 3. Implement the resources server
 class MyWeatherResourcesServer(SimpleResourcesServer):
     config: MyWeatherResourcesServerConfig
 
@@ -345,7 +345,7 @@ This starts three servers:
 
 1. The simple agent server (coordinates interactions)
 2. The OpenAI model server (provides LLM responses)
-3. Your weather resource server (provides the `get_weather` tool)
+3. Your weather resources server (provides the `get_weather` tool)
 
 Configure your OpenAI API key in `env.yaml` (located in the repository root). The `env.yaml` is never committed to Git and is designed to hold secrets like API keys!
 
@@ -376,7 +376,7 @@ The model should either output a chat message and/or use your `get_weather` tool
 
 ## 7. Create Example Data
 
-Your resource server needs example data for testing and validation. Create `resources_servers/my_weather_tool/data/example.jsonl` with at least five example inputs.
+Your resources server needs example data for testing and validation. Create `resources_servers/my_weather_tool/data/example.jsonl` with at least five example inputs.
 
 :::{note}
 JSONL (JSON Lines) format: one JSON object per line, no wrapping array or trailing commas.
@@ -414,13 +414,13 @@ Ensure your servers are running (from step 6) before collecting rollouts. The co
 Update `resources_servers/my_weather_tool/README.md` with licensing and usage information:
 
 ```markdown
-# My Weather Tool Resource Server
+# My Weather Tool Resources Server
 
-A simple weather information resource server demonstrating tool calling.
+A simple weather information resources server demonstrating tool calling.
 
 ## Description
 
-This resource server provides a `get_weather` tool that returns weather information for cities.
+This resources server provides a `get_weather` tool that returns weather information for cities.
 
 ## Data
 
@@ -504,7 +504,7 @@ See `resources_servers/code_gen/app.py` for implementation details.
 
 ## Next Steps
 
-Now that you have a working resource server:
+Now that you have a working resources server:
 
 1. **Add training data**: Collect rollouts and prepare datasets for RL training
 2. **Add complex verification**: Add reward shaping and detailed performance metrics
@@ -523,7 +523,7 @@ Learn how to collect and process rollouts for training data.
 :::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` Train with NeMo RL
 :link: training-nemo-rl-grpo-index
 :link-type: ref
-Train models using your resource server with NeMo RL.
+Train models using your resources server with NeMo RL.
 :::
 
 ::::
@@ -534,7 +534,7 @@ Train models using your resource server with NeMo RL.
 
 ### Domain validation error
 
-If you encounter the error `"A domain is required for resource servers"`, ensure the `domain` field is set in your config YAML file.
+If you encounter the error `"A domain is required for resources servers"`, ensure the `domain` field is set in your config YAML file.
 
 ### Import errors
 
@@ -582,11 +582,11 @@ Server logs appear in the terminal where `ng_run` was executed.
 
 You've learned how to:
 
-✅ Initialize a resource server with `ng_init_resources_server`  
-✅ Configure the required `domain` field  
-✅ Add tools and verification logic  
-✅ Write and run tests  
+✅ Initialize a resources server with `ng_init_resources_server`
+✅ Configure the required `domain` field
+✅ Add tools and verification logic
+✅ Write and run tests
 ✅ Run your server with a model
-✅ Create required data artifacts  
+✅ Create required data artifacts
 
-Resource servers are the foundation for building custom RL environments in NeMo Gym. Experiment with different tool implementations and verification strategies to create engaging tasks for your models!
+Resources servers are the foundation for building custom RL environments in NeMo Gym. Experiment with different tool implementations and verification strategies to create engaging tasks for your models!
