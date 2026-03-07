@@ -65,7 +65,6 @@ class Ether0ResourcesServer(SimpleResourcesServer):
         answer_info = reward_info.answer_info
 
         text = text.replace("<|answer_start|>", "<answer>").replace("<|answer_end|>", "</answer>")
-        text = text.replace("<|think_start|>", "").replace("<|think_end|>", "")
         answer = (extract_answer_loose(text) or "").strip() or None
         if answer is None:
             return _response(body, 0.0, None, eval_fn_name, problem_type)
