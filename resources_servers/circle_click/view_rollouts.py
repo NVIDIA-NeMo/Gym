@@ -20,6 +20,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
+
 def _decode_image(data_url: str) -> Image.Image:
     _, b64 = data_url.split(",", 1)
     return Image.open(io.BytesIO(base64.b64decode(b64)))
