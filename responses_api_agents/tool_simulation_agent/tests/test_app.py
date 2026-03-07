@@ -35,7 +35,7 @@ class TestApp:
             name="tool_agent",
             resources_server=ResourcesServerRef(
                 type="resources_servers",
-                name="tool_resource_server",
+                name="tool_resources_server",
             ),
             model_server=ModelServerRef(
                 type="responses_api_models",
@@ -335,7 +335,7 @@ class TestApp:
                 ),
             ),
             call(
-                server_name="tool_resource_server",
+                server_name="tool_resources_server",
                 url_path="/verify",
                 json={
                     "responses_create_params": {
