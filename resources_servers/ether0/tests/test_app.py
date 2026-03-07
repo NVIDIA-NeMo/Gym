@@ -54,9 +54,9 @@ class TestVerify:
     async def test_str_eval_correct(self) -> None:
         server = _make_server()
         req = _make_request(
-            "<answer>FC1C(=CC=CC=1)C(CNC(C)(C)C)O</answer>",
-            "str_eval!:!FC1C(=CC=CC=1)C(CNC(C)(C)C)O!:!property-cat-brain",
-            "property-cat-brain",
+            "<answer>FCC(=O)O</answer>",
+            "str_eval!:!FCC(=O)O!:!property-regression-ld50",
+            "property-regression-ld50",
         )
         result = await server.verify(req)
         assert result.reward == 1.0
@@ -65,18 +65,28 @@ class TestVerify:
         server = _make_server()
         req = _make_request(
             "<answer>CCCCCC</answer>",
-            "str_eval!:!FC1C(=CC=CC=1)C(CNC(C)(C)C)O!:!property-cat-brain",
-            "property-cat-brain",
+            "str_eval!:!FCC(=O)O!:!property-regression-ld50",
+            "property-regression-ld50",
         )
         result = await server.verify(req)
         assert result.reward == 0.0
+
+    async def test_ether0_special_tokens(self) -> None:
+        server = _make_server()
+        req = _make_request(
+            "<|think_start|>reasoning here<|think_end|><|answer_start|>FCC(=O)O<|answer_end|>",
+            "str_eval!:!FCC(=O)O!:!property-regression-ld50",
+            "property-regression-ld50",
+        )
+        result = await server.verify(req)
+        assert result.reward == 1.0
 
     async def test_no_answer_tag(self) -> None:
         server = _make_server()
         req = _make_request(
             "I have no idea",
-            "str_eval!:!CCO!:!property-cat-brain",
-            "property-cat-brain",
+            "str_eval!:!FCC(=O)O!:!property-regression-ld50",
+            "property-regression-ld50",
         )
         result = await server.verify(req)
         assert result.reward == 0.0
