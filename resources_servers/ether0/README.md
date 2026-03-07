@@ -13,13 +13,17 @@
 - Answering multiple-choice questions about safety, ADME properties, BBB permeability, toxicity, scent, and pKa
 
 Note that retro-synthesis and oracle-solubility require an additional verifier server (see `ether0-serve` in the [ether0 repo](https://github.com/Future-House/ether0/)).
-Create env.yaml:
+
+## Quickstart 
+
+Create `env.yaml`:
 ```
 policy_base_url: http://localhost:8000/v1
 policy_api_key: EMPTY
 policy_model_name: futurehouse/ether0
 ```
 
+Start servers and collect rollouts
 ```bash
 # start vllm and nemo gym servers
 vllm serve futurehouse/ether0 & 
@@ -33,3 +37,5 @@ ng_collect_rollouts \
 
 tail -n 1 resources_servers/ether0/data/ether0_rollouts.jsonl | jq | less
 ```
+
+See `scripts/prepare_ether0.py` to prepare the full dataset.
