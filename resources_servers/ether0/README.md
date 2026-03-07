@@ -30,4 +30,6 @@ ng_collect_rollouts \
     +agent_name=ether0_simple_agent \
     +input_jsonl_fpath=resources_servers/ether0/data/example.jsonl \
     +output_jsonl_fpath=resources_servers/ether0/data/ether0_rollouts.jsonl
+
+tail -n 1 resources_servers/ether0/data/ether0_rollouts.jsonl | jq | less
 ```
