@@ -15,10 +15,14 @@
 import logging
 from typing import Any, Optional
 
-from ether0.model_prompts import extract_answer_loose
-from ether0.models import RewardFunctionInfo
-from ether0.rewards import EVAL_FUNCTIONS
+from resources_servers.ether0.setup_ether0 import ensure_ether0
 
+
+ensure_ether0()
+
+from ether0.model_prompts import extract_answer_loose  # noqa: E402
+from ether0.models import RewardFunctionInfo  # noqa: E402
+from ether0.rewards import EVAL_FUNCTIONS  # noqa: E402
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseRunRequest,

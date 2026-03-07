@@ -1,5 +1,13 @@
 -e nemo-gym[dev] @ ../../
--e ether0 @ ../../../ether0
+datasets
+exmol>=3.3.0
+httpx
+huggingface-hub
+molbloom==2.3.4
+pydantic>=2
+rdkit
+regex
+tenacity
 matplotlib
 Pillow
 contourpy
