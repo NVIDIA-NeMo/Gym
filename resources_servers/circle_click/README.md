@@ -10,6 +10,7 @@ policy_api_key: EMPTY
 policy_model_name: Qwen/Qwen3-VL-2B-Instruct
 ```
 
+There is a bug in hermes tool parser causing crashes with many concurrent calls, so this particular vllm command may fail sporadically. TODO: switch example model 
 ```bash
 vllm serve Qwen/Qwen3-VL-2B-Instruct -tp 8 --enable-auto-tool-choice --tool-call-parser hermes &
 ng_run "+config_paths=[resources_servers/circle_click/configs/circle_click.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" &
