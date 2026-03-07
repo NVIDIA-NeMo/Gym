@@ -33,23 +33,22 @@ COLORS: dict[str, tuple[int, int, int]] = {
     "pink": (211, 54, 130),
 }
 
-IMG_SIZE_RANGE = (300, 500)
-CIRCLE_RADIUS_RANGE = (25, 60)
-
 SYSTEM_PROMPT = (
     "You are a visual assistant. The image has pixel coordinates starting at (0, 0) in the top-left corner. "
-    "Use the click tool to click on the center of the specified colored circle."
+    "Use the click tool to click on the center of the specified colored circle. "
+    "You must pass a single integer for x and a single integer for y. "
+    "Do NOT use lists, arrays, or bounding box coordinates."
 )
 
 CLICK_TOOL = {
     "type": "function",
     "name": "click",
-    "description": "Click at pixel coordinates (x, y) in the image.",
+    "description": "Click at pixel coordinates (x, y) in the image. Both x and y must be single integers, not lists.",
     "parameters": {
         "type": "object",
         "properties": {
-            "x": {"type": "integer", "description": "X pixel coordinate"},
-            "y": {"type": "integer", "description": "Y pixel coordinate"},
+            "x": {"type": "integer", "description": "X pixel coordinate (single integer, not a list)"},
+            "y": {"type": "integer", "description": "Y pixel coordinate (single integer, not a list)"},
         },
         "required": ["x", "y"],
         "additionalProperties": False,
@@ -82,10 +81,14 @@ def _generate_image(circles: list[dict], img_size: int, radius: int) -> str:
     return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}"
 
 
-def make_example(seed: int) -> dict:
+def make_example(
+    seed: int,
+    img_size_range: tuple[int, int] = (1000, 1000),
+    circle_radius_range: tuple[int, int] = (60, 150),
+) -> dict:
     rng = random.Random(seed)
-    img_size = rng.randint(*IMG_SIZE_RANGE)
-    radius = rng.randint(*CIRCLE_RADIUS_RANGE)
+    img_size = rng.randint(*img_size_range)
+    radius = rng.randint(*circle_radius_range)
     num_circles = rng.randint(3, 5)
     color_names = rng.sample(list(COLORS.keys()), num_circles)
     target_color = rng.choice(color_names)
@@ -127,14 +130,22 @@ def main() -> None:
     parser.add_argument("--n", type=int, default=5)
     parser.add_argument("--out", type=str, default=str(Path(__file__).parent / "data" / "example.jsonl"))
     parser.add_argument("--seed-offset", type=int, default=0)
+    parser.add_argument("--img-size-min", type=int, default=1000)
+    parser.add_argument("--img-size-max", type=int, default=1000)
+    parser.add_argument("--radius-min", type=int, default=60)
+    parser.add_argument("--radius-max", type=int, default=150)
     args = parser.parse_args()
+
+    img_size_range = (args.img_size_min, args.img_size_max)
+    circle_radius_range = (args.radius_min, args.radius_max)
 
     output_path = Path(args.out)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with output_path.open("w") as f:
         for i in range(args.n):
-            f.write(json.dumps(make_example(args.seed_offset + i)) + "\n")
+            example = make_example(args.seed_offset + i, img_size_range=img_size_range, circle_radius_range=circle_radius_range)
+            f.write(json.dumps(example) + "\n")
 
     print(f"Generated {args.n} examples -> {output_path}")
 
