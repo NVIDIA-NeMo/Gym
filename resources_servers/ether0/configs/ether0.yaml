@@ -4,8 +4,8 @@ ether0:
       entrypoint: app.py
       domain: knowledge
       verified: false
-      description: Ether0 chemistry reward functions (MCQA, molecule eval, reactions)
-      value: Improve chemistry reasoning with ether0 reward suite
+      description: ether0 chemistry benchmark verifiers
+      value: Evalutate chemistry knowledge and reasoning with ether0 benchmark
 ether0_simple_agent:
   responses_api_agents:
     simple_agent:
