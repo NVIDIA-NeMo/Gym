@@ -5,7 +5,7 @@ Uses an LLM as a judge to compare a model’s generated answer against the expec
 
 Prompt and labels are configurable via config.
 
-An example dataset for this resource server can be found at:
+An example dataset for this resources server can be found at:
 https://huggingface.co/datasets/nvidia/Nemotron-RL-knowledge-openqa 
 
 ### Key config fields

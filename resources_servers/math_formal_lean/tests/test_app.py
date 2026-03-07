@@ -277,7 +277,7 @@ theorem test (n : Nat) : n + 0 = n := by
 class TestMultiTurnSelfCorrection:
     """Tests for multi-turn self-correction functionality.
 
-    The resource server is stateless - it always provides error feedback on failure.
+    The resources server is stateless - it always provides error feedback on failure.
     The agent is responsible for controlling the retry loop and turn counting.
     """
 

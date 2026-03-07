@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Lean4 formal proof verification resource server with multi-turn self-correction."""
+"""Lean4 formal proof verification resources server with multi-turn self-correction."""
 
 import logging
 import re
@@ -398,7 +398,7 @@ class MathFormalLeanResourcesServer(SimpleResourcesServer):
     async def verify(self, body: MathFormalLeanVerifyRequest) -> MathFormalLeanVerifyResponse:
         """Verify a proof attempt with multi-turn self-correction support.
 
-        The resource server is stateless - it always provides error feedback on failure.
+        The resources server is stateless - it always provides error feedback on failure.
         The agent is responsible for controlling the retry loop and turn counting.
 
         Returns:
