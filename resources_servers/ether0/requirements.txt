@@ -1,0 +1,11 @@
+-e nemo-gym[dev] @ ../../
+-e ether0 @ ../../../ether0
+matplotlib
+Pillow
+contourpy
+cycler
+kiwisolver
+scikit-learn
+scipy
+joblib
+threadpoolctl
