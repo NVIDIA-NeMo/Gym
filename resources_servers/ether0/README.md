@@ -12,7 +12,7 @@
 - Converting IUPAC name to SMILES
 - Answering multiple-choice questions about safety, ADME properties, BBB permeability, toxicity, scent, and pKa
 
-Note that retro-synthesis and oracle-solubility require a separate `ether0-serve` verifier server (see the [ether0 repo](https://github.com/Future-House/ether0/)).
+Note that retro-synthesis and oracle-solubility require an additional verifier server (see `ether0-serve` in the [ether0 repo](https://github.com/Future-House/ether0/)).
 
 ```bash
 vllm serve futurehouse/ether0
