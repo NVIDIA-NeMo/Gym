@@ -17,22 +17,17 @@ import os
 import urllib.request
 import uuid
 from dataclasses import dataclass, field
-from typing import List
-
 from pathlib import Path
-from fastapi import Request, Response
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from typing import List
 from urllib.parse import quote
+
+from fastapi import Request, Response
+from openai.types.responses.response_usage import ResponseUsage
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
-)
-from resources_servers.bash_sandbox.app import (
-    SavedFile,
-    UploadedFile,
-    UploadFilesRequest,
-    SeedSessionRequest,
 )
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
@@ -50,14 +45,26 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from resources_servers.bash_sandbox.app import (
+    SavedFile,
+    SeedSessionRequest,
+    UploadedFile,
+    UploadFilesRequest,
+)
+
 
 FINISH_TOOL_NAME = "finish"
 PROMPT_TEMPLATE_PATH = Path(__file__).parent / "prompts" / "gdpval_user_prompt.txt"
+MESSAGE_SUMMARIZER_PATH = Path(__file__).parent / "prompts" / "message_summarizer.txt"
+MESSAGE_SUMMARIZER_BRIDGE_PATH = Path(__file__).parent / "prompts" / "message_summarizer_bridge.txt"
+MESSAGE_SUMMARIZER = MESSAGE_SUMMARIZER_PATH.read_text()
+MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE = MESSAGE_SUMMARIZER_BRIDGE_PATH.read_text()
 
 
 @dataclass
 class Cookies:
     """Tracks cookies for outgoing requests to the model and resources servers."""
+
     model_server: dict[str, str] = field(default_factory=dict)
     resources_server: dict[str, str] = field(default_factory=dict)
 
@@ -72,7 +79,7 @@ class GDPValAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     max_steps: int = 100
-    max_tokens: int = 10000
+    context_window_tokens: int = 128000  # model's total context window (e.g. 128k for Llama-3.1-70B)
     context_summarization_cutoff: float = 0.7
     remaining_step_warning_threshold: int | None = 20
 
@@ -107,6 +114,7 @@ class GDPValAgentVerifyResponse(BaseModel):
 
 class GDPValAgentResponse(BaseModel):
     """GDPVal agent response including permanent save locations of output files."""
+
     output: list
     saved_files: List[SavedFile] = Field(default_factory=list)
     session_id: str | None = None
@@ -123,9 +131,7 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         for url, filename in zip(body.reference_file_urls, body.reference_files_to_save):
             path = os.path.join(reference_dir, os.path.basename(filename))
             if os.path.exists(path):
-                print(
-                    f"Reference file: [{filename}] already exists at path: [{path}]. Skipping download."
-                )
+                print(f"Reference file: [{filename}] already exists at path: [{path}]. Skipping download.")
                 reference_files.append(path)
                 continue
             try:
@@ -134,14 +140,10 @@ class GDPValAgent(SimpleResponsesAPIAgent):
                 print(f"Successfully downloaded reference file: [{filename}] to path: [{path}].")
                 reference_files.append(path)
             except Exception as e:
-                print(
-                    f"Failed to download reference file: [{filename}] to path: "
-                    f"[{path}] with error: [{e}]."
-                )
+                print(f"Failed to download reference file: [{filename}] to path: [{path}] with error: [{e}].")
                 continue
 
         return reference_files if reference_files else None
-
 
     async def prepare_reference_files(
         self, body: GDPValAgentRunRequest, cookies: Cookies
@@ -150,7 +152,7 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         Downloads reference files from the URLs and uploads them to the resources
         server session. Returns the uploaded reference files and the updated cookies.
         """
-    
+
         if body.task_dir is None:
             body.task_dir = Path(body.output_dir).joinpath(f"task_{body.task_id}")
         body.task_dir.mkdir(parents=True, exist_ok=True)
@@ -173,13 +175,10 @@ class GDPValAgent(SimpleResponsesAPIAgent):
             )
             await raise_for_status(upload_response)
             upload_response_json = await get_response_json(upload_response)
-            uploaded_reference_files = [
-                UploadedFile(**f) for f in upload_response_json["uploaded"]
-            ]
+            uploaded_reference_files = [UploadedFile(**f) for f in upload_response_json["uploaded"]]
             cookies.resources_server = upload_response.cookies
 
         return uploaded_reference_files, cookies
-
 
     async def init_message_history(self, body: GDPValAgentRunRequest) -> NeMoGymResponseInput:
         if isinstance(body.task_prompt, str):
@@ -189,21 +188,15 @@ class GDPValAgent(SimpleResponsesAPIAgent):
                 instruction_template = PROMPT_TEMPLATE_PATH.read_text()
 
             if instruction_template is not None and body.uploaded_reference_files is not None:
-                reference_files_str = "\n".join(
-                    [f"[{file.dest_path}]" for file in body.uploaded_reference_files]
-                )
-                task_prompt = instruction_template.format(
-                    task=body.task_prompt, references=reference_files_str
-                )
+                reference_files_str = "\n".join([f"[{file.dest_path}]" for file in body.uploaded_reference_files])
+                task_prompt = instruction_template.format(task=body.task_prompt, references=reference_files_str)
             elif instruction_template is not None:
-                task_prompt = instruction_template.format(
-                    task=body.task_prompt, references="None"
-                )
+                task_prompt = instruction_template.format(task=body.task_prompt, references="None")
             else:
                 task_prompt = body.task_prompt
 
             task_prompt = NeMoGymEasyInputMessage(role="user", content=task_prompt)
-        
+
         else:
             task_prompt = body.task_prompt
 
@@ -215,7 +208,7 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         return [system_prompt, task_prompt]
 
     async def single_response(
-        self, 
+        self,
         body: NeMoGymResponseCreateParamsNonStreaming,
         cookies: Cookies,
     ) -> tuple[NeMoGymResponse, Cookies]:
@@ -239,7 +232,6 @@ class GDPValAgent(SimpleResponsesAPIAgent):
 
         return model_response, cookies
 
-    
     async def run_tool(
         self,
         call: NeMoGymResponseFunctionToolCall,
@@ -258,10 +250,12 @@ class GDPValAgent(SimpleResponsesAPIAgent):
             tool_response = NeMoGymFunctionCallOutput(
                 type="function_call_output",
                 call_id=call.call_id,
-                output=json.dumps({
-                    "error": f"Unknown tool '{call.name}'. Available tools: {', '.join(sorted(KNOWN_TOOLS))}. "
-                             "Use 'run_command' to execute bash commands (including python scripts)."
-                }),
+                output=json.dumps(
+                    {
+                        "error": f"Unknown tool '{call.name}'. Available tools: {', '.join(sorted(KNOWN_TOOLS))}. "
+                        "Use 'run_command' to execute bash commands (including python scripts)."
+                    }
+                ),
             )
             return tool_response, cookies
 
@@ -294,7 +288,13 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         session_id: str,
         output_dir: str | None,
         cookies: Cookies,
-    ) -> tuple[List[NeMoGymResponseOutputMessage], List[NeMoGymFunctionCallOutput], List[SavedFile] | None, Cookies]:
+    ) -> tuple[
+        List[NeMoGymResponseOutputMessage],
+        List[NeMoGymFunctionCallOutput],
+        List[SavedFile] | None,
+        Cookies,
+        ResponseUsage | None,
+    ]:
         """Execute one agent step: generate assistant message and run any requested tool calls.
 
         Args:
@@ -304,9 +304,10 @@ class GDPValAgent(SimpleResponsesAPIAgent):
             cookies: Current cookies for server communication.
 
         Returns:
-            Tuple of (model_outputs, tool_outputs, finished, cookies).
+            Tuple of (model_outputs, tool_outputs, finished, cookies, usage).
             finished is None if the agent has not finished, or a list of SavedFile
             objects representing the permanently saved output files when finished.
+            usage is the ResponseUsage object from the model response (may be None).
 
         """
         model_outputs = []
@@ -318,10 +319,10 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         model_outputs.extend(output)
 
         if model_response.incomplete_details and model_response.incomplete_details.reason == "max_output_tokens":
-            return model_outputs, tool_outputs, finished, cookies
+            return model_outputs, tool_outputs, finished, cookies, model_response.usage
 
         function_calls: List[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
-    
+
         for call in function_calls:
             tool_response, cookies = await self.run_tool(call, session_id, output_dir, cookies)
             tool_outputs.append(tool_response)
@@ -331,11 +332,13 @@ class GDPValAgent(SimpleResponsesAPIAgent):
                 try:
                     finish_data = json.loads(tool_response.output)
                     for file_info in finish_data.get("saved", []):
-                        finished.append(SavedFile(
-                            source_path=file_info.get("source_path", ""),
-                            output_path=file_info["output_path"],
-                            size=file_info["size"],
-                        ))
+                        finished.append(
+                            SavedFile(
+                                source_path=file_info.get("source_path", ""),
+                                output_path=file_info["output_path"],
+                                size=file_info["size"],
+                            )
+                        )
                     if finished:
                         print("Output files saved to permanent locations:")
                         for saved_file in finished:
@@ -345,14 +348,13 @@ class GDPValAgent(SimpleResponsesAPIAgent):
                 except (json.JSONDecodeError, Exception) as e:
                     print(f"Warning: Could not parse finish tool response for saved files: {e}")
 
-        return model_outputs, tool_outputs, finished, cookies
+        return model_outputs, tool_outputs, finished, cookies, model_response.usage
 
     def _get_steps_remaining_msg(self, remaining_steps: int):
         """Create a user message warning the agent about remaining turns before max_steps is reached."""
         if remaining_steps == 1:
             return NeMoGymEasyInputMessage(
-                role="user",
-                content="This is the last turn. Please finish the task by calling the finish tool."
+                role="user", content="This is the last turn. Please finish the task by calling the finish tool."
             )
 
         return NeMoGymEasyInputMessage(
@@ -360,8 +362,48 @@ class GDPValAgent(SimpleResponsesAPIAgent):
             content=(
                 f"You have {remaining_steps} turns remaining to complete the task. "
                 "Please continue. Remember you will need a separate turn to finish the task."
-            )
+            ),
         )
+
+    async def summarize_messages(
+        self,
+        messages: NeMoGymResponseInput,
+        model_params: NeMoGymResponseCreateParamsNonStreaming,
+        cookies: Cookies,
+    ) -> tuple[NeMoGymResponseInput, Cookies]:
+        """Condense message history using LLM to stay within context window."""
+        task_context = []
+        for msg in messages:
+            if isinstance(msg, NeMoGymEasyInputMessage) and msg.role in ("system", "user"):
+                task_context.append(msg)
+            else:
+                break
+
+        summarizer_input = list(messages) + [NeMoGymEasyInputMessage(role="user", content=MESSAGE_SUMMARIZER)]
+        summary_params = model_params.model_copy(
+            update={
+                "input": summarizer_input,
+                "tools": [],
+                "max_output_tokens": None,
+            }
+        )
+        summary_response, cookies = await self.single_response(summary_params, cookies)
+
+        summary_text = ""
+        for item in summary_response.output:
+            if hasattr(item, "content") and item.content:
+                for block in item.content:
+                    if hasattr(block, "text"):
+                        summary_text += block.text
+
+        bridge_content = MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE.format(summary=summary_text)
+        bridge_msg = NeMoGymEasyInputMessage(role="user", content=bridge_content)
+        acknowledgement_msg = NeMoGymEasyInputMessage(role="user", content="Got it, thanks!")
+
+        print(
+            f"Context summarization complete. History condensed from {len(messages)} to {len(task_context) + 2} messages."
+        )
+        return list(task_context) + [bridge_msg, acknowledgement_msg], cookies
 
     async def responses(
         self,
@@ -369,7 +411,6 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: GDPValAgentRunRequest = Body(),
     ) -> GDPValAgentResponse:
-
         cookies = Cookies()
         if request.cookies:
             cookies.resources_server = dict(request.cookies)
@@ -407,9 +448,7 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         input_messages = await self.init_message_history(body)
 
         # 4. Build model params from the responses_create_params, overriding input
-        model_params = body.responses_create_params.model_copy(
-            update={"input": input_messages}
-        )
+        model_params = body.responses_create_params.model_copy(update={"input": input_messages})
 
         session_id = body.session_id
         output_dir = str(body.task_dir)
@@ -422,21 +461,17 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         # 5. Execute the task
         for step_num in range(max_steps):
             # Add warning message if max steps is near
-            if warning_threshold is not None and \
-                max_steps - step_num <= warning_threshold and step_num != 0:
+            if warning_threshold is not None and max_steps - step_num <= warning_threshold and step_num != 0:
                 num_steps_remaining_msg = self._get_steps_remaining_msg(max_steps - step_num)
                 model_params = model_params.model_copy(
                     update={"input": model_params.input + [num_steps_remaining_msg]}
                 )
                 outputs.append(num_steps_remaining_msg)
 
-            # TODO: Add text only tool call message functionality
-            model_outputs, tool_outputs, finished, cookies = await self.step(
+            model_outputs, tool_outputs, finished, cookies, usage = await self.step(
                 model_params, session_id, output_dir, cookies
             )
-            model_params = model_params.model_copy(
-                update={"input": model_params.input + model_outputs + tool_outputs}
-            )
+            model_params = model_params.model_copy(update={"input": model_params.input + model_outputs + tool_outputs})
             outputs.extend(model_outputs)
             outputs.extend(tool_outputs)
 
@@ -449,8 +484,16 @@ class GDPValAgent(SimpleResponsesAPIAgent):
                     print("Task completed. No output files were saved.")
                 break
 
-            if summary_cutoff is not None:
-                continue # TODO
+            if summary_cutoff is not None and usage is not None and step_num < max_steps - 1:
+                total_tokens = usage.total_tokens or 0
+                pct_used = total_tokens / self.config.context_window_tokens
+                if pct_used >= summary_cutoff:
+                    print(
+                        f"Context at {pct_used:.1%} of context_window_tokens "
+                        f"({total_tokens}/{self.config.context_window_tokens}). Summarizing..."
+                    )
+                    condensed_input, cookies = await self.summarize_messages(model_params.input, model_params, cookies)
+                    model_params = model_params.model_copy(update={"input": condensed_input})
 
         # 6. Use cookies to set response cookies
         if cookies.resources_server:
@@ -467,14 +510,14 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         )
         return final_response
 
-
     async def run(self, request: Request, body: GDPValAgentRunRequest) -> GDPValAgentVerifyResponse:
         cookies = Cookies()
         if request.cookies:
             cookies.resources_server = dict(request.cookies)
 
-        assert len(body.reference_files_to_save) == len(body.reference_file_urls), \
+        assert len(body.reference_files_to_save) == len(body.reference_file_urls), (
             "Number of reference files and URLs must match."
+        )
 
         # Session is created inside responses() so the same handler (and thus same
         # agent worker) owns the session for the whole conversation.
@@ -505,15 +548,9 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         # TODO: Implement real verification logic.
         # For now call /verify as a placeholder — the bash_sandbox verify
         # returns reward=1.0 unconditionally.
-        task_prompt_str = (
-            body.task_prompt if isinstance(body.task_prompt, str)
-            else body.task_prompt.content
-        )
+        task_prompt_str = body.task_prompt if isinstance(body.task_prompt, str) else body.task_prompt.content
         # Use JSON-serializable values: Path must be str for orjson.dumps()
-        output_files_serializable = [
-            {"path": str(f.output_path), "size": f.size}
-            for f in saved_files
-        ]
+        output_files_serializable = [{"path": str(f.output_path), "size": f.size} for f in saved_files]
         verify_request = {
             "responses_create_params": body.responses_create_params.model_dump(),
             "response": {

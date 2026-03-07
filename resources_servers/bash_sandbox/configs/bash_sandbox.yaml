@@ -3,18 +3,21 @@ bash_sandbox_resources_server:
     bash_sandbox:
       entrypoint: app.py
       domain: agent
-      # For multiple workers: set worker_urls (one URL per worker) so the agent routes by session_id.
-      # Example: worker_urls: ["http://host:8001", "http://host:8002"]
       judge:
         enabled: true
-        judge_model_name: "gemini-3-pro-preview"
-        gcp_project_id: "nv-nemoposttrai-20250715184023"
-        gcp_location: "global"
+        judge_model_name: gemini-3-pro-preview
+        gcp_project_id: nv-nemoposttrai-20250715184023
+        gcp_location: global
         num_trials: 4
         max_concurrent_judgements: 10
         committee_models:
-          - name: "Qwen3-235B-A22B-Thinking-2507"
-            output_dir: "/path/to/precomputed/Qwen3-235B"
+          - name: Qwen3-235B-A22B-Thinking-2507
+            output_dir: /path/to/precomputed/Qwen3-235B
+        # OpenAI-compatible path — mutually exclusive with the VertexAI path (gcp_project_id).
+        # Set both fields to use the NVIDIA OpenAI endpoint; omit both to use VertexAI.
+        # nvidia_openai_api_key: "sk-..."
+        # nvidia_openai_model: "gcp/google/gemini-3-pro-preview"
+      verified: false
 bash_sandbox_agent:
   responses_api_agents:
     gdpval_agent:
@@ -26,25 +29,25 @@ bash_sandbox_agent:
         type: responses_api_models
         name: policy_model
       datasets:
-      - name: train
-        type: train
-        jsonl_fpath: resources_servers/bash_sandbox/data/train.jsonl
-        num_repeats: 1
-        gitlab_identifier:
-          dataset_name: bash_sandbox
-          version: 0.0.1
-          artifact_fpath: train.jsonl
-        license: Apache 2.0
-      - name: validation
-        type: validation
-        jsonl_fpath: resources_servers/bash_sandbox/data/validation.jsonl
-        num_repeats: 1
-        gitlab_identifier:
-          dataset_name: bash_sandbox
-          version: 0.0.1
-          artifact_fpath: validation.jsonl
-        license: Apache 2.0
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/bash_sandbox/data/example.jsonl
-        num_repeats: 1
+        - name: train
+          type: train
+          jsonl_fpath: resources_servers/bash_sandbox/data/train.jsonl
+          num_repeats: 1
+          gitlab_identifier:
+            dataset_name: bash_sandbox
+            version: 0.0.1
+            artifact_fpath: train.jsonl
+          license: Apache 2.0
+        - name: validation
+          type: validation
+          jsonl_fpath: resources_servers/bash_sandbox/data/validation.jsonl
+          num_repeats: 1
+          gitlab_identifier:
+            dataset_name: bash_sandbox
+            version: 0.0.1
+            artifact_fpath: validation.jsonl
+          license: Apache 2.0
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/bash_sandbox/data/example.jsonl
+          num_repeats: 1

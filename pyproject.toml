@@ -202,16 +202,6 @@ dependencies = [
     # Updated: Mon Mar 03, 2026
     # License: Apache 2.0 https://github.com/googleapis/python-genai/blob/main/LICENSE
     "google-genai",
-
-    # httpx: Async HTTP client used by bash_sandbox web_search and web_fetch tools
-    # Updated: Tue Mar 04, 2026
-    # License: BSD 3-Clause https://github.com/encode/httpx/blob/master/LICENSE.md
-    "httpx",
-
-    # trafilatura: Web content extraction used by bash_sandbox web_fetch tool
-    # Updated: Tue Mar 04, 2026
-    # License: Apache 2.0 https://github.com/adbar/trafilatura/blob/master/LICENSE
-    "trafilatura",
 ]
 
 [dependency-groups]

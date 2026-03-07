@@ -135,9 +135,11 @@ SYSTEM_PROMPT = (
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _load_hf_dataset(split: str):
     """Lazily import datasets and load the openai/gdpval dataset."""
     from datasets import load_dataset
+
     return load_dataset("openai/gdpval", split=split)
 
 
@@ -176,6 +178,7 @@ def _build_run_request(row: dict, output_dir: str) -> dict:
 # ---------------------------------------------------------------------------
 # Subcommands
 # ---------------------------------------------------------------------------
+
 
 def cmd_prepare(args: argparse.Namespace) -> None:
     """Convert HF dataset rows to JSONL for ng_collect_rollouts."""
@@ -264,6 +267,7 @@ def cmd_run(args: argparse.Namespace) -> None:
 # Argument parsing
 # ---------------------------------------------------------------------------
 
+
 def _csv_list(value: str) -> list[str]:
     """Parse a comma-separated string into a list."""
     return [v.strip() for v in value.split(",") if v.strip()]
@@ -281,21 +285,26 @@ def main():
         help="Convert HF openai/gdpval dataset to JSONL for ng_collect_rollouts.",
     )
     p_prepare.add_argument(
-        "--output-jsonl", required=True,
+        "--output-jsonl",
+        required=True,
         help="Path to write the output JSONL file.",
     )
     p_prepare.add_argument("--split", default="train", help="HF dataset split (default: train).")
     p_prepare.add_argument("--limit", type=int, default=None, help="Max number of rows to emit.")
     p_prepare.add_argument(
-        "--task-ids", type=_csv_list, default=None,
+        "--task-ids",
+        type=_csv_list,
+        default=None,
         help="Comma-separated list of task_ids to include.",
     )
     p_prepare.add_argument(
-        "--output-dir", default="/tmp/gdpval_output",
+        "--output-dir",
+        default="/tmp/gdpval_output",
         help="Value for output_dir in each JSONL row (default: /tmp/gdpval_output).",
     )
     p_prepare.add_argument(
-        "--validate", action="store_true",
+        "--validate",
+        action="store_true",
         help="Validate each JSONL row against GDPValAgentRunRequest after writing.",
     )
     p_prepare.set_defaults(func=cmd_prepare)
@@ -308,11 +317,14 @@ def main():
     p_run.add_argument("--split", default="train", help="HF dataset split (default: train).")
     p_run.add_argument("--limit", type=int, default=None, help="Max number of tasks to run.")
     p_run.add_argument(
-        "--task-ids", type=_csv_list, default=None,
+        "--task-ids",
+        type=_csv_list,
+        default=None,
         help="Comma-separated list of task_ids to run.",
     )
     p_run.add_argument(
-        "--output-dir", default="/tmp/gdpval_output",
+        "--output-dir",
+        default="/tmp/gdpval_output",
         help="Output directory for saved files (default: /tmp/gdpval_output).",
     )
     p_run.set_defaults(func=cmd_run)

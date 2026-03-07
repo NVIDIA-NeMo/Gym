@@ -1,0 +1,27 @@
+The context window is approaching its limit. Please create a concise summary of the conversation so far to preserve important information.
+
+Your summary should include:
+
+1. **Task Overview**: What is the main goal or objective?
+
+2. **Progress Made**: What has been accomplished so far?
+   - Key files created/modified (with paths)
+   - Important functions/classes implemented
+   - Tools used and their outcomes
+
+3. **Current State**: Where are we now?
+   - What is currently working?
+   - What has been tested/verified?
+
+4. **Next Steps**: What still needs to be done?
+   - Outstanding TODOs (with specific file paths and line numbers if applicable)
+   - Known issues or bugs to address
+   - Features or functionality not yet implemented
+
+5. **Important Context**: Any critical details that shouldn't be lost
+   - Special configurations or setup requirements
+   - Important variable names, API endpoints, or data structures
+   - Edge cases or constraints to keep in mind
+   - Dependencies or relationships between components
+
+Keep the summary concise but comprehensive. Do not use any tools. Focus on actionable information that will allow smooth continuation of the work.

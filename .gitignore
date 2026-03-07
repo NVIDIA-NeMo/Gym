@@ -237,3 +237,6 @@ env.yaml
 
 # Backup files
 *.backup
+
+# Standard testing
+tmp/

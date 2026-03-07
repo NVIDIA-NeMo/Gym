@@ -1,0 +1,11 @@
+**Context Continuation**
+
+Due to context window limitations, the previous conversation has been summarized. Below is a summary of what happened before:
+
+---
+
+{summary}
+
+---
+
+You should continue working on this task from where it was left off. All the progress, current state, and next steps are described in the summary above. Proceed with completing any outstanding work.

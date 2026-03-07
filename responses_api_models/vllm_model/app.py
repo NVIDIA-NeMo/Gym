@@ -574,8 +574,13 @@ class VLLMConverter(BaseModel):
         # parameters. Some backends (e.g. NVIDIA NIM) strictly reject unknown
         # fields even when their values are None.
         _RESPONSES_API_ONLY_KEYS = {
-            "background", "include", "instructions", "previous_response_id",
-            "prompt", "text", "truncation",
+            "background",
+            "include",
+            "instructions",
+            "previous_response_id",
+            "prompt",
+            "text",
+            "truncation",
         }
         for key in _RESPONSES_API_ONLY_KEYS:
             responses_create_params.pop(key, None)

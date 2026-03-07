@@ -55,8 +55,10 @@ def convert_one(path: Path, out_pdf: Path) -> tuple[Path, bool, str]:
             "--nodefault",
             "--norestore",
             f"-env:UserInstallation={user_install}",
-            "--convert-to", "pdf",
-            "--outdir", str(out_pdf.parent),
+            "--convert-to",
+            "pdf",
+            "--outdir",
+            str(out_pdf.parent),
             str(path),
         ]
         p = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

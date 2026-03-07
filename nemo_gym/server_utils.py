@@ -237,9 +237,7 @@ class ServerClient(BaseModel):
 
         return cls(head_server_config=head_server_config, global_config_dict=global_config_dict)
 
-    def _build_server_base_url(
-        self, server_config_dict: OmegaConf, affinity_key: Optional[str] = None
-    ) -> str:
+    def _build_server_base_url(self, server_config_dict: OmegaConf, affinity_key: Optional[str] = None) -> str:
         """Build base URL for a server. If affinity_key and worker_urls are set, pick URL by hash for session affinity."""
         worker_urls = server_config_dict.get("worker_urls")
         if affinity_key and worker_urls:
