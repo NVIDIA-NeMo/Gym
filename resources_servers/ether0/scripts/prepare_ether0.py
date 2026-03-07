@@ -52,9 +52,7 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None, help="Max rows to output")
     args = parser.parse_args()
 
-    print("Downloading futurehouse/ether0-benchmark", file=sys.stderr)
     ds = load_dataset("futurehouse/ether0-benchmark", split="test")
-    print(f"Loaded {len(ds)} rows", file=sys.stderr)
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
