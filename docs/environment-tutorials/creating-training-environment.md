@@ -151,17 +151,20 @@ from nemo_gym.base_resources_server import (
 # 1. Define the server configuration
 class MyWeatherResourcesServerConfig(BaseResourcesServerConfig):
     """Configuration for the weather resource server."""
+
     pass
 
 
 # 2. Define request and response schemas for your tools
 class GetWeatherRequest(BaseModel):
     """Request schema for getting weather information."""
+
     city: str
 
 
 class GetWeatherResponse(BaseModel):
     """Response schema for weather information."""
+
     city: str
     weather_description: str
 
@@ -173,28 +176,25 @@ class MyWeatherResourcesServer(SimpleResourcesServer):
     def setup_webserver(self) -> FastAPI:
         """Register API routes."""
         app = super().setup_webserver()
-        
+
         # Register your tool endpoints
         app.post("/get_weather")(self.get_weather)
-        
+
         return app
 
     async def get_weather(self, body: GetWeatherRequest) -> GetWeatherResponse:
         """
         Tool implementation: Get weather for a city.
-        
+
         In a production implementation, this would call a weather API.
         For this example, we return a simple static response.
         """
-        return GetWeatherResponse(
-            city=body.city,
-            weather_description=f"The weather in {body.city} is cold."
-        )
+        return GetWeatherResponse(city=body.city, weather_description=f"The weather in {body.city} is cold.")
 
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
         """
         Verification function: Evaluate rollout performance.
-        
+
         This function is called after a rollout completes.
         Return a reward between 0.0 and 1.0.
         """
@@ -204,7 +204,7 @@ class MyWeatherResourcesServer(SimpleResourcesServer):
             if output.type == "function_call" and output.name == "get_weather":
                 used_tool = True
                 break
-        
+
         # Return higher reward if the tool was used correctly
         reward = 1.0 if used_tool else 0.0
         return BaseVerifyResponse(**body.model_dump(), reward=reward)
@@ -260,9 +260,7 @@ def server():
         entrypoint="",
         name="my_weather_tool",
     )
-    return MyWeatherResourcesServer(
-        config=config, server_client=MagicMock(spec=ServerClient)
-    )
+    return MyWeatherResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 
 @pytest.mark.asyncio
@@ -270,7 +268,7 @@ async def test_get_weather(server):
     """Test the get_weather tool."""
     request = GetWeatherRequest(city="San Francisco")
     response = await server.get_weather(request)
-    
+
     assert response.city == "San Francisco"
     assert "cold" in response.weather_description.lower()
 
@@ -280,17 +278,30 @@ async def test_verify(server):
     """Test the verify function."""
     from nemo_gym.base_resources_server import BaseVerifyRequest
     from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-    
+
     # Create a proper BaseVerifyRequest with required fields
     verify_request = BaseVerifyRequest(
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
-            input=[{"type": "text", "text": "What's the weather?"}]
+            input=[{"role": "user", "content": "What's the weather?"}]
         ),
         response=NeMoGymResponse(
-            output=[{"type": "text", "text": "It's cold."}]
-        )
+            id="",
+            object="response",
+            created_at=0.0,
+            model="",
+            output=[
+                {
+                    "role": "assistant",
+                    "id": "",
+                    "content": [{"type": "output_text", "annotations": [], "text": "It's cold."}],
+                }
+            ],
+            tool_choice="auto",
+            tools=[],
+            parallel_tool_calls=False,
+        ),
     )
-    
+
     response = await server.verify(verify_request)
     assert response.reward >= 0.0
     assert response.reward <= 1.0
@@ -310,6 +321,13 @@ source .venv/bin/activate
 pytest -v
 ```
 
+Return to the root NeMo Gym directory and re-activate the root NeMo Gym Python environment.
+```bash
+cd ../..
+deactivate
+source .venv/bin/activate
+```
+
 ---
 
 ## 6. Run with an Agent
@@ -317,12 +335,10 @@ pytest -v
 The initialization command created a paired simple agent configuration in the same YAML file. Start the servers:
 
 ```bash
-config_paths="responses_api_agents/simple_agent/configs/simple_agent.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml,\
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
 resources_servers/my_weather_tool/configs/my_weather_tool.yaml"
 
-ng_run "+config_paths=[$config_paths]" \
-    +simple_agent.responses_api_agents.simple_agent.resources_server.name=my_weather_tool_resources_server
+ng_run "+config_paths=[$config_paths]"
 ```
 
 This starts three servers:
@@ -331,26 +347,22 @@ This starts three servers:
 2. The OpenAI model server (provides LLM responses)
 3. Your weather resource server (provides the `get_weather` tool)
 
-Configure your OpenAI API key in `env.yaml` (located in the repository root):
+Configure your OpenAI API key in `env.yaml` (located in the repository root). The `env.yaml` is never committed to Git and is designed to hold secrets like API keys!
 
 ```yaml
-openai_api_key: ${oc.env:OPENAI_API_KEY}  # Reads from environment variable
+openai_api_key: ???
 policy_api_key: ${openai_api_key}
 policy_base_url: https://api.openai.com/v1
 policy_model_name: gpt-4o-mini
 ```
 
 :::{tip}
-Set your API key as an environment variable before running:
-
-```bash
-export OPENAI_API_KEY="sk-your-key-here"  # pragma: allowlist secret
-```
-
-Never commit API keys directly in YAML files.
+If you don't want to use the OpenAI API, you can try using a local vLLM server (requires GPU access) instead! See {ref}`model-server-vllm`.
 :::
 
 ### Test the resources server
+
+We will test our resources server using a client script. Inside `responses_api_agents/simple_agent/client.py`, change the server name to point from `example_single_tool_call_simple_agent` to our agent name i.e. `my_weather_tool_simple_agent`.
 
 After the servers start, test your resources server in a new terminal:
 
@@ -358,7 +370,7 @@ After the servers start, test your resources server in a new terminal:
 python responses_api_agents/simple_agent/client.py
 ```
 
-The model should be able to use your `get_weather` tool to answer questions about weather!
+The model should either output a chat message and/or use your `get_weather` tool to answer questions about weather!
 
 ---
 
@@ -371,16 +383,16 @@ JSONL (JSON Lines) format: one JSON object per line, no wrapping array or traili
 :::
 
 ```json
-{"input": [{"type": "text", "text": "What's the weather in San Francisco?"}]}
-{"input": [{"type": "text", "text": "Tell me the weather in New York"}]}
-{"input": [{"type": "text", "text": "How's the weather in Seattle?"}]}
-{"input": [{"type": "text", "text": "What is the current weather in Boston?"}]}
-{"input": [{"type": "text", "text": "Can you check the weather in Chicago?"}]}
+{"responses_create_params": {"input": [{"role": "user", "content": "What's the weather in San Francisco?"}], "tools": [{"type": "function", "name": "get_weather", "description": "", "parameters": {"type": "object", "properties": {"city": {"type": "string", "description": ""}}, "required": ["city"], "additionalProperties": false}, "strict": true}]}}
+{"responses_create_params": {"input": [{"role": "user", "content": "Tell me the weather in New York"}], "tools": [{"type": "function", "name": "get_weather", "description": "", "parameters": {"type": "object", "properties": {"city": {"type": "string", "description": ""}}, "required": ["city"], "additionalProperties": false}, "strict": true}]}}
+{"responses_create_params": {"input": [{"role": "user", "content": "How's the weather in Seattle?"}], "tools": [{"type": "function", "name": "get_weather", "description": "", "parameters": {"type": "object", "properties": {"city": {"type": "string", "description": ""}}, "required": ["city"], "additionalProperties": false}, "strict": true}]}}
+{"responses_create_params": {"input": [{"role": "user", "content": "What is the current weather in Boston?"}], "tools": [{"type": "function", "name": "get_weather", "description": "", "parameters": {"type": "object", "properties": {"city": {"type": "string", "description": ""}}, "required": ["city"], "additionalProperties": false}, "strict": true}]}}
+{"responses_create_params": {"input": [{"role": "user", "content": "Can you check the weather in Chicago?"}], "tools": [{"type": "function", "name": "get_weather", "description": "", "parameters": {"type": "object", "properties": {"city": {"type": "string", "description": ""}}, "required": ["city"], "additionalProperties": false}, "strict": true}]}}
 ```
 
 ### Generate Example Rollouts
 
-Collect rollouts by running against your example inputs. This generates interaction traces showing how models use your tools:
+With your NeMo Gym servers still running, collect rollouts by running against your example inputs. This generates interaction traces showing how models use your tools:
 
 ```bash
 ng_collect_rollouts +agent_name=my_weather_tool_simple_agent \
