@@ -18,7 +18,6 @@ from typing import Any, Optional
 from ether0.model_prompts import extract_answer_loose
 from ether0.models import RewardFunctionInfo
 from ether0.rewards import EVAL_FUNCTIONS
-from fastapi import FastAPI
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -46,16 +45,8 @@ class Ether0VerifyResponse(BaseVerifyResponse):
     problem_type: Optional[str] = None
 
 
-class Ether0ResourcesServerConfig(BaseResourcesServerConfig):
-    pass
-
-
 class Ether0ResourcesServer(SimpleResourcesServer):
-    config: Ether0ResourcesServerConfig
-
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-        return app
+    config: BaseResourcesServerConfig
 
     async def verify(self, body: Ether0VerifyRequest) -> Ether0VerifyResponse:
         text = _extract_last_assistant_text(body)
