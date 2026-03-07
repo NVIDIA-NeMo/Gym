@@ -28,10 +28,10 @@ from typing import Dict, List
 import anyio
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
 # tavily is imported lazily inside _get_tavily_client() rather than at module level so
 # that servers which import from this module (e.g. gdpval_agent) do not require
 # tavily-python in their own virtual environments.
-
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
@@ -134,9 +134,7 @@ class JudgeConfig(BaseModel):
         has_key = bool(self.nvidia_openai_api_key_env)
         has_model = bool(self.nvidia_openai_model)
         if has_key != has_model:
-            raise ValueError(
-                "nvidia_openai_api_key and nvidia_openai_model must both be set or both be absent"
-            )
+            raise ValueError("nvidia_openai_api_key and nvidia_openai_model must both be set or both be absent")
         return self
 
 
@@ -675,9 +673,7 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
                     if out_path.suffix.lower() in OFFICE_EXTS:
                         out_pdf = out_path.with_suffix(".pdf")
                         if not out_pdf.exists():
-                            _, ok, err = await loop.run_in_executor(
-                                None, convert_one, out_path, out_pdf
-                            )
+                            _, ok, err = await loop.run_in_executor(None, convert_one, out_path, out_pdf)
                             if not ok:
                                 logger.warning("PDF conversion failed for %s: %s", out_path, err)
             except Exception as e:
@@ -808,7 +804,9 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
                 max_output_tokens=judge_config.max_output_tokens,
                 num_trials=judge_config.num_trials,
                 max_concurrent_judgements=judge_config.max_concurrent_judgements,
-                nvidia_openai_api_key=os.environ.get(judge_config.nvidia_openai_api_key_env) if judge_config.nvidia_openai_api_key_env else None,
+                nvidia_openai_api_key=os.environ.get(judge_config.nvidia_openai_api_key_env)
+                if judge_config.nvidia_openai_api_key_env
+                else None,
                 nvidia_openai_model=judge_config.nvidia_openai_model,
             )
         return self._judge

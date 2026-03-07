@@ -398,10 +398,12 @@ class GDPValJudge:
                     oai_parts.append({"type": "text", "text": p.text})
                 elif p.inline_data is not None:
                     b64 = base64.b64encode(p.inline_data.data).decode()
-                    oai_parts.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{p.inline_data.mime_type};base64,{b64}"},
-                    })
+                    oai_parts.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{p.inline_data.mime_type};base64,{b64}"},
+                        }
+                    )
             messages.append({"role": c.role, "content": oai_parts})
         response = self._openai_client.chat.completions.create(
             model=self.nvidia_openai_model,
@@ -412,9 +414,7 @@ class GDPValJudge:
         )
         content = response.choices[0].message.content
         if content is None:
-            raise RuntimeError(
-                f"OpenAI returned None content (finish_reason={response.choices[0].finish_reason})"
-            )
+            raise RuntimeError(f"OpenAI returned None content (finish_reason={response.choices[0].finish_reason})")
         return content
 
     def _send(self, contents: list[types.Content]) -> str:

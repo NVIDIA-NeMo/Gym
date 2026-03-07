@@ -68,6 +68,8 @@ def _task_dir_for(body: "GDPValAgentRunRequest") -> Path:
     if body.repeat_index is not None:
         name += f"_r{body.repeat_index}"
     return Path(body.output_dir) / name
+
+
 MESSAGE_SUMMARIZER_PATH = Path(__file__).parent / "prompts" / "message_summarizer.txt"
 MESSAGE_SUMMARIZER_BRIDGE_PATH = Path(__file__).parent / "prompts" / "message_summarizer_bridge.txt"
 MESSAGE_SUMMARIZER = MESSAGE_SUMMARIZER_PATH.read_text()
@@ -384,14 +386,14 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         messages: NeMoGymResponseInput,
         model_params: NeMoGymResponseCreateParamsNonStreaming,
         cookies: Cookies,
+        n_task_context: int,
     ) -> tuple[NeMoGymResponseInput, Cookies]:
         """Condense message history using LLM to stay within context window."""
-        task_context = []
-        for msg in messages:
-            if isinstance(msg, NeMoGymEasyInputMessage) and msg.role in ("system", "user"):
-                task_context.append(msg)
-            else:
-                break
+        # Pin task_context to the original initial messages (system prompt + task description +
+        # uploaded reference files). Using a loop like stirrup does (takewhile role=user/system)
+        # causes bridge/ack messages (also role=user) to accumulate in task_context on each
+        # re-summarization, creating nested summaries and growing rather than shrinking context.
+        task_context = list(messages[:n_task_context])
 
         summarizer_input = list(messages) + [NeMoGymEasyInputMessage(role="user", content=MESSAGE_SUMMARIZER)]
         summary_params = model_params.model_copy(
@@ -463,6 +465,7 @@ class GDPValAgent(SimpleResponsesAPIAgent):
 
         # 3. Build initial message history from task/system prompts
         input_messages = await self.init_message_history(body)
+        n_task_context = len(input_messages)
 
         # 4. Build model params from the responses_create_params, overriding input
         model_params = body.responses_create_params.model_copy(update={"input": input_messages})
@@ -501,15 +504,21 @@ class GDPValAgent(SimpleResponsesAPIAgent):
                     print("Task completed. No output files were saved.")
                 break
 
-            if summary_cutoff is not None and usage is not None and step_num < max_steps - 1:
-                total_tokens = usage.total_tokens or 0
-                pct_used = total_tokens / self.config.context_window_tokens
-                if pct_used >= summary_cutoff:
+            if summary_cutoff is not None and step_num < max_steps - 1:
+                if usage is None:
+                    logger.warning(
+                        "usage is None — context summarization skipped (model server may not be returning usage)"
+                    )
+                elif usage.total_tokens and usage.total_tokens / self.config.context_window_tokens >= summary_cutoff:
+                    total_tokens = usage.total_tokens
+                    pct_used = total_tokens / self.config.context_window_tokens
                     print(
                         f"Context at {pct_used:.1%} of context_window_tokens "
                         f"({total_tokens}/{self.config.context_window_tokens}). Summarizing..."
                     )
-                    condensed_input, cookies = await self.summarize_messages(model_params.input, model_params, cookies)
+                    condensed_input, cookies = await self.summarize_messages(
+                        model_params.input, model_params, cookies, n_task_context
+                    )
                     model_params = model_params.model_copy(update={"input": condensed_input})
 
         # 6. Use cookies to set response cookies
