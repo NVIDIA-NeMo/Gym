@@ -3,10 +3,10 @@ name: add-benchmark
 description: >
   Guide for adding a new benchmark or training environment to NeMo-Gym.
   Use when the user asks to add, create, or integrate a benchmark, evaluation,
-  training environment, or resource server into NeMo-Gym. Also use when wrapping
+  training environment, or resources server into NeMo-Gym. Also use when wrapping
   an existing 3rd-party benchmark library. Covers the full workflow: data preparation,
-  resource server implementation, agent wiring, YAML config, testing, and reward
-  profiling (baselining). Triggered by: "add benchmark", "new resource server",
+  resources server implementation, agent wiring, YAML config, testing, and reward
+  profiling (baselining). Triggered by: "add benchmark", "new resources server",
   "integrate benchmark", "wrap benchmark", "add training environment", "add eval".
 ---
 
@@ -16,13 +16,13 @@ description: >
 
 Before starting, determine which type of benchmark you're adding:
 
-**Native benchmark** — verification logic implemented directly in a Gym resource server:
-- Resource server implements `verify()` with reward logic
+**Native benchmark** — verification logic implemented directly in a Gym resources server:
+- Resources server implements `verify()` with reward logic
 - Agent server orchestrates model calls (use `simple_agent` for single-turn, or custom agent for multi-turn)
 - Example: `code_gen`, `instruction_following`, `math_with_judge`
 
 **External benchmark** — wrapping a 3rd-party library that has its own orchestration:
-- Integrate at the agent server level (not resource server)
+- Integrate at the agent server level (not resources server)
 - Agent's `/run` endpoint wraps the external library
 - Pre-process from Gym schema to library input, post-process back to `BaseVerifyResponse`
 - Reproduce publicly reported numbers with the original repo first, then reproduce again after Gym integration
@@ -106,7 +106,7 @@ ng_prepare_data "+config_paths=[resources_servers/my_benchmark/configs/my_benchm
 
 Edit `app.py`. The `verify()` method receives model output + `verifier_metadata`, returns reward.
 
-For code execution benchmarks, see `references/patterns.md` § "Subprocess Execution with Ray" and "Resource Server Pattern".
+For code execution benchmarks, see `references/patterns.md` § "Subprocess Execution with Ray" and "Resources Server Pattern".
 
 Critical rules:
 - Return `reward` as 0.0 or 1.0 (binary)
@@ -131,12 +131,12 @@ Key points:
 
 ### Step 4: Wire YAML config
 
-Edit `configs/my_benchmark.yaml`. Define the resource server instance and agent pairing(s). See `references/patterns.md` § "YAML Config Pattern".
+Edit `configs/my_benchmark.yaml`. Define the resources server instance and agent pairing(s). See `references/patterns.md` § "YAML Config Pattern".
 
 Key points:
 - `verified: false` is auto-added by pre-commit hook (set to `true` after baselining)
 - `license` is required for `train` and `validation` datasets
-- Agent references resource server and model server by instance name
+- Agent references resources server and model server by instance name
 
 For multi-turn benchmarks, either use `proof_refinement_agent` or create a custom agent. See `references/patterns.md` § "Agent Patterns".
 

@@ -1,6 +1,6 @@
 # Description
 
-This is a resource server for verifying terminal-based agent actions. It evaluates agent responses that represent terminal command sequences against expected answers. The server supports two different schema formats (`terminus_1` and `terminus_2`) for terminal interaction tasks.
+This is a resources server for verifying terminal-based agent actions. It evaluates agent responses that represent terminal command sequences against expected answers. The server supports two different schema formats (`terminus_1` and `terminus_2`) for terminal interaction tasks.
 
 For each verification request, the agent's JSON output is validated through multiple checks:
 1. **JSON Parsing**: The model output must be valid JSON
@@ -29,7 +29,7 @@ For each verification request, the agent's JSON output is validated through mult
 
 ## Running servers
 
-The following command can be used to run this resource server, along with the simple agent and a policy model:
+The following command can be used to run this resources server, along with the simple agent and a policy model:
 
 ```bash
 config_paths="resources_servers/terminus_judge/configs/terminus_judge.yaml,\

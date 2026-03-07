@@ -1,12 +1,12 @@
 # Description
-This is a resource server that is to be used to verify a single action taken by an agent that can either call a tool or send a chat message to the user as the next step in a trajectory.  For each verification request, there is an expected action that is either a tool call or a chat message.  An expected tool call is compared with a tool call issued by the agent by programmatically comparing the arguments in the tool calls.  If the expected action is a chat message, then the agent receives a positive reward if it sends a chat message, and a negative reward if it calls a tool instead.
+This is a resources server that is to be used to verify a single action taken by an agent that can either call a tool or send a chat message to the user as the next step in a trajectory.  For each verification request, there is an expected action that is either a tool call or a chat message.  An expected tool call is compared with a tool call issued by the agent by programmatically comparing the arguments in the tool calls.  If the expected action is a chat message, then the agent receives a positive reward if it sends a chat message, and a negative reward if it calls a tool instead.
 
 Data links: ?
 
 # Example usage
 
 ## Running servers
-The following command can be used to run this resource server, along with the tool simulation agent and an OpenAI model:
+The following command can be used to run this resources server, along with the tool simulation agent and an OpenAI model:
 ```bash
 config_paths="resources_servers/single_step_tool_use_with_argument_comparison/configs/single_step_tool_use_with_argument_comparison.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml"
