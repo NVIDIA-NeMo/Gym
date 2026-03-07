@@ -144,10 +144,12 @@ def main() -> None:
 
     with output_path.open("w") as f:
         for i in range(args.n):
-            example = make_example(args.seed_offset + i, img_size_range=img_size_range, circle_radius_range=circle_radius_range)
+            example = make_example(
+                args.seed_offset + i, img_size_range=img_size_range, circle_radius_range=circle_radius_range
+            )
             f.write(json.dumps(example) + "\n")
 
-    print(f"Generated {args.n} examples -> {output_path}")
+    print(f"Generated {args.n} examples: {output_path}")
 
 
 if __name__ == "__main__":
