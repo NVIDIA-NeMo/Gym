@@ -1,8 +1,18 @@
 # Ether0 eval environment
 
-[Benchmark](https://huggingface.co/datasets/futurehouse/ether0-benchmark) and [paper](https://arxiv.org/pdf/2506.17238)
+[Benchmark](https://huggingface.co/datasets/futurehouse/ether0-benchmark) and [paper](https://arxiv.org/pdf/2506.17238).
 
-325 questions across 14 task types: property-regression-adme, property-regression-ld50, property-regression-pka, property-cat-safety, property-cat-eve, property-cat-smell, molecule-formula, molecule-name, molecule-completion, reaction-prediction, simple-formula, functional-group, oracle-solubility, and retro-synthesis. Retro-synthesis and oracle-solubility require a separate `ether0-serve` remotes server, see the [ether0 repo](https://github.com/Future-House/ether0/).
+325 chemistry reasoning questions across 14 task types. All answers are a molecule. Around 25 questions per task, including:
+
+- Completing SMILES fragments
+- Designing molecules adhering to molecular formula and functional group constraints
+- Predicting reaction outcomes
+- Proposing one-step synthesis pathways
+- Editing the solubility of a molecule
+- Converting IUPAC name to SMILES
+- Answering multiple-choice questions about safety, ADME properties, BBB permeability, toxicity, scent, and pKa
+
+Note that retro-synthesis and oracle-solubility require a separate `ether0-serve` verifier server (see the [ether0 repo](https://github.com/Future-House/ether0/)).
 
 ```bash
 vllm serve futurehouse/ether0
