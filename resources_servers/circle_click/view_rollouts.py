@@ -12,15 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Render circle click rollouts as annotated PNGs.
-
-Joins the rollouts file (has reward, clicked coords) with the materialized
-inputs file (has circles, target_color, image) by _ng_task_index.
-
-Usage:
-    python view_rollouts.py results/circle_click_example_rollouts.jsonl --n 5
-"""
-
 import argparse
 import base64
 import io
@@ -28,7 +19,6 @@ import json
 from pathlib import Path
 
 from PIL import Image, ImageDraw
-
 
 def _decode_image(data_url: str) -> Image.Image:
     _, b64 = data_url.split(",", 1)
@@ -132,7 +122,7 @@ def main() -> None:
             _draw(rollout, task_input, i, out_dir)
             count += 1
 
-    print(f"Saved {count} images to {out_dir}/")
+    print(f"Saved to {out_dir}/")
 
 
 if __name__ == "__main__":
