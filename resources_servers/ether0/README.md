@@ -1,4 +1,4 @@
-# Ether0 eval environment
+# ether0 eval environment
 
 [Benchmark](https://huggingface.co/datasets/futurehouse/ether0-benchmark) and [paper](https://arxiv.org/pdf/2506.17238).
 
