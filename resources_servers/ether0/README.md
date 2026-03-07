@@ -1,8 +1,8 @@
 # Ether0 eval environment
 
-https://huggingface.co/datasets/futurehouse/ether0-benchmark
+[Benchmark](https://huggingface.co/datasets/futurehouse/ether0-benchmark) and [paper](https://arxiv.org/pdf/2506.17238)
 
-From the [ether0 paper](https://arxiv.org/pdf/2506.17238), 325 questions across 14 task types: property-regression-adme, property-regression-ld50, property-regression-pka, property-cat-safety, property-cat-eve, property-cat-smell, molecule-formula, molecule-name, molecule-completion, reaction-prediction, simple-formula, functional-group, oracle-solubility, and retro-synthesis. Retro-synthesis and oracle-solubility require a separate `ether0-serve` remotes server (see `packages/remotes/` in the ether0 repo).
+325 questions across 14 task types: property-regression-adme, property-regression-ld50, property-regression-pka, property-cat-safety, property-cat-eve, property-cat-smell, molecule-formula, molecule-name, molecule-completion, reaction-prediction, simple-formula, functional-group, oracle-solubility, and retro-synthesis. Retro-synthesis and oracle-solubility require a separate `ether0-serve` remotes server, see the [ether0 repo](https://github.com/Future-House/ether0/).
 
 ```bash
 vllm serve futurehouse/ether0
