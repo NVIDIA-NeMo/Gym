@@ -26,6 +26,7 @@ from fastapi import Request, Response
 from openai.types.responses.response_usage import ResponseUsage
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from nemo_gym.global_config import REASON_TO_SKIP_KEY_NAME
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
@@ -557,7 +558,9 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         # Fully done: return cached result without calling /v1/responses or /verify
         if reward_sentinel.exists():
             logger.info("Task %s (repeat=%s) already verified, skipping", body.task_id, body.repeat_index)
-            return GDPValAgentVerifyResponse.model_validate_json(reward_sentinel.read_text())
+            data = json.loads(reward_sentinel.read_text())
+            data[REASON_TO_SKIP_KEY_NAME] = "GDPVal: already collected in previous run"
+            return GDPValAgentVerifyResponse.model_validate(data)
 
         if finish_sentinel.exists():
             # Agent done but not verified: synthesize response_json from existing files, skip to /verify

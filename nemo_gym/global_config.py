@@ -54,6 +54,7 @@ HF_TOKEN_KEY_NAME = "hf_token"
 RAY_HEAD_NODE_ADDRESS_KEY_NAME = "ray_head_node_address"
 TASK_INDEX_KEY_NAME = "_task_index"
 REPEAT_INDEX_KEY_NAME = "repeat_index"
+REASON_TO_SKIP_KEY_NAME = "reason_to_skip"
 PORT_RANGE_LOW_KEY_NAME = "port_range_low"
 PORT_RANGE_HIGH_KEY_NAME = "port_range_high"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [

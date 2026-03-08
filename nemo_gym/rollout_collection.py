@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
 
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig
-from nemo_gym.global_config import REPEAT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.global_config import REASON_TO_SKIP_KEY_NAME, REPEAT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
@@ -126,7 +126,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
 
         metrics = Counter()
         Path(config.output_jsonl_fpath).parent.mkdir(exist_ok=True, parents=True)
-        with open(config.output_jsonl_fpath, "w") as f:
+        with open(config.output_jsonl_fpath, "a") as f:
 
             async def _post_coroutine(row: dict) -> None:
                 row["responses_create_params"] = row["responses_create_params"] | config.responses_create_params
@@ -142,7 +142,8 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
                         result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
                     if REPEAT_INDEX_KEY_NAME in row:
                         result[REPEAT_INDEX_KEY_NAME] = row[REPEAT_INDEX_KEY_NAME]
-                    f.write(json.dumps(result) + "\n")
+                    if not result.get(REASON_TO_SKIP_KEY_NAME):
+                        f.write(json.dumps(result) + "\n")
 
             await tqdm.gather(*map(_post_coroutine, rows), desc="Collecting rollouts", miniters=tqdm_miniters)
 
