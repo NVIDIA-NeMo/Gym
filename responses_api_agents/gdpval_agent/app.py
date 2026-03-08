@@ -567,7 +567,9 @@ class GDPValAgent(SimpleResponsesAPIAgent):
                 for p in body.task_dir.iterdir()
                 if p.is_file() and p.name not in _RESUME_SKIP_NAMES
             ]
-            response_json = {"saved_files": [f.model_dump(mode="json") for f in existing_files], "output": []}
+            history_file = body.task_dir / "history.json"
+            history_output = json.loads(history_file.read_text()) if history_file.exists() else []
+            response_json = {"saved_files": [f.model_dump(mode="json") for f in existing_files], "output": history_output}
         else:
             # Normal path: call /v1/responses to run the agent
             response = await self.server_client.post(
@@ -580,6 +582,8 @@ class GDPValAgent(SimpleResponsesAPIAgent):
             response_json = await get_response_json(response)
             cookies = response.cookies
             body.session_id = response_json.get("session_id") or body.session_id
+            history_file = body.task_dir / "history.json"
+            history_file.write_text(json.dumps(response_json.get("output", [])))
 
         # Extract saved files from the agent response
         saved_files = []
@@ -645,6 +649,7 @@ class GDPValAgent(SimpleResponsesAPIAgent):
 
         # Write verify sentinel so future runs can skip directly to return
         reward_sentinel.write_text(result.model_dump_json())
+        (body.task_dir / "history.json").unlink(missing_ok=True)
         return result
 
 
