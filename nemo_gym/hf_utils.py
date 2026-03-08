@@ -20,7 +20,6 @@ import yaml
 from datasets import load_dataset
 from huggingface_hub import HfApi, hf_hub_download
 from huggingface_hub.utils import HfHubHTTPError
-from scripts.update_resource_servers import visit_resource_server
 
 from nemo_gym.config_types import DownloadJsonlDatasetHuggingFaceConfig, UploadJsonlDatasetHuggingFaceConfig
 
@@ -118,6 +117,8 @@ def download_hf_dataset_as_jsonl(
 def upload_jsonl_dataset(
     config: UploadJsonlDatasetHuggingFaceConfig,
 ) -> None:  # pragma: no cover
+    from scripts.update_resource_servers import visit_resource_server  # lazy: scripts/ not installed as a package
+
     client = create_huggingface_client(config.hf_token)
     with open(config.resource_config_path, "r") as f:
         data = yaml.safe_load(f)
