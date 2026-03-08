@@ -256,6 +256,8 @@ class RolloutCollectionHelper(BaseModel):
 
         pbar: tqdm = self.run_examples(input_rows, semaphore=semaphore)
 
+        pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
+        counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
         results_file = output_fpath.open("ab")
         for future in pbar:
             row, result = await future
@@ -267,6 +269,19 @@ class RolloutCollectionHelper(BaseModel):
             results.append(result)
             result_strs.append([orjson.dumps(result)])
             results_file.write(result_strs[-1][0] + b"\n")
+
+            counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
+
+            current_pct = 100 * pbar.n / pbar.total
+            if pcts_to_print and current_pct >= pcts_to_print[0]:
+                while pcts_to_print and current_pct >= pcts_to_print[0]:
+                    pcts_to_print.pop(0)
+
+                top_left = counts_left.most_common(3)  # Fix to top 3 for now.
+                top_left_str = ", ".join(f"{k}: {v}" for k, v in top_left)
+                print_str = f"Examples left: {top_left_str}"
+                pbar.write(print_str)
+
         results_file.close()
 
         if get_wandb_run():  # pragma: no cover
