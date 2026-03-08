@@ -254,8 +254,10 @@ class RolloutCollectionHelper(BaseModel):
 
         output_fpath.parent.mkdir(exist_ok=True, parents=True)
 
+        pbar: tqdm = self.run_examples(input_rows, semaphore=semaphore)
+
         results_file = output_fpath.open("ab")
-        for future in self.run_examples(input_rows, semaphore=semaphore):
+        for future in pbar:
             row, result = await future
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
@@ -333,7 +335,11 @@ Agent-level metrics: {agent_level_metrics_fpath}""")
                 return row, await get_response_json(res)
 
         return tqdm.as_completed(
-            map(_post_subroutine, examples), desc="Collecting rollouts", miniters=10, total=len(examples)
+            map(_post_subroutine, examples),
+            desc="Collecting rollouts",
+            miniters=10,
+            total=len(examples),
+            maxinterval=60,
         )
 
     def setup_server_client(
