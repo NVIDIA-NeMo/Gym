@@ -254,12 +254,10 @@ class RolloutCollectionHelper(BaseModel):
 
         output_fpath.parent.mkdir(exist_ok=True, parents=True)
 
-        pbar: tqdm = self.run_examples(input_rows, semaphore=semaphore)
-
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
         results_file = output_fpath.open("ab")
-        for future in pbar:
+        for future in self.run_examples(input_rows, semaphore=semaphore):
             row, result = await future
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
@@ -271,16 +269,18 @@ class RolloutCollectionHelper(BaseModel):
             results_file.write(result_strs[-1][0] + b"\n")
 
             counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
+            if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
+                counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
 
-            current_pct = 100 * pbar.n / pbar.total
+            current_pct = 100 * len(results) / len(input_rows)
             if pcts_to_print and current_pct >= pcts_to_print[0]:
                 while pcts_to_print and current_pct >= pcts_to_print[0]:
                     pcts_to_print.pop(0)
 
                 top_left = counts_left.most_common(3)  # Fix to top 3 for now.
-                top_left_str = ", ".join(f"{k}: {v}" for k, v in top_left)
-                print_str = f"Examples left: {top_left_str}"
-                pbar.write(print_str)
+                if top_left:
+                    top_left_str = ", ".join(f"{k}: {v}" for k, v in top_left)
+                    print(f"Examples left: {top_left_str}")
 
         results_file.close()
 
