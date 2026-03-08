@@ -142,7 +142,7 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
                         result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
                     if REPEAT_INDEX_KEY_NAME in row:
                         result[REPEAT_INDEX_KEY_NAME] = row[REPEAT_INDEX_KEY_NAME]
-                    f.write(json.dumps(result, indent=2) + "\n")
+                    f.write(json.dumps(result) + "\n")
 
             await tqdm.gather(*map(_post_coroutine, rows), desc="Collecting rollouts", miniters=tqdm_miniters)
 
