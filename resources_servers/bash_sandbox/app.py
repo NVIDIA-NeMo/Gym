@@ -111,11 +111,6 @@ class SavedFile(BaseModel):
     size: int
 
 
-class CommitteeModelConfig(BaseModel):
-    name: str
-    output_dir: str
-
-
 class JudgeConfig(BaseModel):
     enabled: bool = False
     judge_model_name: str = "gemini-3-pro-preview"
@@ -125,7 +120,8 @@ class JudgeConfig(BaseModel):
     max_output_tokens: int = 65535
     num_trials: int = 4
     max_concurrent_judgements: int = 10
-    committee_models: List[CommitteeModelConfig] = Field(default_factory=list)
+    committee_models_root: str = ""
+    committee_models: List[str] = Field(default_factory=list)
     nvidia_openai_api_key_env: str | None = None
     nvidia_openai_model: str | None = None
 
@@ -135,6 +131,20 @@ class JudgeConfig(BaseModel):
         has_model = bool(self.nvidia_openai_model)
         if has_key != has_model:
             raise ValueError("nvidia_openai_api_key and nvidia_openai_model must both be set or both be absent")
+        return self
+
+    @model_validator(mode="after")
+    def _check_committee_models(self) -> "JudgeConfig":
+        if self.committee_models and not self.committee_models_root:
+            raise ValueError("committee_models_root must be set when committee_models is non-empty")
+        if self.committee_models_root:
+            root = Path(self.committee_models_root)
+            if not root.is_dir():
+                raise ValueError(f"committee_models_root {root!r} does not exist or is not a directory")
+            for name in self.committee_models:
+                model_dir = root / name
+                if not model_dir.is_dir():
+                    raise ValueError(f"Committee model directory {model_dir!r} does not exist")
         return self
 
 
@@ -401,7 +411,7 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
 
         try:
             self.session_manager.start_session(session_id)
-            print(f"seed_session: session_id: {session_id}, session_manager: {self.session_manager.id_to_session}")
+            logger.info(f"seed_session: session_id: {session_id}, session_manager: {self.session_manager.id_to_session}")
         except Exception as e:
             return SeedSessionResponse(session_id=session_id, success=False, error_message=str(e))
 
@@ -417,7 +427,7 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
             RunCommandResponse with exit_code, stdout, stderr, and optional error info.
 
         """
-        print(f"run_command: session_id: {body.session_id}, session_manager: {self.session_manager.id_to_session}")
+        logger.info(f"run_command: session_id: {body.session_id}, session_manager: {self.session_manager.id_to_session}")
         try:
             session = self.session_manager.get_session(body.session_id)
         except KeyError:
@@ -514,7 +524,7 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
             UploadFilesResult containing lists of uploaded files and any failures.
 
         """
-        print(f"upload_files: session_id: {body.session_id}, session_manager: {self.session_manager.id_to_session}")
+        logger.info(f"upload_files: session_id: {body.session_id}, session_manager: {self.session_manager.id_to_session}")
         try:
             session = self.session_manager.get_session(body.session_id)
         except KeyError:
@@ -593,7 +603,7 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
             SaveOutputFilesResponse containing lists of saved files and any failures.
 
         """
-        print(
+        logger.info(
             f"save_output_files: session_id: {body.session_id}, session_manager: {self.session_manager.id_to_session}"
         )
         try:
@@ -658,7 +668,7 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
         Returns:
             FinishResponse with session deletion status and saved file details.
         """
-        print(f"finish: session_id: {body.session_id}, session_manager: {self.session_manager.id_to_session}")
+        logger.info(f"finish: session_id: {body.session_id}, session_manager: {self.session_manager.id_to_session}")
         if body.paths is not None and body.output_dir is not None:
             result = await self.save_output_files(
                 SaveOutputFilesRequest(paths=body.paths, session_id=body.session_id, output_dir=body.output_dir)
@@ -818,7 +828,7 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
             "verify: task_id=%r enabled=%r committee_models=%r paths=%r",
             body.task_id,
             judge_config.enabled,
-            [cm.output_dir for cm in judge_config.committee_models],
+            judge_config.committee_models,
             body.paths,
         )
 
@@ -849,13 +859,13 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
         # Build judge tasks for each committee model
         judge_tasks = []
         committee_configs = []
-        for cm in judge_config.committee_models:
-            cm_task_dir = Path(cm.output_dir) / f"task_{body.task_id}"
+        for cm_name in judge_config.committee_models:
+            cm_task_dir = Path(judge_config.committee_models_root) / cm_name / f"task_{body.task_id}"
             finish_params = cm_task_dir / "finish_params.json"
 
             logger.info(
                 "verify: committee=%r cm_task_dir=%r exists=%r finish_params_exists=%r",
-                cm.name,
+                cm_name,
                 str(cm_task_dir),
                 cm_task_dir.exists(),
                 finish_params.exists(),
@@ -865,7 +875,7 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
             if not cm_task_dir.exists() or not finish_params.exists():
                 logger.warning(
                     "Committee model %s has no output for task %s, skipping",
-                    cm.name,
+                    cm_name,
                     body.task_id,
                 )
                 continue
@@ -882,10 +892,10 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
                     evaluated_output_dir=evaluated_output_dir,
                     committee_output_dir=str(cm_task_dir),
                     refs_dir=refs_dir,
-                    committee_model_name=cm.name,
+                    committee_model_name=cm_name,
                 )
             )
-            committee_configs.append(cm)
+            committee_configs.append(cm_name)
 
         # H7: If no committee models have output for this task, fall back to reward=1.0
         if not judge_tasks:
@@ -901,10 +911,10 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
 
         for i, result in enumerate(results):
             if isinstance(result, Exception):
-                logger.error("Judge task for %s raised exception: %s", committee_configs[i].name, result)
+                logger.error("Judge task for %s raised exception: %s", committee_configs[i], result)
                 committee_verdicts.append(
                     CommitteeModelVerdict(
-                        committee_model_name=committee_configs[i].name,
+                        committee_model_name=committee_configs[i],
                         win_count_evaluated=0,
                         win_count_committee=0,
                         tie_count=0,

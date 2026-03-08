@@ -9,7 +9,7 @@ gdpval_agent:
         type: responses_api_models
         name: policy_model
       max_steps: 100
-      max_tokens: 10000
+      context_window_tokens: 128000
       context_summarization_cutoff: 0.7
       remaining_step_warning_threshold: 20
       datasets:

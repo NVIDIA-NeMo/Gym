@@ -8,9 +8,9 @@ bash_sandbox_resources_server:
         judge_model_name: gemini-3-pro-preview
         num_trials: 4
         max_concurrent_judgements: 10
+        committee_models_root: /workspace/tmp/outputs/
         committee_models:
-          - name: my-test-model
-            output_dir: /workspace/tmp/outputs/committee-nano-v3/
+          - committee-nano-v3
         # OpenAI-compatible path — mutually exclusive with the VertexAI path (gcp_project_id).
         # Set both fields to use the NVIDIA OpenAI endpoint; omit both to use VertexAI.
         nvidia_openai_api_key_env: "NVIDIA_OPENAI_API_KEY"
