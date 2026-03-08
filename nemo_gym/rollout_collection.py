@@ -277,10 +277,10 @@ class RolloutCollectionHelper(BaseModel):
                 while pcts_to_print and current_pct >= pcts_to_print[0]:
                     pcts_to_print.pop(0)
 
-                top_left = counts_left.most_common(3)  # Fix to top 3 for now.
+                top_left = counts_left.most_common(5)  # Fix to top 3 for now.
                 if top_left:
-                    top_left_str = ", ".join(f"{k}: {v}" for k, v in top_left)
-                    print(f"Examples left: {top_left_str}")
+                    top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
+                    print(f"Examples left:\n{top_left_str}")
 
         results_file.close()
 
