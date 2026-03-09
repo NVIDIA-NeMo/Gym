@@ -16,6 +16,8 @@ import json
 from enum import StrEnum
 from typing import Any, Dict
 
+import xmltodict
+import yaml
 from fastapi import FastAPI
 from openapi_schema_validator import validate as validate_against_schema_openapi
 
@@ -28,11 +30,13 @@ from nemo_gym.base_resources_server import (
 
 
 class StructuredOutputsResourcesServerConfig(BaseResourcesServerConfig):
-    pass
+    xml_coerce_types: bool = True
 
 
 class SchemaType(StrEnum):
     JSON = "json"
+    YAML = "yaml"
+    XML = "xml"
 
 
 class StructuredOutputsVerifyRequest(BaseVerifyRequest):
@@ -52,6 +56,9 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
         schema_type = body.schema_type
         schema_str = body.schema_str
 
+        if schema_type not in list(SchemaType):
+            raise NotImplementedError(f"SchemaType must be one of {list(SchemaType)}, got {schema_type} !")
+
         # get model generation.
         assistant_responses = []
         for output_item in body.response.output:
@@ -65,30 +72,86 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
                 assistant_responses.append(content_item.text)
         response_text = "".join(assistant_responses)
 
-        # verify based on schema type
-        match schema_type:
-            case SchemaType.JSON:
-                reward = self.evaluate_structured_output_response_json(schema_str, response_text)
-            case _:
-                raise NotImplementedError(f"SchemaType must be one of {list(SchemaType)}, got {schema_type} !")
-
+        reward = self.evaluate_structured_output_response(schema_type, schema_str, response_text)
         return BaseVerifyResponse(**body.model_dump(), reward=reward)
 
-    # ----- JSON Helpers ----- #
-    def strictify_schema_json(self, schema: Dict[str, Any]):
+    # ----- Helpers ----- #
+    def parse_content(self, schema_type: SchemaType, content: str):
+        match schema_type.lower():
+            case SchemaType.JSON:
+                parsed = json.loads(content)
+            case SchemaType.YAML:
+                parsed = yaml.safe_load(content)
+            case SchemaType.XML:
+                parsed = xmltodict.parse(content)
+            case _:
+                parsed = None
+        return parsed
+
+    def strictify_schema(self, schema: Dict[str, Any]):
         """Make a schema strict as per OpenAPI guidelines"""
         if isinstance(schema, Dict):
             if "properties" in schema:
                 schema["required"] = list(schema["properties"])
                 schema["additionalProperties"] = False
             for k, v in schema.items():
-                self.strictify_schema_json(v)
+                self.strictify_schema(v)
 
-    def evaluate_structured_output_response_json(self, schema_str: str, response_text: str) -> bool:
+    def coerce_xml_types(self, data: Any, schema: Dict[str, Any]) -> Any:
+        """Recursively coerce xmltodict string values to match the JSON schema types.
+
+        xmltodict.parse() returns all leaf values as strings. This method walks the
+        parsed data alongside the schema and converts values where possible.
+        On conversion failure the original value is returned so that schema
+        validation can report the error.
+        """
+        if not isinstance(schema, dict) or "type" not in schema:
+            return data
+
+        schema_type = schema["type"]
+
+        if schema_type == "object" and isinstance(data, dict):
+            properties = schema.get("properties", {})
+            coerced = {}
+            for key, value in data.items():
+                if key in properties:
+                    coerced[key] = self.coerce_xml_types(value, properties[key])
+                else:
+                    coerced[key] = value
+            return coerced
+
+        if schema_type == "array":
+            items_schema = schema.get("items", {})
+            if not isinstance(data, list):
+                data = [data] if data is not None else []
+            return [self.coerce_xml_types(item, items_schema) for item in data]
+
+        if isinstance(data, str):
+            try:
+                if schema_type == "integer":
+                    return int(data)
+                if schema_type == "number":
+                    return float(data)
+                if schema_type == "boolean":
+                    lower = data.lower()
+                    if lower in ("true", "1"):
+                        return True
+                    if lower in ("false", "0"):
+                        return False
+            except (ValueError, AttributeError):
+                pass
+
+        return data
+
+    def evaluate_structured_output_response(
+        self, schema_type: SchemaType, schema_str: str, response_text: str
+    ) -> bool:
         try:
             schema = json.loads(schema_str)
-            self.strictify_schema_json(schema)
-            response_obj = json.loads(response_text)
+            self.strictify_schema(schema)
+            response_obj = self.parse_content(schema_type, response_text)
+            if schema_type == SchemaType.XML and self.config.xml_coerce_types:
+                response_obj = self.coerce_xml_types(response_obj, schema)
             validate_against_schema_openapi(response_obj, schema)
             return 1.0
         except Exception:

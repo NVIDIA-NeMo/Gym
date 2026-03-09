@@ -15,14 +15,14 @@ We recommend formatting the dataset to test the model's ability to follow instru
 1. Different Instruction Locations
    1. The instruction can be in the system or user message, and can be before or after the question.
 2. Difficulty of Instructions
-   1. The instruction can be simple, or detailed
+   1. The instruction can be simple, or detailed:
       1. e.g. simple: `Schema: {schema}`
       2. e.g. detailed `Please format your answer using the following schema: {schema}. Remember to validate all typing and formatting constraints. Do not format your answer in Markdown,`
 3. Difficulty of Question
    1. The question exists only to serve as a proxy for eliciting a response worthy of output formatting. To focus the environment towards schema adherence, the question should be easy.
       1. e.g. simple: `Please provide a response based on the document and provided schema`.
 
-For the JSON variant, we use the `openapi-schema-validator` library for verification.
+For any parsed outputs, we use the `openapi-schema-validator` library for verification.
 
 > [!IMPORTANT]
 > Evaluation is only based on the **schema adherence** of the generated output.
@@ -59,6 +59,11 @@ ng_prepare_data "+config_paths=[${config_paths}]" \
     +mode=train_preparation +should_download=true
 ```
 
+# Testing
+```
+ng_test +entrypoint=resources_servers/structured_outputs
+```
+
 # Licensing information
 Code: Apache 2.0
 
@@ -67,3 +72,4 @@ Data: CC BY 4.0
 Dependencies
 - nemo_gym: Apache 2.0
 - openapi-schema-validator: [BSD-3-Clause license](https://github.com/python-openapi/openapi-schema-validator/blob/master/LICENSE)
+- xmltodict: [MIT](https://github.com/martinblech/xmltodict/blob/master/LICENSE)
