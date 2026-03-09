@@ -395,6 +395,26 @@ class NSToolsResourcesServer(SimpleResourcesServer):
 
         verifier_ref = self.config.verifiers[verifier_type]
 
+        # Log sample shape for debugging (data format: each jsonl line should have question, expected_answer, responses_create_params)
+        has_q = body.question is not None and len(str(body.question).strip()) > 0
+        has_a = body.expected_answer is not None and len(str(body.expected_answer).strip()) > 0
+        q_preview = (body.question or "")[:80].replace("\n", " ")
+        if not has_q or not has_a:
+            logger.warning(
+                "ns_tools verify: sample missing question or expected_answer (has_question=%s, has_expected_answer=%s). "
+                "Data format expects each line to have 'question' and 'expected_answer' for math_with_judge.",
+                has_q,
+                has_a,
+            )
+        logger.debug(
+            "ns_tools verify: verifier=%s server=%s question_len=%s expected_answer_len=%s question_preview=%s",
+            verifier_type,
+            verifier_ref.name,
+            len(body.question or ""),
+            len(body.expected_answer or ""),
+            q_preview,
+        )
+
         # Delegate to the verifier
         response = await self.server_client.post(
             server_name=verifier_ref.name,
@@ -406,6 +426,15 @@ class NSToolsResourcesServer(SimpleResourcesServer):
 
         # Hard fail if no reward in response
         if "reward" not in result:
+            result_type = type(result).__name__
+            result_preview = (
+                list(result.keys()) if isinstance(result, dict) else str(result)[:500]
+            )
+            logger.error(
+                "ns_tools verify: verifier returned response without 'reward'. result_type=%s result_preview=%s",
+                result_type,
+                result_preview,
+            )
             raise ValueError(f"Verifier did not return 'reward' field. Response: {result}")
 
         return NSToolsVerifyResponse(

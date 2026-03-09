@@ -13,16 +13,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import contextlib
+import json
 import logging
+import re
+import threading
 from io import StringIO
+from pathlib import Path
 from typing import Any, ClassVar, Optional
+
+# JSONL path for logging every verify: generation (answer part), full_sequence (reasoning + answer), reward, reward_source (llm | math_verify)
+ROLLOUT_JSONL_PATH = Path("/scratch/fsw/portfolios/llmservice/projects/llmservice_nemo_reasoning/users/wedu/rollout.jsonl")
+_ROLLOUT_JSONL_LOCK = threading.Lock()
 
 from fastapi import FastAPI
 from math_verify import grader
 from math_verify.errors import TimeoutException
 from math_verify.metric import math_metric
 from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError as PydanticValidationError
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -38,6 +46,16 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import get_response_json
+
+logger = logging.getLogger(__name__)
+# Truncate long strings for log (e.g. raw vLLM response)
+_LOG_MAX_LEN = 800
+
+
+def _truncate_for_log(s: str, max_len: int = _LOG_MAX_LEN) -> str:
+    if len(s) <= max_len:
+        return s
+    return s[:max_len] + f"... [truncated, total {len(s)} chars]"
 
 
 class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
@@ -72,25 +90,73 @@ class LibraryJudgeMathResourcesServer(SimpleResourcesServer):
     # https://github.com/lmarena/arena-hard-auto/blob/196f6b826783b3da7310e361a805fa36f0be83f3/utils/judge_utils.py
     # They are intended to serve as example messages for an LLM judge, and have not
     # been customized for a specific judge model.
-    JUDGE_SYSTEM_MESSAGE: ClassVar[
-        str
-    ] = """Please act as an impartial judge and evaluate the equivalence of the solutions given by two AI assistants to the mathematical problem displayed below. You will be given AI assistant A's answer and AI assistant B's answer. Your job is to evaluate whether assistant A's answer is equivalent to assistant B's answer.
+    # NOTE: We intentionally keep the judge output machine-parseable by requiring
+    # a "Judgement: Yes|No" line, and we only do trivial simplifications.
+    JUDGE_SYSTEM_MESSAGE: ClassVar[str] = """You will be asked to look at the two answers (Answer A and Answer B) to a math problem and to judge whether they are equivalent within the context of the problem.
 
-Consider the mathematical equivalence of the AI assistants' answers above all other considerations. If the problem requests special formatting instructions, you may disregard any formatting considerations when evaluating the answers -- consider only mathematical equivalence.
+Please first explain your reasoning in a couple of sentences. Then respond with only Yes or No as your judgement on whether the two answers are the same.
+When comparing answers only perform trivial simplifications (e.g., factor order, 3/2 == 1.5, matching multiple-choice option letters to the shown expression, ordering of a set of solutions). Do NOT perform non-trivial algebraic transformations.
 
-After evaluating both answers for equivalence, you must output only one of the following choices as your final verdict with a label:
+Format your final decision exactly like this (last line):
+Judgement: Yes
+or
+Judgement: No
 
-1.  The AI assistants' answers are equivalent: [[A=B]]
-2.  The AI assistants' answers are different: [[A!=B]]
+Here are a few examples.
 
-Example output: "My final verdict is different [[A!=B]]"."""
+Example 1:
+Problem: Factor $7x^3 - 21x^2 + 14x$.
+Answer A: $7x(x - 2)(x - 1)$
+Answer B: $7x(x-1)(x-2)$
+Reasoning: The order of the factors does not matter, so the answers are the same.
+Judgement: Yes
+
+Example 2:
+Problem: A rectangle has a length of 6 meters and a width of 2 meters. If the length is reduced by 3 meters and the width is halved, what is the new area of the rectangle in square meters?
+Answer A: 3/2
+Answer B: 1.5
+Reasoning: 3/2 is the same as 1.5.
+Judgement: Yes
+
+Example 3:
+Problem: Simplify the expression $\\sqrt{7!}$.
+Answer A: 71
+Answer B: $12\\sqrt{35}$.
+Reasoning: This is non-trivial to simplify, so the answers are different.
+Judgement: No
+
+Example 4:
+Problem: What is the simplified form of the expression $\\sqrt{98 x^{3} y^{5} z}$?
+A) $2 x y z \\sqrt{7 x y z}$
+B) $7 x^{2} y^{2} \\sqrt{2 y z}$
+C) $7 x y^{2} \\sqrt{2 x y z}$
+D) $49 x y^{2} \\sqrt{2 x y z}$
+Answer A: $7 x y^{2} \\sqrt{2 x y z}$
+Answer B: C
+Reasoning: Answer A matches option C.
+Judgement: Yes
+
+Example 5:
+Problem: A line segment of length 5 has one endpoint at (1, 2) and the other endpoint at (4, b). Find all possible values of b, separated by commas.
+Answer A: -2, 6
+Answer B: 6, -2
+Reasoning: The order doesn't matter in the context of the problem.
+Judgement: Yes
+
+Example 6:
+Problem: Solve $\\tan x = \\sin x$ for $0 \\le x \\le 2 \\pi.$ Enter all the solutions, separated by commas.
+Answer A: 0, $\\pi$
+Answer B: 0, $\\pi$, $2\\pi$
+Reasoning: The number of solutions is different.
+Judgement: No
+"""
 
     JUDGE_PROMPT_TEMPLATE: ClassVar[str] = (
-        "<|Problem|>\n{question}\n\n<|Start of Assistant A's Answer|>\n{first_answer}\n<|End of Assistant A's Answer|>\n\n<|Start of Assistant B's Answer|>\n{second_answer}\n<|End of Assistant B's Answer|>"
+        "YOUR TASK\n\n"
+        "Problem: {question}\n"
+        "Answer A: {first_answer}\n"
+        "Answer B: {second_answer}\n"
     )
-
-    JUDGE_EQUAL_LABEL: ClassVar[str] = "[[A=B]]"
-    JUDGE_NOT_EQUAL_LABEL: ClassVar[str] = "[[A!=B]]"
 
     config: LibraryJudgeMathResourcesServerConfig
 
@@ -118,24 +184,75 @@ Example output: "My final verdict is different [[A!=B]]"."""
         return app
 
     async def verify(self, body: LibraryJudgeMathVerifyRequest) -> LibraryJudgeMathVerifyResponse:
+        q_len = len(body.question or "")
+        a_len = len(body.expected_answer or "")
+        if not body.question or not body.expected_answer:
+            logger.warning(
+                "math_with_judge verify: missing question or expected_answer (question_len=%s expected_answer_len=%s). "
+                "Upstream data format should provide both.",
+                q_len,
+                a_len,
+            )
+        logger.debug(
+            "math_with_judge verify: question_len=%s expected_answer_len=%s judge_server=%s",
+            q_len,
+            a_len,
+            self.config.judge_model_server.name,
+        )
         assistant_responses = []
+        full_sequence_parts = []
         for output_item in body.response.output:
+            if getattr(output_item, "type", None) == "reasoning":
+                summary = getattr(output_item, "summary", None) or []
+                full_sequence_parts.append("".join(getattr(s, "text", "") or "" for s in summary))
+                continue
             if output_item.type != "message":
                 continue
-
             for content_item in output_item.content:
                 if content_item.type != "output_text":
                     continue
-
                 assistant_responses.append(content_item.text)
+                full_sequence_parts.append(content_item.text)
 
         combined_response = "".join(assistant_responses)
+        full_sequence = "".join(full_sequence_parts)
         (
             reward,
             extracted_answer,
             library_reward,
             judge_evaluations,
         ) = await self._verify_answer(body.question, body.expected_answer, combined_response)
+        # reward_source: llm = used LLM judge; math_verify = used library only
+        reward_source = "llm" if judge_evaluations is not None else "math_verify"
+        try:
+            with _ROLLOUT_JSONL_LOCK:
+                ROLLOUT_JSONL_PATH.parent.mkdir(parents=True, exist_ok=True)
+                with open(ROLLOUT_JSONL_PATH, "a", encoding="utf-8") as f:
+                    f.write(
+                        json.dumps(
+                            {
+                                "generation": combined_response,
+                                "full_sequence": full_sequence,
+                                "reward": reward,
+                                "reward_source": reward_source,
+                                "judge_model_server": (self.config.judge_model_server.name if reward_source == "llm" else None),
+                                "library_reward": library_reward,
+                                "question": body.question,
+                                "expected_answer": body.expected_answer,
+                                "extracted_answer": extracted_answer,
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n"
+                    )
+        except Exception as e:
+            logger.warning("Failed to write rollout jsonl: %s", e)
+        logger.debug(
+            "math_with_judge verify: reward=%s reward_source=%s judge_server=%s",
+            reward,
+            reward_source,
+            self.config.judge_model_server.name if reward_source == "llm" else None,
+        )
         return LibraryJudgeMathVerifyResponse(
             **body.model_dump(),
             reward=reward,
@@ -248,13 +365,38 @@ Example output: "My final verdict is different [[A!=B]]"."""
                 content=judge_prompt,
             ),
         ]
+        # Use same temperature/top_p as policy vLLM worker so the worker's assert passes (shared worker).
+        responses_create_params.temperature = 1.0
+        responses_create_params.top_p = 1.0
 
+        logger.info(
+            "math_with_judge: calling judge server=%s prompt_len=%d",
+            config.judge_model_server.name,
+            len(judge_prompt),
+        )
         response = await self.server_client.post(
             server_name=config.judge_model_server.name,
             url_path="/v1/responses",
             json=responses_create_params,
         )
-        judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
+        logger.info(
+            "math_with_judge: judge HTTP status=%s",
+            getattr(response, "status_code", getattr(response, "status", None)),
+        )
+        raw_json = await get_response_json(response)
+        logger.info(
+            "math_with_judge: judge raw response (truncated): %s",
+            _truncate_for_log(repr(raw_json)),
+        )
+        try:
+            judge_response = NeMoGymResponse.model_validate(raw_json)
+        except PydanticValidationError as e:
+            logger.error(
+                "math_with_judge: judge returned invalid JSON/model. raw_response=%s validation_error=%s",
+                _truncate_for_log(repr(raw_json)),
+                str(e),
+            )
+            raise
         judge_evaluation = JudgeEvaluation(responses_create_params=responses_create_params, response=judge_response)
 
         # Currently, for all the cases in which the response from the LLM judge
@@ -269,23 +411,20 @@ Example output: "My final verdict is different [[A!=B]]"."""
         if last_content.type != "output_text":
             return False, judge_evaluation
 
-        output_text = last_content.text
-        equal_choice_position = output_text.find(self.JUDGE_EQUAL_LABEL)
-        not_equal_choice_position = output_text.find(self.JUDGE_NOT_EQUAL_LABEL)
+        output_text = last_content.text or ""
 
-        # The first label that appears in the text is used for the evaluation.
-        if equal_choice_position < 0:
-            if not_equal_choice_position < 0:
-                return False, judge_evaluation
-            else:
-                return False, judge_evaluation
-        else:
-            if not_equal_choice_position < 0:
-                return True, judge_evaluation
-            elif equal_choice_position < not_equal_choice_position:
-                return True, judge_evaluation
-            else:
-                return False, judge_evaluation
+        # Prefer explicit "Judgement: Yes|No" (last line). Fall back to a trailing Yes/No.
+        m = re.search(r"(?is)\bjudg(?:e)?ment\b\s*:\s*(yes|no)\b", output_text)
+        if m:
+            return (m.group(1).strip().lower() == "yes"), judge_evaluation
+
+        tail = output_text.strip().split()
+        if tail:
+            last_token = tail[-1].strip().strip('"\'.').lower()
+            if last_token in ("yes", "no"):
+                return (last_token == "yes"), judge_evaluation
+
+        return False, judge_evaluation
 
 
 if __name__ == "__main__":

@@ -227,9 +227,10 @@ class GlobalConfigDictParser(BaseModel):
             DictConfig(dict()) if parse_config.skip_load_from_cli else self.parse_global_config_dict_from_cli()
         )
 
-        # Command line overrides function input.
+        # initial_global_config_dict (e.g. from nemo_rl env.nemo_gym) should override base yaml so that
+        # overrides like math_with_judge.should_use_judge: true take effect. Merge with initial last.
         initial_global_config_dict = OmegaConf.create(parse_config.initial_global_config_dict or dict())
-        global_config_dict: DictConfig = OmegaConf.merge(initial_global_config_dict, global_config_dict)
+        global_config_dict: DictConfig = OmegaConf.merge(global_config_dict, initial_global_config_dict)
 
         # Load the env.yaml config. We load it early so that people can use it to conveniently store config paths.
         dotenv_path = parse_config.dotenv_path or PARENT_DIR / "env.yaml"

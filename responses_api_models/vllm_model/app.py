@@ -546,9 +546,10 @@ class VLLMModel(SimpleResponsesAPIModel):
                     [reasoning_content]
                 ) + (choice_dict["message"]["content"] or "")
         else:
-            assert not choice_dict["message"].get("reasoning_content"), (
-                "Please do not use a reasoning parser in vLLM! There is one source of truth for handling data (including reasoning), which is NeMo Gym!"
-            )
+            # Judge and other non-reasoning clients: if vLLM returns reasoning_content, drop it so
+            # we don't crash (some judge models may emit thinking; we only need the main content).
+            if choice_dict["message"].get("reasoning_content"):
+                choice_dict["message"].pop("reasoning_content")
 
         if self.config.return_token_id_information:
             log_probs = choice_dict["logprobs"]["content"]
