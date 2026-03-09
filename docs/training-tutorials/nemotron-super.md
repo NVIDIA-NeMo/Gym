@@ -1,42 +1,25 @@
 (training-nemotron-super)=
-# Production-Scale Training: Nemotron Super 49B
+# Nemotron 3 Super Recipe
+
+Quick-reference recipe for production-scale training with the Nemotron 3 Super 49B model using NeMo RL.
+
+**Nemotron 3 Super** is NVIDIA's 49-billion parameter heterogeneous transformer model designed for production-scale deployments. It uses variable layer configurations (DeciLM architecture) to optimize performance and efficiency for high-quality language generation tasks.
+
+**Use this page to**: check hardware requirements, understand configuration options, and launch production-scale training across multi-node clusters.
 
 ```{warning}
-**Experimental Configuration**: This tutorial uses configurations marked `.disabled` in NeMo RL, indicating they are not yet fully validated. Known issues include [GitHub #1571](https://github.com/NVIDIA-NeMo/RL/issues/1571).
+**Experimental Configuration**: This recipe uses configurations marked `.disabled` in NeMo RL, indicating they are not yet fully validated. Known issues include [GitHub #1571](https://github.com/NVIDIA-NeMo/RL/issues/1571).
 
 **Recommended alternative**: The {doc}`NeMo RL GRPO tutorial <../tutorials/nemo-rl-grpo/index>` provides a validated single-node workflow with Nemotron Nano 9B.
 ```
 
-Train large language models at production scale using the Llama-3.3-Nemotron-Super-49B model on multi-node clusters with NeMo RL.
-
-:::{card}
-
-**Goal**: Configure and launch production-scale training on a multi-node cluster.
-
-^^^
-
-**In this tutorial, you will**:
-
-1. Understand hardware requirements and cost implications
-2. Configure the Nemotron Super 49B training environment
-3. Launch SFT or GRPO training across multiple nodes
-4. Monitor training and handle common failure scenarios
-
-:::
-
-:::{button-ref} ../tutorials/nemo-rl-grpo/index
-:color: secondary
-:outline:
-:ref-type: doc
-
-← Previous: NeMo RL GRPO Tutorial
+:::{tip}
+**New to production-scale training?** Start with the {doc}`NeMo RL GRPO Tutorial <../tutorials/nemo-rl-grpo/index>` and the {doc}`Nemotron Nano recipe <nemotron-nano>` to validate your approach before scaling to Super.
 :::
 
 ---
 
-## Before You Begin
-
-### When to Use This vs. Nano
+## When to Use Nemotron 3 Super
 
 | Factor | Nemotron Super 49B | Nemotron Nano 9B |
 |--------|-------------------|------------------|
@@ -47,8 +30,12 @@ Train large language models at production scale using the Llama-3.3-Nemotron-Sup
 | **Validation status** | Experimental | ✅ Validated |
 | **Best for** | Production deployment, research | Iteration, prototyping |
 
-**Use Super 49B when**: You need maximum model quality and have the compute budget.
+**Use Super 49B when**: You need maximum model quality and have the compute budget.  
 **Use Nano 9B when**: You want to iterate quickly or validate your approach first.
+
+---
+
+## Prerequisites
 
 ### Hardware Requirements
 
@@ -111,11 +98,29 @@ Slurm is a cluster job scheduler. Key commands:
 
 ---
 
-## 1. Cluster Setup
+## Model Information
+
+| Property | Value |
+|----------|-------|
+| **Model name** | `nvidia/Llama-3_3-Nemotron-Super-49B-v1_5` |
+| **Parameters** | 49 billion |
+| **Architecture** | Heterogeneous transformer (DeciLMForCausalLM) |
+| **Max sequence length** | 32,768 tokens |
+| **trust_remote_code** | Required (`True`) |
+
+```{warning}
+**Security note**: This model requires `trust_remote_code=True`, which executes code from the HuggingFace repository. Review the [model card](https://huggingface.co/nvidia/Llama-3_3-Nemotron-Super-49B-v1_5) before proceeding.
+```
+
+---
+
+## Quick Start
+
+### 1. Cluster Setup
 
 **Estimated time**: ~30 minutes
 
-### Verify Cluster Resources
+**Verify cluster resources**:
 
 ```bash
 # Check available nodes
@@ -130,7 +135,7 @@ srun --nodes=8 --ntasks-per-node=1 --time=5:00 hostname
 
 **✅ Success Check**: All 8 nodes report 8× H100 GPUs with 80GB memory each.
 
-### Configure Environment
+**Configure environment**:
 
 ```bash
 # Set up experiment directory (adjust path for your cluster)
@@ -149,74 +154,9 @@ export HF_TOKEN=hf_your_token_here  # Replace with your actual token
 
 **✅ Success Check**: All nodes can read/write to the shared directory.
 
----
-
-## 2. Configuration
+### 2. Copy Configuration
 
 **Estimated time**: ~15 minutes
-
-### Model Information
-
-| Property | Value |
-|----------|-------|
-| **Model name** | `nvidia/Llama-3_3-Nemotron-Super-49B-v1_5` |
-| **Parameters** | 49 billion |
-| **Architecture** | Heterogeneous transformer (DeciLMForCausalLM) |
-| **Max sequence length** | 32,768 tokens |
-| **trust_remote_code** | Required (`True`) |
-
-```{warning}
-**Security note**: This model requires `trust_remote_code=True`, which executes code from the HuggingFace repository. Review the [model card](https://huggingface.co/nvidia/Llama-3_3-Nemotron-Super-49B-v1_5) before proceeding.
-```
-
-### Key Hyperparameters
-
-:::::{tab-set}
-
-::::{tab-item} SFT Configuration
-
-Based on `examples/configs/recipes/llm/sft-nemotron-super-49b-8n8g-fsdp2tp4cp8-tulu-v3.yaml.disabled`:
-
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| `train_global_batch_size` | 128 | Total batch across all nodes |
-| `learning_rate` | 1.0e-05 | Peak learning rate |
-| `max_num_steps` | 50 | Training iterations |
-| `warmup_steps` | 10 | Linear warmup iterations |
-| `max_total_sequence_length` | 32768 | Maximum context window |
-| `tensor_parallel_size` | 4 | GPUs for tensor parallelism |
-| `context_parallel_size` | 8 | GPUs for context parallelism |
-| `activation_checkpointing` | true | Memory optimization |
-
-**Dataset**: TULU v3 SFT Mixture (`tulu3_sft_mixture`)
-
-**Cluster**: 8 nodes × 8 GPUs = **64 GPUs**
-
-::::
-
-::::{tab-item} GRPO Configuration
-
-Based on `examples/configs/recipes/llm/grpo-helpsteer3-llama-3.3-nemotron-super-49b-v1.5-8n8g-fsdp2tp8cp4.yaml.disabled`:
-
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| `train_global_batch_size` | 64 | Total batch across all nodes |
-| `learning_rate` | 3.0e-07 | Peak learning rate (lower for RL) |
-| `max_num_steps` | 10 | Training iterations |
-| `num_prompts_per_step` | 64 | Prompts per training step |
-| `tensor_parallel_size` | 8 | GPUs for tensor parallelism |
-| `context_parallel_size` | 4 | GPUs for context parallelism |
-| `cpu_offload` | true | Optimizer CPU offloading |
-
-**Dataset**: HelpSteer3
-
-**Cluster**: 16 nodes × 8 GPUs = **128 GPUs**
-
-::::
-
-:::::
-
-### Copy and Modify Configuration
 
 The reference configurations are marked `.disabled`. Copy and modify them:
 
@@ -241,13 +181,9 @@ checkpointing:
   checkpoint_dir: /lustre/scratch/your_username/nemotron-super/checkpoints
 ```
 
----
-
-## 3. Launch Training
+### 3. Launch Training
 
 **Estimated time**: 4-12 hours
-
-### Complete Slurm Job Script
 
 Create a job script `train_nemotron_super.sbatch`:
 
@@ -289,7 +225,7 @@ Submit the job:
 sbatch train_nemotron_super.sbatch
 ```
 
-### Monitor Progress
+**Monitor progress**:
 
 ```bash
 # Check job status
@@ -302,16 +238,6 @@ tail -f nemotron-super-sft-*.out
 srun --jobid=YOUR_JOB_ID --overlap nvidia-smi
 ```
 
-### Cancel and Cleanup
-
-```bash
-# Cancel a running job
-scancel YOUR_JOB_ID
-
-# Clean up checkpoints (WARNING: deletes data)
-# rm -rf $SCRATCH/nemotron-super/checkpoints/*
-```
-
 **✅ Success Check**: Training starts across all nodes. Check logs for:
 - `Training step 1/50` messages
 - No OOM errors
@@ -319,7 +245,46 @@ scancel YOUR_JOB_ID
 
 ---
 
-## 4. Expected Results
+## Configuration Reference
+
+### SFT Configuration
+
+Based on `examples/configs/recipes/llm/sft-nemotron-super-49b-8n8g-fsdp2tp4cp8-tulu-v3.yaml.disabled`:
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `train_global_batch_size` | 128 | Total batch across all nodes |
+| `learning_rate` | 1.0e-05 | Peak learning rate |
+| `max_num_steps` | 50 | Training iterations |
+| `warmup_steps` | 10 | Linear warmup iterations |
+| `max_total_sequence_length` | 32768 | Maximum context window |
+| `tensor_parallel_size` | 4 | GPUs for tensor parallelism |
+| `context_parallel_size` | 8 | GPUs for context parallelism |
+| `activation_checkpointing` | true | Memory optimization |
+
+**Dataset**: TULU v3 SFT Mixture (`tulu3_sft_mixture`)  
+**Cluster**: 8 nodes × 8 GPUs = **64 GPUs**
+
+### GRPO Configuration
+
+Based on `examples/configs/recipes/llm/grpo-helpsteer3-llama-3.3-nemotron-super-49b-v1.5-8n8g-fsdp2tp8cp4.yaml.disabled`:
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `train_global_batch_size` | 64 | Total batch across all nodes |
+| `learning_rate` | 3.0e-07 | Peak learning rate (lower for RL) |
+| `max_num_steps` | 10 | Training iterations |
+| `num_prompts_per_step` | 64 | Prompts per training step |
+| `tensor_parallel_size` | 8 | GPUs for tensor parallelism |
+| `context_parallel_size` | 4 | GPUs for context parallelism |
+| `cpu_offload` | true | Optimizer CPU offloading |
+
+**Dataset**: HelpSteer3  
+**Cluster**: 16 nodes × 8 GPUs = **128 GPUs**
+
+---
+
+## Expected Results
 
 ```{note}
 These are estimates based on similar large-scale training runs. Your results will vary based on dataset, hardware, and hyperparameters. The experimental status of these configs means you may encounter issues.
@@ -403,14 +368,21 @@ Before running production training:
 
 ---
 
-## What's Next?
+## Related Resources
 
-After completing this tutorial, explore these options:
-
-::::{grid} 1 1 2 2
+::::{grid} 1 2 2 2
 :gutter: 3
 
-:::{grid-item-card} {octicon}`book;1.5em;sd-mr-1` NeMo RL GRPO Tutorial
+:::{grid-item-card} {octicon}`book;1.5em;sd-mr-1` Nemotron Nano Recipe
+:link: nemotron-nano
+:link-type: doc
+
+Quick-reference for training with Nemotron Nano 9B-12B models.
++++
+{bdg-secondary}`recipe` {bdg-secondary}`nano`
+:::
+
+:::{grid-item-card} {octicon}`workflow;1.5em;sd-mr-1` NeMo RL GRPO Tutorial
 :link: ../tutorials/nemo-rl-grpo/index
 :link-type: doc
 
@@ -426,6 +398,15 @@ Complete, validated tutorial for single-node training with Nemotron Nano 9B.
 Create your own resource server with custom tools and verification logic.
 +++
 {bdg-secondary}`tutorial` {bdg-secondary}`custom-tools`
+:::
+
+:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` Multi-Node Training
+:link: ../tutorials/nemo-rl-grpo/multi-node-training
+:link-type: doc
+
+Scale training to multiple nodes for production workloads.
++++
+{bdg-secondary}`tutorial` {bdg-secondary}`multi-node`
 :::
 
 ::::
