@@ -16,10 +16,20 @@
 """CLI for listing available benchmarks."""
 
 from benchmarks import discover_benchmarks
+from nemo_gym.config_types import BaseNeMoGymCLIConfig
+from nemo_gym.global_config import get_global_config_dict
+
+
+class ListBenchmarksConfig(BaseNeMoGymCLIConfig):
+    """List all available benchmarks in the benchmarks/ directory."""
+
+    pass
 
 
 def list_benchmarks():
     """Print all available benchmarks."""
+    ListBenchmarksConfig.model_validate(get_global_config_dict())
+
     benchmarks = discover_benchmarks()
     if not benchmarks:
         print("No benchmarks found.")

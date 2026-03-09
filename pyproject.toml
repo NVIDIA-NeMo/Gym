@@ -450,6 +450,9 @@ directory = "results/htmlcov"
 skip_covered = true
 sort = "miss"
 fail_under = 96.0
+omit = [
+    "benchmarks/*/prepare.py",
+]
 exclude_also = [
     "def __repr__",
     "if self.debug:",
@@ -463,7 +466,6 @@ exclude_also = [
     "@(abc\\.)?abstractmethod",
     "pass",
 ]
-omit = []
 
 ################################################
 # Linting, formatting, and QOL (using ruff)
