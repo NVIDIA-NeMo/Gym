@@ -128,6 +128,15 @@ Congratulations! You've trained Nemotron Nano 9B v2 for multi-step tool calling 
 ::::{grid} 1 1 2 2
 :gutter: 3
 
+:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` Nemotron 3 Super Recipe
+:link: ../../training-tutorials/nemotron-super
+:link-type: doc
+
+Scale to production with Nemotron Super 49B (64-128 H100 GPUs) for maximum model quality.
++++
+{bdg-secondary}`production` {bdg-secondary}`49B`
+:::
+
 :::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` Use Other Training Environments
 :link: https://github.com/NVIDIA-NeMo/Gym#-available-resource-servers
 
@@ -139,6 +148,15 @@ Browse available resource servers on GitHub to find other training environments.
 :link-type: doc
 
 Create your own resource server with custom tools and verification logic.
+:::
+
+:::{grid-item-card} {octicon}`book;1.5em;sd-mr-1` Nemotron Nano Recipe
+:link: ../../training-tutorials/nemotron-nano
+:link-type: doc
+
+Quick reference for Nemotron Nano 9B-12B model configurations.
++++
+{bdg-secondary}`recipe` {bdg-secondary}`nano`
 :::
 
 ::::
