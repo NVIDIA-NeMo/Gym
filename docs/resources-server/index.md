@@ -40,7 +40,7 @@ Tools are exposed as HTTP endpoints that the Agent server calls during a rollout
 
 Every Resources server implements a `verify()` function that evaluates the result of a rollout and returns a reward signal for training. See {doc}`/about/concepts/task-verification` for verification approaches, patterns, and best practices.
 
-## Example Resource Servers
+## Example Resources Servers
 
 **[`workplace_assistant`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/workplace_assistant)** — Multi-step tool calling in a workplace setting.
 - **Task**: Execute business activities such as sending emails, scheduling meetings, and managing projects.

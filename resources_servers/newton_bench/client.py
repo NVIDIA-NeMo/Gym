@@ -16,7 +16,7 @@
 NewtonBench Client Demo - AI Scientist Workflow
 
 This script demonstrates the full workflow of an AI scientist agent
-interacting with the NewtonBench resource server:
+interacting with the NewtonBench resources server:
 
 1. Initialize a session with a physics module (m0_gravity)
 2. Run systematic experiments to gather data
