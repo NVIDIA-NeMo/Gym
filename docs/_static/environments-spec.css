@@ -1,0 +1,251 @@
+/**
+ * Environments directive styles
+ * Aligned with NVIDIA Sphinx theme - uses theme variables for light/dark mode
+ * Colors: --nv-color-green (#76b900), --pst-color-*
+ * Fonts: --pst-font-family-base, --pst-font-family-heading
+ */
+
+/* Grid layout */
+.env-grid {
+  display: grid;
+  gap: 1rem;
+  margin: 1.5rem 0;
+  font-family: var(--pst-font-family-base, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif);
+}
+
+.env-grid-example {
+  grid-template-columns: 1fr;
+}
+
+.env-grid-server {
+  grid-template-columns: 1fr;
+}
+
+/* Cards */
+.env-card {
+  border: 1px solid var(--pst-color-on-surface, #e1e4e8);
+  border-radius: 0.5rem;
+  background: var(--pst-color-background, #ffffff);
+  overflow: hidden;
+  transition: border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
+}
+
+.env-card:hover {
+  border-color: var(--nv-color-green, #76b900);
+  box-shadow: 0 0 0 0.2rem rgba(118, 185, 0, 0.25);
+}
+
+.env-card-header {
+  padding: 0.75rem 1rem;
+  background: var(--pst-color-surface, #f8f9fa);
+  border-bottom: 1px solid var(--pst-color-on-surface, #e1e4e8);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.env-card-header strong {
+  font-size: 1rem;
+  font-family: var(--pst-font-family-heading, inherit);
+  font-weight: var(--pst-font-weight-heading, 600);
+  color: var(--pst-color-heading, #333333);
+}
+
+.env-card-body {
+  padding: 1rem;
+  color: var(--pst-color-text-base, #333333);
+}
+
+.env-demonstrates {
+  margin: 0 0 0.5rem;
+  font-size: 0.875rem;
+  color: var(--pst-color-text-muted, #6c757d);
+}
+
+.env-card-links {
+  font-size: 0.875rem;
+}
+
+.env-card-links a {
+  color: var(--nv-color-green, #76b900);
+  text-decoration: none;
+  transition: color 0.15s ease-in-out;
+}
+
+.env-card-links a:hover {
+  color: var(--nv-color-green, #76b900);
+  text-decoration: underline;
+  text-decoration-color: var(--nv-color-green, #76b900);
+}
+
+/* Server card: domain badges */
+.env-card-domains {
+  padding: 0.5rem 1rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  min-height: 0;
+}
+
+.env-domain-badge {
+  font-size: 0.7em;
+  padding: 0.15em 0.5em;
+  border-radius: 0.25rem;
+  background: rgba(118, 185, 0, 0.1);
+  color: var(--nv-color-green, #76b900);
+  border: 1px solid rgba(118, 185, 0, 0.2);
+  font-weight: 500;
+}
+
+.env-config-count {
+  font-size: 0.8em;
+  color: var(--pst-color-text-muted, #6c757d);
+}
+
+/* Config list */
+.env-config-list {
+  padding: 0.5rem 1rem 1rem;
+}
+
+.env-config-row {
+  margin: 0.25rem 0;
+  border: 1px solid var(--pst-color-on-surface, #e1e4e8);
+  border-radius: 0.25rem;
+  font-size: 0.875rem;
+  transition: border-color 0.15s ease-in-out;
+}
+
+.env-config-row:hover {
+  border-color: var(--pst-color-text-muted, #6c757d);
+}
+
+.env-config-row[open] {
+  border-color: var(--nv-color-green, #76b900);
+  box-shadow: 0 0 0 0.1rem rgba(118, 185, 0, 0.15);
+}
+
+.env-config-row summary.env-config-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.4rem 0.6rem;
+  cursor: pointer;
+  font-weight: 500;
+  list-style: none;
+  color: var(--pst-color-text-base, #333333);
+}
+
+.env-config-summary-inner {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.env-config-summary-inner .env-config-name {
+  flex-shrink: 0;
+}
+
+.env-config-summary-inner .env-config-meta {
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.env-config-row summary.env-config-summary::-webkit-details-marker {
+  display: none;
+}
+
+.env-config-row summary.env-config-summary::before {
+  content: "▸";
+  display: inline-block;
+  margin-right: 0.25rem;
+  transition: transform 0.2s;
+  opacity: 0.6;
+  color: var(--nv-color-green, #76b900);
+}
+
+.env-config-row[open] summary.env-config-summary::before {
+  transform: rotate(90deg);
+}
+
+.env-config-name a {
+  color: var(--nv-color-green, #76b900);
+  text-decoration: none;
+}
+
+.env-config-name a:hover {
+  text-decoration: underline;
+  text-decoration-color: var(--nv-color-green, #76b900);
+}
+
+.env-config-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  font-size: 0.9em;
+  color: var(--pst-color-text-muted, #6c757d);
+}
+
+.env-meta-item {
+  white-space: nowrap;
+}
+
+.env-config-details {
+  padding: 0.5rem 0.6rem 0.6rem;
+  border-top: 1px solid var(--pst-color-on-surface, #e1e4e8);
+  font-size: 0.85em;
+  color: var(--pst-color-text-base, #333333);
+}
+
+.env-config-detail {
+  margin: 0.2rem 0;
+}
+
+.env-detail-label {
+  font-weight: 600;
+  min-width: 5em;
+  display: inline-block;
+  color: var(--pst-color-text-muted, #6c757d);
+}
+
+.env-config-detail a {
+  color: var(--nv-color-green, #76b900);
+}
+
+/* Pills */
+.env-pill {
+  font-size: 0.75em;
+  padding: 0.1em 0.4em;
+  border-radius: 0.2rem;
+  font-weight: 500;
+}
+
+.env-pill-train {
+  background: var(--nv-color-green, #76b900);
+  color: var(--pst-color-background, #ffffff);
+}
+
+.env-pill-val {
+  background: rgba(118, 185, 0, 0.15);
+  color: var(--nv-color-green, #76b900);
+  border: 1px solid rgba(118, 185, 0, 0.3);
+}
+
+/* Type badge */
+.type-badge {
+  font-size: 0.7em;
+  padding: 0.15em 0.5em;
+  border-radius: 0.25rem;
+  font-weight: 500;
+}
+
+.type-badge.type-object {
+  background: var(--nv-color-green, #76b900);
+  color: var(--pst-color-background, #ffffff);
+}

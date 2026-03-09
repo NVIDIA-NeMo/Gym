@@ -34,6 +34,7 @@ release = "0.1.1"
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
 
 extensions = [
+    "docs._extensions.environments_directive",  # Environments table from YAML
     "myst_parser",  # For our markdown docs
     "autodoc2",  # Generates API docs
     "sphinx.ext.viewcode",  # For adding a link to view source code in docs
@@ -46,6 +47,7 @@ extensions = [
 ]
 
 templates_path = ["_templates"]
+html_static_path = ["_static"]
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "rfc"]
 
 # -- Options for MyST Parser (Markdown) --------------------------------------

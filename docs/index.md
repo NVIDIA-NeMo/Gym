@@ -378,6 +378,7 @@ Engineering Notes <infrastructure/engineering-notes/index>
 
 Configuration <reference/configuration>
 reference/cli-commands.md
+Environments <reference/environments>
 apidocs/index.rst
 FAQ <reference/faq>
 ```
