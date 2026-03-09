@@ -1,4 +1,4 @@
-# Instruction Following Resource Server
+# Instruction Following Resources Server
 
 ### Overview
 

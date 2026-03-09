@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for GenRM Compare Resource Server."""
+"""Tests for GenRM Compare Resources Server."""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
@@ -90,7 +90,7 @@ class TestGenRMCompareRequest:
 
 
 class TestGenRMCompareResourcesServer:
-    """Test GenRM Compare Resource Server methods."""
+    """Test GenRM Compare Resources Server methods."""
 
     @pytest.fixture
     def config(self):

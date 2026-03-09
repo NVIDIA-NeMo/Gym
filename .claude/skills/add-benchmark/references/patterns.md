@@ -4,7 +4,7 @@ Detailed patterns, schemas, and code examples for adding benchmarks to NeMo-Gym.
 
 ## Table of Contents
 
-1. [Resource Server Pattern](#resource-server-pattern)
+1. [Resources Server Pattern](#resources-server-pattern)
 2. [YAML Config Pattern](#yaml-config-pattern)
 3. [JSONL Data Schema](#jsonl-data-schema)
 4. [Agent Patterns](#agent-patterns)
@@ -16,7 +16,7 @@ Detailed patterns, schemas, and code examples for adding benchmarks to NeMo-Gym.
 
 ---
 
-## Resource Server Pattern
+## Resources Server Pattern
 
 ### Minimal verify-only server (e.g. `example_single_tool_call`)
 
@@ -178,10 +178,10 @@ Add `.toolname/` to the server's `.gitignore`.
 
 ## YAML Config Pattern
 
-A single YAML file in `configs/` defines both the resource server and its agent pairing(s):
+A single YAML file in `configs/` defines both the resources server and its agent pairing(s):
 
 ```yaml
-# Resource server instance
+# Resources server instance
 my_benchmark:
   resources_servers:
     my_benchmark:                    # must match subdirectory name
@@ -285,7 +285,7 @@ Each line is a JSON object with this structure:
 - `responses_create_params.tools`: function tool definitions if the benchmark uses tool calls
 - `responses_create_params.temperature`, `max_output_tokens`, etc.
 - `verifier_metadata`: arbitrary dict passed through to `verify()`. Define whatever your benchmark needs.
-- Any other top-level fields — they pass through to the resource server via `BaseRunRequest`.
+- Any other top-level fields — they pass through to the resources server via `BaseRunRequest`.
 
 ### Data conversion
 
@@ -440,7 +440,7 @@ def run_tests_remote(code, test_cases, timeout=30):
 
 ## Test Patterns
 
-### Resource server tests
+### Resources server tests
 
 ```python
 import shutil
@@ -473,7 +473,7 @@ Mock `server_client.post()` to simulate server responses without running actual 
 
 Conversion scripts and prompt files belong in the **source repo** (e.g. your dataset repository), not in NeMo-Gym. Only the converted JSONL files are uploaded to the GitLab dataset registry.
 
-**Exception**: When there is no external source repo, keep the conversion script in the resource server directory.
+**Exception**: When there is no external source repo, keep the conversion script in the resources server directory.
 
 Reference script template (for use in the source repo):
 

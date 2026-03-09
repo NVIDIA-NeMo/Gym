@@ -14,7 +14,7 @@
 # limitations under the License.
 
 """
-Prepare a dataset for use with the ns_tools NeMo Gym resource server.
+Prepare a dataset for use with the ns_tools NeMo Gym resources server.
 
 This script transforms a source dataset (e.g., comp-math-24-25/test.txt) into the
 JSONL format required by nemo-gym, using nemo_skills prompt configs and tool schemas.
@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Prepare dataset for ns_tools NeMo Gym resource server",
+        description="Prepare dataset for ns_tools NeMo Gym resources server",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )

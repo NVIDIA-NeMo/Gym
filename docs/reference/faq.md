@@ -25,14 +25,14 @@ hf_dataset_prefix: str  # field to override the default value "Nemotron-RL" prep
 
 Naming convention for Huggingface datasets is as follows.
 
-`{hf_organization}/{hf_dataset_prefix}-{domain}–{resource_server OR dataset_name}`
+`{hf_organization}/{hf_dataset_prefix}-{domain}–{resources_server OR dataset_name}`
 
 E.g.:
 
 `nvidia/Nemotron-RL-math-OpenMathReasoning`
 
 
-You will only need to manually input the `{dataset_name}` portion of the above when inputting the `dataset_name` flag in the upload command (refer to the command below). Everything preceding it will be automatically populated using your config prior to upload. Note that it is optional, and overrides `resource_server` if used.
+You will only need to manually input the `{dataset_name}` portion of the above when inputting the `dataset_name` flag in the upload command (refer to the command below). Everything preceding it will be automatically populated using your config prior to upload. Note that it is optional, and overrides `resources_server` if used.
 
 To upload to Huggingface, use the below command:
 ```bash
@@ -43,7 +43,7 @@ ng_upload_dataset_to_hf \
     +resource_config_path=${resource_config_path}
 ```
 
-Because of the required dataset nomenclature, the resource server config path is required when uploading. Specifically, `domain` is used in the naming of a dataset in Huggingface.
+Because of the required dataset nomenclature, the resources server config path is required when uploading. Specifically, `domain` is used in the naming of a dataset in Huggingface.
 
 By default, the `split` parameter for uploading is set to `train`, which will run a check on the required fields `{"responses_create_params"}`. Specifying `validation` or `test` bypasses this check:
 
