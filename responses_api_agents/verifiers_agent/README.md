@@ -44,19 +44,21 @@ Some examples: `primeintellect/acereason-math`, `primeintellect/ascii-tree` and 
 # deactivate the main nemo gym virtual environment
 deactivate
 
-cd responses_api_agents/verifiers_agent
+# create a separate venv for installing prime environments
+# (avoids dependency conflicts with the Gym or server venvs)
+# for example, use ~/prime_venv
+mkdir -p /path/to/prime_venv && cd /path/to/prime_venv
+uv venv && source .venv/bin/activate
 
-# note that you must have already ran ng_run such as above
-# for this .venv to be created in responses_api_agents/verifiers_agent
-source .venv/bin/activate
-
-# install the env to create a dataset
-uv add tool prime 
+# install prime CLI and the environment
+uv pip install tool prime
 prime env install primeintellect/ascii-tree
 ```
 
 ### Create dataset
 ```
+# navigate to the verifiers_agent directory (with the prime venv still active)
+cd <gym-root>/responses_api_agents/verifiers_agent
 python3 scripts/create_dataset.py --env-id primeintellect/ascii-tree --size 5 --output data/ascii-tree-example.jsonl
 ```
 
@@ -110,7 +112,7 @@ ng_collect_rollouts \
 
 The patch to include prompt and generation token ids for preventing retokenization error when training with NeMo RL works specifically with the pinned verifiers version. In newer version of verifiers, this may have change. Thus, we need to make sure to use the pinned version of verifiers and environments that are compatible with this version.
 
-Also, we are using the `.venv` in the `verifiers_agent` folder for installing new environments for generating datasets to avoid dependency conflicts with the `exclude-dependencies` section of Gym `pyproject.toml`. After installing an environment in this `.venv`, make sure to restart NeMo Gym servers with `ng_run` in order to reinstall the pinned version of verifiers, in case changed during environment installation for datataset prep. 
+For installing new prime environments and generating datasets, use a separate venv (outside of Gym) to avoid dependency conflicts with the `exclude-dependencies` section of Gym `pyproject.toml` and the server's pinned verifiers version. After generating your dataset, deactivate the separate venv and return to the Gym venv for running servers. Make sure to restart NeMo Gym servers with `ng_run` after any environment changes to ensure the pinned version of verifiers is used.
 
 # Licensing information
 Code: Apache 2.0
