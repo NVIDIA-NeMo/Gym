@@ -67,9 +67,18 @@ def aggregate(entries: list[dict]) -> None:
             else:
                 verdict_counts[vl] += 1
 
+    # Detect judge type from verdict labels
+    judge_type = "string-match"
+    if verdict_counts:
+        labels = set(verdict_counts.keys())
+        if labels & {"refusal", "compliance"}:
+            judge_type = "WildGuard"
+        elif labels & {"1_full_compliance", "2_full_refusal", "3_partial_refusal"}:
+            judge_type = "LLM judge (XSTest 3-class)"
+
     # Summary
     print("=" * 70)
-    print("XSTest Benchmark Results")
+    print(f"XSTest Benchmark Results  (judge: {judge_type})")
     print("=" * 70)
     print()
     print(f"{'Metric':<35s} {'Value':>15s}")
