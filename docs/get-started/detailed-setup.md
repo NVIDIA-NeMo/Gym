@@ -34,7 +34,7 @@
 NeMo Gym is designed to run on standard development machines without specialized hardware:
 
 - **GPU**: Not required for NeMo Gym library operation
-  - GPU may be needed for specific resource servers or model inference (see individual server documentation). E.g. if you are intending to train your model with NeMo-RL, GPU resources are required (see training documentation)
+  - GPU may be needed for specific resources servers or model inference (see individual server documentation). E.g. if you are intending to train your model with NeMo-RL, GPU resources are required (see training documentation)
 - **CPU**: Any modern x86_64 or ARM64 processor (e.g., Intel, AMD, Apple Silicon)
 - **RAM**: Minimum 8 GB (16 GB+ recommended for larger environments and datasets)
 - **Storage**: Minimum 2 GB free disk space for installation and basic usage
@@ -74,7 +74,7 @@ The following configurations have been tested and verified:
 | Windows 11 | x86_64 (via WSL2) | 3.12 | ✅ Verified |
 
 :::{note}
-While NeMo Gym itself does not require a GPU, some resource servers (particularly those involving local model inference or training) may have GPU requirements. Check the individual resource server documentation for specific requirements.
+While NeMo Gym itself does not require a GPU, some resources servers (particularly those involving local model inference or training) may have GPU requirements. Check the individual resources server documentation for specific requirements.
 :::
 
 ---
@@ -214,6 +214,13 @@ If this step fails, you will see a clear error message (like quota exceeded or i
 :::{dropdown} Troubleshooting: "Missing mandatory value: policy_api_key"
 Check your `env.yaml` file has the correct API key format.
 :::
+
+
+The cost for running rollouts using the OpenAI API can be calculated using the following rough formula: per token API cost × average number of input/output tokens × num_repeats × limit.
+- Per token API cost: See the OpenAI API pricing for more details https://openai.com/api/pricing/.
+- Average number of input/output tokens: After rollouts are run, you can see the input/output token usage in the returned response.
+- Num repeats and limit: These parameters are set in the rollout collection command later.
+
 
 ## 3. Start the Servers
 

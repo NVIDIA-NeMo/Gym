@@ -157,9 +157,8 @@ Example output: "My final verdict is different [[A!=B]]"."""
         if not self.config.should_use_judge or library_reward > 0.5:
             return library_reward, extracted_answer, library_reward, None
 
-        judge_reward, judge_evaluations = await self._verify_answer_with_judge(
-            question, expected_answer, generated_answer
-        )
+        judge_answer = extracted_answer if extracted_answer else generated_answer
+        judge_reward, judge_evaluations = await self._verify_answer_with_judge(question, expected_answer, judge_answer)
         return judge_reward, extracted_answer, library_reward, judge_evaluations
 
     @classmethod
@@ -172,11 +171,27 @@ Example output: "My final verdict is different [[A!=B]]"."""
         ):
             yield
 
+    @staticmethod
+    def _strip_math_delimiters(s: str) -> str:
+        """Strip outer math delimiters from expected answers.
+
+        Many expected_answer values are wrapped in \\(...\\) or $...$,
+        which causes the math_verify parser to fail when we wrap them
+        in \\boxed{}.  Removing these outer delimiters fixes parsing.
+        """
+        s = s.strip()
+        if s.startswith("\\(") and s.endswith("\\)"):
+            s = s[2:-2].strip()
+        if s.startswith("$") and s.endswith("$") and len(s) > 1:
+            s = s[1:-1].strip()
+        return s
+
     def _verify_answer_with_library(self, expected_answer: str, generated_answer: str) -> tuple[float, Optional[str]]:
         # This functionality is migrated from Nemo RL.
         # https://github.com/NVIDIA-NeMo/RL/blob/e1f56c42ae175d3863ccaf4e21b7de7e9c46c2e1/nemo_rl/environments/math_environment.py
         try:
-            ground_truth_parsable = "\\boxed{" + expected_answer + "}"
+            stripped = self._strip_math_delimiters(expected_answer)
+            ground_truth_parsable = "\\boxed{" + stripped + "}"
             with self._mute_output():
                 ret_score, extracted_answer = self._library_verifier([ground_truth_parsable], [generated_answer])
 
@@ -197,7 +212,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
                     # If no match is found, that means all the answers are
                     # incorrect.  The first prediction is used as the extracted
                     # answer.
-                    extracted_answer = extracted_prediction[0]
+                    extracted_answer = extracted_prediction[0] if extracted_prediction else None
 
             return reward, extracted_answer
 
@@ -235,6 +250,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
     ) -> tuple[bool, JudgeEvaluation]:
         config = self.config
         responses_create_params = config.judge_responses_create_params.model_copy(deep=True)
+
         judge_prompt = self.JUDGE_PROMPT_TEMPLATE.format(
             question=question, first_answer=first_answer, second_answer=second_answer
         )

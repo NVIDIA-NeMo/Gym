@@ -34,7 +34,7 @@ vllm serve Qwen/Qwen3-4B-Instruct-2507 --max-model-len 32768 --reasoning-parser 
 Now launch NeMo Gym servers:
 ```
 uv sync
-ng_run "+config_paths=[responses_api_agents/verifiers_agent/configs/verifiers_acereason-math.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+ng_run "+config_paths=[responses_api_agents/verifiers_agent/configs/acereason-math.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
 ```
 
 Collect rollouts
@@ -66,7 +66,7 @@ prime env install primeintellect/ascii-tree
 
 ### Creating a dataset
 
-A helper script to make a dataset is in `scripts/create_datset.py`.
+A helper script to make a dataset is in `scripts/create_dataset.py`.
 
 ```
 python3 scripts/create_dataset.py --env-id primeintellect/ascii-tree --size 5 --output data/ascii-tree-example.jsonl

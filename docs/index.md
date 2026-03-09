@@ -23,8 +23,6 @@ content_type: index
 
 [NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) is a library for building reinforcement learning (RL) training environments for large language models (LLMs). NeMo Gym provides infrastructure to develop environments, scale rollout collection, and integrate seamlessly with your preferred training framework.
 
-A training environment consists of three server components: **Agents** orchestrate the rollout lifecycle—calling models, executing tool calls through resources, and coordinating verification. **Models** provide stateless text generation using LLM inference endpoints. **Resources** define tasks, tool implementations, and verification logic.
-
 ````{div} sd-d-flex-row
 ```{button-ref} gs-quickstart
 :ref-type: ref
@@ -37,9 +35,17 @@ Quickstart
 ```{button-ref} environment-tutorials/index
 :ref-type: doc
 :color: secondary
+:class: sd-rounded-pill sd-mr-3
+
+Environment Tutorials
+```
+
+```{button-ref} training-tutorials/index
+:ref-type: doc
+:color: secondary
 :class: sd-rounded-pill
 
-Explore Tutorials
+Training Tutorials
 ```
 ````
 
@@ -63,9 +69,9 @@ Motivation and benefits of NeMo Gym.
 :::{grid-item-card} {octicon}`gear;1.5em;sd-mr-1` Concepts
 :link: about/concepts/index
 :link-type: doc
-Core components, configuration, verification and RL terminology.
+Training approaches, core components, configuration, verification, and RL terminology.
 +++
-{bdg-secondary}`environments` {bdg-secondary}`agents` {bdg-secondary}`models` {bdg-secondary}`resources`
+{bdg-secondary}`sft` {bdg-secondary}`rl` {bdg-secondary}`rlvr` {bdg-secondary}`environments` {bdg-secondary}`agents` {bdg-secondary}`models` {bdg-secondary}`resources`
 :::
 
 :::{grid-item-card} {octicon}`globe;1.5em;sd-mr-1` Ecosystem
@@ -118,12 +124,28 @@ Configure and customize environment components and prepare datasets.
 ::::{grid} 1 2 2 2
 :gutter: 1 1 1 2
 
+:::{grid-item-card} {octicon}`hubot;1.5em;sd-mr-1` Agent Server
+:link: agent-server/index
+:link-type: doc
+Orchestrate rollouts, tool calling, and verification.
++++
+{bdg-secondary}`orchestration` {bdg-secondary}`rollouts`
+:::
+
 :::{grid-item-card} {octicon}`cpu;1.5em;sd-mr-1` Model Server
 :link: model-server/index
 :link-type: doc
 Configure LLM inference backends including vLLM.
 +++
 {bdg-secondary}`inference` {bdg-secondary}`vllm`
+:::
+
+:::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Resources Server
+:link: resources-server/index
+:link-type: doc
+Define tasks, tools, and verification logic for your environment.
++++
+{bdg-secondary}`environments` {bdg-secondary}`verification`
 :::
 
 :::{grid-item-card} {octicon}`database;1.5em;sd-mr-1` Data
@@ -151,14 +173,6 @@ Build a complete training environment from scratch.
 {bdg-primary}`beginner` {bdg-secondary}`foundational`
 :::
 
-:::{grid-item-card} {octicon}`stack;1.5em;sd-mr-1` Multi-Environment Training
-:link: environment-tutorials/multi-environment-training
-:link-type: doc
-Run multiple training environments simultaneously for rollout collection.
-+++
-{bdg-secondary}`multi-environment` {bdg-secondary}`multi-verifier`
-:::
-
 ::::
 
 ```{button-ref} environment-tutorials/index
@@ -179,9 +193,17 @@ Train models using NeMo Gym with your preferred RL framework.
 :::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` RL (GRPO)
 :link: training-tutorials/index
 :link-type: doc
-Hands-on tutorials with NeMo RL, TRL, Unsloth, and more.
+Hands-on tutorials with NeMo RL, Unsloth, and more.
 +++
 {bdg-secondary}`grpo`
+:::
+
+:::{grid-item-card} {octicon}`stack;1.5em;sd-mr-1` Multi-Environment Training
+:link: training-tutorials/multi-environment-training
+:link-type: doc
+Run multiple training environments simultaneously for rollout collection.
++++
+{bdg-secondary}`multi-environment` {bdg-secondary}`multi-verifier`
 :::
 
 :::{grid-item-card} {octicon}`file;1.5em;sd-mr-1` SFT & DPO
@@ -272,12 +294,28 @@ Rollout Collection <get-started/rollout-collection.md>
 ```
 
 ```{toctree}
+:caption: Agent Server
+:hidden:
+:maxdepth: 1
+
+Overview <agent-server/index>
+```
+
+```{toctree}
 :caption: Model Server
 :hidden:
 :maxdepth: 1
 
 Overview <model-server/index>
 vLLM <model-server/vllm>
+```
+
+```{toctree}
+:caption: Resources Server
+:hidden:
+:maxdepth: 1
+
+Overview <resources-server/index>
 ```
 
 ```{toctree}
@@ -297,7 +335,9 @@ Download from Hugging Face <data/download-huggingface>
 
 Overview <environment-tutorials/index>
 Creating Training Environment <environment-tutorials/creating-training-environment>
-Multi-Environment Training <environment-tutorials/multi-environment-training>
+Integrate external libraries <environment-tutorials/integrate-external-environments>
+Add a benchmark <environment-tutorials/adding-a-benchmark>
+Design a customer evaluation <environment-tutorials/designing-customer-evaluation>
 ```
 
 ```{toctree}
@@ -307,8 +347,8 @@ Multi-Environment Training <environment-tutorials/multi-environment-training>
 
 Overview <training-tutorials/index>
 NeMo RL <training-tutorials/nemo-rl-grpo/index.md>
-TRL <training-tutorials/trl>
 Unsloth <training-tutorials/unsloth>
+Multi-Environment Training <training-tutorials/multi-environment-training>
 Offline Training (SFT/DPO) <training-tutorials/offline-training-w-rollouts>
 ```
 

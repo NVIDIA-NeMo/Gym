@@ -3,4 +3,4 @@ fhaviary[gsm8k,hotpotqa,notebook,llm]>=0.28.0
 tqdm
 datasets
 huggingface-hub
-pillow==11.3.0
+pillow==12.1.1
