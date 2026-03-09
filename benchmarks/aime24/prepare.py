@@ -13,9 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Prepare AIME 2025 evaluation data for NeMo Gym.
+"""Prepare AIME 2024 evaluation data for NeMo Gym.
 
-Downloads AIME 2025 problems from HuggingFace and converts to Gym JSONL format
+Downloads AIME 2024 problems from HuggingFace and converts to Gym JSONL format
 compatible with the math_with_judge resource server.
 """
 
@@ -27,20 +27,20 @@ from nemo_gym import PARENT_DIR
 from nemo_gym.prompt import load_prompt
 
 
-BENCHMARK_DIR = PARENT_DIR / "benchmarks" / "aime25"
+BENCHMARK_DIR = PARENT_DIR / "benchmarks" / "aime24"
 DEFAULT_PROMPT_CONFIG = str(BENCHMARK_DIR / "prompts" / "default.yaml")
 
 
 def prepare(prompt_config: str = DEFAULT_PROMPT_CONFIG):
-    """Download AIME 2025 data and convert to Gym JSONL format."""
+    """Download AIME 2024 data and convert to Gym JSONL format."""
     from datasets import load_dataset
 
-    print("Downloading AIME 2025 from HuggingFace...")
-    ds = load_dataset("MathArena/aime_2025", split="train")
+    print("Downloading AIME 2024 from HuggingFace...")
+    ds = load_dataset("MathArena/aime_2024", split="train")
 
     prompt = load_prompt(prompt_config)
     prompt_name = Path(prompt_config).stem
-    output_path = BENCHMARK_DIR / "data" / f"aime25_{prompt_name}.jsonl"
+    output_path = BENCHMARK_DIR / "data" / f"aime24_{prompt_name}.jsonl"
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     rows = []

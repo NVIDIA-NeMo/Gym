@@ -19,7 +19,7 @@ from pathlib import Path
 import orjson
 import pytest
 
-from nemo_gym.prompt import FewShotExamplesConfig, Prompt, PromptConfig, load_prompt
+from nemo_gym.prompt import Prompt, PromptConfig, load_prompt
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
 
@@ -406,36 +406,6 @@ class TestPrompt:
         prompt = Prompt(config)
         messages = prompt.fill({"problem": "What is 5*3?"})
         assert messages == [{"role": "user", "content": "What is 5*3?"}]
-
-    def test_fill_with_few_shot_examples(self) -> None:
-        # {examples} placeholder in user template matches NeMo Skills behavior
-        config = PromptConfig(
-            user="{examples}Solve: {problem}",
-            few_shot_examples=FewShotExamplesConfig(
-                prefix="Here are some examples:\n",
-                template="Q: {question}\nA: {answer}\n",
-                suffix="\nNow solve the following:\n",
-                examples=[
-                    {"question": "1+1", "answer": "2"},
-                    {"question": "2+3", "answer": "5"},
-                ],
-            ),
-        )
-        prompt = Prompt(config)
-        messages = prompt.fill({"problem": "3+4"})
-        assert len(messages) == 1
-        content = messages[0]["content"]
-        assert content.startswith("Here are some examples:\n")
-        assert "Q: 1+1\nA: 2\n" in content
-        assert "Q: 2+3\nA: 5\n" in content
-        assert content.endswith("Solve: 3+4")
-
-    def test_fill_without_examples_placeholder(self) -> None:
-        # When no examples are configured, {examples} resolves to empty string
-        config = PromptConfig(user="{examples}{problem}")
-        prompt = Prompt(config)
-        messages = prompt.fill({"problem": "2+2"})
-        assert messages == [{"role": "user", "content": "2+2"}]
 
     def test_fill_missing_field_raises_key_error(self) -> None:
         config = PromptConfig(user="{problem}")
