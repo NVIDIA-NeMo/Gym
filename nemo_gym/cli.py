@@ -18,9 +18,9 @@ import os
 import platform
 import shlex
 import sys
-import tomllib
 from copy import deepcopy
 from glob import glob
+from importlib.metadata import entry_points
 from importlib.metadata import version as md_version
 from os import makedirs
 from os.path import exists
@@ -611,7 +611,7 @@ def test_all():  # pragma: no cover
         match return_code:
             case 0:
                 tests_passed.append(dir_path)
-            case 1:
+            case 1 | 2:
                 tests_failed.append(dir_path)
             case 5:
                 tests_missing.append(dir_path)
@@ -826,7 +826,7 @@ def dump_config():  # pragma: no cover
     print(OmegaConf.to_yaml(global_config_dict, resolve=True))
 
 
-def display_help():  # pragma: no cover
+def display_help():
     """
     Display a list of available NeMo Gym CLI commands.
 
@@ -840,11 +840,8 @@ def display_help():  # pragma: no cover
     # Just here for help
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
-    pyproject_path = PARENT_DIR / "pyproject.toml"
-    with pyproject_path.open("rb") as f:
-        pyproject_data = tomllib.load(f)
-
-    project_scripts = pyproject_data["project"]["scripts"]
+    eps = entry_points().select(group="console_scripts")
+    project_scripts = {ep.name: ep.value for ep in eps if ep.name.startswith(("nemo_gym_", "ng_"))}
     rich.print("""Run a command with `+h=true` or `+help=true` to see more detailed information!
 
 [bold]Available CLI scripts[/bold]

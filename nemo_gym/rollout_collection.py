@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import json
 from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
@@ -22,6 +23,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
+from omegaconf import OmegaConf
 from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
 from wandb import Table
@@ -159,9 +161,8 @@ class RolloutCollectionHelper(BaseModel):
                 row_idxs_missing_agent_ref.append(row_idx)
 
             # Responses create params
-            row[RESPONSES_CREATE_PARAMS_KEY_NAME] = (
-                row[RESPONSES_CREATE_PARAMS_KEY_NAME] | config.responses_create_params
-            )
+            overrides = OmegaConf.to_container(OmegaConf.create(config.responses_create_params), resolve=True)
+            row[RESPONSES_CREATE_PARAMS_KEY_NAME] = row[RESPONSES_CREATE_PARAMS_KEY_NAME] | overrides
 
             # Resolve task index
             row[TASK_INDEX_KEY_NAME] = row_to_task_idx.setdefault(row_str, len(row_to_task_idx))
@@ -224,6 +225,14 @@ class RolloutCollectionHelper(BaseModel):
                 result_strs,
             ) = self._load_from_cache(config)
         else:
+            if config.resume_from_cache:
+                if not output_fpath.exists():
+                    print(f"Skipping resume_from_cache because output_fpath {output_fpath} doesn't exist!")
+                if not config.materialized_jsonl_fpath.exists():
+                    print(
+                        f"Skipping resume_from_cache because materialized_jsonl_fpath {config.materialized_jsonl_fpath} doesn't exist!"
+                    )
+
             rows: List[Dict] = []
             results: List[Dict] = []
             result_strs: List[List[str]] = []
@@ -245,6 +254,8 @@ class RolloutCollectionHelper(BaseModel):
 
         output_fpath.parent.mkdir(exist_ok=True, parents=True)
 
+        pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
+        counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
         results_file = output_fpath.open("ab")
         for future in self.run_examples(input_rows, semaphore=semaphore):
             row, result = await future
@@ -256,6 +267,21 @@ class RolloutCollectionHelper(BaseModel):
             results.append(result)
             result_strs.append([orjson.dumps(result)])
             results_file.write(result_strs[-1][0] + b"\n")
+
+            counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
+            if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
+                counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
+
+            current_pct = 100 * len(results) / len(input_rows)
+            if pcts_to_print and current_pct >= pcts_to_print[0]:
+                while pcts_to_print and current_pct >= pcts_to_print[0]:
+                    pcts_to_print.pop(0)
+
+                top_left = counts_left.most_common(5)  # Fix to top 3 for now.
+                if top_left:
+                    top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
+                    print(f"Examples left:\n{top_left_str}")
+
         results_file.close()
 
         if get_wandb_run():  # pragma: no cover
@@ -282,6 +308,20 @@ class RolloutCollectionHelper(BaseModel):
                 agent_level_metrics_to_log.pop(f"{agent_name}/{AGENT_REF_KEY_NAME}")
 
             get_wandb_run().log(agent_level_metrics_to_log)
+
+        agent_level_metrics: List[Dict] = orjson.loads(agent_level_metrics_fpath.read_text())
+        agent_level_metrics_to_print: List[Dict] = []
+        for agent_metrics in agent_level_metrics:
+            agent_metrics_to_print = {AGENT_REF_KEY_NAME: agent_metrics[AGENT_REF_KEY_NAME]}
+            for k, v in agent_metrics.items():
+                if not k.startswith("mean/"):
+                    continue
+
+                agent_metrics_to_print[k] = v
+
+            agent_level_metrics_to_print.append(agent_metrics_to_print)
+
+        print("Agent level metrics (mean only):\n" + json.dumps(agent_level_metrics_to_print, indent=4))
 
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {config.materialized_jsonl_fpath}
@@ -310,7 +350,11 @@ Agent-level metrics: {agent_level_metrics_fpath}""")
                 return row, await get_response_json(res)
 
         return tqdm.as_completed(
-            map(_post_subroutine, examples), desc="Collecting rollouts", miniters=10, total=len(examples)
+            map(_post_subroutine, examples),
+            desc="Collecting rollouts",
+            miniters=10,
+            total=len(examples),
+            maxinterval=60,
         )
 
     def setup_server_client(

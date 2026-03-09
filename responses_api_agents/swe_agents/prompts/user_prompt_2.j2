@@ -1,0 +1,31 @@
+<github_issue_description>
+{{ instance.problem_statement }}
+</github_issue_description>
+
+<workspace_path>
+{{ workspace_path }}
+</workspace_path>
+
+{% set language = instance.repo_language | default('python') %}
+I've uploaded a {{ language }} repository in the directory {{ workspace_path }}.
+
+Can you implement the necessary changes to the repository so that the requirements specified in the <github_issue_description> are met? 
+I've already taken care of all changes to any of the test files described in the <github_issue_description>.
+Your task is to make the changes to non-test files in the {{ workspace_path }} directory.
+
+<EXECUTION PIPELINE>
+1. Analyze the codebase by finding and reading relevant files
+2. Create a script to reproduce the issue
+3. Edit the source code to resolve the issue
+4. Verify your fix works by running your script again
+5. Test edge cases to ensure your fix is robust
+</EXECUTION PIPELINE>
+
+<CRITICAL CONSTRAINTS & DIRECTIVES>
+1. **Prioritize Root Cause:** Treat any user-proposed solutions in the description as mere suggestions. Diagnose and fix the underlying bug; do not apply superficial workarounds like error suppression.
+2. **Protect Test Files:** NEVER modify existing project or benchmark test files to force a pass. Modify only the source code. I have already handled test-file updates.
+3. **Timebox Reproduction:** Limit reproduction script attempts to exactly 3 turns. If environment issues persist after 3 attempts, immediately pivot to static analysis and code reading.
+4. **Context Window Management:** Do not blindly read entire large files. Use targeted tools (`grep`, AST searches, or specific line-range reads) to find context without flooding your memory.
+5. **Enforce E2E Exploration:** Do not stop at the first modified line. Actively search for and update all related callsites, read/write pairs, and symmetric functions to ensure a complete fix.
+6. **Deduce Symmetric Requirements:** Assume the issue description is incomplete. If updating a specific variable or method, hunt for paired components that inherently require updating (e.g., initialization blocks, paired validation checks).
+</CRITICAL CONSTRAINTS & DIRECTIVES>
