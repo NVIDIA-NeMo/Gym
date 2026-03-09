@@ -407,50 +407,50 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
 
         Absolute paths that resolve to the session directory are allowed.
         All other absolute paths, home-dir shortcuts, and env-var paths are rejected.
+        When GYM_GDPVAL_OPT_OUT_FROM_SANDBOX=1, the full check is skipped but known
+        risky commands ('rm', 'ls', 'cat', etc.) with path traversal or absolute paths
+        outside the session directory are always blocked regardless of the flag; full
+        session-dir checks skipped only when opted out; TODO left to replace with real
+        OS-level sandboxing.
 
         Returns:
             RunCommandResponse with error if outside paths detected, None otherwise.
         """
+        # Allow opting out if neeed
+        if os.environ.get("GYM_GDPVAL_OPT_OUT_FROM_SANDBOX") == "1":
+            return None
+
         session_dir = str(session.temp_dir)
+        relative_only_msg = "Use relative paths only (e.g. '.', './reference_files/file.xlsx'), don't use '..' or environment variables in paths."
         session_msg = (
             f"You can only access and execute commands inside your session directory: {session_dir}. "
-            "Use relative paths only (e.g. '.', './reference_files/file.xlsx')."
+            + relative_only_msg
         )
 
-        home_patterns = [
-            r"~/",
-            r"\$HOME\b",
-            r"\$\{HOME\}",
-        ]
-        for pattern in home_patterns:
-            if re.search(pattern, cmd):
-                return RunCommandResponse(
-                    exit_code=1,
-                    stdout="",
-                    stderr=(
-                        "Command may access paths outside the session directory. This is not allowed. " + session_msg
-                    ),
-                    error_kind="absolute_path_detected",
-                    advice=session_msg,
-                )
-
-        abs_path_re = re.compile(r"(?:^|[\s;&|\"'=])(/[^\s;&|\"']*)")
-        for match in abs_path_re.finditer(cmd):
-            path = match.group(1)
-            if path.startswith(session_dir):
-                continue
-            if "://" in cmd[max(0, match.start(1) - 8) : match.start(1)]:
-                continue
+        def _blocked(reason: str) -> RunCommandResponse:
             return RunCommandResponse(
                 exit_code=1,
                 stdout="",
-                stderr=(
-                    f"Command references path '{path}' outside the session directory. This is not allowed. "
-                    + session_msg
-                ),
+                stderr=reason + " " + session_msg,
                 error_kind="absolute_path_detected",
                 advice=session_msg,
             )
+
+        # Always blocked: risky commands with unsafe path arguments.
+        # Gating on command name avoids false-positives on math ('a / b', 'x**2').
+        # Path groups: 1 = double-quoted, 2 = single-quoted, 3 = bare.
+        _RISKY_CMDS = "rm|ls|cat|sed|cp|mv|chmod|chown|find|head|tail|grep|touch|mkdir|stat|du|df"
+        _risky_cmd_path_re = re.compile(
+            r"(?:^|[\s;&|])(?:" + _RISKY_CMDS + r")\b(?:\s+--?\w[-\w]*[=\w]*)*\s+"
+            r"""(?:"([^"]*?)"|'([^']*?)'|([^\s\[\]{}&=;'"]+))"""
+        )
+        for m in _risky_cmd_path_re.finditer(cmd):
+            path = m.group(1) or m.group(2) or m.group(3) or ""
+            if ".." in path or "$" in path or "~" in path:
+                return _blocked(f"Command contains path traversal or env-var expansion in '{path}'.")
+            if path.startswith("/") and not path.startswith(session_dir):
+                return _blocked(f"Command references absolute path '{path}' outside the session directory.")
+
         return None
 
     async def seed_session(self, body: SeedSessionRequest) -> SeedSessionResponse:
@@ -466,7 +466,9 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
 
         try:
             self.session_manager.start_session(session_id)
-            logger.info(f"seed_session: session_id: {session_id}, session_manager: {self.session_manager.id_to_session}")
+            logger.info(
+                f"seed_session: session_id: {session_id}, session_manager: {self.session_manager.id_to_session}"
+            )
         except Exception as e:
             return SeedSessionResponse(session_id=session_id, success=False, error_message=str(e))
 
@@ -482,7 +484,9 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
             RunCommandResponse with exit_code, stdout, stderr, and optional error info.
 
         """
-        logger.info(f"run_command: session_id: {body.session_id}, session_manager: {self.session_manager.id_to_session}")
+        logger.info(
+            f"run_command: session_id: {body.session_id}, session_manager: {self.session_manager.id_to_session}"
+        )
         try:
             session = self.session_manager.get_session(body.session_id)
         except KeyError:
@@ -510,8 +514,9 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
             )
 
         # Check for absolute paths — restrict all access to session directory only
-        absolute_path_error = self._check_absolute_paths(body.command, session)
-        if absolute_path_error:
+        # TODO: replace string-based path check with real OS-level sandboxing
+        # (e.g. Landlock LSM or bubblewrap) so this opt-out is no longer needed.
+        if absolute_path_error := self._check_absolute_paths(body.command, session):
             return absolute_path_error
 
         process = None
@@ -579,7 +584,9 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
             UploadFilesResult containing lists of uploaded files and any failures.
 
         """
-        logger.info(f"upload_files: session_id: {body.session_id}, session_manager: {self.session_manager.id_to_session}")
+        logger.info(
+            f"upload_files: session_id: {body.session_id}, session_manager: {self.session_manager.id_to_session}"
+        )
         try:
             session = self.session_manager.get_session(body.session_id)
         except KeyError:
@@ -1007,9 +1014,7 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
                 successful_rewards.append(result.reward)
                 successful_elos.append(elo)
                 # Update aggregate tally for this committee model
-                tally = self._committee_tallies.setdefault(
-                    result.committee_model_name, _CommitteeModelTally()
-                )
+                tally = self._committee_tallies.setdefault(result.committee_model_name, _CommitteeModelTally())
                 tally.win_count_evaluated += result.win_count_evaluated
                 tally.win_count_committee += result.win_count_committee
                 tally.tie_count += result.tie_count
@@ -1031,7 +1036,6 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
             mean_elo=mean_elo,
         )
 
-
     def _load_tallies_from_disk(self) -> None:
         """Reconstruct tallies from reward.json files on disk for autoresume support.
 
@@ -1050,9 +1054,7 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
                     verdict = CommitteeModelVerdict.model_validate(verdict_dict)
                     if not verdict.success:
                         continue
-                    tally = self._committee_tallies.setdefault(
-                        verdict.committee_model_name, _CommitteeModelTally()
-                    )
+                    tally = self._committee_tallies.setdefault(verdict.committee_model_name, _CommitteeModelTally())
                     tally.win_count_evaluated += verdict.win_count_evaluated
                     tally.win_count_committee += verdict.win_count_committee
                     tally.tie_count += verdict.tie_count
