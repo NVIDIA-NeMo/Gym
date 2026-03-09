@@ -17,34 +17,31 @@
 
 Downloads GPQA Diamond from HuggingFace and converts to Gym JSONL format
 compatible with the mcqa resource server.
+
+Output is raw data (no prompts baked in). Use prompt_config at rollout time
+to specify the prompt, or ng_materialize_prompts to produce RL-ready data.
 """
 
-import argparse
 import hashlib
 import json
 import random
 import uuid
-from pathlib import Path
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.prompt import load_prompt
 
 
-BENCHMARK_DIR = PARENT_DIR / "benchmarks" / "gpqa"
-DEFAULT_PROMPT_CONFIG = str(BENCHMARK_DIR / "prompts" / "default.yaml")
+OUTPUT_PATH = PARENT_DIR / "benchmarks" / "gpqa" / "data" / "gpqa_diamond_validation.jsonl"
 OPTION_LETTERS = ["A", "B", "C", "D"]
 
 
-def prepare(prompt_config: str = DEFAULT_PROMPT_CONFIG):
+def prepare():
     """Download GPQA Diamond data and convert to Gym JSONL format."""
     from datasets import load_dataset
 
     print("Downloading GPQA Diamond from HuggingFace...")
     ds = load_dataset("Idavidrein/gpqa", "gpqa_diamond", split="train")
 
-    prompt = load_prompt(prompt_config)
-    prompt_name = Path(prompt_config).stem
-    output_path = BENCHMARK_DIR / "data" / f"gpqa_diamond_{prompt_name}.jsonl"
+    output_path = OUTPUT_PATH
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     rows = []
@@ -71,14 +68,12 @@ def prepare(prompt_config: str = DEFAULT_PROMPT_CONFIG):
         options_text = "\n".join(f"{letter}: {text}" for letter, text in zip(OPTION_LETTERS, choices))
 
         row = {
-            "responses_create_params": {
-                "input": prompt.fill({"question": example["Question"], "options_text": options_text}),
-            },
+            "question": example["Question"],
+            "options_text": options_text,
             "options": options,
             "expected_answer": correct_letter,
             "grading_mode": "strict_single_letter_boxed",
             "uuid": str(uuid.uuid5(uuid.NAMESPACE_URL, example["Question"])),
-            "prompt_config_used": prompt_config,
         }
         rows.append(json.dumps(row) + "\n")
 
@@ -89,7 +84,4 @@ def prepare(prompt_config: str = DEFAULT_PROMPT_CONFIG):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--prompt_config", default=DEFAULT_PROMPT_CONFIG)
-    args = parser.parse_args()
-    prepare(prompt_config=args.prompt_config)
+    prepare()

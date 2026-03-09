@@ -17,25 +17,24 @@
 
 Downloads LiveCodeBench v5 from HuggingFace and converts to Gym JSONL format
 compatible with the code_gen resource server.
+
+Output is raw data (no prompts baked in). Use prompt_config at rollout time
+to specify the prompt, or ng_materialize_prompts to produce RL-ready data.
 """
 
-import argparse
 import json
-from pathlib import Path
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.prompt import load_prompt
 
 
-BENCHMARK_DIR = PARENT_DIR / "benchmarks" / "livecodebench"
-DEFAULT_PROMPT_CONFIG = str(BENCHMARK_DIR / "prompts" / "default.yaml")
+OUTPUT_PATH = PARENT_DIR / "benchmarks" / "livecodebench" / "data" / "livecodebench_v5_validation.jsonl"
 
 # LiveCodeBench date range for v5
 DATE_FROM = "2024-07-01"
 DATE_TO = "2025-02-01"
 
 
-def prepare(prompt_config: str = DEFAULT_PROMPT_CONFIG):
+def prepare():
     """Download LiveCodeBench data and convert to Gym JSONL format."""
     from datasets import load_dataset
 
@@ -47,9 +46,7 @@ def prepare(prompt_config: str = DEFAULT_PROMPT_CONFIG):
         revision="refs/pr/7",
     )
 
-    prompt = load_prompt(prompt_config)
-    prompt_name = Path(prompt_config).stem
-    output_path = BENCHMARK_DIR / "data" / f"livecodebench_v5_{prompt_name}.jsonl"
+    output_path = OUTPUT_PATH
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     rows = []
@@ -79,9 +76,7 @@ def prepare(prompt_config: str = DEFAULT_PROMPT_CONFIG):
             outputs.extend(tc["output"] for tc in hidden)
 
         row = {
-            "responses_create_params": {
-                "input": prompt.fill({"question_content": example["question_content"]}),
-            },
+            "question_content": example["question_content"],
             "verifier_metadata": {
                 "unit_tests": {
                     "inputs": inputs,
@@ -90,7 +85,6 @@ def prepare(prompt_config: str = DEFAULT_PROMPT_CONFIG):
                 }
             },
             "problem_id": example.get("question_id", ""),
-            "prompt_config_used": prompt_config,
         }
         rows.append(json.dumps(row) + "\n")
 
@@ -101,7 +95,4 @@ def prepare(prompt_config: str = DEFAULT_PROMPT_CONFIG):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--prompt_config", default=DEFAULT_PROMPT_CONFIG)
-    args = parser.parse_args()
-    prepare(prompt_config=args.prompt_config)
+    prepare()

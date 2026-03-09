@@ -19,7 +19,7 @@ from pathlib import Path
 import orjson
 import pytest
 
-from nemo_gym.prompt import Prompt, PromptConfig, load_prompt
+from nemo_gym.prompt import Prompt, PromptConfig, load_prompt, materialize_prompts
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
 
@@ -113,7 +113,7 @@ class TestRolloutCollection:
                 for example in examples:
                     future = Future()
                     # (row, result)
-                    future.set_result((example, {"response": {"usage": {"abc usage": 1}}}))
+                    future.set_result((example, {"reward": 1.0, "response": {"usage": {"abc usage": 1}}}))
                     futures.append(future)
 
                 return futures
@@ -121,12 +121,12 @@ class TestRolloutCollection:
         actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
 
         expected_results = [
-            {"_ng_task_index": 0, "_ng_rollout_index": 0, "response": {"usage": {"abc usage": 1}}},
-            {"_ng_task_index": 0, "_ng_rollout_index": 1, "response": {"usage": {"abc usage": 1}}},
-            {"_ng_task_index": 1, "_ng_rollout_index": 0, "response": {"usage": {"abc usage": 1}}},
-            {"_ng_task_index": 1, "_ng_rollout_index": 1, "response": {"usage": {"abc usage": 1}}},
-            {"_ng_task_index": 2, "_ng_rollout_index": 0, "response": {"usage": {"abc usage": 1}}},
-            {"_ng_task_index": 2, "_ng_rollout_index": 1, "response": {"usage": {"abc usage": 1}}},
+            {"reward": 1.0, "response": {"usage": {"abc usage": 1}}, "_ng_task_index": 0, "_ng_rollout_index": 0},
+            {"reward": 1.0, "response": {"usage": {"abc usage": 1}}, "_ng_task_index": 0, "_ng_rollout_index": 1},
+            {"reward": 1.0, "response": {"usage": {"abc usage": 1}}, "_ng_task_index": 1, "_ng_rollout_index": 0},
+            {"reward": 1.0, "response": {"usage": {"abc usage": 1}}, "_ng_task_index": 1, "_ng_rollout_index": 1},
+            {"reward": 1.0, "response": {"usage": {"abc usage": 1}}, "_ng_task_index": 2, "_ng_rollout_index": 0},
+            {"reward": 1.0, "response": {"usage": {"abc usage": 1}}, "_ng_task_index": 2, "_ng_rollout_index": 1},
         ]
 
         assert expected_results == actual_returned_results
@@ -147,7 +147,7 @@ class TestRolloutCollection:
         assert "per_sample_aggregate" in metrics_data
         assert "per_task" in metrics_data
         assert "usage" in metrics_data
-        assert metrics_data["usage"]["abc usage"] == 1.0
+        assert metrics_data["usage"]["abc usage"]["mean"] == 1.0
 
     async def test_run_from_config_sorted(self, tmp_path: Path) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
@@ -176,7 +176,7 @@ class TestRolloutCollection:
                 for example in examples:
                     future = Future()
                     # (row, result)
-                    future.set_result((example, {"response": {"usage": {"abc usage": 1}}}))
+                    future.set_result((example, {"reward": 1.0, "response": {"usage": {"abc usage": 1}}}))
                     futures.append(future)
 
                 # Reverse!
@@ -187,12 +187,12 @@ class TestRolloutCollection:
         actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
 
         expected_results = [
-            {"_ng_task_index": 0, "_ng_rollout_index": 0, "response": {"usage": {"abc usage": 1}}},
-            {"_ng_task_index": 0, "_ng_rollout_index": 1, "response": {"usage": {"abc usage": 1}}},
-            {"_ng_task_index": 1, "_ng_rollout_index": 0, "response": {"usage": {"abc usage": 1}}},
-            {"_ng_task_index": 1, "_ng_rollout_index": 1, "response": {"usage": {"abc usage": 1}}},
-            {"_ng_task_index": 2, "_ng_rollout_index": 0, "response": {"usage": {"abc usage": 1}}},
-            {"_ng_task_index": 2, "_ng_rollout_index": 1, "response": {"usage": {"abc usage": 1}}},
+            {"reward": 1.0, "response": {"usage": {"abc usage": 1}}, "_ng_task_index": 0, "_ng_rollout_index": 0},
+            {"reward": 1.0, "response": {"usage": {"abc usage": 1}}, "_ng_task_index": 0, "_ng_rollout_index": 1},
+            {"reward": 1.0, "response": {"usage": {"abc usage": 1}}, "_ng_task_index": 1, "_ng_rollout_index": 0},
+            {"reward": 1.0, "response": {"usage": {"abc usage": 1}}, "_ng_task_index": 1, "_ng_rollout_index": 1},
+            {"reward": 1.0, "response": {"usage": {"abc usage": 1}}, "_ng_task_index": 2, "_ng_rollout_index": 0},
+            {"reward": 1.0, "response": {"usage": {"abc usage": 1}}, "_ng_task_index": 2, "_ng_rollout_index": 1},
         ]
 
         assert expected_results == actual_returned_results
@@ -298,14 +298,10 @@ class TestRolloutCollection:
         prompt_yaml.write_text('user: "Q: {question}"\n')
 
         fpath = tmp_path / "input.jsonl"
+        # All rows use prompt_config (no pre-baked input)
         samples = [
             json.dumps({"question": "2+2", "agent_ref": {"name": "agent"}, "prompt_config": str(prompt_yaml)}),
-            json.dumps(
-                {
-                    "responses_create_params": {"input": [{"role": "user", "content": "prebaked"}]},
-                    "agent_ref": {"name": "agent"},
-                }
-            ),
+            json.dumps({"question": "3+3", "agent_ref": {"name": "agent"}, "prompt_config": str(prompt_yaml)}),
         ]
         fpath.write_text("\n".join(samples) + "\n")
 
@@ -316,7 +312,7 @@ class TestRolloutCollection:
 
         rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
         assert rows[0]["responses_create_params"]["input"] == [{"role": "user", "content": "Q: 2+2"}]
-        assert rows[1]["responses_create_params"]["input"] == [{"role": "user", "content": "prebaked"}]
+        assert rows[1]["responses_create_params"]["input"] == [{"role": "user", "content": "Q: 3+3"}]
 
     def test_cli_prompt_config_overrides_row_prompt_config(self, tmp_path: Path) -> None:
         cli_prompt = tmp_path / "cli.yaml"
@@ -338,25 +334,20 @@ class TestRolloutCollection:
         rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
         assert rows[0]["responses_create_params"]["input"] == [{"role": "user", "content": "CLI: x"}]
 
-    def test_prompt_config_rejects_multi_turn_input(self, tmp_path: Path) -> None:
+    def test_prompt_config_rejects_prebaked_input(self, tmp_path: Path) -> None:
+        """prompt_config + responses_create_params.input = error (mutual exclusion)."""
         prompt_yaml = tmp_path / "prompt.yaml"
         prompt_yaml.write_text('user: "{problem}"\n')
 
         fpath = tmp_path / "input.jsonl"
-        multi_turn_row = json.dumps(
+        row_with_input = json.dumps(
             {
                 "problem": "x",
                 "agent_ref": {"name": "agent"},
-                "responses_create_params": {
-                    "input": [
-                        {"role": "user", "content": "What is 2+2?"},
-                        {"role": "assistant", "content": "4"},
-                        {"role": "user", "content": "Now what is 3+3?"},
-                    ]
-                },
+                "responses_create_params": {"input": [{"role": "user", "content": "prebaked"}]},
             }
         )
-        fpath.write_text(multi_turn_row + "\n")
+        fpath.write_text(row_with_input + "\n")
 
         config = RolloutCollectionConfig(
             input_jsonl_fpath=str(fpath),
@@ -364,31 +355,21 @@ class TestRolloutCollection:
             prompt_config=str(prompt_yaml),
         )
 
-        with pytest.raises(ValueError, match="prompt_config only supports single-turn"):
+        with pytest.raises(ValueError, match="mutually exclusive"):
             RolloutCollectionHelper._preprocess_rows_from_config(None, config)
 
-    def test_prompt_config_allows_single_turn_input(self, tmp_path: Path) -> None:
-        prompt_yaml = tmp_path / "prompt.yaml"
-        prompt_yaml.write_text('user: "{problem}"\n')
-
+    def test_no_prompt_config_and_no_input_raises(self, tmp_path: Path) -> None:
+        """No prompt_config + no responses_create_params.input = error."""
         fpath = tmp_path / "input.jsonl"
-        single_turn_row = json.dumps(
-            {
-                "problem": "x",
-                "agent_ref": {"name": "agent"},
-                "responses_create_params": {"input": [{"role": "user", "content": "old prompt"}]},
-            }
-        )
-        fpath.write_text(single_turn_row + "\n")
+        fpath.write_text(json.dumps({"question": "2+2", "agent_ref": {"name": "agent"}}) + "\n")
 
         config = RolloutCollectionConfig(
             input_jsonl_fpath=str(fpath),
             output_jsonl_fpath=str(tmp_path / "output.jsonl"),
-            prompt_config=str(prompt_yaml),
         )
 
-        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
-        assert rows[0]["responses_create_params"]["input"] == [{"role": "user", "content": "x"}]
+        with pytest.raises(ValueError, match="neither prompt_config nor responses_create_params.input"):
+            RolloutCollectionHelper._preprocess_rows_from_config(None, config)
 
 
 class TestPrompt:
@@ -424,3 +405,52 @@ class TestPrompt:
             {"role": "system", "content": "Be helpful."},
             {"role": "user", "content": "Hello?"},
         ]
+
+
+class TestMaterializePrompts:
+    def test_materialize_creates_output_with_baked_prompts(self, tmp_path: Path) -> None:
+        prompt_yaml = tmp_path / "prompt.yaml"
+        prompt_yaml.write_text('system: "Solve math."\nuser: "{question}"\n')
+
+        input_jsonl = tmp_path / "raw.jsonl"
+        input_jsonl.write_text(
+            json.dumps({"question": "2+2", "expected_answer": "4"})
+            + "\n"
+            + json.dumps({"question": "3+3", "expected_answer": "6"})
+            + "\n"
+        )
+
+        output_jsonl = tmp_path / "materialized.jsonl"
+        materialize_prompts(str(input_jsonl), str(prompt_yaml), str(output_jsonl))
+
+        assert output_jsonl.exists()
+        rows = [json.loads(line) for line in output_jsonl.read_text().strip().split("\n")]
+        assert len(rows) == 2
+
+        # Check first row has baked prompts
+        assert rows[0]["responses_create_params"]["input"] == [
+            {"role": "system", "content": "Solve math."},
+            {"role": "user", "content": "2+2"},
+        ]
+        assert rows[0]["question"] == "2+2"
+        assert rows[0]["expected_answer"] == "4"
+        assert rows[0]["prompt_config_used"] == str(prompt_yaml)
+
+    def test_materialize_rejects_prebaked_input(self, tmp_path: Path) -> None:
+        prompt_yaml = tmp_path / "prompt.yaml"
+        prompt_yaml.write_text('user: "{question}"\n')
+
+        input_jsonl = tmp_path / "already_baked.jsonl"
+        input_jsonl.write_text(
+            json.dumps(
+                {
+                    "question": "2+2",
+                    "responses_create_params": {"input": [{"role": "user", "content": "already baked"}]},
+                }
+            )
+            + "\n"
+        )
+
+        output_jsonl = tmp_path / "output.jsonl"
+        with pytest.raises(ValueError, match="already has responses_create_params.input"):
+            materialize_prompts(str(input_jsonl), str(prompt_yaml), str(output_jsonl))

@@ -4,7 +4,8 @@ config_paths:
 
 # Rollout collection defaults — picked up directly by RolloutCollectionConfig
 agent_name: code_gen_simple_agent
-input_jsonl_fpath: benchmarks/livecodebench/data/livecodebench_v5_default.jsonl
+input_jsonl_fpath: benchmarks/livecodebench/data/livecodebench_v5_validation.jsonl
+prompt_config: benchmarks/livecodebench/prompts/default.yaml
 num_repeats: 10
 responses_create_params:
   max_output_tokens: 65536

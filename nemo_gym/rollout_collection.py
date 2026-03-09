@@ -170,19 +170,26 @@ class RolloutCollectionHelper(BaseModel):
             elif not row.get(AGENT_REF_KEY_NAME, dict()).get("name"):
                 row_idxs_missing_agent_ref.append(row_idx)
 
-            # Apply prompt config: CLI prompt_config > row prompt_config > row responses_create_params
+            # Apply prompt config — mutually exclusive with pre-baked responses_create_params.input.
+            # If prompt_config is set, the data must NOT have responses_create_params.input.
+            # If prompt_config is not set, the data MUST have responses_create_params.input.
             prompt_config_path = config.prompt_config or row.get("prompt_config")
-            if prompt_config_path:
-                existing_input = row.get(RESPONSES_CREATE_PARAMS_KEY_NAME, {}).get("input", [])
-                num_user_turns = sum(1 for msg in existing_input if msg.get("role") == "user")
-                if num_user_turns > 1:
-                    raise ValueError(
-                        f"Row {row_idx} has {num_user_turns} user turns in responses_create_params.input "
-                        f"but a prompt_config is set ('{prompt_config_path}'). "
-                        f"prompt_config only supports single-turn initial prompts. "
-                        f"Remove prompt_config for this row or use pre-baked responses_create_params."
-                    )
+            has_input = "input" in row.get(RESPONSES_CREATE_PARAMS_KEY_NAME, {})
 
+            if prompt_config_path and has_input:
+                raise ValueError(
+                    f"Row {row_idx} has both prompt_config ('{prompt_config_path}') and "
+                    f"responses_create_params.input. These are mutually exclusive — use raw data "
+                    f"with prompt_config, or pre-materialized data without prompt_config."
+                )
+            if not prompt_config_path and not has_input:
+                raise ValueError(
+                    f"Row {row_idx} has neither prompt_config nor responses_create_params.input. "
+                    f"Provide a prompt_config to build prompts at runtime, or use pre-materialized "
+                    f"data with responses_create_params.input already set."
+                )
+
+            if prompt_config_path:
                 from nemo_gym.prompt import load_prompt
 
                 prompt = load_prompt(prompt_config_path)

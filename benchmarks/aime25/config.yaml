@@ -4,7 +4,8 @@ config_paths:
 
 # Rollout collection defaults — picked up directly by RolloutCollectionConfig
 agent_name: math_with_judge_simple_agent
-input_jsonl_fpath: benchmarks/aime25/data/aime25_default.jsonl
+input_jsonl_fpath: benchmarks/aime25/data/aime25_validation.jsonl
+prompt_config: benchmarks/aime25/prompts/default.yaml
 num_repeats: 32
 metrics_type: "resources_servers.math_with_judge.metrics::MathMetrics"
 responses_create_params:
