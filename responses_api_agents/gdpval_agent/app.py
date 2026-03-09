@@ -600,7 +600,7 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         else:
             # Normal path: call /v1/responses to run the agent
             try:
-                async with anyio.fail_after(TASK_TIMEOUT):
+                with anyio.fail_after(TASK_TIMEOUT):
                     response = await self.server_client.post(
                         server_name=self.config.name,
                         url_path="/v1/responses",
