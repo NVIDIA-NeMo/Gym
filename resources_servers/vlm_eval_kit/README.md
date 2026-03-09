@@ -9,19 +9,43 @@
 5. Judge model configs: https://github.com/open-compass/VLMEvalKit/blob/00804217f868058f871f5ff252a7b9623c3475d9/run.py#L363
 
 ## Accuracy reproduction using GPT-4o-mini-20240718
-|Benchmark|Name for run.py|Judge|Reported score|Original repo repro|Gym repro|
-|---|---|---|---|---|---|
-|MMBench V1.1|MMBench_DEV_EN_V11|N/A?|76|TODO|TODO|
-|MMStar|MMStar|N/A|54.8|TODO|TODO|
-|MMMU|MMMU_DEV_VAL|N/A|60|TODO|TODO|
-|MathVista|MathVista_MINI|gpt-4o-mini|52.5|TODO|TODO|
-|HallusionBench Avg.|HallusionBench|N/A|46.1|TODO|TODO|
-|AI2D|AI2D_TEST,AI2D_TEST_NO_MASK|N/A|77.8|TODO|TODO|
-|OCRBench|OCRBench|N/A|785|TODO|TODO|
-|MMVet|MMVet|66.9|gpt-4-turbo|TODO|TODO|
+|Benchmark|Name for run.py|Judge|Num samples|Reported score|Original repo repro|Gym repro|
+|---|---|---|---|---|---|---|
+|MMBench V1.1|MMBench_DEV_EN_V11|N/A?|4876|76 (test)|75.8 (dev)|TODO|
+|MMStar|MMStar|N/A|TODO|54.8|TODO|TODO|
+|MMMU|MMMU_DEV_VAL|N/A|TODO|60|TODO|TODO|
+|MathVista|MathVista_MINI|gpt-4o-mini|TODO|52.5|TODO|TODO|
+|HallusionBench Avg.|HallusionBench|N/A|TODO|46.1|TODO|TODO|
+|AI2D|AI2D_TEST,AI2D_TEST_NO_MASK|N/A|TODO|77.8|TODO|TODO|
+|OCRBench|OCRBench|N/A|1000|785|776|TODO|
+|MMVet|MMVet|gpt-4-turbo|TODO|66.9|TODO|TODO|
 
 
-Data links: ?
+## Installation details
+Rather than using decord, we use decord2 which is compatible with MacOS.
+
+## Original repo repro
+```bash
+git clone https://github.com/open-compass/VLMEvalKit
+cd VLMEvalKit
+
+uv venv --python 3.12 --seed
+source .venv/bin/activate
+uv pip install '-e .' rouge
+
+# Modify requirements.txt to use decord2 rather than decord
+sed -i '' 's/decord>=0.6.0/decord2>=3.0.0/' requirements.txt
+
+# For some reason, clip cannot be properly imported (import error on from pkg_resources import packaging)
+sed -i '' 's/import clip/# import clip/' vlmeval/dataset/utils/SArena/FID.py
+
+# Set your OpenAI API key
+echo "OPENAI_API_KEY=..." > .env
+
+python run.py --verbose \
+    --data OCRBench \
+    --model GPT4o_MINI
+```
 
 # Licensing information
 Code: ?
