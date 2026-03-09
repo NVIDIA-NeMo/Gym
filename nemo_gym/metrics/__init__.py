@@ -15,12 +15,17 @@
 import importlib
 from typing import Optional
 
-from nemo_gym.metrics.base import BaseMetrics, MetricsOutput
+from nemo_gym.metrics.base import NOT_FOUND, BaseMetrics, MetricsOutput, compute_statistics
 from nemo_gym.metrics.reward_metrics import RewardMetrics
 
 
 def get_metrics(metrics_type: Optional[str] = None) -> BaseMetrics:
     """Resolve a metrics class from a class path string.
+
+    The default RewardMetrics simply reads the "reward" field from verify results.
+    Custom metrics override get_score_dict() for multi-score reporting (e.g. symbolic_accuracy
+    + judge_accuracy + accuracy), get_answer() for majority@k voting, and optionally
+    _add_derived_metrics() for cross-sample computations like precision/recall/F1.
 
     Args:
         metrics_type: Either None/"reward" for default RewardMetrics,
@@ -48,4 +53,4 @@ def get_metrics(metrics_type: Optional[str] = None) -> BaseMetrics:
     return cls()
 
 
-__all__ = ["BaseMetrics", "MetricsOutput", "RewardMetrics", "get_metrics"]
+__all__ = ["NOT_FOUND", "BaseMetrics", "MetricsOutput", "RewardMetrics", "compute_statistics", "get_metrics"]

@@ -22,5 +22,5 @@ class RewardMetrics(BaseMetrics):
 
     def get_score_dict(self, result: dict) -> Dict[str, Union[float, bool]]:
         if "reward" not in result:
-            return {}
+            raise ValueError(f"Verify result missing required 'reward' field. Got keys: {sorted(result.keys())}")
         return {"reward": result["reward"]}

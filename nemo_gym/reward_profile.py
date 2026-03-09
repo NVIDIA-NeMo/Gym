@@ -248,5 +248,8 @@ Agent metrics: {agent_metrics_fpath}""")
     if metrics_output.aggregate:
         print("\nAggregate metrics:")
         for mode, scores in metrics_output.aggregate.items():
-            scores_str = ", ".join(f"{name}: {val:.2f}" for name, val in scores.items())
+            scores_str = ", ".join(
+                f"{name}: {val:.2f}" if isinstance(val, (int, float)) else f"{name}: {val}"
+                for name, val in scores.items()
+            )
             print(f"  {mode}: {scores_str}")

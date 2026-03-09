@@ -17,7 +17,7 @@ from typing import Dict, List, Optional, Union
 
 import pytest
 
-from nemo_gym.metrics import MetricsOutput, get_metrics
+from nemo_gym.metrics import NOT_FOUND, MetricsOutput, get_metrics
 from nemo_gym.metrics.base import BaseMetrics
 from nemo_gym.metrics.reward_metrics import RewardMetrics
 
@@ -65,17 +65,13 @@ class TestRewardMetrics:
         assert "pass@1[avg-of-1]" in output.aggregate
         assert "pass@1[avg-of-2]" in output.aggregate
 
-        # pass@1 with k=1: uses combinatorial formula
-        # Task 0: 1 correct out of 2, pass@1 = 1 - C(1,1)/C(2,1) = 1 - 1/2 = 0.5
-        # Task 1: 1 correct out of 2, pass@1 = 0.5
-        # Task 2: 2 correct out of 2, pass@1 = 1.0
-        # Average: (0.5 + 0.5 + 1.0) / 3 = 0.6667 -> 66.67%
+        # pass@1: max of first 1 score per task
+        # Task 0: max([1.0]) = 1.0, Task 1: max([0.0]) = 0.0, Task 2: max([1.0]) = 1.0
+        # Average: (1.0 + 0.0 + 1.0) / 3 = 0.6667 -> 66.67%
         assert output.aggregate["pass@1"]["reward"] == pytest.approx(100.0 * 2.0 / 3.0, abs=0.01)
 
-        # pass@2: at least one correct in 2 samples
-        # Task 0: 1 correct, pass@2 = 1 - C(1,2)/C(2,2) = 1 - 0/1 = 1.0
-        # Task 1: same, 1.0
-        # Task 2: 1.0
+        # pass@2: max of first 2 scores per task
+        # Task 0: max([1.0, 0.0]) = 1.0, Task 1: max([0.0, 1.0]) = 1.0, Task 2: max([1.0, 1.0]) = 1.0
         # Average: 100%
         assert output.aggregate["pass@2"]["reward"] == pytest.approx(100.0)
 
@@ -93,13 +89,17 @@ class TestRewardMetrics:
         ]
         output = metrics.compute(task_results)
 
-        # sample_0: uses rollout 0 from each task -> [1, 0, 1] -> mean = 66.67%
-        assert output.per_sample_aggregate["sample_0"]["reward"] == pytest.approx(100.0 * 2.0 / 3.0, abs=0.01)
+        # per_sample_aggregate["reward"] is a list: [pass@1 using rollout 0, pass@1 using rollout 1]
+        assert "reward" in output.per_sample_aggregate
+        assert len(output.per_sample_aggregate["reward"]) == 2
 
-        # sample_1: uses rollout 1 from each task -> [0, 1, 1] -> mean = 66.67%
-        assert output.per_sample_aggregate["sample_1"]["reward"] == pytest.approx(100.0 * 2.0 / 3.0, abs=0.01)
+        # rollout 0: [1, 0, 1] -> mean = 66.67%
+        assert output.per_sample_aggregate["reward"][0] == pytest.approx(100.0 * 2.0 / 3.0, abs=0.01)
 
-    def test_statistics(self) -> None:
+        # rollout 1: [0, 1, 1] -> mean = 66.67%
+        assert output.per_sample_aggregate["reward"][1] == pytest.approx(100.0 * 2.0 / 3.0, abs=0.01)
+
+    def test_statistics_fused_into_aggregate(self) -> None:
         metrics = RewardMetrics()
         task_results = [
             [{"reward": 1.0, "response": {}}, {"reward": 0.0, "response": {}}],
@@ -108,23 +108,26 @@ class TestRewardMetrics:
         ]
         output = metrics.compute(task_results)
 
-        assert "reward" in output.statistics
-        stats = output.statistics["reward"]
-        assert "std_dev_across_runs" in stats
-        assert "std_err_across_runs" in stats
-        assert "avg_sample_std_dev" in stats
+        # Statistics are fused into pass@1[avg-of-2] only
+        avg_of_2 = output.aggregate["pass@1[avg-of-2]"]
+        assert "reward_std_dev_across_runs" in avg_of_2
+        assert "reward_std_err_across_runs" in avg_of_2
+
+        # pass@1 and pass@2 should NOT have statistics
+        assert "reward_std_dev_across_runs" not in output.aggregate["pass@1"]
+        assert "reward_std_dev_across_runs" not in output.aggregate["pass@2"]
 
         # Per-sample aggregates:
-        # sample_0: [1, 0, 1] -> mean = 66.67%
-        # sample_1: [0, 0, 1] -> mean = 33.33%
+        # rollout 0: [1, 0, 1] -> mean = 66.67%
+        # rollout 1: [0, 0, 1] -> mean = 33.33%
         # std_dev_across_runs = std([66.67, 33.33]) with ddof=1
         sample_means = [100.0 * 2.0 / 3.0, 100.0 * 1.0 / 3.0]
         mean_of_means = sum(sample_means) / len(sample_means)
         expected_std = math.sqrt(sum((x - mean_of_means) ** 2 for x in sample_means) / (len(sample_means) - 1))
-        assert stats["std_dev_across_runs"] == pytest.approx(expected_std, abs=0.01)
+        assert avg_of_2["reward_std_dev_across_runs"] == pytest.approx(expected_std, abs=0.01)
 
         # std_err = std_dev / sqrt(k)
-        assert stats["std_err_across_runs"] == pytest.approx(expected_std / math.sqrt(2), abs=0.01)
+        assert avg_of_2["reward_std_err_across_runs"] == pytest.approx(expected_std / math.sqrt(2), abs=0.01)
 
     def test_per_task(self) -> None:
         metrics = RewardMetrics()
@@ -157,8 +160,34 @@ class TestRewardMetrics:
         ]
         output = metrics.compute(task_results)
 
-        assert output.usage["completion_tokens"] == pytest.approx(55.0)
-        assert output.usage["prompt_tokens"] == pytest.approx(110.0)
+        assert output.usage["completion_tokens"]["mean"] == pytest.approx(55.0)
+        assert output.usage["prompt_tokens"]["mean"] == pytest.approx(110.0)
+        # std_dev with 2 values
+        assert output.usage["completion_tokens"]["std_dev"] > 0
+        assert output.usage["prompt_tokens"]["std_dev"] > 0
+
+    def test_usage_nested_dicts(self) -> None:
+        """Nested usage dicts (e.g. input_token_details) are flattened with dot-separated keys."""
+        metrics = RewardMetrics()
+        task_results = [
+            [
+                {
+                    "reward": 1.0,
+                    "response": {
+                        "usage": {
+                            "prompt_tokens": 100,
+                            "prompt_tokens_details": {"cached_tokens": 20, "audio_tokens": 0},
+                        }
+                    },
+                },
+            ],
+        ]
+        output = metrics.compute(task_results)
+
+        assert "prompt_tokens" in output.usage
+        assert "prompt_tokens_details.cached_tokens" in output.usage
+        assert "prompt_tokens_details.audio_tokens" in output.usage
+        assert output.usage["prompt_tokens_details.cached_tokens"]["mean"] == pytest.approx(20.0)
 
 
 class TestAllCorrectAllIncorrect:
@@ -201,18 +230,16 @@ class TestSingleRollout:
         assert "pass@1" in output.aggregate
         assert "pass@2" not in output.aggregate
 
-        # pass@1 for binary: C(n-c,1)/C(n,1) = (n-c)/n
-        # Task 0: c=1, pass@1 = 1.0
-        # Task 1: c=0, pass@1 = 0.0
-        # Task 2: c=1, pass@1 = 1.0
+        # pass@1: max of first 1 score
+        # Task 0: 1.0, Task 1: 0.0, Task 2: 1.0
         assert output.aggregate["pass@1"]["reward"] == pytest.approx(100.0 * 2.0 / 3.0, abs=0.01)
 
-        # No statistics with k=1
-        assert output.statistics == {}
+        # No statistics with k=1 (nothing fused into aggregate)
+        assert "reward_std_dev_across_runs" not in output.aggregate.get("pass@1", {})
 
-        # Per sample: only sample_0
-        assert len(output.per_sample_aggregate) == 1
-        assert "sample_0" in output.per_sample_aggregate
+        # Per sample: only 1 rollout, so each score has a list of length 1
+        assert "reward" in output.per_sample_aggregate
+        assert len(output.per_sample_aggregate["reward"]) == 1
 
 
 class TestEmptyInput:
@@ -222,7 +249,6 @@ class TestEmptyInput:
 
         assert output.aggregate == {}
         assert output.per_sample_aggregate == {}
-        assert output.statistics == {}
         assert output.per_task == []
         assert output.usage == {}
 
@@ -252,15 +278,15 @@ class TestMultipleScores:
         assert "accuracy" in output.aggregate["pass@1"]
         assert "quality" in output.aggregate["pass@1"]
 
-        # accuracy is binary, quality is continuous
-        # pass@1 for accuracy: Task 0: c=1/n=2 -> 0.5, Task 1: c=2/n=2 -> 1.0. avg = 0.75
-        assert output.aggregate["pass@1"]["accuracy"] == pytest.approx(75.0)
+        # pass@1 for accuracy: max of first 1
+        # Task 0: max([1.0]) = 1.0, Task 1: max([1.0]) = 1.0. avg = 1.0
+        assert output.aggregate["pass@1"]["accuracy"] == pytest.approx(100.0)
 
-        # pass@1 for quality (continuous): max of first 1 value
+        # pass@1 for quality: max of first 1 value
         # Task 0: max([0.8]) = 0.8, Task 1: max([0.9]) = 0.9. avg = 0.85
         assert output.aggregate["pass@1"]["quality"] == pytest.approx(85.0)
 
-        # pass@2 for quality (continuous): max of first 2 values
+        # pass@2 for quality: max of first 2 values
         # Task 0: max([0.8, 0.3]) = 0.8, Task 1: max([0.9, 0.7]) = 0.9. avg = 0.85
         assert output.aggregate["pass@2"]["quality"] == pytest.approx(85.0)
 
@@ -351,7 +377,6 @@ class TestComputeOverride:
                 return MetricsOutput(
                     aggregate={"custom": {"mean_score": mean_score}},
                     per_sample_aggregate={},
-                    statistics={},
                     per_task=[],
                     usage={},
                 )
@@ -367,27 +392,30 @@ class TestComputeOverride:
         assert output.per_sample_aggregate == {}
 
 
-class TestPassAtKCombinatorial:
-    def test_formula_correctness(self) -> None:
-        # n=5, c=2, k=1: 1 - C(3,1)/C(5,1) = 1 - 3/5 = 0.4
-        assert BaseMetrics._pass_at_k_combinatorial(5, 2, 1) == pytest.approx(0.4)
+class TestPassAtK:
+    def test_max_of_k(self) -> None:
+        """pass@k uses max of first k scores for all score types."""
+        metrics = RewardMetrics()
+        # 2 tasks, 3 rollouts each
+        task_results = [
+            [{"reward": 0.0, "response": {}}, {"reward": 1.0, "response": {}}, {"reward": 0.0, "response": {}}],
+            [{"reward": 0.0, "response": {}}, {"reward": 0.0, "response": {}}, {"reward": 1.0, "response": {}}],
+        ]
+        output = metrics.compute(task_results)
 
-        # n=5, c=2, k=5: 1 - C(3,5)/C(5,5) = 1 - 0/1 = 1.0 (n-c < k)
-        assert BaseMetrics._pass_at_k_combinatorial(5, 2, 5) == pytest.approx(1.0)
+        # pass@1: max([:1]) -> Task 0: 0.0, Task 1: 0.0. avg = 0%
+        assert output.aggregate["pass@1"]["reward"] == pytest.approx(0.0)
 
-        # n=5, c=0, k=1: 1 - C(5,1)/C(5,1) = 0
-        assert BaseMetrics._pass_at_k_combinatorial(5, 0, 1) == pytest.approx(0.0)
+        # pass@2: max([:2]) -> Task 0: max(0,1)=1.0, Task 1: max(0,0)=0.0. avg = 50%
+        assert output.aggregate["pass@2"]["reward"] == pytest.approx(50.0)
 
-        # n=5, c=5, k=1: 1 - C(0,1)/C(5,1) = 1 - 0/5 = 1.0
-        assert BaseMetrics._pass_at_k_combinatorial(5, 5, 1) == pytest.approx(1.0)
-
-        # n=10, c=3, k=2: 1 - C(7,2)/C(10,2) = 1 - 21/45 = 1 - 7/15
-        assert BaseMetrics._pass_at_k_combinatorial(10, 3, 2) == pytest.approx(1.0 - 21.0 / 45.0)
+        # pass@3: max([:3]) -> Task 0: 1.0, Task 1: 1.0. avg = 100%
+        assert output.aggregate["pass@3"]["reward"] == pytest.approx(100.0)
 
 
 class TestStatisticsCorrectness:
-    def test_variance_stats(self) -> None:
-        """Verify std_dev_across_runs, std_err, avg_sample_std_dev match expected values."""
+    def test_variance_stats_fused(self) -> None:
+        """Verify std_dev_across_runs, std_err, avg_sample_std_dev are fused into pass@1[avg-of-k]."""
         metrics = RewardMetrics()
 
         # 4 tasks, 3 rollouts each
@@ -400,15 +428,19 @@ class TestStatisticsCorrectness:
         output = metrics.compute(task_results)
 
         # Per-sample means:
-        # sample_0: [1, 0, 1, 0] -> mean = 50%
-        # sample_1: [1, 1, 0, 0] -> mean = 50%
-        # sample_2: [0, 0, 1, 1] -> mean = 50%
-        for key in ["sample_0", "sample_1", "sample_2"]:
-            assert output.per_sample_aggregate[key]["reward"] == pytest.approx(50.0)
+        # rollout 0: [1, 0, 1, 0] -> mean = 50%
+        # rollout 1: [1, 1, 0, 0] -> mean = 50%
+        # rollout 2: [0, 0, 1, 1] -> mean = 50%
+        assert len(output.per_sample_aggregate["reward"]) == 3
+        for val in output.per_sample_aggregate["reward"]:
+            assert val == pytest.approx(50.0)
+
+        # Statistics fused into pass@1[avg-of-3]
+        avg_of_3 = output.aggregate["pass@1[avg-of-3]"]
 
         # std_dev_across_runs: std of [50, 50, 50] with ddof=1 = 0
-        assert output.statistics["reward"]["std_dev_across_runs"] == pytest.approx(0.0)
-        assert output.statistics["reward"]["std_err_across_runs"] == pytest.approx(0.0)
+        assert avg_of_3["reward_std_dev_across_runs"] == pytest.approx(0.0)
+        assert avg_of_3["reward_std_err_across_runs"] == pytest.approx(0.0)
 
         # avg_sample_std_dev: std per task, then averaged
         # Each task has some mix of 0s and 1s with n=3
@@ -417,7 +449,10 @@ class TestStatisticsCorrectness:
         # Task 2: [1,0,1] -> mean=2/3, same variance = 1/3
         # Task 3: [0,0,1] -> mean=1/3, same variance = 1/3
         expected_avg_std = math.sqrt(1 / 3)
-        assert output.statistics["reward"]["avg_sample_std_dev"] == pytest.approx(expected_avg_std, abs=0.001)
+        assert avg_of_3["reward_avg_sample_std_dev"] == pytest.approx(expected_avg_std, abs=0.001)
+
+        # pass@1 and majority should NOT have statistics
+        assert "reward_std_dev_across_runs" not in output.aggregate["pass@1"]
 
 
 class TestMathMetrics:
@@ -475,6 +510,179 @@ class TestMathMetrics:
         assert "accuracy" in output.aggregate["pass@1"]
 
 
+class TestNoAnswer:
+    def test_not_found_excluded_from_voting_and_tracked(self) -> None:
+        """NOT_FOUND answers are excluded from majority voting but counted in no_answer metric."""
+
+        class AnswerMetrics(BaseMetrics):
+            def get_score_dict(self, result: dict) -> Dict[str, Union[float, bool]]:
+                return {"accuracy": result["reward"]}
+
+            def get_answer(self, result: dict) -> Optional[str]:
+                return result.get("answer", NOT_FOUND)
+
+        metrics = AnswerMetrics()
+        task_results = [
+            # Task 0: has answers
+            [
+                {"reward": 1.0, "answer": "42", "response": {}},
+                {"reward": 0.0, "answer": "43", "response": {}},
+            ],
+            # Task 1: all NOT_FOUND (no "answer" key)
+            [
+                {"reward": 0.0, "response": {}},
+                {"reward": 0.0, "response": {}},
+            ],
+        ]
+        output = metrics.compute(task_results)
+
+        # majority@2 should exist (task 0 has answers)
+        assert "majority@2" in output.aggregate
+
+        # no_answer should be 50% (1 out of 2 tasks has all NOT_FOUND)
+        assert output.aggregate["majority@2"]["no_answer"] == pytest.approx(50.0)
+
+    def test_custom_no_answer_label(self) -> None:
+        class CustomLabelMetrics(BaseMetrics):
+            def get_score_dict(self, result: dict) -> Dict[str, Union[float, bool]]:
+                return {"accuracy": result["reward"]}
+
+            def get_answer(self, result: dict) -> Optional[str]:
+                return result.get("answer", NOT_FOUND)
+
+            @property
+            def no_answer_label(self) -> str:
+                return "invalid_judgements"
+
+        metrics = CustomLabelMetrics()
+        task_results = [
+            [{"reward": 1.0, "answer": "42", "response": {}}, {"reward": 0.0, "response": {}}],
+            [{"reward": 0.0, "response": {}}, {"reward": 0.0, "response": {}}],
+        ]
+        output = metrics.compute(task_results)
+
+        # Should use custom label
+        assert "invalid_judgements" in output.aggregate.get("majority@2", {})
+        assert "no_answer" not in output.aggregate.get("majority@2", {})
+
+    def test_none_answers_skip_majority_entirely(self) -> None:
+        """When get_answer() is not overridden (returns None), no majority@k or no_answer."""
+        metrics = RewardMetrics()
+        task_results = [
+            [{"reward": 1.0, "response": {}}, {"reward": 0.0, "response": {}}],
+        ]
+        output = metrics.compute(task_results)
+
+        assert not any(key.startswith("majority@") for key in output.aggregate)
+
+
+class TestMetricsOutputSchema:
+    """Golden-output test that documents the full MetricsOutput schema.
+
+    This test serves as living documentation of the exact shape of MetricsOutput
+    for a concrete example: 3 math tasks, 2 rollouts each, with majority voting.
+    """
+
+    def test_full_output_schema(self) -> None:
+        class MathLikeMetrics(BaseMetrics):
+            def get_score_dict(self, result: dict) -> Dict[str, Union[float, bool]]:
+                return {"accuracy": result["reward"]}
+
+            def get_answer(self, result: dict) -> Optional[str]:
+                return result.get("answer", NOT_FOUND)
+
+        metrics = MathLikeMetrics()
+        task_results = [
+            # Task 0: both correct, same answer
+            [
+                {
+                    "reward": 1.0,
+                    "answer": "42",
+                    "response": {"usage": {"prompt_tokens": 100, "completion_tokens": 50}},
+                },
+                {
+                    "reward": 1.0,
+                    "answer": "42",
+                    "response": {"usage": {"prompt_tokens": 110, "completion_tokens": 60}},
+                },
+            ],
+            # Task 1: first wrong, second correct
+            [
+                {"reward": 0.0, "answer": "7", "response": {"usage": {"prompt_tokens": 100, "completion_tokens": 40}}},
+                {"reward": 1.0, "answer": "5", "response": {"usage": {"prompt_tokens": 120, "completion_tokens": 80}}},
+            ],
+            # Task 2: both wrong, answer extraction failed on second
+            [
+                {"reward": 0.0, "answer": "99", "response": {"usage": {"prompt_tokens": 90, "completion_tokens": 30}}},
+                {"reward": 0.0, "response": {"usage": {"prompt_tokens": 95, "completion_tokens": 35}}},
+            ],
+        ]
+        output = metrics.compute(task_results)
+
+        # === aggregate ===
+        # Keys: pass@1, pass@2, pass@1[avg-of-1], pass@1[avg-of-2], majority@1, majority@2
+        # Only pass@1[avg-of-2] gets fused statistics.
+        # no_answer appears when any task has all-NOT_FOUND answers for that k.
+
+        # pass@1: max([:1]) per task -> [1.0, 0.0, 0.0] -> avg = 33.33%
+        assert output.aggregate["pass@1"]["accuracy"] == pytest.approx(100.0 / 3.0, abs=0.01)
+
+        # pass@2: max([:2]) per task -> [1.0, 1.0, 0.0] -> avg = 66.67%
+        assert output.aggregate["pass@2"]["accuracy"] == pytest.approx(200.0 / 3.0, abs=0.01)
+
+        # pass@1[avg-of-2]: mean of 2 rollouts per task -> [(1+1)/2, (0+1)/2, (0+0)/2] = [1.0, 0.5, 0.0] -> 50%
+        assert output.aggregate["pass@1[avg-of-2]"]["accuracy"] == pytest.approx(50.0)
+        # Statistics fused into pass@1[avg-of-2] only
+        assert "accuracy_std_dev_across_runs" in output.aggregate["pass@1[avg-of-2]"]
+        assert "accuracy_std_err_across_runs" in output.aggregate["pass@1[avg-of-2]"]
+        assert "accuracy_avg_sample_std_dev" in output.aggregate["pass@1[avg-of-2]"]
+        # Other agg keys don't get statistics
+        assert "accuracy_std_dev_across_runs" not in output.aggregate["pass@1"]
+        assert "accuracy_std_dev_across_runs" not in output.aggregate["pass@2"]
+
+        # majority@2: vote among 2 answers, use winner's score
+        assert "majority@2" in output.aggregate
+        # Task 2 rollout 1 has no answer (NOT_FOUND) -> only 1 valid answer "99" -> score 0.0
+        assert "accuracy" in output.aggregate["majority@2"]
+
+        # no_answer: Task 2 rollout 1 is NOT_FOUND, but task 2 rollout 0 has answer "99"
+        # So no task has ALL answers as NOT_FOUND for k=2 -> no no_answer key
+        # (no_answer only appears when ALL k answers for a task are NOT_FOUND)
+        assert "no_answer" not in output.aggregate.get("majority@2", {})
+
+        # === per_sample_aggregate ===
+        # Dict[str, List[float]] — element i = pass@1 using only rollout i
+        assert set(output.per_sample_aggregate.keys()) == {"accuracy"}
+        assert len(output.per_sample_aggregate["accuracy"]) == 2
+        # rollout 0: [1.0, 0.0, 0.0] -> mean = 33.33%
+        assert output.per_sample_aggregate["accuracy"][0] == pytest.approx(100.0 / 3.0, abs=0.01)
+        # rollout 1: [1.0, 1.0, 0.0] -> mean = 66.67%
+        assert output.per_sample_aggregate["accuracy"][1] == pytest.approx(200.0 / 3.0, abs=0.01)
+
+        # === per_task ===
+        # List of dicts, one per task, with rollout scores and task-level aggregations
+        assert len(output.per_task) == 3
+        task0 = output.per_task[0]
+        assert task0["task_index"] == 0
+        assert task0["num_rollouts"] == 2
+        assert len(task0["rollouts"]) == 2
+        assert task0["rollouts"][0] == {"rollout_index": 0, "accuracy": 1, "answer": "42"}
+        assert task0["rollouts"][1] == {"rollout_index": 1, "accuracy": 1, "answer": "42"}
+        assert task0["aggregations"]["mean/accuracy"] == pytest.approx(1.0)
+        assert task0["aggregations"]["max/accuracy"] == 1
+        assert task0["aggregations"]["min/accuracy"] == 1
+        assert "pass@1/accuracy" in task0["aggregations"]
+        assert "pass@2/accuracy" in task0["aggregations"]
+
+        # === usage ===
+        # Dict[str, Dict[str, float]] — each key has {"mean": ..., "std_dev": ...}
+        assert "prompt_tokens" in output.usage
+        assert "completion_tokens" in output.usage
+        assert set(output.usage["prompt_tokens"].keys()) == {"mean", "std_dev"}
+        assert output.usage["prompt_tokens"]["mean"] == pytest.approx((100 + 110 + 100 + 120 + 90 + 95) / 6.0)
+        assert output.usage["prompt_tokens"]["std_dev"] > 0
+
+
 class TestCodeGenMetrics:
     def test_code_gen_metrics(self) -> None:
         from resources_servers.code_gen.metrics import CodeGenMetrics
@@ -487,10 +695,8 @@ class TestCodeGenMetrics:
         output = metrics.compute(task_results)
 
         assert "accuracy" in output.aggregate["pass@1"]
-        # Task 0: c=1/n=2, pass@1 = 0.5
-        # Task 1: c=0/n=2, pass@1 = 0.0
-        # Average: 25%
-        assert output.aggregate["pass@1"]["accuracy"] == pytest.approx(25.0)
+        # pass@1: max([:1]) -> Task 0: 1.0, Task 1: 0.0. avg = 50%
+        assert output.aggregate["pass@1"]["accuracy"] == pytest.approx(50.0)
 
-        # pass@2: Task 0: 1 - C(1,2)/C(2,2) = 1.0, Task 1: 0.0. avg = 50%
+        # pass@2: max([:2]) -> Task 0: max(1,0)=1.0, Task 1: max(0,0)=0.0. avg = 50%
         assert output.aggregate["pass@2"]["accuracy"] == pytest.approx(50.0)
