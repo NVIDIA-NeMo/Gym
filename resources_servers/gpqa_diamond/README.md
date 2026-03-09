@@ -36,10 +36,7 @@ See `data/example.jsonl` for concrete examples.
 
 ## Preprocessing Raw GPQA-Diamond
 
-Full train/validation data is not stored in this repo, following the same
-pattern as `resources_servers/mcqa`. Dataset locations are declared in
-`configs/gpqa_diamond.yaml` via `gitlab_identifier` and
-`huggingface_identifier`.
+Full train data is not stored in this repo.
 
 `dataset_preprocess.py` always downloads GPQA-Diamond raw data from HuggingFace,
 stores the raw file, then writes the Gym-formatted train file into `data/`.
@@ -56,7 +53,8 @@ This generates:
 - `resources_servers/gpqa_diamond/data/train.jsonl`
 
 `data/example.jsonl` is a curated repo artifact and is not modified by the
-preprocess script.
+preprocess script. There is currently no `validation.jsonl` for this resource
+server.
 
 ## Example Usage
 

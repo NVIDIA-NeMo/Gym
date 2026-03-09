@@ -21,18 +21,6 @@ gpqa_diamond_simple_agent:
       - name: train
         type: train
         jsonl_fpath: resources_servers/gpqa_diamond/data/train.jsonl
-        gitlab_identifier:
-          dataset_name: gpqa_diamond
-          version: 1.0.0
-          artifact_fpath: train.jsonl
-        huggingface_identifier:
-          repo_id: nvidia/Nemotron-RL-knowledge-gpqa-diamond
-        license: TBD
-      - name: validation
-        type: validation
-        jsonl_fpath: resources_servers/gpqa_diamond/data/validation.jsonl
-        huggingface_identifier:
-          repo_id: nvidia/Nemotron-RL-knowledge-gpqa-diamond
         license: TBD
       - name: example
         type: example
