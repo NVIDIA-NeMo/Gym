@@ -21,9 +21,9 @@ from pathlib import Path
 from typing import Any, Optional
 from uuid import uuid4
 
+
 BOXED_INSTRUCTION = (
-    "You should output your final response letter inside \\boxed{} and nothing else "
-    "You can first think step-by-step."
+    "You should output your final response letter inside \\boxed{} and nothing else You can first think step-by-step."
 )
 CHOICE_LETTERS = ("A", "B", "C", "D")
 OPTION_BLOCK_RE = re.compile(r"\n\s*\nA\)\s", re.MULTILINE)

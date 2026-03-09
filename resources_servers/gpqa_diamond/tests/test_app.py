@@ -15,10 +15,10 @@
 from unittest.mock import MagicMock
 
 from app import GPQADiamondResourcesServer
-from resources_servers.mcqa.app import MCQAResourcesServerConfig, MCQAVerifyRequest
 
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
+from resources_servers.mcqa.app import MCQAResourcesServerConfig, MCQAVerifyRequest
 
 
 class TestApp:
