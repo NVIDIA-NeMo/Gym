@@ -415,7 +415,7 @@ class TestPassAtK:
 
 class TestStatisticsCorrectness:
     def test_variance_stats_fused(self) -> None:
-        """Verify std_dev_across_runs, std_err, avg_sample_std_dev are fused into pass@1[avg-of-k]."""
+        """Verify std_dev_across_runs, std_err are fused into pass@1[avg-of-k]."""
         metrics = RewardMetrics()
 
         # 4 tasks, 3 rollouts each
@@ -441,15 +441,6 @@ class TestStatisticsCorrectness:
         # std_dev_across_runs: std of [50, 50, 50] with ddof=1 = 0
         assert avg_of_3["reward_std_dev_across_runs"] == pytest.approx(0.0)
         assert avg_of_3["reward_std_err_across_runs"] == pytest.approx(0.0)
-
-        # avg_sample_std_dev: std per task, then averaged
-        # Each task has some mix of 0s and 1s with n=3
-        # Task 0: [1,1,0] -> mean=2/3, var=((1-2/3)^2 + (1-2/3)^2 + (0-2/3)^2)/2 = (1/9+1/9+4/9)/2 = 1/3
-        # Task 1: [0,1,0] -> mean=1/3, var=((1/3)^2 + (2/3)^2 + (1/3)^2)/2 = (1/9+4/9+1/9)/2 = 1/3
-        # Task 2: [1,0,1] -> mean=2/3, same variance = 1/3
-        # Task 3: [0,0,1] -> mean=1/3, same variance = 1/3
-        expected_avg_std = math.sqrt(1 / 3)
-        assert avg_of_3["reward_avg_sample_std_dev"] == pytest.approx(expected_avg_std, abs=0.001)
 
         # pass@1 and majority should NOT have statistics
         assert "reward_std_dev_across_runs" not in output.aggregate["pass@1"]
@@ -539,8 +530,16 @@ class TestNoAnswer:
         # majority@2 should exist (task 0 has answers)
         assert "majority@2" in output.aggregate
 
-        # no_answer should be 50% (1 out of 2 tasks has all NOT_FOUND)
-        assert output.aggregate["majority@2"]["no_answer"] == pytest.approx(50.0)
+        # no_answer should be in per_sample_aggregate with per-sample values
+        # rollout 0: task 1 has NOT_FOUND -> 1/2 = 50%
+        # rollout 1: task 1 has NOT_FOUND -> 1/2 = 50%
+        assert "no_answer" in output.per_sample_aggregate
+        assert len(output.per_sample_aggregate["no_answer"]) == 2
+        assert output.per_sample_aggregate["no_answer"][0] == pytest.approx(50.0)
+        assert output.per_sample_aggregate["no_answer"][1] == pytest.approx(50.0)
+
+        # no_answer mean (50%) fused into pass@1[avg-of-2]
+        assert output.aggregate["pass@1[avg-of-2]"]["no_answer"] == pytest.approx(50.0)
 
     def test_custom_no_answer_label(self) -> None:
         class CustomLabelMetrics(BaseMetrics):
@@ -561,9 +560,12 @@ class TestNoAnswer:
         ]
         output = metrics.compute(task_results)
 
-        # Should use custom label
-        assert "invalid_judgements" in output.aggregate.get("majority@2", {})
-        assert "no_answer" not in output.aggregate.get("majority@2", {})
+        # Should use custom label in per_sample_aggregate
+        assert "invalid_judgements" in output.per_sample_aggregate
+        assert "no_answer" not in output.per_sample_aggregate
+
+        # And fused into pass@1[avg-of-2]
+        assert "invalid_judgements" in output.aggregate["pass@1[avg-of-2]"]
 
     def test_none_answers_skip_majority_entirely(self) -> None:
         """When get_answer() is not overridden (returns None), no majority@k or no_answer."""
@@ -635,7 +637,7 @@ class TestMetricsOutputSchema:
         # Statistics fused into pass@1[avg-of-2] only
         assert "accuracy_std_dev_across_runs" in output.aggregate["pass@1[avg-of-2]"]
         assert "accuracy_std_err_across_runs" in output.aggregate["pass@1[avg-of-2]"]
-        assert "accuracy_avg_sample_std_dev" in output.aggregate["pass@1[avg-of-2]"]
+        assert "accuracy_std_err_across_runs" in output.aggregate["pass@1[avg-of-2]"]
         # Other agg keys don't get statistics
         assert "accuracy_std_dev_across_runs" not in output.aggregate["pass@1"]
         assert "accuracy_std_dev_across_runs" not in output.aggregate["pass@2"]
@@ -645,19 +647,27 @@ class TestMetricsOutputSchema:
         # Task 2 rollout 1 has no answer (NOT_FOUND) -> only 1 valid answer "99" -> score 0.0
         assert "accuracy" in output.aggregate["majority@2"]
 
-        # no_answer: Task 2 rollout 1 is NOT_FOUND, but task 2 rollout 0 has answer "99"
-        # So no task has ALL answers as NOT_FOUND for k=2 -> no no_answer key
-        # (no_answer only appears when ALL k answers for a task are NOT_FOUND)
-        assert "no_answer" not in output.aggregate.get("majority@2", {})
+        # no_answer is in per_sample_aggregate (rollout 1 has 1/3 NOT_FOUND)
+        # and fused into pass@1[avg-of-2] with statistics
+        assert "no_answer" in output.per_sample_aggregate
+        assert "no_answer" in output.aggregate["pass@1[avg-of-2]"]
 
         # === per_sample_aggregate ===
-        # Dict[str, List[float]] — element i = pass@1 using only rollout i
-        assert set(output.per_sample_aggregate.keys()) == {"accuracy"}
+        # Dict[str, List[float]] — element i = metric using only rollout i across all tasks
+        # Includes scores from get_score_dict() AND per-sample no_answer rate
+        assert "accuracy" in output.per_sample_aggregate
         assert len(output.per_sample_aggregate["accuracy"]) == 2
         # rollout 0: [1.0, 0.0, 0.0] -> mean = 33.33%
         assert output.per_sample_aggregate["accuracy"][0] == pytest.approx(100.0 / 3.0, abs=0.01)
         # rollout 1: [1.0, 1.0, 0.0] -> mean = 66.67%
         assert output.per_sample_aggregate["accuracy"][1] == pytest.approx(200.0 / 3.0, abs=0.01)
+
+        # Per-sample no_answer: task 2 rollout 1 has NOT_FOUND
+        # rollout 0: 0/3 tasks have NOT_FOUND -> 0%
+        # rollout 1: 1/3 tasks have NOT_FOUND -> 33.33%
+        assert "no_answer" in output.per_sample_aggregate
+        assert output.per_sample_aggregate["no_answer"][0] == pytest.approx(0.0)
+        assert output.per_sample_aggregate["no_answer"][1] == pytest.approx(100.0 / 3.0, abs=0.01)
 
         # === per_task ===
         # List of dicts, one per task, with rollout scores and task-level aggregations
