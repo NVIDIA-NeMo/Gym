@@ -258,9 +258,9 @@ class TestRolloutCollection:
             agent_name="agent",
             input_jsonl_fpath="input.jsonl",
             output_jsonl_fpath="output.jsonl",
-            prompt_config="prompt_configs/math.yaml",
+            prompt_config="benchmarks/aime25/prompts/default.yaml",
         )
-        assert config.prompt_config == "prompt_configs/math.yaml"
+        assert config.prompt_config == "benchmarks/aime25/prompts/default.yaml"
 
     def test_prompt_config_default_none(self) -> None:
         config = RolloutCollectionConfig(
