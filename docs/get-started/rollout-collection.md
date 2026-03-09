@@ -45,7 +45,7 @@ Make sure you have:
 
 ## 1. Inspect the Data
 
-Look at the example dataset included with the Example Single Tool Call resource server:
+Look at the example dataset included with the Example Single Tool Call resources server:
 
 ```bash
 head -1 resources_servers/example_single_tool_call/data/example.jsonl | python -m json.tool

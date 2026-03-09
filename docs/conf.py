@@ -124,6 +124,18 @@ html_extra_path = ["project.json", "versions1.json"]
 # The .html extension is required for source paths.
 
 redirects = {
+    # tutorials/ split into environment-tutorials/ and training-tutorials/ (0.1.1 → 0.2.0)
+    "tutorials/index.html": "../training-tutorials/index.html",
+    "tutorials/creating-resource-server.html": "../environment-tutorials/creating-training-environment.html",
+    "tutorials/offline-training-w-rollouts.html": "../training-tutorials/offline-training-w-rollouts.html",
+    # nemo-rl-grpo subdir: source is tutorials/nemo-rl-grpo/, target is training-tutorials/nemo-rl-grpo/
+    "tutorials/nemo-rl-grpo/index.html": "../../training-tutorials/nemo-rl-grpo/index.html",
+    "tutorials/nemo-rl-grpo/about-workplace-assistant.html": "../../training-tutorials/nemo-rl-grpo/about-workplace-assistant.html",
+    "tutorials/nemo-rl-grpo/gym-configuration.html": "../../training-tutorials/nemo-rl-grpo/gym-configuration.html",
+    "tutorials/nemo-rl-grpo/nemo-rl-configuration.html": "../../training-tutorials/nemo-rl-grpo/nemo-rl-configuration.html",
+    "tutorials/nemo-rl-grpo/setup.html": "../../training-tutorials/nemo-rl-grpo/setup.html",
+    "tutorials/nemo-rl-grpo/single-node-training.html": "../../training-tutorials/nemo-rl-grpo/single-node-training.html",
+    "tutorials/nemo-rl-grpo/multi-node-training.html": "../../training-tutorials/nemo-rl-grpo/multi-node-training.html",
     # Get Started section renames (same directory)
     "get-started/setup-installation.html": "detailed-setup.html",
     # RL Framework Integration moved from training/ to contribute/

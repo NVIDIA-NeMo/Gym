@@ -2,12 +2,12 @@
 
 # Add a New Environment
 
-An environment consists of three components: Agents, Models, and Resources. Most contributors will create new resource servers while using existing agent server and model server implementations. If you need to create custom agents or models, you can reference the implementations in `responses_api_agents/` and `responses_api_models/`.
+An environment consists of three components: Agents, Models, and Resources. Most contributors will create new resources servers while using existing agent server and model server implementations. If you need to create custom agents or models, you can reference the implementations in `responses_api_agents/` and `responses_api_models/`.
 
-This guide focuses on the resource server contribution process.
+This guide focuses on the resources server contribution process.
 
 :::{tip}
-For a guide to building your first resource server, refer to {doc}`/environment-tutorials/creating-training-environment`.
+For a guide to building your first resources server, refer to {doc}`/environment-tutorials/creating-training-environment`.
 :::
 
 ## Guiding Principles
@@ -23,7 +23,7 @@ When making a training environment PR, include W&B links and screenshots of the 
 
 ## Required Files
 
-Your resource server must include these files:
+Your resources server must include these files:
 
 ```{list-table}
 :header-rows: 1
@@ -50,7 +50,7 @@ Your resource server must include these files:
 
 ## Contribution Workflow
 
-Contributing a resource server follows this sequence:
+Contributing a resources server follows this sequence:
 
 ```{list-table}
 :header-rows: 1
@@ -64,7 +64,7 @@ Contributing a resource server follows this sequence:
   - Collect or generate training tasks and create example data
 * - 2
   - Implementation
-  - Build resource server with verification logic
+  - Build resources server with verification logic
 * - 3
   - Testing
   - Write and run unit tests
@@ -94,19 +94,19 @@ Prepare the dataset for your environment:
 - Collect or generate prompts/tasks for your environment
 - Create `data/example.jsonl` with at least 5 representative task examples
 
-### 2. Resource Server Implementation
+### 2. Resources Server Implementation
 
-Build your resource server:
+Build your resources server:
 
-- Run `ng_init_resources_server +entrypoint=resources_servers/my_server` to scaffold the new resource server
+- Run `ng_init_resources_server +entrypoint=resources_servers/my_server` to scaffold the new resources server
 - Follow the {doc}`/environment-tutorials/creating-training-environment` guide to implement your specific logic
 - Implement verification logic for your tasks by defining the `verify()` function
-- Set the `domain` field in your resource server configuration (see {py:class}`~nemo_gym.config_types.Domain`).
+- Set the `domain` field in your resources server configuration (see {py:class}`~nemo_gym.config_types.Domain`).
 - Complete the auto-generated `README.md` with licensing information
 
 ### 3. Testing
 
-Write and run tests for your resource server:
+Write and run tests for your resources server:
 
 - At least one test per server is required for PR approval
 - You are responsible for ensuring your tests adequately cover your server's functionality
@@ -230,6 +230,6 @@ For multi-step scenarios, the model returns training information on response mes
 
 ## Reference
 
-- {doc}`/environment-tutorials/creating-training-environment` - Introductory tutorial for creating your first resource server
+- {doc}`/environment-tutorials/creating-training-environment` - Introductory tutorial for creating your first resources server
 - {doc}`/about/concepts/task-verification` - Verification and reward concepts
 - {doc}`/about/concepts/core-components` - Environment component architecture

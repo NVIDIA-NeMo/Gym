@@ -575,7 +575,7 @@ Browse available environments on GitHub to find other training options.
 :link: /environment-tutorials/creating-training-environment
 :link-type: doc
 
-Create your own resource server with custom tools and verification logic.
+Create your own resources server with custom tools and verification logic.
 :::
 
 ::::
