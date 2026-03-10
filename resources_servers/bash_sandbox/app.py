@@ -28,9 +28,8 @@ from typing import Dict, List
 import anyio
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-# tavily is imported lazily inside _get_tavily_client() rather than at module level so
-# that servers which import from this module (e.g. gdpval_agent) do not require
-# tavily-python in their own virtual environments.
+from tavily import TavilyClient
+
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -382,7 +381,6 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
 
         try:
             self.session_manager.start_session(session_id)
-            print(f"seed_session: session_id: {session_id}, session_manager: {self.session_manager.id_to_session}")
         except Exception as e:
             return SeedSessionResponse(session_id=session_id, success=False, error_message=str(e))
 
@@ -398,7 +396,6 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
             RunCommandResponse with exit_code, stdout, stderr, and optional error info.
 
         """
-        print(f"run_command: session_id: {body.session_id}, session_manager: {self.session_manager.id_to_session}")
         try:
             session = self.session_manager.get_session(body.session_id)
         except KeyError:
@@ -495,7 +492,6 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
             UploadFilesResult containing lists of uploaded files and any failures.
 
         """
-        print(f"upload_files: session_id: {body.session_id}, session_manager: {self.session_manager.id_to_session}")
         try:
             session = self.session_manager.get_session(body.session_id)
         except KeyError:
@@ -574,9 +570,6 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
             SaveOutputFilesResponse containing lists of saved files and any failures.
 
         """
-        print(
-            f"save_output_files: session_id: {body.session_id}, session_manager: {self.session_manager.id_to_session}"
-        )
         try:
             session = self.session_manager.get_session(body.session_id)
         except Exception as e:
@@ -639,7 +632,6 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
         Returns:
             FinishResponse with session deletion status and saved file details.
         """
-        print(f"finish: session_id: {body.session_id}, session_manager: {self.session_manager.id_to_session}")
         if body.paths is not None and body.output_dir is not None:
             result = await self.save_output_files(
                 SaveOutputFilesRequest(paths=body.paths, session_id=body.session_id, output_dir=body.output_dir)
@@ -693,8 +685,6 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
         )
 
     def _get_tavily_client(self):
-        from tavily import TavilyClient  # lazy import — see module-level comment
-
         api_key = os.getenv("TAVILY_API_KEY")
         if not api_key:
             raise ValueError("TAVILY_API_KEY environment variable not set")
@@ -717,7 +707,6 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
 
     async def web_search(self, body: WebSearchRequest) -> WebSearchResponse:
         """Search the web using Tavily Search API. Returns top results as XML."""
-        print(f"WEB_SEARCH: session_id: {body.session_id}")
         try:
             client = self._get_tavily_client()
         except ValueError as exc:
@@ -751,7 +740,6 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
 
     async def web_fetch(self, body: WebFetchRequest) -> WebFetchResponse:
         """Fetch a web page and extract content using Tavily Extract API."""
-        print(f"WEB_FETCH: session_id: {body.session_id}")
         try:
             client = self._get_tavily_client()
         except ValueError as exc:

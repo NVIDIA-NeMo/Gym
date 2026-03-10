@@ -31,7 +31,7 @@ ng_run "+config_paths=[${RESOURCE_AND_AGENT_CONFIG},${MODEL_SERVER_CONFIG}]" \
 # Terminal 2: Running the agent
 ```bash
 # Start terminal 2
-srun --jobid=9838726 --overlap --pty -c 8 --gres=none bash
+srun --jobid=9854513 --overlap --pty -c 8 --gres=none bash
 
 # Init Env
 cd /lustre/fsw/portfolios/llmservice/users/vadams/Gym
@@ -41,18 +41,19 @@ source .venv/bin/activate
 python responses_api_agents/gdpval_agent/client.py prepare \
     --output-jsonl tmp/gdpval_tasks.jsonl \
     --split train \
-    --limit 5
+    --limit 220 \
+    --output-dir tmp/gdpval_output
 
 ng_collect_rollouts +agent_name=bash_sandbox_agent \
     +input_jsonl_fpath=tmp/gdpval_tasks.jsonl \
     +output_jsonl_fpath=tmp/gdpval_rollouts.jsonl \
-    +limit=5 \
-    +num_samples_in_parallel=1
+    +limit=220 \
+    +num_samples_in_parallel=16
 
 ng_collect_rollouts +agent_name=bash_sandbox_agent \
     +input_jsonl_fpath=tmp/web_search_tst.jsonl \
     +output_jsonl_fpath=tmp/web_search_rollout.jsonl \
-    +limit=5 \
+    +limit=1 \
     +num_samples_in_parallel=1
 ```
 
