@@ -124,6 +124,79 @@ class TestAggregateMetricsRoute:
         assert not any(k.startswith("histogram") for k in result.agent_metrics)
 
 
+class TestComputeMetricsHook:
+    @pytest.mark.asyncio
+    async def test_compute_metrics_receives_grouped_responses(self) -> None:
+        """compute_metrics receives all verify responses grouped by task."""
+
+        class _MathServer(SimpleResourcesServer):
+            async def verify(self, body):
+                pass
+
+            def compute_metrics(self, tasks):
+                # tasks[i] is a list of rollout dicts for task i
+                assert len(tasks) == 3
+                assert all(len(rollouts) == 4 for rollouts in tasks)
+
+                # Compute pass@k: fraction of tasks where any rollout got reward=1
+                pass_at_k = sum(1 for rollouts in tasks if any(r["reward"] >= 1.0 for r in rollouts)) / len(tasks)
+
+                # Compute pass@1 avg-of-k: average of per-task mean rewards
+                pass_at_1 = sum(sum(r["reward"] for r in rollouts) / len(rollouts) for rollouts in tasks) / len(tasks)
+
+                return {"pass@k": pass_at_k, "pass@1_avg_of_k": pass_at_1}
+
+            def get_key_metrics(self, agent_metrics):
+                return {k: agent_metrics[k] for k in ("pass@k", "pass@1_avg_of_k") if k in agent_metrics}
+
+        config = BaseResourcesServerConfig(host="127.0.0.1", port=12345, entrypoint="app.py", name="test_server")
+        server = _MathServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+        # Task 0: all correct, Task 1: all wrong, Task 2: mixed
+        def reward_fn(t, r):
+            if t == 0:
+                return 1.0
+            if t == 1:
+                return 0.0
+            return float(r % 2)
+
+        responses = _make_verify_responses(tasks=3, rollouts_per_task=4, reward_fn=reward_fn)
+        body = AggregateMetricsRequest(verify_responses=responses)
+        result = await server.aggregate_metrics(body)
+
+        # 2 of 3 tasks have at least one correct rollout (task 0 and task 2)
+        assert result.agent_metrics["pass@k"] == pytest.approx(2.0 / 3.0)
+        assert "pass@k" in result.key_metrics
+        assert "pass@1_avg_of_k" in result.key_metrics
+
+    @pytest.mark.asyncio
+    async def test_compute_metrics_sees_custom_verify_fields(self) -> None:
+        """compute_metrics has access to custom fields from verify responses."""
+
+        class _JudgeServer(SimpleResourcesServer):
+            async def verify(self, body):
+                pass
+
+            def compute_metrics(self, tasks):
+                # Verify we can see custom fields
+                for rollouts in tasks:
+                    for r in rollouts:
+                        assert "judgement" in r
+                return {"custom_metric": 42.0}
+
+        config = BaseResourcesServerConfig(host="127.0.0.1", port=12345, entrypoint="app.py", name="test_server")
+        server = _JudgeServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+        responses = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "judgement": "[[A>>B]]"},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.0, "judgement": "[[B>A]]"},
+        ]
+        body = AggregateMetricsRequest(verify_responses=responses)
+        result = await server.aggregate_metrics(body)
+
+        assert result.agent_metrics["custom_metric"] == 42.0
+
+
 class TestDefaultAgentAggregateMetrics:
     @pytest.mark.asyncio
     async def test_default_fallback(self) -> None:

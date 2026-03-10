@@ -48,11 +48,11 @@ class AggregateMetrics(BaseModel):
 
     group_level_metrics: List[Dict[str, Any]] = Field(
         default_factory=list,
-        description="Per-task metrics from describe_dataframe, one dict per task.",
+        description="Per-task metrics (one dict per task) from RewardProfiler baseline stats.",
     )
     agent_metrics: Dict[str, Any] = Field(
         default_factory=dict,
-        description="Overall metrics from describe_dataframe across all rollouts.",
+        description="Overall metrics across all rollouts (RewardProfiler baseline + compute_metrics).",
     )
     key_metrics: Dict[str, Any] = Field(
         default_factory=dict,
@@ -84,16 +84,33 @@ class BaseSeedSessionResponse(BaseModel):
     pass
 
 
+def _group_by_task(verify_responses: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+    """Group verify responses by task index, returning a list of per-task rollout lists."""
+    from collections import defaultdict
+
+    from nemo_gym.global_config import TASK_INDEX_KEY_NAME
+
+    groups: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    for vr in verify_responses:
+        groups[vr.get(TASK_INDEX_KEY_NAME, 0)].append(vr)
+    return [groups[k] for k in sorted(groups)]
+
+
 def compute_aggregate_metrics(
     verify_responses: List[Dict[str, Any]],
-    describe_dataframe_fn=None,
+    compute_metrics_fn=None,
     get_key_metrics_fn=None,
 ) -> AggregateMetrics:
     """Shared aggregation logic for /aggregate_metrics.
 
-    Uses RewardProfiler to compute group-level (per-task) and agent-level metrics.
-    Optionally accepts custom describe_dataframe and get_key_metrics functions
-    for benchmark-specific customization.
+    RewardProfiler runs with defaults to produce baseline stats (mean/max/min/median/std)
+    for both group-level (per-task) and agent-level metrics.
+
+    Optionally accepts custom functions for benchmark-specific customization:
+      - compute_metrics_fn: receives ALL verify responses grouped by task
+        (List[List[Dict]]) for metrics that need the full dataset (e.g. confidence
+        intervals, cross-task statistics, pass@k). Returned dict is merged into agent_metrics.
+      - get_key_metrics_fn: select headline metrics from agent_metrics
     """
     from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
     from nemo_gym.reward_profile import RewardProfiler
@@ -101,15 +118,7 @@ def compute_aggregate_metrics(
     if not verify_responses:
         return AggregateMetrics()
 
-    if describe_dataframe_fn:
-
-        class _Profiler(RewardProfiler):
-            def describe_dataframe(self, df):
-                return describe_dataframe_fn(df)
-
-        rp = _Profiler()
-    else:
-        rp = RewardProfiler()
+    rp = RewardProfiler()
 
     rows = []
     results = []
@@ -134,6 +143,11 @@ def compute_aggregate_metrics(
 
     serialized_group = rp.prepare_for_serialization(group_level_metrics)
     serialized_agent = rp.prepare_for_serialization([agent_metrics])[0] if agent_metrics else {}
+
+    # Custom metrics computed from all raw verify responses grouped by task
+    if compute_metrics_fn:
+        tasks = _group_by_task(verify_responses)
+        serialized_agent.update(compute_metrics_fn(tasks))
 
     if get_key_metrics_fn:
         key_metrics = get_key_metrics_fn(serialized_agent)
@@ -168,20 +182,22 @@ class SimpleResourcesServer(BaseResourcesServer, SimpleServer):
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
         pass
 
-    def describe_dataframe(self, df: Any) -> Any:
-        """Override to add custom per-group aggregation metrics.
+    def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        """Override to compute custom metrics from all verify responses.
 
-        Called by /aggregate_metrics for each task group AND for the overall dataset.
-        Default: delegates to RewardProfiler.describe_dataframe() (mean/max/min/median/std).
+        Receives verify responses grouped by task: tasks[i] is a list of rollout
+        dicts for task i. Each dict has at minimum reward, plus any custom fields
+        from the verify response (e.g. symbolic_correct, judgement-gen-base).
 
-        Override pattern:
-            result = super().describe_dataframe(df)
-            # Add custom rows/columns (e.g. pass@k)
-            return result
+        Use for metrics that need the full dataset at once:
+        - Confidence intervals (ArenaMetrics)
+        - Cross-task statistics (std_dev_across_runs)
+        - pass@k with proper combinatorial computation
+
+        The returned dict is merged into agent_metrics.
+        Default: empty dict (no additional metrics).
         """
-        from nemo_gym.reward_profile import RewardProfiler
-
-        return RewardProfiler().describe_dataframe(df)
+        return {}
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
         """Override to select headline metrics for this benchmark.
@@ -191,13 +207,13 @@ class SimpleResourcesServer(BaseResourcesServer, SimpleServer):
         return {k: v for k, v in agent_metrics.items() if k.startswith("mean/")}
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
-        """Compute aggregate metrics from verify responses using RewardProfiler.
+        """Compute aggregate metrics from verify responses.
 
-        Uses self.describe_dataframe() as the aggregation function, so subclasses
-        can add custom metrics by overriding describe_dataframe().
+        RewardProfiler provides baseline stats. Override compute_metrics() and/or
+        get_key_metrics() for benchmark-specific customization.
         """
         return compute_aggregate_metrics(
             body.verify_responses,
-            describe_dataframe_fn=self.describe_dataframe,
+            compute_metrics_fn=self.compute_metrics,
             get_key_metrics_fn=self.get_key_metrics,
         )
