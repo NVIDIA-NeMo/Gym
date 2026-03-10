@@ -26,6 +26,52 @@ class TestApp:
         config = MCQAResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
         GPQADiamondResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
+    async def test_verify_gpqa_diamond_template_metadata_priority(self) -> None:
+        server = GPQADiamondResourcesServer(
+            config=MCQAResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        regex_response = NeMoGymResponse(
+            id="resp_regex",
+            created_at=0.0,
+            model="dummy",
+            object="response",
+            output=[
+                {
+                    "id": "msg_regex",
+                    "content": [
+                        {
+                            "annotations": [],
+                            "text": "Answer: A\nFinal Choice: c",
+                            "type": "output_text",
+                        }
+                    ],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+        )
+
+        verify_request = MCQAVerifyRequest(
+            responses_create_params={
+                "input": [{"role": "user", "content": "Question?\nA: optA\nB: optB\nC: optC\nD: optD"}]
+            },
+            response=regex_response,
+            options=[{"A": "optA"}, {"B": "optB"}, {"C": "optC"}, {"D": "optD"}],
+            expected_answer="C",
+            grading_mode="strict_single_letter_boxed",
+            template_metadata={"output_regex": r"Final Choice:\s*([A-Za-z])"},
+        )
+        result = await server.verify(verify_request)
+
+        assert result.reward == 1.0
+        assert result.extracted_answer == "C"
+
     async def test_verify_gpqa_diamond_format(self) -> None:
         server = GPQADiamondResourcesServer(
             config=MCQAResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
@@ -72,23 +118,31 @@ class TestApp:
         assert result_answer.reward == 1.0
         assert result_answer.extracted_answer == "C"
 
-        boxed_response = answer_response.model_copy(
-            update={
-                "id": "resp_boxed",
-                "output": [
-                    {
-                        "id": "msg_boxed",
-                        "content": [
-                            {"annotations": [], "text": "Final: \\boxed{the answer is C}", "type": "output_text"}
-                        ],
-                        "role": "assistant",
-                        "status": "completed",
-                        "type": "message",
-                    }
-                ],
-            }
+        boxed_response = NeMoGymResponse(
+            id="resp_boxed",
+            created_at=0.0,
+            model="dummy",
+            object="response",
+            output=[
+                {
+                    "id": "msg_boxed",
+                    "content": [{"annotations": [], "text": "Final: \\boxed{C}", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
         )
-        verify_request_boxed = verify_request.model_copy(update={"response": boxed_response})
+        verify_request_boxed = MCQAVerifyRequest(
+            responses_create_params=verify_request.responses_create_params.model_dump(exclude_none=True),
+            response=boxed_response,
+            options=verify_request.options,
+            expected_answer=verify_request.expected_answer,
+            grading_mode=verify_request.grading_mode,
+        )
         result_boxed = await server.verify(verify_request_boxed)
 
         assert result_boxed.reward == 1.0

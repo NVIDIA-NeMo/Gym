@@ -21,7 +21,11 @@ gpqa_diamond_simple_agent:
       - name: train
         type: train
         jsonl_fpath: resources_servers/gpqa_diamond/data/train.jsonl
-        license: TBD
+        gitlab_identifier:
+          dataset_name: gpqa_diamond_benchmark
+          version: 0.0.2
+          artifact_fpath: train.jsonl
+        license: MIT
       - name: example
         type: example
         jsonl_fpath: resources_servers/gpqa_diamond/data/example.jsonl

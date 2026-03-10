@@ -23,7 +23,7 @@ from uuid import uuid4
 
 
 BOXED_INSTRUCTION = (
-    "You should output your final response letter inside \\boxed{} and nothing else You can first think step-by-step."
+    "Answer the following multiple choice question. The last line of your response should be of the following format: 'Answer: LETTER' (without quotes) where LETTER is one of ABCD. Example: 'Answer: B'. Think step by step before answering."
 )
 CHOICE_LETTERS = ("A", "B", "C", "D")
 OPTION_BLOCK_RE = re.compile(r"\n\s*\nA\)\s", re.MULTILINE)
