@@ -22,9 +22,7 @@ from typing import Any, Optional
 from uuid import uuid4
 
 
-BOXED_INSTRUCTION = (
-    "Answer the following multiple choice question. The last line of your response should be of the following format: 'Answer: LETTER' (without quotes) where LETTER is one of ABCD. Example: 'Answer: B'. Think step by step before answering."
-)
+BOXED_INSTRUCTION = "Answer the following multiple choice question. The last line of your response should be of the following format: 'Answer: LETTER' (without quotes) where LETTER is one of ABCD. Example: 'Answer: B'. Think step by step before answering."
 CHOICE_LETTERS = ("A", "B", "C", "D")
 OPTION_BLOCK_RE = re.compile(r"\n\s*\nA\)\s", re.MULTILINE)
 DATA_DIR = Path(__file__).resolve().parent / "data"
