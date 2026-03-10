@@ -28,24 +28,9 @@ The data generation pipeline:
 
 ---
 
-## Prerequisites
+## Notebook
 
-- **NVIDIA API Key** from [build.nvidia.com](https://build.nvidia.com) (or your own LLM endpoint)
-- **Python 3.11+**
-- Install tutorial dependencies (paths relative to the [NeMo Gym repository root](https://github.com/NVIDIA-NeMo/Gym)):
-
-  ```bash
-  cd resources_servers/workplace_assistant/notebooks/synthetic-data-generation/
-  uv pip install -r requirements.txt
-  ```
-
----
-
-## Running the Notebook
-
-The tutorial is provided as a Jupyter notebook at `resources_servers/workplace_assistant/notebooks/synthetic-data-generation/multistep-toolcalling-sdg.ipynb`.
-
-> **Important:** Run the notebook from the `resources_servers/workplace_assistant/notebooks/synthetic-data-generation/` directory so that relative imports for `tools/` and `utils/` resolve correctly.
+The tutorial is provided as a Jupyter notebook. See the [notebook README](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/workplace_assistant/notebooks/synthetic-data-generation/) for prerequisites and setup instructions.
 
 :::{button-link} https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/workplace_assistant/notebooks/synthetic-data-generation/multistep-toolcalling-sdg.ipynb
 :color: primary
