@@ -518,12 +518,6 @@ Once you've collected rollouts and validated your environment, run training with
 Train models using GRPO with NeMo RL.
 :::
 
-:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` TRL
-:link: /training-tutorials/trl
-:link-type: doc
-Train with Hugging Face TRL.
-:::
-
 :::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` Unsloth
 :link: /training-tutorials/unsloth
 :link-type: doc
