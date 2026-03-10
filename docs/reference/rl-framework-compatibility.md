@@ -32,3 +32,13 @@ The following table maps NeMo Gym versions to compatible NeMo RL containers. Use
 | --- | --- | --- |
 | NeMo Gym v0.1.1 | [NeMo RL v0.5 container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo-rl) | Released |
 | NeMo Gym v0.1.1 | [NeMo RL v0.4.0.nemotron_3_nano](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo-rl) (Nemotron 3 Nano) | Released |
+
+---
+
+## Unsloth
+
+The NeMo Gym integration with Unsloth is tested on {{unsloth_pinned}}. Other versions are not guaranteed to work.
+
+:::{seealso}
+{doc}`/training-tutorials/unsloth` for the Unsloth training tutorial.
+:::

@@ -62,8 +62,11 @@ myst_enable_extensions = [
 myst_heading_anchors = 5  # Generates anchor links for headings up to level 5
 
 # MyST substitutions - variables that can be used in markdown files
+_unsloth_version = "2026.1.4"
 myst_substitutions = {
     "product_name": "NeMo Gym",
+    "unsloth_version": _unsloth_version,
+    "unsloth_pinned": f"`unsloth=={_unsloth_version}` and `unsloth_zoo=={_unsloth_version}`",
 }
 
 # -- Options for Autodoc2 ---------------------------------------------------
