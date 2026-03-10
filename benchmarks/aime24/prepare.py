@@ -15,9 +15,7 @@
 """Prepare AIME 2024 benchmark data.
 
 Downloads AIME 2024 problems from HuggingFace and converts them to the
-Gym benchmark JSONL format. Output rows contain `question` and
-`expected_answer` fields but no `responses_create_params.input` — prompts
-are applied at rollout time via prompt_config.
+Gym benchmark JSONL format with `question` and `expected_answer` fields.
 """
 
 import json
@@ -28,7 +26,7 @@ from datasets import load_dataset
 
 BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
-OUTPUT_FPATH = DATA_DIR / "aime24.jsonl"
+OUTPUT_FPATH = DATA_DIR / "aime24_validation.jsonl"
 
 # HuggingFace dataset for AIME 2024
 HF_REPO_ID = "HuggingFaceH4/aime_2024"
