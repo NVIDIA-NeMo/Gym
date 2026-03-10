@@ -18,4 +18,12 @@ Distributed training of Nemotron 3 Nano 30B across multiple nodes using Slurm an
 {bdg-secondary}`model recipe` {bdg-secondary}`nemotron`
 :::
 
+:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` Nemotron 3 Super
+:link: model-recipes-nemotron-3-super
+:link-type: ref
+Distributed training of Nemotron 3 Super 120B across multiple nodes using Slurm and Ray.
++++
+{bdg-secondary}`model recipe` {bdg-secondary}`nemotron`
+:::
+
 ::::
