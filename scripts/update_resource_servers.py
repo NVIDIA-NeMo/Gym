@@ -319,16 +319,16 @@ def generate_training_table(servers: list[ServerInfo]) -> str:  # pragma: no cov
     """Generate table for training resources servers."""
     col_names = [
         "Resources Server",
-        "Config",
         "Domain",
-        "Dataset",
         "Description",
         "Value",
         "Train",
         "Validation",
+        "License",
+        "Config",
+        "Dataset",
         # TODO: Add back in when we can verify resources servers
         # "Verified",
-        "License",
     ]
     if not servers:
         return handle_empty_table(col_names)
@@ -336,32 +336,26 @@ def generate_training_table(servers: list[ServerInfo]) -> str:  # pragma: no cov
     rows = []
 
     for server in servers:
-        # TODO: Add back in when we can verify resources servers
-        # verified_mark = server.get_verified_mark()
-
         rows.append(
             [
                 server.display_name,
-                server.get_config_link(use_filename=True),
                 server.get_domain_or_empty(),
-                server.get_dataset_link(),
                 server.get_description_or_dash(),
                 server.get_value_or_dash(),
                 server.get_train_mark(),
                 server.get_validation_mark(),
+                server.get_license_or_dash(),
+                server.get_config_link(use_filename=True),
+                server.get_dataset_link(),
                 # TODO: Add back in when we can verify resources servers
                 # verified_mark,
-                server.get_license_or_dash(),
             ]
         )
 
     rows.sort(
         key=lambda r: (
             normalize_str(r[0]),  # resources server name
-            normalize_str(r[1]),  # config filename
-            normalize_str(r[2]),  # domain
-            # TODO: Add back in when we can verify resources servers
-            # 0 if "✓" in r[8] else 1,  # verified first (reverse order for checkmarks...hyphens)
+            normalize_str(r[1]),  # domain
             tuple(normalize_str(cell) for cell in r),
         )
     )
