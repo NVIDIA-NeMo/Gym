@@ -599,12 +599,21 @@ class VLLMConverter(BaseModel):
         content = m["content"]
 
         if isinstance(content, list) and m["role"] != "assistant":
+            converted_parts = []
             for part_param in content:
                 match part_param["type"]:
                     case "input_text":
-                        part_param["type"] = "text"
+                        converted_parts.append({"type": "text", "text": part_param["text"]})
+                    case "input_image":
+                        image_url = part_param.get("image_url", "")
+                        detail = part_param.get("detail", "auto")
+                        converted_parts.append(
+                            {"type": "image_url", "image_url": {"url": image_url, "detail": detail}}
+                        )
                     case _:
                         raise NotImplementedError(f"Unsupported part param type: {part_param['type']}")
+            content = converted_parts
+            m["content"] = content
 
         match m["role"]:
             case "assistant":
