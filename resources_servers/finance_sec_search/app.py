@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Finance Agent Resource Server.
+Finance SEC Search Resource Server.
 
 Provides tools for searching SEC filings by ticker symbol or company name.
 Caches ticker mappings and filing metadata locally to minimize SEC API calls.
@@ -80,7 +80,7 @@ class FinanceAgentResourcesServerConfig(BaseResourcesServerConfig):
         "Supports {question}, {expected_answer}, {generated_answer} placeholders.",
     )
     judge_prompt_template_fpath: str = Field(
-        default="prompt_templates/finance_agent_judge.yaml",
+        default="prompt_templates/finance_sec_search_judge.yaml",
         description="Fallback file path for judge prompt template (used when judge_prompt_template is not set)",
     )
     # Retrieval model parameters

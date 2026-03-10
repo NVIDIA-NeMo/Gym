@@ -1,4 +1,4 @@
-# Finance Agent Resource Server
+# Finance SEC Search Resource Server
 
 Financial information retrieval using SEC EDGAR filings with optional web search via Tavily.
 
@@ -31,9 +31,9 @@ search_judge_model_base_url: http://localhost:5000/v1
 search_judge_model_api_key: ""
 search_judge_model_name: /hf_models/Qwen3-30B-A3B
 
-finance_agent_resources_server:
+finance_sec_search_resources_server:
   resources_servers:
-    finance_agent:
+    finance_sec_search:
       cache_dir: cache
       # tavily_api_key: <your-tavily-key>
 ```
@@ -43,7 +43,7 @@ finance_agent_resources_server:
 ### 1. Prepare the dataset
 
 The input is a JSONL file with question/answer pairs. An example is provided at
-`resources_servers/finance_agent/data/example_questions.jsonl`:
+`resources_servers/finance_sec_search/data/example_questions.jsonl`:
 
 ```json
 {"question": "What is the number of shares of common stock outstanding as of November 14, 2025 for Nvidia?", "expected_answer": "24.3 billion"}
@@ -55,9 +55,9 @@ Convert the questions into the Gym input format (adds tool definitions, system p
 Use the `--include-web-search` flag to include the optional `web_search` tool:
 
 ```bash
-python resources_servers/finance_agent/scripts/convert_questions.py \
-  --input resources_servers/finance_agent/data/example_questions.jsonl \
-  --output resources_servers/finance_agent/data/example.jsonl \
+python resources_servers/finance_sec_search/scripts/convert_questions.py \
+  --input resources_servers/finance_sec_search/data/example_questions.jsonl \
+  --output resources_servers/finance_sec_search/data/example.jsonl \
   --include-web-search
 ```
 
@@ -66,7 +66,7 @@ python resources_servers/finance_agent/scripts/convert_questions.py \
 To prepare the [SecQue](https://huggingface.co/datasets/nogabenyoash/SecQue) dataset (filters to questions mentioning known companies and converts to Gym format):
 
 ```bash
-cd resources_servers/finance_agent
+cd resources_servers/finance_sec_search
 python scripts/prepare_secque_questions.py
 ```
 
@@ -82,7 +82,7 @@ Launch a vLLM-compatible model server (e.g. Qwen3-30B-A3B) so the policy and jud
 ### 3. Start the Gym servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,resources_servers/finance_agent/configs/finance_agent.yaml"
+config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,resources_servers/finance_sec_search/configs/finance_sec_search.yaml"
 ng_run "+config_paths=[$config_paths]"
 ```
 
@@ -90,25 +90,25 @@ ng_run "+config_paths=[$config_paths]"
 
 ```bash
 ng_collect_rollouts \
-  +agent_name=finance_simple_agent \
-  +input_jsonl_fpath=resources_servers/finance_agent/data/example.jsonl \
-  +output_jsonl_fpath=results/finance_agent_rollouts.jsonl
+  +agent_name=finance_agent \
+  +input_jsonl_fpath=resources_servers/finance_sec_search/data/example.jsonl \
+  +output_jsonl_fpath=results/finance_sec_search_rollouts.jsonl
 ```
 
 Add `+limit=1` for a quick single-question test:
 
 ```bash
 ng_collect_rollouts \
-  +agent_name=finance_simple_agent \
-  +input_jsonl_fpath=resources_servers/finance_agent/data/example.jsonl \
-  +output_jsonl_fpath=results/finance_agent_rollouts.jsonl \
+  +agent_name=finance_agent \
+  +input_jsonl_fpath=resources_servers/finance_sec_search/data/example.jsonl \
+  +output_jsonl_fpath=results/finance_sec_search_rollouts.jsonl \
   +limit=1
 ```
 
 ### Run tests
 
 ```bash
-ng_test +entrypoint=resources_servers/finance_agent
+ng_test +entrypoint=resources_servers/finance_sec_search
 ```
 
 ## Verification

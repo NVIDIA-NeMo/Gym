@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Download the SecQue benchmark (nogabenyoash/SecQue), filter to questions that mention known
-companies, and convert to the finance agent test format. Run from the finance_agent/ directory:
+companies, and convert to the finance SEC search test format. Run from the finance_sec_search/ directory:
     python scripts/prepare_secque_questions.py
 Output is written to data/secque_questions.jsonl.
 """

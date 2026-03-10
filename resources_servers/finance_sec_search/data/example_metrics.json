@@ -1,7 +1,7 @@
 {
     "name": "example",
     "type": "example",
-    "jsonl_fpath": "resources_servers/finance_agent/data/example.jsonl",
+    "jsonl_fpath": "resources_servers/finance_sec_search/data/example.jsonl",
     "num_repeats": 1,
     "gitlab_identifier": null,
     "huggingface_identifier": null,
@@ -9,16 +9,16 @@
     "Number of examples": 5,
     "Number of tools": {
         "Total # non-null values": 5,
-        "Average": 5.0,
-        "Min": 5.0,
-        "Max": 5.0,
+        "Average": 4.0,
+        "Min": 4.0,
+        "Max": 4.0,
         "Standard deviation": 0.0
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 5,
-        "Average": 900.8,
-        "Min": 899.0,
-        "Max": 903.0,
+        "Average": 848.8,
+        "Min": 847.0,
+        "Max": 851.0,
         "Standard deviation": 1.48
     },
     "Number of turns": {

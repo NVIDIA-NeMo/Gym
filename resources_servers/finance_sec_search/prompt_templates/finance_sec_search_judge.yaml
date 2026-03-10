@@ -6,7 +6,7 @@
 # Placeholders: {question}, {expected_answer}, {generated_answer}
 #
 # To override from NVFlow, create an overlay YAML that sets
-# finance_agent_resources_server.resources_servers.finance_agent.judge_prompt_template
+# finance_sec_search_resources_server.resources_servers.finance_sec_search.judge_prompt_template
 # as an inline string in nemo_gym_config_paths. The inline value takes priority.
 
 judge_prompt_template: |-

@@ -28,7 +28,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import ServerClient
-from resources_servers.finance_agent.app import (
+from resources_servers.finance_sec_search.app import (
     FinanceAgentResourcesServer,
     FinanceAgentResourcesServerConfig,
     FinanceAgentSearchRequest,
@@ -73,12 +73,12 @@ def temp_cache_dir():
 @pytest.fixture
 def server_config(temp_cache_dir):
     """Create test server configuration."""
-    prompt_fpath = str(Path(__file__).resolve().parents[1] / "prompt_templates/finance_agent_judge.yaml")
+    prompt_fpath = str(Path(__file__).resolve().parents[1] / "prompt_templates/finance_sec_search_judge.yaml")
     return FinanceAgentResourcesServerConfig(
         host="0.0.0.0",
         port=8080,
         entrypoint="",
-        name="finance_agent_test",
+        name="finance_sec_search_test",
         cache_dir=temp_cache_dir,
         judge_prompt_template_fpath=prompt_fpath,
     )
@@ -133,7 +133,7 @@ class TestTickerLoading:
         assert "MSFT" in server._tickers
         assert server._tickers["AAPL"]["cik"] == "0000320193"
 
-    @patch("resources_servers.finance_agent.app.urllib.request.urlopen")
+    @patch("resources_servers.finance_sec_search.app.urllib.request.urlopen")
     def test_load_fetches_from_sec(self, mock_urlopen, server, temp_cache_dir):
         """Downloads tickers from SEC and caches to disk when no cache exists."""
         mock_resp = MagicMock()
@@ -150,7 +150,7 @@ class TestTickerLoading:
         mock_urlopen.assert_called_once()
 
     @patch("time.sleep")
-    @patch("resources_servers.finance_agent.app.urllib.request.urlopen")
+    @patch("resources_servers.finance_sec_search.app.urllib.request.urlopen")
     def test_load_raises_after_retries(self, mock_urlopen, mock_sleep, server):
         """RuntimeError raised when SEC is unreachable after all retries."""
         mock_urlopen.side_effect = urllib.error.URLError("connection refused")
@@ -162,7 +162,7 @@ class TestTickerLoading:
         assert mock_urlopen.call_count == 5
 
     @patch("time.sleep")
-    @patch("resources_servers.finance_agent.app.urllib.request.urlopen")
+    @patch("resources_servers.finance_sec_search.app.urllib.request.urlopen")
     def test_load_succeeds_on_retry(self, mock_urlopen, mock_sleep, server):
         """Recovers after transient failures."""
         mock_resp = MagicMock()
@@ -183,7 +183,7 @@ class TestTickerLoading:
         assert mock_urlopen.call_count == 3
 
     @patch("time.sleep")
-    @patch("resources_servers.finance_agent.app.urllib.request.urlopen")
+    @patch("resources_servers.finance_sec_search.app.urllib.request.urlopen")
     def test_load_refetches_on_corrupt_cache(self, mock_urlopen, mock_sleep, server, temp_cache_dir):
         """Re-downloads if cached tickers.json contains invalid JSON."""
         tickers_file = Path(temp_cache_dir) / "tickers.json"
@@ -588,7 +588,7 @@ class TestVerify:
 
     @staticmethod
     def _prompt_template_fpath() -> str:
-        return str(Path(__file__).resolve().parents[1] / "prompt_templates/finance_agent_judge.yaml")
+        return str(Path(__file__).resolve().parents[1] / "prompt_templates/finance_sec_search_judge.yaml")
 
     def _create_server_with_judge(self, tmp_path: Path) -> FinanceAgentResourcesServer:
         config = FinanceAgentResourcesServerConfig(
