@@ -16,7 +16,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import OmegaConf
 
 from nemo_gym.benchmarks import BenchmarkConfig, discover_benchmarks, get_benchmark, list_benchmarks, prepare_benchmark
 
@@ -78,20 +78,20 @@ class TestGetBenchmark:
             get_benchmark("nonexistent_benchmark")
 
 
-def _mock_global_config(config: dict) -> DictConfig:
-    """Patch get_global_config_dict to return a fixed config without CLI/file parsing."""
-    return OmegaConf.create(config)
+def _mock_global_config(config: dict = None):
+    """Return an OmegaConf config without CLI/file parsing."""
+    return OmegaConf.create(config or {})
 
 
 class TestListBenchmarks:
     def test_lists_found_benchmarks(self, capsys) -> None:
-        with patch("nemo_gym.benchmarks.get_global_config_dict", return_value=_mock_global_config({})):
+        with patch("nemo_gym.benchmarks.get_global_config_dict", return_value=_mock_global_config()):
             list_benchmarks()
         assert "aime24" in capsys.readouterr().out
 
     def test_no_benchmarks(self, capsys) -> None:
         with (
-            patch("nemo_gym.benchmarks.get_global_config_dict", return_value=_mock_global_config({})),
+            patch("nemo_gym.benchmarks.get_global_config_dict", return_value=_mock_global_config()),
             patch("nemo_gym.benchmarks.discover_benchmarks", return_value={}),
         ):
             list_benchmarks()
