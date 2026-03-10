@@ -5,6 +5,7 @@ calendar:
       domain: agent
       verified: false
       description: Multi-turn calendar scheduling dataset. User states events and constraints in natural language; model schedules events to satisfy all constraints.
+      value: Improve multi-turn instruction following capabilities
 calendar_simple_agent:
   responses_api_agents:
     simple_agent:
