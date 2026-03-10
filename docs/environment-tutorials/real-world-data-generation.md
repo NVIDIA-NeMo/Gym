@@ -35,7 +35,7 @@ The data generation pipeline:
 - Install tutorial dependencies (paths relative to the [NeMo Gym repository root](https://github.com/NVIDIA-NeMo/Gym)):
 
   ```bash
-  cd resources_servers/workplace_assistant/examples/synthetic-data-generation/
+  cd resources_servers/workplace_assistant/notebooks/synthetic-data-generation/
   uv pip install -r requirements.txt
   ```
 
@@ -43,11 +43,11 @@ The data generation pipeline:
 
 ## Running the Notebook
 
-The tutorial is provided as a Jupyter notebook at `resources_servers/workplace_assistant/examples/synthetic-data-generation/multistep-toolcalling-sdg.ipynb`.
+The tutorial is provided as a Jupyter notebook at `resources_servers/workplace_assistant/notebooks/synthetic-data-generation/multistep-toolcalling-sdg.ipynb`.
 
-> **Important:** Run the notebook from the `resources_servers/workplace_assistant/examples/synthetic-data-generation/` directory so that relative imports for `tools/` and `utils/` resolve correctly.
+> **Important:** Run the notebook from the `resources_servers/workplace_assistant/notebooks/synthetic-data-generation/` directory so that relative imports for `tools/` and `utils/` resolve correctly.
 
-:::{button-link} https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/workplace_assistant/examples/synthetic-data-generation/multistep-toolcalling-sdg.ipynb
+:::{button-link} https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/workplace_assistant/notebooks/synthetic-data-generation/multistep-toolcalling-sdg.ipynb
 :color: primary
 :class: sd-rounded-pill
 

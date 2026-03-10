@@ -22,11 +22,11 @@ pip install -r requirements.txt
 Open the notebook in Jupyter or Colab and run the cells sequentially:
 
 ```bash
-cd resources_servers/workplace_assistant/examples/synthetic-data-generation/
+cd resources_servers/workplace_assistant/notebooks/synthetic-data-generation/
 jupyter notebook multistep-toolcalling-sdg.ipynb
 ```
 
-> **Important:** Run the notebook from this directory (`resources_servers/workplace_assistant/examples/synthetic-data-generation/`) so that relative imports for `tools/` and `utils/` resolve correctly.
+> **Important:** Run the notebook from this directory (`resources_servers/workplace_assistant/notebooks/synthetic-data-generation/`) so that relative imports for `tools/` and `utils/` resolve correctly.
 
 ## Related Resources
 
