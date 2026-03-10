@@ -164,7 +164,8 @@ def _build_run_request(row: dict, output_dir: str) -> dict:
         "responses_create_params": {
             "input": "",
             "tools": TOOLS,
-            "max_output_tokens": 10000,
+            "max_output_tokens": 64000,
+            "temperature": 0.6,
         },
         "task_prompt": row["prompt"],
         "system_prompt": SYSTEM_PROMPT,

@@ -371,6 +371,30 @@ class VLLMModel(SimpleResponsesAPIModel):
                 )
                 raise e
 
+        # TODO: Virginia - Check if we should have this kind of fallback behavior before merging into main.
+        if "choices" not in chat_completion_dict:
+            logger.error(
+                "Model response missing 'choices' — full body: %s",
+                chat_completion_dict,
+            )
+            return NeMoGymChatCompletion(
+                id="chtcmpl-123",
+                object="chat.completion",
+                created=int(time()),
+                model=self.config.model,
+                choices=[
+                    NeMoGymChoice(
+                        index=0,
+                        finish_reason="stop",
+                        message=NeMoGymChatCompletionMessage(
+                            role="assistant",
+                            content=f"ERROR: Model returned a response without 'choices': {chat_completion_dict}",
+                            tool_calls=None,
+                        ),
+                    )
+                ],
+            )
+
         choice_dict = chat_completion_dict["choices"][0]
         if self.config.uses_reasoning_parser:
             # See the TODO wrt reasoning_content above

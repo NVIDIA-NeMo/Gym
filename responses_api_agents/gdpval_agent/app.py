@@ -287,7 +287,20 @@ class GDPValAgent(SimpleResponsesAPIAgent):
             )
             return tool_response, cookies
 
-        args = json.loads(call.arguments)
+        try:
+            args = json.loads(call.arguments)
+        except json.JSONDecodeError as e:
+            tool_response = NeMoGymFunctionCallOutput(
+                type="function_call_output",
+                call_id=call.call_id,
+                output=json.dumps(
+                    {
+                        "error": f"Invalid JSON in tool arguments: {e}. "
+                        "Please ensure your tool call arguments are valid JSON."
+                    }
+                ),
+            )
+            return tool_response, cookies
         args["session_id"] = session_id
 
         if call.name == FINISH_TOOL_NAME and output_dir is not None:

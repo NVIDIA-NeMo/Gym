@@ -4,15 +4,15 @@ bash_sandbox_resources_server:
       entrypoint: app.py
       domain: agent
       judge:
-        enabled: true
+        enabled: false
         judge_model_name: gemini-3-pro-preview
         num_trials: 4
         max_concurrent_judgements: 10
-        committee_models_root: /workspace/tmp/outputs/
-        evaluated_outputs_root: /workspace/tmp/outputs/policy_model/
-        committee_models:
-          - name: committee-nano-v3
-            elo: 1000
+        committee_models_root: /lustre/fsw/portfolios/llmservice/users/vadams/committee-model-outputs
+        evaluated_outputs_root: /lustre/fsw/portfolios/llmservice/users/vadams/committee-model-outputs
+        # committee_models:
+        #   - name: committee-nano-v3
+        #     elo: 1000
         # OpenAI-compatible path — mutually exclusive with the VertexAI path (gcp_project_id).
         # Set both fields to use the NVIDIA OpenAI endpoint; omit both to use VertexAI.
         nvidia_openai_api_key_env: "NVIDIA_OPENAI_API_KEY"
