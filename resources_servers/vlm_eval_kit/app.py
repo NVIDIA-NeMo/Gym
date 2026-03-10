@@ -42,7 +42,8 @@ class VlmEvalKitResourcesServer(SimpleResourcesServer):
 && if [ ! -d VLMEvalKit ]; then git clone https://github.com/open-compass/VLMEvalKit/ fi \
 && cd VLMEvalKit \
 && git checkout 00804217f868058f871f5ff252a7b9623c3475d9 \
-&& uv pip install '-e .' --active
+&& uv pip install '-e .' --active \
+&& sed -i '' 's/import clip/# import clip/' vlmeval/dataset/utils/SArena/FID.py
 """
         proc = Popen(setup_command, shell=True)
         proc.communicate()
