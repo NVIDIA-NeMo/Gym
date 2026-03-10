@@ -32,6 +32,20 @@ Build a complete environment end-to-end, from scaffolding to RL-ready rollouts.
 
 ---
 
+## Prerequisites
+
+Complete **{doc}`/get-started/detailed-setup`** before starting --- clone the repository, install dependencies, configure your API key, and verify servers start correctly.
+
+:::{tip}
+If you followed the {doc}`Quickstart </get-started/index>`, you're ready to proceed.
+:::
+
+:::{important}
+Run all commands from the **repository root** directory (where `pyproject.toml` is located).
+:::
+
+---
+
 ## How It Works
 
 NeMo Gym uses a decoupled three-component architecture: the Agent Server orchestrates the loop, the Model Server runs inference, and the Resources Server provides tools and verification. All three are async FastAPI servers communicating over HTTP, which allows many rollouts to run concurrently across episodes. See {ref}`core-components` for the full architecture.
@@ -64,20 +78,6 @@ NeMo Gym uses a decoupled three-component architecture: the Agent Server orchest
 ```
 
 In most cases, the **Resources Server** is where your changes go: define your tool endpoints and a `verify()` method that returns a reward. NeMo Gym ships several pre-built agent servers (`simple_agent`, `swe_agents`, etc.) and model servers (`openai_model`, `vllm_model`) that you can use as-is, or you can bring your own.
-
----
-
-## Prerequisites
-
-Complete **{doc}`/get-started/detailed-setup`** before starting --- clone the repository, install dependencies, configure your API key, and verify servers start correctly.
-
-:::{tip}
-If you followed the {doc}`Quickstart </get-started/index>`, you're ready to proceed.
-:::
-
-:::{important}
-Run all commands from the **repository root** directory (where `pyproject.toml` is located).
-:::
 
 ---
 
@@ -148,7 +148,6 @@ Each line contains a `responses_create_params` object with the conversation mess
 | `responses_create_params.input` | Conversation messages (system, user, assistant) |
 | `responses_create_params.tools` | Available tools/functions for the agent |
 | `responses_create_params.parallel_tool_calls` | Whether the model may call multiple tools simultaneously. Set to `false` to force sequential tool calls --- useful when tool outputs depend on each other. |
-| `expected_*` (custom fields) | Ground truth fields passed through to `verify()` for reward computation |
 
 ### Create Data
 
@@ -170,7 +169,7 @@ This section covers the key aspects of building the environment itself: creating
 
 ### 3.1 Agent Server
 
-The built-in `simple_agent` handles multi-step tool calling out of the box --- no custom agent code is needed. Its core logic (simplified from [`responses_api_agents/simple_agent/app.py`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/simple_agent)):
+The built-in `simple_agent` handles multi-step tool calling out of the box --- no custom agent code is needed. Here is simplified pseudocode showing the core flow ([actual implementation](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/simple_agent)):
 
 ```python
 # run() — episode lifecycle
@@ -296,12 +295,12 @@ async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
             used_tool = True
             break
 
-    # Return higher reward if the tool was used correctly
+    # Reward 1.0 if the model called the tool, 0.0 otherwise
     reward = 1.0 if used_tool else 0.0
     return BaseVerifyResponse(**body.model_dump(), reward=reward)
 ```
 
-See {ref}`task-verification` for the full verification patterns and best practices, or jump to [Advanced: Verification Patterns](#advanced-verification-patterns) at the end of this tutorial for quick examples.
+This example checks tool *usage*, not argument correctness. See {ref}`task-verification` for the full verification patterns and best practices, or jump to [Advanced: Verification Patterns](#advanced-verification-patterns) at the end of this tutorial for quick examples.
 
 #### Configure - Wiring the pieces together
 
@@ -480,7 +479,7 @@ policy_model_name: gpt-4o-mini
 ```
 
 :::{tip}
-Set your API key as an environment variable before running:
+Set your API key as an environment variable before running the next command:
 
 ```bash
 export OPENAI_API_KEY="sk-your-key-here"  # pragma: allowlist secret
@@ -493,18 +492,16 @@ Never commit API keys directly in YAML files.
 If you don't want to use the OpenAI API, you can try using a local vLLM server (requires GPU access) instead! See {ref}`model-server-vllm`.
 :::
 
-### Test with Client
+### Test with Client (Optional)
 
-Inside `responses_api_agents/simple_agent/client.py`, change the server name from `example_single_tool_call_simple_agent` to `my_weather_tool_simple_agent`. Then, in a new terminal:
+You can do a quick spot-check by pointing the built-in client at your agent. Inside `responses_api_agents/simple_agent/client.py`, change the server name to `my_weather_tool_simple_agent`, then run:
 
 ```bash
 python responses_api_agents/simple_agent/client.py
 ```
 
-The model should use your `get_weather` tool to answer questions about weather.
-
 :::{note}
-This client calls `/v1/responses`, which tests the model's tool-calling ability but does not exercise the full episode lifecycle (`seed_session` → `responses` → `verify`). End-to-end validation happens during [rollout collection](#collect-rollouts) below.
+This client calls `/v1/responses`, which tests tool-calling but does not exercise the full episode lifecycle (`seed_session` → `responses` → `verify`). End-to-end validation happens during [rollout collection](#collect-rollouts) below.
 :::
 
 ### Collect Rollouts
@@ -622,12 +619,21 @@ Next: Multi-Step Environment >
 :::{dropdown} Multi-step verification with output parsing
 :icon: code
 
-For tasks requiring multiple tool calls, parse the final output to compute accuracy:
+For tasks requiring multiple tool calls, define a custom verify request model to carry ground-truth data, then parse the final output to compute accuracy:
 
 ```python
-async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+from nemo_gym.base_resources_server import BaseVerifyRequest, BaseVerifyResponse
+
+
+class MultiStepVerifyRequest(BaseVerifyRequest):
+    """Custom request model that carries ground-truth data for verification."""
+
+    expected_values: list[int]
+
+
+async def verify(self, body: MultiStepVerifyRequest) -> BaseVerifyResponse:
     """Extract and validate multi-step results."""
-    expected = body.expected_values  # From request
+    expected = body.expected_values  # Available because we declared it above
 
     # Parse the final tool call output
     actual = []
@@ -646,18 +652,19 @@ async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
         reward=float(accuracy),
     )
 ```
-
 See `resources_servers/example_multi_step/app.py` for a complete example.
+
+::::{important}
+The custom request model (`MultiStepVerifyRequest`) is required for extra fields like `expected_values` to survive Pydantic parsing. Using `BaseVerifyRequest` directly would silently drop any fields not defined on the base class.
+::::
+
+
 :::
 
 :::{dropdown} LLM-as-judge verification
 :icon: sparkle-fill
 
-For tasks with multiple valid answers, use an LLM to judge correctness:
-
-```python
-# See resources_servers/math_with_judge/app.py for the full pattern
-```
+For tasks with multiple valid answers, use an LLM to judge correctness.
 
 See `resources_servers/math_with_judge/app.py` for implementation details.
 :::
@@ -665,11 +672,7 @@ See `resources_servers/math_with_judge/app.py` for implementation details.
 :::{dropdown} Unit test verification (code generation)
 :icon: beaker
 
-For code generation tasks, run unit tests against model output:
-
-```python
-# See resources_servers/code_gen/app.py for the full pattern
-```
+For code generation tasks, run unit tests against model output.
 
 See `resources_servers/code_gen/app.py` for implementation details.
 :::
