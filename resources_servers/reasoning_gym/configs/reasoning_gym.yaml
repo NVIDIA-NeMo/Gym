@@ -4,6 +4,8 @@ reasoning_gym:
       entrypoint: app.py
       domain: knowledge
       verified: true
+      description: Over 100 tasks including algebra, arithmetic, computation, cognition, geometry, graph theory, logic, and many common games.
+      value: Improve robustness, generalization, broad knowledge and reasoning
 reasoning_gym_simple_agent:
   responses_api_agents:
     simple_agent:
