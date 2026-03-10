@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
 import re
 from copy import deepcopy
 from time import time
@@ -20,6 +21,7 @@ from uuid import uuid4
 
 from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request
+from openai.types.responses.response_usage import ResponseUsage
 from pydantic import BaseModel, Field
 
 from nemo_gym.base_responses_api_model import (
@@ -56,6 +58,9 @@ from nemo_gym.openai_utils import (
     TokenIDLogProbMixin,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_worker
+
+
+logger = logging.getLogger(__name__)
 
 
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
@@ -113,6 +118,25 @@ class VLLMModel(SimpleResponsesAPIModel):
         response_output = self._converter.postprocess_chat_response(choice)
         response_output_dicts = [item.model_dump() for item in response_output]
 
+        _cu = chat_completion_response.usage
+        usage = (
+            ResponseUsage(
+                input_tokens=_cu.prompt_tokens,
+                output_tokens=_cu.completion_tokens,
+                total_tokens=_cu.total_tokens,
+                input_tokens_details={
+                    "cached_tokens": (_cu.prompt_tokens_details.cached_tokens or 0) if _cu.prompt_tokens_details else 0
+                },
+                output_tokens_details={
+                    "reasoning_tokens": (_cu.completion_tokens_details.reasoning_tokens or 0)
+                    if _cu.completion_tokens_details
+                    else 0
+                },
+            )
+            if _cu is not None
+            else None
+        )
+
         # Chat Completion -> Response
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
@@ -139,6 +163,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             instructions=body.instructions,
             user=body.user,
             incomplete_details={"reason": "max_output_tokens"} if choice.finish_reason == "length" else None,
+            usage=usage,
         )
 
     async def chat_completions(
@@ -249,6 +274,11 @@ class VLLMModel(SimpleResponsesAPIModel):
                     ],
                 )
             else:
+                logger.error(
+                    "Unexpected %d from model — body: %s",
+                    e.status,
+                    result_content_str,
+                )
                 raise e
 
         choice_dict = chat_completion_dict["choices"][0]

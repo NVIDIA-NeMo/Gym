@@ -29,6 +29,7 @@ Key differences from stirrup:
 import asyncio
 import base64
 import logging
+import math
 import os
 import re
 import shutil
@@ -162,6 +163,21 @@ FILE_TYPE_MAP = {
     "sol": {"type": "TXT", "converter": load_raw_text, "mime_type": None},
     "ts": {"type": "TXT", "converter": load_raw_text, "mime_type": None},
 }
+
+
+# --- ELO formula ---
+
+
+def calculate_elo(win_rate: float, ref_elo: float) -> float:
+    """ELO rating for evaluated model relative to a reference committee model.
+
+    Adapted from stirrup's calculate_ELO (run_judge.py:154-158). Drops normalized_elo
+    (raw ELO is more interpretable). win_rate clamped to avoid log(0).
+    Uses Bradley-Terry win_rate (wins + 0.5*ties)/total — differs from stirrup which
+    excludes ties from numerator.
+    """
+    win_rate = max(1e-6, min(1 - 1e-6, win_rate))
+    return ref_elo - 400.0 * (math.log10(1 - win_rate) - math.log10(win_rate))
 
 
 # --- Result dataclass ---
@@ -398,10 +414,12 @@ class GDPValJudge:
                     oai_parts.append({"type": "text", "text": p.text})
                 elif p.inline_data is not None:
                     b64 = base64.b64encode(p.inline_data.data).decode()
-                    oai_parts.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{p.inline_data.mime_type};base64,{b64}"},
-                    })
+                    oai_parts.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{p.inline_data.mime_type};base64,{b64}"},
+                        }
+                    )
             messages.append({"role": c.role, "content": oai_parts})
         response = self._openai_client.chat.completions.create(
             model=self.nvidia_openai_model,
@@ -412,9 +430,7 @@ class GDPValJudge:
         )
         content = response.choices[0].message.content
         if content is None:
-            raise RuntimeError(
-                f"OpenAI returned None content (finish_reason={response.choices[0].finish_reason})"
-            )
+            raise RuntimeError(f"OpenAI returned None content (finish_reason={response.choices[0].finish_reason})")
         return content
 
     def _send(self, contents: list[types.Content]) -> str:

@@ -15,21 +15,26 @@
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import shutil
 import subprocess
 import tempfile
 import uuid
+from dataclasses import dataclass
 from html import escape
 from pathlib import Path
 from typing import Dict, List
 
 import anyio
-from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from tavily import TavilyClient
 
+# tavily is imported lazily inside _get_tavily_client() rather than at module level so
+# that servers which import from this module (e.g. gdpval_agent) do not require
+# tavily-python in their own virtual environments.
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -110,9 +115,36 @@ class SavedFile(BaseModel):
     size: int
 
 
+def _calculate_elo(win_rate: float, ref_elo: float) -> float:
+    """ELO for evaluated model vs reference committee model.
+
+    Inlined from judge.calculate_elo to avoid importing judge.py at startup
+    (judge.py triggers google-genai/openai imports even when judge is disabled).
+    """
+    win_rate = max(1e-6, min(1 - 1e-6, win_rate))
+    return ref_elo - 400.0 * (math.log10(1 - win_rate) - math.log10(win_rate))
+
+
+@dataclass
+class _CommitteeModelTally:
+    """Accumulated win/tie/loss counts across all verify() calls for one committee model."""
+
+    win_count_evaluated: int = 0
+    win_count_committee: int = 0
+    tie_count: int = 0
+    num_successful_tasks: int = 0
+
+    @property
+    def win_rate(self) -> float:
+        total = self.win_count_evaluated + self.win_count_committee + self.tie_count
+        if total == 0:
+            return 0.5
+        return (self.win_count_evaluated + 0.5 * self.tie_count) / total
+
+
 class CommitteeModelConfig(BaseModel):
     name: str
-    output_dir: str
+    elo: float = 1000.0
 
 
 class JudgeConfig(BaseModel):
@@ -124,18 +156,32 @@ class JudgeConfig(BaseModel):
     max_output_tokens: int = 65535
     num_trials: int = 4
     max_concurrent_judgements: int = 10
+    committee_models_root: str = ""
+    evaluated_outputs_root: str = ""
     committee_models: List[CommitteeModelConfig] = Field(default_factory=list)
-    nvidia_openai_api_key: str | None = None
+    nvidia_openai_api_key_env: str | None = None
     nvidia_openai_model: str | None = None
 
     @model_validator(mode="after")
     def _check_openai_fields(self) -> "JudgeConfig":
-        has_key = bool(self.nvidia_openai_api_key)
+        has_key = bool(self.nvidia_openai_api_key_env)
         has_model = bool(self.nvidia_openai_model)
         if has_key != has_model:
-            raise ValueError(
-                "nvidia_openai_api_key and nvidia_openai_model must both be set or both be absent"
-            )
+            raise ValueError("nvidia_openai_api_key and nvidia_openai_model must both be set or both be absent")
+        return self
+
+    @model_validator(mode="after")
+    def _check_committee_models(self) -> "JudgeConfig":
+        if self.committee_models and not self.committee_models_root:
+            raise ValueError("committee_models_root must be set when committee_models is non-empty")
+        if self.committee_models_root:
+            root = Path(self.committee_models_root)
+            if not root.is_dir():
+                raise ValueError(f"committee_models_root {root!r} does not exist or is not a directory")
+            for cm in self.committee_models:
+                model_dir = root / cm.name
+                if not model_dir.is_dir():
+                    raise ValueError(f"Committee model directory {model_dir!r} does not exist")
         return self
 
 
@@ -147,6 +193,7 @@ class BashSandboxResourcesServerConfig(BaseResourcesServerConfig):
 
 class SeedSessionRequest(BaseSeedSessionRequest):
     session_id: str | None = None
+    repeat_index: int | None = None
 
 
 class SeedSessionResponse(BaseSeedSessionResponse):
@@ -185,6 +232,13 @@ class SaveOutputFilesRequest(BaseModel):
     session_id: str
     output_dir: str
 
+    @field_validator("paths", mode="before")
+    @classmethod
+    def _coerce_paths(cls, v):
+        if isinstance(v, str):
+            return json.loads(v)
+        return v
+
 
 class SaveOutputFilesResponse(BaseModel):
     saved: List[SavedFile]
@@ -196,6 +250,13 @@ class FinishRequest(BaseModel):
     session_id: str
     paths: List[str] | None = None
     output_dir: str | None = None
+
+    @field_validator("paths", mode="before")
+    @classmethod
+    def _coerce_paths(cls, v):
+        if isinstance(v, str):
+            return json.loads(v)
+        return v
 
 
 class FinishResponse(BaseModel):
@@ -230,6 +291,7 @@ class VerifyRequest(BaseVerifyRequest):
     paths: List[str]
     task_id: str = ""
     task_prompt: str = ""
+    output_dir: str | None = None
 
 
 class CommitteeModelVerdict(BaseModel):
@@ -239,12 +301,28 @@ class CommitteeModelVerdict(BaseModel):
     tie_count: int
     num_trials: int
     reward: float
+    elo: float | None = None
     success: bool
     error_message: str | None = None
 
 
 class GDPValVerifyResponse(BaseVerifyResponse):
     committee_verdicts: List[CommitteeModelVerdict] = Field(default_factory=list)
+    mean_elo: float | None = None
+
+
+class CommitteeEloEntry(BaseModel):
+    committee_model_name: str
+    elo: float | None  # None if no successful tasks yet
+    ref_elo: float
+    win_count_evaluated: int
+    win_count_committee: int
+    tie_count: int
+    num_successful_tasks: int
+
+
+class CommitteeEloResponse(BaseModel):
+    entries: List[CommitteeEloEntry]
 
 
 class BashSandboxResourcesServer(SimpleResourcesServer):
@@ -253,10 +331,13 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
     config: BashSandboxResourcesServerConfig
     session_manager: SessionManager = None  # type: ignore[assignment]
     _judge: object = None  # Lazily initialized GDPValJudge
+    _committee_tallies: dict = None  # type: ignore[assignment]  # per-worker; not shared across Ray workers
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.session_manager = SessionManager(Path(self.config.temp_dir_base))
+        self._committee_tallies = {}
+        self._load_tallies_from_disk()
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -269,6 +350,7 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
         app.post("/finish")(self.finish)  # Finish tool for task completion
         app.post("/web_search")(self.web_search)
         app.post("/web_fetch")(self.web_fetch)
+        app.get("/committee_elo")(self.committee_elo)
 
         return app
 
@@ -327,53 +409,58 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
 
         Absolute paths that resolve to the session directory are allowed.
         All other absolute paths, home-dir shortcuts, and env-var paths are rejected.
+        When GYM_GDPVAL_OPT_OUT_FROM_SANDBOX=1, the full check is skipped but known
+        risky commands ('rm', 'ls', 'cat', etc.) with path traversal or absolute paths
+        outside the session directory are always blocked regardless of the flag; full
+        session-dir checks skipped only when opted out; TODO left to replace with real
+        OS-level sandboxing.
 
         Returns:
             RunCommandResponse with error if outside paths detected, None otherwise.
         """
+        # Allow opting out if neeed
+        if os.environ.get("GYM_GDPVAL_OPT_OUT_FROM_SANDBOX") == "1":
+            return None
+
         session_dir = str(session.temp_dir)
+        relative_only_msg = "Use relative paths only (e.g. '.', './reference_files/file.xlsx'), don't use '..' or environment variables in paths."
         session_msg = (
             f"You can only access and execute commands inside your session directory: {session_dir}. "
-            "Use relative paths only (e.g. '.', './reference_files/file.xlsx')."
+            + relative_only_msg
         )
 
-        home_patterns = [
-            r"~/",
-            r"\$HOME\b",
-            r"\$\{HOME\}",
-        ]
-        for pattern in home_patterns:
-            if re.search(pattern, cmd):
-                return RunCommandResponse(
-                    exit_code=1,
-                    stdout="",
-                    stderr=(
-                        "Command may access paths outside the session directory. This is not allowed. " + session_msg
-                    ),
-                    error_kind="absolute_path_detected",
-                    advice=session_msg,
-                )
-
-        abs_path_re = re.compile(r"(?:^|[\s;&|\"'=])(/[^\s;&|\"']*)")
-        for match in abs_path_re.finditer(cmd):
-            path = match.group(1)
-            if path.startswith(session_dir):
-                continue
-            if "://" in cmd[max(0, match.start(1) - 8) : match.start(1)]:
-                continue
+        def _blocked(reason: str) -> RunCommandResponse:
             return RunCommandResponse(
                 exit_code=1,
                 stdout="",
-                stderr=(
-                    f"Command references path '{path}' outside the session directory. This is not allowed. "
-                    + session_msg
-                ),
+                stderr=reason + " " + session_msg,
                 error_kind="absolute_path_detected",
                 advice=session_msg,
             )
+
+        # Always blocked: risky commands with unsafe path arguments.
+        # Gating on command name avoids false-positives on math ('a / b', 'x**2').
+        # Path groups: 1 = double-quoted, 2 = single-quoted, 3 = bare.
+        _RISKY_CMDS = "rm|ls|cat|sed|cp|mv|chmod|chown|find|head|tail|grep|touch|mkdir|stat|du|df"
+        _risky_cmd_path_re = re.compile(
+            r"(?:^|[\s;&|])(?:" + _RISKY_CMDS + r")\b(?:\s+--?\w[-\w]*[=\w]*)*\s+"
+            r"""(?:"([^"]*?)"|'([^']*?)'|([^\s\[\]{}&=;'"]+))"""
+        )
+        for m in _risky_cmd_path_re.finditer(cmd):
+            path = m.group(1) or m.group(2) or m.group(3) or ""
+            if ".." in path or "$" in path or "~" in path:
+                return _blocked(f"Command contains path traversal or env-var expansion in '{path}'.")
+            if path.startswith("/") and not path.startswith(session_dir):
+                return _blocked(f"Command references absolute path '{path}' outside the session directory.")
+
         return None
 
     async def seed_session(self, body: SeedSessionRequest) -> SeedSessionResponse:
+        if body.repeat_index is not None and not self.config.judge.enabled:
+            raise HTTPException(
+                status_code=400,
+                detail="num_repeats > 1 is not allowed when judge is disabled (calibration runs must be single-repeat)",
+            )
         if body.session_id is None:
             session_id = str(uuid.uuid4())
         else:
@@ -381,6 +468,9 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
 
         try:
             self.session_manager.start_session(session_id)
+            logger.info(
+                f"seed_session: session_id: {session_id}, session_manager: {self.session_manager.id_to_session}"
+            )
         except Exception as e:
             return SeedSessionResponse(session_id=session_id, success=False, error_message=str(e))
 
@@ -423,8 +513,9 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
             )
 
         # Check for absolute paths — restrict all access to session directory only
-        absolute_path_error = self._check_absolute_paths(body.command, session)
-        if absolute_path_error:
+        # TODO: replace string-based path check with real OS-level sandboxing
+        # (e.g. Landlock LSM or bubblewrap) so this opt-out is no longer needed.
+        if absolute_path_error := self._check_absolute_paths(body.command, session):
             return absolute_path_error
 
         process = None
@@ -646,9 +737,7 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
                     if out_path.suffix.lower() in OFFICE_EXTS:
                         out_pdf = out_path.with_suffix(".pdf")
                         if not out_pdf.exists():
-                            _, ok, err = await loop.run_in_executor(
-                                None, convert_one, out_path, out_pdf
-                            )
+                            _, ok, err = await loop.run_in_executor(None, convert_one, out_path, out_pdf)
                             if not ok:
                                 logger.warning("PDF conversion failed for %s: %s", out_path, err)
             except Exception as e:
@@ -775,25 +864,40 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
                 max_output_tokens=judge_config.max_output_tokens,
                 num_trials=judge_config.num_trials,
                 max_concurrent_judgements=judge_config.max_concurrent_judgements,
-                nvidia_openai_api_key=judge_config.nvidia_openai_api_key,
+                nvidia_openai_api_key=os.environ.get(judge_config.nvidia_openai_api_key_env)
+                if judge_config.nvidia_openai_api_key_env
+                else None,
                 nvidia_openai_model=judge_config.nvidia_openai_model,
             )
         return self._judge
 
-    async def verify(self, body: VerifyRequest) -> BaseVerifyResponse:
+    async def verify(self, body: VerifyRequest) -> GDPValVerifyResponse:
         judge_config = self.config.judge
+
+        logger.warning(
+            "verify: task_id=%r enabled=%r committee_models=%r paths=%r",
+            body.task_id,
+            judge_config.enabled,
+            judge_config.committee_models,
+            body.paths,
+        )
 
         # Backward compatible: if judge not enabled or no committee models, return reward=1.0
         if not judge_config.enabled or not judge_config.committee_models:
+            logger.warning("verify: judge disabled or no committee models, returning reward=1.0")
             return GDPValVerifyResponse(**body.model_dump(), reward=1.0)
 
         judge = self._get_or_create_judge()
 
-        # Determine evaluated output dir from the first saved file path
+        # Determine evaluated output dir: prefer first saved file's parent, fall back to output_dir.
+        # When the model saved no files, output_dir is still set so the judge can compare
+        # against the committee model (empty output → committee wins → reward=0).
         if body.paths:
             evaluated_output_dir = str(Path(body.paths[0]).parent)
+        elif body.output_dir:
+            evaluated_output_dir = body.output_dir
         else:
-            logger.warning("No output paths in verify request, returning reward=1.0")
+            logger.warning("No output paths or output_dir in verify request, returning reward=1.0")
             return GDPValVerifyResponse(**body.model_dump(), reward=1.0)
 
         # Find reference files directory: check if reference_files/ exists in evaluated output
@@ -806,11 +910,22 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
         judge_tasks = []
         committee_configs = []
         for cm in judge_config.committee_models:
-            cm_task_dir = Path(cm.output_dir) / f"task_{body.task_id}"
+            cm_task_dir = Path(judge_config.committee_models_root) / cm.name / f"task_{body.task_id}"
             finish_params = cm_task_dir / "finish_params.json"
 
-            # H7: Skip committee models that didn't attempt this task
-            if not cm_task_dir.exists() or not finish_params.exists():
+            logger.info(
+                "verify: committee=%r cm_task_dir=%r exists=%r finish_params_exists=%r",
+                cm.name,
+                str(cm_task_dir),
+                cm_task_dir.exists(),
+                finish_params.exists(),
+            )
+
+            # H7: Skip committee models that didn't attempt this task.
+            # Accept either finish_params.json (explicit finish call) or reward.json
+            # (task ran to completion even if LLM exhausted max_steps without calling finish).
+            reward_json = cm_task_dir / "reward.json"
+            if not cm_task_dir.exists() or (not finish_params.exists() and not reward_json.exists()):
                 logger.warning(
                     "Committee model %s has no output for task %s, skipping",
                     cm.name,
@@ -846,6 +961,7 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
         # Build verdicts and compute mean reward
         committee_verdicts = []
         successful_rewards = []
+        successful_elos = []
 
         for i, result in enumerate(results):
             if isinstance(result, Exception):
@@ -858,12 +974,16 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
                         tie_count=0,
                         num_trials=0,
                         reward=0.0,
+                        elo=None,
                         success=False,
                         error_message=str(result),
                     )
                 )
                 continue
 
+            # Gate ELO on result.success: graceful failures have win_rate=0.5 (default guard),
+            # which would produce a misleading ref_elo value
+            elo = _calculate_elo(result.win_rate, committee_configs[i].elo) if result.success else None
             verdict = CommitteeModelVerdict(
                 committee_model_name=result.committee_model_name,
                 win_count_evaluated=result.win_count_evaluated,
@@ -871,6 +991,7 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
                 tie_count=result.tie_count,
                 num_trials=result.num_trials,
                 reward=result.reward,
+                elo=elo,
                 success=result.success,
                 error_message=result.error_message,
             )
@@ -879,6 +1000,13 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
             # H6: Only include successful verdicts in the mean
             if result.success:
                 successful_rewards.append(result.reward)
+                successful_elos.append(elo)
+                # Update aggregate tally for this committee model
+                tally = self._committee_tallies.setdefault(result.committee_model_name, _CommitteeModelTally())
+                tally.win_count_evaluated += result.win_count_evaluated
+                tally.win_count_committee += result.win_count_committee
+                tally.tie_count += result.tie_count
+                tally.num_successful_tasks += 1
 
         # H6: If ALL verdicts fail, fall back to reward=1.0
         if not successful_rewards:
@@ -887,11 +1015,64 @@ class BashSandboxResourcesServer(SimpleResourcesServer):
         else:
             mean_reward = sum(successful_rewards) / len(successful_rewards)
 
+        mean_elo = sum(successful_elos) / len(successful_elos) if successful_elos else None
+
         return GDPValVerifyResponse(
             **body.model_dump(),
             reward=mean_reward,
             committee_verdicts=committee_verdicts,
+            mean_elo=mean_elo,
         )
+
+    def _load_tallies_from_disk(self) -> None:
+        """Reconstruct tallies from reward.json files on disk for autoresume support.
+
+        reward.json already contains committee_verdicts (written by gdpval_agent after verify
+        succeeds). Scanning these files on startup avoids double-counting: if the server crashed
+        mid-verify, no reward.json exists → task will be re-verified → tally updated once.
+        """
+        judge_config = self.config.judge
+        if not judge_config.enabled or not judge_config.evaluated_outputs_root:
+            return
+        root = Path(judge_config.evaluated_outputs_root)
+        for reward_file in root.glob("task_*/reward.json"):
+            try:
+                data = json.loads(reward_file.read_text())
+                for verdict_dict in data.get("committee_verdicts", []):
+                    verdict = CommitteeModelVerdict.model_validate(verdict_dict)
+                    if not verdict.success:
+                        continue
+                    tally = self._committee_tallies.setdefault(verdict.committee_model_name, _CommitteeModelTally())
+                    tally.win_count_evaluated += verdict.win_count_evaluated
+                    tally.win_count_committee += verdict.win_count_committee
+                    tally.tie_count += verdict.tie_count
+                    tally.num_successful_tasks += 1
+            except Exception:
+                logger.warning("Failed to load tallies from %s, skipping", reward_file)
+
+    async def committee_elo(self) -> CommitteeEloResponse:
+        """Return aggregate ELO across all verify() calls since server start.
+
+        NOTE: tallies are per-worker — in multi-worker Ray deployments this endpoint
+        only reflects tasks processed by the responding worker, not a global aggregate.
+        """
+        cm_config_by_name = {cm.name: cm for cm in self.config.judge.committee_models}
+        entries = []
+        for name, tally in self._committee_tallies.items():
+            ref_elo = cm_config_by_name[name].elo if name in cm_config_by_name else 1000.0
+            elo = _calculate_elo(tally.win_rate, ref_elo) if tally.num_successful_tasks > 0 else None
+            entries.append(
+                CommitteeEloEntry(
+                    committee_model_name=name,
+                    elo=elo,
+                    ref_elo=ref_elo,
+                    win_count_evaluated=tally.win_count_evaluated,
+                    win_count_committee=tally.win_count_committee,
+                    tie_count=tally.tie_count,
+                    num_successful_tasks=tally.num_successful_tasks,
+                )
+            )
+        return CommitteeEloResponse(entries=entries)
 
 
 if __name__ == "__main__":
