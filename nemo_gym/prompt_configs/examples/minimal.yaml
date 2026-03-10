@@ -1,0 +1,3 @@
+# Minimal prompt config — user message only.
+# The {question} placeholder is filled from each row's "question" field.
+user: "{question}"

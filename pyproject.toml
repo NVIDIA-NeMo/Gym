@@ -330,6 +330,10 @@ ng_collect_rollouts = "nemo_gym.rollout_collection:collect_rollouts"
 nemo_gym_e2e_collect_rollouts = "nemo_gym.cli:e2e_rollout_collection"
 ng_e2e_collect_rollouts = "nemo_gym.cli:e2e_rollout_collection"
 
+# Prompt materialization
+nemo_gym_materialize_prompts = "nemo_gym.prompt:materialize_prompts_cli"
+ng_materialize_prompts = "nemo_gym.prompt:materialize_prompts_cli"
+
 # Reward profiling
 nemo_gym_reward_profile = "nemo_gym.reward_profile:reward_profile"
 ng_reward_profile = "nemo_gym.reward_profile:reward_profile"
@@ -380,9 +384,12 @@ ng_version = "nemo_gym.cli:version"
 nemo_gym_reinstall = "nemo_gym.cli:reinstall"
 ng_reinstall = "nemo_gym.cli:reinstall"
 
+[tool.setuptools.package-data]
+nemo_gym = ["prompt_configs/**/*.yaml"]
+
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["benchmarks", "resources_servers", "responses_api_agents", "responses_api_models", "nemo_gym"]
+include = ["benchmarks", "resources_servers", "responses_api_agents", "responses_api_models", "nemo_gym", "nemo_gym.*"]
 
 ################################################
 # Testing
