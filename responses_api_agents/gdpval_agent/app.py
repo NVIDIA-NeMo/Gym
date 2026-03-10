@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import logging
 import os
 import urllib.request
 import uuid
@@ -21,10 +22,12 @@ from pathlib import Path
 from typing import List
 from urllib.parse import quote
 
-from fastapi import Request, Response
+import anyio
+from fastapi import HTTPException, Request, Response
 from openai.types.responses.response_usage import ResponseUsage
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from nemo_gym.global_config import REASON_TO_SKIP_KEY_NAME
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
@@ -53,8 +56,32 @@ from resources_servers.bash_sandbox.app import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+TASK_TIMEOUT = 60 * 15  # 15 minutes — cap on the /v1/responses agent loop
+
+MAX_TOOL_OUTPUT_CHARS = 20_000
+
+
+def _estimate_input_tokens(messages: list) -> int:
+    """Rough token estimate: 4 chars per token, based on JSON-serialised message text."""
+    return sum(len(m.model_dump_json()) for m in messages) // 4
+
+
 FINISH_TOOL_NAME = "finish"
 PROMPT_TEMPLATE_PATH = Path(__file__).parent / "prompts" / "gdpval_user_prompt.txt"
+
+# Files written by infrastructure/sentinels; excluded when enumerating task outputs on resume
+_RESUME_SKIP_NAMES = frozenset({"finish_params.json", "reward.json", "history.json", "metadata.json", "log.txt"})
+
+
+def _task_dir_for(body: "GDPValAgentRunRequest") -> Path:
+    name = f"task_{body.task_id}"
+    if body.repeat_index is not None:
+        name += f"_r{body.repeat_index}"
+    return Path(body.output_dir) / name
+
+
 MESSAGE_SUMMARIZER_PATH = Path(__file__).parent / "prompts" / "message_summarizer.txt"
 MESSAGE_SUMMARIZER_BRIDGE_PATH = Path(__file__).parent / "prompts" / "message_summarizer_bridge.txt"
 MESSAGE_SUMMARIZER = MESSAGE_SUMMARIZER_PATH.read_text()
@@ -95,6 +122,7 @@ class GDPValAgentRunRequest(BaseRunRequest):
     task_id: str | None = None
     session_id: str | None = None
     task_dir: Path | None = None
+    repeat_index: int | None = None
 
 
 class GDPValAgentVerifyRequest(BaseVerifyRequest):
@@ -274,10 +302,17 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         )
         cookies.resources_server = api_response.cookies
 
+        raw_output = (await api_response.content.read()).decode()
+        if len(raw_output) > MAX_TOOL_OUTPUT_CHARS:
+            raw_output = (
+                raw_output[:MAX_TOOL_OUTPUT_CHARS]
+                + f"\n[...output truncated at {MAX_TOOL_OUTPUT_CHARS} chars; "
+                f"total output was {len(raw_output)} chars. Use head/tail or redirect to a file to avoid truncation...]"
+            )
         tool_response = NeMoGymFunctionCallOutput(
             type="function_call_output",
             call_id=call.call_id,
-            output=(await api_response.content.read()).decode(),
+            output=raw_output,
         )
 
         return tool_response, cookies
@@ -370,14 +405,14 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         messages: NeMoGymResponseInput,
         model_params: NeMoGymResponseCreateParamsNonStreaming,
         cookies: Cookies,
+        n_task_context: int,
     ) -> tuple[NeMoGymResponseInput, Cookies]:
         """Condense message history using LLM to stay within context window."""
-        task_context = []
-        for msg in messages:
-            if isinstance(msg, NeMoGymEasyInputMessage) and msg.role in ("system", "user"):
-                task_context.append(msg)
-            else:
-                break
+        # Pin task_context to the original initial messages (system prompt + task description +
+        # uploaded reference files). Using a loop like stirrup does (takewhile role=user/system)
+        # causes bridge/ack messages (also role=user) to accumulate in task_context on each
+        # re-summarization, creating nested summaries and growing rather than shrinking context.
+        task_context = list(messages[:n_task_context])
 
         summarizer_input = list(messages) + [NeMoGymEasyInputMessage(role="user", content=MESSAGE_SUMMARIZER)]
         summary_params = model_params.model_copy(
@@ -420,13 +455,16 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         #    whole conversation (avoids run() and responses() being on different agent workers).
         if body.session_id is None:
             if body.task_dir is None:
-                body.task_dir = Path(body.output_dir).joinpath(f"task_{body.task_id}")
+                body.task_dir = _task_dir_for(body)
             body.task_dir.mkdir(parents=True, exist_ok=True)
-            session_id = body.task_id or str(uuid.uuid4())
+            if body.task_id and body.repeat_index is not None:
+                session_id = f"{body.task_id}_r{body.repeat_index}"
+            else:
+                session_id = body.task_id or str(uuid.uuid4())
             seed_session_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/seed_session",
-                json=SeedSessionRequest(session_id=session_id).model_dump(),
+                json=SeedSessionRequest(session_id=session_id, repeat_index=body.repeat_index).model_dump(),
                 cookies=cookies.resources_server,
                 affinity_key=session_id,
             )
@@ -438,7 +476,7 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         # 2. Prepare reference files (download + upload to sandbox) only if not already uploaded.
         if not body.uploaded_reference_files:
             if body.task_dir is None:
-                body.task_dir = Path(body.output_dir).joinpath(f"task_{body.task_id}")
+                body.task_dir = _task_dir_for(body)
             body.task_dir.mkdir(parents=True, exist_ok=True)
             uploaded_reference_files, cookies = await self.prepare_reference_files(body, cookies)
             if uploaded_reference_files:
@@ -446,6 +484,7 @@ class GDPValAgent(SimpleResponsesAPIAgent):
 
         # 3. Build initial message history from task/system prompts
         input_messages = await self.init_message_history(body)
+        n_task_context = len(input_messages)
 
         # 4. Build model params from the responses_create_params, overriding input
         model_params = body.responses_create_params.model_copy(update={"input": input_messages})
@@ -484,15 +523,20 @@ class GDPValAgent(SimpleResponsesAPIAgent):
                     print("Task completed. No output files were saved.")
                 break
 
-            if summary_cutoff is not None and usage is not None and step_num < max_steps - 1:
-                total_tokens = usage.total_tokens or 0
-                pct_used = total_tokens / self.config.context_window_tokens
-                if pct_used >= summary_cutoff:
+            if summary_cutoff is not None and step_num < max_steps - 1:
+                estimated = _estimate_input_tokens(model_params.input)
+                usage_total = usage.total_tokens if usage is not None else 0
+                max_seen = max(estimated, usage_total)
+                if max_seen / self.config.context_window_tokens >= summary_cutoff:
+                    pct_used = max_seen / self.config.context_window_tokens
                     print(
                         f"Context at {pct_used:.1%} of context_window_tokens "
-                        f"({total_tokens}/{self.config.context_window_tokens}). Summarizing..."
+                        f"(char-estimate={estimated}, usage={usage_total}, "
+                        f"limit={self.config.context_window_tokens}). Summarizing..."
                     )
-                    condensed_input, cookies = await self.summarize_messages(model_params.input, model_params, cookies)
+                    condensed_input, cookies = await self.summarize_messages(
+                        model_params.input, model_params, cookies, n_task_context
+                    )
                     model_params = model_params.model_copy(update={"input": condensed_input})
 
         # 6. Use cookies to set response cookies
@@ -522,20 +566,64 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         # Session is created inside responses() so the same handler (and thus same
         # agent worker) owns the session for the whole conversation.
         if body.task_dir is None:
-            body.task_dir = Path(body.output_dir).joinpath(f"task_{body.task_id}")
+            body.task_dir = _task_dir_for(body)
         body.task_dir.mkdir(parents=True, exist_ok=True)
 
-        # Execute the task by calling the self.responses endpoint
-        response = await self.server_client.post(
-            server_name=self.config.name,
-            url_path="/v1/responses",
-            json=body.model_dump(mode="json"),
-            cookies=cookies.resources_server,
-        )
-        await raise_for_status(response)
-        response_json = await get_response_json(response)
-        cookies = response.cookies
-        body.session_id = response_json.get("session_id") or body.session_id
+        reward_sentinel = body.task_dir / "reward.json"
+        finish_sentinel = body.task_dir / "finish_params.json"
+        timeout_sentinel = body.task_dir / "timeout.json"
+
+        if timeout_sentinel.exists():
+            logger.info(
+                "Task %s (repeat=%s) previously timed out, retrying from scratch",
+                body.task_id, body.repeat_index,
+            )
+
+        # Fully done: return cached result without calling /v1/responses or /verify
+        if reward_sentinel.exists():
+            logger.info("Task %s (repeat=%s) already verified, skipping", body.task_id, body.repeat_index)
+            data = json.loads(reward_sentinel.read_text())
+            data[REASON_TO_SKIP_KEY_NAME] = "GDPVal: already collected in previous run"
+            return GDPValAgentVerifyResponse.model_validate(data)
+
+        if finish_sentinel.exists():
+            # Agent done but not verified: synthesize response_json from existing files, skip to /verify
+            logger.info("Task %s (repeat=%s) agent done, skipping to verify", body.task_id, body.repeat_index)
+            existing_files = [
+                SavedFile(source_path=str(p), output_path=p, size=p.stat().st_size)
+                for p in body.task_dir.iterdir()
+                if p.is_file() and p.name not in _RESUME_SKIP_NAMES
+            ]
+            history_file = body.task_dir / "history.json"
+            history_output = json.loads(history_file.read_text()) if history_file.exists() else []
+            response_json = {"saved_files": [f.model_dump(mode="json") for f in existing_files], "output": history_output}
+        else:
+            # Normal path: call /v1/responses to run the agent
+            try:
+                with anyio.fail_after(TASK_TIMEOUT):
+                    response = await self.server_client.post(
+                        server_name=self.config.name,
+                        url_path="/v1/responses",
+                        json=body.model_dump(mode="json"),
+                        cookies=cookies.resources_server,
+                    )
+                    await raise_for_status(response)
+                    response_json = await get_response_json(response)
+                    cookies = response.cookies
+                    body.session_id = response_json.get("session_id") or body.session_id
+                    history_file = body.task_dir / "history.json"
+                    history_file.write_text(json.dumps(response_json.get("output", [])))
+            except TimeoutError:
+                logger.warning(
+                    "Task %s (repeat=%s) timed out after %ds",
+                    body.task_id, body.repeat_index, TASK_TIMEOUT,
+                )
+                timeout_sentinel.write_text(json.dumps({
+                    "task_id": body.task_id,
+                    "repeat_index": body.repeat_index,
+                    "timeout_seconds": TASK_TIMEOUT,
+                }))
+                raise HTTPException(status_code=408, detail=f"Task timed out after {TASK_TIMEOUT}s")
 
         # Extract saved files from the agent response
         saved_files = []
@@ -568,6 +656,7 @@ class GDPValAgent(SimpleResponsesAPIAgent):
             "output_files": output_files_serializable,
             "session_id": body.session_id or "",
             "paths": [str(f.output_path) for f in saved_files],
+            "output_dir": str(body.task_dir),
         }
 
         verify_response = await self.server_client.post(
@@ -580,7 +669,7 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         await raise_for_status(verify_response)
         verify_json = await get_response_json(verify_response)
 
-        return GDPValAgentVerifyResponse(
+        result = GDPValAgentVerifyResponse(
             responses_create_params=body.responses_create_params.model_dump(),
             response={
                 "id": "placeholder",
@@ -597,6 +686,11 @@ class GDPValAgent(SimpleResponsesAPIAgent):
             output_files=saved_files,
             committee_verdicts=verify_json.get("committee_verdicts", []),
         )
+
+        # Write verify sentinel so future runs can skip directly to return
+        reward_sentinel.write_text(result.model_dump_json())
+        (body.task_dir / "history.json").unlink(missing_ok=True)
+        return result
 
 
 if __name__ == "__main__":

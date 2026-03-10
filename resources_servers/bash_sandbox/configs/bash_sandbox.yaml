@@ -6,17 +6,17 @@ bash_sandbox_resources_server:
       judge:
         enabled: true
         judge_model_name: gemini-3-pro-preview
-        gcp_project_id: nv-nemoposttrai-20250715184023
-        gcp_location: global
         num_trials: 4
         max_concurrent_judgements: 10
+        committee_models_root: /workspace/tmp/outputs/
+        evaluated_outputs_root: /workspace/tmp/outputs/policy_model/
         committee_models:
-          - name: Qwen3-235B-A22B-Thinking-2507
-            output_dir: /path/to/precomputed/Qwen3-235B
+          - name: committee-nano-v3
+            elo: 1000
         # OpenAI-compatible path — mutually exclusive with the VertexAI path (gcp_project_id).
         # Set both fields to use the NVIDIA OpenAI endpoint; omit both to use VertexAI.
-        # nvidia_openai_api_key: "sk-..."
-        # nvidia_openai_model: "gcp/google/gemini-3-pro-preview"
+        nvidia_openai_api_key_env: "NVIDIA_OPENAI_API_KEY"
+        nvidia_openai_model: "gcp/google/gemini-3-pro"
       verified: false
 bash_sandbox_agent:
   responses_api_agents:

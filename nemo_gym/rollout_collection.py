@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+import logging
 from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
@@ -24,6 +25,7 @@ from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
 from omegaconf import OmegaConf
+from aiohttp import ClientResponseError
 from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
 from wandb import Table
