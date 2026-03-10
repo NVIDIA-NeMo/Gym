@@ -34,4 +34,6 @@ arc_agi_simple_agent:
           version: 0.0.1
           artifact_fpath: arc_agi_1_evaluation.jsonl
         license: Apache 2.0
+      description: Solve puzzles designed to test intelligence. See https://arcprize.org/arc-agi.
+      value: Improve puzzle-solving capabilities.
 
