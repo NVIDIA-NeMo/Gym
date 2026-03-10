@@ -35,9 +35,6 @@ class VlmEvalKitResourcesServer(SimpleResourcesServer):
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
 
-        # Additional server routes go here! e.g.:
-        # app.post("/get_weather")(self.get_weather)
-
         this_dir = Path(__file__).parent.absolute()
         # We freeze the commit SHA for now.
         setup_command = f"""cd {this_dir} \
