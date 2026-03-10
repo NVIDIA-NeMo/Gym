@@ -16,7 +16,13 @@ from abc import abstractmethod
 
 from fastapi import Body, FastAPI
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.base_resources_server import (
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    BaseRunRequest,
+    BaseVerifyResponse,
+    compute_aggregate_metrics,
+)
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -42,6 +48,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, SimpleServer):
 
         app.post("/v1/responses")(self.responses)
         app.post("/run")(self.run)
+        app.post("/aggregate_metrics")(self.aggregate_metrics)
 
         return app
 
@@ -54,3 +61,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, SimpleServer):
     @abstractmethod
     async def run(self, body: BaseRunRequest = Body()) -> BaseVerifyResponse:
         pass
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+        """Default: same RewardProfiler aggregation as resources server. Override to proxy."""
+        return compute_aggregate_metrics(body.verify_responses)

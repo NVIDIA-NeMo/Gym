@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
 from wandb import Table
 
+from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
@@ -323,6 +324,9 @@ class RolloutCollectionHelper(BaseModel):
 
         print("Agent level metrics (mean only):\n" + json.dumps(agent_level_metrics_to_print, indent=4))
 
+        # Call /aggregate_metrics for richer evaluation metrics
+        await self._call_aggregate_metrics(results, rows, output_fpath)
+
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
@@ -330,6 +334,49 @@ Reward profiling outputs: {reward_profiling_fpath}
 Agent-level metrics: {agent_level_metrics_fpath}""")
 
         return results
+
+    async def _call_aggregate_metrics(
+        self,
+        results: List[Dict],
+        rows: List[Dict],
+        output_fpath: Path,
+    ) -> Optional[AggregateMetrics]:
+        """Call /aggregate_metrics on the agent server after rollouts complete."""
+        if not results:
+            return None
+
+        # Determine agent name from the first row's agent_ref
+        agent_name = (rows[0].get(AGENT_REF_KEY_NAME) or {}).get("name") if rows else None
+        if not agent_name:
+            return None
+
+        # Strip heavyweight fields before sending
+        stripped = [{k: v for k, v in r.items() if k not in ("response", "responses_create_params")} for r in results]
+
+        try:
+            server_client = self.setup_server_client()
+            agg_request = AggregateMetricsRequest(verify_responses=stripped)
+            agg_response = await server_client.post(
+                server_name=agent_name,
+                url_path="/aggregate_metrics",
+                json=agg_request,
+            )
+            await raise_for_status(agg_response)
+            agg_result = AggregateMetrics.model_validate(await get_response_json(agg_response))
+
+            # Write metrics JSON
+            metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
+            metrics_fpath.write_bytes(orjson.dumps(agg_result.model_dump(), option=orjson.OPT_INDENT_2))
+            print(f"\nAggregate metrics written to {metrics_fpath}")
+
+            # Log to W&B
+            if get_wandb_run():  # pragma: no cover
+                get_wandb_run().log(agg_result.agent_metrics)
+
+            return agg_result
+        except Exception as e:
+            print(f"\nWarning: aggregate_metrics call failed: {e}")
+            return None
 
     def run_examples(
         self,
