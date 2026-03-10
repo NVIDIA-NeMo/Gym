@@ -409,7 +409,9 @@ exclude_also = [
     "@(abc\\.)?abstractmethod",
     "pass",
 ]
-omit = []
+omit = [
+    "benchmarks/*/prepare.py",
+]
 
 ################################################
 # Linting, formatting, and QOL (using ruff)
