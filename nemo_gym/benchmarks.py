@@ -82,11 +82,12 @@ def get_benchmark(name: str) -> BenchmarkConfig:
 
 def list_benchmarks() -> None:
     """CLI command: list available benchmarks."""
-    get_global_config_dict(
+    global_config_dict = get_global_config_dict(
         global_config_dict_parser_config=GlobalConfigDictParserConfig(
             initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
         )
     )
+    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
     benchmarks = discover_benchmarks()
 
