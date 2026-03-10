@@ -1,0 +1,11 @@
+# AIME 2024 benchmark configuration
+#
+# This benchmark evaluates mathematical reasoning on the
+# American Invitational Mathematics Examination (AIME) 2024 problems.
+
+agent_name: simple_agent
+num_repeats: 1
+
+# Prompt and metrics integration will be added in future PRs:
+# prompt_config: benchmarks/aime24/prompts/default.yaml
+# metrics_type: "resources_servers.math_with_judge.metrics::MathMetrics"

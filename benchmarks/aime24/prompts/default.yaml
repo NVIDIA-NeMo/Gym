@@ -1,0 +1,7 @@
+# Default prompt template for AIME 2024
+#
+# Placeholders like {question} are filled from JSONL row fields.
+# Use {{ and }} for literal braces.
+
+system: "Your task is to solve a math problem. Make sure to put the answer inside \\boxed{{}}."
+user: "{question}"
