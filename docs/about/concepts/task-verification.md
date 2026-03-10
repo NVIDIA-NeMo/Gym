@@ -6,11 +6,11 @@
 
 ## What is Verification?
 
-Every resource server in NeMo Gym implements a `verify()` function that returns a reward value for task performance.
+Every resources server in NeMo Gym implements a `verify()` function that returns a reward value for task performance.
 
 **The Problem**: When you ran the weather example in the quickstart, the agent successfully called the tool and provided a response. But was that response *good*? Should the model be rewarded or penalized? Without verification, you cannot measure performance or guide improvement.
 
-**The Solution**: Each resource server must define exactly what "good performance" means for its domain.
+**The Solution**: Each resources server must define exactly what "good performance" means for its domain.
 
 ## Why Verification Matters
 
@@ -29,7 +29,7 @@ Verification scores become the **reward signals** that drive reinforcement learn
 
 ## Common Verification Patterns
 
-Let's look at real examples from NeMo Gym's resource servers:
+Let's look at real examples from NeMo Gym's resources servers:
 
 ::::{tab-set}
 
@@ -177,7 +177,7 @@ reward = await expensive_api_call(predicted, expected)
 ## What You've Learned
 
 This verification system is what makes NeMo Gym powerful for model training:
-- **Resource servers** provide verification logic
+- **Resources servers** provide verification logic
 - **Verification patterns** vary by domain but follow common principles
 - **Reward signals** from verification drive model improvement through RL
 - **Good verification** is reliable, meaningful, and scalable
