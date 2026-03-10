@@ -28,10 +28,10 @@ Reference for NeMo Gym version compatibility with supported training frameworks.
 
 The following table maps NeMo Gym versions to compatible NeMo RL containers. Use the latest version when possible; the table provides historical compatibility for users who cannot upgrade.
 
-| NeMo Gym Version | NeMo RL Container | Status |
+| NeMo Gym Version | NeMo RL Container | Recipe |
 | --- | --- | --- |
-| NeMo Gym v0.1.1 | [NeMo RL v0.5 container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo-rl) | Released |
-| NeMo Gym v0.1.1 | [NeMo RL v0.4.0.nemotron_3_nano](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo-rl) (Nemotron 3 Nano) | Released |
+| v0.1.1 | [`nvcr.io/nvidia/nemo-rl:v0.4.0.nemotron_3_nano`](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo-rl/tags?version=v0.4.0) | {doc}`Nemotron 3 Nano </model-recipes/nemotron-3-nano>` |
+| v0.2.0 | [`nvcr.io/nvidia/nemo-rl:v0.5.0.nemotron_3_super`](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo-rl/tags?version=v0.5.0) | {doc}`Nemotron 3 Super </model-recipes/nemotron-3-super>` |
 
 ---
 
