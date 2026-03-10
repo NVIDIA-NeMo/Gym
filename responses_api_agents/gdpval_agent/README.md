@@ -33,8 +33,8 @@ source .venv/bin/activate
 
 uv pip install tavily-python
 
-export NVIDIA_API_KEY=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
-export TAVILY_API_KEY="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"
+export NVIDIA_API_KEY="[YOUR_NVIDIA_API_KEY]"
+export TAVILY_API_KEY="[YOUR_TAVILY_API_KEY]"
 
 # bash_sandbox.yaml starts: bash_sandbox_resources_server + bash_sandbox_agent
 # nano_v3_single_node.yaml starts: policy_model (local vLLM Nemotron)
