@@ -1,0 +1,30 @@
+code_gen:
+  resources_servers:
+    code_gen:
+      entrypoint: app.py
+      domain: coding
+      verified: true
+      verified_url: https://wandb.ai/nvidia/bxyu-nemo-gym-rl-integration-20250926/runs/54uzarwq
+      num_processes: 8
+      unit_test_timeout_secs: 10
+      debug: false
+      description: High-quality competitive coding prompts from public datasets, with cleaned statements and verified test cases for RL.
+code_gen_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: code_gen
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/code_gen/data/train_v1.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-code-competitive_coding-v1
+          artifact_fpath: train.jsonl
+        license: TBD
+        num_repeats: 1
