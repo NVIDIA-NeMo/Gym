@@ -78,7 +78,9 @@ class TestApp:
                 "output": [
                     {
                         "id": "msg_boxed",
-                        "content": [{"annotations": [], "text": "Final: \\boxed{the answer is C}", "type": "output_text"}],
+                        "content": [
+                            {"annotations": [], "text": "Final: \\boxed{the answer is C}", "type": "output_text"}
+                        ],
                         "role": "assistant",
                         "status": "completed",
                         "type": "message",
@@ -118,7 +120,9 @@ class TestApp:
         )
 
         verify_request = MCQAVerifyRequest(
-            responses_create_params={"input": [{"role": "user", "content": "Question?\nA: optA\nB: optB\nC: optC\nD: optD"}]},
+            responses_create_params={
+                "input": [{"role": "user", "content": "Question?\nA: optA\nB: optB\nC: optC\nD: optD"}]
+            },
             response=invalid_response,
             options=[{"A": "optA"}, {"B": "optB"}, {"C": "optC"}, {"D": "optD"}],
             expected_answer="C",

@@ -38,9 +38,7 @@ def extract_letter(text: str) -> Optional[str]:
         if letter_match:
             return letter_match[-1].strip()
 
-    answer_match = re.findall(
-        r"(?i)[\*\_]{0,2}Answer[\*\_]{0,2}\s*:[\s\*\_]{0,2}\s*([A-Z])(?![a-zA-Z0-9])", text
-    )
+    answer_match = re.findall(r"(?i)[\*\_]{0,2}Answer[\*\_]{0,2}\s*:[\s\*\_]{0,2}\s*([A-Z])(?![a-zA-Z0-9])", text)
     if answer_match:
         return answer_match[-1].strip().upper()
 
