@@ -13,15 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from abc import abstractmethod
+from collections import defaultdict
 from typing import Any, Dict, List
 
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
+from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.reward_profile import RewardProfiler
 from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 
 
@@ -86,10 +89,6 @@ class BaseSeedSessionResponse(BaseModel):
 
 def _group_by_task(verify_responses: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
     """Group verify responses by task index, returning a list of per-task rollout lists."""
-    from collections import defaultdict
-
-    from nemo_gym.global_config import TASK_INDEX_KEY_NAME
-
     groups: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
     for vr in verify_responses:
         groups[vr.get(TASK_INDEX_KEY_NAME, 0)].append(vr)
@@ -112,9 +111,6 @@ def compute_aggregate_metrics(
         intervals, cross-task statistics, pass@k). Returned dict is merged into agent_metrics.
       - get_key_metrics_fn: select headline metrics from agent_metrics
     """
-    from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-    from nemo_gym.reward_profile import RewardProfiler
-
     if not verify_responses:
         return AggregateMetrics()
 
