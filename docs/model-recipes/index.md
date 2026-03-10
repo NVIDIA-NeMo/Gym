@@ -1,17 +1,21 @@
 (model-recipes-index)=
+
 # Model Recipes
 
-Pre-configured training recipes for specific models. These recipes provide end-to-end configurations optimized for particular model families.
+Model recipes are tutorials to run Gym with various data recipes that were used to train models.
+
+
+## Backend Guides
 
 ::::{grid} 1 2 2 2
 :gutter: 1 1 1 2
 
-:::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` Nemotron 3 Nano
-:link: nemotron-nano
-:link-type: doc
-Efficient small model training.
+:::{grid-item-card} {octicon}`server;1.5em;sd-mr-1` Nemotron 3 Nano
+:link: model-recipes-nemotron-3-nano
+:link-type: ref
+Distributed training of Nemotron 3 Nano 30B across multiple nodes using Slurm and Ray.
 +++
-{bdg-secondary}`nemotron` {bdg-secondary}`nano`
+{bdg-secondary}`model recipe` {bdg-secondary}`nemotron`
 :::
 
 ::::

@@ -3,7 +3,7 @@
 
 ## Training Framework Deployment
 
-When NeMo Gym is used for RL training (not standalone rollout collection), it runs alongside a training framework. NeMo Gym's Model Server acts as an HTTP proxy for policy model inference — it translates between the Responses API and Chat Completions API formats, forwarding requests to the training framework's generation endpoint (e.g., vLLM). NeMo Gym can also run other models on GPU (e.g., reward models, judge models) through its own resource servers.
+When NeMo Gym is used for RL training (not standalone rollout collection), it runs alongside a training framework. NeMo Gym's Model Server acts as an HTTP proxy for policy model inference — it translates between the Responses API and Chat Completions API formats, forwarding requests to the training framework's generation endpoint (e.g., vLLM). NeMo Gym can also run other models on GPU (e.g., reward models, judge models) through its own resources servers.
 
 This section covers resource requirements, cluster strategies, and how to choose between them. For a detailed integration walkthrough from the training framework side, see how [NeMo RL integrated with NeMo Gym](https://github.com/NVIDIA-NeMo/RL/blob/main/docs/design-docs/nemo-gym-integration.md). For guidance on integrating a new training framework, see {doc}`/contribute/rl-framework-integration/index`.
 
@@ -13,7 +13,7 @@ NeMo Gym and the training framework have different compute profiles:
 
 | Component | Compute | Role |
 |-----------|---------|------|
-| **NeMo Gym** | CPU by default | Orchestrates rollouts, executes tools, computes rewards. Some resource servers may use GPUs (e.g., running local reward or judge models via vLLM). |
+| **NeMo Gym** | CPU by default | Orchestrates rollouts, executes tools, computes rewards. Some resources servers may use GPUs (e.g., running local reward or judge models via vLLM). |
 | **Training framework** (e.g., NeMo RL) | GPU | Holds model weights, runs policy training, serves inference via an OpenAI-compatible HTTP endpoint (e.g., vLLM) |
 
 ### Cluster Co-location Strategy
@@ -49,8 +49,8 @@ flowchart LR
 
 **How it works:**
 1. The training framework initializes the Ray cluster and creates vLLM workers with HTTP servers
-2. The training framework creates a NemoGym Ray actor within the same cluster
-3. The NemoGym actor spawns Gym servers (Head, Agent, Model, Resources) as subprocesses
+2. The training framework creates a NeMo Gym Ray actor within the same cluster
+3. The NeMo Gym actor spawns NeMo Gym servers (Head, Agent, Model, Resources) as subprocesses
 4. NeMo Gym's Model Server proxies inference requests to the training framework's vLLM HTTP endpoints
 5. Results flow back through the actor to the training loop
 
@@ -62,7 +62,7 @@ When NeMo Gym connects to an existing Ray cluster, the same Ray and Python versi
 
 ---
 
-#### Gym's Own Ray Cluster
+#### NeMo Gym's Own Ray Cluster
 
 When the training framework **does not use Ray**, NeMo Gym spins up its own independent Ray cluster for coordination.
 
@@ -105,7 +105,7 @@ flowchart LR
         vLLM["vLLM + HTTP"]
         Workers["Policy Workers"]
     end
-    subgraph B["Gym Cluster · CPU"]
+    subgraph B["NeMo Gym Cluster · CPU"]
         Agent["Agent Server"]
         Model["Model Server (proxy)"]
         Resources["Resources Server"]
@@ -118,18 +118,18 @@ flowchart LR
 ```
 
 **When to use:**
-- Training framework and Gym are deployed independently by different teams
-- Clusters have different lifecycle requirements (e.g., Gym always on, training runs are transient)
+- Training framework and NeMo Gym are deployed independently by different teams
+- Clusters have different lifecycle requirements (e.g., NeMo Gym always on, training runs are transient)
 - Network security policies require isolation between training and environment infrastructure
 - Hybrid cloud setups where training runs on GPU cloud and environments run on CPU cloud
 
 **Requirements:**
-- The training cluster must expose its generation backend (e.g., vLLM) as HTTP endpoints reachable from the Gym cluster
+- The training cluster must expose its generation backend (e.g., vLLM) as HTTP endpoints reachable from the NeMo Gym cluster
 - Network connectivity and firewall rules between clusters must allow HTTP traffic on the configured ports
 
 ### Choosing a Deployment Strategy
 
-| Factor | Single Ray Cluster | Gym's Own Ray Cluster | Separate Clusters |
+| Factor | Single Ray Cluster | NeMo Gym's Own Ray Cluster | Separate Clusters |
 |--------|-------------------|----------------------|-------------------|
 | **Training framework** | Ray-based | Non-Ray | Any |
 | **Startup** | Co-launched | Independent | Independent |
@@ -144,7 +144,7 @@ flowchart LR
 :gutter: 3
 
 :::{grid-item-card} {octicon}`book;1.5em;sd-mr-1` Architecture Overview
-:link: /about/architecture
+:link: /about/concepts/architecture
 :link-type: doc
 Understand the server-based architecture.
 :::
@@ -156,7 +156,7 @@ Implement NeMo Gym integration into a new training framework.
 :::
 
 :::{grid-item-card} {octicon}`rocket;1.5em;sd-mr-1` NeMo RL GRPO Training
-:link: /tutorials/nemo-rl-grpo/index
+:link: /training-tutorials/nemo-rl-grpo/index
 :link-type: doc
 End-to-end GRPO training tutorial with NeMo RL.
 :::

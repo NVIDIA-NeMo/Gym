@@ -3,6 +3,10 @@
 
 We have hands-on tutorials with supported training frameworks to help you train with NeMo Gym environments. If you're interested in integrating another training framework, see the {doc}`Training Framework Integration Guide <../contribute/rl-framework-integration/index>`.
 
+:::{tip}
+See {ref}`training-approaches` for a refresher on when to use GRPO, SFT, or DPO.
+:::
+
 ## RL (GRPO)
 
 ::::{grid} 1 2 2 2
@@ -24,16 +28,8 @@ Review the agent executor for using NeMo Gym environments with OpenRLHF.
 {bdg-secondary}`openrlhf`
 :::
 
-:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` TRL
-:link: trl
-:link-type: doc
-GRPO training on Workplace Assistant and Reasoning Gym environments
-+++
-{bdg-secondary}`trl`
-:::
-
 :::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Unsloth
-:link: unsloth-training
+:link: unsloth
 :link-type: doc
 GRPO training on instruction following and reasoning environments.
 +++
@@ -53,6 +49,21 @@ GRPO training on instruction following and reasoning environments.
 *Coming soon*
 +++
 {bdg-secondary}`verl` {bdg-warning}`in progress`
+:::
+
+::::
+
+### Multi-Environment Training
+
+::::{grid} 1 1 2 2
+:gutter: 1 1 1 2
+
+:::{grid-item-card} {octicon}`stack;1.5em;sd-mr-1` Multi-Environment Training
+:link: multi-environment-training
+:link-type: doc
+Run multiple training environments simultaneously for rollout collection.
++++
+{bdg-secondary}`multi-environment` {bdg-secondary}`multi-verifier`
 :::
 
 ::::

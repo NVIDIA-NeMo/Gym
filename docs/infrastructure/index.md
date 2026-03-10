@@ -1,7 +1,7 @@
 (infrastructure-index)=
 # Infrastructure
 
-Learn how NeMo Gym is deployed and scaled for production workloads.
+Learn how to deploy NeMo Gym and plan cluster resources for training.
 
 ::::{grid} 1 2 2 2
 :gutter: 1 1 1 2
@@ -12,6 +12,14 @@ Learn how NeMo Gym is deployed and scaled for production workloads.
 Server deployment patterns and training framework integration.
 +++
 {bdg-secondary}`deployment` {bdg-secondary}`topology` {bdg-secondary}`training-integration`
+:::
+
+:::{grid-item-card} {octicon}`note;1.5em;sd-mr-1` Engineering Notes
+:link: engineering-notes/index
+:link-type: doc
+Technical notes on infrastructure decisions and design rationale.
++++
+{bdg-secondary}`engineering-notes` {bdg-secondary}`case-studies`
 :::
 
 ::::

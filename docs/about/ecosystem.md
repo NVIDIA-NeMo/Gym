@@ -13,8 +13,7 @@ We have hands-on tutorials with supported training frameworks to help you train 
 
 - **{doc}`NeMo RL <../training-tutorials/nemo-rl-grpo/index>`** - GRPO training to improve multi-step tool calling on the Workplace Assistant environment
 - **[OpenRLHF](https://github.com/OpenRLHF/OpenRLHF/blob/main/examples/python/agent_func_nemogym_executor.py)** - example agent executor for RL training
-- **{doc}`TRL <../training-tutorials/trl>`** - GRPO training on Workplace Assistant and Reasoning Gym environments
-- **{doc}`Unsloth <../training-tutorials/unsloth-training>`** - GRPO training on instruction following and reasoning environments
+- **{doc}`Unsloth <../training-tutorials/unsloth>`** - GRPO training on instruction following and reasoning environments
 - **NeMo Customizer** - *(In progress)*
 - **VeRL** - *(In progress)*
 
@@ -45,7 +44,7 @@ Depending on your workflow, you may also find these libraries useful:
 | [NeMo RL](https://github.com/NVIDIA-NeMo/RL) | Scalable post-training with GRPO, DPO, and SFT |
 | **[NeMo Gym](https://github.com/NVIDIA-NeMo/Gym)** | RL environment infrastructure and rollout collection *(this project)* |
 | [NeMo Curator](https://github.com/NVIDIA-NeMo/Curator) | Data preprocessing and curation |
-| [NeMo Data Designer](https://github.com/NVIDIA-NeMo/DataDesigner) | Synthetic data generation |
+| [NeMo Data Designer](https://github.com/NVIDIA-NeMo/DataDesigner) | High-quality Synthetic data generation from scratch or seed data |
 | [NeMo Evaluator](https://github.com/NVIDIA-NeMo/Evaluator) | Model evaluation and benchmarking |
 | [NeMo Guardrails](https://github.com/NVIDIA-NeMo/Guardrails) | Programmable safety guardrails |
 | [NeMo Skills](https://github.com/NVIDIA-NeMo/NeMo-Skills) | Convenience pipelines used by LLM researchers across SDG, evaluation and training |
