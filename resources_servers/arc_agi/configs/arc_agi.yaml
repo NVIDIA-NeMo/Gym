@@ -4,6 +4,8 @@ arc_agi_resources_server:
       entrypoint: app.py
       domain: knowledge
       verified: false
+      description: Solve puzzles designed to test intelligence. See https://arcprize.org/arc-agi.
+      value: Improve puzzle-solving capabilities.
 arc_agi_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -34,6 +36,3 @@ arc_agi_simple_agent:
           version: 0.0.1
           artifact_fpath: arc_agi_1_evaluation.jsonl
         license: Apache 2.0
-      description: Solve puzzles designed to test intelligence. See https://arcprize.org/arc-agi.
-      value: Improve puzzle-solving capabilities.
-
