@@ -96,6 +96,13 @@ multichallenge_simple_agent:
           type: train
           license: "TBD"
           jsonl_fpath: resources_servers/multichallenge/data/vanilla.jsonl
+        - name: train
+          type: train
+          license: Creative Commons Attribution 4.0 International
+          jsonl_fpath: resources_servers/multichallenge/data/Nemotron-RL-Instruction-Following-MultiTurnChat-v1_train.jsonl
+          huggingface_identifier:
+            repo_id: nvidia/Nemotron-RL-Instruction-Following-MultiTurnChat-v1
+            artifact_fpath: train.jsonl
       verified: false
 
 # ============================================================================
