@@ -188,6 +188,14 @@ Fetch datasets from HuggingFace Hub.
 {bdg-secondary}`huggingface`
 :::
 
+:::{grid-item-card} {octicon}`pencil;1.5em;sd-mr-1` Prompt Config
+:link: prompt-config
+:link-type: doc
+YAML-based prompt templates applied at rollout time.
++++
+{bdg-secondary}`prompts`
+:::
+
 ::::
 
 ## CLI Commands
