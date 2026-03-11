@@ -47,9 +47,16 @@ Then, rollouts can be collected using a command such as the following:
 ```bash
 ng_collect_rollouts \
     +agent_name=structured_outputs_simple_agent \
-    +input_jsonl_fpath=resources_servers/structured_outputs/data/structured_outputs_251027_nano_v3_sdg_json_train.jsonl \
+    +input_jsonl_fpath=resources_servers/structured_outputs/data/structured_outputs_260309_nano_v3_sdg_json_yaml_xml_val.jsonl \
     +output_jsonl_fpath=results/example_structured_outputs_json.jsonl \
-    +limit=1
+    +resume_from_cache=True \
+    +num_samples_in_parallel=256
+```
+
+You can see breakdown of results from the rollout file using the provided breakdown_metrics file.
+```bash
+python resources_servers/structured_outputs/misc/breakdown_rollouts_metrics.py \
+   -f results/example_structured_outputs_json.jsonl
 ```
 
 ## Downloading Data
