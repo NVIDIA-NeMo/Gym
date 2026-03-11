@@ -14,7 +14,9 @@
 # limitations under the License.
 import logging
 import re
+import threading
 from copy import deepcopy
+from sys import exc_info
 from time import time
 from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
@@ -186,161 +188,199 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         session_id = request.session[SESSION_ID_KEY]
         request_id = str(uuid4())
-
-        client_idx = await self._routing_policy.select_client(
-            request_body=body_dict, request_id=request_id, session_id=session_id
-        )
-        await self._routing_policy.on_prefill_complete(request_id)
-        client = self._clients[client_idx]
-
-        create_params = body_dict
-
-        if self.config.return_token_id_information:
-            create_params |= dict(
-                logprobs=True,
-                # Typically passed via OpenAI client extra_body.
-                return_tokens_as_token_ids=True,
-                # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-                # For prompt and generation token IDs
-                # return_token_ids=True,
-                # For prompt token IDs
-                # prompt_logprobs=0,
-            )
-
-        if self.config.uses_reasoning_parser:
-            for message_dict in body_dict["messages"]:
-                if message_dict.get("role") != "assistant" or "content" not in message_dict:
-                    continue
-
-                content = message_dict["content"]
-                if isinstance(content, str):
-                    reasoning_matches, remaining_content = self._converter._extract_reasoning_from_content(content)
-                    message_dict["content"] = remaining_content
-                    if reasoning_matches:
-                        message_dict["reasoning_content"] = reasoning_matches[0]
-                elif isinstance(content, list):
-                    reasoning_content = None
-                    for content_item_dict in content:
-                        reasoning_matches, remaining_content = self._converter._extract_reasoning_from_content(
-                            content_item_dict["text"]
-                        )
-                        assert reasoning_content is None or not reasoning_matches, (
-                            f"Found multiple reasoning matches in a single assistant message content item list!\nMessage: {message_dict}"
-                        )
-
-                        # Even though we set the reasoning content already here, we still loop through all the content item dicts for the assert above.
-                        content_item_dict["text"] = remaining_content
-                        if reasoning_matches:
-                            message_dict["reasoning_content"] = reasoning_matches[0]
-                elif not content:
-                    # No content or content None is a no-op
-                    pass
-                else:
-                    raise NotImplementedError
-
-        if self.config.extra_body:
-            create_params = self.config.extra_body | create_params
+        request_routed = False
 
         try:
-            chat_completion_dict = await client.create_chat_completion(**create_params)
-        except ClientResponseError as e:
-            """
-            Example messages for out of context length:
-
-            1. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L914
-            ```json
-            {"object":"error","message":"This model\'s maximum context length is 32768 tokens. However, you requested 32818 tokens in the messages, Please reduce the length of the messages. None","type":"BadRequestError","param":null,"code":400}
-            ```
-            2. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L940
-            3. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L948
-            4. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/sampling_params.py#L463
-            """
-            result_content_str = e.response_content.decode()
-
-            is_out_of_context_length = e.status == 400 and (
-                "context length" in result_content_str or "max_tokens" in result_content_str
+            client_idx = await self._routing_policy.select_client(
+                request_body=body_dict, request_id=request_id, session_id=session_id
             )
-            if is_out_of_context_length:
-                return NeMoGymChatCompletion(
-                    id="chtcmpl-123",
-                    object="chat.completion",
-                    created=int(time()),
-                    model=self.config.model,
-                    choices=[
-                        NeMoGymChoice(
-                            index=0,
-                            finish_reason="stop",
-                            message=NeMoGymChatCompletionMessage(
-                                role="assistant",
-                                content=None,
-                                tool_calls=None,
-                            ),
-                        )
-                    ],
-                )
-            else:
-                raise e
+            request_routed = True
+            await self._routing_policy.on_prefill_complete(request_id)
+            client = self._clients[client_idx]
 
-        # Notify routing policy of request lifecycle events (non-streaming: both happen at response return)
-        await self._routing_policy.on_generation_complete(request_id)
+            if not hasattr(self, "_inflight_counter"):
+                self._inflight_counter = 0
+                self._inflight_lock = threading.Lock()
+            with self._inflight_lock:
+                self._inflight_counter += 1
+                inflight_snapshot = self._inflight_counter
+            num_messages = len(body_dict.get("messages", []))
+            vllm_send_time = time()
 
-        choice_dict = chat_completion_dict["choices"][0]
-        if self.config.uses_reasoning_parser:
-            reasoning_content = choice_dict["message"].get("reasoning_content")
-            if reasoning_content:
-                choice_dict["message"].pop("reasoning_content")
+            create_params = body_dict
 
-                # We wrap this here in think tags for Gym's sake and to return a valid OpenAI Chat Completions response.
-                choice_dict["message"]["content"] = self._converter._wrap_reasoning_in_think_tags(
-                    [reasoning_content]
-                ) + (choice_dict["message"]["content"] or "")
-        else:
-            assert not choice_dict["message"].get("reasoning_content"), (
-                "Please do not use a reasoning parser in vLLM! There is one source of truth for handling data (including reasoning), which is NeMo Gym!"
-            )
-
-        if self.config.return_token_id_information:
-            log_probs = choice_dict["logprobs"]["content"]
-            generation_log_probs = [log_prob["logprob"] for log_prob in log_probs]
-
-            """
-            START TODO remove this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-            """
-            # Looks like `"token_id:151667"`
-            generation_token_ids = [log_prob["token"].removeprefix("token_id:") for log_prob in log_probs]
-
-            # The tokenize endpoint doesn't accept any sampling parameters
-            # The only relevant params are model, messages, and tools.
-            tokenize_body_dict = dict()
-            for key in ("model", "messages", "tools"):
-                if key in body_dict:
-                    tokenize_body_dict[key] = body_dict[key]
-
-            # The base url has /v1 at the end but vLLM's tokenize endpoint does not have v1, hence the ..
-            tokenize_response = await client.create_tokenize(**tokenize_body_dict)
-            """
-            END
-            """
-
-            message_dict = choice_dict["message"]
-            message_dict.update(
-                dict(
+            if self.config.return_token_id_information:
+                create_params |= dict(
+                    logprobs=True,
+                    # Typically passed via OpenAI client extra_body.
+                    return_tokens_as_token_ids=True,
                     # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-                    # prompt_token_ids=chat_completion_dict["prompt_token_ids"],
-                    prompt_token_ids=tokenize_response["tokens"],
-                    # generation_token_ids=choice_dict["token_ids"],
-                    generation_token_ids=generation_token_ids,
-                    generation_log_probs=generation_log_probs,
+                    # For prompt and generation token IDs
+                    # return_token_ids=True,
+                    # For prompt token IDs
+                    # prompt_logprobs=0,
                 )
-            )
 
-            # Clean the duplicated information
-            choice_dict.pop("logprobs")
-            # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-            # chat_completion_dict.pop("prompt_token_ids")
-            # choice_dict.pop("token_ids")
+            if self.config.uses_reasoning_parser:
+                for message_dict in body_dict["messages"]:
+                    if message_dict.get("role") != "assistant" or "content" not in message_dict:
+                        continue
 
-        return NeMoGymChatCompletion.model_validate(chat_completion_dict)
+                    content = message_dict["content"]
+                    if isinstance(content, str):
+                        reasoning_matches, remaining_content = self._converter._extract_reasoning_from_content(content)
+                        message_dict["content"] = remaining_content
+                        if reasoning_matches:
+                            message_dict["reasoning_content"] = reasoning_matches[0]
+                    elif isinstance(content, list):
+                        reasoning_content = None
+                        for content_item_dict in content:
+                            reasoning_matches, remaining_content = self._converter._extract_reasoning_from_content(
+                                content_item_dict["text"]
+                            )
+                            assert reasoning_content is None or not reasoning_matches, (
+                                f"Found multiple reasoning matches in a single assistant message content item list!\nMessage: {message_dict}"
+                            )
+
+                            # Even though we set the reasoning content already here, we still loop through all the content item dicts for the assert above.
+                            content_item_dict["text"] = remaining_content
+                            if reasoning_matches:
+                                message_dict["reasoning_content"] = reasoning_matches[0]
+                    elif not content:
+                        # No content or content None is a no-op
+                        pass
+                    else:
+                        raise NotImplementedError
+
+            if self.config.extra_body:
+                create_params = self.config.extra_body | create_params
+
+            try:
+                chat_completion_dict = await client.create_chat_completion(**create_params)
+            except ClientResponseError as e:
+                vllm_elapsed = time() - vllm_send_time
+                with self._inflight_lock:
+                    self._inflight_counter -= 1
+                print(f"[vllm-debug] request={request_id} client={client_idx} FAILED after {vllm_elapsed:.1f}s status={e.status} msgs={num_messages}")
+                """
+                Example messages for out of context length:
+
+                1. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L914
+                ```json
+                {"object":"error","message":"This model\'s maximum context length is 32768 tokens. However, you requested 32818 tokens in the messages, Please reduce the length of the messages. None","type":"BadRequestError","param":null,"code":400}
+                ```
+                2. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L940
+                3. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L948
+                4. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/sampling_params.py#L463
+                """
+                result_content_str = e.response_content.decode()
+
+                is_out_of_context_length = e.status == 400 and (
+                    "context length" in result_content_str or "max_tokens" in result_content_str
+                )
+                if is_out_of_context_length:
+                    return NeMoGymChatCompletion(
+                        id="chtcmpl-123",
+                        object="chat.completion",
+                        created=int(time()),
+                        model=self.config.model,
+                        choices=[
+                            NeMoGymChoice(
+                                index=0,
+                                finish_reason="stop",
+                                message=NeMoGymChatCompletionMessage(
+                                    role="assistant",
+                                    content=None,
+                                    tool_calls=None,
+                                ),
+                            )
+                        ],
+                    )
+                else:
+                    raise e
+            except Exception as e:
+                vllm_elapsed = time() - vllm_send_time
+                with self._inflight_lock:
+                    self._inflight_counter -= 1
+                print(f"[vllm-debug] request={request_id} client={client_idx} EXCEPTION after {vllm_elapsed:.1f}s: {type(e).__name__}: {e}")
+                raise
+
+            vllm_elapsed = time() - vllm_send_time
+            with self._inflight_lock:
+                self._inflight_counter -= 1
+                inflight_after = self._inflight_counter
+            finish_reason = chat_completion_dict.get("choices", [{}])[0].get("finish_reason", "?")
+            print(f"[vllm-debug] request={request_id} client={client_idx} OK {vllm_elapsed:.1f}s finish={finish_reason} msgs={num_messages} inflight={inflight_snapshot}->{inflight_after}")
+
+            choice_dict = chat_completion_dict["choices"][0]
+            if self.config.uses_reasoning_parser:
+                reasoning_content = choice_dict["message"].get("reasoning_content")
+                if reasoning_content:
+                    choice_dict["message"].pop("reasoning_content")
+
+                    # We wrap this here in think tags for Gym's sake and to return a valid OpenAI Chat Completions response.
+                    choice_dict["message"]["content"] = self._converter._wrap_reasoning_in_think_tags(
+                        [reasoning_content]
+                    ) + (choice_dict["message"]["content"] or "")
+            else:
+                assert not choice_dict["message"].get("reasoning_content"), (
+                    "Please do not use a reasoning parser in vLLM! There is one source of truth for handling data (including reasoning), which is NeMo Gym!"
+                )
+
+            if self.config.return_token_id_information:
+                log_probs = choice_dict["logprobs"]["content"]
+                generation_log_probs = [log_prob["logprob"] for log_prob in log_probs]
+
+                """
+                START TODO remove this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
+                """
+                # Looks like `"token_id:151667"`
+                generation_token_ids = [log_prob["token"].removeprefix("token_id:") for log_prob in log_probs]
+
+                # The tokenize endpoint doesn't accept any sampling parameters
+                # The only relevant params are model, messages, and tools.
+                tokenize_body_dict = dict()
+                for key in ("model", "messages", "tools"):
+                    if key in body_dict:
+                        tokenize_body_dict[key] = body_dict[key]
+
+                # The base url has /v1 at the end but vLLM's tokenize endpoint does not have v1, hence the ..
+                tokenize_response = await client.create_tokenize(**tokenize_body_dict)
+                """
+                END
+                """
+
+                message_dict = choice_dict["message"]
+                message_dict.update(
+                    dict(
+                        # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
+                        # prompt_token_ids=chat_completion_dict["prompt_token_ids"],
+                        prompt_token_ids=tokenize_response["tokens"],
+                        # generation_token_ids=choice_dict["token_ids"],
+                        generation_token_ids=generation_token_ids,
+                        generation_log_probs=generation_log_probs,
+                    )
+                )
+
+                # Clean the duplicated information
+                choice_dict.pop("logprobs")
+                # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
+                # chat_completion_dict.pop("prompt_token_ids")
+                # choice_dict.pop("token_ids")
+
+            return NeMoGymChatCompletion.model_validate(chat_completion_dict)
+        finally:
+            if request_routed:
+                cleanup_error_is_fatal = exc_info()[0] is None
+                try:
+                    await self._routing_policy.on_generation_complete(request_id)
+                except Exception:
+                    logger.exception(
+                        "Failed to notify routing policy that request %s completed",
+                        request_id,
+                    )
+                    if cleanup_error_is_fatal:
+                        raise
 
 
 class VLLMConverterResponsesToChatCompletionsState(BaseModel):
