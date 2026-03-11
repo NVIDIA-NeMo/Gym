@@ -4,6 +4,8 @@ xlam_fc:
       entrypoint: app.py
       domain: agent
       verified: false
+      description: Salesforce xlam-function-calling-60k tool calling tasks
+      value: Improve tool-calling capabilities
 xlam_fc_simple_agent:
   responses_api_agents:
     simple_agent:

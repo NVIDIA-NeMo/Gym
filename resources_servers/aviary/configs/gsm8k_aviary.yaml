@@ -4,6 +4,8 @@ gsm8k_aviary_resources_server:
       entrypoint: gsm8k_app.py
       domain: math
       verified: false
+      description: GSM8k benchmark with calculator tool
+      value: Test math and agentic capability
 gsm8k_aviary_agent:
   responses_api_agents:
     aviary_agent:

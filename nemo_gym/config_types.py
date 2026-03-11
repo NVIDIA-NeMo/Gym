@@ -205,7 +205,7 @@ class JsonlDatasetHuggingFaceIdentifer(BaseModel):
 
 class BaseUploadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
     """
-    Upload a JSONL dataset to HuggingFace Hub with automatic naming based on domain and resource server.
+    Upload a JSONL dataset to HuggingFace Hub with automatic naming based on domain and resources server.
 
     Examples:
 
@@ -224,11 +224,11 @@ class BaseUploadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
     hf_collection_name: str = Field(description="HuggingFace collection name for organizing datasets.")
     hf_collection_slug: str = Field(description="Alphanumeric collection slug found at the end of collection URI.")
     dataset_name: Optional[str] = Field(
-        default=None, description="Name of the dataset (will be combined with domain and resource server name)."
+        default=None, description="Name of the dataset (will be combined with domain and resources server name)."
     )
     input_jsonl_fpath: str = Field(description="Path to the local jsonl file to upload.")
     resource_config_path: str = Field(
-        description="Path to resource server config file (used to extract domain for naming convention)."
+        description="Path to resources server config file (used to extract domain for naming convention)."
     )
     hf_dataset_prefix: str = Field(
         default="Nemotron-RL", description="Prefix prepended to dataset name (default: 'NeMo-Gym')."
@@ -408,7 +408,7 @@ class BaseServerConfig(BaseModel):
 
 class BaseRunServerConfig(BaseServerConfig):
     entrypoint: str
-    domain: Optional[Domain] = None  # Only required for resource servers
+    domain: Optional[Domain] = None  # Only required for resources servers
 
 
 class BaseRunServerInstanceConfig(BaseRunServerConfig):
@@ -477,10 +477,10 @@ class BaseServerInstanceConfig(BaseServerTypeConfig):
     server_type_config_dict: DictConfig = Field(exclude=True)
 
     @model_validator(mode="after")
-    def validate_domain_for_resource_server(self) -> "BaseServerInstanceConfig":
+    def validate_domain_for_resources_server(self) -> "BaseServerInstanceConfig":
         config = self.get_inner_run_server_config()
         if self.SERVER_TYPE == "resources_servers":
-            assert config.domain is not None, "A domain is required for resource servers."
+            assert config.domain is not None, "A domain is required for resources servers."
         else:
             # Remove domain field from Model and Agent servers.
             if hasattr(config, "domain"):

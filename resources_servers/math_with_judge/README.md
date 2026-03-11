@@ -1,5 +1,5 @@
 # Description
-This is a resource server for verifying the correctness of answers to mathematical problems.  It uses a combination of the Hugging Face Math-Verify library and an LLM as a judge.
+This is a resources server for verifying the correctness of answers to mathematical problems.  It uses a combination of the Hugging Face Math-Verify library and an LLM as a judge.
 
 The problems in the OpenMathReasoning dataset are taken from the
 [OpenMathReasoning dataset](https://huggingface.co/datasets/nvidia/Nemotron-RL-math-OpenMathReasoning)
@@ -9,7 +9,7 @@ on Hugging Face.
 # Example usage
 
 ## Running servers
-The following are example commands for running this resource server, along with the simple agent and an OpenAI model:
+The following are example commands for running this resources server, along with the simple agent and an OpenAI model:
 ```bash
 config_paths="responses_api_models/openai_model/configs/openai_model.yaml, \
 resources_servers/math_with_judge/configs/math_with_judge.yaml"

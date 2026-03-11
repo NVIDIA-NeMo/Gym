@@ -1,7 +1,7 @@
 # Description
 > Keywords: Instruction Following, Structured Outputs, Schema Adherence
 
-This is a resource server for verifying the ability of the model to follow output formatting instructions under schema constraints.
+This is a resources server for verifying the ability of the model to follow output formatting instructions under schema constraints.
 
 Each problem consists three components:
 1. Document
@@ -32,7 +32,7 @@ For the JSON variant, we use the `openapi-schema-validator` library for verifica
 # Example usage
 
 ## Running servers
-The following are example commands for running this resource server, along with the simple agent and an OpenAI model:
+The following are example commands for running this resources server, along with the simple agent and an OpenAI model:
 ```bash
 config_paths="responses_api_models/openai_model/configs/openai_model.yaml, \
 resources_servers/structured_outputs/configs/structured_outputs_json.yaml"

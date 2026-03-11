@@ -1,6 +1,6 @@
 > Keywords: Tool Use, Multi-step Reasoning, Environment Interaction, Scientific Tasks
 
-This resource server adapts [Aviary environments](https://github.com/Future-House/aviary) into the NeMo Gym resources-server interface, so NeMo Gym agents can interact with Aviary `Environment`s. This allows one to implement tool and environment logic in Aviary, and deploy the environment for inference or training with Gym.
+This resources server adapts [Aviary environments](https://github.com/Future-House/aviary) into the NeMo Gym resources-server interface, so NeMo Gym agents can interact with Aviary `Environment`s. This allows one to implement tool and environment logic in Aviary, and deploy the environment for inference or training with Gym.
 
 ### Implemented servers in this folder
 

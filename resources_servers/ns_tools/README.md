@@ -1,12 +1,12 @@
 # Description
-This is a resource server for executing NeMo Skills tools (e.g., stateful Python code execution) with math verification via math_with_judge.
+This is a resources server for executing NeMo Skills tools (e.g., stateful Python code execution) with math verification via math_with_judge.
 
 It integrates with the NeMo Skills ToolManager to dynamically load and execute tools, maintaining stateful sessions across multiple tool calls within a rollout.
 
 # Example usage
 
 ## Running servers
-The following are example commands for running this resource server with the simple agent and a vLLM model:
+The following are example commands for running this resources server with the simple agent and a vLLM model:
 ```bash
 config_paths="resources_servers/ns_tools/configs/ns_tools.yaml, \
 resources_servers/math_with_judge/configs/math_with_judge.yaml, \

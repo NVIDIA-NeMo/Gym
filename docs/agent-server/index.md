@@ -13,13 +13,13 @@ The following pseudocode illustrates a typical agent rollout in three phases: in
 class Agent:
     async def run(self, task_data):
         # 1. Initialize episode
-        resource_server.seed_session(task_data)
+        resources_server.seed_session(task_data)
 
         # 2. Run the agent loop
         response = self.responses(task_data.prompt, task_data.tools)
 
         # 3. Grade the result
-        reward = resource_server.verify(response, task_data.ground_truth)
+        reward = resources_server.verify(response, task_data.ground_truth)
         return response, reward
 
     async def responses(self, prompt, tools):
@@ -35,7 +35,7 @@ class Agent:
                 break # model is done, no more tool calls
 
             for tool_call in model_output.function_calls:
-                result = resource_server.post(f"/{tool_call.name}", tool_call.arguments)
+                result = resources_server.post(f"/{tool_call.name}", tool_call.arguments)
                 conversation.append(result)
 
             step += 1

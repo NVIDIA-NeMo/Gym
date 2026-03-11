@@ -1,0 +1,5 @@
+# Finance Agent Resource Server Dependencies
+-e nemo-gym[dev] @ ../../
+aiohttp>=3.9.0
+beautifulsoup4>=4.12.0
+tavily==1.1.0

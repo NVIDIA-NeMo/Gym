@@ -1,7 +1,7 @@
-# Google Search Resource Server
+# Google Search Resources Server
 
 ## Table of Contents
-- [Google Search Resource Server](#google-search-resource-server)
+- [Google Search Resources Server](#google-search-resources-server)
   - [Table of Contents](#table-of-contents)
   - [Description](#description)
     - [Overview](#overview)

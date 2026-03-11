@@ -12,6 +12,8 @@ tavily_search_resources_server:
       judge_responses_create_params:
         input: []
       verified: false
+      description: Model uses search tools to satisfy a user query.
+      value: Measure agentic search capability
 judge_model:
   responses_api_models:
     vllm_model:

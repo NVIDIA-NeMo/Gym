@@ -13,4 +13,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Lean4 formal proof verification resource server for NeMo Gym."""
+"""Lean4 formal proof verification resources server for NeMo Gym."""

@@ -14,7 +14,7 @@ The GenRM compare server evaluates multiple candidate responses by:
 ### Architecture
 
 ```
-GenRM Compare Resource Server
+GenRM Compare Resources Server
     ├── Pair Generation (circular or all_pairs)
     ├── Message Formatting (response_1, response_2 roles)
     ├── Call GenRM Model (/v1/responses) for each pair
@@ -204,7 +204,7 @@ Example principle:
 ```
 genrm_compare/
 ├── __init__.py
-├── app.py                         # Main Resource Server implementation
+├── app.py                         # Main Resources Server implementation
 ├── comparison_strategies.py       # Comparison strategy infrastructure (GenRMStrategy)
 ├── utils.py                       # Utility functions (parsing, aggregation, etc.)
 ├── configs/
@@ -262,12 +262,12 @@ python app.py --config configs/genrm_compare.yaml
 
 ## Comparison Strategies Integration
 
-The `comparison_strategies.py` module provides the infrastructure for integrating this Resource Server with rollout collection workflows (e.g., GRPO training):
+The `comparison_strategies.py` module provides the infrastructure for integrating this Resources Server with rollout collection workflows (e.g., GRPO training):
 
 **Key Components:**
 
 - **`ComparisonStrategy` Protocol**: Interface for comparison strategies
-- **`GenRMStrategy`**: Implementation that calls this Resource Server
+- **`GenRMStrategy`**: Implementation that calls this Resources Server
 - **`GenRMStrategyConfig`**: Configuration for strategy behavior
 - **Utility functions**: For prompt grouping, text extraction, response generation
 
@@ -276,7 +276,7 @@ The `comparison_strategies.py` module provides the infrastructure for integratin
 When configured in `rollout_collection.py`, the strategy:
 1. Generates N responses per prompt using the policy model
 2. Buffers responses by prompt+principle
-3. Calls this Resource Server's `/compare` endpoint
+3. Calls this Resources Server's `/compare` endpoint
 4. Attaches rewards and metrics to results
 
 See `examples/genrm_grpo_example.yaml` for complete configuration.

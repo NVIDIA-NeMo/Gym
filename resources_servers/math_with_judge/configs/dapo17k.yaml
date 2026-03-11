@@ -11,6 +11,8 @@ math_with_judge:
       should_use_judge: false
       domain: math
       verified: false
+      description: DAPO17k math dataset with math-verify
+      value: Improve math capabilities including AIME 24 / 25
 math_with_judge_simple_agent:
   responses_api_agents:
     simple_agent:

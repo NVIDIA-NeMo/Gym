@@ -1,8 +1,8 @@
-# Text-to-SQL Resource Server
+# Text-to-SQL Resources Server
 
 ## Description
 
-This resource server evaluates text-to-SQL generation using an LLM as a judge. Given a natural language question and database schema, the model generates SQL queries that are compared against ground truth using semantic equivalence checking.
+This resources server evaluates text-to-SQL generation using an LLM as a judge. Given a natural language question and database schema, the model generates SQL queries that are compared against ground truth using semantic equivalence checking.
 
 The server extracts SQL from model responses (supporting code blocks and raw SQL statements) and uses an LLM judge to determine if the generated query is functionally equivalent to the expected query.
 

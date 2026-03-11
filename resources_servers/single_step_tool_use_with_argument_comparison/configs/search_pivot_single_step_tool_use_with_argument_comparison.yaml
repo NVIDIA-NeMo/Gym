@@ -6,6 +6,8 @@ search_pivot_single_step_tool_use_with_argument_comparison_resources_server:
       tool_call_comparator_config:
         word_count_similarity_threshold: 0.3
       verified: false
+      description: The model must output the next correct call in a given trajectory involving search tools.
+      value: Improve agentic search capability.
 search_pivot_single_step_tool_use_with_argument_comparison_agent:
   responses_api_agents:
     tool_simulation_agent:

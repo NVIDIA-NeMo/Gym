@@ -57,7 +57,7 @@ class TestServerStatus:
                 pid=123,
                 server_type="resources_servers",
                 name="test_resource",
-                process_name="test_resource_server",
+                process_name="test_resources_server",
                 host="127.0.0.1",
                 port=8000,
                 url="http://127.0.0.1:8000",

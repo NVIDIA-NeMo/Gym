@@ -20,7 +20,7 @@ from nemo_gym.server_utils import ServerClient
 
 async def main():
     """
-    Demo client for the Calendar Resource Server.
+    Demo client for the Calendar Resources Server.
 
     The server verifies whether an assistant correctly schedules calendar events
     by checking if the assistant's response contains a valid JSON list of events
@@ -29,9 +29,9 @@ async def main():
     server_client = ServerClient.load_from_global_config()
 
     print("=" * 80)
-    print("Calendar Resource Server Demo")
+    print("Calendar Resources Server Demo")
     print("=" * 80)
-    print("\nThis demo shows how the resource server grades assistant responses")
+    print("\nThis demo shows how the resources server grades assistant responses")
     print("for calendar scheduling tasks with time constraints.\n")
 
     # Example 1: Valid response - correctly scheduled events

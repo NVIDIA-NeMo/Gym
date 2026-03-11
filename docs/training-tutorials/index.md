@@ -28,14 +28,6 @@ Review the agent executor for using NeMo Gym environments with OpenRLHF.
 {bdg-secondary}`openrlhf`
 :::
 
-:::{grid-item-card} {octicon}`package;1.5em;sd-mr-1` TRL
-:link: trl
-:link-type: doc
-GRPO training on Workplace Assistant and Reasoning Gym environments
-+++
-{bdg-secondary}`trl`
-:::
-
 :::{grid-item-card} {octicon}`zap;1.5em;sd-mr-1` Unsloth
 :link: unsloth
 :link-type: doc

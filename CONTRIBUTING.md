@@ -1,6 +1,6 @@
 # Contributing To NeMo-Gym
 
-Welcome to NeMo Gym! Help advance RL training for the community by contributing to NeMo Gym.
+Welcome! We are excited to have you contribute to NeMo Gym. Whether you are adding new training environments, integrating RL frameworks, improving documentation, or fixing bugs, your contributions help advance RL training.
 
 ## High Priority Contributions
 

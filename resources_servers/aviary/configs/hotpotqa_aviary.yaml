@@ -4,6 +4,8 @@ hotpotqa_aviary_resources_server:
       entrypoint: hotpotqa_app.py
       domain: agent
       verified: false
+      description: Multi-hop question answering on the HotPotQA dataset with Wikipedia search
+      value: Improve knowledge and agentic capability
 hotpotqa_aviary_agent:
   responses_api_agents:
     aviary_agent:

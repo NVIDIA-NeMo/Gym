@@ -17,11 +17,11 @@
 
 This agent implements a verify-correction loop:
 1. Generate initial proof attempt
-2. Verify with resource server
+2. Verify with resources server
 3. If failed and turns remaining: inject correction_prompt, generate again
 4. Repeat until success or max turns exhausted
 
-The resource server is stateless - it always provides error feedback on failure.
+The resources server is stateless - it always provides error feedback on failure.
 The agent controls the retry loop and turn counting.
 """
 
@@ -74,7 +74,7 @@ class ProofRefinementAgentConfig(BaseResponsesAPIAgentConfig):
 
 
 class ProofRefinementRunRequest(BaseRunRequest):
-    """Run request that forwards fields to the resource server."""
+    """Run request that forwards fields to the resources server."""
 
     model_config = ConfigDict(extra="allow")
 
@@ -134,7 +134,7 @@ class ProofRefinementAgent(SimpleResponsesAPIAgent):
         """Execute the proof refinement loop.
 
         Flow:
-        1. Seed the session with the resource server
+        1. Seed the session with the resources server
         2. Generate initial proof attempt
         3. Verify the proof
         4. If failed and turns remaining:

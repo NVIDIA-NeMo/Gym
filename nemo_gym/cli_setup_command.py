@@ -52,6 +52,8 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
 
     verbose_flag = "-v " if global_config_dict.get(PIP_INSTALL_VERBOSE_KEY_NAME) else ""
 
+    is_editable_install = (dir_path / "../../pyproject.toml").exists()
+
     if should_skip_venv_setup:
         env_setup_cmd = f"source {venv_activate_fpath}"
     else:
@@ -62,9 +64,25 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
                 f"Found both pyproject.toml and requirements.txt for uv venv setup in server dir: {dir_path}. Please only use one or the other!"
             )
         elif has_pyproject_toml:
-            install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
+            if is_editable_install:
+                install_cmd = (
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
+                )
+            else:
+                # install nemo-gym from pypi instead of relative path in pyproject.toml
+                install_cmd = (
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}nemo-gym && """
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}--no-sources '-e .' {" ".join(head_server_deps)}"""
+                )
         elif has_requirements_txt:
-            install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}-r requirements.txt {" ".join(head_server_deps)}"""
+            if is_editable_install:
+                install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}-r requirements.txt {" ".join(head_server_deps)}"""
+            else:
+                # install nemo-gym from pypi instead of relative path in requirements.txt
+                install_cmd = (
+                    f"""(echo 'nemo-gym' && grep -v -F '../..' requirements.txt) | """
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}-r /dev/stdin {" ".join(head_server_deps)}"""
+                )
         else:
             raise RuntimeError(
                 f"Missing pyproject.toml or requirements.txt for uv venv setup in server dir: {dir_path}"

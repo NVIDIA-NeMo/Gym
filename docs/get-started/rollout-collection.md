@@ -45,7 +45,7 @@ Make sure you have:
 
 ## 1. Inspect the Data
 
-Look at the example dataset included with the Example Single Tool Call resource server:
+Look at the example dataset included with the Example Single Tool Call resources server:
 
 ```bash
 head -1 resources_servers/example_single_tool_call/data/example.jsonl | python -m json.tool
@@ -210,7 +210,7 @@ Explore environments available for training and evaluation.
 :::
 
 :::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build a Custom Environment
-:link: ../environment-tutorials/creating-training-environment
+:link: ../environment-tutorials/index
 :link-type: doc
 
 Implement or integrate existing tools and define task verification logic.

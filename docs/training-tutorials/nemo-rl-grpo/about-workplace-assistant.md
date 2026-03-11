@@ -153,7 +153,7 @@ The full task includes all 27 tools across the 5 databases.
 
 ## How Verification Works
 
-The environment is implemented as a FastAPI-based resource server that executes tools and verification. It uses **state-matching verification**: instead of requiring exact tool sequences, it compares final database states.
+The environment is implemented as a FastAPI-based resources server that executes tools and verification. It uses **state-matching verification**: instead of requiring exact tool sequences, it compares final database states.
 
 ::::{tab-set}
 

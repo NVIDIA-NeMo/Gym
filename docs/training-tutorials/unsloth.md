@@ -11,6 +11,8 @@ This tutorial demonstrates how to use [Unsloth](https://github.com/unslothai/uns
 - A Google account (for Colab) or a local GPU with 16GB+ VRAM
 - Familiarity with NeMo Gym concepts ({doc}`/get-started/index`)
 
+The NeMo Gym integration with Unsloth is tested on {{unsloth_pinned}}. Other versions are not guaranteed to work.
+
 ---
 
 ## Getting Started
