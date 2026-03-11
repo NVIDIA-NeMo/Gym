@@ -261,6 +261,8 @@ def get_example_and_training_server_info() -> tuple[list[ServerInfo], list[Serve
 
         for yaml_file in yaml_files:
             yaml_data = extract_config_metadata(yaml_file)
+            if not yaml_data.types:
+                continue
 
             server_name = subdir.name
             is_example_only = server_name.startswith("example_")

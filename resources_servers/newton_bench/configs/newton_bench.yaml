@@ -6,6 +6,8 @@ newton_bench:
       port: 8000
       domain: math
       verified: false
+      description: Scientific law discovery tasks through agentic experimentation across 12 physics domains
+      value: Improve science, reasoning, and tool use capabilities
 newton_bench_simple_agent:
   responses_api_agents:
     simple_agent:
