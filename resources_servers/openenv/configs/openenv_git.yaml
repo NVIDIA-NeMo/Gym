@@ -1,0 +1,25 @@
+openenv_git_resources_server:
+  resources_servers:
+    openenv:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: "Git environment via OpenEnv. Agent performs git operations against a Gitea server. Requires Gitea Docker container."
+      env_class: "git_env.server.git_task_environment.GitTaskEnvironment"
+      action_class: "git_env.models.GitAction"
+      is_mcp: false
+
+openenv_git_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: openenv_git_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/openenv/data/git/example.jsonl
