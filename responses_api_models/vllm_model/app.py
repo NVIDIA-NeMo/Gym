@@ -127,6 +127,177 @@ def _build_vllm_argv(config: VLLMModelConfig, server_host: str, server_port: int
     return argv
 
 
+def _patch_vllm_hermes_tool_parser_thread_safety() -> None:
+    """Patch Hermes2ProToolParser.__init__ to cache tokenizer calls.
+
+    The HuggingFace tokenizer's Rust backend does not support concurrent
+    access. When multiple async requests call _preprocess_chat concurrently,
+    each one constructs a new Hermes2ProToolParser which calls
+    tokenizer.encode() and tokenizer.decode() in __init__, causing
+    "RuntimeError: Already borrowed".
+
+    This patch caches the encode/decode results so only the first
+    instantiation (protected by a lock) touches the tokenizer.
+
+    Related:
+    - https://github.com/vllm-project/vllm/pull/30264
+    - https://github.com/huggingface/tokenizers/issues/537
+    """
+    import importlib.util
+    import importlib.resources
+
+    spec = importlib.util.find_spec("vllm")
+    if spec is None or not spec.submodule_search_locations:
+        return
+
+    base_dir = next(iter(spec.submodule_search_locations))
+    file_path = os.path.join(base_dir, "tool_parsers", "hermes_tool_parser.py")
+    if not os.path.exists(file_path):
+        return
+
+    with open(file_path, "r") as f:
+        content = f.read()
+
+    if "_tokenizer_cache" in content:
+        return
+
+    old_import = "import json\nfrom collections.abc import Sequence"
+    new_import = "import json\nimport threading\nfrom collections.abc import Sequence"
+
+    old_class_line = "class Hermes2ProToolParser(ToolParser):"
+    new_class_line = (
+        "class Hermes2ProToolParser(ToolParser):\n"
+        "    _tokenizer_lock = threading.Lock()\n"
+        "    _tokenizer_cache = {}"
+    )
+
+    old_init_snippet = (
+        "        self.tool_call_start_token_ids = self.model_tokenizer.encode(\n"
+        "            self.tool_call_start_token, add_special_tokens=False\n"
+        "        )\n"
+        "        self.tool_call_end_token_ids = self.model_tokenizer.encode(\n"
+        "            self.tool_call_end_token, add_special_tokens=False\n"
+        "        )\n"
+        "\n"
+        "        self.tool_call_start_token_array = [\n"
+        "            self.model_tokenizer.decode([token_id])\n"
+        "            for token_id in self.tool_call_start_token_ids\n"
+        "        ]\n"
+        "\n"
+        "        self.tool_call_end_token_array = [\n"
+        "            self.model_tokenizer.decode([token_id])\n"
+        "            for token_id in self.tool_call_end_token_ids\n"
+        "        ]"
+    )
+
+    new_init_snippet = (
+        "        _tid = id(self.model_tokenizer)\n"
+        "        if _tid in Hermes2ProToolParser._tokenizer_cache:\n"
+        "            _cached = Hermes2ProToolParser._tokenizer_cache[_tid]\n"
+        "            self.tool_call_start_token_ids = _cached['start_ids']\n"
+        "            self.tool_call_end_token_ids = _cached['end_ids']\n"
+        "            self.tool_call_start_token_array = _cached['start_array']\n"
+        "            self.tool_call_end_token_array = _cached['end_array']\n"
+        "        else:\n"
+        "            with Hermes2ProToolParser._tokenizer_lock:\n"
+        "                if _tid in Hermes2ProToolParser._tokenizer_cache:\n"
+        "                    _cached = Hermes2ProToolParser._tokenizer_cache[_tid]\n"
+        "                    self.tool_call_start_token_ids = _cached['start_ids']\n"
+        "                    self.tool_call_end_token_ids = _cached['end_ids']\n"
+        "                    self.tool_call_start_token_array = _cached['start_array']\n"
+        "                    self.tool_call_end_token_array = _cached['end_array']\n"
+        "                else:\n"
+        "                    self.tool_call_start_token_ids = self.model_tokenizer.encode(\n"
+        "                        self.tool_call_start_token, add_special_tokens=False\n"
+        "                    )\n"
+        "                    self.tool_call_end_token_ids = self.model_tokenizer.encode(\n"
+        "                        self.tool_call_end_token, add_special_tokens=False\n"
+        "                    )\n"
+        "                    self.tool_call_start_token_array = [\n"
+        "                        self.model_tokenizer.decode([token_id])\n"
+        "                        for token_id in self.tool_call_start_token_ids\n"
+        "                    ]\n"
+        "                    self.tool_call_end_token_array = [\n"
+        "                        self.model_tokenizer.decode([token_id])\n"
+        "                        for token_id in self.tool_call_end_token_ids\n"
+        "                    ]\n"
+        "                    Hermes2ProToolParser._tokenizer_cache[_tid] = {\n"
+        "                        'start_ids': self.tool_call_start_token_ids,\n"
+        "                        'end_ids': self.tool_call_end_token_ids,\n"
+        "                        'start_array': self.tool_call_start_token_array,\n"
+        "                        'end_array': self.tool_call_end_token_array,\n"
+        "                    }"
+    )
+
+    if old_init_snippet not in content:
+        return
+
+    content = content.replace(old_import, new_import, 1)
+    content = content.replace(old_class_line, new_class_line, 1)
+    content = content.replace(old_init_snippet, new_init_snippet, 1)
+
+    with open(file_path, "w") as f:
+        f.write(content)
+
+
+def _patch_flashinfer_mnnvl_cluster_uuid() -> None:
+    """Patch flashinfer mnnvl.py to guard against empty/undecodable clusterUuid.
+
+    On single-node NVSwitch clusters, clusterUuid is all-zero bytes
+    (no multi-node NVLink domain). ctypes truncates at the first null
+    byte, producing an empty string — then ``clusterUuid[0]`` raises
+    ``IndexError``. On some hardware the raw bytes are not valid UTF-8,
+    causing ``UnicodeDecodeError`` before the index is even reached.
+
+    Fix: wrap the clusterUuid access in a try/except so that either
+    failure safely returns ``False``, falling back to standard NCCL.
+
+    Upstream fix: https://github.com/flashinfer-ai/flashinfer/pull/2626
+    Related issue: https://github.com/flashinfer-ai/flashinfer/issues/2633
+    """
+    import importlib.util
+
+    spec = importlib.util.find_spec("flashinfer")
+    if spec is None or not spec.submodule_search_locations:
+        return
+
+    base_dir = next(iter(spec.submodule_search_locations))
+    file_path = os.path.join(base_dir, "comm", "mnnvl.py")
+    if not os.path.exists(file_path):
+        return
+
+    with open(file_path, "r") as f:
+        content = f.read()
+
+    old_snippet = (
+        "        if (\n"
+        "            fabric_info.state >= pynvml.NVML_GPU_FABRIC_STATE_COMPLETED\n"
+        "            and fabric_info.clusterUuid[0] != 0\n"
+        "        ):\n"
+        "            return True\n"
+        "        return False\n"
+    )
+
+    new_snippet = (
+        "        try:\n"
+        "            return (\n"
+        "                fabric_info.state >= pynvml.NVML_GPU_FABRIC_STATE_COMPLETED\n"
+        "                and fabric_info.clusterUuid\n"
+        "                and fabric_info.clusterUuid[0] != 0\n"
+        "            )\n"
+        "        except (UnicodeDecodeError, IndexError):\n"
+        "            return False\n"
+    )
+
+    if new_snippet in content or old_snippet not in content:
+        return
+
+    content = content.replace(old_snippet, new_snippet)
+
+    with open(file_path, "w") as f:
+        f.write(content)
+
+
 def _start_vllm_server(
     config: VLLMModelConfig,
     server_host: str,
@@ -149,6 +320,13 @@ def _start_vllm_server(
     """
     for k, v in (config.server_env or {}).items():
         os.environ[k] = v
+
+    # Patches must run before any vLLM import so the modified source files
+    # are read by Python for the first time rather than being applied to an
+    # already-loaded in-memory module.  find_spec() only locates the package
+    # on disk and does not trigger an import, so this ordering is safe.
+    _patch_vllm_hermes_tool_parser_thread_safety()
+    _patch_flashinfer_mnnvl_cluster_uuid()
 
     import uvloop
     import vllm.engine.arg_utils
