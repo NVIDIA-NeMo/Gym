@@ -385,7 +385,7 @@ ng_reinstall = "nemo_gym.cli:reinstall"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["benchmarks", "resources_servers", "responses_api_agents", "responses_api_models", "nemo_gym", "nemo_gym.*"]
+include = ["benchmarks", "resources_servers", "responses_api_agents", "responses_api_models", "nemo_gym"]
 
 ################################################
 # Testing
