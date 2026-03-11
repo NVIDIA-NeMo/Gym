@@ -14,7 +14,7 @@
 # limitations under the License.
 """Prompt configuration: YAML-based prompt templates applied at rollout time.
 
-Prompt templates are mutually exclusive with pre-baked
+Prompt templates are mutually exclusive with pre-populated
 ``responses_create_params.input`` values. This separation enables prompt
 sweeps without re-preparing data.
 """
@@ -83,7 +83,7 @@ def fill_prompt(prompt_config: PromptConfig, row: dict) -> List[Dict[str, str]]:
 
 
 def validate_prompt_compatibility(rows: List[dict], prompt_config: PromptConfig) -> None:
-    """Validate that no rows have pre-baked responses_create_params.input when a prompt_config is provided.
+    """Validate that no rows have pre-populated responses_create_params.input when a prompt_config is provided.
 
     Collects all violating row indices and reports them in a single error.
     """
@@ -91,7 +91,7 @@ def validate_prompt_compatibility(rows: List[dict], prompt_config: PromptConfig)
     if conflicting_indices:
         raise ValueError(
             "Some rows have responses_create_params.input but prompt_config is also specified. "
-            f"These are mutually exclusive — use one or the other. Violating rows: {conflicting_indices}"
+            f"These are mutually exclusive. Use one or the other. Violating rows: {conflicting_indices}"
         )
 
 
@@ -116,7 +116,7 @@ def apply_prompt_to_row(row: dict, prompt_config: PromptConfig) -> dict:
 def materialize_prompts(input_jsonl: str, prompt_config: str, output_jsonl: str) -> None:
     """Apply a prompt template to raw JSONL data, producing materialized JSONL.
 
-    Reads each row from ``input_jsonl``, validates that no row has pre-baked
+    Reads each row from ``input_jsonl``, validates that no row has pre-populated
     ``responses_create_params.input``, applies the prompt template, and writes
     the result to ``output_jsonl``.
 
@@ -147,23 +147,21 @@ def materialize_prompts(input_jsonl: str, prompt_config: str, output_jsonl: str)
 class MaterializePromptsConfig(BaseNeMoGymCLIConfig):
     """
     Apply a prompt template to raw JSONL data, producing materialized JSONL
-    with baked ``responses_create_params.input`` for RL training.
+    with populated ``responses_create_params.input`` for RL training.
 
     Examples:
-
-    See example prompt configs in ``nemo_gym/prompt_configs/examples/``.
 
     ```bash
     ng_materialize_prompts \\
         +input_jsonl_fpath=data/my_dataset.jsonl \\
-        +prompt_config=nemo_gym/prompt_configs/examples/math_cot.yaml \\
+        +prompt_config=/path/to/my_prompt.yaml \\
         +output_jsonl_fpath=my_dataset_materialized.jsonl
     ```
     """
 
     input_jsonl_fpath: str = Field(description="Raw JSONL data (no responses_create_params.input).")
     prompt_config: str = Field(description="Path to prompt YAML file to apply.")
-    output_jsonl_fpath: str = Field(description="Output path for materialized JSONL with baked prompts.")
+    output_jsonl_fpath: str = Field(description="Output path for materialized JSONL with populated prompts.")
 
 
 def materialize_prompts_cli() -> None:  # pragma: no cover

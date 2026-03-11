@@ -1,4 +1,0 @@
-# Math chain-of-thought prompt with system message.
-# Expects rows with a "question" field.
-system: "You are a helpful math assistant. Think step by step and put your final answer in \\boxed{{}}."
-user: "{question}"

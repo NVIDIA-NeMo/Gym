@@ -1,7 +1,0 @@
-# Prompt using multiple fields from the data row.
-# Expects rows with "question" and "context" fields.
-system: "Answer the question using the provided context."
-user: |
-  Context: {context}
-
-  Question: {question}

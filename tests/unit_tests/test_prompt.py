@@ -78,9 +78,17 @@ class TestResolvePath:
         p.write_text("")
         assert _resolve_path(str(p)) == p
 
-    def test_relative_path_resolves_to_parent_dir(self):
-        resolved = _resolve_path("nemo_gym/prompt_configs/examples/minimal.yaml")
-        assert resolved.exists()
+    def test_relative_path_resolves_to_parent_dir(self, tmp_path):
+        # Create a file relative to PARENT_DIR to test resolution
+        from nemo_gym import PARENT_DIR
+
+        test_file = PARENT_DIR / "test_resolve_path_temp.yaml"
+        test_file.write_text("user: '{q}'")
+        try:
+            resolved = _resolve_path("test_resolve_path_temp.yaml")
+            assert resolved.exists()
+        finally:
+            test_file.unlink()
 
 
 class TestFillPrompt:

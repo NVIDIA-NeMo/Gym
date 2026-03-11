@@ -117,7 +117,7 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
     )
     prompt_config: Optional[str] = Field(
         default=None,
-        description="Path to a prompt YAML file. Builds responses_create_params.input from the template at rollout time. Mutually exclusive with pre-baked responses_create_params.input in the JSONL data.",
+        description="Path to a prompt YAML file. Builds responses_create_params.input from the template at rollout time. Mutually exclusive with pre-populated responses_create_params.input in the JSONL data.",
     )
 
     @property
