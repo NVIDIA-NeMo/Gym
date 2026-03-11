@@ -67,7 +67,8 @@ multichallenge:
       no_label: "[[NO]]"
 
       domain: knowledge
-      description: "MultiChallenge benchmark evaluation with LLM judge"
+      description: Targets inference memory, instruction retention, version editing, and self-coherence.
+      value: Improve complex multi-turn conversational capability
       verified: false
 
 # ============================================================================
