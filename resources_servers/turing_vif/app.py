@@ -90,6 +90,11 @@ logger = logging.getLogger(__name__)
 class TuringVIFResourcesServerConfig(BaseResourcesServerConfig):
     """Configuration for the Turing VIF Resource Server."""
 
+    judge_server_name: Optional[str] = Field(
+        default=None,
+        description="NeMo Gym server instance name for the judge model. When set, the judge URL is discovered "
+        "automatically from the server registry, and judge_base_url is ignored.",
+    )
     judge_base_url: Optional[str] = Field(
         default=None, description="Base URL for the LLM judge API. If not set, uses policy_base_url."
     )
@@ -247,11 +252,16 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
     def _get_judge_client(self) -> NeMoGymAsyncOpenAI:
         """Get or create the LLM judge client."""
         if self._judge_client is None:
-            # Use judge-specific config if available, otherwise fall back to policy config
-            base_url = self.config.judge_base_url or getattr(
-                self.config, "policy_base_url", "https://api.openai.com/v1"
-            )
             api_key = self.config.judge_api_key or getattr(self.config, "policy_api_key", "")
+
+            if self.config.judge_server_name:
+                from nemo_gym.server_utils import get_server_url
+
+                base_url = get_server_url(self.config.judge_server_name) + "/v1"
+            else:
+                base_url = self.config.judge_base_url or getattr(
+                    self.config, "policy_base_url", "https://api.openai.com/v1"
+                )
 
             self._judge_client = NeMoGymAsyncOpenAI(
                 base_url=base_url,
