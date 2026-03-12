@@ -174,67 +174,28 @@ class AggregateMetricsMixin:
     """
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
-        """Compute custom metrics from all verify responses grouped by task.
+        """Override to compute custom metrics from all verify responses.
 
-        Default: if config has metrics_type, resolves a BaseMetrics subclass and runs
-        its compute() pipeline (pass@k, majority@k, per-sample statistics, usage).
-        The MetricsOutput is flattened to flat keys and merged into agent_metrics.
+        Receives verify responses grouped by task: tasks[i] is a list of rollout
+        dicts for task i. Each dict has at minimum reward, plus any custom fields
+        from the verify response (e.g. symbolic_correct, judgement-gen-base).
 
-        Override for fully custom aggregation (e.g. arena win-rate).
+        Use for metrics that need the full dataset at once:
+        - Confidence intervals (ArenaMetrics)
+        - Cross-task statistics (std_dev_across_runs)
+        - pass@k with proper combinatorial computation
+
+        The returned dict is merged into agent_metrics.
+        Default: empty dict (no additional metrics).
         """
-        metrics_type = getattr(getattr(self, "config", None), "metrics_type", None)
-        if not metrics_type:
-            return {}
-
-        from nemo_gym.metrics import get_metrics
-
-        metrics = get_metrics(metrics_type)
-        output = metrics.compute(tasks)
-
-        # Flatten MetricsOutput.aggregate into flat keys
-        flat: Dict[str, Any] = {}
-        for mode, scores in output.aggregate.items():
-            for name, val in scores.items():
-                flat[f"{mode}/{name}"] = val
-        for key, usage_stats in output.usage.items():
-            for stat_name, stat_val in usage_stats.items():
-                flat[f"usage/{key}/{stat_name}"] = stat_val
-        flat["per_sample_aggregate"] = output.per_sample_aggregate
-        flat["per_task"] = output.per_task
-        return flat
+        return {}
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
-        """Select headline metrics for this benchmark.
+        """Override to select headline metrics for this benchmark.
 
-        Default: all mean/* entries from RewardProfiler, plus the highest-k
-        pass@1[avg-of-*] scores from BaseMetrics (excluding statistics).
+        Default: all mean/* entries from agent_metrics.
         """
-        key = {}
-        # RewardProfiler mean stats
-        for k, v in agent_metrics.items():
-            if k.startswith("mean/"):
-                key[k] = v
-
-        # BaseMetrics: find highest-k pass@1[avg-of-*] entry
-        avg_of_keys = [k for k in agent_metrics if k.startswith("pass@1[avg-of-")]
-        if avg_of_keys:
-            # Group by prefix to find the highest k
-            highest_k = max(avg_of_keys, key=lambda k: int(k.split("pass@1[avg-of-")[1].split("]")[0]))
-            prefix = highest_k.split("/")[0] + "/"
-            for k, v in agent_metrics.items():
-                if k.startswith(prefix) and "std_dev" not in k and "std_err" not in k:
-                    key[k] = v
-
-        # BaseMetrics: highest-k pass@k
-        pass_keys = [k for k in agent_metrics if k.startswith("pass@") and "[" not in k]
-        if pass_keys:
-            highest_pass = max(pass_keys, key=lambda k: int(k.split("@")[1].split("/")[0]))
-            prefix = highest_pass.split("/")[0] + "/"
-            for k, v in agent_metrics.items():
-                if k.startswith(prefix):
-                    key[k] = v
-
-        return key
+        return {k: v for k, v in agent_metrics.items() if k.startswith("mean/")}
 
 
 def _group_by_task(verify_responses: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from abc import abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
@@ -27,7 +27,7 @@ from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, Simpl
 
 
 class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
-    metrics_type: Optional[str] = None
+    pass
 
 
 class AggregateMetricsRequest(BaseModel):

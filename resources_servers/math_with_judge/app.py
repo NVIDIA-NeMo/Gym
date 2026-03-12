@@ -14,8 +14,10 @@
 # limitations under the License.
 import contextlib
 import logging
+import math
+from collections import Counter
 from io import StringIO
-from typing import Any, ClassVar, Optional
+from typing import Any, ClassVar, Dict, List, Optional, Union
 
 from fastapi import FastAPI
 from math_verify import grader
@@ -302,6 +304,169 @@ Example output: "My final verdict is different [[A!=B]]"."""
                 return True, judge_evaluation
             else:
                 return False, judge_evaluation
+
+    # ──────────────────────────────────────────────────────────
+    # Aggregate metrics overrides
+    # ──────────────────────────────────────────────────────────
+
+    def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        """Compute math-specific metrics: pass@k, majority@k, per-sample statistics."""
+        if not tasks:
+            return {}
+
+        k = max(len(rollouts) for rollouts in tasks)
+        score_dicts, answers = _extract_scores_and_answers(tasks)
+        score_names = sorted({n for ts in score_dicts for s in ts for n in s})
+
+        flat: Dict[str, Any] = {}
+
+        # pass@k and pass@1[avg-of-k]
+        for k_val in range(1, k + 1):
+            pass_k, avg_k = _compute_pass_and_avg(score_dicts, score_names, k_val)
+            for name, val in pass_k.items():
+                flat[f"pass@{k_val}/{name}"] = val
+            for name, val in avg_k.items():
+                flat[f"pass@1[avg-of-{k_val}]/{name}"] = val
+
+        # majority@k
+        has_answers = any(any(a is not None for a in ta) for ta in answers)
+        if has_answers:
+            for k_val in range(1, k + 1):
+                maj = _compute_majority_at_k(score_dicts, answers, score_names, k_val)
+                for name, val in maj.items():
+                    flat[f"majority@{k_val}/{name}"] = val
+
+        # Per-sample statistics (std_dev/std_err across runs)
+        per_sample = _compute_per_sample(score_dicts, score_names, k)
+        if k > 1:
+            for name, values in per_sample.items():
+                if len(values) < 2:
+                    continue
+                mean = sum(values) / len(values)
+                variance = sum((x - mean) ** 2 for x in values) / (len(values) - 1)
+                std_dev = math.sqrt(variance)
+                # Find the matching avg-of-k key and fuse stats
+                avg_key = f"pass@1[avg-of-{k}]/{name}"
+                if avg_key in flat:
+                    flat[f"pass@1[avg-of-{k}]/{name}_std_dev_across_runs"] = std_dev
+                    flat[f"pass@1[avg-of-{k}]/{name}_std_err_across_runs"] = std_dev / math.sqrt(len(values))
+
+        return flat
+
+    def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Select headline metrics: mean/reward + highest-k pass@1 and pass@k accuracy."""
+        key: Dict[str, Any] = {}
+
+        for k, v in agent_metrics.items():
+            if k.startswith("mean/"):
+                key[k] = v
+
+        # Highest-k pass@1[avg-of-*] accuracy (no statistics)
+        avg_keys = [k for k in agent_metrics if k.startswith("pass@1[avg-of-") and "/accuracy" in k]
+        avg_keys = [k for k in avg_keys if "std_dev" not in k and "std_err" not in k]
+        if avg_keys:
+            best = max(avg_keys, key=lambda k: int(k.split("pass@1[avg-of-")[1].split("]")[0]))
+            key[best] = agent_metrics[best]
+
+        # Highest-k pass@k accuracy
+        pass_keys = [k for k in agent_metrics if k.startswith("pass@") and "[" not in k and "/accuracy" in k]
+        if pass_keys:
+            best = max(pass_keys, key=lambda k: int(k.split("@")[1].split("/")[0]))
+            key[best] = agent_metrics[best]
+
+        # Highest-k majority accuracy
+        maj_keys = [k for k in agent_metrics if k.startswith("majority@") and "/accuracy" in k]
+        if maj_keys:
+            best = max(maj_keys, key=lambda k: int(k.split("@")[1].split("/")[0]))
+            key[best] = agent_metrics[best]
+
+        return key
+
+
+# ──────────────────────────────────────────────────────────
+# Math metrics computation functions
+# ──────────────────────────────────────────────────────────
+
+
+def _get_score_dict(result: dict) -> Dict[str, Union[float, bool]]:
+    """Extract named scores from a math verify response."""
+    scores: Dict[str, Union[float, bool]] = {}
+    if "library_reward" in result:
+        scores["symbolic_accuracy"] = result["library_reward"]
+    if "judge_evaluations" in result and result["judge_evaluations"] is not None:
+        scores["judge_accuracy"] = result["reward"]
+    scores["accuracy"] = result["reward"]
+    return {n: int(v) if isinstance(v, bool) else v for n, v in scores.items()}
+
+
+def _extract_scores_and_answers(
+    tasks: List[List[dict]],
+) -> tuple[List[List[Dict[str, float]]], List[List[Optional[str]]]]:
+    """Extract score dicts and answers for all tasks and rollouts."""
+    all_scores: List[List[Dict[str, float]]] = []
+    all_answers: List[List[Optional[str]]] = []
+    for rollouts in tasks:
+        task_scores = [_get_score_dict(r) for r in rollouts]
+        task_answers = [r.get("extracted_answer") for r in rollouts]
+        all_scores.append(task_scores)
+        all_answers.append(task_answers)
+    return all_scores, all_answers
+
+
+def _compute_pass_and_avg(
+    all_scores: List[List[Dict[str, float]]], score_names: List[str], k: int
+) -> tuple[Dict[str, float], Dict[str, float]]:
+    """pass@k (max of first k) and pass@1[avg-of-k] (mean of first k)."""
+    pass_k: Dict[str, float] = {}
+    avg_k: Dict[str, float] = {}
+    for name in score_names:
+        pass_vals, avg_vals = [], []
+        for task_scores in all_scores:
+            vals = [s.get(name) for s in task_scores if name in s]
+            if vals:
+                first_k = vals[:k]
+                avg_vals.append(sum(first_k) / len(first_k))
+                if len(vals) >= k:
+                    pass_vals.append(max(first_k))
+        if pass_vals:
+            pass_k[name] = 100.0 * sum(pass_vals) / len(pass_vals)
+        if avg_vals:
+            avg_k[name] = 100.0 * sum(avg_vals) / len(avg_vals)
+    return pass_k, avg_k
+
+
+def _compute_majority_at_k(
+    all_scores: List[List[Dict[str, float]]],
+    all_answers: List[List[Optional[str]]],
+    score_names: List[str],
+    k: int,
+) -> Dict[str, float]:
+    """majority@k: pick most common answer among first k, use its score."""
+    result = {}
+    for name in score_names:
+        values = []
+        for task_scores, task_answers in zip(all_scores, all_answers):
+            pairs = [(a, s[name]) for s, a in zip(task_scores[:k], task_answers[:k]) if a is not None and name in s]
+            if not pairs:
+                continue
+            most_common = Counter(a for a, _ in pairs).most_common(1)[0][0]
+            values.append(next(score for a, score in pairs if a == most_common))
+        if values:
+            result[name] = 100.0 * sum(values) / len(values)
+    return result
+
+
+def _compute_per_sample(
+    all_scores: List[List[Dict[str, float]]], score_names: List[str], k: int
+) -> Dict[str, List[float]]:
+    """Element i = pass@1 using only rollout i across all tasks."""
+    result: Dict[str, List[float]] = {name: [] for name in score_names}
+    for sample_idx in range(k):
+        for name in score_names:
+            vals = [ts[sample_idx][name] for ts in all_scores if sample_idx < len(ts) and name in ts[sample_idx]]
+            if vals:
+                result[name].append(100.0 * sum(vals) / len(vals))
+    return {name: values for name, values in result.items() if values}
 
 
 if __name__ == "__main__":

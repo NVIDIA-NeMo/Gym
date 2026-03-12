@@ -9,7 +9,6 @@ math_with_judge:
         input: []
       }
       should_use_judge: false
-      metrics_type: "resources_servers.math_with_judge.metrics::MathMetrics"
       domain: math
       verified: false
       description: OpenMathReasoning math dataset with math-verify and LLM-as-a-judge
