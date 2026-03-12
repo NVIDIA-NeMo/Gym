@@ -62,6 +62,7 @@ PORT_RANGE_HIGH_KEY_NAME = "port_range_high"
 DRY_RUN_KEY_NAME = "dry_run"
 UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
 UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
+BENCHMARK_KEY_NAME = "benchmark"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -81,6 +82,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     DRY_RUN_KEY_NAME,
     UV_CACHE_DIR_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
+    BENCHMARK_KEY_NAME,
 ]
 
 # Data keys
@@ -309,7 +311,29 @@ class GlobalConfigDictParser(BaseModel):
         config_paths = merged_config_for_config_paths.get(CONFIG_PATHS_KEY_NAME) or []
         config_paths = ta.validate_python(config_paths)
 
+        # Load benchmark config if +benchmark=<name> is specified.
+        # The benchmark YAML's config_paths are prepended to the config chain,
+        # and its other top-level keys (agent_name, input_jsonl_fpath, prompt_config,
+        # num_repeats, etc) are preserved as defaults that CLI args can override.
+        benchmark_name = merged_config_for_config_paths.get(BENCHMARK_KEY_NAME)
+        benchmark_defaults = DictConfig({})
+        if benchmark_name:
+            benchmark_config_path = PARENT_DIR / "benchmarks" / benchmark_name / "config.yaml"
+            if not benchmark_config_path.exists():
+                raise FileNotFoundError(f"Benchmark config not found: {benchmark_config_path}")
+            benchmark_config = OmegaConf.load(benchmark_config_path)
+            # Extract config_paths from benchmark (these chain to resource server configs)
+            for bp in benchmark_config.get(CONFIG_PATHS_KEY_NAME) or []:
+                if bp not in config_paths:
+                    config_paths.insert(0, bp)
+            # All other keys become defaults (lowest priority — CLI overrides them)
+            benchmark_defaults = DictConfig({k: v for k, v in benchmark_config.items() if k != CONFIG_PATHS_KEY_NAME})
+
         config_paths, extra_configs = self.load_extra_config_paths(config_paths)
+
+        # Benchmark defaults are lowest priority (inserted before everything else)
+        if benchmark_defaults:
+            extra_configs.insert(0, benchmark_defaults)
 
         # Dot env overrides previous configs
         extra_configs.append(dotenv_extra_config)
