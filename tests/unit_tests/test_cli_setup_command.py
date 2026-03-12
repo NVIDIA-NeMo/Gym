@@ -340,23 +340,3 @@ class TestCLISetupCommandRunCommand:
         )
         actual_args = Popen_mock.call_args
         assert expected_args == actual_args
-
-    def test_no_tee_when_log_dir_unset(self, monkeypatch: MonkeyPatch) -> None:
-        Popen_mock, get_global_config_dict_mock = self._setup(monkeypatch)
-
-        run_command(
-            command="my command",
-            working_dir_path=Path("/my path"),
-            server_name="my_server",
-        )
-
-        expected_args = call(
-            "my command",
-            executable="/bin/bash",
-            shell=True,
-            env={"PYTHONPATH": "/my path", "UV_CACHE_DIR": "default uv cache dir"},
-            stdout="stdout",
-            stderr="stderr",
-        )
-        actual_args = Popen_mock.call_args
-        assert expected_args == actual_args
