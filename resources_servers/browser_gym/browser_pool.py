@@ -26,6 +26,76 @@ from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
 logger = logging.getLogger(__name__)
 
+PLAYWRIGHT_KEY_MAP = {
+    "ctrl": "Control",
+    "control": "Control",
+    "control_l": "Control",
+    "control_r": "Control",
+    "cmd": "Meta",
+    "command": "Meta",
+    "meta": "Meta",
+    "super_l": "Meta",
+    "super_r": "Meta",
+    "alt": "Alt",
+    "alt_l": "Alt",
+    "alt_r": "Alt",
+    "option": "Alt",
+    "shift": "Shift",
+    "shift_l": "Shift",
+    "shift_r": "Shift",
+    "enter": "Enter",
+    "return": "Enter",
+    "tab": "Tab",
+    "escape": "Escape",
+    "esc": "Escape",
+    "backspace": "Backspace",
+    "delete": "Delete",
+    "del": "Delete",
+    "space": " ",
+    "arrowup": "ArrowUp",
+    "arrowdown": "ArrowDown",
+    "arrowleft": "ArrowLeft",
+    "arrowright": "ArrowRight",
+    "up": "ArrowUp",
+    "down": "ArrowDown",
+    "left": "ArrowLeft",
+    "right": "ArrowRight",
+    "pageup": "PageUp",
+    "pagedown": "PageDown",
+    "page_up": "PageUp",
+    "page_down": "PageDown",
+    "prior": "PageUp",
+    "next": "PageDown",
+    "home": "Home",
+    "end": "End",
+    "insert": "Insert",
+    "caps_lock": "CapsLock",
+    "capslock": "CapsLock",
+    "num_lock": "NumLock",
+    "numlock": "NumLock",
+    "scroll_lock": "ScrollLock",
+    "scrolllock": "ScrollLock",
+    "print": "PrintScreen",
+    "printscreen": "PrintScreen",
+    "f1": "F1",
+    "f2": "F2",
+    "f3": "F3",
+    "f4": "F4",
+    "f5": "F5",
+    "f6": "F6",
+    "f7": "F7",
+    "f8": "F8",
+    "f9": "F9",
+    "f10": "F10",
+    "f11": "F11",
+    "f12": "F12",
+}
+
+
+def _normalize_key(key: str) -> str:
+    """Normalize a key name (including X11/xdotool names) to Playwright format."""
+    return PLAYWRIGHT_KEY_MAP.get(key.lower().strip(), key)
+
 
 @dataclass
 class BrowserSession:
@@ -170,11 +240,18 @@ class BrowserPool:
                 await page.keyboard.press("Enter")
 
         elif action_type == "keypress":
-            if action.keys:
-                combo = "+".join(action.keys)
-                await page.keyboard.press(combo)
-            elif action.key:
-                await page.keyboard.press(action.key)
+            try:
+                if action.keys:
+                    combo = "+".join(_normalize_key(k) for k in action.keys)
+                    await page.keyboard.press(combo)
+                elif action.key:
+                    if "+" in action.key:
+                        combo = "+".join(_normalize_key(k) for k in action.key.split("+"))
+                        await page.keyboard.press(combo)
+                    else:
+                        await page.keyboard.press(_normalize_key(action.key))
+            except Exception as e:
+                logger.warning(f"Keypress failed for key={action.key!r} keys={action.keys!r}: {e}")
 
         elif action_type == "scroll":
             if action.coordinate:

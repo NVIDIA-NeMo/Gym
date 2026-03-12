@@ -16,19 +16,24 @@ Anthropic CUA adapter (Sonnet + Opus).
 
 Context management: Client-side turn-based trimming.
 Full conversation history maintained in messages list, trimmed before each API call:
-1. _trim_conversation_history: preserve initial task, keep last N turns, never split tool_use/tool_result pairs
+1. _trim_conversation_history: preserve initial task, keep last N turns, validate tool_use/tool_result pairs
 2. _trim_screenshot_messages: cap screenshot-only messages
 3. _strip_leading_orphaned_tool_results: ensure valid message ordering
+4. _gc_old_screenshots: replace base64 data in messages outside the trim window with a placeholder
+
+Supports two execution modes:
+- Direct: adapter calls Anthropic API directly (default, uses AsyncAnthropic)
+- Model-server routed: adapter prepares params, delegates API call to an injected callable
+  (used when a NeMo-Gym model server is configured)
 """
 
-import base64
+import copy
 import logging
-from typing import Any, Dict, List, Optional
-
-from anthropic import Anthropic
+from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 from resources_servers.browser_gym.schemas import BrowserAction
 from responses_api_agents.browser_agent.adapters.base import BaseCUAAdapter, CUAAdapterResponse
+
 
 logger = logging.getLogger(__name__)
 
@@ -58,11 +63,15 @@ QUALITY STRATEGY:
 IMPORTANT: Do not include extra user messages between paired tool_use and tool_result. \
 Screenshots may be included inside tool_result content when needed for verification."""
 
+SCREENSHOT_PLACEHOLDER = "[screenshot-trimmed]"
+
+ApiCaller = Callable[[Dict[str, Any]], Coroutine[Any, Any, Any]]
+
 
 class AnthropicCUAAdapter(BaseCUAAdapter):
     def __init__(
         self,
-        api_key: str,
+        api_key: str = "",
         model: str = "claude-sonnet-4-20250514",
         is_opus: bool = False,
         viewport_width: int = 1280,
@@ -71,8 +80,9 @@ class AnthropicCUAAdapter(BaseCUAAdapter):
         turns_to_keep: int = 8,
         screenshot_turn_limit: int = 8,
         effort_level: str = "high",
+        api_caller: Optional[ApiCaller] = None,
+        timeout: float = 300.0,
     ):
-        self._client = Anthropic(api_key=api_key, max_retries=4)
         self._model = model
         self._is_opus = is_opus
         self._viewport_width = viewport_width
@@ -81,22 +91,33 @@ class AnthropicCUAAdapter(BaseCUAAdapter):
         self._turns_to_keep = turns_to_keep
         self._screenshot_turn_limit = screenshot_turn_limit
         self._effort_level = effort_level
+        self._api_caller = api_caller
+
+        if api_caller is None:
+            from anthropic import AsyncAnthropic
+
+            self._client = AsyncAnthropic(api_key=api_key, max_retries=4, timeout=timeout)
+        else:
+            self._client = None
 
         self._messages: List[Dict[str, Any]] = []
         self._system_prompt: str = ""
         self._pending_tool_use_ids: List[str] = []
 
+    # ── Tool / beta helpers ──────────────────────────────────────
+
     def _get_tools(self) -> List[Dict[str, Any]]:
         tool_type = "computer_20251124" if self._is_opus else "computer_20250124"
-        return [
-            {
-                "type": tool_type,
-                "name": "computer",
-                "display_width_px": self._viewport_width,
-                "display_height_px": self._viewport_height,
-                "display_number": 1,
-            }
-        ]
+        tool = {
+            "type": tool_type,
+            "name": "computer",
+            "display_width_px": self._viewport_width,
+            "display_height_px": self._viewport_height,
+            "display_number": 1,
+        }
+        if self._is_opus:
+            tool["enable_zoom"] = True
+        return [tool]
 
     def _get_beta_flags(self) -> List[str]:
         if self._is_opus:
@@ -105,6 +126,8 @@ class AnthropicCUAAdapter(BaseCUAAdapter):
                 betas.append(OPUS_EFFORT_BETA)
             return betas
         return [SONNET_COMPUTER_USE_BETA, SONNET_CONTEXT_MGMT_BETA, TOKEN_EFFICIENT_BETA]
+
+    # ── Context management ───────────────────────────────────────
 
     def _has_tool_result(self, message: Dict) -> bool:
         if message.get("role") != "user":
@@ -135,7 +158,6 @@ class AnthropicCUAAdapter(BaseCUAAdapter):
         return False
 
     def _trim_screenshot_messages(self, messages: List[Dict]) -> List[Dict]:
-        """Cap screenshot-only user messages to the configured limit."""
         if self._screenshot_turn_limit <= 0 or not messages:
             return messages
 
@@ -147,7 +169,6 @@ class AnthropicCUAAdapter(BaseCUAAdapter):
         return [m for i, m in enumerate(messages) if i not in to_remove]
 
     def _trim_conversation_history(self, messages: List[Dict]) -> List[Dict]:
-        """Keep initial task message + last N complete turns. Never split tool_use/tool_result pairs."""
         if not messages or len(messages) <= 2:
             return self._trim_screenshot_messages(messages)
 
@@ -177,21 +198,146 @@ class AnthropicCUAAdapter(BaseCUAAdapter):
         return self._trim_screenshot_messages(trimmed)
 
     def _strip_leading_orphaned_tool_results(self, messages: List[Dict]) -> List[Dict]:
-        """Ensure messages list never starts with a tool_result."""
         while messages and self._has_tool_result(messages[0]):
             messages = messages[1:]
         return messages
 
+    def _validate_tool_pairs(self, messages: List[Dict]) -> List[Dict]:
+        """Ensure every assistant tool_use has a matching user tool_result and vice versa.
+
+        Walks the message list and collects tool_use IDs from assistant messages.
+        If the next user message doesn't provide tool_results for all of them,
+        both the assistant and user messages are dropped to maintain validity.
+        """
+        result = []
+        i = 0
+        while i < len(messages):
+            msg = messages[i]
+            if msg.get("role") == "assistant":
+                content = msg.get("content", [])
+                tool_use_ids = set()
+                if isinstance(content, list):
+                    tool_use_ids = {
+                        b["id"] for b in content if isinstance(b, dict) and b.get("type") == "tool_use" and "id" in b
+                    }
+
+                if not tool_use_ids:
+                    result.append(msg)
+                    i += 1
+                    continue
+
+                if i + 1 < len(messages) and messages[i + 1].get("role") == "user":
+                    next_content = messages[i + 1].get("content", [])
+                    result_ids = set()
+                    if isinstance(next_content, list):
+                        result_ids = {
+                            b.get("tool_use_id")
+                            for b in next_content
+                            if isinstance(b, dict) and b.get("type") == "tool_result"
+                        }
+
+                    if tool_use_ids <= result_ids:
+                        result.append(msg)
+                        result.append(messages[i + 1])
+                        i += 2
+                        continue
+
+                logger.warning("Dropping orphaned tool_use assistant message (ids=%s)", tool_use_ids)
+                i += 1
+            else:
+                result.append(msg)
+                i += 1
+
+        return result
+
+    # ── Memory management ────────────────────────────────────────
+
+    def _gc_old_screenshots(self, trim_window_size: int) -> None:
+        """Replace base64 image data in messages outside the recent trim window with a placeholder.
+
+        Only touches self._messages in-place. The trimming step will discard these
+        messages anyway, so replacing the data has no effect on API calls — it just
+        frees memory.
+        """
+        if len(self._messages) <= trim_window_size:
+            return
+
+        cutoff = len(self._messages) - trim_window_size
+        for msg in self._messages[:cutoff]:
+            content = msg.get("content", [])
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "image":
+                    source = block.get("source", {})
+                    if isinstance(source, dict) and source.get("type") == "base64":
+                        source["data"] = SCREENSHOT_PLACEHOLDER
+                elif block.get("type") == "tool_result":
+                    inner = block.get("content", [])
+                    if isinstance(inner, list):
+                        for inner_block in inner:
+                            if isinstance(inner_block, dict) and inner_block.get("type") == "image":
+                                source = inner_block.get("source", {})
+                                if isinstance(source, dict) and source.get("type") == "base64":
+                                    source["data"] = SCREENSHOT_PLACEHOLDER
+
+    # ── API call lifecycle ───────────────────────────────────────
+
+    def _prepare_api_params(self) -> Dict[str, Any]:
+        """Build trimmed, ready-to-send Anthropic API params."""
+        self._gc_old_screenshots(self._turns_to_keep * 2 + 2)
+
+        trimmed = self._trim_conversation_history(copy.deepcopy(self._messages))
+        trimmed = self._strip_leading_orphaned_tool_results(trimmed)
+        trimmed = self._validate_tool_pairs(trimmed)
+
+        params: Dict[str, Any] = {
+            "max_tokens": self._max_tokens,
+            "system": self._system_prompt,
+            "tools": self._get_tools(),
+            "betas": self._get_beta_flags(),
+            "messages": trimmed,
+        }
+
+        if not self._api_caller:
+            params["model"] = self._model
+
+        if self._is_opus and self._effort_level != "high":
+            params["output_config"] = {"effort": self._effort_level}
+
+        return params
+
+    async def _execute_api_call(self, api_params: Dict[str, Any]):
+        """Execute the Anthropic API call, either directly or via injected model-server caller."""
+        if self._api_caller:
+            raw = await self._api_caller(api_params)
+            if isinstance(raw, dict):
+                from anthropic.types.beta import BetaMessage
+
+                return BetaMessage.model_validate(raw)
+            return raw
+        return await self._client.beta.messages.create(**api_params)
+
+    def _update_history_from_response(self, response):
+        """Append assistant response to conversation history and track pending tool IDs."""
+        assistant_content = [
+            {"type": b.type, **(b.model_dump() if hasattr(b, "model_dump") else {})} for b in response.content
+        ]
+        self._messages.append({"role": "assistant", "content": assistant_content})
+
+        self._pending_tool_use_ids = [b.id for b in response.content if b.type == "tool_use"]
+
+    # ── Response parsing ─────────────────────────────────────────
+
     def _parse_response(self, response) -> CUAAdapterResponse:
-        """Parse Anthropic response into CUAAdapterResponse."""
         actions: List[BrowserAction] = []
         message: Optional[str] = None
         done = False
-        self._pending_tool_use_ids = []
 
         for block in response.content:
             if block.type == "tool_use":
-                self._pending_tool_use_ids.append(block.id)
                 action_input = block.input or {}
                 browser_action = self._map_anthropic_action(action_input)
                 if browser_action:
@@ -206,7 +352,6 @@ class AnthropicCUAAdapter(BaseCUAAdapter):
         return CUAAdapterResponse(actions=actions, message=message, raw_response=raw, done=done)
 
     def _map_anthropic_action(self, action: Dict[str, Any]) -> Optional[BrowserAction]:
-        """Map Anthropic action to unified BrowserAction."""
         action_type = action.get("action", "")
 
         if action_type in ("left_click", "click"):
@@ -244,10 +389,12 @@ class AnthropicCUAAdapter(BaseCUAAdapter):
         elif action_type == "hold_key":
             return BrowserAction(action_type="keypress", key=action.get("key", ""), duration=action.get("duration"))
         elif action_type == "zoom":
-            return BrowserAction(action_type="screenshot", region=action.get("region"))
+            return BrowserAction(action_type="zoom", region=action.get("region"))
         else:
             logger.warning(f"Unknown Anthropic action: {action_type}")
             return None
+
+    # ── Public interface ─────────────────────────────────────────
 
     async def initialize(self, task_prompt: str, screenshot_b64: str) -> CUAAdapterResponse:
         self._messages = []
@@ -271,11 +418,32 @@ class AnthropicCUAAdapter(BaseCUAAdapter):
             }
         )
 
-        return await self._call_api()
+        api_params = self._prepare_api_params()
+
+        logger.info(
+            "Anthropic API request: model=%s, num_messages=%d, betas=%s",
+            api_params.get("model", self._model),
+            len(api_params["messages"]),
+            api_params["betas"],
+        )
+
+        response = await self._execute_api_call(api_params)
+        self._update_history_from_response(response)
+
+        logger.info(
+            "Anthropic API response: stop_reason=%s, content_blocks=%d",
+            response.stop_reason,
+            len(response.content),
+        )
+
+        return self._parse_response(response)
 
     async def step(self, screenshot_b64: str, action_result: Optional[str] = None) -> CUAAdapterResponse:
+        current_tool_ids = self._pending_tool_use_ids
+        self._pending_tool_use_ids = []
+
         tool_results = []
-        for tool_id in self._pending_tool_use_ids:
+        for tool_id in current_tool_ids:
             tool_results.append(
                 {
                     "type": "tool_result",
@@ -308,29 +476,9 @@ class AnthropicCUAAdapter(BaseCUAAdapter):
                 }
             )
 
-        return await self._call_api()
-
-    async def _call_api(self) -> CUAAdapterResponse:
-        trimmed = self._trim_conversation_history(list(self._messages))
-        trimmed = self._strip_leading_orphaned_tool_results(trimmed)
-
-        api_params = {
-            "model": self._model,
-            "max_tokens": self._max_tokens,
-            "system": self._system_prompt,
-            "tools": self._get_tools(),
-            "betas": self._get_beta_flags(),
-            "messages": trimmed,
-        }
-
-        if self._is_opus and self._effort_level != "high":
-            api_params["output_config"] = {"effort": self._effort_level}
-
-        response = self._client.beta.messages.create(**api_params)
-
-        assistant_content = [{"type": b.type, **(b.model_dump() if hasattr(b, "model_dump") else {})} for b in response.content]
-        self._messages.append({"role": "assistant", "content": assistant_content})
-
+        api_params = self._prepare_api_params()
+        response = await self._execute_api_call(api_params)
+        self._update_history_from_response(response)
         return self._parse_response(response)
 
     def reset(self):
