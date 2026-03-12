@@ -20,6 +20,7 @@ import orjson
 import pytest
 import yaml
 
+from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
 
@@ -188,6 +189,18 @@ class TestRolloutCollection:
 
                 return futures
 
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                """Compute aggregate metrics locally (no server needed)."""
+                stripped = [{k: v for k, v in r.items() if k not in ("responses_create_params",)} for r in results]
+                agg = compute_aggregate_metrics(stripped)
+                metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
+                metrics_fpath.write_bytes(
+                    orjson.dumps(
+                        [{"agent_ref": {"name": "my agent name"}, **agg.model_dump()}], option=orjson.OPT_INDENT_2
+                    )
+                )
+                return metrics_fpath
+
         actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
 
         expected_results = [
@@ -210,25 +223,23 @@ class TestRolloutCollection:
             actual_written_results = [json.loads(line) for line in f]
         assert expected_results == actual_written_results
 
-        expected_reward_profiling_output_len = 3
-        reward_profiling_fpath = tmp_path / "output_reward_profiling.jsonl"
-        with reward_profiling_fpath.open() as f:
-            actual_reward_profiling_output_len = len(list(f))
-        assert expected_reward_profiling_output_len == actual_reward_profiling_output_len
-
-        agent_level_metrics_fpath = tmp_path / "output_agent_metrics.json"
-        actual_agent_level_metrics = json.loads(agent_level_metrics_fpath.read_text())
-        expected_agent_level_metrics = [
+        aggregate_metrics_fpath = tmp_path / "output_aggregate_metrics.json"
+        actual_aggregate_metrics = json.loads(aggregate_metrics_fpath.read_text())
+        expected_aggregate_metrics = [
             {
-                "mean/abc usage": 1.0,
-                "max/abc usage": 1,
-                "min/abc usage": 1,
-                "median/abc usage": 1.0,
-                "std/abc usage": 0.0,
                 "agent_ref": {"name": "my agent name"},
+                "agent_metrics": {
+                    "mean/abc usage": 1.0,
+                    "max/abc usage": 1,
+                    "min/abc usage": 1,
+                    "median/abc usage": 1.0,
+                    "std/abc usage": 0.0,
+                },
+                "key_metrics": {"mean/abc usage": 1.0},
+                "group_level_metrics": actual_aggregate_metrics[0]["group_level_metrics"],
             }
         ]
-        assert expected_agent_level_metrics == actual_agent_level_metrics
+        assert expected_aggregate_metrics == actual_aggregate_metrics
 
     async def test_run_from_config_sorted(self, tmp_path: Path) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
@@ -264,6 +275,9 @@ class TestRolloutCollection:
                 futures = reversed(futures)
 
                 return futures
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                return None
 
         actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
 
@@ -333,3 +347,143 @@ class TestRolloutCollection:
         )
 
         assert expected_results == actual_returned_results
+
+    async def test_call_aggregate_metrics(self, tmp_path: Path) -> None:
+        """Test _call_aggregate_metrics with a mocked server client."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
+        from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+
+        agg = AggregateMetrics(
+            agent_metrics={"mean/reward": 0.5},
+            key_metrics={"mean/reward": 0.5},
+            group_level_metrics=[{"mean/reward": 1.0}, {"mean/reward": 0.0}],
+        )
+
+        mock_response = AsyncMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.read = AsyncMock(return_value=orjson.dumps(agg.model_dump()))
+        mock_response.status = 200
+
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=mock_response)
+
+        class MockHelper(RolloutCollectionHelper):
+            def setup_server_client(self):
+                return mock_server_client
+
+        helper = MockHelper()
+
+        rows = [
+            {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
+            {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1},
+            {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0},
+            {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 1},
+        ]
+        results = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "response": {"usage": {"tokens": 10}}},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.0, "response": {"usage": {"tokens": 12}}},
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "response": {"usage": {"tokens": 8}}},
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.0, "response": {"usage": {"tokens": 15}}},
+        ]
+
+        output_fpath = tmp_path / "output.jsonl"
+        metrics_fpath = await helper._call_aggregate_metrics(results, rows, output_fpath)
+
+        # Verify file was written
+        assert metrics_fpath is not None
+        assert metrics_fpath.exists()
+        written = json.loads(metrics_fpath.read_text())
+        assert len(written) == 1
+        assert written[0][AGENT_REF_KEY_NAME] == {"name": "my_agent"}
+        assert written[0]["agent_metrics"]["mean/reward"] == 0.5
+        assert written[0]["key_metrics"]["mean/reward"] == 0.5
+        assert len(written[0]["group_level_metrics"]) == 2
+
+        # Verify server_client.post was called with stripped data (usage preserved)
+        call_kwargs = mock_server_client.post.call_args
+        sent_request = call_kwargs.kwargs["json"]
+        sent_data = (
+            sent_request.verify_responses
+            if isinstance(sent_request, AggregateMetricsRequest)
+            else sent_request["verify_responses"]
+        )
+        for item in sent_data:
+            assert "responses_create_params" not in item
+            assert "usage" in item["response"]
+
+    async def test_call_aggregate_metrics_multiple_agents(self, tmp_path: Path) -> None:
+        """Test _call_aggregate_metrics with multiple agents runs concurrently via as_completed."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from nemo_gym.base_resources_server import AggregateMetrics
+        from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+
+        agg_a = AggregateMetrics(
+            agent_metrics={"mean/reward": 1.0},
+            key_metrics={"mean/reward": 1.0},
+            group_level_metrics=[{"mean/reward": 1.0}],
+        )
+        agg_b = AggregateMetrics(
+            agent_metrics={"mean/reward": 0.0},
+            key_metrics={"mean/reward": 0.0},
+            group_level_metrics=[{"mean/reward": 0.0}],
+        )
+
+        # Return different responses per agent based on server_name
+        async def mock_post(server_name, **kwargs):
+            agg = agg_a if server_name == "agent_a" else agg_b
+            resp = AsyncMock()
+            resp.raise_for_status = MagicMock()
+            resp.read = AsyncMock(return_value=orjson.dumps(agg.model_dump()))
+            resp.status = 200
+            return resp
+
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(side_effect=mock_post)
+
+        class MockHelper(RolloutCollectionHelper):
+            def setup_server_client(self):
+                return mock_server_client
+
+        helper = MockHelper()
+
+        rows = [
+            {AGENT_REF_KEY_NAME: {"name": "agent_a"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
+            {AGENT_REF_KEY_NAME: {"name": "agent_a"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1},
+            {AGENT_REF_KEY_NAME: {"name": "agent_b"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
+            {AGENT_REF_KEY_NAME: {"name": "agent_b"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1},
+        ]
+        results = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "response": {"usage": {"tokens": 10}}},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 1.0, "response": {"usage": {"tokens": 12}}},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0, "response": {"usage": {"tokens": 8}}},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.0, "response": {"usage": {"tokens": 15}}},
+        ]
+
+        output_fpath = tmp_path / "output.jsonl"
+        metrics_fpath = await helper._call_aggregate_metrics(results, rows, output_fpath)
+
+        written = json.loads(metrics_fpath.read_text())
+        assert len(written) == 2
+
+        # Both agents should be present (order may vary due to as_completed)
+        agent_names = {entry[AGENT_REF_KEY_NAME]["name"] for entry in written}
+        assert agent_names == {"agent_a", "agent_b"}
+
+        for entry in written:
+            if entry[AGENT_REF_KEY_NAME]["name"] == "agent_a":
+                assert entry["agent_metrics"]["mean/reward"] == 1.0
+            else:
+                assert entry["agent_metrics"]["mean/reward"] == 0.0
+
+        # Verify both agents were called
+        assert mock_server_client.post.call_count == 2
+
+    async def test_call_aggregate_metrics_empty(self, tmp_path: Path) -> None:
+        """_call_aggregate_metrics returns None for empty results."""
+        helper = RolloutCollectionHelper()
+        output_fpath = tmp_path / "output.jsonl"
+        result = await helper._call_aggregate_metrics([], [], output_fpath)
+        assert result is None

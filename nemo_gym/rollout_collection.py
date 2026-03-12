@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
 from wandb import Table
 
+from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
@@ -37,7 +38,6 @@ from nemo_gym.global_config import (
     get_wandb_run,
 )
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
-from nemo_gym.reward_profile import RewardProfiler
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
@@ -304,44 +304,88 @@ class RolloutCollectionHelper(BaseModel):
         rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
         results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
 
-        rp = RewardProfiler()
-        group_level_metrics, agent_level_metrics = rp.profile_from_data(rows, results)
-        reward_profiling_fpath, agent_level_metrics_fpath = rp.write_to_disk(
-            group_level_metrics, agent_level_metrics, output_fpath
-        )
-
-        if get_wandb_run():  # pragma: no cover
-            agent_level_metrics_to_log = dict()
-            for agent_metrics in agent_level_metrics:
-                agent_name = agent_metrics[AGENT_REF_KEY_NAME]["name"]
-                for key, value in agent_metrics.items():
-                    agent_level_metrics_to_log[f"{agent_name}/{key}"] = value
-
-                agent_level_metrics_to_log.pop(f"{agent_name}/{AGENT_REF_KEY_NAME}")
-
-            get_wandb_run().log(agent_level_metrics_to_log)
-
-        agent_level_metrics: List[Dict] = orjson.loads(agent_level_metrics_fpath.read_text())
-        agent_level_metrics_to_print: List[Dict] = []
-        for agent_metrics in agent_level_metrics:
-            agent_metrics_to_print = {AGENT_REF_KEY_NAME: agent_metrics[AGENT_REF_KEY_NAME]}
-            for k, v in agent_metrics.items():
-                if not k.startswith("mean/"):
-                    continue
-
-                agent_metrics_to_print[k] = v
-
-            agent_level_metrics_to_print.append(agent_metrics_to_print)
-
-        print("Agent level metrics (mean only):\n" + json.dumps(agent_level_metrics_to_print, indent=4))
+        # Compute and write aggregate metrics via /aggregate_metrics on each agent server
+        aggregate_metrics_fpath = await self._call_aggregate_metrics(results, rows, output_fpath)
 
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
-Reward profiling outputs: {reward_profiling_fpath}
-Agent-level metrics: {agent_level_metrics_fpath}""")
+Aggregate metrics: {aggregate_metrics_fpath}""")
 
         return results
+
+    async def _call_aggregate_metrics(
+        self,
+        results: List[Dict],
+        rows: List[Dict],
+        output_fpath: Path,
+    ) -> Optional[Path]:
+        """Call /aggregate_metrics on each agent server after rollouts complete.
+
+        Writes a single _aggregate_metrics.json with one entry per agent (same shape
+        as the old _agent_metrics.json). Returns the file path.
+        """
+        if not results:
+            return None
+
+        # Group results by agent name
+        agent_results: Dict[str, List[Dict]] = {}
+        for row, result in zip(rows, results):
+            agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+            if not agent_name:
+                continue
+            agent_results.setdefault(agent_name, []).append(result)
+
+        server_client = self.setup_server_client()
+
+        async def _fetch_agent_metrics(agent_name: str, agent_result_list: List[Dict]) -> Dict:
+            # Strip heavyweight fields before sending, but preserve response.usage
+            stripped = []
+            for r in agent_result_list:
+                entry = {k: v for k, v in r.items() if k not in ("response", "responses_create_params")}
+                usage = (r.get("response") or {}).get("usage")
+                if usage:
+                    entry["response"] = {"usage": usage}
+                stripped.append(entry)
+
+            agg_request = AggregateMetricsRequest(verify_responses=stripped)
+            agg_response = await server_client.post(
+                server_name=agent_name,
+                url_path="/aggregate_metrics",
+                json=agg_request,
+            )
+            await raise_for_status(agg_response)
+            agg_result = AggregateMetrics.model_validate(await get_response_json(agg_response))
+
+            agent_entry = {
+                AGENT_REF_KEY_NAME: {"name": agent_name},
+                "agent_metrics": agg_result.agent_metrics,
+                "key_metrics": agg_result.key_metrics,
+                "group_level_metrics": agg_result.group_level_metrics,
+            }
+
+            # Log to W&B
+            if get_wandb_run():  # pragma: no cover
+                wandb_metrics = {f"{agent_name}/{k}": v for k, v in agg_result.agent_metrics.items()}
+                get_wandb_run().log(wandb_metrics)
+
+            return agent_entry
+
+        all_agent_metrics: List[Dict] = []
+        tasks = [_fetch_agent_metrics(name, results_list) for name, results_list in agent_results.items()]
+        for coro in asyncio.as_completed(tasks):
+            agent_entry = await coro
+            all_agent_metrics.append(agent_entry)
+
+            agent_name = agent_entry[AGENT_REF_KEY_NAME]["name"]
+            key_metrics = agent_entry.get("key_metrics", {})
+            print(f"\nKey metrics for {agent_name}:\n" + json.dumps(key_metrics, indent=4))
+
+        # Write single file with all agents
+        metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
+        metrics_fpath.write_bytes(orjson.dumps(all_agent_metrics, option=orjson.OPT_INDENT_2))
+
+        return metrics_fpath
 
     def run_examples(
         self,
