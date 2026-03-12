@@ -326,7 +326,6 @@ Overview <resources-server/index>
 Overview <data/index>
 Prepare and Validate <data/prepare-validate>
 Download from Hugging Face <data/download-huggingface>
-Aggregate Metrics <data/aggregate-metrics>
 Prompt Config <data/prompt-config>
 ```
 
@@ -343,6 +342,7 @@ Real-World Environment <environment-tutorials/real-world-environment>
 Integrate external libraries <environment-tutorials/integrate-external-environments>
 Add a benchmark <environment-tutorials/adding-a-benchmark>
 Design a customer evaluation <environment-tutorials/designing-customer-evaluation>
+Aggregate Metrics <environment-tutorials/aggregate-metrics>
 ```
 
 ```{toctree}

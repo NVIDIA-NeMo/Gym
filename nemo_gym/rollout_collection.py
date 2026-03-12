@@ -337,9 +337,8 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
             agent_results.setdefault(agent_name, []).append(result)
 
         server_client = self.setup_server_client()
-        all_agent_metrics: List[Dict] = []
 
-        for agent_name, agent_result_list in agent_results.items():
+        async def _fetch_agent_metrics(agent_name: str, agent_result_list: List[Dict]) -> Dict:
             # Strip heavyweight fields before sending, but preserve response.usage
             stripped = []
             for r in agent_result_list:
@@ -358,7 +357,6 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
             await raise_for_status(agg_response)
             agg_result = AggregateMetrics.model_validate(await get_response_json(agg_response))
 
-            # Build per-agent entry preserving the AggregateMetrics structure
             agent_entry = {
                 AGENT_REF_KEY_NAME: {"name": agent_name},
                 "agent_metrics": agg_result.agent_metrics,
@@ -366,22 +364,26 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                 "group_level_metrics": agg_result.group_level_metrics,
             }
 
-            all_agent_metrics.append(agent_entry)
-
             # Log to W&B
             if get_wandb_run():  # pragma: no cover
                 wandb_metrics = {f"{agent_name}/{k}": v for k, v in agg_result.agent_metrics.items()}
                 get_wandb_run().log(wandb_metrics)
 
-        # Write single file with all agents (mirrors _agent_metrics.json structure)
-        metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
-        metrics_fpath.write_bytes(orjson.dumps(all_agent_metrics, option=orjson.OPT_INDENT_2))
+            return agent_entry
 
-        # Print key metrics summary
-        for agent_entry in all_agent_metrics:
+        all_agent_metrics: List[Dict] = []
+        tasks = [_fetch_agent_metrics(name, results_list) for name, results_list in agent_results.items()]
+        for coro in asyncio.as_completed(tasks):
+            agent_entry = await coro
+            all_agent_metrics.append(agent_entry)
+
             agent_name = agent_entry[AGENT_REF_KEY_NAME]["name"]
             key_metrics = agent_entry.get("key_metrics", {})
             print(f"\nKey metrics for {agent_name}:\n" + json.dumps(key_metrics, indent=4))
+
+        # Write single file with all agents
+        metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
+        metrics_fpath.write_bytes(orjson.dumps(all_agent_metrics, option=orjson.OPT_INDENT_2))
 
         return metrics_fpath
 

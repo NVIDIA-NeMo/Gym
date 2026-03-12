@@ -413,6 +413,74 @@ class TestRolloutCollection:
             assert "responses_create_params" not in item
             assert "usage" in item["response"]
 
+    async def test_call_aggregate_metrics_multiple_agents(self, tmp_path: Path) -> None:
+        """Test _call_aggregate_metrics with multiple agents runs concurrently via as_completed."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from nemo_gym.base_resources_server import AggregateMetrics
+        from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+
+        agg_a = AggregateMetrics(
+            agent_metrics={"mean/reward": 1.0},
+            key_metrics={"mean/reward": 1.0},
+            group_level_metrics=[{"mean/reward": 1.0}],
+        )
+        agg_b = AggregateMetrics(
+            agent_metrics={"mean/reward": 0.0},
+            key_metrics={"mean/reward": 0.0},
+            group_level_metrics=[{"mean/reward": 0.0}],
+        )
+
+        # Return different responses per agent based on server_name
+        async def mock_post(server_name, **kwargs):
+            agg = agg_a if server_name == "agent_a" else agg_b
+            resp = AsyncMock()
+            resp.raise_for_status = MagicMock()
+            resp.read = AsyncMock(return_value=orjson.dumps(agg.model_dump()))
+            resp.status = 200
+            return resp
+
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(side_effect=mock_post)
+
+        class MockHelper(RolloutCollectionHelper):
+            def setup_server_client(self):
+                return mock_server_client
+
+        helper = MockHelper()
+
+        rows = [
+            {AGENT_REF_KEY_NAME: {"name": "agent_a"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
+            {AGENT_REF_KEY_NAME: {"name": "agent_a"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1},
+            {AGENT_REF_KEY_NAME: {"name": "agent_b"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
+            {AGENT_REF_KEY_NAME: {"name": "agent_b"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1},
+        ]
+        results = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "response": {"usage": {"tokens": 10}}},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 1.0, "response": {"usage": {"tokens": 12}}},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0, "response": {"usage": {"tokens": 8}}},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.0, "response": {"usage": {"tokens": 15}}},
+        ]
+
+        output_fpath = tmp_path / "output.jsonl"
+        metrics_fpath = await helper._call_aggregate_metrics(results, rows, output_fpath)
+
+        written = json.loads(metrics_fpath.read_text())
+        assert len(written) == 2
+
+        # Both agents should be present (order may vary due to as_completed)
+        agent_names = {entry[AGENT_REF_KEY_NAME]["name"] for entry in written}
+        assert agent_names == {"agent_a", "agent_b"}
+
+        for entry in written:
+            if entry[AGENT_REF_KEY_NAME]["name"] == "agent_a":
+                assert entry["agent_metrics"]["mean/reward"] == 1.0
+            else:
+                assert entry["agent_metrics"]["mean/reward"] == 0.0
+
+        # Verify both agents were called
+        assert mock_server_client.post.call_count == 2
+
     async def test_call_aggregate_metrics_empty(self, tmp_path: Path) -> None:
         """_call_aggregate_metrics returns None for empty results."""
         helper = RolloutCollectionHelper()
