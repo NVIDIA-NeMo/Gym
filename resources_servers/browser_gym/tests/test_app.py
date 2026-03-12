@@ -17,7 +17,7 @@ import pytest
 
 from nemo_gym.server_utils import ServerClient
 from resources_servers.browser_gym.app import BrowserGymResourcesServer
-from resources_servers.browser_gym.browser_pool import BrowserPool
+from resources_servers.browser_gym.browser_pool import PLAYWRIGHT_KEY_MAP, BrowserPool, _normalize_key
 from resources_servers.browser_gym.schemas import (
     BrowserAction,
     BrowserGymResourcesServerConfig,
@@ -123,8 +123,9 @@ class TestBrowserAction:
         assert action.duration == 2000
 
     def test_zoom_action(self):
-        action = BrowserAction(action_type="screenshot", region={"x": 0, "y": 0, "width": 500, "height": 500})
+        action = BrowserAction(action_type="screenshot", region=[0, 0, 500, 500])
         assert action.region is not None
+        assert action.region == [0, 0, 500, 500]
 
 
 class TestSchemas:
@@ -254,7 +255,7 @@ class TestVerifyEndpoint:
             mock_response = AsyncMock()
             mock_response.status = 200
             mock_response.json = AsyncMock(
-                return_value={"assertions": [{"isPassing": True}, {"isPassing": True}]}
+                return_value={"assertions": [{"result": "pass"}, {"result": "pass"}]}
             )
             mock_response.__aenter__ = AsyncMock(return_value=mock_response)
             mock_response.__aexit__ = AsyncMock(return_value=None)
@@ -300,7 +301,7 @@ class TestVerifyEndpoint:
             mock_response = AsyncMock()
             mock_response.status = 200
             mock_response.json = AsyncMock(
-                return_value={"assertions": [{"isPassing": True}, {"isPassing": False}]}
+                return_value={"assertions": [{"result": "pass"}, {"result": "fail"}]}
             )
             mock_response.__aenter__ = AsyncMock(return_value=mock_response)
             mock_response.__aexit__ = AsyncMock(return_value=None)
@@ -313,3 +314,88 @@ class TestVerifyEndpoint:
             with patch("aiohttp.ClientSession", return_value=mock_session):
                 result = await server.verify(body)
                 assert result.reward == 0.0
+
+
+class TestNormalizeKey:
+    def test_basic_mappings(self):
+        assert _normalize_key("ctrl") == "Control"
+        assert _normalize_key("cmd") == "Meta"
+        assert _normalize_key("alt") == "Alt"
+        assert _normalize_key("shift") == "Shift"
+        assert _normalize_key("enter") == "Enter"
+        assert _normalize_key("return") == "Enter"
+        assert _normalize_key("tab") == "Tab"
+        assert _normalize_key("escape") == "Escape"
+        assert _normalize_key("esc") == "Escape"
+
+    def test_case_insensitive(self):
+        assert _normalize_key("CTRL") == "Control"
+        assert _normalize_key("Shift") == "Shift"
+        assert _normalize_key("ENTER") == "Enter"
+        assert _normalize_key("Tab") == "Tab"
+
+    def test_space_variants(self):
+        assert _normalize_key("space") == " "
+        assert _normalize_key("spacebar") == " "
+        assert _normalize_key("SPACE") == " "
+
+    def test_arrow_keys(self):
+        assert _normalize_key("arrowup") == "ArrowUp"
+        assert _normalize_key("up") == "ArrowUp"
+        assert _normalize_key("arrowdown") == "ArrowDown"
+        assert _normalize_key("down") == "ArrowDown"
+        assert _normalize_key("arrowleft") == "ArrowLeft"
+        assert _normalize_key("left") == "ArrowLeft"
+        assert _normalize_key("arrowright") == "ArrowRight"
+        assert _normalize_key("right") == "ArrowRight"
+
+    def test_modifier_variants(self):
+        assert _normalize_key("control_l") == "Control"
+        assert _normalize_key("control_r") == "Control"
+        assert _normalize_key("shift_l") == "Shift"
+        assert _normalize_key("shift_r") == "Shift"
+        assert _normalize_key("alt_l") == "Alt"
+        assert _normalize_key("alt_r") == "Alt"
+        assert _normalize_key("super_l") == "Meta"
+        assert _normalize_key("super_r") == "Meta"
+
+    def test_function_keys(self):
+        for i in range(1, 13):
+            assert _normalize_key(f"f{i}") == f"F{i}"
+
+    def test_page_keys(self):
+        assert _normalize_key("pageup") == "PageUp"
+        assert _normalize_key("pagedown") == "PageDown"
+        assert _normalize_key("page_up") == "PageUp"
+        assert _normalize_key("page_down") == "PageDown"
+        assert _normalize_key("prior") == "PageUp"
+        assert _normalize_key("next") == "PageDown"
+
+    def test_passthrough_for_unknown(self):
+        assert _normalize_key("a") == "a"
+        assert _normalize_key("z") == "z"
+        assert _normalize_key("1") == "1"
+        assert _normalize_key("F13") == "F13"
+
+    def test_delete_variants(self):
+        assert _normalize_key("backspace") == "Backspace"
+        assert _normalize_key("delete") == "Delete"
+        assert _normalize_key("del") == "Delete"
+
+    def test_whitespace_stripping(self):
+        assert _normalize_key("  enter  ") == "Enter"
+        assert _normalize_key("  ctrl  ") == "Control"
+
+
+class TestBrowserActionClearBeforeTyping:
+    def test_default_none(self):
+        action = BrowserAction(action_type="type", text="hello")
+        assert action.clear_before_typing is None
+
+    def test_set_true(self):
+        action = BrowserAction(action_type="type", text="hello", clear_before_typing=True)
+        assert action.clear_before_typing is True
+
+    def test_set_false(self):
+        action = BrowserAction(action_type="type", text="hello", clear_before_typing=False)
+        assert action.clear_before_typing is False

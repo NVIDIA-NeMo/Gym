@@ -52,6 +52,7 @@ PLAYWRIGHT_KEY_MAP = {
     "delete": "Delete",
     "del": "Delete",
     "space": " ",
+    "spacebar": " ",
     "arrowup": "ArrowUp",
     "arrowdown": "ArrowDown",
     "arrowleft": "ArrowLeft",
@@ -213,10 +214,18 @@ class BrowserPool:
             x, y = action.coordinate or [0, 0]
             button = action.button or "left"
             await page.mouse.click(x, y, button=button)
+            try:
+                await page.wait_for_load_state(timeout=5000)
+            except Exception:
+                pass
 
         elif action_type == "double_click":
             x, y = action.coordinate or [0, 0]
             await page.mouse.dblclick(x, y)
+            try:
+                await page.wait_for_load_state(timeout=5000)
+            except Exception:
+                pass
 
         elif action_type == "triple_click":
             x, y = action.coordinate or [0, 0]
@@ -234,15 +243,61 @@ class BrowserPool:
             if action.coordinate:
                 x, y = action.coordinate
                 await page.mouse.click(x, y)
+                try:
+                    await page.wait_for_load_state(timeout=5000)
+                except Exception:
+                    pass
+            if action.clear_before_typing:
+                import sys as _sys
+
+                mod = "Meta" if _sys.platform == "darwin" else "Control"
+                await page.keyboard.press(f"{mod}+a")
+                await page.keyboard.press("Delete")
             text = action.text or ""
-            await page.keyboard.type(text)
+            try:
+                for char in text:
+                    await page.keyboard.type(char, delay=50)
+            except Exception:
+                try:
+                    await page.fill("input, textarea", text)
+                except Exception:
+                    await page.evaluate(
+                        """(text) => {
+                            const el = document.activeElement;
+                            if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {
+                                el.value = '';
+                                el.value = text;
+                                el.dispatchEvent(new Event('input', { bubbles: true }));
+                                el.dispatchEvent(new Event('change', { bubbles: true }));
+                            }
+                        }""",
+                        text,
+                    )
+            try:
+                await page.wait_for_load_state(timeout=5000)
+            except Exception:
+                pass
             if action.press_enter:
                 await page.keyboard.press("Enter")
+                try:
+                    await page.wait_for_load_state(timeout=5000)
+                except Exception:
+                    pass
 
         elif action_type == "keypress":
             try:
-                if action.keys:
-                    combo = "+".join(_normalize_key(k) for k in action.keys)
+                keys = action.keys
+                if keys and len(keys) > 2:
+                    unique = set(k.lower() for k in keys)
+                    if len(unique) == 1:
+                        normalized = _normalize_key(keys[0])
+                        for i in range(len(keys)):
+                            await page.keyboard.press(normalized)
+                            if i < len(keys) - 1:
+                                await asyncio.sleep(0.05)
+                        keys = None
+                if keys:
+                    combo = "+".join(_normalize_key(k) for k in keys)
                     await page.keyboard.press(combo)
                 elif action.key:
                     if "+" in action.key:
@@ -259,21 +314,25 @@ class BrowserPool:
             else:
                 x, y = session.viewport_width // 2, session.viewport_height // 2
 
+            await page.mouse.move(x, y)
+
             if action.scroll_x is not None or action.scroll_y is not None:
                 dx = action.scroll_x or 0
                 dy = action.scroll_y or 0
-                await page.mouse.move(x, y)
-                await page.evaluate(f"window.scrollBy({dx}, {dy})")
+                await page.mouse.wheel(dx, dy)
             elif action.scroll_direction and action.scroll_amount:
                 pixels = action.scroll_amount * 100
                 direction_map = {"up": (0, -pixels), "down": (0, pixels), "left": (-pixels, 0), "right": (pixels, 0)}
                 dx, dy = direction_map.get(action.scroll_direction, (0, 0))
-                await page.mouse.move(x, y)
-                await page.evaluate(f"window.scrollBy({dx}, {dy})")
+                await page.mouse.wheel(dx, dy)
 
         elif action_type == "hover":
             x, y = action.coordinate or [0, 0]
             await page.mouse.move(x, y)
+            try:
+                await page.wait_for_load_state(timeout=5000)
+            except Exception:
+                pass
 
         elif action_type == "drag":
             if action.path and len(action.path) >= 2:
@@ -293,13 +352,30 @@ class BrowserPool:
                 sx, sy = action.start_coordinate
                 ex, ey = action.end_coordinate
                 await page.mouse.move(sx, sy)
+                try:
+                    await page.wait_for_load_state(timeout=5000)
+                except Exception:
+                    pass
                 await page.mouse.down()
                 await page.mouse.move(ex, ey)
                 await page.mouse.up()
+                try:
+                    await page.wait_for_load_state(timeout=5000)
+                except Exception:
+                    pass
 
         elif action_type == "goto":
             url = action.url or ""
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            if url and not url.startswith(("http://", "https://")):
+                url = "https://" + url
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=10000)
+                except Exception:
+                    pass
+            except Exception:
+                await page.goto(url, wait_until="networkidle", timeout=30000)
 
         elif action_type == "wait":
             duration_ms = action.duration or 1000
@@ -328,9 +404,22 @@ class BrowserPool:
 
         elif action_type == "new_tab":
             new_page = await session.context.new_page()
+            await new_page.set_viewport_size(
+                {"width": session.viewport_width, "height": session.viewport_height}
+            )
             session.page = new_page
             if action.url:
-                await new_page.goto(action.url, wait_until="domcontentloaded", timeout=30000)
+                tab_url = action.url
+                if not tab_url.startswith(("http://", "https://")):
+                    tab_url = "https://" + tab_url
+                try:
+                    await new_page.goto(tab_url, wait_until="domcontentloaded", timeout=30000)
+                    try:
+                        await new_page.wait_for_load_state("networkidle", timeout=10000)
+                    except Exception:
+                        pass
+                except Exception:
+                    await new_page.goto(tab_url, wait_until="networkidle", timeout=30000)
 
         elif action_type == "close_tab":
             pages = session.context.pages
