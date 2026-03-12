@@ -1,4 +1,2 @@
 -e nemo-gym[dev] @ ../../
-aiohttp
-anthropic
 google-genai

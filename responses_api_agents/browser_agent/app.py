@@ -240,6 +240,10 @@ class BrowserAgent(SimpleResponsesAPIAgent):
         elif adapter_type == "gemini":
             kwargs["max_conversation_turns"] = self.config.cua_max_conversation_turns
 
+            if self._uses_model_server():
+                kwargs["api_caller"] = self._make_gemini_model_server_caller()
+                kwargs["api_key"] = ""
+
         return AdapterFactory.create(adapter_type, **kwargs)
 
     def _make_anthropic_model_server_caller(self):
@@ -264,6 +268,28 @@ class BrowserAgent(SimpleResponsesAPIAgent):
             if not resp.ok:
                 err_body = await resp.content.read()
                 logger.error("Anthropic model server error (status=%s): %s", resp.status, err_body)
+            await raise_for_status(resp)
+            return await get_response_json(resp)
+
+        return caller
+
+    def _make_gemini_model_server_caller(self):
+        """Create an async callable that routes Gemini API calls through the model server."""
+
+        async def caller(api_params: Dict[str, Any]):
+            proxy_body = {
+                "contents": api_params["contents"],
+                "config": api_params.get("config", {}),
+            }
+
+            resp = await self.server_client.post(
+                server_name=self.config.model_server.name,
+                url_path="/v1/responses",
+                json=proxy_body,
+            )
+            if not resp.ok:
+                err_body = await resp.content.read()
+                logger.error("Gemini model server error (status=%s): %s", resp.status, err_body)
             await raise_for_status(resp)
             return await get_response_json(resp)
 
@@ -438,32 +464,45 @@ class BrowserAgent(SimpleResponsesAPIAgent):
 
             trajectory = CUATrajectory(steps=[], task_prompt=task_prompt, initial_screenshot=screenshot_b64)
             step_count = 0
+            step_data = None
 
             while not adapter_resp.done and step_count < self.config.max_steps:
                 for action in adapter_resp.actions:
-                    step_resp_raw = await self.server_client.post(
-                        server_name=self.config.resources_server.name,
-                        url_path="/step",
-                        json={"env_id": env_id, "action": action.model_dump()},
-                    )
-                    await raise_for_status(step_resp_raw)
-                    step_data = CUAStepResponse.model_validate(await get_response_json(step_resp_raw))
-
-                    trajectory.steps.append(
-                        CUAStep(
-                            action=action,
-                            screenshot_before=screenshot_b64,
-                            screenshot_after=step_data.screenshot,
-                            current_url=step_data.current_url,
-                            raw_provider_response=adapter_resp.raw_response,
+                    try:
+                        step_resp_raw = await self.server_client.post(
+                            server_name=self.config.resources_server.name,
+                            url_path="/step",
+                            json={"env_id": env_id, "action": action.model_dump()},
                         )
-                    )
-                    screenshot_b64 = step_data.screenshot
+                        await raise_for_status(step_resp_raw)
+                        step_data = CUAStepResponse.model_validate(await get_response_json(step_resp_raw))
+
+                        trajectory.steps.append(
+                            CUAStep(
+                                action=action,
+                                screenshot_before=screenshot_b64,
+                                screenshot_after=step_data.screenshot,
+                                current_url=step_data.current_url,
+                                raw_provider_response=adapter_resp.raw_response,
+                            )
+                        )
+                        screenshot_b64 = step_data.screenshot
+                    except Exception as step_err:
+                        logger.warning(
+                            "Step action failed (action=%s): %s — continuing with current screenshot",
+                            action.action_type,
+                            step_err,
+                        )
 
                 step_count += 1
                 if adapter_resp.done:
                     break
-                adapter_resp = await adapter.step(screenshot_b64)
+                last_url = step_data.current_url if step_data else "about:blank"
+                try:
+                    adapter_resp = await adapter.step(screenshot_b64, action_result=last_url)
+                except Exception as adapter_err:
+                    logger.error("Adapter step failed: %s — ending loop", adapter_err)
+                    break
 
             if adapter_resp.message:
                 trajectory.final_message = adapter_resp.message
@@ -527,9 +566,13 @@ class BrowserAgent(SimpleResponsesAPIAgent):
             env_id = seed_data.env_id
             screenshot_b64 = seed_data.screenshot
 
-            is_anthropic = self.config.cua_adapter_type in ("anthropic_sonnet", "anthropic_opus")
+            is_adapter_managed = self.config.cua_adapter_type in (
+                "anthropic_sonnet",
+                "anthropic_opus",
+                "gemini",
+            )
 
-            if self._uses_model_server() and not is_anthropic:
+            if self._uses_model_server() and not is_adapter_managed:
                 trajectory, local_storage_dump, usage = await self._responses_via_model_server(
                     task_prompt, env_id, screenshot_b64, viewport_w, viewport_h
                 )

@@ -65,6 +65,7 @@ class BrowserAction(BaseModel):
     url: Optional[str] = None
     tab_index: Optional[int] = None
     press_enter: Optional[bool] = None
+    clear_before_typing: Optional[bool] = None
     region: Optional[List[int]] = None
 
 
