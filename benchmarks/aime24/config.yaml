@@ -5,4 +5,8 @@ config_paths:
 # Rollout collection defaults — picked up directly by RolloutCollectionConfig
 agent_name: math_with_judge_simple_agent
 input_jsonl_fpath: benchmarks/aime24/data/aime24_validation.jsonl
+prompt_config: benchmarks/aime24/prompts/default.yaml
 num_repeats: 32
+responses_create_params:
+  max_output_tokens: 65536
+  temperature: 1.0
