@@ -22,10 +22,6 @@ browser_gym_anthropic_sonnet_model:
       entrypoint: app.py
       anthropic_api_key: ${cua_anthropic_api_key}
       anthropic_model: claude-sonnet-4-20250514
-      anthropic_is_opus: false
-      anthropic_max_tokens: 4096
-      anthropic_turns_to_keep: 8
-      anthropic_screenshot_turn_limit: 8
 
 browser_gym_anthropic_opus_model:
   responses_api_models:
@@ -33,11 +29,6 @@ browser_gym_anthropic_opus_model:
       entrypoint: app.py
       anthropic_api_key: ${cua_anthropic_api_key}
       anthropic_model: claude-opus-4-6
-      anthropic_is_opus: true
-      anthropic_effort_level: high
-      anthropic_max_tokens: 4096
-      anthropic_turns_to_keep: 8
-      anthropic_screenshot_turn_limit: 8
 
 browser_openai_agent:
   responses_api_agents:
@@ -68,6 +59,10 @@ browser_anthropic_sonnet_agent:
       entrypoint: app.py
       cua_adapter_type: anthropic_sonnet
       cua_model: claude-sonnet-4-20250514
+      cua_is_opus: false
+      cua_max_tokens: 4096
+      cua_turns_to_keep: 8
+      cua_screenshot_turn_limit: 8
       max_steps: 250
       viewport_width: 1280
       viewport_height: 720
@@ -91,6 +86,11 @@ browser_anthropic_opus_agent:
       entrypoint: app.py
       cua_adapter_type: anthropic_opus
       cua_model: claude-opus-4-6
+      cua_is_opus: true
+      cua_effort_level: high
+      cua_max_tokens: 4096
+      cua_turns_to_keep: 8
+      cua_screenshot_turn_limit: 8
       max_steps: 250
       viewport_width: 1280
       viewport_height: 720

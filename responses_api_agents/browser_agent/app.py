@@ -31,7 +31,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
-
 from resources_servers.browser_gym.schemas import (
     BrowserAction,
     CUADumpLocalStorageResponse,
@@ -46,6 +45,7 @@ from resources_servers.browser_gym.schemas import (
 from responses_api_agents.browser_agent.adapters import AdapterFactory
 from responses_api_agents.browser_agent.adapters.base import BaseCUAAdapter
 from responses_api_agents.browser_agent.trajectory_writer import save_debug_trajectory
+
 
 logger = logging.getLogger(__name__)
 
@@ -209,8 +209,15 @@ def _map_openai_action(action: Dict[str, Any]) -> Optional[BrowserAction]:
 class BrowserAgent(SimpleResponsesAPIAgent):
     config: BrowserAgentConfig
 
-    def _create_adapter(self, viewport_width: Optional[int] = None, viewport_height: Optional[int] = None) -> BaseCUAAdapter:
-        """Create an adapter for non-OpenAI providers (Anthropic, Gemini)."""
+    def _create_adapter(
+        self, viewport_width: Optional[int] = None, viewport_height: Optional[int] = None
+    ) -> BaseCUAAdapter:
+        """Create a CUA adapter.
+
+        For Anthropic with a model server configured, injects an api_caller that
+        routes API calls through the model server (stateless proxy) while the
+        adapter still owns all context management.
+        """
         adapter_type = self.config.cua_adapter_type
         kwargs = {
             "api_key": self.config.cua_api_key,
@@ -225,16 +232,48 @@ class BrowserAgent(SimpleResponsesAPIAgent):
             kwargs["turns_to_keep"] = self.config.cua_turns_to_keep
             kwargs["screenshot_turn_limit"] = self.config.cua_screenshot_turn_limit
             kwargs["effort_level"] = self.config.cua_effort_level
+
+            if self._uses_model_server():
+                kwargs["api_caller"] = self._make_anthropic_model_server_caller()
+                kwargs["api_key"] = ""
+
         elif adapter_type == "gemini":
             kwargs["max_conversation_turns"] = self.config.cua_max_conversation_turns
 
         return AdapterFactory.create(adapter_type, **kwargs)
 
+    def _make_anthropic_model_server_caller(self):
+        """Create an async callable that routes Anthropic API calls through the model server."""
+
+        async def caller(api_params: Dict[str, Any]):
+            proxy_body = {
+                "messages": api_params["messages"],
+                "system": api_params.get("system", ""),
+                "tools": api_params.get("tools", []),
+                "betas": api_params.get("betas", []),
+                "max_tokens": api_params.get("max_tokens", 4096),
+            }
+            if api_params.get("output_config"):
+                proxy_body["output_config"] = api_params["output_config"]
+
+            resp = await self.server_client.post(
+                server_name=self.config.model_server.name,
+                url_path="/v1/responses",
+                json=proxy_body,
+            )
+            if not resp.ok:
+                err_body = await resp.content.read()
+                logger.error("Anthropic model server error (status=%s): %s", resp.status, err_body)
+            await raise_for_status(resp)
+            return await get_response_json(resp)
+
+        return caller
+
     def _uses_model_server(self) -> bool:
         return self.config.model_server is not None
 
     # ──────────────────────────────────────────────────────────────
-    # Model-server path (OpenAI) -- standard NeMo-Gym architecture
+    # Model-server path (OpenAI only) -- context managed server-side
     # ──────────────────────────────────────────────────────────────
 
     async def _responses_via_model_server(
@@ -360,7 +399,9 @@ class BrowserAgent(SimpleResponsesAPIAgent):
                 err_body = await model_resp_raw.content.read()
                 logger.error(
                     "Model server error on follow-up CUA request step=%d (status=%s): %s",
-                    step_count, model_resp_raw.status, err_body,
+                    step_count,
+                    model_resp_raw.status,
+                    err_body,
                 )
             await raise_for_status(model_resp_raw)
             model_response = NeMoGymResponse.model_validate(await get_response_json(model_resp_raw))
@@ -381,7 +422,9 @@ class BrowserAgent(SimpleResponsesAPIAgent):
         return trajectory, ls_data.local_storage_dump, cumulative_usage
 
     # ──────────────────────────────────────────────────────────────
-    # Adapter path (Anthropic, Gemini) -- direct API calls
+    # Adapter path (Anthropic, Gemini) -- context managed agent-side
+    # Anthropic with model server: adapter manages context, API call
+    # routes through model server via injected api_caller.
     # ──────────────────────────────────────────────────────────────
 
     async def _responses_via_adapter(
@@ -484,7 +527,9 @@ class BrowserAgent(SimpleResponsesAPIAgent):
             env_id = seed_data.env_id
             screenshot_b64 = seed_data.screenshot
 
-            if self._uses_model_server():
+            is_anthropic = self.config.cua_adapter_type in ("anthropic_sonnet", "anthropic_opus")
+
+            if self._uses_model_server() and not is_anthropic:
                 trajectory, local_storage_dump, usage = await self._responses_via_model_server(
                     task_prompt, env_id, screenshot_b64, viewport_w, viewport_h
                 )
@@ -536,7 +581,7 @@ class BrowserAgent(SimpleResponsesAPIAgent):
                     logger.warning(f"Failed to save debug trajectory: {e}")
 
             return result
-        except Exception as e:
+        except Exception:
             logger.exception("Error in run")
             raise
 

@@ -8,8 +8,8 @@ This integration adds Browser Agent support to NeMo-Gym, enabling LLMs to intera
 
 The integration follows NeMo-Gym's three-server architecture:
 
-- **OpenAI**: Uses the `openai_model` server -- token tracking, retry logic via `NeMoGymAsyncOpenAI`
-- **Anthropic**: Uses the `anthropic_model` server -- stateful session management, context trimming, action normalization to OpenAI format
+- **OpenAI**: Uses the `openai_model` server -- token tracking, retry logic via `NeMoGymAsyncOpenAI`, server-side context via `previous_response_id`
+- **Anthropic**: Uses the `anthropic_model` server as a **stateless API proxy** -- all context management (turn-based trimming, tool pair validation, screenshot GC) is handled by the adapter in the agent layer; the model server only relays API calls
 - **Gemini**: Uses a direct-API adapter in the agent (Gemini's protocol doesn't fit either schema)
 
 ```
@@ -36,14 +36,14 @@ The integration follows NeMo-Gym's three-server architecture:
 │  │         BROWSER AGENT SERVER  │                  │           │   │
 │  │   responses_api_agents/browser_agent             │           │   │
 │  │                               │                  │           │   │
-│  │  ┌── Model server path ───┐   │    ┌─────────────┴────────┐  │   │
-│  │  │ OpenAI + Anthropic     │   │    │  Gemini adapter      │  │   │
-│  │  │ via /v1/responses      │   │    │  (direct HTTP)       │  │   │
-│  │  │                        │   │    │                      │  │   │
-│  │  │ • computer_call        │   │    │  • Client-side       │  │   │
-│  │  │ • computer_call_output │   │    │    context mgmt      │  │   │
-│  │  │ • previous_response    │   │    │  • Provider-specific │  │   │
-│  │  │   _id chaining         │   │    │    action mapping    │  │   │
+│  │  ┌── OpenAI (model srv) ──┐   │    ┌─────────────┴────────┐  │   │
+│  │  │ via /v1/responses      │   │    │  Anthropic / Gemini  │  │   │
+│  │  │                        │   │    │  (adapter path)      │  │   │
+│  │  │ • computer_call        │   │    │                      │  │   │
+│  │  │ • computer_call_output │   │    │  • Client-side       │  │   │
+│  │  │ • previous_response    │   │    │    context mgmt      │  │   │
+│  │  │   _id chaining         │   │    │  • Turn-based trim   │  │   │
+│  │  │ • Server-side context  │   │    │  • Tool pair valid.  │  │   │
 │  │  └─────────┬──────────────┘   │    └──────────┬───────────┘  │   │
 │  │            │                  │               │              │   │
 │  │            │  unified BrowserAction           │              │   │
@@ -67,13 +67,11 @@ The integration follows NeMo-Gym's three-server architecture:
 │  │  │  openai_model          │  │  anthropic_model           │  │   │
 │  │  │                        │  │                            │  │   │
 │  │  │  • api.openai.com      │  │  • api.anthropic.com       │  │   │
-│  │  │  • computer_use_preview│  │  • Stateful sessions       │  │   │
-│  │  │  • Org header          │  │  • Context trimming        │  │   │
-│  │  │  • Token tracking      │  │  • Action normalization    │  │   │
-│  │  │  • Retry with backoff  │  │    (Anthropic → OpenAI)    │  │   │
-│  │  └────────────────────────┘  │  • Token tracking          │  │   │
-│  │                              │  • Beta flags              │  │   │
-│  │                              └────────────────────────────┘  │   │
+│  │  │  • computer_use_preview│  │  • Stateless API proxy     │  │   │
+│  │  │  • Org header          │  │  • Relays pre-built params │  │   │
+│  │  │  • Token tracking      │  │  • AsyncAnthropic client   │  │   │
+│  │  │  • Retry with backoff  │  │  • 300s timeout + retries  │  │   │
+│  │  └────────────────────────┘  └────────────────────────────┘  │   │
 │  └──────────────────────────────────────────────────────────────┘   │
 │                                                                     │
 │  ┌──────────────────────────────────────────────────────────────┐   │
@@ -108,9 +106,9 @@ The integration follows NeMo-Gym's three-server architecture:
 ```
 
 **Key points:**
-- **OpenAI** goes through the `openai_model` server, gaining token usage tracking, centralized retry logic, and full architectural consistency. CUA-specific types (`computer_call`, `computer_call_output`) are supported in `NeMoGymResponseInputItem`.
-- **Anthropic** goes through the `anthropic_model` server, which translates between NeMo-Gym's OpenAI-style schema and Anthropic's native protocol. It maintains stateful sessions (conversation history, context trimming) and normalizes Anthropic actions to OpenAI format so the agent uses a single code path.
-- **Gemini** still uses a direct-API adapter because its protocol (`FunctionCall`/`FunctionResponse`) doesn't map to either schema.
+- **OpenAI** goes through the `openai_model` server, gaining token usage tracking, centralized retry logic, and full architectural consistency. CUA-specific types (`computer_call`, `computer_call_output`) are supported in `NeMoGymResponseInputItem`. Context is managed server-side via `previous_response_id`.
+- **Anthropic** uses the adapter path with the `anthropic_model` server acting as a **stateless API proxy**. All context management (conversation history, turn-based trimming, tool pair validation, screenshot memory GC) lives in the `AnthropicCUAAdapter` in the agent layer. The adapter prepares complete Anthropic API parameters and either calls the API directly or routes through the model server via an injected `api_caller`.
+- **Gemini** uses a direct-API adapter because its protocol (`FunctionCall`/`FunctionResponse`) doesn't map to either schema.
 - The resource server manages browser lifecycle **and** verification in one process.
 - Gym environments are external -- they can be remote (deployed URLs) or local.
 
@@ -137,7 +135,8 @@ The integration follows NeMo-Gym's three-server architecture:
 │  │                                                               │  │
 │  │  Orchestrates the full CUA loop:                              │  │
 │  │   • Calls resource server to manage browser                   │  │
-│  │   • Calls model server (or adapter) for next action           │  │
+│  │   • Calls model server (OpenAI) or adapter (Anthropic/Gemini) │  │
+│  │   • Anthropic adapter: context mgmt, trimming, screenshot GC  │  │
 │  │   • Builds trajectory (screenshots, actions, provider data)   │  │
 │  │   • Calls resource server to verify at end                    │  │
 │  └───────┬────────────────────────────────┬──────────────────────┘  │
@@ -161,11 +160,10 @@ The integration follows NeMo-Gym's three-server architecture:
 │  │  ┌────────────────────────┐ │  └──────────────────┬───────────┘  │
 │  │  │  anthropic_model       │ │                     │              │
 │  │  │  • api.anthropic.com   │ │                     │              │
-│  │  │  • Stateful sessions   │ │                     │              │
-│  │  │  • Context trimming    │ │                     │              │
-│  │  │  • Action normalization│ │                     │              │
-│  │  │  • Token tracking      │ │                     │              │
-│  │  │  • Beta flags          │ │                     │              │
+│  │  │  • Stateless API proxy │ │                     │              │
+│  │  │  • Relays pre-built    │ │                     │              │
+│  │  │    params from adapter │ │                     │              │
+│  │  │  • AsyncAnthropic      │ │                     │              │
 │  │  └────────────────────────┘ │                     │              │
 │  └─────────┬───────────────────┘                     │              │
 │            │                                         │              │
@@ -188,7 +186,8 @@ The integration follows NeMo-Gym's three-server architecture:
 | From | To | Endpoint | Payload | Response |
 |------|----|----------|---------|----------|
 | CLI | Agent | `POST /run` | task prompt + verifier_metadata | CUAVerifyResponse (reward + trajectory) |
-| Agent | Model | `POST /v1/responses` | screenshot + input items | NeMoGymResponse (computer_call actions) |
+| Agent | OpenAI Model | `POST /v1/responses` | screenshot + input items | NeMoGymResponse (computer_call actions) |
+| Agent | Anthropic Model | `POST /v1/responses` | pre-built Anthropic API params (messages, tools, betas) | raw Anthropic response dict |
 | Agent | Resource | `POST /seed_session` | start_url, viewport, task_id | env_id + initial screenshot |
 | Agent | Resource | `POST /step` | env_id + BrowserAction | screenshot + current_url |
 | Agent | Resource | `POST /dump_local_storage` | env_id | localStorage JSON string |
@@ -201,7 +200,8 @@ The integration follows NeMo-Gym's three-server architecture:
 1. Agent receives task prompt + `verifier_metadata` (task_id, gym_url, start_url)
 2. Agent seeds a browser session via resource server (navigates to start_url)
 3. Agent enters CUA loop:
-   - **Model server path** (OpenAI + Anthropic): sends `NeMoGymResponseCreateParamsNonStreaming` with screenshot to model server `/v1/responses` → receives `NeMoGymResponse` with `computer_call` items → maps to `BrowserAction` → executes via resource server `/step` → sends `computer_call_output` with new screenshot → repeat (context managed via `previous_response_id`)
+   - **Model server path** (OpenAI): sends `NeMoGymResponseCreateParamsNonStreaming` with screenshot to model server `/v1/responses` → receives `NeMoGymResponse` with `computer_call` items → maps to `BrowserAction` → executes via resource server `/step` → sends `computer_call_output` with new screenshot → repeat (context managed server-side via `previous_response_id`)
+   - **Adapter path** (Anthropic): adapter manages full conversation history with turn-based trimming, tool pair validation, and screenshot memory GC → prepares complete Anthropic API params → routes through model server (stateless proxy) or calls API directly → maps Anthropic actions to `BrowserAction` → executes via resource server `/step` → repeat
    - **Adapter path** (Gemini): sends screenshot to adapter → receives `BrowserAction` → executes via resource server `/step` → repeat
 4. On completion (model says "done" or max_steps reached), agent dumps localStorage from the browser
 5. Agent closes the browser session
@@ -213,7 +213,7 @@ The integration follows NeMo-Gym's three-server architecture:
 | Provider | Execution Path | Context Management | Token Tracking |
 |----------|---------------|-------------------|----------------|
 | **OpenAI** (CUA Preview) | Model server (`openai_model`) | Server-side via `previous_response_id` | Yes (via `NeMoGymResponseUsage`) |
-| **Anthropic** (Sonnet/Opus) | Model server (`anthropic_model`) | Stateful sessions with turn-based trimming | Yes (via usage in response) |
+| **Anthropic** (Sonnet/Opus) | Adapter → model server (stateless proxy) | Client-side in adapter: turn-based trimming, tool pair validation, screenshot GC | Yes (via usage in response) |
 | **Gemini** (2.5 Flash) | Direct-API adapter | Client-side `_contents` list with paired-turn trimming | No |
 
 ## File Structure
@@ -235,7 +235,7 @@ resources_servers/browser_gym/
 └── README.md                       # This file
 
 responses_api_models/anthropic_model/
-├── app.py                          # Anthropic CUA model server (stateful, /v1/responses)
+├── app.py                          # Anthropic model server (stateless API proxy, /v1/responses)
 └── requirements.txt
 
 responses_api_agents/browser_agent/
@@ -245,7 +245,7 @@ responses_api_agents/browser_agent/
 │   ├── __init__.py                 # AdapterFactory registry
 │   ├── base.py                     # BaseCUAAdapter abstract class
 │   ├── openai_adapter.py           # OpenAI Computer Use Preview (fallback without model server)
-│   ├── anthropic_adapter.py        # Anthropic Sonnet / Opus (fallback without model server)
+│   ├── anthropic_adapter.py        # Anthropic Sonnet / Opus (context mgmt, trimming, API routing)
 │   └── gemini_adapter.py           # Google Gemini (primary path -- no model server)
 ├── tests/
 │   ├── __init__.py
@@ -314,6 +314,8 @@ ng_status
 
 ### Collect Rollouts
 
+Debug trajectories (screenshots, `conversation.json`, `verification.json`) are saved to `/tmp/cua_debug_trajectories/` when `cua_debug_trajectories=true` (enabled by default for OpenAI, Sonnet, and Opus agents in the YAML config).
+
 **OpenAI (Computer Use Preview):**
 
 ```bash
@@ -322,7 +324,8 @@ ng_collect_rollouts \
   +input_jsonl_fpath=resources_servers/browser_gym/data/example.jsonl \
   +output_jsonl_fpath=results/cua_rollouts_openai.jsonl \
   +num_repeats=1 \
-  "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
+  "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}" \
+  ++browser_openai_agent.responses_api_agents.browser_agent.cua_debug_trajectories=true
 ```
 
 **Anthropic Claude Sonnet:**
@@ -333,7 +336,8 @@ ng_collect_rollouts \
   +input_jsonl_fpath=resources_servers/browser_gym/data/example.jsonl \
   +output_jsonl_fpath=results/cua_rollouts_anthropic_sonnet.jsonl \
   +num_repeats=1 \
-  "+responses_create_params={max_output_tokens: 4096, temperature: 1.0}"
+  "+responses_create_params={max_output_tokens: 4096, temperature: 1.0}" \
+  ++browser_anthropic_sonnet_agent.responses_api_agents.browser_agent.cua_debug_trajectories=true
 ```
 
 **Anthropic Claude Opus:**
@@ -344,7 +348,8 @@ ng_collect_rollouts \
   +input_jsonl_fpath=resources_servers/browser_gym/data/example.jsonl \
   +output_jsonl_fpath=results/cua_rollouts_anthropic_opus.jsonl \
   +num_repeats=1 \
-  "+responses_create_params={max_output_tokens: 4096, temperature: 1.0}"
+  "+responses_create_params={max_output_tokens: 4096, temperature: 1.0}" \
+  ++browser_anthropic_opus_agent.responses_api_agents.browser_agent.cua_debug_trajectories=true
 ```
 
 **Gemini 2.5 Flash:**
@@ -355,10 +360,13 @@ ng_collect_rollouts \
   +input_jsonl_fpath=resources_servers/browser_gym/data/example.jsonl \
   +output_jsonl_fpath=results/cua_rollouts_gemini.jsonl \
   +num_repeats=1 \
-  "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
+  "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}" \
+  ++browser_gemini_agent.responses_api_agents.browser_agent.cua_debug_trajectories=true
 ```
 
 Available agent names: `browser_openai_agent`, `browser_anthropic_sonnet_agent`, `browser_anthropic_opus_agent`, `browser_gemini_agent`
+
+> **Note:** To disable debug output, change `=true` to `=false` or omit the `cua_debug_trajectories` override (defaults are set in the YAML config).
 
 ### Reward Profiling
 
@@ -503,7 +511,7 @@ Create `.vscode/launch.json` in the project root with the following content (rep
             "env": {
                 "PYTHONPATH": "${workspaceFolder}",
                 "NEMO_GYM_CONFIG_PATH": "browser_gym_resources_server",
-                "NEMO_GYM_CONFIG_DICT": "browser_gym_resources_server:\n  resources_servers:\n    browser_gym:\n      entrypoint: app.py\n      domain: agent\n      max_concurrent_browsers: 16\n      default_viewport_width: 1280\n      default_viewport_height: 720\n      host: 127.0.0.1\n      port: 10212\nbrowser_openai_agent:\n  responses_api_agents:\n    browser_agent:\n      entrypoint: app.py\n      cua_adapter_type: openai\n      cua_model: computer-use-preview\n      cua_api_key: YOUR_OPENAI_API_KEY\n      cua_org: YOUR_OPENAI_ORG\n      max_steps: 50\n      viewport_width: 1280\n      viewport_height: 720\n      cua_debug_trajectories: true\n      cua_debug_output_dir: /tmp/cua_debug_trajectories\n      resources_server:\n        type: resources_servers\n        name: browser_gym_resources_server\n      datasets:\n      - name: example\n        type: example\n        jsonl_fpath: resources_servers/browser_gym/data/example.jsonl\n        num_repeats: 1\n      host: 127.0.0.1\n      port: 13135\nhead_server:\n  host: 127.0.0.1\n  port: 11000\ndry_run: false"
+                "NEMO_GYM_CONFIG_DICT": "browser_gym_resources_server:\n  resources_servers:\n    browser_gym:\n      entrypoint: app.py\n      domain: agent\n      max_concurrent_browsers: 16\n      default_viewport_width: 1280\n      default_viewport_height: 720\n      host: 127.0.0.1\n      port: 10212\nbrowser_openai_agent:\n  responses_api_agents:\n    browser_agent:\n      entrypoint: app.py\n      cua_adapter_type: openai\n      cua_model: computer-use-preview\n      cua_api_key: YOUR_OPENAI_API_KEY\n      cua_org: YOUR_OPENAI_ORG\n      max_steps: 250\n      viewport_width: 1280\n      viewport_height: 720\n      cua_debug_trajectories: true\n      cua_debug_output_dir: /tmp/cua_debug_trajectories\n      resources_server:\n        type: resources_servers\n        name: browser_gym_resources_server\n      datasets:\n      - name: example\n        type: example\n        jsonl_fpath: resources_servers/browser_gym/data/example.jsonl\n        num_repeats: 1\n      host: 127.0.0.1\n      port: 13135\nhead_server:\n  host: 127.0.0.1\n  port: 11000\ndry_run: false"
             },
             "justMyCode": false,
             "console": "integratedTerminal"
@@ -518,7 +526,7 @@ Create `.vscode/launch.json` in the project root with the following content (rep
             "env": {
                 "PYTHONPATH": "${workspaceFolder}",
                 "NEMO_GYM_CONFIG_PATH": "browser_openai_agent",
-                "NEMO_GYM_CONFIG_DICT": "browser_gym_resources_server:\n  resources_servers:\n    browser_gym:\n      entrypoint: app.py\n      domain: agent\n      max_concurrent_browsers: 16\n      default_viewport_width: 1280\n      default_viewport_height: 720\n      host: 127.0.0.1\n      port: 10212\nbrowser_openai_agent:\n  responses_api_agents:\n    browser_agent:\n      entrypoint: app.py\n      cua_adapter_type: openai\n      cua_model: computer-use-preview\n      cua_api_key: YOUR_OPENAI_API_KEY\n      cua_org: YOUR_OPENAI_ORG\n      max_steps: 50\n      viewport_width: 1280\n      viewport_height: 720\n      cua_debug_trajectories: true\n      cua_debug_output_dir: /tmp/cua_debug_trajectories\n      resources_server:\n        type: resources_servers\n        name: browser_gym_resources_server\n      datasets:\n      - name: example\n        type: example\n        jsonl_fpath: resources_servers/browser_gym/data/example.jsonl\n        num_repeats: 1\n      host: 127.0.0.1\n      port: 13135\nhead_server:\n  host: 127.0.0.1\n  port: 11000\ndry_run: false"
+                "NEMO_GYM_CONFIG_DICT": "browser_gym_resources_server:\n  resources_servers:\n    browser_gym:\n      entrypoint: app.py\n      domain: agent\n      max_concurrent_browsers: 16\n      default_viewport_width: 1280\n      default_viewport_height: 720\n      host: 127.0.0.1\n      port: 10212\nbrowser_openai_agent:\n  responses_api_agents:\n    browser_agent:\n      entrypoint: app.py\n      cua_adapter_type: openai\n      cua_model: computer-use-preview\n      cua_api_key: YOUR_OPENAI_API_KEY\n      cua_org: YOUR_OPENAI_ORG\n      max_steps: 250\n      viewport_width: 1280\n      viewport_height: 720\n      cua_debug_trajectories: true\n      cua_debug_output_dir: /tmp/cua_debug_trajectories\n      resources_server:\n        type: resources_servers\n        name: browser_gym_resources_server\n      datasets:\n      - name: example\n        type: example\n        jsonl_fpath: resources_servers/browser_gym/data/example.jsonl\n        num_repeats: 1\n      host: 127.0.0.1\n      port: 13135\nhead_server:\n  host: 127.0.0.1\n  port: 11000\ndry_run: false"
             },
             "justMyCode": false,
             "console": "integratedTerminal"
@@ -666,7 +674,16 @@ Verification uses **localStorage assertions**. After the CUA agent completes a t
 
 ## Adding a New CUA Provider
 
-**Option A: Model server (preferred)** -- full NeMo-Gym architectural consistency:
+**Option A: Adapter + stateless model server** -- recommended for providers with their own context protocol (like Anthropic):
+
+1. Create an adapter in `responses_api_agents/browser_agent/adapters/your_adapter.py` extending `BaseCUAAdapter`
+2. Implement context management (history, trimming) in the adapter
+3. Create a stateless model server in `responses_api_models/your_model/app.py` that only relays API calls
+4. The adapter prepares complete API params and routes through the model server via an injected `api_caller`
+5. Add model server + agent config blocks in `configs/browser_gym.yaml` with `model_server` reference
+6. Add `requirements.txt` with the provider's SDK in both server directories
+
+**Option B: Model server with server-side context** -- for providers that support server-side context (like OpenAI):
 
 1. Create `responses_api_models/your_model/app.py` extending `SimpleResponsesAPIModel`
 2. Translate provider requests/responses to NeMo-Gym's `NeMoGymResponse` format (with `computer_call` items)
@@ -674,7 +691,7 @@ Verification uses **localStorage assertions**. After the CUA agent completes a t
 4. Add model server + agent config blocks in `configs/browser_gym.yaml` with `model_server` reference
 5. Add `requirements.txt` with the provider's SDK
 
-**Option B: Adapter** -- for providers whose protocol is hard to normalize:
+**Option C: Standalone adapter** -- for providers whose protocol doesn't fit model server patterns (like Gemini):
 
 1. Create `responses_api_agents/browser_agent/adapters/your_adapter.py`
 2. Extend `BaseCUAAdapter` and implement `initialize()`, `step()`, `reset()`
