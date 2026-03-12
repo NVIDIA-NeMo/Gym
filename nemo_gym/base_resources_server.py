@@ -13,18 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from abc import abstractmethod
-from collections import defaultdict
 from typing import Any, Dict, List
 
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.reward_profile import RewardProfiler
+from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 
 
@@ -87,77 +85,7 @@ class BaseSeedSessionResponse(BaseModel):
     pass
 
 
-def _group_by_task(verify_responses: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
-    """Group verify responses by task index, returning a list of per-task rollout lists."""
-    groups: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
-    for vr in verify_responses:
-        groups[vr.get(TASK_INDEX_KEY_NAME, 0)].append(vr)
-    return [groups[k] for k in sorted(groups)]
-
-
-def compute_aggregate_metrics(
-    verify_responses: List[Dict[str, Any]],
-    compute_metrics_fn=None,
-    get_key_metrics_fn=None,
-) -> AggregateMetrics:
-    """Shared aggregation logic for /aggregate_metrics.
-
-    RewardProfiler runs with defaults to produce baseline stats (mean/max/min/median/std)
-    for both group-level (per-task) and agent-level metrics.
-
-    Optionally accepts custom functions for benchmark-specific customization:
-      - compute_metrics_fn: receives ALL verify responses grouped by task
-        (List[List[Dict]]) for metrics that need the full dataset (e.g. confidence
-        intervals, cross-task statistics, pass@k). Returned dict is merged into agent_metrics.
-      - get_key_metrics_fn: select headline metrics from agent_metrics
-    """
-    if not verify_responses:
-        return AggregateMetrics()
-
-    rp = RewardProfiler()
-
-    rows = []
-    results = []
-    for vr in verify_responses:
-        rows.append(
-            {
-                TASK_INDEX_KEY_NAME: vr.get(TASK_INDEX_KEY_NAME, 0),
-                ROLLOUT_INDEX_KEY_NAME: vr.get(ROLLOUT_INDEX_KEY_NAME, 0),
-                "agent_ref": {"name": "agent"},
-            }
-        )
-        results.append(vr if "response" in vr else {**vr, "response": {}})
-
-    group_level_metrics, agent_level_metrics = rp.profile_from_data(rows, results)
-
-    # Flatten agent_level_metrics (one entry since we use a single agent name)
-    agent_metrics: Dict[str, Any] = {}
-    for entry in agent_level_metrics:
-        for k, v in entry.items():
-            if k != "agent_ref":
-                agent_metrics[k] = v
-
-    serialized_group = rp.prepare_for_serialization(group_level_metrics)
-    serialized_agent = rp.prepare_for_serialization([agent_metrics])[0] if agent_metrics else {}
-
-    # Custom metrics computed from all raw verify responses grouped by task
-    if compute_metrics_fn:
-        tasks = _group_by_task(verify_responses)
-        serialized_agent.update(compute_metrics_fn(tasks))
-
-    if get_key_metrics_fn:
-        key_metrics = get_key_metrics_fn(serialized_agent)
-    else:
-        key_metrics = {k: v for k, v in serialized_agent.items() if k.startswith("mean/")}
-
-    return AggregateMetrics(
-        group_level_metrics=serialized_group,
-        agent_metrics=serialized_agent,
-        key_metrics=key_metrics,
-    )
-
-
-class SimpleResourcesServer(BaseResourcesServer, SimpleServer):
+class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):
     config: BaseResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:
@@ -177,30 +105,6 @@ class SimpleResourcesServer(BaseResourcesServer, SimpleServer):
     @abstractmethod
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
         pass
-
-    def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
-        """Override to compute custom metrics from all verify responses.
-
-        Receives verify responses grouped by task: tasks[i] is a list of rollout
-        dicts for task i. Each dict has at minimum reward, plus any custom fields
-        from the verify response (e.g. symbolic_correct, judgement-gen-base).
-
-        Use for metrics that need the full dataset at once:
-        - Confidence intervals (ArenaMetrics)
-        - Cross-task statistics (std_dev_across_runs)
-        - pass@k with proper combinatorial computation
-
-        The returned dict is merged into agent_metrics.
-        Default: empty dict (no additional metrics).
-        """
-        return {}
-
-    def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
-        """Override to select headline metrics for this benchmark.
-
-        Default: all mean/* entries from agent_metrics.
-        """
-        return {k: v for k, v in agent_metrics.items() if k.startswith("mean/")}
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
         """Compute aggregate metrics from verify responses.

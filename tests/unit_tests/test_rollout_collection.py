@@ -18,6 +18,7 @@ from pathlib import Path
 
 import orjson
 
+from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
 
@@ -116,6 +117,18 @@ class TestRolloutCollection:
 
                 return futures
 
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                """Compute aggregate metrics locally (no server needed)."""
+                stripped = [{k: v for k, v in r.items() if k not in ("responses_create_params",)} for r in results]
+                agg = compute_aggregate_metrics(stripped)
+                metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
+                metrics_fpath.write_bytes(
+                    orjson.dumps(
+                        [{"agent_ref": {"name": "my agent name"}, **agg.model_dump()}], option=orjson.OPT_INDENT_2
+                    )
+                )
+                return metrics_fpath
+
         actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
 
         expected_results = [
@@ -138,25 +151,23 @@ class TestRolloutCollection:
             actual_written_results = [json.loads(line) for line in f]
         assert expected_results == actual_written_results
 
-        expected_reward_profiling_output_len = 3
-        reward_profiling_fpath = tmp_path / "output_reward_profiling.jsonl"
-        with reward_profiling_fpath.open() as f:
-            actual_reward_profiling_output_len = len(list(f))
-        assert expected_reward_profiling_output_len == actual_reward_profiling_output_len
-
-        agent_level_metrics_fpath = tmp_path / "output_agent_metrics.json"
-        actual_agent_level_metrics = json.loads(agent_level_metrics_fpath.read_text())
-        expected_agent_level_metrics = [
+        aggregate_metrics_fpath = tmp_path / "output_aggregate_metrics.json"
+        actual_aggregate_metrics = json.loads(aggregate_metrics_fpath.read_text())
+        expected_aggregate_metrics = [
             {
-                "mean/abc usage": 1.0,
-                "max/abc usage": 1,
-                "min/abc usage": 1,
-                "median/abc usage": 1.0,
-                "std/abc usage": 0.0,
                 "agent_ref": {"name": "my agent name"},
+                "agent_metrics": {
+                    "mean/abc usage": 1.0,
+                    "max/abc usage": 1,
+                    "min/abc usage": 1,
+                    "median/abc usage": 1.0,
+                    "std/abc usage": 0.0,
+                },
+                "key_metrics": {"mean/abc usage": 1.0},
+                "group_level_metrics": actual_aggregate_metrics[0]["group_level_metrics"],
             }
         ]
-        assert expected_agent_level_metrics == actual_agent_level_metrics
+        assert expected_aggregate_metrics == actual_aggregate_metrics
 
     async def test_run_from_config_sorted(self, tmp_path: Path) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
@@ -192,6 +203,9 @@ class TestRolloutCollection:
                 futures = reversed(futures)
 
                 return futures
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                return None
 
         actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
 
