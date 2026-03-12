@@ -17,12 +17,84 @@ from asyncio import Future
 from pathlib import Path
 
 import orjson
+import pytest
+import yaml
 
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
 
 class TestRolloutCollection:
+    def test_preprocess_rows_with_prompt_config(self, tmp_path: Path) -> None:
+        """prompt_config builds responses_create_params.input from template."""
+        prompt_path = tmp_path / "prompt.yaml"
+        prompt_path.write_text(yaml.dump({"system": "You are a math tutor.", "user": "Solve: {question}"}))
+
+        fpath = tmp_path / "input.jsonl"
+        rows = [
+            {"question": "What is 2+2?", "expected_answer": "4"},
+            {"question": "What is 3*5?", "expected_answer": "15"},
+        ]
+        fpath.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+        config = RolloutCollectionConfig(
+            agent_name="my_agent",
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            prompt_config=str(prompt_path),
+            num_repeats=1,
+        )
+
+        result = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+        assert len(result) == 2
+        assert result[0]["responses_create_params"]["input"] == [
+            {"role": "system", "content": "You are a math tutor."},
+            {"role": "user", "content": "Solve: What is 2+2?"},
+        ]
+        assert result[0]["expected_answer"] == "4"
+        assert result[1]["responses_create_params"]["input"][1]["content"] == "Solve: What is 3*5?"
+
+    def test_preprocess_rows_prompt_config_rejects_prebaked(self, tmp_path: Path) -> None:
+        """prompt_config raises when rows already have responses_create_params.input."""
+        prompt_path = tmp_path / "prompt.yaml"
+        prompt_path.write_text(yaml.dump({"user": "{question}"}))
+
+        fpath = tmp_path / "input.jsonl"
+        rows = [{"question": "test", "responses_create_params": {"input": [{"role": "user", "content": "baked"}]}}]
+        fpath.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+        config = RolloutCollectionConfig(
+            agent_name="my_agent",
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            prompt_config=str(prompt_path),
+        )
+
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+    def test_preprocess_rows_prompt_config_preserves_rcp_fields(self, tmp_path: Path) -> None:
+        """prompt_config preserves other responses_create_params fields like tools."""
+        prompt_path = tmp_path / "prompt.yaml"
+        prompt_path.write_text(yaml.dump({"user": "{question}"}))
+
+        fpath = tmp_path / "input.jsonl"
+        rows = [{"question": "test", "responses_create_params": {"tools": [{"type": "function", "name": "calc"}]}}]
+        fpath.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+        config = RolloutCollectionConfig(
+            agent_name="my_agent",
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            prompt_config=str(prompt_path),
+            num_repeats=1,
+        )
+
+        result = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert result[0]["responses_create_params"]["tools"] == [{"type": "function", "name": "calc"}]
+        assert result[0]["responses_create_params"]["input"] == [{"role": "user", "content": "test"}]
+
     def test_preprocess_rows_from_config(self, tmp_path: Path) -> None:
         fpath = tmp_path / "input.jsonl"
         samples = [json.dumps({"responses_create_params": {"input": []}, "x": i}) for i in range(10)]

@@ -37,6 +37,7 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     get_wandb_run,
 )
+from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
@@ -114,6 +115,10 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=False,
         description="If the same command is run multiple times, check the materialized inputs and current outputs and remove the inputs that have already been run",
     )
+    prompt_config: Optional[str] = Field(
+        default=None,
+        description="Path to a prompt YAML file. Builds responses_create_params.input from the template at rollout time. Mutually exclusive with pre-populated responses_create_params.input in the JSONL data.",
+    )
 
     @property
     def materialized_jsonl_fpath(self) -> Path:
@@ -141,19 +146,28 @@ class RolloutCollectionHelper(BaseModel):
         if num_repeats:
             print(f"Repeating rows {num_repeats} times (in a pattern of abc to aabbcc)!")
 
-        input_file = open(config.input_jsonl_fpath)
-        rows_iterator: Iterator[str] = input_file
-        rows_iterator: Iterator[str] = tqdm(rows_iterator, desc="Reading rows")
-        rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
+        # Load prompt config if specified
+        prompt_cfg = None
+        if config.prompt_config:
+            prompt_cfg = load_prompt_config(config.prompt_config)
+            print(f"Using prompt config: {config.prompt_config}")
+
+        with open(config.input_jsonl_fpath) as input_file:
+            rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
+            rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
+            raw_rows = [(row_idx, row_str, orjson.loads(row_str)) for row_idx, row_str in rows_iterator]
+
+        # Validate and apply prompt config before per-row processing
+        if prompt_cfg is not None:
+            validate_prompt_compatibility([row for _, _, row in raw_rows], prompt_cfg)
+            raw_rows = [(idx, s, apply_prompt_to_row(row, prompt_cfg)) for idx, s, row in raw_rows]
 
         # For ng_reward_profile to match rollouts to tasks
         row_to_task_idx: Dict[str, int] = dict()
         task_idx_to_rollout_idx: Dict[int, int] = Counter()
         row_idxs_missing_agent_ref: List[int] = []
         rows: List[Dict] = []
-        for row_idx, row_str in rows_iterator:
-            row = orjson.loads(row_str)
-
+        for row_idx, row_str, row in raw_rows:
             # Resolve agent name
             if config.agent_name:
                 row.setdefault(AGENT_REF_KEY_NAME, {"name": config.agent_name})
@@ -178,8 +192,6 @@ class RolloutCollectionHelper(BaseModel):
                     row[RESPONSES_CREATE_PARAMS_KEY_NAME]["seed"] = row[ROLLOUT_INDEX_KEY_NAME]
 
                 rows.append(row)
-
-        input_file.close()
 
         if row_idxs_missing_agent_ref:
             raise ValueError(
