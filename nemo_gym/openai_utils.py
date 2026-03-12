@@ -191,6 +191,28 @@ class NeMoGymResponseFunctionToolCall(BaseModel):
     status: Optional[Literal["in_progress", "completed", "incomplete"]] = None
 
 
+class NeMoGymComputerToolCall(BaseModel):
+    """Wraps ResponseComputerToolCall (type="computer_call") for CUA support."""
+
+    id: str
+    action: Dict[str, Any]
+    call_id: str
+    pending_safety_checks: List[Dict[str, Any]] = Field(default_factory=list)
+    status: Literal["in_progress", "completed", "incomplete"] = "completed"
+    type: Literal["computer_call"] = "computer_call"
+
+
+class NeMoGymComputerCallOutput(BaseModel):
+    """Wraps ComputerCallOutput (type="computer_call_output") for CUA support."""
+
+    call_id: str
+    output: Dict[str, Any]
+    type: Literal["computer_call_output"] = "computer_call_output"
+    id: Optional[str] = None
+    acknowledged_safety_checks: Optional[List[Dict[str, Any]]] = None
+    status: Optional[Literal["in_progress", "completed", "incomplete"]] = None
+
+
 class NeMoGymResponseInputText(ResponseInputTextParam):
     pass
 
@@ -231,6 +253,8 @@ NeMoGymResponseInputItem = Union[
     NeMoGymResponseFunctionToolCall,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseReasoningItem,
+    NeMoGymComputerToolCall,
+    NeMoGymComputerCallOutput,
     # For training:
     NeMoGymEasyInputMessageForTraining,
     NeMoGymMessageForTraining,
@@ -470,6 +494,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
     base_url: str
     api_key: str
+    organization: Optional[str] = None
 
     internal: bool = Field(
         default=False,
@@ -477,10 +502,13 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     )
 
     async def _request(self, **request_kwargs: Dict) -> ClientResponse:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+        }
+        if self.organization:
+            headers["Openai-Organization"] = self.organization
         request_kwargs = request_kwargs | {
-            "headers": {
-                "Authorization": f"Bearer {self.api_key}",
-            },
+            "headers": headers,
             "_internal": self.internal,
         }
 

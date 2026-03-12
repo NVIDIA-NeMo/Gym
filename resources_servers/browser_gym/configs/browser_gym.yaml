@@ -1,0 +1,131 @@
+browser_gym_resources_server:
+  resources_servers:
+    browser_gym:
+      entrypoint: app.py
+      domain: agent
+      max_concurrent_browsers: 16
+      default_viewport_width: 1280
+      default_viewport_height: 720
+
+browser_gym_openai_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: "https://api.openai.com/v1"
+      openai_api_key: ${cua_openai_api_key}
+      openai_model: computer-use-preview
+      openai_organization: ${cua_openai_org}
+
+browser_gym_anthropic_sonnet_model:
+  responses_api_models:
+    anthropic_model:
+      entrypoint: app.py
+      anthropic_api_key: ${cua_anthropic_api_key}
+      anthropic_model: claude-sonnet-4-20250514
+      anthropic_is_opus: false
+      anthropic_max_tokens: 4096
+      anthropic_turns_to_keep: 8
+      anthropic_screenshot_turn_limit: 8
+
+browser_gym_anthropic_opus_model:
+  responses_api_models:
+    anthropic_model:
+      entrypoint: app.py
+      anthropic_api_key: ${cua_anthropic_api_key}
+      anthropic_model: claude-opus-4-6
+      anthropic_is_opus: true
+      anthropic_effort_level: high
+      anthropic_max_tokens: 4096
+      anthropic_turns_to_keep: 8
+      anthropic_screenshot_turn_limit: 8
+
+browser_openai_agent:
+  responses_api_agents:
+    browser_agent:
+      entrypoint: app.py
+      cua_adapter_type: openai
+      cua_model: computer-use-preview
+      max_steps: 250
+      viewport_width: 1280
+      viewport_height: 720
+      cua_debug_trajectories: true
+      cua_debug_output_dir: /tmp/cua_debug_trajectories
+      resources_server:
+        type: resources_servers
+        name: browser_gym_resources_server
+      model_server:
+        type: responses_api_models
+        name: browser_gym_openai_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/browser_gym/data/example.jsonl
+        num_repeats: 1
+
+browser_anthropic_sonnet_agent:
+  responses_api_agents:
+    browser_agent:
+      entrypoint: app.py
+      cua_adapter_type: anthropic_sonnet
+      cua_model: claude-sonnet-4-20250514
+      max_steps: 250
+      viewport_width: 1280
+      viewport_height: 720
+      cua_debug_trajectories: true
+      cua_debug_output_dir: /tmp/cua_debug_trajectories
+      resources_server:
+        type: resources_servers
+        name: browser_gym_resources_server
+      model_server:
+        type: responses_api_models
+        name: browser_gym_anthropic_sonnet_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/browser_gym/data/example.jsonl
+        num_repeats: 1
+
+browser_anthropic_opus_agent:
+  responses_api_agents:
+    browser_agent:
+      entrypoint: app.py
+      cua_adapter_type: anthropic_opus
+      cua_model: claude-opus-4-6
+      max_steps: 250
+      viewport_width: 1280
+      viewport_height: 720
+      cua_debug_trajectories: true
+      cua_debug_output_dir: /tmp/cua_debug_trajectories
+      resources_server:
+        type: resources_servers
+        name: browser_gym_resources_server
+      model_server:
+        type: responses_api_models
+        name: browser_gym_anthropic_opus_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/browser_gym/data/example.jsonl
+        num_repeats: 1
+
+browser_gemini_agent:
+  responses_api_agents:
+    browser_agent:
+      entrypoint: app.py
+      cua_adapter_type: gemini
+      cua_model: gemini-2.5-flash
+      cua_api_key: ${cua_gemini_api_key}
+      cua_max_conversation_turns: 8
+      max_steps: 250
+      viewport_width: 1280
+      viewport_height: 720
+      cua_debug_trajectories: false
+      cua_debug_output_dir: /tmp/cua_debug_trajectories
+      resources_server:
+        type: resources_servers
+        name: browser_gym_resources_server
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/browser_gym/data/example.jsonl
+        num_repeats: 1
