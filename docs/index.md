@@ -326,6 +326,7 @@ Overview <resources-server/index>
 Overview <data/index>
 Prepare and Validate <data/prepare-validate>
 Download from Hugging Face <data/download-huggingface>
+Aggregate Metrics <data/aggregate-metrics>
 ```
 
 ```{toctree}
