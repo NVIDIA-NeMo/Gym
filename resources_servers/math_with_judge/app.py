@@ -34,6 +34,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.global_config import TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -372,27 +373,24 @@ Example output: "My final verdict is different [[A!=B]]"."""
             for k in agent_metrics
             if k.startswith("pass@1[avg-of-") and k.count("/") == 1 and "std_dev" not in k and "std_err" not in k
         ]
-        if avg_keys:
-            highest_k = max(int(k.split("pass@1[avg-of-")[1].split("]")[0]) for k in avg_keys)
-            for k in avg_keys:
-                if k.startswith(f"pass@1[avg-of-{highest_k}]"):
-                    key[k] = agent_metrics[k]
+        highest_k = max(int(k.split("pass@1[avg-of-")[1].split("]")[0]) for k in avg_keys)
+        for k in avg_keys:
+            if k.startswith(f"pass@1[avg-of-{highest_k}]"):
+                key[k] = agent_metrics[k]
 
         # Highest-k pass@k for accuracy scores only (not no_answer)
         pass_keys = [k for k in agent_metrics if k.startswith("pass@") and "[" not in k and "/no_answer" not in k]
-        if pass_keys:
-            highest_k = max(int(k.split("@")[1].split("/")[0]) for k in pass_keys)
-            for k in pass_keys:
-                if k.startswith(f"pass@{highest_k}/"):
-                    key[k] = agent_metrics[k]
+        highest_k = max(int(k.split("@")[1].split("/")[0]) for k in pass_keys)
+        for k in pass_keys:
+            if k.startswith(f"pass@{highest_k}/"):
+                key[k] = agent_metrics[k]
 
         # Highest-k majority for accuracy scores only (not no_answer)
         maj_keys = [k for k in agent_metrics if k.startswith("majority@") and "/no_answer" not in k]
-        if maj_keys:
-            highest_k = max(int(k.split("@")[1].split("/")[0]) for k in maj_keys)
-            for k in maj_keys:
-                if k.startswith(f"majority@{highest_k}/"):
-                    key[k] = agent_metrics[k]
+        highest_k = max(int(k.split("@")[1].split("/")[0]) for k in maj_keys)
+        for k in maj_keys:
+            if k.startswith(f"majority@{highest_k}/"):
+                key[k] = agent_metrics[k]
 
         return key
 
@@ -501,7 +499,7 @@ def _compute_per_task_metrics(
     """Per-task evaluation metrics: pass@k, majority@k, no_answer for each task."""
     per_task = []
     for task_idx, (task_scores, task_answers) in enumerate(zip(all_scores, all_answers)):
-        entry: Dict[str, Any] = {"task_index": task_idx}
+        entry: Dict[str, Any] = {TASK_INDEX_KEY_NAME: task_idx}
         n = len(task_scores)
 
         # pass@k per task: max of first k_val scores
