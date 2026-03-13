@@ -91,6 +91,7 @@ class GeminiCUAAdapter(BaseCUAAdapter):
         self._is_gemini_3 = "gemini-3" in model.lower()
         self._contents: list = []
         self._pending_action_names: List[str] = []
+        self._pending_safety_decisions: Dict[str, bool] = {}
         self._current_url: str = "about:blank"
 
         self._build_generate_config(thinking_level, include_thoughts)
@@ -356,6 +357,7 @@ class GeminiCUAAdapter(BaseCUAAdapter):
         actions: List[BrowserAction] = []
         message: Optional[str] = None
         done = False
+        safety_decisions: Dict[str, bool] = {}
 
         candidates = response_data.get("candidates", [])
         if not candidates:
@@ -368,7 +370,11 @@ class GeminiCUAAdapter(BaseCUAAdapter):
             for p in content_data.get("parts", []):
                 if "function_call" in p:
                     fc_data = p["function_call"]
-                    parts.append(Part(function_call=FunctionCall(name=fc_data["name"], args=fc_data.get("args", {}))))
+                    args = fc_data.get("args", {})
+                    if "safety_decision" in args:
+                        safety_decisions[fc_data["name"]] = True
+                        logger.info("Safety decision for %s: %s", fc_data["name"], args["safety_decision"])
+                    parts.append(Part(function_call=FunctionCall(name=fc_data["name"], args=args)))
                 elif "text" in p:
                     if p.get("thought"):
                         parts.append(Part(text=p["text"], thought=True))
@@ -385,6 +391,8 @@ class GeminiCUAAdapter(BaseCUAAdapter):
                         actions.append(browser_action)
                 elif "text" in p and not p.get("thought"):
                     message = p["text"]
+
+        self._pending_safety_decisions = safety_decisions
 
         if not actions and message:
             done = True
@@ -405,20 +413,26 @@ class GeminiCUAAdapter(BaseCUAAdapter):
         """Build function response content with screenshot for each pending action.
 
         Gemini CUA requires every function response to include a 'url' or
-        'current_url' field in the response dict.
+        'current_url' field in the response dict. When a function call included
+        a safety_decision, the corresponding function_response must include
+        safety_acknowledgement.
         """
         from google.genai.types import Content, FunctionResponse, Part
 
         url = self._current_url or "about:blank"
         screenshot_bytes = base64.b64decode(screenshot_b64)
+        safety_decisions = getattr(self, "_pending_safety_decisions", {})
 
         parts = []
         for name in action_names:
+            response_dict: Dict[str, Any] = {"url": url, "status": "success"}
+            if safety_decisions.get(name):
+                response_dict["safety_acknowledgement"] = "true"
             parts.append(
                 Part(
                     function_response=FunctionResponse(
                         name=name,
-                        response={"url": url, "status": "success"},
+                        response=response_dict,
                     )
                 )
             )
@@ -601,4 +615,5 @@ class GeminiCUAAdapter(BaseCUAAdapter):
     def reset(self):
         self._contents = []
         self._pending_action_names = []
+        self._pending_safety_decisions = {}
         self._current_url = "about:blank"

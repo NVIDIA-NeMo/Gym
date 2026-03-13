@@ -113,7 +113,9 @@ class BrowserGymResourcesServer(SimpleResourcesServer):
                 if model_response:
                     form_data.add_field("modelResponse", model_response)
 
-                async with session.post(verify_url, data=form_data, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                async with session.post(
+                    verify_url, data=form_data, timeout=aiohttp.ClientTimeout(total=300)
+                ) as resp:
                     if resp.status != 200:
                         resp_text = await resp.text()
                         logger.warning(f"Verification API returned {resp.status}: {resp_text}")
@@ -127,17 +129,31 @@ class BrowserGymResourcesServer(SimpleResourcesServer):
 
             assertions = result.get("assertions", [])
             if not assertions:
+                logger.warning("Verification returned no assertions for task_id=%s", task_id)
                 return CUAVerifyResponse(**body.model_dump(), reward=0.0, verification_result=result)
 
             all_passed = all(a.get("result") == "pass" for a in assertions)
             reward = 1.0 if all_passed else 0.0
 
+            if not all_passed:
+                failed = [a for a in assertions if a.get("result") != "pass"]
+                logger.info(
+                    "Verification task_id=%s reward=%.1f — %d/%d assertions failed: %s",
+                    task_id,
+                    reward,
+                    len(failed),
+                    len(assertions),
+                    failed,
+                )
+
             return CUAVerifyResponse(**body.model_dump(), reward=reward, verification_result=result)
 
         except Exception as e:
-            logger.error(f"Verification failed: {e}")
+            logger.error("Verification failed for task_id=%s: %s: %s", task_id, type(e).__name__, e)
             return CUAVerifyResponse(
-                **body.model_dump(), reward=0.0, verification_result={"error": str(e)}
+                **body.model_dump(),
+                reward=0.0,
+                verification_result={"error": f"{type(e).__name__}: {e}"},
             )
 
     async def close(self, body: CUACloseRequest) -> CUACloseResponse:

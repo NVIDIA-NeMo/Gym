@@ -68,6 +68,7 @@ class OpenAICUAAdapter(BaseCUAAdapter):
         message: Optional[str] = None
         done = False
         pending_call_ids: List[str] = []
+        pending_safety_checks: List[Dict[str, Any]] = []
 
         for item in output:
             item_type = item.get("type")
@@ -75,6 +76,9 @@ class OpenAICUAAdapter(BaseCUAAdapter):
             if item_type == "computer_call":
                 call_id = item.get("call_id", "")
                 pending_call_ids.append(call_id)
+                safety_checks = item.get("pending_safety_checks", [])
+                if safety_checks:
+                    pending_safety_checks.extend(safety_checks)
                 action_data = item.get("action", {})
                 browser_action = self._map_openai_action(action_data)
                 if browser_action:
@@ -89,6 +93,7 @@ class OpenAICUAAdapter(BaseCUAAdapter):
                     done = True
 
         self._pending_call_ids = pending_call_ids
+        self._pending_safety_checks = pending_safety_checks
 
         usage = None
         resp_usage = response.get("usage")
@@ -199,6 +204,7 @@ class OpenAICUAAdapter(BaseCUAAdapter):
         """First call: send full input with user prompt + initial screenshot."""
         self._last_response_id = None
         self._pending_call_ids = []
+        self._pending_safety_checks = []
 
         input_items = [
             {
@@ -229,32 +235,24 @@ class OpenAICUAAdapter(BaseCUAAdapter):
     async def step(self, screenshot_b64: str, action_result: Optional[str] = None) -> CUAAdapterResponse:
         """Follow-up call using previous_response_id for context chaining."""
         followups = []
+        safety_checks = getattr(self, "_pending_safety_checks", [])
 
         for call_id in getattr(self, "_pending_call_ids", []):
-            followups.append(
-                {
-                    "type": "computer_call_output",
-                    "call_id": call_id,
-                    "output": {
-                        "type": "input_image",
-                        "image_url": f"data:image/png;base64,{screenshot_b64}",
-                    },
-                }
-            )
+            item: Dict[str, Any] = {
+                "type": "computer_call_output",
+                "call_id": call_id,
+                "output": {
+                    "type": "input_image",
+                    "image_url": f"data:image/png;base64,{screenshot_b64}",
+                },
+            }
+            if safety_checks:
+                item["acknowledged_safety_checks"] = safety_checks
+            followups.append(item)
 
         if not followups:
-            followups.append(
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_image",
-                            "image_url": f"data:image/png;base64,{screenshot_b64}",
-                            "detail": "auto",
-                        }
-                    ],
-                }
-            )
+            logger.warning("No pending call IDs for step — signaling done")
+            return CUAAdapterResponse(actions=[], message=None, raw_response={}, done=True)
 
         payload = {
             "model": self._model,
@@ -273,3 +271,4 @@ class OpenAICUAAdapter(BaseCUAAdapter):
         """Clear context state."""
         self._last_response_id = None
         self._pending_call_ids = []
+        self._pending_safety_checks = []

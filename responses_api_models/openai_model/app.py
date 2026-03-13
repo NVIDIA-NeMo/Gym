@@ -13,11 +13,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+import re
 from typing import Any, Dict, Optional
 
 from pydantic import Field
 
+
 logger = logging.getLogger(__name__)
+
+_SENSITIVE_HEADER_RE = re.compile(r"('Authorization': ')[^']*(')", re.IGNORECASE)
+_SENSITIVE_COOKIE_RE = re.compile(r"('(?:Set-)?Cookie': ')[^']*(')", re.IGNORECASE)
+
+
+def _sanitize_error(e: Exception) -> str:
+    """Strip sensitive headers (API keys, cookies) from error repr for safe logging."""
+    msg = repr(e)
+    msg = _SENSITIVE_HEADER_RE.sub(r"\1[REDACTED]\2", msg)
+    msg = _SENSITIVE_COOKIE_RE.sub(r"\1[REDACTED]\2", msg)
+    return msg
+
 
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
@@ -60,7 +74,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
         try:
             openai_response_dict = await self._client.create_response(**body_dict)
         except Exception as e:
-            logger.error("OpenAI API call failed: %s", repr(e))
+            logger.error("OpenAI API call failed: %s", _sanitize_error(e))
             raise
         try:
             return NeMoGymResponse.model_validate(openai_response_dict)
