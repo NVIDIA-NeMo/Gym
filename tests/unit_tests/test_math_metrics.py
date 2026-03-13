@@ -400,17 +400,16 @@ class TestBenchmarkConfigLoading:
         assert benchmark_config.get("prompt_config") is not None
         assert CONFIG_PATHS_KEY_NAME in benchmark_config
 
-    def test_benchmark_not_found_raises(self) -> None:
-        from omegaconf import DictConfig
-
-        from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+    def test_benchmark_config_chains_via_config_paths(self) -> None:
+        """Benchmark config's config_paths are recursively loaded by load_extra_config_paths."""
+        from nemo_gym.global_config import GlobalConfigDictParser
 
         parser = GlobalConfigDictParser()
-        with pytest.raises(FileNotFoundError, match="Benchmark config not found"):
-            parser.parse(
-                GlobalConfigDictParserConfig(
-                    initial_global_config_dict=DictConfig({"benchmark": "nonexistent_benchmark"}),
-                    skip_load_from_cli=True,
-                    skip_load_from_dotenv=True,
-                )
-            )
+        config_paths, extra_configs = parser.load_extra_config_paths(["benchmarks/aime24/config.yaml"])
+
+        # The benchmark config should chain to the math_with_judge resource server config
+        assert any("math_with_judge" in p for p in config_paths)
+        # Should have loaded at least 2 configs (benchmark + chained resource server)
+        assert len(extra_configs) >= 2
+        # Benchmark config's non-config_paths keys should be in the first extra_config
+        assert extra_configs[0].get("agent_name") == "math_with_judge_simple_agent"
