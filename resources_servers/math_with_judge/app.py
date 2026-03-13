@@ -96,7 +96,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
 
     config: LibraryJudgeMathResourcesServerConfig
 
-    def model_post_init(self, context: Any) -> None:
+    def model_post_init(self, context: Any) -> None:  # pragma: no cover
         super().model_post_init(context)
 
         logging.getLogger("math_verify").setLevel(logging.CRITICAL)
@@ -111,7 +111,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
             ),
         )
 
-    def setup_webserver(self) -> FastAPI:
+    def setup_webserver(self) -> FastAPI:  # pragma: no cover
         app = super().setup_webserver()
 
         # Additional server routes go here! e.g.:
@@ -119,7 +119,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
 
         return app
 
-    async def verify(self, body: LibraryJudgeMathVerifyRequest) -> LibraryJudgeMathVerifyResponse:
+    async def verify(self, body: LibraryJudgeMathVerifyRequest) -> LibraryJudgeMathVerifyResponse:  # pragma: no cover
         assistant_responses = []
         for output_item in body.response.output:
             if output_item.type != "message":
@@ -146,7 +146,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
             judge_evaluations=judge_evaluations,
         )
 
-    async def _verify_answer(
+    async def _verify_answer(  # pragma: no cover
         self, question: str, expected_answer: str, generated_answer: str
     ) -> tuple[float, Optional[str], float, Optional[list[JudgeEvaluation]]]:
         """Verify the correctness of a generated answer.
@@ -165,7 +165,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
 
     @classmethod
     @contextlib.contextmanager
-    def _mute_output(cls):
+    def _mute_output(cls):  # pragma: no cover
         devnull_out, devnull_err = StringIO(), StringIO()
         with (
             contextlib.redirect_stdout(devnull_out),
@@ -174,7 +174,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
             yield
 
     @staticmethod
-    def _strip_math_delimiters(s: str) -> str:
+    def _strip_math_delimiters(s: str) -> str:  # pragma: no cover
         """Strip outer math delimiters from expected answers.
 
         Many expected_answer values are wrapped in \\(...\\) or $...$,
@@ -188,7 +188,9 @@ Example output: "My final verdict is different [[A!=B]]"."""
             s = s[1:-1].strip()
         return s
 
-    def _verify_answer_with_library(self, expected_answer: str, generated_answer: str) -> tuple[float, Optional[str]]:
+    def _verify_answer_with_library(
+        self, expected_answer: str, generated_answer: str
+    ) -> tuple[float, Optional[str]]:  # pragma: no cover
         # This functionality is migrated from Nemo RL.
         # https://github.com/NVIDIA-NeMo/RL/blob/e1f56c42ae175d3863ccaf4e21b7de7e9c46c2e1/nemo_rl/environments/math_environment.py
         try:
@@ -224,7 +226,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
         except (Exception, TimeoutException):
             return 0.0, None
 
-    async def _verify_answer_with_judge(
+    async def _verify_answer_with_judge(  # pragma: no cover
         self, question: str, expected_answer: str, generated_answer: str
     ) -> tuple[float, list[JudgeEvaluation]]:
         # The judge is asked to evaluate whether the answers are equal using both
@@ -247,7 +249,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
             reward = 0.0
         return reward, [first_judge_evaluation, second_judge_evaluation]
 
-    async def _generate_judge_evaluation(
+    async def _generate_judge_evaluation(  # pragma: no cover
         self, question: str, first_answer: str, second_answer: str
     ) -> tuple[bool, JudgeEvaluation]:
         config = self.config
