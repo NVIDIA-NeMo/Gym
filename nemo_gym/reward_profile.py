@@ -252,6 +252,11 @@ def compute_aggregate_metrics(
                 agent_metrics[k] = v
 
     serialized_group = rp.prepare_for_serialization(group_level_metrics)
+
+    # Re-add task index to group-level metrics (RewardProfiler pops it during profiling)
+    for i, group in enumerate(serialized_group):
+        group[TASK_INDEX_KEY_NAME] = i
+
     serialized_agent = rp.prepare_for_serialization([agent_metrics])[0] if agent_metrics else {}
 
     # Custom metrics computed from all raw verify responses grouped by task

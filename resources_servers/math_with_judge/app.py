@@ -348,8 +348,8 @@ Example output: "My final verdict is different [[A!=B]]"."""
                 # Find the matching avg-of-k key and fuse stats
                 avg_key = f"pass@1[avg-of-{k}]/{name}"
                 if avg_key in flat:
-                    flat[f"pass@1[avg-of-{k}]/{name}_std_dev_across_runs"] = std_dev
-                    flat[f"pass@1[avg-of-{k}]/{name}_std_err_across_runs"] = std_dev / math.sqrt(len(values))
+                    flat[f"pass@1[avg-of-{k}]/{name}/std_dev_across_runs"] = std_dev
+                    flat[f"pass@1[avg-of-{k}]/{name}/std_err_across_runs"] = std_dev / math.sqrt(len(values))
 
         return flat
 
@@ -362,8 +362,9 @@ Example output: "My final verdict is different [[A!=B]]"."""
                 key[k] = v
 
         # Highest-k pass@1[avg-of-*] accuracy (no statistics)
-        avg_keys = [k for k in agent_metrics if k.startswith("pass@1[avg-of-") and "/accuracy" in k]
-        avg_keys = [k for k in avg_keys if "std_dev" not in k and "std_err" not in k]
+        avg_keys = [
+            k for k in agent_metrics if k.startswith("pass@1[avg-of-") and "/accuracy" in k and k.count("/") == 1
+        ]
         if avg_keys:
             best = max(avg_keys, key=lambda k: int(k.split("pass@1[avg-of-")[1].split("]")[0]))
             key[best] = agent_metrics[best]
