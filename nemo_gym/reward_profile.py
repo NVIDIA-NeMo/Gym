@@ -264,7 +264,21 @@ def compute_aggregate_metrics(
     # Custom metrics computed from all raw verify responses grouped by task
     if compute_metrics_fn:
         tasks = _group_by_task(verify_responses)
-        serialized_agent.update(compute_metrics_fn(tasks))
+        custom = compute_metrics_fn(tasks)
+
+        # Merge per_task_metrics into group_level_metrics (keyed by task_index)
+        per_task_metrics = custom.pop("per_task_metrics", None)
+        if per_task_metrics:
+            per_task_by_idx = {m["task_index"]: m for m in per_task_metrics}
+            for group in serialized_group:
+                task_idx = group.get(TASK_INDEX_KEY_NAME)
+                if task_idx is not None and task_idx in per_task_by_idx:
+                    ptm = per_task_by_idx[task_idx]
+                    for k, v in ptm.items():
+                        if k != "task_index":
+                            group[k] = v
+
+        serialized_agent.update(custom)
 
     if get_key_metrics_fn:
         key_metrics = get_key_metrics_fn(serialized_agent)

@@ -337,71 +337,83 @@ Example output: "My final verdict is different [[A!=B]]"."""
                     flat[f"majority@{k_val}/{name}"] = val
 
         # Per-sample no_answer: for rollout i, what % of tasks had no extracted answer?
+        no_answer_per_sample = []
         if has_answers:
-            no_answer_per_sample = []
             for sample_idx in range(k):
                 no_answer_count = sum(1 for ta in answers if sample_idx < len(ta) and ta[sample_idx] is None)
                 total = sum(1 for ta in answers if sample_idx < len(ta))
                 no_answer_per_sample.append(100.0 * no_answer_count / total if total else 0.0)
             if any(v > 0 for v in no_answer_per_sample):
-                avg_no_answer = sum(no_answer_per_sample) / len(no_answer_per_sample)
-                flat["no_answer"] = avg_no_answer
+                flat["no_answer"] = sum(no_answer_per_sample) / len(no_answer_per_sample)
 
-        # Per-sample aggregate: element i = pass@1 using only rollout i across all tasks.
-        # e.g. {"accuracy": [82.0, 84.0, 83.0]} for k=3 — variance shows stability across seeds.
+        # Per-sample aggregate
         per_sample = _compute_per_sample(score_dicts, score_names, k)
-        if has_answers and any(v > 0 for v in no_answer_per_sample):
+        if no_answer_per_sample and any(v > 0 for v in no_answer_per_sample):
             per_sample["no_answer"] = no_answer_per_sample
         flat["per_sample_aggregate"] = per_sample
 
-        # Compute std_dev/std_err across runs from per_sample values
-        if k > 1:
-            for name, values in per_sample.items():
-                if len(values) < 2:
+        # Compute std_dev/std_err across runs for ALL k values (not just max k)
+        for name, values in per_sample.items():
+            for k_val in range(2, k + 1):
+                subset = values[:k_val]
+                if len(subset) < 2:
                     continue
-                mean = sum(values) / len(values)
-                variance = sum((x - mean) ** 2 for x in values) / (len(values) - 1)
+                mean = sum(subset) / len(subset)
+                variance = sum((x - mean) ** 2 for x in subset) / (len(subset) - 1)
                 std_dev = math.sqrt(variance)
-                std_err = std_dev / math.sqrt(len(values))
-                # Score metrics fuse under pass@1[avg-of-k], no_answer is top-level
+                std_err = std_dev / math.sqrt(len(subset))
                 if name == "no_answer":
-                    flat["no_answer/std_dev_across_runs"] = std_dev
-                    flat["no_answer/std_err_across_runs"] = std_err
+                    flat[f"pass@1[avg-of-{k_val}]/no_answer/std_dev_across_runs"] = std_dev
+                    flat[f"pass@1[avg-of-{k_val}]/no_answer/std_err_across_runs"] = std_err
                 else:
-                    avg_key = f"pass@1[avg-of-{k}]/{name}"
-                    if avg_key in flat:
-                        flat[f"pass@1[avg-of-{k}]/{name}/std_dev_across_runs"] = std_dev
-                        flat[f"pass@1[avg-of-{k}]/{name}/std_err_across_runs"] = std_err
+                    flat[f"pass@1[avg-of-{k_val}]/{name}/std_dev_across_runs"] = std_dev
+                    flat[f"pass@1[avg-of-{k_val}]/{name}/std_err_across_runs"] = std_err
+
+        # Per-task metrics for group_level_metrics
+        flat["per_task_metrics"] = _compute_per_task_metrics(score_dicts, answers, score_names, k)
 
         return flat
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
-        """Select headline metrics: mean/reward + highest-k pass@1 and pass@k accuracy."""
+        """Select headline metrics for this math benchmark."""
         key: Dict[str, Any] = {}
 
+        # Mean stats (reward, token usage)
         for k, v in agent_metrics.items():
             if k.startswith("mean/"):
                 key[k] = v
 
-        # Highest-k pass@1[avg-of-*] accuracy (no statistics)
+        # Highest-k pass@1[avg-of-*] for each score name (no statistics)
         avg_keys = [
-            k for k in agent_metrics if k.startswith("pass@1[avg-of-") and "/accuracy" in k and k.count("/") == 1
+            k
+            for k in agent_metrics
+            if k.startswith("pass@1[avg-of-") and k.count("/") == 1 and "std_dev" not in k and "std_err" not in k
         ]
         if avg_keys:
-            best = max(avg_keys, key=lambda k: int(k.split("pass@1[avg-of-")[1].split("]")[0]))
-            key[best] = agent_metrics[best]
+            highest_k = max(int(k.split("pass@1[avg-of-")[1].split("]")[0]) for k in avg_keys)
+            for k in avg_keys:
+                if k.startswith(f"pass@1[avg-of-{highest_k}]"):
+                    key[k] = agent_metrics[k]
 
-        # Highest-k pass@k accuracy
-        pass_keys = [k for k in agent_metrics if k.startswith("pass@") and "[" not in k and "/accuracy" in k]
+        # Highest-k pass@k for each score name
+        pass_keys = [k for k in agent_metrics if k.startswith("pass@") and "[" not in k]
         if pass_keys:
-            best = max(pass_keys, key=lambda k: int(k.split("@")[1].split("/")[0]))
-            key[best] = agent_metrics[best]
+            highest_k = max(int(k.split("@")[1].split("/")[0]) for k in pass_keys)
+            for k in pass_keys:
+                if k.startswith(f"pass@{highest_k}/"):
+                    key[k] = agent_metrics[k]
 
-        # Highest-k majority accuracy
-        maj_keys = [k for k in agent_metrics if k.startswith("majority@") and "/accuracy" in k]
+        # Highest-k majority for each score name
+        maj_keys = [k for k in agent_metrics if k.startswith("majority@")]
         if maj_keys:
-            best = max(maj_keys, key=lambda k: int(k.split("@")[1].split("/")[0]))
-            key[best] = agent_metrics[best]
+            highest_k = max(int(k.split("@")[1].split("/")[0]) for k in maj_keys)
+            for k in maj_keys:
+                if k.startswith(f"majority@{highest_k}/"):
+                    key[k] = agent_metrics[k]
+
+        # no_answer
+        if "no_answer" in agent_metrics:
+            key["no_answer"] = agent_metrics["no_answer"]
 
         return key
 
@@ -412,13 +424,17 @@ Example output: "My final verdict is different [[A!=B]]"."""
 
 
 def _get_score_dict(result: dict) -> Dict[str, Union[float, bool]]:
-    """Extract named scores from a math verify response."""
+    """Extract named scores from a math verify response.
+
+    symbolic_accuracy (from library_reward) is the primary score.
+    judge_accuracy appears only when the LLM judge actually ran.
+    reward itself is always available via RewardProfiler's mean/reward.
+    """
     scores: Dict[str, Union[float, bool]] = {}
     if "library_reward" in result:
         scores["symbolic_accuracy"] = result["library_reward"]
     if "judge_evaluations" in result and result["judge_evaluations"] is not None:
         scores["judge_accuracy"] = result["reward"]
-    scores["accuracy"] = result["reward"]
     return {n: int(v) if isinstance(v, bool) else v for n, v in scores.items()}
 
 
@@ -490,6 +506,47 @@ def _compute_per_sample(
             if vals:
                 result[name].append(100.0 * sum(vals) / len(vals))
     return {name: values for name, values in result.items() if values}
+
+
+def _compute_per_task_metrics(
+    all_scores: List[List[Dict[str, float]]],
+    all_answers: List[List[Optional[str]]],
+    score_names: List[str],
+    k: int,
+) -> List[Dict[str, Any]]:
+    """Per-task evaluation metrics: pass@k, majority@k, no_answer for each task."""
+    per_task = []
+    for task_idx, (task_scores, task_answers) in enumerate(zip(all_scores, all_answers)):
+        entry: Dict[str, Any] = {"task_index": task_idx}
+        n = len(task_scores)
+
+        # pass@k per task: max of first k_val scores
+        for name in score_names:
+            vals = [s.get(name) for s in task_scores if name in s]
+            if not vals:
+                continue
+            for k_val in range(1, min(k, n) + 1):
+                entry[f"pass@{k_val}/{name}"] = max(vals[:k_val])
+
+        # majority@k per task
+        for k_val in range(1, min(k, n) + 1):
+            for name in score_names:
+                pairs = [
+                    (a, s[name])
+                    for s, a in zip(task_scores[:k_val], task_answers[:k_val])
+                    if a is not None and name in s
+                ]
+                if pairs:
+                    most_common = Counter(a for a, _ in pairs).most_common(1)[0][0]
+                    entry[f"majority@{k_val}/{name}"] = next(sc for a, sc in pairs if a == most_common)
+
+        # no_answer per task: fraction of rollouts with no extracted answer
+        no_answer_count = sum(1 for a in task_answers if a is None)
+        if no_answer_count > 0:
+            entry["no_answer"] = 100.0 * no_answer_count / n
+
+        per_task.append(entry)
+    return per_task
 
 
 if __name__ == "__main__":

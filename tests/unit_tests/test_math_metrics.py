@@ -40,22 +40,25 @@ from resources_servers.math_with_judge.app import (
 
 
 class TestGetScoreDict:
-    def test_basic_reward(self) -> None:
+    def test_reward_only_no_scores(self) -> None:
+        """Without library_reward or judge, no scores are extracted (reward is in RewardProfiler)."""
         result = _get_score_dict({"reward": 1.0})
-        assert result == {"accuracy": 1.0}
+        assert result == {}
 
     def test_with_library_reward(self) -> None:
         result = _get_score_dict({"reward": 1.0, "library_reward": 0.5})
-        assert result == {"accuracy": 1.0, "symbolic_accuracy": 0.5}
+        assert result == {"symbolic_accuracy": 0.5}
+        assert "accuracy" not in result
 
     def test_with_judge(self) -> None:
         result = _get_score_dict({"reward": 1.0, "library_reward": 0.0, "judge_evaluations": [{"v": "A=B"}]})
-        assert "judge_accuracy" in result
-        assert result["judge_accuracy"] == 1.0
+        assert result == {"symbolic_accuracy": 0.0, "judge_accuracy": 1.0}
+        assert "accuracy" not in result
 
     def test_judge_none_excluded(self) -> None:
         result = _get_score_dict({"reward": 1.0, "library_reward": 1.0, "judge_evaluations": None})
         assert "judge_accuracy" not in result
+        assert result == {"symbolic_accuracy": 1.0}
 
 
 class TestExtractScoresAndAnswers:
@@ -179,32 +182,31 @@ class TestComputeMetricsIntegration:
         result = LibraryJudgeMathResourcesServer.compute_metrics(None, tasks)
 
         # pass@1: max([:1]) per task → [1.0, 1.0, 0.0] → 66.67%
-        assert result["pass@1/accuracy"] == pytest.approx(200.0 / 3.0, abs=0.01)
+        assert result["pass@1/symbolic_accuracy"] == pytest.approx(200.0 / 3.0, abs=0.01)
         # pass@4: max([:4]) per task → [1.0, 1.0, 0.0] → 66.67%
-        assert result["pass@4/accuracy"] == pytest.approx(200.0 / 3.0, abs=0.01)
+        assert result["pass@4/symbolic_accuracy"] == pytest.approx(200.0 / 3.0, abs=0.01)
 
     def test_majority_at_k(self) -> None:
         tasks = self._make_tasks()
         result = LibraryJudgeMathResourcesServer.compute_metrics(None, tasks)
 
         # majority@4 exists (answers are present)
-        assert "majority@4/accuracy" in result
+        assert "majority@4/symbolic_accuracy" in result
 
     def test_per_sample_aggregate(self) -> None:
         tasks = self._make_tasks()
         result = LibraryJudgeMathResourcesServer.compute_metrics(None, tasks)
 
         psa = result["per_sample_aggregate"]
-        assert "accuracy" in psa
-        assert len(psa["accuracy"]) == 4  # 4 rollouts
+        assert "symbolic_accuracy" in psa
+        assert len(psa["symbolic_accuracy"]) == 4  # 4 rollouts
 
     def test_no_answer_tracking(self) -> None:
         tasks = self._make_tasks()
         result = LibraryJudgeMathResourcesServer.compute_metrics(None, tasks)
 
-        # no_answer is top-level, not under pass@1[avg-of-k]
+        # Top-level no_answer average
         assert "no_answer" in result
-        assert not any(k.startswith("pass@1[avg-of-") and "no_answer" in k for k in result)
 
         # Per-sample no_answer in per_sample_aggregate
         psa = result["per_sample_aggregate"]
@@ -216,13 +218,18 @@ class TestComputeMetricsIntegration:
         # rollout 3: task 0 None, task 1 None, task 2 None → 100% no_answer
         assert psa["no_answer"][3] == pytest.approx(100.0)
 
+        # no_answer stats exist for each k_val >= 2
+        assert "pass@1[avg-of-2]/no_answer/std_dev_across_runs" in result
+        assert "pass@1[avg-of-4]/no_answer/std_dev_across_runs" in result
+
     def test_no_answer_stats(self) -> None:
         tasks = self._make_tasks()
         result = LibraryJudgeMathResourcesServer.compute_metrics(None, tasks)
 
-        assert "no_answer/std_dev_across_runs" in result
-        assert "no_answer/std_err_across_runs" in result
-        assert result["no_answer/std_dev_across_runs"] > 0
+        # no_answer stats are per-k under pass@1[avg-of-k]
+        assert "pass@1[avg-of-4]/no_answer/std_dev_across_runs" in result
+        assert "pass@1[avg-of-4]/no_answer/std_err_across_runs" in result
+        assert result["pass@1[avg-of-4]/no_answer/std_dev_across_runs"] > 0
 
     def test_stat_key_separator(self) -> None:
         tasks = self._make_tasks()
@@ -233,12 +240,50 @@ class TestComputeMetricsIntegration:
         for k in stat_keys:
             assert "/std_dev_across_runs" in k, f"Expected / separator in {k}"
 
+    def test_stats_for_all_k_values(self) -> None:
+        tasks = self._make_tasks()
+        result = LibraryJudgeMathResourcesServer.compute_metrics(None, tasks)
+
+        # Should have std_dev for k=2, k=3, k=4 (not k=1 since need >=2 samples)
+        for k_val in [2, 3, 4]:
+            key = f"pass@1[avg-of-{k_val}]/symbolic_accuracy/std_dev_across_runs"
+            assert key in result, f"Missing stats for k={k_val}: {key}"
+
+    def test_per_task_metrics(self) -> None:
+        tasks = self._make_tasks()
+        result = LibraryJudgeMathResourcesServer.compute_metrics(None, tasks)
+
+        ptm = result["per_task_metrics"]
+        assert len(ptm) == 3  # 3 tasks
+
+        # Task 0: 3 correct out of 4, has pass@k and majority@k
+        t0 = ptm[0]
+        assert t0["task_index"] == 0
+        assert "pass@1/symbolic_accuracy" in t0
+        assert "majority@4/symbolic_accuracy" in t0
+
+        # Task 2: all wrong, pass@k should be 0
+        t2 = ptm[2]
+        assert t2["pass@4/symbolic_accuracy"] == 0.0
+
+    def test_per_task_no_answer(self) -> None:
+        tasks = self._make_tasks()
+        result = LibraryJudgeMathResourcesServer.compute_metrics(None, tasks)
+
+        ptm = result["per_task_metrics"]
+        # Task 0 has 1 no_answer out of 4 → 25%
+        assert ptm[0]["no_answer"] == pytest.approx(25.0)
+        # Task 2 has 1 no_answer out of 4 → 25%
+        assert ptm[2]["no_answer"] == pytest.approx(25.0)
+
     def test_multi_score(self) -> None:
         tasks = self._make_tasks()
         result = LibraryJudgeMathResourcesServer.compute_metrics(None, tasks)
 
         assert "pass@1/symbolic_accuracy" in result
-        assert "pass@1/accuracy" in result
+        assert "accuracy" not in str(
+            [k for k in result if "accuracy" in k and "symbolic" not in k and "judge" not in k]
+        )
 
 
 class TestGetKeyMetrics:
@@ -247,22 +292,29 @@ class TestGetKeyMetrics:
             "mean/reward": 0.5,
             "mean/library_reward": 0.5,
             "mean/input_tokens": 100.0,
-            "pass@1/accuracy": 50.0,
-            "pass@1[avg-of-1]/accuracy": 50.0,
-            "pass@1[avg-of-4]/accuracy": 45.0,
-            "pass@1[avg-of-4]/accuracy/std_dev_across_runs": 3.0,
-            "pass@4/accuracy": 70.0,
-            "majority@4/accuracy": 60.0,
+            "pass@1/symbolic_accuracy": 50.0,
+            "pass@1[avg-of-1]/symbolic_accuracy": 50.0,
+            "pass@1[avg-of-4]/symbolic_accuracy": 45.0,
+            "pass@1[avg-of-4]/symbolic_accuracy/std_dev_across_runs": 3.0,
+            "pass@4/symbolic_accuracy": 70.0,
+            "majority@4/symbolic_accuracy": 60.0,
             "no_answer": 10.0,
         }
         result = LibraryJudgeMathResourcesServer.get_key_metrics(None, agent_metrics)
 
         assert "mean/reward" in result
-        assert "pass@1[avg-of-4]/accuracy" in result
-        assert "pass@4/accuracy" in result
-        assert "majority@4/accuracy" in result
+        assert "mean/input_tokens" in result
+        assert "pass@1[avg-of-4]/symbolic_accuracy" in result
+        assert "pass@4/symbolic_accuracy" in result
+        assert "majority@4/symbolic_accuracy" in result
+        assert result["no_answer"] == 10.0
         # Stats should NOT be in key metrics
-        assert "pass@1[avg-of-4]/accuracy/std_dev_across_runs" not in result
+        assert "pass@1[avg-of-4]/symbolic_accuracy/std_dev_across_runs" not in result
+
+    def test_no_answer_included(self) -> None:
+        agent_metrics = {"mean/reward": 0.5, "no_answer": 15.0}
+        result = LibraryJudgeMathResourcesServer.get_key_metrics(None, agent_metrics)
+        assert result["no_answer"] == 15.0
 
 
 class TestTaskIndexInGroupMetrics:
