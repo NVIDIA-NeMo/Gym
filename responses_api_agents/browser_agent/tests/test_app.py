@@ -569,3 +569,189 @@ class TestBuildNemoResponse:
         traj = CUATrajectory(steps=[], task_prompt="test", initial_screenshot="")
         resp = _build_nemo_response(traj, "env-1", None, "test-model")
         assert resp.output[0].content[0].text == "Task completed"
+
+    def test_builds_response_with_usage(self):
+        from nemo_gym.openai_utils import (
+            NeMoGymResponseInputTokensDetails,
+            NeMoGymResponseOutputTokensDetails,
+            NeMoGymResponseUsage,
+        )
+        from responses_api_agents.browser_agent.app import _build_nemo_response
+
+        traj = CUATrajectory(steps=[], task_prompt="test", initial_screenshot="")
+        usage = NeMoGymResponseUsage(
+            input_tokens=100,
+            output_tokens=50,
+            total_tokens=150,
+            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+            output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+        )
+        resp = _build_nemo_response(traj, "env-1", None, "test-model", usage=usage)
+        assert resp.usage is not None
+        assert resp.usage.input_tokens == 100
+        assert resp.usage.output_tokens == 50
+        assert resp.usage.total_tokens == 150
+
+    def test_builds_response_without_usage(self):
+        from responses_api_agents.browser_agent.app import _build_nemo_response
+
+        traj = CUATrajectory(steps=[], task_prompt="test", initial_screenshot="")
+        resp = _build_nemo_response(traj, "env-1", None, "test-model")
+        assert resp.usage is None
+
+
+class TestCUAAdapterUsage:
+    def test_default_values(self):
+        from responses_api_agents.browser_agent.adapters.base import CUAAdapterUsage
+
+        usage = CUAAdapterUsage()
+        assert usage.input_tokens == 0
+        assert usage.output_tokens == 0
+        assert usage.total_tokens == 0
+
+    def test_custom_values(self):
+        from responses_api_agents.browser_agent.adapters.base import CUAAdapterUsage
+
+        usage = CUAAdapterUsage(input_tokens=100, output_tokens=50, total_tokens=150)
+        assert usage.input_tokens == 100
+        assert usage.output_tokens == 50
+        assert usage.total_tokens == 150
+
+    def test_adapter_response_with_usage(self):
+        from responses_api_agents.browser_agent.adapters.base import CUAAdapterUsage
+
+        usage = CUAAdapterUsage(input_tokens=10, output_tokens=20, total_tokens=30)
+        resp = CUAAdapterResponse(usage=usage)
+        assert resp.usage is not None
+        assert resp.usage.input_tokens == 10
+
+    def test_adapter_response_default_no_usage(self):
+        resp = CUAAdapterResponse()
+        assert resp.usage is None
+
+
+class TestAnthropicUsageExtraction:
+    def test_parse_response_extracts_usage(self):
+        pytest.importorskip("anthropic", reason="anthropic SDK not installed")
+        from responses_api_agents.browser_agent.adapters.anthropic_adapter import AnthropicCUAAdapter
+
+        adapter = AnthropicCUAAdapter.__new__(AnthropicCUAAdapter)
+        adapter._pending_tool_use_ids = []
+
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(type="text", text="Done")]
+        mock_response.stop_reason = "end_turn"
+        mock_response.id = "msg_123"
+        mock_response.model = "claude-sonnet-4-20250514"
+        mock_response.usage = MagicMock(input_tokens=500, output_tokens=200)
+
+        result = adapter._parse_response(mock_response)
+        assert result.usage is not None
+        assert result.usage.input_tokens == 500
+        assert result.usage.output_tokens == 200
+        assert result.usage.total_tokens == 700
+
+    def test_parse_response_no_usage(self):
+        pytest.importorskip("anthropic", reason="anthropic SDK not installed")
+        from responses_api_agents.browser_agent.adapters.anthropic_adapter import AnthropicCUAAdapter
+
+        adapter = AnthropicCUAAdapter.__new__(AnthropicCUAAdapter)
+        adapter._pending_tool_use_ids = []
+
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(type="text", text="Done")]
+        mock_response.stop_reason = "end_turn"
+        mock_response.id = "msg_456"
+        mock_response.model = "claude-sonnet-4-20250514"
+        mock_response.usage = None
+
+        result = adapter._parse_response(mock_response)
+        assert result.usage is None
+
+
+class TestGeminiUsageExtraction:
+    def test_parse_response_native_with_usage(self):
+        adapter = _make_gemini_adapter()
+
+        mock_part = MagicMock()
+        mock_part.function_call = None
+        mock_part.text = "Task complete"
+        mock_part.thought = False
+
+        mock_content = MagicMock()
+        mock_content.parts = [mock_part]
+
+        mock_candidate = MagicMock()
+        mock_candidate.content = mock_content
+
+        mock_response = MagicMock()
+        mock_response.candidates = [mock_candidate]
+        mock_response.usage_metadata = MagicMock(prompt_token_count=300, candidates_token_count=150)
+
+        result = adapter._parse_response(mock_response)
+        assert result.usage is not None
+        assert result.usage.input_tokens == 300
+        assert result.usage.output_tokens == 150
+        assert result.usage.total_tokens == 450
+
+    def test_parse_response_native_no_usage(self):
+        adapter = _make_gemini_adapter()
+
+        mock_part = MagicMock()
+        mock_part.function_call = None
+        mock_part.text = "Done"
+        mock_part.thought = False
+
+        mock_content = MagicMock()
+        mock_content.parts = [mock_part]
+
+        mock_candidate = MagicMock()
+        mock_candidate.content = mock_content
+
+        mock_response = MagicMock()
+        mock_response.candidates = [mock_candidate]
+        mock_response.usage_metadata = None
+
+        result = adapter._parse_response(mock_response)
+        assert result.usage is None
+
+    def test_parse_serialized_response_with_usage(self):
+        adapter = _make_gemini_adapter()
+
+        data = {
+            "candidates": [
+                {
+                    "content": {
+                        "role": "model",
+                        "parts": [{"text": "Done"}],
+                    }
+                }
+            ],
+            "usage_metadata": {
+                "prompt_token_count": 1000,
+                "candidates_token_count": 400,
+            },
+        }
+
+        result = adapter._parse_serialized_response(data)
+        assert result.usage is not None
+        assert result.usage.input_tokens == 1000
+        assert result.usage.output_tokens == 400
+        assert result.usage.total_tokens == 1400
+
+    def test_parse_serialized_response_no_usage(self):
+        adapter = _make_gemini_adapter()
+
+        data = {
+            "candidates": [
+                {
+                    "content": {
+                        "role": "model",
+                        "parts": [{"text": "Done"}],
+                    }
+                }
+            ],
+        }
+
+        result = adapter._parse_serialized_response(data)
+        assert result.usage is None

@@ -32,7 +32,7 @@ import logging
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 from resources_servers.browser_gym.schemas import BrowserAction
-from responses_api_agents.browser_agent.adapters.base import BaseCUAAdapter, CUAAdapterResponse
+from responses_api_agents.browser_agent.adapters.base import BaseCUAAdapter, CUAAdapterResponse, CUAAdapterUsage
 
 
 logger = logging.getLogger(__name__)
@@ -349,7 +349,17 @@ class AnthropicCUAAdapter(BaseCUAAdapter):
             done = True
 
         raw = {"id": response.id, "model": response.model, "stop_reason": response.stop_reason}
-        return CUAAdapterResponse(actions=actions, message=message, raw_response=raw, done=done)
+
+        usage = None
+        resp_usage = getattr(response, "usage", None)
+        if resp_usage:
+            usage = CUAAdapterUsage(
+                input_tokens=getattr(resp_usage, "input_tokens", 0),
+                output_tokens=getattr(resp_usage, "output_tokens", 0),
+                total_tokens=getattr(resp_usage, "input_tokens", 0) + getattr(resp_usage, "output_tokens", 0),
+            )
+
+        return CUAAdapterResponse(actions=actions, message=message, raw_response=raw, done=done, usage=usage)
 
     def _map_anthropic_action(self, action: Dict[str, Any]) -> Optional[BrowserAction]:
         action_type = action.get("action", "")
