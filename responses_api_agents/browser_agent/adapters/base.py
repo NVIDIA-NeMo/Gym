@@ -24,6 +24,14 @@ from pydantic import BaseModel, Field
 from resources_servers.browser_gym.schemas import BrowserAction
 
 
+class CUAAdapterUsage(BaseModel):
+    """Provider-agnostic token usage from an adapter call."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+
+
 class CUAAdapterResponse(BaseModel):
     """Response from an adapter step."""
 
@@ -31,6 +39,7 @@ class CUAAdapterResponse(BaseModel):
     message: Optional[str] = None
     raw_response: Dict[str, Any] = Field(default_factory=dict)
     done: bool = False
+    usage: Optional[CUAAdapterUsage] = None
 
 
 class BaseCUAAdapter(ABC):

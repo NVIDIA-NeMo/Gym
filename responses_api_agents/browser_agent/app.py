@@ -27,8 +27,11 @@ from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NeMoGymResponseOutputTokensDetails,
+    NeMoGymResponseUsage,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from resources_servers.browser_gym.schemas import (
@@ -455,12 +458,19 @@ class BrowserAgent(SimpleResponsesAPIAgent):
 
     async def _responses_via_adapter(
         self, task_prompt: str, env_id: str, screenshot_b64: str, viewport_w: int = 1280, viewport_h: int = 720
-    ) -> tuple[CUATrajectory, Optional[str]]:
+    ) -> tuple[CUATrajectory, Optional[str], Optional[Any]]:
         """Run the CUA loop through a direct-API adapter (Anthropic/Gemini)."""
         adapter = self._create_adapter(viewport_width=viewport_w, viewport_height=viewport_h)
 
+        cumulative_input_tokens = 0
+        cumulative_output_tokens = 0
+
         try:
             adapter_resp = await adapter.initialize(task_prompt, screenshot_b64)
+
+            if adapter_resp.usage:
+                cumulative_input_tokens += adapter_resp.usage.input_tokens
+                cumulative_output_tokens += adapter_resp.usage.output_tokens
 
             trajectory = CUATrajectory(steps=[], task_prompt=task_prompt, initial_screenshot=screenshot_b64)
             step_count = 0
@@ -500,6 +510,9 @@ class BrowserAgent(SimpleResponsesAPIAgent):
                 last_url = step_data.current_url if step_data else "about:blank"
                 try:
                     adapter_resp = await adapter.step(screenshot_b64, action_result=last_url)
+                    if adapter_resp.usage:
+                        cumulative_input_tokens += adapter_resp.usage.input_tokens
+                        cumulative_output_tokens += adapter_resp.usage.output_tokens
                 except Exception as adapter_err:
                     logger.error("Adapter step failed: %s — ending loop", adapter_err)
                     break
@@ -515,7 +528,17 @@ class BrowserAgent(SimpleResponsesAPIAgent):
             await raise_for_status(ls_resp)
             ls_data = CUADumpLocalStorageResponse.model_validate(await get_response_json(ls_resp))
 
-            return trajectory, ls_data.local_storage_dump
+            adapter_usage = None
+            if cumulative_input_tokens > 0 or cumulative_output_tokens > 0:
+                adapter_usage = NeMoGymResponseUsage(
+                    input_tokens=cumulative_input_tokens,
+                    output_tokens=cumulative_output_tokens,
+                    total_tokens=cumulative_input_tokens + cumulative_output_tokens,
+                    input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+                    output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+                )
+
+            return trajectory, ls_data.local_storage_dump, adapter_usage
         finally:
             adapter.reset()
 
@@ -577,7 +600,7 @@ class BrowserAgent(SimpleResponsesAPIAgent):
                     task_prompt, env_id, screenshot_b64, viewport_w, viewport_h
                 )
             else:
-                trajectory, local_storage_dump = await self._responses_via_adapter(
+                trajectory, local_storage_dump, usage = await self._responses_via_adapter(
                     task_prompt, env_id, screenshot_b64, viewport_w, viewport_h
                 )
 

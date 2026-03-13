@@ -33,7 +33,7 @@ import logging
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 from resources_servers.browser_gym.schemas import BrowserAction
-from responses_api_agents.browser_agent.adapters.base import BaseCUAAdapter, CUAAdapterResponse
+from responses_api_agents.browser_agent.adapters.base import BaseCUAAdapter, CUAAdapterResponse, CUAAdapterUsage
 
 
 logger = logging.getLogger(__name__)
@@ -413,8 +413,15 @@ class GeminiCUAAdapter(BaseCUAAdapter):
         if not actions and message:
             done = True
 
+        usage = None
+        usage_meta = getattr(response_data, "usage_metadata", None)
+        if usage_meta:
+            in_tok = getattr(usage_meta, "prompt_token_count", 0) or 0
+            out_tok = getattr(usage_meta, "candidates_token_count", 0) or 0
+            usage = CUAAdapterUsage(input_tokens=in_tok, output_tokens=out_tok, total_tokens=in_tok + out_tok)
+
         raw = {"model": self._model}
-        return CUAAdapterResponse(actions=actions, message=message, raw_response=raw, done=done)
+        return CUAAdapterResponse(actions=actions, message=message, raw_response=raw, done=done, usage=usage)
 
     def _parse_serialized_response(self, data: Dict[str, Any]) -> CUAAdapterResponse:
         """Parse a serialized (dict) response from the model server proxy."""
@@ -456,8 +463,15 @@ class GeminiCUAAdapter(BaseCUAAdapter):
         if not actions and message:
             done = True
 
+        usage = None
+        usage_meta = data.get("usage_metadata")
+        if usage_meta:
+            in_tok = usage_meta.get("prompt_token_count", 0) or 0
+            out_tok = usage_meta.get("candidates_token_count", 0) or 0
+            usage = CUAAdapterUsage(input_tokens=in_tok, output_tokens=out_tok, total_tokens=in_tok + out_tok)
+
         raw = {"model": self._model}
-        return CUAAdapterResponse(actions=actions, message=message, raw_response=raw, done=done)
+        return CUAAdapterResponse(actions=actions, message=message, raw_response=raw, done=done, usage=usage)
 
     # ── Function response building ───────────────────────────────
 
