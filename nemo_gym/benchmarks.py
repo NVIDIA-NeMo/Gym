@@ -20,7 +20,6 @@ from typing import Dict, Optional
 
 import rich
 from omegaconf import OmegaConf
-from pydantic import Field
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
@@ -108,14 +107,28 @@ class PrepareBenchmarkConfig(BaseNeMoGymCLIConfig):
     """
     Prepare benchmark data by running the benchmark's prepare.py script.
 
+    The benchmark is identified from a config_paths entry pointing to a
+    benchmarks/*/config.yaml file.
+
     Examples:
 
     ```bash
-    ng_prepare_benchmark +benchmark=aime24
+    ng_prepare_benchmark "+config_paths=[benchmarks/aime24/config.yaml]"
     ```
     """
 
-    benchmark: str = Field(description="Name of the benchmark to prepare (e.g., 'aime24').")
+
+def _find_benchmark_dirs_from_config_paths(config_paths) -> list[Path]:
+    """Find benchmark directories from resolved config_paths."""
+    benchmark_dirs = []
+    for cp in config_paths:
+        cp = Path(cp)
+        if not cp.is_absolute():
+            cwd_path = Path.cwd() / cp
+            cp = cwd_path if cwd_path.exists() else PARENT_DIR / cp
+        if BENCHMARKS_DIR in cp.parents or cp.parent == BENCHMARKS_DIR:
+            benchmark_dirs.append(cp.parent)
+    return benchmark_dirs
 
 
 def prepare_benchmark() -> None:
@@ -125,21 +138,36 @@ def prepare_benchmark() -> None:
             initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
         )
     )
-    config = PrepareBenchmarkConfig.model_validate(global_config_dict)
+    PrepareBenchmarkConfig.model_validate(global_config_dict)
 
-    bench = get_benchmark(config.benchmark)
-    prepare_module_path = bench.path / "prepare.py"
+    config_paths = global_config_dict.get("config_paths") or []
+    benchmark_dirs = _find_benchmark_dirs_from_config_paths(config_paths)
 
-    if not prepare_module_path.exists():
-        raise FileNotFoundError(f"No prepare.py found for benchmark '{config.benchmark}' at {prepare_module_path}")
+    if not benchmark_dirs:
+        raise ValueError(
+            "No benchmark config found in config_paths. "
+            'Pass a benchmark config, e.g.: "+config_paths=[benchmarks/aime24/config.yaml]"'
+        )
 
-    # Import and run the benchmark's prepare function
-    module_name = f"benchmarks.{config.benchmark}.prepare"
-    module = importlib.import_module(module_name)
+    # Validate all benchmarks before preparing any
+    validated = []
+    for bench_dir in benchmark_dirs:
+        benchmark_name = bench_dir.name
+        prepare_module_path = bench_dir / "prepare.py"
 
-    if not hasattr(module, "prepare"):
-        raise AttributeError(f"benchmarks/{config.benchmark}/prepare.py must define a `prepare()` function")
+        if not prepare_module_path.exists():
+            raise FileNotFoundError(f"No prepare.py found for benchmark '{benchmark_name}' at {prepare_module_path}")
 
-    print(f"Preparing benchmark: {config.benchmark}")
-    output_path = module.prepare()
-    print(f"Benchmark data prepared at: {output_path}")
+        module_name = f"benchmarks.{benchmark_name}.prepare"
+        module = importlib.import_module(module_name)
+
+        if not hasattr(module, "prepare"):
+            raise AttributeError(f"benchmarks/{benchmark_name}/prepare.py must define a `prepare()` function")
+
+        validated.append((benchmark_name, module))
+
+    # Prepare after all validations pass
+    for benchmark_name, module in validated:
+        print(f"Preparing benchmark: {benchmark_name}")
+        output_path = module.prepare()
+        print(f"Benchmark data prepared at: {output_path}")
