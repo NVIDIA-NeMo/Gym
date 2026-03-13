@@ -336,9 +336,22 @@ Example output: "My final verdict is different [[A!=B]]"."""
                 for name, val in maj.items():
                     flat[f"majority@{k_val}/{name}"] = val
 
+        # Per-sample no_answer: for rollout i, what % of tasks had no extracted answer?
+        if has_answers:
+            no_answer_per_sample = []
+            for sample_idx in range(k):
+                no_answer_count = sum(1 for ta in answers if sample_idx < len(ta) and ta[sample_idx] is None)
+                total = sum(1 for ta in answers if sample_idx < len(ta))
+                no_answer_per_sample.append(100.0 * no_answer_count / total if total else 0.0)
+            if any(v > 0 for v in no_answer_per_sample):
+                avg_no_answer = sum(no_answer_per_sample) / len(no_answer_per_sample)
+                flat["no_answer"] = avg_no_answer
+
         # Per-sample aggregate: element i = pass@1 using only rollout i across all tasks.
         # e.g. {"accuracy": [82.0, 84.0, 83.0]} for k=3 — variance shows stability across seeds.
         per_sample = _compute_per_sample(score_dicts, score_names, k)
+        if has_answers and any(v > 0 for v in no_answer_per_sample):
+            per_sample["no_answer"] = no_answer_per_sample
         flat["per_sample_aggregate"] = per_sample
 
         # Compute std_dev/std_err across runs from per_sample values
@@ -349,10 +362,16 @@ Example output: "My final verdict is different [[A!=B]]"."""
                 mean = sum(values) / len(values)
                 variance = sum((x - mean) ** 2 for x in values) / (len(values) - 1)
                 std_dev = math.sqrt(variance)
-                avg_key = f"pass@1[avg-of-{k}]/{name}"
-                if avg_key in flat:
-                    flat[f"pass@1[avg-of-{k}]/{name}/std_dev_across_runs"] = std_dev
-                    flat[f"pass@1[avg-of-{k}]/{name}/std_err_across_runs"] = std_dev / math.sqrt(len(values))
+                std_err = std_dev / math.sqrt(len(values))
+                # Score metrics fuse under pass@1[avg-of-k], no_answer is top-level
+                if name == "no_answer":
+                    flat["no_answer/std_dev_across_runs"] = std_dev
+                    flat["no_answer/std_err_across_runs"] = std_err
+                else:
+                    avg_key = f"pass@1[avg-of-{k}]/{name}"
+                    if avg_key in flat:
+                        flat[f"pass@1[avg-of-{k}]/{name}/std_dev_across_runs"] = std_dev
+                        flat[f"pass@1[avg-of-{k}]/{name}/std_err_across_runs"] = std_err
 
         return flat
 
