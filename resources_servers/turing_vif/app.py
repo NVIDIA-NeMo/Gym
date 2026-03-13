@@ -225,6 +225,58 @@ class DefinitionResponse(BaseModel):
 
 
 # ============================================================================
+# Thinking Trace Helpers
+# ============================================================================
+
+_THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+_THINKING_TAG_RE = re.compile(r"<thinking>.*?</thinking>", re.DOTALL)
+
+
+def _strip_thinking_traces(text: str) -> str:
+    """Remove <think>...</think> and <thinking>...</thinking> blocks from text."""
+    text = _THINK_TAG_RE.sub("", text)
+    text = _THINKING_TAG_RE.sub("", text)
+    # Fallback: the opening <think>/<thinking> tag may have been part of
+    # the prompt template rather than the model's generation, so the text
+    # starts with CoT reasoning followed by </think> without a matching
+    # opening tag. Strip everything up to and including the unpaired closing tag.
+    text = re.sub(r"^.*?</think>", "", text, flags=re.DOTALL)
+    text = re.sub(r"^.*?</thinking>", "", text, flags=re.DOTALL)
+    return text.strip()
+
+
+def _extract_text_from_response(response, exclude_thinking: bool = True) -> str:
+    """Extract text from the last assistant message, skipping reasoning output items.
+
+    Handles three thinking representations:
+    - ``type="reasoning"`` output items are skipped entirely (never examined).
+    - ``<think>``/``<thinking>`` inline tags are regex-stripped when *exclude_thinking* is True.
+    - Content is extracted from both list-of-objects and plain-string formats.
+    """
+    for output in reversed(response.output):
+        if getattr(output, "type", None) == "message" and getattr(output, "role", None) == "assistant":
+            content = getattr(output, "content", None)
+
+            if isinstance(content, list):
+                texts = []
+                for c in content:
+                    text = getattr(c, "text", None)
+                    if isinstance(text, str):
+                        texts.append(text)
+                full_text = "\n".join(texts).strip()
+            elif isinstance(content, str):
+                full_text = content.strip()
+            else:
+                continue
+
+            if exclude_thinking:
+                full_text = _strip_thinking_traces(full_text)
+
+            return full_text
+    return ""
+
+
+# ============================================================================
 # Resource Server Implementation
 # ============================================================================
 
@@ -388,8 +440,7 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
                 user_content="Evaluate the response.", system_content=judge_prompt
             )
 
-            # Parse response
-            evaluation = evaluation.strip()
+            evaluation = _strip_thinking_traces(evaluation)
 
             # Handle Markdown code blocks
             if evaluation.startswith("```"):
@@ -444,8 +495,7 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
                 user_content=f"Define the term: {term}", system_content=system_prompt
             )
 
-            # Parse the response
-            evaluation = response_str.strip()
+            evaluation = _strip_thinking_traces(response_str)
             if evaluation.startswith("```"):
                 evaluation = re.sub(r"^```(?:\w+)?\s*", "", evaluation, flags=re.DOTALL)
                 evaluation = re.sub(r"\s*```$", "", evaluation, flags=re.DOTALL)
@@ -526,8 +576,7 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
 
             evaluation = await self._judge_llm_api_async(response, judge_prompt)
 
-            # Parse response
-            evaluation = evaluation.strip()
+            evaluation = _strip_thinking_traces(evaluation)
             if evaluation.startswith("```"):
                 evaluation = re.sub(r"^```(?:\w+)?\s*", "", evaluation, flags=re.DOTALL)
                 evaluation = re.sub(r"\s*```$", "", evaluation, flags=re.DOTALL)
@@ -684,12 +733,7 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
         Returns:
             TuringVIFVerifyResponse with reward and validation details
         """
-        # Extract the response text from the NeMoGymResponse
-        final_response_text = ""
-        if body.response.output:
-            last_output = body.response.output[-1]
-            if hasattr(last_output, "content") and last_output.content:
-                final_response_text = last_output.content[0].text
+        final_response_text = _extract_text_from_response(body.response)
 
         is_following_list: List[bool] = []
         validation_results: List[ValidationResult] = []
