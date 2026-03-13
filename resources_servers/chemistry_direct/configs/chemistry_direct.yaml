@@ -1,0 +1,35 @@
+chemistry_direct:
+  resources_servers:
+    chemistry_direct:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: >
+        Verifiable chemistry question answering (direct generation).
+        The agent receives a natural-language chemistry question + SMILES and
+        must respond with a single number or binary flag.  All questions are
+        derived from RDKit-computable properties over the ChEMBL database.
+      value: Train models to answer quantitative chemistry questions about molecules
+
+chemistry_direct_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: chemistry_direct
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: train
+          type: train
+          jsonl_fpath: resources_servers/chemistry_direct/data/train.jsonl
+          license: "NVIDIA Proprietary (derived from ChEMBL — CC-BY-SA 3.0)"
+        - name: validation
+          type: validation
+          jsonl_fpath: resources_servers/chemistry_direct/data/validation.jsonl
+          license: "NVIDIA Proprietary (derived from ChEMBL — CC-BY-SA 3.0)"
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/chemistry_direct/data/example.jsonl
