@@ -1,0 +1,41 @@
+# Proof-with-judge: combined env for theorem proving with verifier + meta-verifier.
+#
+# This is the unified env that handles both data formatting and verification,
+# so nemo-rl can use the standard run_grpo_nemo_gym.py flow without custom
+# data preprocessing in start_grpo_gym.py.
+#
+# Data preparation:
+#   Run prepare_data.py to convert raw {"problem": "..."} JSONL into Gym-compatible
+#   format with the prover prompt template applied.
+#
+# Judge modes (same as proof_judge):
+#   A) Gym-internal: judge_model_server points to a Gym-managed vllm_model.
+#   B) External (JUDGE_SERVER_ARGS): nemo-skill pipeline starts judge as SLURM het group.
+proof_with_judge:
+  resources_servers:
+    proof_with_judge:
+      entrypoint: app.py
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_model_name: ""
+      alpha: 1.0
+      beta: 0.0
+      temperature: 0.6
+      top_p: 0.95
+      max_tokens: 8192
+      assert_think_end: false
+      domain: math
+      description: Theorem proving with verifier + meta-verifier judge (combined env)
+
+proof_with_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: proof_with_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets: []
