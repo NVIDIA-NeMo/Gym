@@ -19,7 +19,7 @@ All three providers follow the same unified flow: **Agent → Adapter → Model 
                   ┌──────────────────────────────────────────┐
                   │   OpenAI      Anthropic       Google     │
                   │   (CUA         (Sonnet/        (Gemini   │
-                  │   Preview)     Opus)           2.5 Flash)│
+                  │   Preview)     Opus)           2.5 CU)   │
                   └─────┬──────────┬──────────────────┬──────┘
                         │          │                  │
                         │          │                  │
@@ -59,41 +59,38 @@ All three providers follow the same unified flow: **Agent → Adapter → Model 
 │  │    │   5. /dump_local_storage → capture LS              │    │   │
 │  │    │   6. /close → tear down browser                    │    │   │
 │  │    └────────────────────────────────────────────────────┘    │   │
-│  └───────────────────────────┬──────────────────────────────────┘   │
-│                              │ /verify                              │
-│  ┌───────────────────────────┴──────────────────────────────────┐   │
-│  │  MODEL SERVERS                                               │   │
-│  │                                                              │   │
-│  │  ┌─────────────────┐ ┌─────────────────┐ ┌────────────────┐  │   │
-│  │  │ openai_model    │ │ anthropic_model │ │ gemini_model   │  │   │
-│  │  │                 │ │                 │ │                │  │   │
-│  │  │ • api.openai.com│ │ • Stateless     │ │ • Stateless    │  │   │
-│  │  │ • computer_use  │ │   API proxy     │ │   API proxy    │  │   │
-│  │  │   _preview      │ │ • AsyncAnthropic│ │ • genai Client │  │   │
-│  │  │ • Org header    │ │ • 300s timeout  │ │ • asyncio.to   │  │   │
-│  │  │ • Token tracking│ │   + retries     │ │   _thread      │  │   │
-│  │  │ • Retry/backoff │ │                 │ │ • Serialization│  │   │
-│  │  └─────────────────┘ └─────────────────┘ └────────────────┘  │   │
-│  └──────────────────────────────────────────────────────────────┘   │
-│                                                                     │
-│  ┌──────────────────────────────────────────────────────────────┐   │
-│  │  BROWSER GYM RESOURCE SERVER                                 │   │
-│  │  resources_servers/browser_gym                               │   │
-│  │                                                              │   │
-│  │  /seed_session  /step  /dump_local_storage  /close  /verify  │   │
-│  │                                                              │   │
-│  │  ┌──────────────────┐   ┌───────────────────────────────┐    │   │
-│  │  │   BrowserPool    │   │        Verification           │    │   │
-│  │  │   (Playwright    │   │  taskId + localStorageDump    │    │   │
-│  │  │    Chromium,     │   │         │                     │    │   │
-│  │  │    Semaphore     │   │         ▼                     │    │   │
-│  │  │    bounded)      │   │  POST /api/v1/get_actual_state│────┼───┼──┐
-│  │  │                  │   │         │                     │    │   │  │
-│  │  │                  │   │         ▼                     │    │   │  │
-│  │  │                  │   │  assertions → reward (0/1)    │    │   │  │
-│  │  └──────────────────┘   └───────────────────────────────┘    │   │  │
-│  └──────────────────────────────────────────────────────────────┘   │  │
-└─────────────────────────────────────────────────────────────────────┘  │
+│  └──────────┬────────────────────────────────┬────────────────────┘   │
+│             │ /v1/responses                  │ /seed_session          │
+│             │                                │ /step, /close          │
+│             │                                │ /dump_local_storage    │
+│             │                                │ /verify                │
+│             ▼                                ▼                        │
+│  ┌──────────────────────────────┐  ┌─────────────────────────────┐   │
+│  │  MODEL SERVERS               │  │  BROWSER GYM RESOURCE SERVER│   │
+│  │                              │  │  resources_servers/browser_ │   │
+│  │  ┌────────────────────────┐  │  │  gym                        │   │
+│  │  │ openai_model           │  │  │                             │   │
+│  │  │ • api.openai.com       │  │  │  ┌───────────────────────┐  │   │
+│  │  │ • Token tracking       │  │  │  │   BrowserPool         │  │   │
+│  │  │ • Retry/backoff        │  │  │  │   (Playwright         │  │   │
+│  │  └────────────────────────┘  │  │  │    Chromium,          │  │   │
+│  │                              │  │  │    Semaphore bounded)  │  │   │
+│  │  ┌────────────────────────┐  │  │  └───────────────────────┘  │   │
+│  │  │ anthropic_model        │  │  │                             │   │
+│  │  │ • Stateless API proxy  │  │  │  ┌───────────────────────┐  │   │
+│  │  │ • AsyncAnthropic       │  │  │  │    Verification       │  │   │
+│  │  └────────────────────────┘  │  │  │  taskId + LS dump     │  │   │
+│  │                              │  │  │         │             │  │   │
+│  │  ┌────────────────────────┐  │  │  │         ▼             │  │   │
+│  │  │ gemini_model           │  │  │  │  POST /api/v1/        │──┼───┼──┐
+│  │  │ • Stateless API proxy  │  │  │  │   get_actual_state    │  │   │  │
+│  │  │ • genai Client         │  │  │  │         │             │  │   │  │
+│  │  └────────────────────────┘  │  │  │         ▼             │  │   │  │
+│  │                              │  │  │  assertions → reward  │  │   │  │
+│  │                              │  │  │  (0.0 or 1.0)         │  │   │  │
+│  └──────────────────────────────┘  │  └───────────────────────┘  │   │  │
+│                                    └─────────────────────────────┘   │  │
+└──────────────────────────────────────────────────────────────────────┘  │
                                                                          │
                    ┌─────────────────────────────────────┐               │
                    │     GYM ENVIRONMENTS (external)     │◄──────────────┘
@@ -200,7 +197,7 @@ All three providers follow the same unified flow: **Agent → Adapter → Model 
 | Agent | OpenAI Model | `POST /v1/responses` | screenshot + input items | NeMoGymResponse (computer_call actions) |
 | Agent | Anthropic Model | `POST /v1/responses` | pre-built Anthropic API params (messages, tools, betas) | raw Anthropic response dict |
 | Agent | Gemini Model | `POST /v1/responses` | serialized contents + config | serialized Gemini response dict |
-| Agent | Resource | `POST /seed_session` | start_url, viewport, task_id | env_id + initial screenshot |
+| Agent | Resource | `POST /seed_session` | start_url, viewport_width, viewport_height | env_id + initial screenshot |
 | Agent | Resource | `POST /step` | env_id + BrowserAction | screenshot + current_url |
 | Agent | Resource | `POST /dump_local_storage` | env_id | localStorage JSON string |
 | Agent | Resource | `POST /close` | env_id | status |
@@ -225,7 +222,7 @@ All three providers follow the same unified flow: **Agent → Adapter → Model 
 |----------|---------------|-------------------|----------------|
 | **OpenAI** (CUA Preview) | Adapter → model server (`openai_model`) | Server-side via `previous_response_id` | Yes (via `NeMoGymResponseUsage`) |
 | **Anthropic** (Sonnet/Opus) | Adapter → model server (stateless proxy) | Client-side in adapter: turn-based trimming, tool pair validation, screenshot GC | Yes (via usage in response) |
-| **Gemini** (2.5 Flash / 3 Pro) | Adapter → model server (stateless proxy) | Client-side in adapter: paired-turn trimming, function pair validation, screenshot GC | Yes (via usage_metadata in response) |
+| **Gemini** (2.5 Computer Use) | Adapter → model server (stateless proxy) | Client-side in adapter: paired-turn trimming, function pair validation, screenshot GC | Yes (via usage_metadata in response) |
 
 ## File Structure
 
@@ -299,6 +296,9 @@ responses_api_agents/browser_agent/
    cua_anthropic_api_key: "sk-ant-..."
    cua_gemini_api_key: "AIza..."
 
+   # Debug trajectories (screenshots + JSON saved to /tmp/cua_debug_trajectories/)
+   cua_debug_trajectories: false
+
    # Optional: override default concurrent rollouts (default: 10)
    num_samples_in_parallel: 10
    ```
@@ -334,7 +334,7 @@ ng_status
 
 Tasks can be loaded from either a **local JSONL file** or directly from a **gym URL** (via the gym's `/api/v1/get_expected_state` endpoint). The gym URL approach requires no data preparation -- just point to the gym and go.
 
-Debug trajectories (screenshots, `conversation.json`, `verification.json`) are saved to `/tmp/cua_debug_trajectories/` when `cua_debug_trajectories=true` (enabled by default for OpenAI, Sonnet, and Opus agents in the YAML config).
+Debug trajectories (screenshots, `conversation.json`, `verification.json`) are saved to `/tmp/cua_debug_trajectories/` when `cua_debug_trajectories: true` is set in `env.yaml` (disabled by default). All agents share this single setting.
 
 #### From a Gym URL (Recommended)
 
@@ -376,7 +376,7 @@ ng_collect_rollouts \
   "+responses_create_params={max_output_tokens: 4096, temperature: 1.0}"
 ```
 
-**Gemini 2.5 Flash -- all tasks:**
+**Gemini 2.5 Computer Use -- all tasks:**
 
 ```bash
 ng_collect_rollouts \
@@ -448,8 +448,7 @@ ng_collect_rollouts \
   +input_jsonl_fpath=resources_servers/browser_gym/data/example.jsonl \
   +output_jsonl_fpath=results/cua_rollouts_openai.jsonl \
   +num_repeats=1 \
-  "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}" \
-  ++browser_openai_agent.responses_api_agents.browser_agent.cua_debug_trajectories=true
+  "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
 ```
 
 **Anthropic Claude Sonnet:**
@@ -460,8 +459,7 @@ ng_collect_rollouts \
   +input_jsonl_fpath=resources_servers/browser_gym/data/example.jsonl \
   +output_jsonl_fpath=results/cua_rollouts_anthropic_sonnet.jsonl \
   +num_repeats=1 \
-  "+responses_create_params={max_output_tokens: 4096, temperature: 1.0}" \
-  ++browser_anthropic_sonnet_agent.responses_api_agents.browser_agent.cua_debug_trajectories=true
+  "+responses_create_params={max_output_tokens: 4096, temperature: 1.0}"
 ```
 
 **Anthropic Claude Opus:**
@@ -472,11 +470,10 @@ ng_collect_rollouts \
   +input_jsonl_fpath=resources_servers/browser_gym/data/example.jsonl \
   +output_jsonl_fpath=results/cua_rollouts_anthropic_opus.jsonl \
   +num_repeats=1 \
-  "+responses_create_params={max_output_tokens: 4096, temperature: 1.0}" \
-  ++browser_anthropic_opus_agent.responses_api_agents.browser_agent.cua_debug_trajectories=true
+  "+responses_create_params={max_output_tokens: 4096, temperature: 1.0}"
 ```
 
-**Gemini 2.5 Flash:**
+**Gemini 2.5 Computer Use:**
 
 ```bash
 ng_collect_rollouts \
@@ -484,13 +481,12 @@ ng_collect_rollouts \
   +input_jsonl_fpath=resources_servers/browser_gym/data/example.jsonl \
   +output_jsonl_fpath=results/cua_rollouts_gemini.jsonl \
   +num_repeats=1 \
-  "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}" \
-  ++browser_gemini_agent.responses_api_agents.browser_agent.cua_debug_trajectories=true
+  "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
 ```
 
 Available agent names: `browser_openai_agent`, `browser_anthropic_sonnet_agent`, `browser_anthropic_opus_agent`, `browser_gemini_agent`
 
-> **Note:** To disable debug output, change `=true` to `=false` or omit the `cua_debug_trajectories` override (defaults are set in the YAML config).
+> **Note:** Debug trajectories are disabled by default (`cua_debug_trajectories: false` in `env.yaml`). To enable, set `cua_debug_trajectories: true` in `env.yaml` and restart the servers. This is a server-side config — it takes effect at server startup.
 
 ### Reward Profiling
 
@@ -564,21 +560,21 @@ with open('results/cua_rollouts_agent_metrics.json') as f:
 
 Enable debug mode to save screenshots as PNGs and structured JSON for visual inspection.
 
-### Option 1: Via CLI override (no config change)
+### Option 1: Set in `env.yaml` (recommended)
 
-```bash
-ng_collect_rollouts \
-  +agent_name=browser_openai_agent \
-  +input_jsonl_fpath=resources_servers/browser_gym/data/example.jsonl \
-  +output_jsonl_fpath=results/cua_rollouts.jsonl \
-  +num_repeats=1 \
-  "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}" \
-  ++browser_openai_agent.responses_api_agents.browser_agent.cua_debug_trajectories=true
+In `env.yaml` (project root), set:
+
+```yaml
+cua_debug_trajectories: true
 ```
 
-### Option 2: Set in YAML config
+Then restart the servers. All agents will save debug trajectories.
 
-In `configs/browser_gym.yaml`, set `cua_debug_trajectories: true` for the desired agent.
+### Option 2: Via CLI override on `ng_run`
+
+```bash
+ng_run "+config_paths=[resources_servers/browser_gym/configs/browser_gym.yaml]" ++cua_debug_trajectories=true
+```
 
 ### Output Structure
 
@@ -670,11 +666,11 @@ Then:
 
 1. **Stop `ng_run`** if it's running (ports will conflict)
 2. Open **Run and Debug** (Cmd+Shift+D)
-3. Select **"CUA Full Stack (Resource Server + Agent)"** and press F5
+3. Select **"Browser Gym Full Stack (Resource Server + Agent)"** and press F5
 4. Set breakpoints in:
-   - `browser_pool.py` line ~142 (`execute_action`) — see Playwright calls
-   - `openai_adapter.py` line ~160 (`_map_openai_action`) — see action parsing
-   - `app.py` (agent) line ~192 — see the main CUA loop
+   - `browser_pool.py` line ~509 (`execute_action`) — see Playwright calls
+   - `openai_adapter.py` line ~129 (`_map_openai_action`) — see action parsing
+   - `app.py` (agent) line ~327 — see the main CUA loop
 5. Trigger a run via curl:
 
 ```bash

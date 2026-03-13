@@ -14,6 +14,9 @@
 """
 Debug trajectory writer -- saves each CUA rollout as a self-contained directory.
 
+Screenshots and conversation steps are streamed to disk in real-time so that
+partial data is available even if a rollout crashes mid-way.
+
 Output structure:
     <output_dir>/<env_id>/
         screenshots/
@@ -21,7 +24,8 @@ Output structure:
             01_after.png
             02_after.png
             ...
-        conversation.json       # full agent interaction (actions, URLs, raw provider responses -- no base64)
+        conversation.jsonl      # one JSON line per step, appended in real-time
+        conversation.json       # final consolidated conversation (written at end)
         verification.json       # reward, local storage dump, verification metadata
 """
 
@@ -31,7 +35,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from resources_servers.browser_gym.schemas import CUATrajectory
+from resources_servers.browser_gym.schemas import BrowserAction, CUATrajectory
 
 
 logger = logging.getLogger(__name__)
@@ -64,8 +68,68 @@ def _save_b64_png(b64_data: str, path: Path) -> None:
     path.write_bytes(base64.b64decode(raw))
 
 
-def save_debug_trajectory(
+# ── Streaming API ────────────────────────────────────────────────
+
+
+def init_debug_trajectory(
     output_dir: str,
+    env_id: str,
+    initial_screenshot: str,
+    task_prompt: str,
+    adapter_type: str = "",
+    model_name: str = "",
+) -> Path:
+    """Create the rollout directory and write the initial screenshot.
+
+    Returns the rollout directory path for use in subsequent calls.
+    """
+    rollout_dir = Path(output_dir) / env_id
+    screenshots_dir = rollout_dir / "screenshots"
+    screenshots_dir.mkdir(parents=True, exist_ok=True)
+
+    _save_b64_png(initial_screenshot, screenshots_dir / "00_initial.png")
+
+    jsonl_path = rollout_dir / "conversation.jsonl"
+    header = {
+        "type": "header",
+        "env_id": env_id,
+        "adapter_type": adapter_type,
+        "model": model_name,
+        "task_prompt": task_prompt,
+    }
+    with open(jsonl_path, "w") as f:
+        f.write(json.dumps(header, ensure_ascii=False) + "\n")
+
+    logger.info("[CUA %s] debug trajectory initialized at %s", env_id, rollout_dir)
+    return rollout_dir
+
+
+def append_debug_step(
+    rollout_dir: Path,
+    step_idx: int,
+    action: BrowserAction,
+    screenshot_after: str,
+    current_url: str,
+    raw_provider_response: Optional[Any] = None,
+) -> None:
+    """Write one screenshot and append one step to the streaming conversation log."""
+    screenshots_dir = rollout_dir / "screenshots"
+    _save_b64_png(screenshot_after, screenshots_dir / f"{step_idx:02d}_after.png")
+
+    step_record = {
+        "type": "step",
+        "step": step_idx,
+        "action": action.model_dump(exclude_none=True),
+        "current_url": current_url,
+        "screenshot": f"screenshots/{step_idx:02d}_after.png",
+        "raw_provider_response": _strip_base64_fields(raw_provider_response),
+    }
+    with open(rollout_dir / "conversation.jsonl", "a") as f:
+        f.write(json.dumps(step_record, ensure_ascii=False) + "\n")
+
+
+def finalize_debug_trajectory(
+    rollout_dir: Path,
     env_id: str,
     trajectory: CUATrajectory,
     reward: Optional[float] = None,
@@ -75,18 +139,9 @@ def save_debug_trajectory(
     verifier_metadata: Optional[Dict[str, Any]] = None,
     verification_result: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Write trajectory screenshots, conversation, and verification to disk."""
-    rollout_dir = Path(output_dir) / env_id
-    screenshots_dir = rollout_dir / "screenshots"
-    screenshots_dir.mkdir(parents=True, exist_ok=True)
-
-    if trajectory.initial_screenshot:
-        _save_b64_png(trajectory.initial_screenshot, screenshots_dir / "00_initial.png")
-
+    """Write the final conversation.json and verification.json."""
     conversation_steps = []
     for idx, step in enumerate(trajectory.steps, start=1):
-        _save_b64_png(step.screenshot_after, screenshots_dir / f"{idx:02d}_after.png")
-
         conversation_steps.append(
             {
                 "step": idx,
@@ -106,7 +161,6 @@ def save_debug_trajectory(
         "num_steps": len(trajectory.steps),
         "steps": conversation_steps,
     }
-
     (rollout_dir / "conversation.json").write_text(json.dumps(conversation, indent=2, ensure_ascii=False))
 
     ls_parsed = None
@@ -123,8 +177,45 @@ def save_debug_trajectory(
         "verifier_metadata": verifier_metadata,
         "local_storage_dump": ls_parsed,
     }
-
     (rollout_dir / "verification.json").write_text(json.dumps(verification, indent=2, ensure_ascii=False))
 
-    logger.info(f"Debug trajectory saved to {rollout_dir} ({len(trajectory.steps)} steps, reward={reward})")
+    logger.info("[CUA %s] debug trajectory finalized (%d steps, reward=%s)", env_id, len(trajectory.steps), reward)
     return str(rollout_dir)
+
+
+# ── Legacy batch API (kept for backward compatibility) ───────────
+
+
+def save_debug_trajectory(
+    output_dir: str,
+    env_id: str,
+    trajectory: CUATrajectory,
+    reward: Optional[float] = None,
+    local_storage_dump: Optional[str] = None,
+    adapter_type: str = "",
+    model_name: str = "",
+    verifier_metadata: Optional[Dict[str, Any]] = None,
+    verification_result: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Write trajectory screenshots, conversation, and verification to disk (batch mode)."""
+    rollout_dir = Path(output_dir) / env_id
+    screenshots_dir = rollout_dir / "screenshots"
+    screenshots_dir.mkdir(parents=True, exist_ok=True)
+
+    if trajectory.initial_screenshot:
+        _save_b64_png(trajectory.initial_screenshot, screenshots_dir / "00_initial.png")
+
+    for idx, step in enumerate(trajectory.steps, start=1):
+        _save_b64_png(step.screenshot_after, screenshots_dir / f"{idx:02d}_after.png")
+
+    return finalize_debug_trajectory(
+        rollout_dir=rollout_dir,
+        env_id=env_id,
+        trajectory=trajectory,
+        reward=reward,
+        local_storage_dump=local_storage_dump,
+        adapter_type=adapter_type,
+        model_name=model_name,
+        verifier_metadata=verifier_metadata,
+        verification_result=verification_result,
+    )
