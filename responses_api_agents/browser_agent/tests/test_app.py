@@ -11,13 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from resources_servers.browser_gym.schemas import BrowserAction, CUATrajectory
-from responses_api_agents.browser_agent.adapters.base import BaseCUAAdapter, CUAAdapterResponse
+from responses_api_agents.browser_agent.adapters.base import CUAAdapterResponse
 
 
 class TestCUAAdapterResponse:
@@ -42,7 +41,7 @@ class TestOpenAIAdapter:
     def test_action_parsing_click(self):
         from responses_api_agents.browser_agent.adapters.openai_adapter import OpenAICUAAdapter
 
-        adapter = OpenAICUAAdapter(api_key="test-key")
+        adapter = OpenAICUAAdapter()
         action = adapter._map_openai_action({"type": "click", "coordinate": [100, 200]})
         assert action.action_type == "click"
         assert action.coordinate == [100, 200]
@@ -50,7 +49,7 @@ class TestOpenAIAdapter:
     def test_action_parsing_type(self):
         from responses_api_agents.browser_agent.adapters.openai_adapter import OpenAICUAAdapter
 
-        adapter = OpenAICUAAdapter(api_key="test-key")
+        adapter = OpenAICUAAdapter()
         action = adapter._map_openai_action({"type": "type", "text": "hello world"})
         assert action.action_type == "type"
         assert action.text == "hello world"
@@ -58,7 +57,7 @@ class TestOpenAIAdapter:
     def test_action_parsing_scroll(self):
         from responses_api_agents.browser_agent.adapters.openai_adapter import OpenAICUAAdapter
 
-        adapter = OpenAICUAAdapter(api_key="test-key")
+        adapter = OpenAICUAAdapter()
         action = adapter._map_openai_action(
             {"type": "scroll", "coordinate": [640, 360], "scroll_x": 0, "scroll_y": 300}
         )
@@ -68,7 +67,7 @@ class TestOpenAIAdapter:
     def test_action_parsing_keypress(self):
         from responses_api_agents.browser_agent.adapters.openai_adapter import OpenAICUAAdapter
 
-        adapter = OpenAICUAAdapter(api_key="test-key")
+        adapter = OpenAICUAAdapter()
         action = adapter._map_openai_action({"type": "keypress", "keys": ["Control", "a"]})
         assert action.action_type == "keypress"
         assert action.keys == ["Control", "a"]
@@ -76,7 +75,7 @@ class TestOpenAIAdapter:
     def test_action_parsing_drag(self):
         from responses_api_agents.browser_agent.adapters.openai_adapter import OpenAICUAAdapter
 
-        adapter = OpenAICUAAdapter(api_key="test-key")
+        adapter = OpenAICUAAdapter()
         action = adapter._map_openai_action(
             {"type": "drag", "start_x": 10, "start_y": 20, "destination_x": 100, "destination_y": 200}
         )
@@ -87,7 +86,7 @@ class TestOpenAIAdapter:
     def test_action_parsing_goto(self):
         from responses_api_agents.browser_agent.adapters.openai_adapter import OpenAICUAAdapter
 
-        adapter = OpenAICUAAdapter(api_key="test-key")
+        adapter = OpenAICUAAdapter()
         action = adapter._map_openai_action({"type": "goto", "url": "https://example.com"})
         assert action.action_type == "goto"
         assert action.url == "https://example.com"
@@ -95,7 +94,7 @@ class TestOpenAIAdapter:
     def test_action_parsing_tab_actions(self):
         from responses_api_agents.browser_agent.adapters.openai_adapter import OpenAICUAAdapter
 
-        adapter = OpenAICUAAdapter(api_key="test-key")
+        adapter = OpenAICUAAdapter()
         assert adapter._map_openai_action({"type": "new_tab", "url": "https://example.com"}).action_type == "new_tab"
         assert adapter._map_openai_action({"type": "close_tab"}).action_type == "close_tab"
         assert adapter._map_openai_action({"type": "switch_tab", "tab_index": 1}).action_type == "switch_tab"
@@ -103,29 +102,14 @@ class TestOpenAIAdapter:
     def test_action_parsing_unknown(self):
         from responses_api_agents.browser_agent.adapters.openai_adapter import OpenAICUAAdapter
 
-        adapter = OpenAICUAAdapter(api_key="test-key")
+        adapter = OpenAICUAAdapter()
         action = adapter._map_openai_action({"type": "unknown_action"})
         assert action is None
-
-    def test_headers_with_org(self):
-        from responses_api_agents.browser_agent.adapters.openai_adapter import OpenAICUAAdapter
-
-        adapter = OpenAICUAAdapter(api_key="sk-test", organization="org-123")
-        headers = adapter._get_headers()
-        assert headers["Authorization"] == "Bearer sk-test"
-        assert headers["Openai-Organization"] == "org-123"
-
-    def test_headers_without_org(self):
-        from responses_api_agents.browser_agent.adapters.openai_adapter import OpenAICUAAdapter
-
-        adapter = OpenAICUAAdapter(api_key="sk-test")
-        headers = adapter._get_headers()
-        assert "Openai-Organization" not in headers
 
     def test_tools_config(self):
         from responses_api_agents.browser_agent.adapters.openai_adapter import OpenAICUAAdapter
 
-        adapter = OpenAICUAAdapter(api_key="test", viewport_width=1024, viewport_height=768)
+        adapter = OpenAICUAAdapter(viewport_width=1024, viewport_height=768)
         tools = adapter._get_tools()
         assert tools[0]["type"] == "computer_use_preview"
         assert tools[0]["display_width"] == 1024
@@ -134,7 +118,7 @@ class TestOpenAIAdapter:
     def test_parse_actions_computer_call(self):
         from responses_api_agents.browser_agent.adapters.openai_adapter import OpenAICUAAdapter
 
-        adapter = OpenAICUAAdapter(api_key="test")
+        adapter = OpenAICUAAdapter()
         response = {
             "id": "resp_123",
             "output": [
@@ -153,7 +137,7 @@ class TestOpenAIAdapter:
     def test_parse_actions_final_message(self):
         from responses_api_agents.browser_agent.adapters.openai_adapter import OpenAICUAAdapter
 
-        adapter = OpenAICUAAdapter(api_key="test")
+        adapter = OpenAICUAAdapter()
         response = {
             "id": "resp_123",
             "output": [
@@ -169,10 +153,52 @@ class TestOpenAIAdapter:
         assert result.done is True
         assert result.message == "Done!"
 
+    def test_parse_actions_extracts_usage(self):
+        from responses_api_agents.browser_agent.adapters.openai_adapter import OpenAICUAAdapter
+
+        adapter = OpenAICUAAdapter()
+        response = {
+            "id": "resp_123",
+            "output": [
+                {
+                    "type": "computer_call",
+                    "call_id": "call_1",
+                    "action": {"type": "click", "coordinate": [100, 200]},
+                }
+            ],
+            "usage": {
+                "input_tokens": 500,
+                "output_tokens": 120,
+                "total_tokens": 620,
+            },
+        }
+        result = adapter._parse_actions(response)
+        assert result.usage is not None
+        assert result.usage.input_tokens == 500
+        assert result.usage.output_tokens == 120
+        assert result.usage.total_tokens == 620
+
+    def test_parse_actions_no_usage(self):
+        from responses_api_agents.browser_agent.adapters.openai_adapter import OpenAICUAAdapter
+
+        adapter = OpenAICUAAdapter()
+        response = {
+            "id": "resp_123",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Done!"}],
+                }
+            ],
+        }
+        result = adapter._parse_actions(response)
+        assert result.usage is None
+
     def test_reset(self):
         from responses_api_agents.browser_agent.adapters.openai_adapter import OpenAICUAAdapter
 
-        adapter = OpenAICUAAdapter(api_key="test")
+        adapter = OpenAICUAAdapter()
         adapter._last_response_id = "resp_123"
         adapter._pending_call_ids = ["call_1"]
         adapter.reset()
@@ -182,7 +208,7 @@ class TestOpenAIAdapter:
     def test_response_id_tracking(self):
         from responses_api_agents.browser_agent.adapters.openai_adapter import OpenAICUAAdapter
 
-        adapter = OpenAICUAAdapter(api_key="test")
+        adapter = OpenAICUAAdapter()
         response = {
             "id": "resp_abc123",
             "output": [
@@ -289,7 +315,10 @@ class TestAnthropicAdapterParsing:
         ]
         for i in range(5):
             messages.append(
-                {"role": "assistant", "content": [{"type": "tool_use", "id": f"tu_{i}", "name": "computer", "input": {}}]}
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": f"tu_{i}", "name": "computer", "input": {}}],
+                }
             )
             messages.append(
                 {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"tu_{i}", "content": "ok"}]}
@@ -325,8 +354,6 @@ def _make_gemini_adapter(viewport_width=1280, viewport_height=720):
     adapter._is_gemini_3 = False
     adapter._max_conversation_turns = 8
     adapter._api_caller = None
-    adapter._client = None
-    adapter._timeout = 300.0
     return adapter
 
 
@@ -524,14 +551,14 @@ class TestAdapterFactory:
         from responses_api_agents.browser_agent.adapters import AdapterFactory
         from responses_api_agents.browser_agent.adapters.openai_adapter import OpenAICUAAdapter
 
-        adapter = AdapterFactory.create("openai", api_key="test")
+        adapter = AdapterFactory.create("openai")
         assert isinstance(adapter, OpenAICUAAdapter)
 
     def test_create_unknown(self):
         from responses_api_agents.browser_agent.adapters import AdapterFactory
 
         with pytest.raises(ValueError, match="Unknown adapter type"):
-            AdapterFactory.create("nonexistent", api_key="test")
+            AdapterFactory.create("nonexistent")
 
     def test_available_adapters(self):
         from responses_api_agents.browser_agent.adapters import AdapterFactory
@@ -670,52 +697,7 @@ class TestAnthropicUsageExtraction:
 
 
 class TestGeminiUsageExtraction:
-    def test_parse_response_native_with_usage(self):
-        adapter = _make_gemini_adapter()
-
-        mock_part = MagicMock()
-        mock_part.function_call = None
-        mock_part.text = "Task complete"
-        mock_part.thought = False
-
-        mock_content = MagicMock()
-        mock_content.parts = [mock_part]
-
-        mock_candidate = MagicMock()
-        mock_candidate.content = mock_content
-
-        mock_response = MagicMock()
-        mock_response.candidates = [mock_candidate]
-        mock_response.usage_metadata = MagicMock(prompt_token_count=300, candidates_token_count=150)
-
-        result = adapter._parse_response(mock_response)
-        assert result.usage is not None
-        assert result.usage.input_tokens == 300
-        assert result.usage.output_tokens == 150
-        assert result.usage.total_tokens == 450
-
-    def test_parse_response_native_no_usage(self):
-        adapter = _make_gemini_adapter()
-
-        mock_part = MagicMock()
-        mock_part.function_call = None
-        mock_part.text = "Done"
-        mock_part.thought = False
-
-        mock_content = MagicMock()
-        mock_content.parts = [mock_part]
-
-        mock_candidate = MagicMock()
-        mock_candidate.content = mock_content
-
-        mock_response = MagicMock()
-        mock_response.candidates = [mock_candidate]
-        mock_response.usage_metadata = None
-
-        result = adapter._parse_response(mock_response)
-        assert result.usage is None
-
-    def test_parse_serialized_response_with_usage(self):
+    def test_parse_response_with_usage(self):
         adapter = _make_gemini_adapter()
 
         data = {
@@ -733,13 +715,13 @@ class TestGeminiUsageExtraction:
             },
         }
 
-        result = adapter._parse_serialized_response(data)
+        result = adapter._parse_response(data)
         assert result.usage is not None
         assert result.usage.input_tokens == 1000
         assert result.usage.output_tokens == 400
         assert result.usage.total_tokens == 1400
 
-    def test_parse_serialized_response_no_usage(self):
+    def test_parse_response_no_usage(self):
         adapter = _make_gemini_adapter()
 
         data = {
@@ -753,5 +735,5 @@ class TestGeminiUsageExtraction:
             ],
         }
 
-        result = adapter._parse_serialized_response(data)
+        result = adapter._parse_response(data)
         assert result.usage is None

@@ -21,10 +21,7 @@ Full conversation history maintained in messages list, trimmed before each API c
 3. _strip_leading_orphaned_tool_results: ensure valid message ordering
 4. _gc_old_screenshots: replace base64 data in messages outside the trim window with a placeholder
 
-Supports two execution modes:
-- Direct: adapter calls Anthropic API directly (default, uses AsyncAnthropic)
-- Model-server routed: adapter prepares params, delegates API call to an injected callable
-  (used when a NeMo-Gym model server is configured)
+All API calls are routed through an injected api_caller (model server proxy).
 """
 
 import copy
@@ -71,7 +68,6 @@ ApiCaller = Callable[[Dict[str, Any]], Coroutine[Any, Any, Any]]
 class AnthropicCUAAdapter(BaseCUAAdapter):
     def __init__(
         self,
-        api_key: str = "",
         model: str = "claude-sonnet-4-20250514",
         is_opus: bool = False,
         viewport_width: int = 1280,
@@ -81,7 +77,6 @@ class AnthropicCUAAdapter(BaseCUAAdapter):
         screenshot_turn_limit: int = 8,
         effort_level: str = "high",
         api_caller: Optional[ApiCaller] = None,
-        timeout: float = 300.0,
     ):
         self._model = model
         self._is_opus = is_opus
@@ -92,14 +87,6 @@ class AnthropicCUAAdapter(BaseCUAAdapter):
         self._screenshot_turn_limit = screenshot_turn_limit
         self._effort_level = effort_level
         self._api_caller = api_caller
-
-        if api_caller is None:
-            from anthropic import AsyncAnthropic
-
-            self._client = AsyncAnthropic(api_key=api_key, max_retries=4, timeout=timeout)
-        else:
-            self._client = None
-
         self._messages: List[Dict[str, Any]] = []
         self._system_prompt: str = ""
         self._pending_tool_use_ids: List[str] = []
@@ -301,24 +288,21 @@ class AnthropicCUAAdapter(BaseCUAAdapter):
             "messages": trimmed,
         }
 
-        if not self._api_caller:
-            params["model"] = self._model
-
         if self._is_opus and self._effort_level != "high":
             params["output_config"] = {"effort": self._effort_level}
 
         return params
 
     async def _execute_api_call(self, api_params: Dict[str, Any]):
-        """Execute the Anthropic API call, either directly or via injected model-server caller."""
-        if self._api_caller:
-            raw = await self._api_caller(api_params)
-            if isinstance(raw, dict):
-                from anthropic.types.beta import BetaMessage
+        """Route API call through the injected model server proxy."""
+        if not self._api_caller:
+            raise RuntimeError("AnthropicCUAAdapter requires an api_caller (model server proxy). No direct API calls.")
+        raw = await self._api_caller(api_params)
+        if isinstance(raw, dict):
+            from anthropic.types.beta import BetaMessage
 
-                return BetaMessage.model_validate(raw)
-            return raw
-        return await self._client.beta.messages.create(**api_params)
+            return BetaMessage.model_validate(raw)
+        return raw
 
     def _update_history_from_response(self, response):
         """Append assistant response to conversation history and track pending tool IDs."""

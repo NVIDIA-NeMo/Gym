@@ -33,6 +33,7 @@ from typing import Any, Dict, Optional
 
 from resources_servers.browser_gym.schemas import CUATrajectory
 
+
 logger = logging.getLogger(__name__)
 
 

@@ -18,49 +18,32 @@ Context management: Server-side via previous_response_id.
 No client-side conversation history is maintained. OpenAI manages full context
 server-side with truncation="auto" and reasoning={"summary": "auto"}.
 
-Uses raw HTTP requests (not SDK) with Authorization + Openai-Organization headers.
+All API calls are routed through an injected api_caller (model server proxy).
 """
 
-import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
-import aiohttp
-
 from resources_servers.browser_gym.schemas import BrowserAction
-from responses_api_agents.browser_agent.adapters.base import BaseCUAAdapter, CUAAdapterResponse
+from responses_api_agents.browser_agent.adapters.base import BaseCUAAdapter, CUAAdapterResponse, CUAAdapterUsage
+
 
 logger = logging.getLogger(__name__)
-
-OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 
 
 class OpenAICUAAdapter(BaseCUAAdapter):
     def __init__(
         self,
-        api_key: str,
         model: str = "computer-use-preview",
-        organization: Optional[str] = None,
         viewport_width: int = 1280,
         viewport_height: int = 720,
-        max_retries: int = 3,
+        api_caller=None,
     ):
-        self._api_key = api_key
         self._model = model
-        self._organization = organization
         self._viewport_width = viewport_width
         self._viewport_height = viewport_height
-        self._max_retries = max_retries
+        self._api_caller = api_caller
         self._last_response_id: Optional[str] = None
-
-    def _get_headers(self) -> Dict[str, str]:
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
-        if self._organization:
-            headers["Openai-Organization"] = self._organization
-        return headers
 
     def _get_tools(self) -> List[Dict[str, Any]]:
         return [
@@ -73,35 +56,10 @@ class OpenAICUAAdapter(BaseCUAAdapter):
         ]
 
     async def _call_api(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Call OpenAI Responses API with retry logic."""
-        last_exception = None
-        for attempt in range(self._max_retries):
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        OPENAI_RESPONSES_URL,
-                        headers=self._get_headers(),
-                        json=payload,
-                        timeout=aiohttp.ClientTimeout(total=120),
-                    ) as resp:
-                        response_json = await resp.json()
-                        if resp.status != 200:
-                            error_msg = response_json.get("error", {}).get("message", str(response_json))
-                            raise aiohttp.ClientResponseError(
-                                request_info=resp.request_info,
-                                history=resp.history,
-                                status=resp.status,
-                                message=error_msg,
-                            )
-                        return response_json
-            except Exception as e:
-                last_exception = e
-                if attempt < self._max_retries - 1:
-                    wait_time = 2 ** (attempt + 1)
-                    logger.warning(f"OpenAI API attempt {attempt + 1} failed: {e}. Retrying in {wait_time}s...")
-                    await asyncio.sleep(wait_time)
-
-        raise last_exception
+        """Route API call through the injected model server proxy."""
+        if not self._api_caller:
+            raise RuntimeError("OpenAICUAAdapter requires an api_caller (model server proxy). No direct API calls.")
+        return await self._api_caller(payload)
 
     def _parse_actions(self, response: Dict[str, Any]) -> CUAAdapterResponse:
         """Parse OpenAI response into CUAAdapterResponse."""
@@ -131,7 +89,15 @@ class OpenAICUAAdapter(BaseCUAAdapter):
                     done = True
 
         self._pending_call_ids = pending_call_ids
-        return CUAAdapterResponse(actions=actions, message=message, raw_response=response, done=done)
+
+        usage = None
+        resp_usage = response.get("usage")
+        if resp_usage and isinstance(resp_usage, dict):
+            in_tok = resp_usage.get("input_tokens", 0) or 0
+            out_tok = resp_usage.get("output_tokens", 0) or 0
+            usage = CUAAdapterUsage(input_tokens=in_tok, output_tokens=out_tok, total_tokens=in_tok + out_tok)
+
+        return CUAAdapterResponse(actions=actions, message=message, raw_response=response, done=done, usage=usage)
 
     @staticmethod
     def _get_coord(action: Dict[str, Any]) -> Optional[List[int]]:
@@ -242,6 +208,7 @@ class OpenAICUAAdapter(BaseCUAAdapter):
                     {
                         "type": "input_image",
                         "image_url": f"data:image/png;base64,{screenshot_b64}",
+                        "detail": "auto",
                     },
                 ],
             }
@@ -283,6 +250,7 @@ class OpenAICUAAdapter(BaseCUAAdapter):
                         {
                             "type": "input_image",
                             "image_url": f"data:image/png;base64,{screenshot_b64}",
+                            "detail": "auto",
                         }
                     ],
                 }
