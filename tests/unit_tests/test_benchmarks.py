@@ -159,7 +159,7 @@ class TestPrepareBenchmark:
             ),
             patch("nemo_gym.benchmarks.BENCHMARKS_DIR", bench_dir.parent),
         ):
-            with pytest.raises(FileNotFoundError, match="No prepare.py found"):
+            with pytest.raises(ValueError, match="No prepare.py found"):
                 prepare_benchmark()
 
     def test_missing_prepare_function(self, tmp_path: Path) -> None:
@@ -177,7 +177,7 @@ class TestPrepareBenchmark:
             patch("nemo_gym.benchmarks.BENCHMARKS_DIR", bench_dir.parent),
             patch("nemo_gym.benchmarks.importlib.import_module", return_value=mock_module),
         ):
-            with pytest.raises(AttributeError, match="must define a `prepare\\(\\)` function"):
+            with pytest.raises(ValueError, match="must define a `prepare\\(\\)` function"):
                 prepare_benchmark()
 
     def test_no_benchmark_in_config_paths(self) -> None:

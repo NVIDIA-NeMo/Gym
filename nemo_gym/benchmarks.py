@@ -150,21 +150,27 @@ def prepare_benchmark() -> None:
         )
 
     # Validate all benchmarks before preparing any
+    errors = []
     validated = []
     for bench_dir in benchmark_dirs:
         benchmark_name = bench_dir.name
         prepare_module_path = bench_dir / "prepare.py"
 
         if not prepare_module_path.exists():
-            raise FileNotFoundError(f"No prepare.py found for benchmark '{benchmark_name}' at {prepare_module_path}")
+            errors.append(f"No prepare.py found for benchmark '{benchmark_name}' at {prepare_module_path}")
+            continue
 
         module_name = f"benchmarks.{benchmark_name}.prepare"
         module = importlib.import_module(module_name)
 
         if not hasattr(module, "prepare"):
-            raise AttributeError(f"benchmarks/{benchmark_name}/prepare.py must define a `prepare()` function")
+            errors.append(f"benchmarks/{benchmark_name}/prepare.py must define a `prepare()` function")
+            continue
 
         validated.append((benchmark_name, module))
+
+    if errors:
+        raise ValueError("Benchmark validation failed:\n  " + "\n  ".join(errors))
 
     # Prepare after all validations pass
     for benchmark_name, module in validated:
