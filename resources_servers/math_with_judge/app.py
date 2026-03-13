@@ -359,12 +359,12 @@ Example output: "My final verdict is different [[A!=B]]"."""
         """Select headline metrics for this math benchmark."""
         key: Dict[str, Any] = {}
 
-        # Mean stats (reward, token usage)
-        for k, v in agent_metrics.items():
-            if k.startswith("mean/"):
-                key[k] = v
+        # Token usage (not reward — that's redundant with accuracy scores)
+        for name in ("mean/input_tokens", "mean/output_tokens"):
+            if name in agent_metrics:
+                key[name] = agent_metrics[name]
 
-        # Highest-k pass@1[avg-of-*] for each score name (no statistics)
+        # Highest-k pass@1[avg-of-*] for all score names including no_answer (no statistics)
         avg_keys = [
             k
             for k in agent_metrics
@@ -376,16 +376,16 @@ Example output: "My final verdict is different [[A!=B]]"."""
                 if k.startswith(f"pass@1[avg-of-{highest_k}]"):
                     key[k] = agent_metrics[k]
 
-        # Highest-k pass@k for each score name
-        pass_keys = [k for k in agent_metrics if k.startswith("pass@") and "[" not in k]
+        # Highest-k pass@k for accuracy scores only (not no_answer)
+        pass_keys = [k for k in agent_metrics if k.startswith("pass@") and "[" not in k and "/no_answer" not in k]
         if pass_keys:
             highest_k = max(int(k.split("@")[1].split("/")[0]) for k in pass_keys)
             for k in pass_keys:
                 if k.startswith(f"pass@{highest_k}/"):
                     key[k] = agent_metrics[k]
 
-        # Highest-k majority for each score name
-        maj_keys = [k for k in agent_metrics if k.startswith("majority@")]
+        # Highest-k majority for accuracy scores only (not no_answer)
+        maj_keys = [k for k in agent_metrics if k.startswith("majority@") and "/no_answer" not in k]
         if maj_keys:
             highest_k = max(int(k.split("@")[1].split("/")[0]) for k in maj_keys)
             for k in maj_keys:

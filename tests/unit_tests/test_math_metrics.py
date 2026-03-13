@@ -311,6 +311,8 @@ class TestGetKeyMetrics:
             "mean/reward": 0.5,
             "mean/library_reward": 0.5,
             "mean/input_tokens": 100.0,
+            "mean/output_tokens": 500.0,
+            "mean/total_tokens": 600.0,
             "pass@1/symbolic_accuracy": 50.0,
             "pass@1/no_answer": 10.0,
             "pass@1[avg-of-1]/symbolic_accuracy": 50.0,
@@ -322,16 +324,24 @@ class TestGetKeyMetrics:
             "pass@4/symbolic_accuracy": 70.0,
             "pass@4/no_answer": 15.0,
             "majority@4/symbolic_accuracy": 60.0,
+            "majority@4/no_answer": 5.0,
         }
         result = LibraryJudgeMathResourcesServer.get_key_metrics(None, agent_metrics)
 
-        assert "mean/reward" in result
+        # Only input/output tokens, not reward or total
         assert "mean/input_tokens" in result
+        assert "mean/output_tokens" in result
+        assert "mean/reward" not in result
+        assert "mean/library_reward" not in result
+        assert "mean/total_tokens" not in result
+        # pass@1[avg-of-k] for all scores including no_answer
         assert "pass@1[avg-of-4]/symbolic_accuracy" in result
         assert "pass@1[avg-of-4]/no_answer" in result
+        # pass@k and majority@k for accuracy scores only, not no_answer
         assert "pass@4/symbolic_accuracy" in result
-        assert "pass@4/no_answer" in result
+        assert "pass@4/no_answer" not in result
         assert "majority@4/symbolic_accuracy" in result
+        assert "majority@4/no_answer" not in result
         # Stats should NOT be in key metrics
         assert "pass@1[avg-of-4]/symbolic_accuracy/std_dev_across_runs" not in result
         assert "pass@1[avg-of-4]/no_answer/std_dev_across_runs" not in result
