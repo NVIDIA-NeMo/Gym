@@ -14,8 +14,10 @@
 import logging
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Dict, Optional
 
+from fastapi import Request, Response
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest
@@ -42,7 +44,11 @@ from resources_servers.browser_gym.schemas import (
 )
 from responses_api_agents.browser_agent.adapters import AdapterFactory
 from responses_api_agents.browser_agent.adapters.base import BaseCUAAdapter
-from responses_api_agents.browser_agent.trajectory_writer import save_debug_trajectory
+from responses_api_agents.browser_agent.trajectory_writer import (
+    append_debug_step,
+    finalize_debug_trajectory,
+    init_debug_trajectory,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -116,13 +122,19 @@ class BrowserAgent(SimpleResponsesAPIAgent):
     config: BrowserAgentConfig
 
     def _create_adapter(
-        self, viewport_width: Optional[int] = None, viewport_height: Optional[int] = None
+        self,
+        cookie_jar: Dict[str, Any],
+        viewport_width: Optional[int] = None,
+        viewport_height: Optional[int] = None,
     ) -> BaseCUAAdapter:
         """Create a CUA adapter for any provider.
 
         All API calls are routed through the model server (stateless proxy).
         The adapter owns context management and action mapping; the model
         server handles authentication, retries, and provider API transport.
+
+        cookie_jar is a mutable ``{"cookies": ...}`` dict shared with the
+        model-server callers so that session cookies propagate across calls.
         """
         if not self._uses_model_server():
             raise ValueError(
@@ -138,7 +150,7 @@ class BrowserAgent(SimpleResponsesAPIAgent):
         }
 
         if adapter_type == "openai":
-            kwargs["api_caller"] = self._make_openai_model_server_caller()
+            kwargs["api_caller"] = self._make_openai_model_server_caller(cookie_jar)
 
         elif adapter_type in ("anthropic_sonnet", "anthropic_opus"):
             kwargs["is_opus"] = self.config.cua_is_opus
@@ -146,23 +158,29 @@ class BrowserAgent(SimpleResponsesAPIAgent):
             kwargs["turns_to_keep"] = self.config.cua_turns_to_keep
             kwargs["screenshot_turn_limit"] = self.config.cua_screenshot_turn_limit
             kwargs["effort_level"] = self.config.cua_effort_level
-            kwargs["api_caller"] = self._make_anthropic_model_server_caller()
+            kwargs["api_caller"] = self._make_anthropic_model_server_caller(cookie_jar)
 
         elif adapter_type == "gemini":
             kwargs["max_conversation_turns"] = self.config.cua_max_conversation_turns
-            kwargs["api_caller"] = self._make_gemini_model_server_caller()
+            kwargs["api_caller"] = self._make_gemini_model_server_caller(cookie_jar)
 
         return AdapterFactory.create(adapter_type, **kwargs)
 
-    def _make_openai_model_server_caller(self):
-        """Create an async callable that routes OpenAI API calls through the model server."""
+    def _make_openai_model_server_caller(self, cookie_jar: Dict[str, Any]):
+        """Create an async callable that routes OpenAI API calls through the model server.
+
+        The cookie_jar is a mutable dict with a "cookies" key that is read and
+        updated after every call so that session affinity is maintained.
+        """
 
         async def caller(api_params: Dict[str, Any]):
             resp = await self.server_client.post(
                 server_name=self.config.model_server.name,
                 url_path="/v1/responses",
                 json=api_params,
+                cookies=cookie_jar["cookies"],
             )
+            cookie_jar["cookies"] = resp.cookies
             if not resp.ok:
                 err_body = await resp.content.read()
                 logger.error("OpenAI model server error (status=%s): %s", resp.status, err_body)
@@ -171,8 +189,12 @@ class BrowserAgent(SimpleResponsesAPIAgent):
 
         return caller
 
-    def _make_anthropic_model_server_caller(self):
-        """Create an async callable that routes Anthropic API calls through the model server."""
+    def _make_anthropic_model_server_caller(self, cookie_jar: Dict[str, Any]):
+        """Create an async callable that routes Anthropic API calls through the model server.
+
+        The cookie_jar is a mutable dict with a "cookies" key that is read and
+        updated after every call so that session affinity is maintained.
+        """
 
         async def caller(api_params: Dict[str, Any]):
             proxy_body = {
@@ -189,7 +211,9 @@ class BrowserAgent(SimpleResponsesAPIAgent):
                 server_name=self.config.model_server.name,
                 url_path="/v1/responses",
                 json=proxy_body,
+                cookies=cookie_jar["cookies"],
             )
+            cookie_jar["cookies"] = resp.cookies
             if not resp.ok:
                 err_body = await resp.content.read()
                 logger.error("Anthropic model server error (status=%s): %s", resp.status, err_body)
@@ -198,8 +222,12 @@ class BrowserAgent(SimpleResponsesAPIAgent):
 
         return caller
 
-    def _make_gemini_model_server_caller(self):
-        """Create an async callable that routes Gemini API calls through the model server."""
+    def _make_gemini_model_server_caller(self, cookie_jar: Dict[str, Any]):
+        """Create an async callable that routes Gemini API calls through the model server.
+
+        The cookie_jar is a mutable dict with a "cookies" key that is read and
+        updated after every call so that session affinity is maintained.
+        """
 
         async def caller(api_params: Dict[str, Any]):
             proxy_body = {
@@ -211,7 +239,9 @@ class BrowserAgent(SimpleResponsesAPIAgent):
                 server_name=self.config.model_server.name,
                 url_path="/v1/responses",
                 json=proxy_body,
+                cookies=cookie_jar["cookies"],
             )
+            cookie_jar["cookies"] = resp.cookies
             if not resp.ok:
                 err_body = await resp.content.read()
                 logger.error("Gemini model server error (status=%s): %s", resp.status, err_body)
@@ -228,41 +258,97 @@ class BrowserAgent(SimpleResponsesAPIAgent):
     # ──────────────────────────────────────────────────────────────
 
     async def _responses_via_adapter(
-        self, task_prompt: str, env_id: str, screenshot_b64: str, viewport_w: int = 1280, viewport_h: int = 720
-    ) -> tuple[CUATrajectory, Optional[str], Optional[Any]]:
+        self,
+        task_prompt: str,
+        env_id: str,
+        screenshot_b64: str,
+        cookie_jar: Dict[str, Any],
+        viewport_w: int = 1280,
+        viewport_h: int = 720,
+    ) -> tuple[CUATrajectory, Optional[str], Optional[Any], Optional[Path]]:
         """Run the CUA loop through the provider adapter.
 
         All providers (OpenAI, Anthropic, Gemini) follow the same path:
         adapter handles context management and action mapping, routing
         API calls through the model server.
+
+        cookie_jar is a mutable ``{"cookies": ...}`` dict that is read and
+        updated after every downstream ``server_client.post`` call so that
+        session cookies propagate correctly.
+
+        Returns (trajectory, local_storage_dump, usage, debug_rollout_dir).
+        debug_rollout_dir is non-None only when debug trajectories are enabled
+        and the directory was successfully created.
         """
-        adapter = self._create_adapter(viewport_width=viewport_w, viewport_height=viewport_h)
+        adapter = self._create_adapter(cookie_jar, viewport_width=viewport_w, viewport_height=viewport_h)
+        debug_enabled = self.config.cua_debug_trajectories
 
         cumulative_input_tokens = 0
         cumulative_output_tokens = 0
+        debug_rollout_dir = None
 
         try:
+            loop_start = time.time()
             adapter_resp = await adapter.initialize(task_prompt, screenshot_b64)
+
+            logger.info(
+                "[CUA %s] initialize done — actions=%d done=%s",
+                env_id,
+                len(adapter_resp.actions),
+                adapter_resp.done,
+            )
 
             if adapter_resp.usage:
                 cumulative_input_tokens += adapter_resp.usage.input_tokens
                 cumulative_output_tokens += adapter_resp.usage.output_tokens
 
             trajectory = CUATrajectory(steps=[], task_prompt=task_prompt, initial_screenshot=screenshot_b64)
+
+            if debug_enabled:
+                try:
+                    debug_rollout_dir = init_debug_trajectory(
+                        output_dir=self.config.cua_debug_output_dir,
+                        env_id=env_id,
+                        initial_screenshot=screenshot_b64,
+                        task_prompt=task_prompt,
+                        adapter_type=self.config.cua_adapter_type,
+                        model_name=self.config.cua_model,
+                    )
+                except Exception as e:
+                    logger.warning("[CUA %s] failed to init debug trajectory: %s", env_id, e)
+
             step_count = 0
+            action_index = 0
             step_data = None
+            consecutive_failures = 0
+            max_consecutive_failures = 3
+            browser_crashed = False
 
             while not adapter_resp.done and step_count < self.config.max_steps:
+                if browser_crashed:
+                    break
                 for action in adapter_resp.actions:
                     try:
                         step_resp_raw = await self.server_client.post(
                             server_name=self.config.resources_server.name,
                             url_path="/step",
                             json={"env_id": env_id, "action": action.model_dump()},
+                            cookies=cookie_jar["cookies"],
                         )
+                        cookie_jar["cookies"] = step_resp_raw.cookies
                         await raise_for_status(step_resp_raw)
                         step_data = CUAStepResponse.model_validate(await get_response_json(step_resp_raw))
 
+                        if not step_data.screenshot or step_data.current_url == "error:browser_stuck":
+                            logger.error(
+                                "[CUA %s] browser stuck (empty screenshot returned) — closing session",
+                                env_id,
+                            )
+                            browser_crashed = True
+                            break
+
+                        consecutive_failures = 0
+                        action_index += 1
                         trajectory.steps.append(
                             CUAStep(
                                 action=action,
@@ -272,37 +358,96 @@ class BrowserAgent(SimpleResponsesAPIAgent):
                                 raw_provider_response=adapter_resp.raw_response,
                             )
                         )
+
+                        if debug_enabled and debug_rollout_dir:
+                            try:
+                                append_debug_step(
+                                    rollout_dir=debug_rollout_dir,
+                                    step_idx=action_index,
+                                    action=action,
+                                    screenshot_after=step_data.screenshot,
+                                    current_url=step_data.current_url,
+                                    raw_provider_response=adapter_resp.raw_response,
+                                )
+                            except Exception as e:
+                                logger.warning("[CUA %s] failed to append debug step %d: %s", env_id, action_index, e)
+
                         screenshot_b64 = step_data.screenshot
                     except Exception as step_err:
+                        consecutive_failures += 1
                         logger.warning(
-                            "Step action failed (action=%s): %s — continuing with current screenshot",
+                            "[CUA %s] action %s failed (%d/%d consecutive): %s",
+                            env_id,
                             action.action_type,
+                            consecutive_failures,
+                            max_consecutive_failures,
                             step_err,
                         )
+                        if consecutive_failures >= max_consecutive_failures:
+                            logger.error(
+                                "[CUA %s] %d consecutive action failures — browser appears crashed, ending loop",
+                                env_id,
+                                consecutive_failures,
+                            )
+                            browser_crashed = True
+                            break
 
+                current_url = step_data.current_url if step_data else "about:blank"
                 step_count += 1
-                if adapter_resp.done:
+                total_elapsed = time.time() - loop_start
+
+                logger.info(
+                    "[CUA %s] step %d/%d (total %.1fs) — actions=%d url=%s",
+                    env_id,
+                    step_count,
+                    self.config.max_steps,
+                    total_elapsed,
+                    len(adapter_resp.actions),
+                    current_url[:80] if current_url else "?",
+                )
+
+                if adapter_resp.done or browser_crashed:
                     break
-                last_url = step_data.current_url if step_data else "about:blank"
+                last_url = current_url
                 try:
                     adapter_resp = await adapter.step(screenshot_b64, action_result=last_url)
                     if adapter_resp.usage:
                         cumulative_input_tokens += adapter_resp.usage.input_tokens
                         cumulative_output_tokens += adapter_resp.usage.output_tokens
                 except Exception as adapter_err:
-                    logger.error("Adapter step failed: %s — ending loop", adapter_err)
+                    logger.error("[CUA %s] Adapter step failed: %s — ending loop", env_id, adapter_err)
                     break
+
+            total_elapsed = time.time() - loop_start
+            logger.info(
+                "[CUA %s] loop finished — steps=%d total_time=%.1fs input_tokens=%d output_tokens=%d",
+                env_id,
+                step_count,
+                total_elapsed,
+                cumulative_input_tokens,
+                cumulative_output_tokens,
+            )
 
             if adapter_resp.message:
                 trajectory.final_message = adapter_resp.message
 
-            ls_resp = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/dump_local_storage",
-                json={"env_id": env_id},
-            )
-            await raise_for_status(ls_resp)
-            ls_data = CUADumpLocalStorageResponse.model_validate(await get_response_json(ls_resp))
+            local_storage_dump = ""
+            if browser_crashed:
+                logger.warning("[CUA %s] skipping dump_local_storage — browser crashed", env_id)
+            else:
+                try:
+                    ls_resp = await self.server_client.post(
+                        server_name=self.config.resources_server.name,
+                        url_path="/dump_local_storage",
+                        json={"env_id": env_id},
+                        cookies=cookie_jar["cookies"],
+                    )
+                    cookie_jar["cookies"] = ls_resp.cookies
+                    await raise_for_status(ls_resp)
+                    ls_data = CUADumpLocalStorageResponse.model_validate(await get_response_json(ls_resp))
+                    local_storage_dump = ls_data.local_storage_dump
+                except Exception as ls_err:
+                    logger.warning("[CUA %s] dump_local_storage failed: %s", env_id, ls_err)
 
             adapter_usage = None
             if cumulative_input_tokens > 0 or cumulative_output_tokens > 0:
@@ -314,7 +459,7 @@ class BrowserAgent(SimpleResponsesAPIAgent):
                     output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
                 )
 
-            return trajectory, ls_data.local_storage_dump, adapter_usage
+            return trajectory, local_storage_dump, adapter_usage, debug_rollout_dir
         finally:
             adapter.reset()
 
@@ -322,7 +467,16 @@ class BrowserAgent(SimpleResponsesAPIAgent):
     # Public API
     # ──────────────────────────────────────────────────────────────
 
-    async def responses(self, body: BrowserAgentRunRequest) -> CUANeMoGymResponse:
+    async def _do_responses(
+        self, body: BrowserAgentRunRequest, cookie_jar: Dict[str, Any]
+    ) -> tuple[CUANeMoGymResponse, Optional[Path]]:
+        """Core CUA loop shared by both ``responses()`` and ``run()``.
+
+        Accepts a mutable *cookie_jar* (``{"cookies": ...}``) that is read
+        and updated after every downstream call.
+
+        Returns (response, debug_rollout_dir).
+        """
         body = body.model_copy(deep=True)
         rcp = body.responses_create_params
 
@@ -359,14 +513,16 @@ class BrowserAgent(SimpleResponsesAPIAgent):
                 server_name=self.config.resources_server.name,
                 url_path="/seed_session",
                 json={"start_url": start_url, "viewport_width": viewport_w, "viewport_height": viewport_h},
+                cookies=cookie_jar["cookies"],
             )
+            cookie_jar["cookies"] = seed_resp.cookies
             await raise_for_status(seed_resp)
             seed_data = CUASeedSessionResponse.model_validate(await get_response_json(seed_resp))
             env_id = seed_data.env_id
             screenshot_b64 = seed_data.screenshot
 
-            trajectory, local_storage_dump, usage = await self._responses_via_adapter(
-                task_prompt, env_id, screenshot_b64, viewport_w, viewport_h
+            trajectory, local_storage_dump, usage, debug_rollout_dir = await self._responses_via_adapter(
+                task_prompt, env_id, screenshot_b64, cookie_jar, viewport_w, viewport_h
             )
 
         finally:
@@ -376,40 +532,56 @@ class BrowserAgent(SimpleResponsesAPIAgent):
                         server_name=self.config.resources_server.name,
                         url_path="/close",
                         json={"env_id": env_id},
+                        cookies=cookie_jar["cookies"],
                     )
                 except Exception as e:
                     logger.warning(f"Error closing browser session: {e}")
 
-        return _build_nemo_response(trajectory, env_id, local_storage_dump, self.config.cua_model, usage)
+        nemo_resp = _build_nemo_response(trajectory, env_id, local_storage_dump, self.config.cua_model, usage)
+        return nemo_resp, debug_rollout_dir
 
-    async def run(self, body: BrowserAgentRunRequest) -> CUAVerifyResponse:
+    async def responses(
+        self, request: Request, response: Response, body: BrowserAgentRunRequest
+    ) -> CUANeMoGymResponse:
+        cookie_jar: Dict[str, Any] = {"cookies": request.cookies}
+
+        result, _debug_dir = await self._do_responses(body, cookie_jar)
+
+        for k, v in cookie_jar["cookies"].items():
+            response.set_cookie(k, v)
+        return result
+
+    async def run(self, request: Request, body: BrowserAgentRunRequest) -> CUAVerifyResponse:
+        cookie_jar: Dict[str, Any] = {"cookies": request.cookies}
         try:
-            response = await self.responses(body)
+            cua_response, debug_rollout_dir = await self._do_responses(body, cookie_jar)
 
-            verify_request = CUAVerifyRequest.model_validate(body.model_dump() | {"response": response})
+            verify_request = CUAVerifyRequest.model_validate(body.model_dump() | {"response": cua_response})
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
                 json=verify_request.model_dump(),
+                cookies=cookie_jar["cookies"],
             )
+            cookie_jar["cookies"] = verify_resp.cookies
             await raise_for_status(verify_resp)
             result = CUAVerifyResponse.model_validate(await get_response_json(verify_resp))
 
-            if self.config.cua_debug_trajectories:
+            if self.config.cua_debug_trajectories and debug_rollout_dir:
                 try:
-                    save_debug_trajectory(
-                        output_dir=self.config.cua_debug_output_dir,
-                        env_id=response.env_id,
-                        trajectory=response.trajectory,
+                    finalize_debug_trajectory(
+                        rollout_dir=debug_rollout_dir,
+                        env_id=cua_response.env_id,
+                        trajectory=cua_response.trajectory,
                         reward=result.reward,
-                        local_storage_dump=response.local_storage_dump,
+                        local_storage_dump=cua_response.local_storage_dump,
                         adapter_type=self.config.cua_adapter_type,
                         model_name=self.config.cua_model,
                         verifier_metadata=body.verifier_metadata,
                         verification_result=getattr(result, "verification_result", None),
                     )
                 except Exception as e:
-                    logger.warning(f"Failed to save debug trajectory: {e}")
+                    logger.warning(f"Failed to finalize debug trajectory: {e}")
 
             return result
         except Exception:

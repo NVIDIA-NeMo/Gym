@@ -173,10 +173,13 @@ class GeminiCUAAdapter(BaseCUAAdapter):
         self._trim_paired_turns()
 
     def _validate_function_pairs(self):
-        """Ensure every function_call content has a matching function_response content.
+        """Ensure every function_call content has a matching function_response content
+        and vice versa, with matching names.
 
-        Walks the _contents list and drops orphaned function_call or function_response
-        entries to maintain API validity.
+        Walks the _contents list and drops:
+        - orphaned function_call (no following function_response)
+        - orphaned function_response (not preceded by a function_call)
+        - pairs where the response names don't match the call names
         """
         result = []
         i = 0
@@ -184,17 +187,41 @@ class GeminiCUAAdapter(BaseCUAAdapter):
             content = self._contents[i]
             if self._is_function_call(content):
                 if i + 1 < len(self._contents) and self._is_function_response(self._contents[i + 1]):
-                    result.append(content)
-                    result.append(self._contents[i + 1])
-                    i += 2
-                    continue
+                    call_names = self._get_function_names(content, "function_call")
+                    resp_names = self._get_function_names(self._contents[i + 1], "function_response")
+                    if call_names == resp_names:
+                        result.append(content)
+                        result.append(self._contents[i + 1])
+                        i += 2
+                        continue
+                    else:
+                        logger.warning(
+                            "Dropping function pair at index %d: call names %s != response names %s",
+                            i,
+                            call_names,
+                            resp_names,
+                        )
+                        i += 2
                 else:
                     logger.warning("Dropping orphaned function_call at index %d", i)
                     i += 1
+            elif self._is_function_response(content):
+                logger.warning("Dropping orphaned function_response at index %d", i)
+                i += 1
             else:
                 result.append(content)
                 i += 1
         self._contents = result
+
+    def _get_function_names(self, content, part_type: str) -> List[str]:
+        """Extract function call or response names from a Content object."""
+        names = []
+        for part in content.parts or []:
+            if part_type == "function_call" and hasattr(part, "function_call") and part.function_call:
+                names.append(part.function_call.name)
+            elif part_type == "function_response" and hasattr(part, "function_response") and part.function_response:
+                names.append(part.function_response.name)
+        return names
 
     def _gc_old_screenshots(self, trim_window_size: int) -> None:
         """Replace inline image data in old messages with a placeholder to free memory."""
@@ -343,6 +370,8 @@ class GeminiCUAAdapter(BaseCUAAdapter):
         elif action_name == "list_tabs":
             return BrowserAction(action_type="screenshot")
         elif action_name == "open_web_browser":
+            return BrowserAction(action_type="screenshot")
+        elif action_name in ("WebAgentState", "web_agent_state"):
             return BrowserAction(action_type="screenshot")
         else:
             logger.warning("Unknown Gemini action: %s", action_name)
@@ -572,16 +601,24 @@ class GeminiCUAAdapter(BaseCUAAdapter):
         response = await self._execute_api_call()
         result = self._parse_response(response)
 
-        self._pending_action_names = []
-        for a in result.actions:
-            for part in self._contents[-1].parts if self._contents else []:
-                if hasattr(part, "function_call") and part.function_call:
-                    self._pending_action_names.append(part.function_call.name)
-                    break
-            else:
-                self._pending_action_names.append(a.action_type)
+        self._pending_action_names = self._extract_function_call_names()
 
         return result
+
+    def _extract_function_call_names(self) -> List[str]:
+        """Extract all function call names from the last model response in _contents.
+
+        This must return one name per function call the model emitted so that
+        ``_build_function_responses`` sends exactly the right number of
+        ``FunctionResponse`` items back to the Gemini API.
+        """
+        names: List[str] = []
+        if self._contents:
+            last_content = self._contents[-1]
+            for part in last_content.parts or []:
+                if hasattr(part, "function_call") and part.function_call:
+                    names.append(part.function_call.name)
+        return names
 
     async def step(self, screenshot_b64: str, action_result: Optional[str] = None) -> CUAAdapterResponse:
         if action_result:
@@ -601,14 +638,7 @@ class GeminiCUAAdapter(BaseCUAAdapter):
         response = await self._execute_api_call()
         result = self._parse_response(response)
 
-        self._pending_action_names = []
-        if result.actions and self._contents:
-            last_content = self._contents[-1]
-            for part in last_content.parts or []:
-                if hasattr(part, "function_call") and part.function_call:
-                    self._pending_action_names.append(part.function_call.name)
-        if not self._pending_action_names:
-            self._pending_action_names = [a.action_type for a in result.actions]
+        self._pending_action_names = self._extract_function_call_names()
 
         return result
 

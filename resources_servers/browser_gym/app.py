@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import logging
 import uuid
 
@@ -19,7 +20,6 @@ from fastapi import FastAPI
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import SimpleResourcesServer
-
 from resources_servers.browser_gym.browser_pool import BrowserPool
 from resources_servers.browser_gym.schemas import (
     BrowserGymResourcesServerConfig,
@@ -35,6 +35,7 @@ from resources_servers.browser_gym.schemas import (
     CUAVerifyResponse,
 )
 from resources_servers.browser_gym.setup_playwright import ensure_playwright
+
 
 logger = logging.getLogger(__name__)
 
@@ -72,11 +73,26 @@ class BrowserGymResourcesServer(SimpleResourcesServer):
         return CUASeedSessionResponse(env_id=env_id, screenshot=screenshot)
 
     async def step(self, body: CUAStepRequest) -> CUAStepResponse:
-        screenshot, current_url = await self.browser_pool.execute_action(body.env_id, body.action)
-        return CUAStepResponse(screenshot=screenshot, current_url=current_url)
+        try:
+            screenshot, current_url = await self.browser_pool.execute_action(body.env_id, body.action)
+            return CUAStepResponse(screenshot=screenshot, current_url=current_url)
+        except (TimeoutError, asyncio.TimeoutError):
+            logger.error(
+                "Browser stuck for env_id=%s action=%s — returning empty screenshot",
+                body.env_id,
+                body.action.action_type,
+            )
+            return CUAStepResponse(screenshot="", current_url="error:browser_stuck")
 
     async def dump_local_storage(self, body: CUADumpLocalStorageRequest) -> CUADumpLocalStorageResponse:
-        ls_dump = await self.browser_pool.dump_local_storage(body.env_id)
+        try:
+            ls_dump = await self.browser_pool.dump_local_storage(body.env_id)
+        except (TimeoutError, asyncio.TimeoutError):
+            logger.warning("dump_local_storage timed out for env_id=%s — returning empty", body.env_id)
+            ls_dump = ""
+        except Exception as e:
+            logger.warning("dump_local_storage failed for env_id=%s: %s", body.env_id, e)
+            ls_dump = ""
         return CUADumpLocalStorageResponse(local_storage_dump=ls_dump)
 
     async def verify(self, body: CUAVerifyRequest) -> CUAVerifyResponse:
@@ -113,9 +129,7 @@ class BrowserGymResourcesServer(SimpleResourcesServer):
                 if model_response:
                     form_data.add_field("modelResponse", model_response)
 
-                async with session.post(
-                    verify_url, data=form_data, timeout=aiohttp.ClientTimeout(total=300)
-                ) as resp:
+                async with session.post(verify_url, data=form_data, timeout=aiohttp.ClientTimeout(total=300)) as resp:
                     if resp.status != 200:
                         resp_text = await resp.text()
                         logger.warning(f"Verification API returned {resp.status}: {resp_text}")

@@ -19,10 +19,11 @@ Each browser session is identified by a unique env_id.
 import asyncio
 import base64
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
+
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,33 @@ PLAYWRIGHT_KEY_MAP = {
     "f12": "F12",
 }
 
+# Per-action timeout map (seconds) — values match the rl-gym-harness-ui
+# base_playwright.py @with_timeout decorators exactly.
+ACTION_TIMEOUTS: dict[str, float] = {
+    "screenshot": 20.0,
+    "click": 10.0,
+    "double_click": 10.0,
+    "triple_click": 10.0,
+    "right_click": 10.0,
+    "middle_click": 10.0,
+    "type": 300.0,
+    "keypress": 15.0,
+    "scroll": 15.0,
+    "hover": 10.0,
+    "drag": 10.0,
+    "goto": 90.0,
+    "new_tab": 90.0,
+    "close_tab": 10.0,
+    "switch_tab": 10.0,
+    "go_back": 10.0,
+    "go_forward": 10.0,
+    "zoom": 20.0,
+    "wait": None,
+}
+
+MAX_CONSECUTIVE_ACTION_FAILURES = 3
+CLOSE_SESSION_STEP_TIMEOUT = 60.0
+
 
 def _normalize_key(key: str) -> str:
     """Normalize a key name (including X11/xdotool names) to Playwright format."""
@@ -107,7 +135,9 @@ class BrowserSession:
 
 
 class BrowserPool:
-    def __init__(self, max_concurrent: int = 16, default_viewport_width: int = 1280, default_viewport_height: int = 720):
+    def __init__(
+        self, max_concurrent: int = 16, default_viewport_width: int = 1280, default_viewport_height: int = 720
+    ):
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._sessions: dict[str, BrowserSession] = {}
         self._browser: Optional[Browser] = None
@@ -159,30 +189,54 @@ class BrowserPool:
     async def take_screenshot(self, env_id: str) -> str:
         """Take a screenshot of the current page and return base64-encoded PNG."""
         session = self.get_session(env_id)
-        screenshot_bytes = await session.page.screenshot(type="png", full_page=False)
+        screenshot_bytes = await asyncio.wait_for(
+            session.page.screenshot(type="png", full_page=False),
+            timeout=ACTION_TIMEOUTS["screenshot"],
+        )
         return base64.b64encode(screenshot_bytes).decode("utf-8")
 
     async def get_current_url(self, env_id: str) -> str:
         session = self.get_session(env_id)
         return session.page.url
 
-    async def dump_local_storage(self, env_id: str) -> str:
-        """Dump localStorage as a JSON string."""
+    async def dump_local_storage(self, env_id: str, timeout: float = 10.0) -> str:
+        """Dump localStorage as a JSON string (with timeout to guard against stuck browsers)."""
         session = self.get_session(env_id)
-        local_storage = await session.page.evaluate("() => JSON.stringify(localStorage)")
+        local_storage = await asyncio.wait_for(
+            session.page.evaluate("() => JSON.stringify(localStorage)"),
+            timeout=timeout,
+        )
         return local_storage
 
     async def close_session(self, env_id: str) -> bool:
-        """Close a browser session. Idempotent -- returns False if session was already closed."""
+        """Close a browser session with timeout-protected escalation.
+
+        Attempts page.close() then context.close(), each with a timeout.
+        Always releases the semaphore regardless of cleanup success.
+        """
         session = self._sessions.pop(env_id, None)
         if session is None:
             return False
+
         try:
-            await session.context.close()
-        except Exception as e:
-            logger.warning(f"Error closing browser context for env_id={env_id}: {e}")
+            # Step 1: close the page (60s, matching harness timeout_seconds=60)
+            try:
+                await asyncio.wait_for(session.page.close(), timeout=CLOSE_SESSION_STEP_TIMEOUT)
+            except asyncio.TimeoutError:
+                logger.warning("Page close timed out for env_id=%s (%.0fs)", env_id, CLOSE_SESSION_STEP_TIMEOUT)
+            except Exception as e:
+                logger.warning("Error closing page for env_id=%s: %s", env_id, e)
+
+            # Step 2: close the context (60s, matching harness timeout_seconds=60)
+            try:
+                await asyncio.wait_for(session.context.close(), timeout=CLOSE_SESSION_STEP_TIMEOUT)
+            except asyncio.TimeoutError:
+                logger.warning("Context close timed out for env_id=%s (%.0fs)", env_id, CLOSE_SESSION_STEP_TIMEOUT)
+            except Exception as e:
+                logger.warning("Error closing context for env_id=%s: %s", env_id, e)
         finally:
             self._semaphore.release()
+
         return True
 
     async def shutdown(self):
@@ -203,11 +257,17 @@ class BrowserPool:
                 logger.warning(f"Error stopping playwright: {e}")
             self._playwright = None
 
-    async def execute_action(self, env_id: str, action) -> tuple[str, str]:
-        """Execute a BrowserAction on the page. Returns (screenshot_b64, current_url)."""
-        session = self.get_session(env_id)
-        page = session.page
+    # ──────────────────────────────────────────────────────────────
+    # Action execution with per-action timeouts
+    # ──────────────────────────────────────────────────────────────
 
+    async def _do_action(self, session: BrowserSession, env_id: str, action) -> None:
+        """Execute the raw Playwright commands for a single BrowserAction.
+
+        This is the inner helper called by execute_action, which wraps it
+        in asyncio.wait_for with the appropriate per-action timeout.
+        """
+        page = session.page
         action_type = action.action_type
 
         if action_type == "click":
@@ -285,28 +345,30 @@ class BrowserPool:
                     pass
 
         elif action_type == "keypress":
-            try:
-                keys = action.keys
-                if keys and len(keys) > 2:
-                    unique = set(k.lower() for k in keys)
-                    if len(unique) == 1:
-                        normalized = _normalize_key(keys[0])
-                        for i in range(len(keys)):
-                            await page.keyboard.press(normalized)
-                            if i < len(keys) - 1:
-                                await asyncio.sleep(0.05)
-                        keys = None
-                if keys:
-                    combo = "+".join(_normalize_key(k) for k in keys)
+            keys = action.keys
+            if keys and len(keys) > 2:
+                unique = set(k.lower() for k in keys)
+                if len(unique) == 1:
+                    normalized = _normalize_key(keys[0])
+                    for i in range(len(keys)):
+                        await page.keyboard.press(normalized)
+                        if i < len(keys) - 1:
+                            await asyncio.sleep(0.05)
+                    keys = None
+            if keys:
+                combo = "+".join(_normalize_key(k) for k in keys)
+                await page.keyboard.press(combo)
+            elif action.key:
+                raw_key = action.key
+                if "+" in raw_key:
+                    combo = "+".join(_normalize_key(k) for k in raw_key.split("+"))
                     await page.keyboard.press(combo)
-                elif action.key:
-                    if "+" in action.key:
-                        combo = "+".join(_normalize_key(k) for k in action.key.split("+"))
-                        await page.keyboard.press(combo)
-                    else:
-                        await page.keyboard.press(_normalize_key(action.key))
-            except Exception as e:
-                logger.warning(f"Keypress failed for key={action.key!r} keys={action.keys!r}: {e}")
+                elif " " in raw_key.strip():
+                    for k in raw_key.split():
+                        await page.keyboard.press(_normalize_key(k))
+                        await asyncio.sleep(0.05)
+                else:
+                    await page.keyboard.press(_normalize_key(raw_key))
 
         elif action_type == "scroll":
             if action.coordinate:
@@ -336,6 +398,7 @@ class BrowserPool:
 
         elif action_type == "drag":
             if action.path and len(action.path) >= 2:
+
                 def _pt(p):
                     if isinstance(p, dict):
                         return int(p["x"]), int(p["y"])
@@ -369,17 +432,18 @@ class BrowserPool:
             if url and not url.startswith(("http://", "https://")):
                 url = "https://" + url
             try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                await page.goto(url, wait_until="domcontentloaded", timeout=35000)
                 try:
                     await page.wait_for_load_state("networkidle", timeout=10000)
                 except Exception:
                     pass
             except Exception:
-                await page.goto(url, wait_until="networkidle", timeout=30000)
+                await page.goto(url, wait_until="networkidle", timeout=35000)
 
         elif action_type == "wait":
             duration_ms = action.duration or 1000
-            await asyncio.sleep(duration_ms / 1000.0)
+            capped_ms = min(duration_ms, 30000)
+            await asyncio.sleep(capped_ms / 1000.0)
 
         elif action_type == "zoom":
             region = action.region
@@ -387,6 +451,7 @@ class BrowserPool:
                 x1, y1, x2, y2 = region
                 screenshot_bytes = await page.screenshot(type="png", full_page=False)
                 from io import BytesIO
+
                 from PIL import Image
 
                 img = Image.open(BytesIO(screenshot_bytes))
@@ -400,26 +465,24 @@ class BrowserPool:
                 return base64.b64encode(buf.getvalue()).decode("utf-8"), current_url
 
         elif action_type == "screenshot":
-            pass  # just take screenshot below
+            pass
 
         elif action_type == "new_tab":
             new_page = await session.context.new_page()
-            await new_page.set_viewport_size(
-                {"width": session.viewport_width, "height": session.viewport_height}
-            )
+            await new_page.set_viewport_size({"width": session.viewport_width, "height": session.viewport_height})
             session.page = new_page
             if action.url:
                 tab_url = action.url
                 if not tab_url.startswith(("http://", "https://")):
                     tab_url = "https://" + tab_url
                 try:
-                    await new_page.goto(tab_url, wait_until="domcontentloaded", timeout=30000)
+                    await new_page.goto(tab_url, wait_until="domcontentloaded", timeout=35000)
                     try:
                         await new_page.wait_for_load_state("networkidle", timeout=10000)
                     except Exception:
                         pass
                 except Exception:
-                    await new_page.goto(tab_url, wait_until="networkidle", timeout=30000)
+                    await new_page.goto(tab_url, wait_until="networkidle", timeout=35000)
 
         elif action_type == "close_tab":
             pages = session.context.pages
@@ -443,8 +506,56 @@ class BrowserPool:
         else:
             logger.warning(f"Unknown action_type: {action_type}")
 
+    async def execute_action(self, env_id: str, action) -> tuple[str, str]:
+        """Execute a BrowserAction on the page with per-action timeout.
+
+        Returns (screenshot_b64, current_url).
+
+        If the action itself times out, we still attempt a screenshot so the
+        agent can see the current page state and decide what to do next.
+        Only raises if even the recovery screenshot fails.
+        """
+        session = self.get_session(env_id)
+        action_type = action.action_type
+        timeout = ACTION_TIMEOUTS.get(action_type, 30.0)
+        action_timed_out = False
+
+        if timeout is not None:
+            try:
+                result = await asyncio.wait_for(
+                    self._do_action(session, env_id, action),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Action '%s' timed out after %.0fs for env_id=%s — attempting recovery screenshot",
+                    action_type,
+                    timeout,
+                    env_id,
+                )
+                action_timed_out = True
+                result = None
+            if result is not None:
+                return result
+        else:
+            result = await self._do_action(session, env_id, action)
+            if result is not None:
+                return result
+
         await asyncio.sleep(0.3)
 
-        screenshot_b64 = await self.take_screenshot(env_id)
+        try:
+            screenshot_b64 = await asyncio.wait_for(
+                self.take_screenshot(env_id),
+                timeout=ACTION_TIMEOUTS["screenshot"],
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "Post-action screenshot timed out for env_id=%s (action_timed_out=%s)",
+                env_id,
+                action_timed_out,
+            )
+            raise
+
         current_url = await self.get_current_url(env_id)
         return screenshot_b64, current_url

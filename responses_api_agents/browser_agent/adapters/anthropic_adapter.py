@@ -245,12 +245,15 @@ class AnthropicCUAAdapter(BaseCUAAdapter):
         Only touches self._messages in-place. The trimming step will discard these
         messages anyway, so replacing the data has no effect on API calls — it just
         frees memory.
+
+        Always skips messages[0] (the initial task message) because
+        _trim_conversation_history always preserves it.
         """
         if len(self._messages) <= trim_window_size:
             return
 
         cutoff = len(self._messages) - trim_window_size
-        for msg in self._messages[:cutoff]:
+        for msg in self._messages[1:cutoff]:
             content = msg.get("content", [])
             if not isinstance(content, list):
                 continue
@@ -357,6 +360,8 @@ class AnthropicCUAAdapter(BaseCUAAdapter):
             return BrowserAction(action_type="middle_click", coordinate=action.get("coordinate"))
         elif action_type == "double_click":
             return BrowserAction(action_type="double_click", coordinate=action.get("coordinate"))
+        elif action_type == "triple_click":
+            return BrowserAction(action_type="triple_click", coordinate=action.get("coordinate"))
         elif action_type == "type":
             return BrowserAction(action_type="type", text=action.get("text", ""))
         elif action_type == "key":
