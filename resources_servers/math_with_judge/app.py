@@ -336,8 +336,12 @@ Example output: "My final verdict is different [[A!=B]]"."""
                 for name, val in maj.items():
                     flat[f"majority@{k_val}/{name}"] = val
 
-        # Per-sample statistics (std_dev/std_err across runs)
+        # Per-sample aggregate: element i = pass@1 using only rollout i across all tasks.
+        # e.g. {"accuracy": [82.0, 84.0, 83.0]} for k=3 — variance shows stability across seeds.
         per_sample = _compute_per_sample(score_dicts, score_names, k)
+        flat["per_sample_aggregate"] = per_sample
+
+        # Compute std_dev/std_err across runs from per_sample values
         if k > 1:
             for name, values in per_sample.items():
                 if len(values) < 2:
@@ -345,7 +349,6 @@ Example output: "My final verdict is different [[A!=B]]"."""
                 mean = sum(values) / len(values)
                 variance = sum((x - mean) ** 2 for x in values) / (len(values) - 1)
                 std_dev = math.sqrt(variance)
-                # Find the matching avg-of-k key and fuse stats
                 avg_key = f"pass@1[avg-of-{k}]/{name}"
                 if avg_key in flat:
                     flat[f"pass@1[avg-of-{k}]/{name}/std_dev_across_runs"] = std_dev
