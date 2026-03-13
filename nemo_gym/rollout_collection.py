@@ -366,7 +366,11 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
 
             # Log to W&B
             if get_wandb_run():  # pragma: no cover
-                wandb_metrics = {f"{agent_name}/{k}": v for k, v in agg_result.agent_metrics.items()}
+                # Exclude per_sample_aggregate — it's a nested dict of lists (per-rollout-index
+                # accuracies), not a scalar metric, so it can't be logged to W&B.
+                wandb_metrics = {
+                    f"{agent_name}/{k}": v for k, v in agg_result.agent_metrics.items() if k != "per_sample_aggregate"
+                }
                 get_wandb_run().log(wandb_metrics)
 
             return agent_entry

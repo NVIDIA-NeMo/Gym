@@ -221,3 +221,33 @@ class TestDefaultAgentAggregateMetrics:
         assert result.agent_metrics["mean/reward"] == pytest.approx(1.0)
         assert len(result.group_level_metrics) == 2
         assert "mean/reward" in result.key_metrics
+
+
+class TestTaskIndexInGroupMetrics:
+    def test_task_index_preserved(self) -> None:
+        from nemo_gym.reward_profile import compute_aggregate_metrics
+
+        responses = [
+            {TASK_INDEX_KEY_NAME: 5, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "response": {}},
+            {TASK_INDEX_KEY_NAME: 5, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.0, "response": {}},
+            {TASK_INDEX_KEY_NAME: 10, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.5, "response": {}},
+            {TASK_INDEX_KEY_NAME: 10, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.5, "response": {}},
+        ]
+        result = compute_aggregate_metrics(responses)
+
+        assert len(result.group_level_metrics) == 2
+        indices = [g[TASK_INDEX_KEY_NAME] for g in result.group_level_metrics]
+        assert indices == [5, 10]
+
+    def test_non_sequential_indices(self) -> None:
+        from nemo_gym.reward_profile import compute_aggregate_metrics
+
+        responses = [
+            {TASK_INDEX_KEY_NAME: 100, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "response": {}},
+            {TASK_INDEX_KEY_NAME: 200, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0, "response": {}},
+            {TASK_INDEX_KEY_NAME: 300, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.5, "response": {}},
+        ]
+        result = compute_aggregate_metrics(responses)
+
+        indices = [g[TASK_INDEX_KEY_NAME] for g in result.group_level_metrics]
+        assert indices == [100, 200, 300]

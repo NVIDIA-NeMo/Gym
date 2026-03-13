@@ -252,12 +252,33 @@ def compute_aggregate_metrics(
                 agent_metrics[k] = v
 
     serialized_group = rp.prepare_for_serialization(group_level_metrics)
+
+    # Re-add task index (RewardProfiler pops it during profiling, but groups are
+    # returned in sorted task index order from the pandas groupby)
+    sorted_task_indices = sorted({vr.get(TASK_INDEX_KEY_NAME, 0) for vr in verify_responses})
+    for group, task_idx in zip(serialized_group, sorted_task_indices):
+        group[TASK_INDEX_KEY_NAME] = task_idx
+
     serialized_agent = rp.prepare_for_serialization([agent_metrics])[0] if agent_metrics else {}
 
     # Custom metrics computed from all raw verify responses grouped by task
     if compute_metrics_fn:
         tasks = _group_by_task(verify_responses)
-        serialized_agent.update(compute_metrics_fn(tasks))
+        custom = compute_metrics_fn(tasks)
+
+        # Merge per_task_metrics into group_level_metrics (keyed by task_index)
+        per_task_metrics = custom.pop("per_task_metrics", None)
+        if per_task_metrics:
+            per_task_by_idx = {m[TASK_INDEX_KEY_NAME]: m for m in per_task_metrics}
+            for group in serialized_group:
+                task_idx = group.get(TASK_INDEX_KEY_NAME)
+                if task_idx is not None and task_idx in per_task_by_idx:
+                    ptm = per_task_by_idx[task_idx]
+                    for k, v in ptm.items():
+                        if k != TASK_INDEX_KEY_NAME:
+                            group[k] = v
+
+        serialized_agent.update(custom)
 
     if get_key_metrics_fn:
         key_metrics = get_key_metrics_fn(serialized_agent)
