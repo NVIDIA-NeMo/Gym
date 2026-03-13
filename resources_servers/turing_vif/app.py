@@ -26,6 +26,7 @@ import json
 import logging
 import re
 import sys
+from enum import Enum
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple
 
@@ -87,6 +88,16 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 
+class AggregationMode(str, Enum):
+    """How individual validation verdicts are combined into the final reward."""
+
+    ALL = "all"
+    ANY = "any"
+    MEAN = "mean"
+    MIN = "min"
+    MAX = "max"
+
+
 class TuringVIFResourcesServerConfig(BaseResourcesServerConfig):
     """Configuration for the Turing VIF Resource Server."""
 
@@ -115,6 +126,12 @@ class TuringVIFResourcesServerConfig(BaseResourcesServerConfig):
     judge_error_fallback: str = Field(
         default="Judge unavailable.",
         description="Safe string returned when the judge LLM call fails (security: no error leak).",
+    )
+    aggregation_mode: AggregationMode = Field(
+        default=AggregationMode.ALL,
+        description="How to aggregate individual validation verdicts into the final reward. "
+        "'all': 1.0 only if every check passes (AND). 'any': 1.0 if at least one passes (OR). "
+        "'mean': average of binary scores. 'min'/'max': minimum/maximum score.",
     )
 
 
@@ -560,7 +577,7 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
                 actual_args = set(
                     k
                     for k in instruction.keys()
-                    if k not in ("instruction_id", "uid", "source", "is_misalignment_check")
+                    if k not in ("instruction_id", "uid", "source", "is_misalignment_check", "weight")
                 )
                 missing_args = set(expected_args) - actual_args
                 if missing_args:
@@ -634,6 +651,25 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
                 )
 
         return errors
+
+    def _aggregate_scores(self, scores: List[float]) -> float:
+        """Combine per-check scores into a single reward using the configured mode."""
+        if not scores:
+            return 0.0
+
+        mode = self.config.aggregation_mode
+
+        if mode == AggregationMode.ALL:
+            return 1.0 if all(s >= 0.99 for s in scores) else 0.0
+        elif mode == AggregationMode.ANY:
+            return 1.0 if any(s >= 0.99 for s in scores) else 0.0
+        elif mode == AggregationMode.MEAN:
+            return sum(scores) / len(scores)
+        elif mode == AggregationMode.MIN:
+            return min(scores)
+        elif mode == AggregationMode.MAX:
+            return max(scores)
+        return 0.0
 
     async def verify(self, body: TuringVIFVerifyRequest) -> TuringVIFVerifyResponse:
         """
@@ -821,10 +857,12 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
 
         # Calculate overall success
         follow_all_instructions = all(is_following_list) if is_following_list else True
+        scores = [1.0 if v else 0.0 for v in is_following_list]
+        reward = self._aggregate_scores(scores)
 
         return TuringVIFVerifyResponse(
             **body.model_dump(),
-            reward=float(follow_all_instructions),
+            reward=reward,
             follow_all_instructions=follow_all_instructions,
             follow_instruction_list=is_following_list,
             validation_results=validation_results,

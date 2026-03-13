@@ -96,10 +96,35 @@ turing_vif:
     turing_vif:
       entrypoint: app.py
       domain: instruction_following
+      # Reward aggregation mode
+      aggregation_mode: all  # all | any | mean | min | max
       # LLM Judge configuration - uses policy model by default
       judge_base_url: ${policy_base_url}
       judge_api_key: ${policy_api_key}
       judge_model: ${policy_model_name}  # Supports GPT-5 and GPT-4.1
+```
+
+### Reward Aggregation Modes
+
+The `aggregation_mode` setting controls how individual check verdicts are combined into the final reward:
+
+| Mode | Behavior | Output Range |
+|------|----------|-------------|
+| `all` (default) | All checks must pass (logical AND) | 0.0 or 1.0 |
+| `any` | At least one check must pass (logical OR) | 0.0 or 1.0 |
+| `mean` | Average of binary per-check scores | [0.0, 1.0] continuous |
+| `min` | Minimum score (strictest) | 0.0 or 1.0 |
+| `max` | Maximum score (most lenient) | 0.0 or 1.0 |
+
+Override in your experiment YAML:
+
+```yaml
+env:
+  nemo_gym:
+    turing_vif:
+      resources_servers:
+        turing_vif:
+          aggregation_mode: mean
 ```
 
 ### Model Support
@@ -174,7 +199,7 @@ Validates a response against instructions.
 {
   "reward": 1.0,
   "follow_all_instructions": true,
-  "follow_instruction_list": [true, true, false],
+  "follow_instruction_list": [true, true, true],
   "validation_results": [
     {"instruction": "length_constraints:number_words", "status": "Passed", "message": "Word count: 75 (at least 50)"},
     {"instruction": "stylistic:tone_formality", "status": "Passed", "message": "The response maintains formal tone..."},

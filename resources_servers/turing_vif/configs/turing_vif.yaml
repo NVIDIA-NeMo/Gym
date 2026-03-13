@@ -10,6 +10,9 @@ turing_vif:
       verified: false
       description: Turing VIF instruction following validators with rule-based and LLM judge support
       value: Improve instruction following capabilities with comprehensive validation
+      # Reward aggregation: how individual check verdicts combine into the final reward
+      # Options: all (AND), any (OR), mean, min, max
+      aggregation_mode: all
       # LLM Judge configuration - uses policy model credentials by default
       judge_base_url: ${policy_base_url}
       judge_api_key: ${policy_api_key}
