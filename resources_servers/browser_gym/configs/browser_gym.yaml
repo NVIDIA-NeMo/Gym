@@ -121,7 +121,6 @@ browser_gemini_agent:
       entrypoint: app.py
       cua_adapter_type: gemini
       cua_model: gemini-2.5-computer-use-preview-10-2025
-      cua_api_key: ${cua_gemini_api_key}
       cua_max_conversation_turns: 8
       max_steps: 250
       viewport_width: 1280

@@ -15,11 +15,9 @@
 Gemini CUA adapter.
 
 Context management: Client-side paired-turn trimming (same pattern as Anthropic adapter).
-Full conversation maintained in _contents list, trimmed before each generate_content call.
-Supports two execution modes:
-- Direct: adapter calls Gemini API directly (default, wraps sync in asyncio.to_thread)
-- Model-server routed: adapter prepares serialized params, delegates API call to an injected callable
-  (used when a NeMo-Gym model server is configured)
+Full conversation maintained in _contents list, trimmed before each API call.
+
+All API calls are routed through an injected api_caller (model server proxy).
 
 Handles all 17 predefined Gemini Computer Use functions:
   open_web_browser, click_at, hover_at, type_text_at, scroll_document, scroll_at,
@@ -27,7 +25,6 @@ Handles all 17 predefined Gemini Computer Use functions:
   drag_and_drop, new_tab, switch_tab, close_tab
 """
 
-import asyncio
 import base64
 import logging
 from typing import Any, Callable, Coroutine, Dict, List, Optional
@@ -72,40 +69,17 @@ You are a browser automation agent. Your goal is to complete tasks efficiently u
 Remember: Speed and forward progress matter most. Complete the task sequentially \
 without revisiting completed subtasks."""
 
-PREDEFINED_COMPUTER_USE_FUNCTIONS = [
-    "open_web_browser",
-    "click_at",
-    "hover_at",
-    "type_text_at",
-    "scroll_document",
-    "scroll_at",
-    "wait_5_seconds",
-    "go_back",
-    "go_forward",
-    "search",
-    "navigate",
-    "keypress",
-    "key_combination",
-    "drag_and_drop",
-    "new_tab",
-    "switch_tab",
-    "close_tab",
-    "list_tabs",
-]
-
 ApiCaller = Callable[[Dict[str, Any]], Coroutine[Any, Any, Any]]
 
 
 class GeminiCUAAdapter(BaseCUAAdapter):
     def __init__(
         self,
-        api_key: str = "",
         model: str = "gemini-2.5-computer-use-preview-10-2025",
         viewport_width: int = 1280,
         viewport_height: int = 720,
         max_conversation_turns: int = 8,
         api_caller: Optional[ApiCaller] = None,
-        timeout: float = 300.0,
         thinking_level: str = "THINKING_LEVEL_MEDIUM",
         include_thoughts: bool = True,
     ):
@@ -114,16 +88,7 @@ class GeminiCUAAdapter(BaseCUAAdapter):
         self._viewport_height = viewport_height
         self._max_conversation_turns = max_conversation_turns
         self._api_caller = api_caller
-        self._timeout = timeout
         self._is_gemini_3 = "gemini-3" in model.lower()
-
-        if api_caller is None:
-            from google import genai
-
-            self._client = genai.Client(api_key=api_key)
-        else:
-            self._client = None
-
         self._contents: list = []
         self._pending_action_names: List[str] = []
         self._current_url: str = "about:blank"
@@ -385,45 +350,6 @@ class GeminiCUAAdapter(BaseCUAAdapter):
     # ── Response parsing ─────────────────────────────────────────
 
     def _parse_response(self, response_data) -> CUAAdapterResponse:
-        """Parse a Gemini response (native object or serialized dict) into a CUAAdapterResponse."""
-        if isinstance(response_data, dict):
-            return self._parse_serialized_response(response_data)
-
-        actions: List[BrowserAction] = []
-        message: Optional[str] = None
-        done = False
-
-        if not response_data.candidates:
-            return CUAAdapterResponse(done=True)
-
-        candidate = response_data.candidates[0]
-
-        if candidate.content:
-            self._contents.append(candidate.content)
-
-        for part in candidate.content.parts if candidate.content else []:
-            if part.function_call:
-                fc = part.function_call
-                browser_action = self._map_gemini_action(fc.name, fc.args or {})
-                if browser_action:
-                    actions.append(browser_action)
-            elif part.text and not getattr(part, "thought", False):
-                message = part.text
-
-        if not actions and message:
-            done = True
-
-        usage = None
-        usage_meta = getattr(response_data, "usage_metadata", None)
-        if usage_meta:
-            in_tok = getattr(usage_meta, "prompt_token_count", 0) or 0
-            out_tok = getattr(usage_meta, "candidates_token_count", 0) or 0
-            usage = CUAAdapterUsage(input_tokens=in_tok, output_tokens=out_tok, total_tokens=in_tok + out_tok)
-
-        raw = {"model": self._model}
-        return CUAAdapterResponse(actions=actions, message=message, raw_response=raw, done=done, usage=usage)
-
-    def _parse_serialized_response(self, data: Dict[str, Any]) -> CUAAdapterResponse:
         """Parse a serialized (dict) response from the model server proxy."""
         from google.genai.types import Content, FunctionCall, Part
 
@@ -431,7 +357,7 @@ class GeminiCUAAdapter(BaseCUAAdapter):
         message: Optional[str] = None
         done = False
 
-        candidates = data.get("candidates", [])
+        candidates = response_data.get("candidates", [])
         if not candidates:
             return CUAAdapterResponse(done=True)
 
@@ -464,7 +390,7 @@ class GeminiCUAAdapter(BaseCUAAdapter):
             done = True
 
         usage = None
-        usage_meta = data.get("usage_metadata")
+        usage_meta = response_data.get("usage_metadata")
         if usage_meta:
             in_tok = usage_meta.get("prompt_token_count", 0) or 0
             out_tok = usage_meta.get("candidates_token_count", 0) or 0
@@ -595,26 +521,16 @@ class GeminiCUAAdapter(BaseCUAAdapter):
         self._validate_function_pairs()
 
     async def _execute_api_call(self):
-        """Execute the Gemini API call, either directly or via injected model-server caller."""
-        if self._api_caller:
-            serialized_contents = self._serialize_contents()
-            serialized_config = self._serialize_config()
-            api_params = {
-                "contents": serialized_contents,
-                "config": serialized_config,
-            }
-            if not self._api_caller:
-                api_params["model"] = self._model
-            raw = await self._api_caller(api_params)
-            return raw
-        else:
-            response = await asyncio.to_thread(
-                self._client.models.generate_content,
-                model=self._model,
-                contents=self._contents,
-                config=self._generate_config,
-            )
-            return response
+        """Route API call through the injected model server proxy."""
+        if not self._api_caller:
+            raise RuntimeError("GeminiCUAAdapter requires an api_caller (model server proxy). No direct API calls.")
+        serialized_contents = self._serialize_contents()
+        serialized_config = self._serialize_config()
+        api_params = {
+            "contents": serialized_contents,
+            "config": serialized_config,
+        }
+        return await self._api_caller(api_params)
 
     # ── Public interface ─────────────────────────────────────────
 
