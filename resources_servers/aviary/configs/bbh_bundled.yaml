@@ -1,4 +1,4 @@
-bbh_hypotest_aviary_resources_server:
+bbh_aviary_resources_server:
   resources_servers:
     aviary:
       entrypoint: hypotest_app.py
@@ -25,7 +25,7 @@ bbh_hypotest_aviary_resources_server:
           cell_execution_timeout: 180
           job_timeout: 1800
 
-bbh_hypotest_aviary_agent:
+bbh_aviary_agent:
   responses_api_agents:
     aviary_agent:
       entrypoint: app.py
@@ -33,7 +33,7 @@ bbh_hypotest_aviary_agent:
       return_transitions: false
       resources_server:
         type: resources_servers
-        name: bbh_hypotest_aviary_resources_server
+        name: bbh_aviary_resources_server
       model_server:
         type: responses_api_models
         name: policy_model
