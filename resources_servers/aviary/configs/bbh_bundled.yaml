@@ -3,28 +3,33 @@ bbh_aviary_resources_server:
     aviary:
       entrypoint: hypotest_app.py
       domain: coding
-
       dataset:
-        problem_jsonl: data/bbh.jsonl # path to the data jsonl (pull from HF)
-        capsule_dir: /capsules # path to the capsule dir
-        work_dir: /workspace # path to the workspace dir (should be shared between all nodes if using enroot)
-        force_python: True
-        rubric_model: [insert rubric model]
+        problem_jsonl: data/bbh.jsonl
+        capsule_dir: /capsules
+        work_dir: /workspace
+        force_python: true
+        rubric_model:
+        - insert rubric model
         rubric_model_config:
           reasoning_effort: medium
           model_list:
-            - model_name: [insert model name]
-              litellm_params:
-                model: [insert model api name]
-                api_key: [insert model api key]
-                base_url: [insert model api url]
+          - model_name:
+            - insert model name
+            litellm_params:
+              model:
+              - insert model api name
+              api_key:
+              - insert model api key
+              base_url:
+              - insert model api url
         use_docker: false
         use_enroot: true
-        container_sqsh_path: [insert path to container if using enroot containerization]
+        container_sqsh_path:
+        - insert path to container if using enroot containerization
         execution_config:
           cell_execution_timeout: 180
           job_timeout: 1800
-
+      verified: false
 bbh_aviary_agent:
   responses_api_agents:
     aviary_agent:

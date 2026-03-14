@@ -3,9 +3,11 @@ bbh_aviary_resources_server:
     aviary:
       entrypoint: client_app.py
       domain: coding
-      server_url: [insert server url]
-      api_key: [insert server api key]
-
+      server_url:
+      - insert server url
+      api_key:
+      - insert server api key
+      verified: false
 bbh_aviary_agent:
   responses_api_agents:
     aviary_agent:
