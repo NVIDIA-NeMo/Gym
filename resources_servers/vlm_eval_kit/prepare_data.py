@@ -29,14 +29,12 @@ def load_and_dump(dataset_cls, dataset_name: str):
                         "role": "user",
                         "content": [
                             {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{vlmevalkit_row['image']}",
-                                    "detail": "high",
-                                },
+                                "type": "input_image",
+                                "image_url": f"data:image/jpeg;base64,{vlmevalkit_row['image']}",
+                                "detail": "high",
                             },
                             {
-                                "type": "text",
+                                "type": "input_text",
                                 "text": vlmevalkit_row["question"],
                             },
                         ],

@@ -15,14 +15,14 @@ vlm_eval_kit_simple_agent:
         type: responses_api_models
         name: policy_model
       datasets:
-      - name: validation
+      - name: OCRBench
         type: validation
-        jsonl_fpath: resources_servers/vlm_eval_kit/data/validation.jsonl
+        jsonl_fpath: resources_servers/vlm_eval_kit/data/OCRBench_validation.jsonl
         num_repeats: 1
         gitlab_identifier:
           dataset_name: vlm_eval_kit
           version: 0.0.1
-          artifact_fpath: validation.jsonl
+          artifact_fpath: OCRBench_validation.jsonl
         license: Apache 2.0
       - name: example
         type: example
