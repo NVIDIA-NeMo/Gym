@@ -181,7 +181,7 @@ class RolloutCollectionHelper(BaseModel):
             # Resolve task index
             row[TASK_INDEX_KEY_NAME] = row_to_task_idx.setdefault(row_str, len(row_to_task_idx))
 
-            for repeat_idx in range(num_repeats):
+            for _ in range(num_repeats):
                 row = deepcopy(row)
 
                 # Resolve rollout index

@@ -9,7 +9,7 @@
 5. Judge model configs: https://github.com/open-compass/VLMEvalKit/blob/00804217f868058f871f5ff252a7b9623c3475d9/run.py#L363
 6. Actual requests.post call to OpenAI endpoint: https://github.com/open-compass/VLMEvalKit/blob/00804217f868058f871f5ff252a7b9623c3475d9/vlmeval/api/gpt.py#L234
 
-## Accuracy reproduction using GPT-4o-mini-20240718
+## Accuracy reproduction using gpt-4o-mini-2024-07-18
 |Benchmark|Name for run.py|Judge|Num samples|Reported score|Original repo repro|Gym repro|
 |---|---|---|---|---|---|---|
 |MMBench V1.1|MMBench_DEV_EN_V11|N/A?|4876|76 (test)|75.8 (dev)|TODO|
