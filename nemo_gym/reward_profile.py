@@ -12,8 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
+
+from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import orjson
 from pandas import DataFrame, Series, notna
@@ -28,6 +31,10 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     get_global_config_dict,
 )
+
+
+if TYPE_CHECKING:
+    from nemo_gym.base_resources_server import AggregateMetrics
 
 
 class RewardProfileConfig(BaseNeMoGymCLIConfig):
@@ -157,6 +164,132 @@ class RewardProfiler:
         agent_level_metrics_fpath.write_bytes(orjson.dumps(self.prepare_for_serialization(agent_level_metrics)))
 
         return reward_profiling_fpath, agent_level_metrics_fpath
+
+
+class AggregateMetricsMixin:
+    """Mixin providing compute_metrics/get_key_metrics hooks and the aggregate_metrics endpoint.
+
+    Inherited by both SimpleResourcesServer and SimpleResponsesAPIAgent so that
+    benchmark-specific metric logic can live on either server type.
+    """
+
+    def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        """Override to compute custom metrics from all verify responses.
+
+        Receives verify responses grouped by task: tasks[i] is a list of rollout
+        dicts for task i. Each dict has at minimum reward, plus any custom fields
+        from the verify response (e.g. symbolic_correct, judgement-gen-base).
+
+        Use for metrics that need the full dataset at once:
+        - Confidence intervals (ArenaMetrics)
+        - Cross-task statistics (std_dev_across_runs)
+        - pass@k with proper combinatorial computation
+
+        The returned dict is merged into agent_metrics.
+        Default: empty dict (no additional metrics).
+        """
+        return {}
+
+    def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Override to select headline metrics for this benchmark.
+
+        Default: all mean/* entries from agent_metrics.
+        """
+        return {k: v for k, v in agent_metrics.items() if k.startswith("mean/")}
+
+
+def _group_by_task(verify_responses: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+    """Group verify responses by task index, returning a list of per-task rollout lists."""
+    groups: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    for vr in verify_responses:
+        groups[vr.get(TASK_INDEX_KEY_NAME, 0)].append(vr)
+    return [groups[k] for k in sorted(groups)]
+
+
+def compute_aggregate_metrics(
+    verify_responses: List[Dict[str, Any]],
+    compute_metrics_fn=None,
+    get_key_metrics_fn=None,
+) -> AggregateMetrics:
+    """Shared aggregation logic for /aggregate_metrics.
+
+    RewardProfiler runs with defaults to produce baseline stats (mean/max/min/median/std)
+    for both group-level (per-task) and agent-level metrics.
+
+    Optionally accepts custom functions for benchmark-specific customization:
+      - compute_metrics_fn: receives ALL verify responses grouped by task
+        (List[List[Dict]]) for metrics that need the full dataset (e.g. confidence
+        intervals, cross-task statistics, pass@k). Returned dict is merged into agent_metrics.
+      - get_key_metrics_fn: select headline metrics from agent_metrics
+    """
+    # Import here to avoid circular dependency (AggregateMetrics is defined in base_resources_server)
+    from nemo_gym.base_resources_server import AggregateMetrics
+
+    if not verify_responses:
+        return AggregateMetrics()
+
+    rp = RewardProfiler()
+
+    rows = []
+    results = []
+    for vr in verify_responses:
+        rows.append(
+            {
+                TASK_INDEX_KEY_NAME: vr.get(TASK_INDEX_KEY_NAME, 0),
+                ROLLOUT_INDEX_KEY_NAME: vr.get(ROLLOUT_INDEX_KEY_NAME, 0),
+                "agent_ref": {"name": "agent"},
+            }
+        )
+        results.append(vr if "response" in vr else {**vr, "response": {}})
+
+    group_level_metrics, agent_level_metrics = rp.profile_from_data(rows, results)
+
+    # Flatten agent_level_metrics (one entry since we use a single agent name)
+    agent_metrics: Dict[str, Any] = {}
+    for entry in agent_level_metrics:
+        for k, v in entry.items():
+            if k != "agent_ref":
+                agent_metrics[k] = v
+
+    serialized_group = rp.prepare_for_serialization(group_level_metrics)
+
+    # Re-add task index (RewardProfiler pops it during profiling, but groups are
+    # returned in sorted task index order from the pandas groupby)
+    sorted_task_indices = sorted({vr.get(TASK_INDEX_KEY_NAME, 0) for vr in verify_responses})
+    for group, task_idx in zip(serialized_group, sorted_task_indices):
+        group[TASK_INDEX_KEY_NAME] = task_idx
+
+    serialized_agent = rp.prepare_for_serialization([agent_metrics])[0] if agent_metrics else {}
+
+    # Custom metrics computed from all raw verify responses grouped by task
+    if compute_metrics_fn:
+        tasks = _group_by_task(verify_responses)
+        custom = compute_metrics_fn(tasks)
+
+        # Merge per_task_metrics into group_level_metrics (keyed by task_index)
+        per_task_metrics = custom.pop("per_task_metrics", None)
+        if per_task_metrics:
+            per_task_by_idx = {m[TASK_INDEX_KEY_NAME]: m for m in per_task_metrics}
+            for group in serialized_group:
+                task_idx = group.get(TASK_INDEX_KEY_NAME)
+                if task_idx is not None and task_idx in per_task_by_idx:
+                    ptm = per_task_by_idx[task_idx]
+                    for k, v in ptm.items():
+                        if k != TASK_INDEX_KEY_NAME:
+                            group[k] = v
+
+        serialized_agent.update(custom)
+
+    if get_key_metrics_fn:
+        key_metrics = get_key_metrics_fn(serialized_agent)
+    else:
+        key_metrics = {k: v for k, v in serialized_agent.items() if k.startswith("mean/")}
+
+    return AggregateMetrics(
+        group_level_metrics=serialized_group,
+        agent_metrics=serialized_agent,
+        key_metrics=key_metrics,
+    )
 
 
 def reward_profile():  # pragma: no cover

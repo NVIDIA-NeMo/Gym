@@ -210,7 +210,7 @@ Explore environments available for training and evaluation.
 :::
 
 :::{grid-item-card} {octicon}`tools;1.5em;sd-mr-1` Build a Custom Environment
-:link: ../environment-tutorials/creating-training-environment
+:link: ../environment-tutorials/index
 :link-type: doc
 
 Implement or integrate existing tools and define task verification logic.

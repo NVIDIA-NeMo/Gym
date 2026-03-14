@@ -117,6 +117,7 @@ over_refusal_detection:
       domain: safety
       verified: false
       description: Over-refusal detection based on XSTest - trains models to respond helpfully to safe prompts
+      value: Improve model safety.
 
 over_refusal_detection_simple_agent:
   responses_api_agents:
@@ -129,7 +130,9 @@ over_refusal_detection_simple_agent:
         type: responses_api_models
         name: policy_model
       datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/over_refusal_detection/data/train.jsonl
       - name: example
         type: example
         jsonl_fpath: resources_servers/over_refusal_detection/data/example.jsonl
-

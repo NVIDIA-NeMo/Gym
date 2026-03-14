@@ -165,8 +165,8 @@ Learn how to build custom training environments for various RL scenarios.
 ::::{grid} 1 2 2 2
 :gutter: 1 1 1 2
 
-:::{grid-item-card} {octicon}`plus-circle;1.5em;sd-mr-1` Creating Environments
-:link: environment-tutorials/creating-training-environment
+:::{grid-item-card} {octicon}`plus-circle;1.5em;sd-mr-1` Building Environments
+:link: environment-tutorials/index
 :link-type: doc
 Build a complete training environment from scratch.
 +++
@@ -326,6 +326,7 @@ Overview <resources-server/index>
 Overview <data/index>
 Prepare and Validate <data/prepare-validate>
 Download from Hugging Face <data/download-huggingface>
+Prompt Config <data/prompt-config>
 ```
 
 ```{toctree}
@@ -334,10 +335,14 @@ Download from Hugging Face <data/download-huggingface>
 :maxdepth: 1
 
 Overview <environment-tutorials/index>
-Creating Training Environment <environment-tutorials/creating-training-environment>
+Single-Step Environment <environment-tutorials/single-step-environment>
+Multi-Step Environment <environment-tutorials/multi-step-environment>
+Stateful Environment <environment-tutorials/stateful-environment>
+Real-World Environment <environment-tutorials/real-world-environment>
 Integrate external libraries <environment-tutorials/integrate-external-environments>
 Add a benchmark <environment-tutorials/adding-a-benchmark>
 Design a customer evaluation <environment-tutorials/designing-customer-evaluation>
+Aggregate Metrics <environment-tutorials/aggregate-metrics>
 ```
 
 ```{toctree}
@@ -359,6 +364,7 @@ Offline Training (SFT/DPO) <training-tutorials/offline-training-w-rollouts>
 
 Overview <model-recipes/index>
 Nemotron 3 Nano <model-recipes/nemotron-3-nano>
+Nemotron 3 Super <model-recipes/nemotron-3-super>
 ```
 
 ```{toctree}
@@ -377,6 +383,7 @@ Engineering Notes <infrastructure/engineering-notes/index>
 :maxdepth: 1
 
 Configuration <reference/configuration>
+RL Framework Compatibility <reference/rl-framework-compatibility>
 reference/cli-commands.md
 apidocs/index.rst
 FAQ <reference/faq>

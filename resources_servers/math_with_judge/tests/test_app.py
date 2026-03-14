@@ -576,3 +576,286 @@ class TestApp:
             "not_equal_first_id",
             not_equal_first_item,
         )
+
+
+# ──────────────────────────────────────────────────────────
+# Math metrics tests
+# ──────────────────────────────────────────────────────────
+
+from pytest import approx
+
+from resources_servers.math_with_judge.app import (
+    _compute_majority_at_k,
+    _compute_pass_and_avg,
+    _compute_per_sample,
+    _extract_scores_and_answers,
+    _get_score_dict,
+)
+
+
+class TestGetScoreDict:
+    def test_reward_only(self) -> None:
+        """Without library_reward or judge, only no_answer is extracted."""
+        result = _get_score_dict({"reward": 1.0})
+        assert result == {"no_answer": 1}  # no extracted_answer → no_answer=1
+
+    def test_with_library_reward(self) -> None:
+        result = _get_score_dict({"reward": 1.0, "library_reward": 0.5, "extracted_answer": "42"})
+        assert result == {"symbolic_accuracy": 0.5, "no_answer": 0}
+
+    def test_with_judge(self) -> None:
+        result = _get_score_dict(
+            {"reward": 1.0, "library_reward": 0.0, "judge_evaluations": [{"v": "A=B"}], "extracted_answer": "42"}
+        )
+        assert result == {"symbolic_accuracy": 0.0, "judge_accuracy": 1.0, "no_answer": 0}
+
+    def test_judge_none_excluded(self) -> None:
+        result = _get_score_dict(
+            {"reward": 1.0, "library_reward": 1.0, "judge_evaluations": None, "extracted_answer": "42"}
+        )
+        assert "judge_accuracy" not in result
+        assert result == {"symbolic_accuracy": 1.0, "no_answer": 0}
+
+    def test_no_answer_when_missing(self) -> None:
+        result = _get_score_dict({"reward": 0.0, "library_reward": 0.0, "extracted_answer": None})
+        assert result["no_answer"] == 1
+
+    def test_no_answer_when_present(self) -> None:
+        result = _get_score_dict({"reward": 1.0, "library_reward": 1.0, "extracted_answer": "42"})
+        assert result["no_answer"] == 0
+
+
+class TestExtractScoresAndAnswers:
+    def test_extracts_answers(self) -> None:
+        tasks = [
+            [{"reward": 1.0, "extracted_answer": "42"}, {"reward": 0.0, "extracted_answer": "7"}],
+            [{"reward": 1.0, "extracted_answer": "5"}],
+        ]
+        scores, answers = _extract_scores_and_answers(tasks)
+        assert len(scores) == 2
+        assert answers[0] == ["42", "7"]
+        assert answers[1] == ["5"]
+
+    def test_none_answer(self) -> None:
+        tasks = [[{"reward": 0.0}]]
+        _, answers = _extract_scores_and_answers(tasks)
+        assert answers[0] == [None]
+
+
+class TestComputePassAndAvg:
+    def test_pass_at_1(self) -> None:
+        scores = [
+            [{"accuracy": 1.0}, {"accuracy": 0.0}],
+            [{"accuracy": 0.0}, {"accuracy": 1.0}],
+        ]
+        pass_k, avg_k = _compute_pass_and_avg(scores, ["accuracy"], k=1)
+        assert pass_k["accuracy"] == approx(50.0)
+        assert avg_k["accuracy"] == approx(50.0)
+
+    def test_pass_at_2(self) -> None:
+        scores = [
+            [{"accuracy": 0.0}, {"accuracy": 1.0}],
+            [{"accuracy": 0.0}, {"accuracy": 0.0}],
+        ]
+        pass_k, avg_k = _compute_pass_and_avg(scores, ["accuracy"], k=2)
+        assert pass_k["accuracy"] == approx(50.0)
+        assert avg_k["accuracy"] == approx(25.0)
+
+    def test_all_correct(self) -> None:
+        scores = [[{"accuracy": 1.0}] * 3] * 4
+        pass_k, avg_k = _compute_pass_and_avg(scores, ["accuracy"], k=3)
+        assert pass_k["accuracy"] == approx(100.0)
+        assert avg_k["accuracy"] == approx(100.0)
+
+
+class TestComputeMajorityAtK:
+    def test_majority_voting(self) -> None:
+        scores = [
+            [{"accuracy": 1.0}, {"accuracy": 1.0}, {"accuracy": 0.0}],
+        ]
+        answers = [["42", "42", "7"]]
+        result = _compute_majority_at_k(scores, answers, ["accuracy"], k=3)
+        assert result["accuracy"] == approx(100.0)
+
+    def test_none_answers_excluded(self) -> None:
+        scores = [
+            [{"accuracy": 1.0}, {"accuracy": 0.0}, {"accuracy": 0.0}],
+        ]
+        answers = [["42", None, "7"]]
+        result = _compute_majority_at_k(scores, answers, ["accuracy"], k=3)
+        assert result["accuracy"] == approx(100.0)
+
+    def test_all_none(self) -> None:
+        scores = [[{"accuracy": 0.0}, {"accuracy": 0.0}]]
+        answers = [[None, None]]
+        result = _compute_majority_at_k(scores, answers, ["accuracy"], k=2)
+        assert result == {}
+
+
+class TestComputePerSample:
+    def test_per_sample_values(self) -> None:
+        scores = [
+            [{"accuracy": 1.0}, {"accuracy": 0.0}],
+            [{"accuracy": 0.0}, {"accuracy": 1.0}],
+            [{"accuracy": 1.0}, {"accuracy": 1.0}],
+        ]
+        result = _compute_per_sample(scores, ["accuracy"], k=2)
+        assert result["accuracy"][0] == approx(200.0 / 3.0, abs=0.01)
+        assert result["accuracy"][1] == approx(200.0 / 3.0, abs=0.01)
+
+
+class TestComputeMetricsIntegration:
+    """Test the full compute_metrics method on LibraryJudgeMathResourcesServer."""
+
+    def _make_tasks(self):
+        """3 tasks × 4 rollouts with varying correctness and some no_answer."""
+        return [
+            # Task 0: 3 correct, 1 no_answer
+            [
+                {"reward": 1.0, "library_reward": 1.0, "extracted_answer": "204"},
+                {"reward": 1.0, "library_reward": 1.0, "extracted_answer": "204"},
+                {"reward": 1.0, "library_reward": 1.0, "extracted_answer": "204"},
+                {"reward": 0.0, "library_reward": 0.0, "extracted_answer": None},
+            ],
+            # Task 1: 1 correct, 1 wrong, 2 no_answer
+            [
+                {"reward": 1.0, "library_reward": 1.0, "extracted_answer": "113"},
+                {"reward": 0.0, "library_reward": 0.0, "extracted_answer": "42"},
+                {"reward": 0.0, "library_reward": 0.0, "extracted_answer": None},
+                {"reward": 0.0, "library_reward": 0.0, "extracted_answer": None},
+            ],
+            # Task 2: all wrong, 1 no_answer
+            [
+                {"reward": 0.0, "library_reward": 0.0, "extracted_answer": "99"},
+                {"reward": 0.0, "library_reward": 0.0, "extracted_answer": "42"},
+                {"reward": 0.0, "library_reward": 0.0, "extracted_answer": "7"},
+                {"reward": 0.0, "library_reward": 0.0, "extracted_answer": None},
+            ],
+        ]
+
+    def test_pass_at_k(self) -> None:
+        tasks = self._make_tasks()
+        result = LibraryJudgeMathResourcesServer.compute_metrics(None, tasks)
+        assert result["pass@1/symbolic_accuracy"] == approx(200.0 / 3.0, abs=0.01)
+        assert result["pass@4/symbolic_accuracy"] == approx(200.0 / 3.0, abs=0.01)
+
+    def test_majority_at_k(self) -> None:
+        tasks = self._make_tasks()
+        result = LibraryJudgeMathResourcesServer.compute_metrics(None, tasks)
+        assert "majority@4/symbolic_accuracy" in result
+
+    def test_per_sample_aggregate(self) -> None:
+        tasks = self._make_tasks()
+        result = LibraryJudgeMathResourcesServer.compute_metrics(None, tasks)
+        psa = result["per_sample_aggregate"]
+        assert "symbolic_accuracy" in psa
+        assert len(psa["symbolic_accuracy"]) == 4
+
+    def test_no_answer_tracking(self) -> None:
+        tasks = self._make_tasks()
+        result = LibraryJudgeMathResourcesServer.compute_metrics(None, tasks)
+        assert "pass@1/no_answer" in result
+        assert "pass@4/no_answer" in result
+        assert "pass@1[avg-of-4]/no_answer" in result
+        psa = result["per_sample_aggregate"]
+        assert "no_answer" in psa
+        assert len(psa["no_answer"]) == 4
+        assert psa["no_answer"][0] == approx(0.0)
+        assert psa["no_answer"][3] == approx(100.0)
+        assert "pass@1[avg-of-2]/no_answer/std_dev_across_runs" in result
+        assert "pass@1[avg-of-4]/no_answer/std_dev_across_runs" in result
+
+    def test_no_answer_stats(self) -> None:
+        tasks = self._make_tasks()
+        result = LibraryJudgeMathResourcesServer.compute_metrics(None, tasks)
+        assert "pass@1[avg-of-4]/no_answer/std_dev_across_runs" in result
+        assert "pass@1[avg-of-4]/no_answer/std_err_across_runs" in result
+        assert result["pass@1[avg-of-4]/no_answer/std_dev_across_runs"] > 0
+
+    def test_stat_key_separator(self) -> None:
+        tasks = self._make_tasks()
+        result = LibraryJudgeMathResourcesServer.compute_metrics(None, tasks)
+        stat_keys = [k for k in result if "std_dev_across_runs" in k]
+        for k in stat_keys:
+            assert "/std_dev_across_runs" in k, f"Expected / separator in {k}"
+
+    def test_stats_for_all_k_values(self) -> None:
+        tasks = self._make_tasks()
+        result = LibraryJudgeMathResourcesServer.compute_metrics(None, tasks)
+        for k_val in [2, 3, 4]:
+            key = f"pass@1[avg-of-{k_val}]/symbolic_accuracy/std_dev_across_runs"
+            assert key in result, f"Missing stats for k={k_val}: {key}"
+
+    def test_per_task_metrics(self) -> None:
+        tasks = self._make_tasks()
+        result = LibraryJudgeMathResourcesServer.compute_metrics(None, tasks)
+        ptm = result["per_task_metrics"]
+        assert len(ptm) == 3
+        t0 = ptm[0]
+        from nemo_gym.global_config import TASK_INDEX_KEY_NAME
+
+        assert t0[TASK_INDEX_KEY_NAME] == 0
+        assert "pass@1/symbolic_accuracy" in t0
+        assert "pass@1[avg-of-4]/symbolic_accuracy" in t0
+        assert "majority@4/symbolic_accuracy" in t0
+        assert t0["pass@1[avg-of-4]/symbolic_accuracy"] == approx(0.75)
+        assert t0["pass@1[avg-of-1]/symbolic_accuracy"] == approx(1.0)
+        t2 = ptm[2]
+        assert t2["pass@4/symbolic_accuracy"] == 0.0
+        assert t2["pass@1[avg-of-4]/symbolic_accuracy"] == approx(0.0)
+
+    def test_per_task_no_answer(self) -> None:
+        tasks = self._make_tasks()
+        result = LibraryJudgeMathResourcesServer.compute_metrics(None, tasks)
+        ptm = result["per_task_metrics"]
+        assert ptm[0]["pass@1[avg-of-4]/no_answer"] == approx(0.25)
+        assert ptm[2]["pass@1[avg-of-4]/no_answer"] == approx(0.25)
+
+    def test_multi_score(self) -> None:
+        tasks = self._make_tasks()
+        result = LibraryJudgeMathResourcesServer.compute_metrics(None, tasks)
+        assert "pass@1/symbolic_accuracy" in result
+        assert "accuracy" not in str(
+            [k for k in result if "accuracy" in k and "symbolic" not in k and "judge" not in k]
+        )
+
+    def test_empty_tasks(self) -> None:
+        result = LibraryJudgeMathResourcesServer.compute_metrics(None, [])
+        assert result == {}
+
+
+class TestGetKeyMetrics:
+    def test_selects_headlines(self) -> None:
+        agent_metrics = {
+            "mean/reward": 0.5,
+            "mean/library_reward": 0.5,
+            "mean/input_tokens": 100.0,
+            "mean/output_tokens": 500.0,
+            "mean/total_tokens": 600.0,
+            "pass@1/symbolic_accuracy": 50.0,
+            "pass@1/no_answer": 10.0,
+            "pass@1[avg-of-1]/symbolic_accuracy": 50.0,
+            "pass@1[avg-of-1]/no_answer": 10.0,
+            "pass@1[avg-of-4]/symbolic_accuracy": 45.0,
+            "pass@1[avg-of-4]/symbolic_accuracy/std_dev_across_runs": 3.0,
+            "pass@1[avg-of-4]/no_answer": 12.0,
+            "pass@1[avg-of-4]/no_answer/std_dev_across_runs": 2.0,
+            "pass@4/symbolic_accuracy": 70.0,
+            "pass@4/no_answer": 15.0,
+            "majority@4/symbolic_accuracy": 60.0,
+            "majority@4/no_answer": 5.0,
+        }
+        result = LibraryJudgeMathResourcesServer.get_key_metrics(None, agent_metrics)
+        assert "mean/input_tokens" in result
+        assert "mean/output_tokens" in result
+        assert "mean/reward" not in result
+        assert "mean/library_reward" not in result
+        assert "mean/total_tokens" not in result
+        assert "pass@1[avg-of-4]/symbolic_accuracy" in result
+        assert "pass@1[avg-of-4]/no_answer" in result
+        assert "pass@4/symbolic_accuracy" in result
+        assert "pass@4/no_answer" not in result
+        assert "majority@4/symbolic_accuracy" in result
+        assert "majority@4/no_answer" not in result
+        assert "pass@1[avg-of-4]/symbolic_accuracy/std_dev_across_runs" not in result
+        assert "pass@1[avg-of-4]/no_answer/std_dev_across_runs" not in result
