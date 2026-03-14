@@ -40,11 +40,15 @@
         "Standard deviation": 0.0
     },
     "answer": {
-        "unique_count": 967,
-        "total_count": 1000
+        "unique_count": 1146,
+        "total_count": 1187
     },
     "category": {
         "unique_count": 10,
+        "total_count": 1000
+    },
+    "eval_fn": {
+        "unique_count": 1,
         "total_count": 1000
     }
 }

@@ -14,6 +14,7 @@
 # limitations under the License.
 from pathlib import Path
 from subprocess import run
+from typing import Any, Dict, List
 
 from fastapi import FastAPI
 
@@ -26,6 +27,16 @@ from nemo_gym.base_resources_server import (
 
 
 class VlmEvalKitResourcesServerConfig(BaseResourcesServerConfig):
+    pass
+
+
+class VLMEvalKitVerifyRequest(BaseVerifyRequest):
+    eval_fn: str
+    answer: List[str]
+    category: str
+
+
+class VLMEvalKitVerifyResponse(VLMEvalKitVerifyRequest, BaseVerifyResponse):
     pass
 
 
@@ -51,8 +62,36 @@ class VlmEvalKitResourcesServer(SimpleResourcesServer):
 
         return app
 
-    async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
-        return BaseVerifyResponse(**body.model_dump(), reward=1.0)
+    async def verify(self, body: VLMEvalKitVerifyRequest) -> VLMEvalKitVerifyResponse:
+        score_fn = getattr(self, body.eval_fn)
+
+        score_dict = score_fn(body)
+
+        return VLMEvalKitVerifyResponse(**body.model_dump(), **score_dict)
+
+    def _score_OCRBench(self, body: BaseVerifyRequest) -> Dict[str, Any]:
+        # Reformatted from https://github.com/open-compass/VLMEvalKit/blob/00804217f868058f871f5ff252a7b9623c3475d9/vlmeval/dataset/image_vqa.py#L505
+        reward = 0.0
+
+        predict = body.response.output_text
+        answers = body.answer
+        category = body.category
+        if category == "Handwritten Mathematical Expression Recognition":
+            for j in range(len(answers)):
+                answer = answers[j].strip().replace("\n", " ").replace(" ", "")
+                predict = predict.strip().replace("\n", " ").replace(" ", "")
+                if answer in predict:
+                    reward = 1.0
+                    break
+        else:
+            for j in range(len(answers)):
+                answer = answers[j].lower().strip().replace("\n", " ")
+                predict = predict.lower().strip().replace("\n", " ")
+                if answer in predict:
+                    reward = 1.0
+                    break
+
+        return {category: reward, "reward": reward}
 
 
 if __name__ == "__main__":

@@ -41,8 +41,9 @@ def load_and_dump(dataset_cls, dataset_name: str):
                     }
                 ],
             },
-            "answer": vlmevalkit_row["answer"],
+            "answer": eval(vlmevalkit_row["answer"]),
             "category": vlmevalkit_row["category"],
+            "eval_fn": "_score_OCRBench",
         }
         f.write(orjson.dumps(gym_row) + b"\n")
 
