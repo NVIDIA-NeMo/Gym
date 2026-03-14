@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from pathlib import Path
-from subprocess import Popen
+from subprocess import run
 
 from fastapi import FastAPI
 
@@ -37,16 +37,17 @@ class VlmEvalKitResourcesServer(SimpleResourcesServer):
 
         this_dir = Path(__file__).parent.absolute()
         # We freeze the commit SHA for now.
+        # We pip install with no-deps since we have the deps in the pyproject.toml already.
         setup_command = f"""cd {this_dir} \
 && source .venv/bin/activate \
-&& if [ ! -d VLMEvalKit ]; then git clone https://github.com/open-compass/VLMEvalKit/ fi \
+&& if [ ! -d VLMEvalKit ]; then git clone https://github.com/open-compass/VLMEvalKit/; fi \
 && cd VLMEvalKit \
 && git checkout 00804217f868058f871f5ff252a7b9623c3475d9 \
-&& uv pip install '-e .' --active \
+&& uv pip install '-e .' --no-deps \
 && sed -i '' 's/import clip/# import clip/' vlmeval/dataset/utils/SArena/FID.py
 """
-        proc = Popen(setup_command, shell=True)
-        proc.communicate()
+        print(f"Running VLMEvalKit setup command: {setup_command}")
+        run(setup_command, shell=True, check=True)
 
         return app
 
