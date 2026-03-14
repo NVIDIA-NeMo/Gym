@@ -1,0 +1,21 @@
+bbh_aviary_resources_server:
+  resources_servers:
+    aviary:
+      entrypoint: client_app.py
+      domain: coding
+      server_url: [insert server url]
+      api_key: [insert server api key]
+
+bbh_aviary_agent:
+  responses_api_agents:
+    aviary_agent:
+      entrypoint: app.py
+      max_steps: 30
+      return_transitions: false
+      resources_server:
+        type: resources_servers
+        name: bbh_aviary_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_total_sequence_length: 32768
