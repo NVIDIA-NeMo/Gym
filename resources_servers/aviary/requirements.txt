@@ -4,3 +4,5 @@ tqdm
 datasets
 huggingface-hub
 pillow==12.1.1
+
+hypotest @ git+ssh://git@github.com/EdisonScientific/hypotest.git@akomaragiri/enroot_perf_fixes
