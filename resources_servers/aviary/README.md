@@ -12,7 +12,7 @@ This resources server adapts [Aviary environments](https://github.com/Future-Hou
   - Implements the [BixBench dataset](https://arxiv.org/abs/2503.00096) as a set of environments that allow execution of a Jupyter notebook.
   - Also serves as an example for how to implement notebook-backed environments for other scientific computational tasks.
 - **BixBench-Hypothesis**: `hypotest_app.py (bundled), client_app.py (remote)`
-  - Implements the [BixBench-Hypothesis dataset](https://huggingface.co/datasets/nvidia/Nemotron-RL-bixbench_hypothesis) similar to BixBench but supports a REPL-style code interface and tests hypothesis testing.
+  - Implements the [BixBench-Hypothesis dataset](https://huggingface.co/datasets/nvidia/Nemotron-RL-bixbench_hypothesis) with a REPL-style code interface and testing hypothesis testing capabilities.
 - **Client/proxy to a remote Aviary dataset server**: `client_app.py`
   - A generic interface to an Aviary `TaskDatasetServer`. Can be used to interact with any Aviary environments being served remotely.
 
@@ -189,7 +189,6 @@ sbatch \
     --gres=gpu:8 \
     ray.sub
 ```
-
 
 # Licensing information
 Code: Apache 2.0
