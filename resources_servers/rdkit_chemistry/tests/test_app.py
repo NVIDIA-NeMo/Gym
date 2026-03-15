@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[3]))  # repo root
 
-from resources_servers.chemistry_direct.app import (
+from resources_servers.rdkit_chemistry.app import (
     compute_reward,
     extract_predicted_value,
 )

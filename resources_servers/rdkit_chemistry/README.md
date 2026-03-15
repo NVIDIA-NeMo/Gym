@@ -47,23 +47,23 @@ make export-nemo-gym-data EXPERIMENT_ID=my_exp
 # → nemo_gym_data/{train,validation,example}.jsonl
 
 # Copy into this environment
-cp nemo_gym_data/train.jsonl       path/to/nemo-gym/resources_servers/chemistry_direct/data/
-cp nemo_gym_data/validation.jsonl  path/to/nemo-gym/resources_servers/chemistry_direct/data/
-cp nemo_gym_data/example.jsonl     path/to/nemo-gym/resources_servers/chemistry_direct/data/
+cp nemo_gym_data/train.jsonl       path/to/nemo-gym/resources_servers/rdkit_chemistry/data/
+cp nemo_gym_data/validation.jsonl  path/to/nemo-gym/resources_servers/rdkit_chemistry/data/
+cp nemo_gym_data/example.jsonl     path/to/nemo-gym/resources_servers/rdkit_chemistry/data/
 ```
 
 ## Running
 
 ```bash
 # Start all servers (resources + model)
-config_paths="resources_servers/chemistry_direct/configs/chemistry_direct.yaml,\
+config_paths="resources_servers/rdkit_chemistry/configs/rdkit_chemistry.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml"
 ng_run "+config_paths=[${config_paths}]"
 
 # Collect verified rollouts
 ng_collect_rollouts \
-    +agent_name=chemistry_direct_simple_agent \
-    +input_jsonl_fpath=resources_servers/chemistry_direct/data/train.jsonl \
+    +agent_name=rdkit_chemistry_simple_agent \
+    +input_jsonl_fpath=resources_servers/rdkit_chemistry/data/train.jsonl \
     +output_jsonl_fpath=rollouts_out.jsonl
 ```
 

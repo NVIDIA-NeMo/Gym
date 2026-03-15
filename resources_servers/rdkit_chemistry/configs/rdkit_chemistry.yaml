@@ -1,6 +1,6 @@
-chemistry_direct:
+rdkit_chemistry:
   resources_servers:
-    chemistry_direct:
+    rdkit_chemistry:
       entrypoint: app.py
       domain: knowledge
       verified: false
@@ -11,25 +11,25 @@ chemistry_direct:
         derived from RDKit-computable properties over the ChEMBL database.
       value: Train models to answer quantitative chemistry questions about molecules
 
-chemistry_direct_simple_agent:
+rdkit_chemistry_simple_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py
       resources_server:
         type: resources_servers
-        name: chemistry_direct
+        name: rdkit_chemistry
       model_server:
         type: responses_api_models
         name: policy_model
       datasets:
         - name: train
           type: train
-          jsonl_fpath: resources_servers/chemistry_direct/data/train.jsonl
+          jsonl_fpath: resources_servers/rdkit_chemistry/data/train.jsonl
           license: "NVIDIA Proprietary (derived from ChEMBL — CC-BY-SA 3.0)"
         - name: validation
           type: validation
-          jsonl_fpath: resources_servers/chemistry_direct/data/validation.jsonl
+          jsonl_fpath: resources_servers/rdkit_chemistry/data/validation.jsonl
           license: "NVIDIA Proprietary (derived from ChEMBL — CC-BY-SA 3.0)"
         - name: example
           type: example
-          jsonl_fpath: resources_servers/chemistry_direct/data/example.jsonl
+          jsonl_fpath: resources_servers/rdkit_chemistry/data/example.jsonl
