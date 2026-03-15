@@ -297,14 +297,16 @@ class RolloutCollectionHelper(BaseModel):
         results_file.close()
 
         if get_wandb_run():  # pragma: no cover
+            print("Uploading rollouts to W&B")
             get_wandb_run().log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
         del result_strs
 
-        # Sort to ensure consistent ordering
+        print("Sorting results to ensure consistent ordering")
         rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
         results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
 
         # Compute and write aggregate metrics via /aggregate_metrics on each agent server
+        print("Computing aggregate metrics")
         aggregate_metrics_fpath = await self._call_aggregate_metrics(results, rows, output_fpath)
 
         print(f"""Finished rollout collection! View results at:
