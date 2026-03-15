@@ -4,6 +4,7 @@ vlm_eval_kit_resources_server:
       entrypoint: app.py
       domain: other
       verified: false
+      value: Measure VLM capabilities
 vlm_eval_kit_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -15,7 +16,12 @@ vlm_eval_kit_simple_agent:
         type: responses_api_models
         name: policy_model
       datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/vlm_eval_kit/data/example.jsonl
+      - name: MMBench V1.1
+        type: validation
+        jsonl_fpath: resources_servers/vlm_eval_kit/data/MMBench_V1_1_validation.jsonl
         num_repeats: 1
+        gitlab_identifier:
+          dataset_name: vlm_eval_kit
+          version: 0.0.1
+          artifact_fpath: MMBench_V1_1_validation.jsonl
+        license: TBD
