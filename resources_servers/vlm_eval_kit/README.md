@@ -48,7 +48,29 @@ python run.py --verbose \
     --model GPT4o_MINI
 ```
 
-# Run with Gym
+## Gym repro
+
+### Prepare data
+First run the VLMEvalKit server to install dependencies.
+```bash
+config_paths="resources_servers/vlm_eval_kit/configs/vlm_eval_kit.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml"
+ng_run "+config_paths=[${config_paths}]"
+```
+
+Then cd into this directory and activate the Python environment
+```bash
+cd resources_servers/vlm_eval_kit
+source .venv/bin/activate
+```
+
+Uncomment the dataset you are preparing at the bottom of the script. Then run
+```bash
+python prepare_data.py
+```
+
+
+### Run with Gym
 ```bash
 WANDB_PROJECT=
 EXPERIMENT_NAME=vlmevalkit/gpt-4o-mini-20240718
