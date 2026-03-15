@@ -104,9 +104,11 @@ Data head:
 
         group = get_group(vlmevalkit_row["index"])
 
-        image = vlmevalkit_row["image"]
-        if not image.startswith("/9j"):  # Is not valid image, rather is an image reference
-            image = data[data["index"] == int(image)].iloc[0]["image"]
+        has_image = group == int(vlmevalkit_row["index"])
+        if has_image:
+            image = vlmevalkit_row["image"]
+        if not has_image:  # Is not valid image, rather is an image reference
+            image = data[data["index"] == int(vlmevalkit_row["image"])].iloc[0]["image"]
 
         gym_row = {
             "responses_create_params": {
