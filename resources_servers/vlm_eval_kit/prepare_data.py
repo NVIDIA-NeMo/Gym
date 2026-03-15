@@ -16,28 +16,13 @@
 The prepare_* functions in this file are written to exactly match the input observed in the VLMEvalKit OpenAI API call.
 """
 
-from pathlib import Path
-from subprocess import run
+from collections import Counter
 
 import orjson
+from app import VlmEvalKitResourcesServer
 from vlmeval.dataset.image_mcq import ImageMCQDataset
 from vlmeval.dataset.image_vqa import OCRBench
-
-
-def setup_VLMEvalKit():
-    this_dir = Path(__file__).parent.absolute()
-    # We freeze the commit SHA for now.
-    # We pip install with no-deps since we have the deps in the pyproject.toml already.
-    setup_command = f"""cd {this_dir} \
-&& source .venv/bin/activate \
-&& if [ ! -d VLMEvalKit ]; then git clone https://github.com/open-compass/VLMEvalKit/; fi \
-&& cd VLMEvalKit \
-&& git checkout 00804217f868058f871f5ff252a7b9623c3475d9 \
-&& uv pip install '-e .' --no-deps \
-&& sed -i '' 's/import clip/# import clip/' vlmeval/dataset/utils/SArena/FID.py
-"""
-    print(f"Running VLMEvalKit setup command: {setup_command}")
-    run(setup_command, shell=True, check=True)
+from vlmeval.dataset.utils.multiple_choice import build_choices
 
 
 def prepare_OCRBench():
@@ -90,6 +75,10 @@ Data:
 Data head:
 {data.head()}""")
 
+    # From https://github.com/open-compass/VLMEvalKit/blob/00804217f868058f871f5ff252a7b9623c3475d9/vlmeval/dataset/utils/multiple_choice.py#L513
+    get_group = lambda i: int(i % 1e6)
+    group_counts = Counter(map(get_group, data["index"]))
+
     assert list(data.columns) == [
         "index",
         "question",
@@ -109,6 +98,7 @@ Data head:
     for _, vlmevalkit_row in data.iterrows():
         messages = dataset.build_prompt(vlmevalkit_row)
 
+        group = get_group(vlmevalkit_row["index"])
         gym_row = {
             "responses_create_params": {
                 "input": [
@@ -126,12 +116,16 @@ Data head:
             "answer": vlmevalkit_row["answer"],
             "category": vlmevalkit_row["category"],
             "eval_fn": f"_score_{dataset_name}",
+            "group": group,
+            "group_size": group_counts[group],
+            # Choices is built here https://github.com/open-compass/VLMEvalKit/blob/00804217f868058f871f5ff252a7b9623c3475d9/vlmeval/dataset/utils/multiple_choice.py#L337
+            "choices": build_choices(vlmevalkit_row),
         }
         f.write(orjson.dumps(gym_row) + b"\n")
 
 
 if __name__ == "__main__":
-    setup_VLMEvalKit()
+    VlmEvalKitResourcesServer.setup_VLMEvalKit(None)
 
     # prepare_OCRBench()
     prepare_MMBench_DEV_EN_V11()
