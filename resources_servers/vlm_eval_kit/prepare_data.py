@@ -84,6 +84,8 @@ Data head:
     get_group = lambda i: int(i % 1e6)
     group_counts = Counter(map(get_group, data["index"]))
 
+    # We sort this dataset so that samples in a group are adjacent to each other rather than spread apart
+    # At runtime, this data will be read in order and this results in much more efficient processing
     # This key is the same as get_group, just for a pd.Series
     data = data.sort_values("index", key=lambda i: i.astype(int) % 1e6)
 
