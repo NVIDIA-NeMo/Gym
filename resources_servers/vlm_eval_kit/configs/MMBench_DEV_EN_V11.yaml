@@ -16,12 +16,12 @@ vlm_eval_kit_simple_agent:
         type: responses_api_models
         name: policy_model
       datasets:
-      - name: MMBench V1.1
+      - name: MMBench_DEV_EN_V11
         type: validation
-        jsonl_fpath: resources_servers/vlm_eval_kit/data/MMBench_V1_1_validation.jsonl
+        jsonl_fpath: resources_servers/vlm_eval_kit/data/MMBench_DEV_EN_V11_validation.jsonl
         num_repeats: 1
         gitlab_identifier:
           dataset_name: vlm_eval_kit
           version: 0.0.1
-          artifact_fpath: MMBench_V1_1_validation.jsonl
+          artifact_fpath: MMBench_DEV_EN_V11_validation.jsonl
         license: TBD

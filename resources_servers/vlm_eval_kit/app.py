@@ -12,11 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from pathlib import Path
-from subprocess import run
-from typing import Any, Dict, List
-
-from fastapi import FastAPI
+from typing import Any, Dict
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -32,8 +28,8 @@ class VlmEvalKitResourcesServerConfig(BaseResourcesServerConfig):
 
 class VLMEvalKitVerifyRequest(BaseVerifyRequest):
     eval_fn: str
-    answer: List[str]
     category: str
+    answer: Any
 
 
 class VLMEvalKitVerifyResponse(VLMEvalKitVerifyRequest, BaseVerifyResponse):
@@ -42,25 +38,6 @@ class VLMEvalKitVerifyResponse(VLMEvalKitVerifyRequest, BaseVerifyResponse):
 
 class VlmEvalKitResourcesServer(SimpleResourcesServer):
     config: VlmEvalKitResourcesServerConfig
-
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-
-        this_dir = Path(__file__).parent.absolute()
-        # We freeze the commit SHA for now.
-        # We pip install with no-deps since we have the deps in the pyproject.toml already.
-        setup_command = f"""cd {this_dir} \
-&& source .venv/bin/activate \
-&& if [ ! -d VLMEvalKit ]; then git clone https://github.com/open-compass/VLMEvalKit/; fi \
-&& cd VLMEvalKit \
-&& git checkout 00804217f868058f871f5ff252a7b9623c3475d9 \
-&& uv pip install '-e .' --no-deps \
-&& sed -i '' 's/import clip/# import clip/' vlmeval/dataset/utils/SArena/FID.py
-"""
-        print(f"Running VLMEvalKit setup command: {setup_command}")
-        run(setup_command, shell=True, check=True)
-
-        return app
 
     async def verify(self, body: VLMEvalKitVerifyRequest) -> VLMEvalKitVerifyResponse:
         score_fn = getattr(self, body.eval_fn)

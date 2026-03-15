@@ -48,6 +48,21 @@ python run.py --verbose \
     --model GPT4o_MINI
 ```
 
+# Run with Gym
+```bash
+WANDB_PROJECT=
+EXPERIMENT_NAME=vlmevalkit/gpt-4o-mini-20240718
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/vlm_eval_kit/configs/vlm_eval_kit.yaml"
+ng_e2e_collect_rollouts \
+    "+config_paths=[${config_paths}]" \
+    +wandb_project=$WANDB_PROJECT \
+    +wandb_name=$EXPERIMENT_NAME \
+    ++output_jsonl_fpath=results/$EXPERIMENT_NAME.jsonl \
+    ++split=validation \
+    ++policy_model_name=gpt-4o-mini-2024-07-18
+```
+
 # Licensing information
 Code: ?
 Data: ?
