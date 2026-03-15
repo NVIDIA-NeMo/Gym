@@ -78,6 +78,9 @@ class VlmEvalKitResourcesServer(SimpleResourcesServer):
         run(setup_command, shell=True, check=True)
 
         # Dummy import to load ahead of time
+        import vlmeval.utils.matching_util
+
+        vlmeval.utils.matching_util
 
     async def verify(self, body: VLMEvalKitVerifyRequest) -> VLMEvalKitVerifyResponse:
         score_fn = getattr(self, body.eval_fn)
