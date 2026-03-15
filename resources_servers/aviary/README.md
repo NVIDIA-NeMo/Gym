@@ -193,7 +193,7 @@ sbatch \
 # Licensing information
 Code: Apache 2.0
 
-Data: MIT (GSM8k),  Apache 2.0 (BixBench, BixBench-Hypothesis)
+Data: MIT (GSM8k),  Apache 2.0 (BixBench), CC BY 4.0 (BixBench-Hypothesis)
 
 Dependencies
 - nemo_gym: Apache 2.0
