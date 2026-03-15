@@ -81,10 +81,14 @@ def prepare_OCRBench():
 def prepare_MMBench_DEV_EN_V11():
     dataset_name = "MMBench_DEV_EN_V11"
 
-    data = ImageMCQDataset(dataset=dataset_name).load_data(dataset_name)
+    dataset = ImageMCQDataset(dataset=dataset_name)
+    data = dataset.load_data(dataset_name)
 
-    print(f"Columns: {data.columns}")
-    print(data.head())
+    print(f"""Columns: {data.columns}
+Data:
+{data}
+Data head:
+{data.head()}""")
 
     assert list(data.columns) == [
         "index",
@@ -100,6 +104,30 @@ def prepare_MMBench_DEV_EN_V11():
         "l2-category",
         "split",
     ]
+
+    f = open(f"data/{dataset_name}_validation.jsonl", "wb")
+    for _, vlmevalkit_row in data.iterrows():
+        messages = dataset.build_prompt(vlmevalkit_row)
+
+        gym_row = {
+            "responses_create_params": {
+                "input": [
+                    {
+                        "type": "input_image",
+                        "image_url": f"data:image/jpeg;base64,{vlmevalkit_row['image']}",
+                        "detail": "high",
+                    },
+                    {
+                        "type": "input_text",
+                        "text": messages[-1]["value"],
+                    },
+                ]
+            },
+            "answer": vlmevalkit_row["answer"],
+            "category": vlmevalkit_row["category"],
+            "eval_fn": f"_score_{dataset_name}",
+        }
+        f.write(orjson.dumps(gym_row) + b"\n")
 
 
 if __name__ == "__main__":
