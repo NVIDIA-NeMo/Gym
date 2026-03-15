@@ -69,6 +69,8 @@ class VlmEvalKitResourcesServer(SimpleResourcesServer):
 
         return VLMEvalKitVerifyResponse(**body.model_dump(), **score_dict)
 
+    # For each of the scoring functions, we copy it over in a nicer way since the original functions
+    # couple together reading from an input file path, LLM as judge, etc. It's just easier to reimplement and test e2e accuracy.
     def _score_OCRBench(self, body: BaseVerifyRequest) -> Dict[str, Any]:
         # Reformatted from https://github.com/open-compass/VLMEvalKit/blob/00804217f868058f871f5ff252a7b9623c3475d9/vlmeval/dataset/image_vqa.py#L505
         reward = 0.0
