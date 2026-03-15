@@ -20,6 +20,7 @@ from collections import Counter
 
 import orjson
 from app import VlmEvalKitResourcesServer
+from pandas import DataFrame
 from vlmeval.dataset.image_mcq import ImageMCQDataset
 from vlmeval.dataset.image_vqa import OCRBench
 from vlmeval.dataset.utils.multiple_choice import build_choices
@@ -67,7 +68,7 @@ def prepare_MMBench_DEV_EN_V11():
     dataset_name = "MMBench_DEV_EN_V11"
 
     dataset = ImageMCQDataset(dataset=dataset_name)
-    data = dataset.load_data(dataset_name)
+    data: DataFrame = dataset.load_data(dataset_name)
 
     # Uncomment these lines to test a single sample
     # samples = [3757, 1003757, 2003757, 3003757]
@@ -82,6 +83,9 @@ Data head:
     # From https://github.com/open-compass/VLMEvalKit/blob/00804217f868058f871f5ff252a7b9623c3475d9/vlmeval/dataset/utils/multiple_choice.py#L513
     get_group = lambda i: int(i % 1e6)
     group_counts = Counter(map(get_group, data["index"]))
+
+    # This key is the same as get_group, just for a pd.Series
+    data = data.sort_values("index", key=lambda i: i.astype(int) % 1e6)
 
     assert list(data.columns) == [
         "index",
