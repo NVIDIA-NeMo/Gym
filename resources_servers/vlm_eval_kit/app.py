@@ -77,6 +77,8 @@ class VlmEvalKitResourcesServer(SimpleResourcesServer):
         print(f"Running VLMEvalKit setup command: {setup_command}")
         run(setup_command, shell=True, check=True)
 
+        # Dummy import to load ahead of time
+
     async def verify(self, body: VLMEvalKitVerifyRequest) -> VLMEvalKitVerifyResponse:
         score_fn = getattr(self, body.eval_fn)
 

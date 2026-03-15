@@ -69,6 +69,10 @@ def prepare_MMBench_DEV_EN_V11():
     dataset = ImageMCQDataset(dataset=dataset_name)
     data = dataset.load_data(dataset_name)
 
+    # Uncomment these lines to test a single sample
+    # samples = [3757, 1003757, 2003757, 3003757]
+    # data = data[data["index"].isin(samples)]
+
     print(f"""Columns: {data.columns}
 Data:
 {data}
@@ -99,17 +103,27 @@ Data head:
         messages = dataset.build_prompt(vlmevalkit_row)
 
         group = get_group(vlmevalkit_row["index"])
+
+        image = vlmevalkit_row["image"]
+        if not image.startswith("/9j"):  # Is not valid image, rather is an image reference
+            image = data[data["index"] == int(image)].iloc[0]["image"]
+
         gym_row = {
             "responses_create_params": {
                 "input": [
                     {
-                        "type": "input_image",
-                        "image_url": f"data:image/jpeg;base64,{vlmevalkit_row['image']}",
-                        "detail": "high",
-                    },
-                    {
-                        "type": "input_text",
-                        "text": messages[-1]["value"],
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_image",
+                                "image_url": f"data:image/jpeg;base64,{image}",
+                                "detail": "high",
+                            },
+                            {
+                                "type": "input_text",
+                                "text": messages[-1]["value"],
+                            },
+                        ],
                     },
                 ]
             },

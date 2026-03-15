@@ -1,0 +1,68 @@
+{
+    "name": "MMBench_DEV_EN_V11",
+    "type": "validation",
+    "jsonl_fpath": "resources_servers/vlm_eval_kit/data/MMBench_DEV_EN_V11_validation.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": {
+        "dataset_name": "vlm_eval_kit",
+        "version": "0.0.1",
+        "artifact_fpath": "MMBench_DEV_EN_V11_validation.jsonl"
+    },
+    "huggingface_identifier": null,
+    "license": "TBD",
+    "Number of examples": 4,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 4,
+        "Average": 46.0,
+        "Min": 46.0,
+        "Max": 46.0,
+        "Standard deviation": 0.0
+    },
+    "Number of turns": {
+        "Total # non-null values": 4,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "answer": {
+        "unique_count": 4,
+        "total_count": 4
+    },
+    "category": {
+        "unique_count": 1,
+        "total_count": 4
+    },
+    "eval_fn": {
+        "unique_count": 1,
+        "total_count": 4
+    },
+    "group": {
+        "Total # non-null values": 4,
+        "Average": 3757.0,
+        "Min": 3757.0,
+        "Max": 3757.0,
+        "Standard deviation": 0.0
+    },
+    "group_size": {
+        "Total # non-null values": 4,
+        "Average": 4.0,
+        "Min": 4.0,
+        "Max": 4.0,
+        "Standard deviation": 0.0
+    }
+}
