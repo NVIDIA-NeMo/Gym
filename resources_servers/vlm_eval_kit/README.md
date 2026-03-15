@@ -18,7 +18,7 @@
 |MathVista|MathVista_MINI|gpt-4o-mini|TODO|52.5|TODO|TODO|
 |HallusionBench Avg.|HallusionBench|N/A|TODO|46.1|TODO|TODO|
 |AI2D|AI2D_TEST,AI2D_TEST_NO_MASK|N/A|TODO|77.8|TODO|TODO|
-|OCRBench|OCRBench|N/A|1000|785|776|TODO|
+|OCRBench|OCRBench|N/A|1000|785|776|772|
 |MMVet|MMVet|gpt-4-turbo|TODO|66.9|TODO|TODO|
 
 
