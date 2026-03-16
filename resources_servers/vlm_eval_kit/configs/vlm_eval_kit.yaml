@@ -34,6 +34,7 @@ vlm_eval_kit_simple_agent:
           dataset_name: vlm_eval_kit
           version: 0.0.1
           artifact_fpath: OCRBench_validation.jsonl
+        license: TBD
       - name: example
         type: example
         jsonl_fpath: resources_servers/vlm_eval_kit/data/example.jsonl

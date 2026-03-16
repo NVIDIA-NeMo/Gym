@@ -145,5 +145,5 @@ Data head:
 if __name__ == "__main__":
     VlmEvalKitResourcesServer.setup_VLMEvalKit(None)
 
-    # prepare_OCRBench()
+    prepare_OCRBench()
     prepare_MMBench_DEV_EN_V11()
