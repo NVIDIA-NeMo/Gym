@@ -41,10 +41,38 @@ from nemo_gym.openai_utils import (
 logger = logging.getLogger(__name__)
 
 
+_RETRYABLE_EXCEPTION_NAMES = frozenset(
+    {
+        "ResourceExhausted",
+        "ServiceUnavailable",
+        "InternalServerError",
+        "DeadlineExceeded",
+        "Aborted",
+        "ServerError",
+        "TooManyRequests",
+    }
+)
+
+_RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504, 520})
+
+
+def _is_retryable_gemini_error(exc: Exception) -> bool:
+    """Determine if a Gemini API exception is transient and safe to retry."""
+    if isinstance(exc, (ConnectionError, TimeoutError, asyncio.TimeoutError)):
+        return True
+    if type(exc).__name__ in _RETRYABLE_EXCEPTION_NAMES:
+        return True
+    status = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    if isinstance(status, int) and status in _RETRYABLE_STATUS_CODES:
+        return True
+    return False
+
+
 class GeminiModelServerConfig(BaseResponsesAPIModelConfig):
     gemini_api_key: str
     gemini_model: str = "gemini-2.5-computer-use-preview-10-2025"
     gemini_timeout: float = 300.0
+    gemini_max_retries: int = 4
 
 
 class GeminiProxyRequest(BaseModel):
@@ -69,7 +97,6 @@ class GeminiModelServer(SimpleResponsesAPIModel):
         from google import genai
 
         self._client = genai.Client(api_key=self.config.gemini_api_key)
-        self._timeout = self.config.gemini_timeout
         return super().model_post_init(context)
 
     async def responses(self, body: GeminiProxyRequest = Body()):  # type: ignore[override]
@@ -84,21 +111,49 @@ class GeminiModelServer(SimpleResponsesAPIModel):
             len(contents),
         )
 
-        try:
-            response = await asyncio.to_thread(
-                self._client.models.generate_content,
-                model=model_name,
-                contents=contents,
-                config=gen_config,
-            )
-        except Exception as e:
-            logger.error("Gemini API call failed: %s", repr(e))
-            raise
+        max_attempts = self.config.gemini_max_retries + 1
+        last_exception: Optional[Exception] = None
 
-        candidates_count = len(response.candidates) if response.candidates else 0
-        logger.info("Gemini proxy response: candidates=%d", candidates_count)
+        for attempt in range(max_attempts):
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._client.models.generate_content,
+                        model=model_name,
+                        contents=contents,
+                        config=gen_config,
+                    ),
+                    timeout=self.config.gemini_timeout,
+                )
 
-        return self._serialize_response(response)
+                candidates_count = len(response.candidates) if response.candidates else 0
+                logger.info("Gemini proxy response: candidates=%d", candidates_count)
+                return self._serialize_response(response)
+
+            except Exception as e:
+                last_exception = e
+                if not _is_retryable_gemini_error(e):
+                    logger.error("Gemini API call failed (non-retryable): %s", repr(e))
+                    raise
+
+                logger.warning(
+                    "Gemini API call failed (attempt %d/%d): %s",
+                    attempt + 1,
+                    max_attempts,
+                    repr(e),
+                )
+
+                if attempt < self.config.gemini_max_retries:
+                    wait = 0.5 * (2**attempt)
+                    logger.info("Retrying in %.1fs...", wait)
+                    await asyncio.sleep(wait)
+
+        logger.error(
+            "Gemini API call failed after %d attempts: %s",
+            max_attempts,
+            repr(last_exception),
+        )
+        raise last_exception  # type: ignore[misc]
 
     async def chat_completions(
         self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
