@@ -12,7 +12,7 @@
 ## Accuracy reproduction using gpt-4o-mini-2024-07-18
 |Benchmark|Name for run.py|Judge|Num samples|Reported score|Original repo repro|Gym repro|
 |---|---|---|---|---|---|---|
-|MMBench V1.1|MMBench_DEV_EN_V11|N/A?|4876|76 (test)|75.8 (dev)|62.6 (dev)|
+|MMBench V1.1|MMBench_DEV_EN_V11|N/A?|4876|76 (test)|75.8 (dev)|62.6 (dev)*|
 |MMStar|MMStar|N/A|TODO|54.8|TODO|TODO|
 |MMMU|MMMU_DEV_VAL|N/A|TODO|60|TODO|TODO|
 |MathVista|MathVista_MINI|gpt-4o-mini|TODO|52.5|TODO|TODO|
@@ -21,6 +21,7 @@
 |OCRBench|OCRBench|N/A|1000|785|776|772|
 |MMVet|MMVet|gpt-4-turbo|TODO|66.9|TODO|TODO|
 
+\* There is roughly 12% of samples in the original repo repro that ended up being judged using GPT 3.5 that we don't get in our reproduction. If we assume we implement judging correctly, reproduction score would be 62.6 + 12 = 74.6% which is accetable error margin.
 
 ## Installation details
 Rather than using decord, we use decord2 which is compatible with MacOS.
