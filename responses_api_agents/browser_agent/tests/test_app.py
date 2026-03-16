@@ -11,12 +11,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from unittest.mock import MagicMock
+import json
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from resources_servers.browser_gym.schemas import BrowserAction, CUAStep, CUATrajectory
 from responses_api_agents.browser_agent.adapters.base import CUAAdapterResponse
+from responses_api_agents.browser_agent.trajectory_writer import (
+    _looks_like_base64,
+    _strip_base64_fields,
+    append_debug_step,
+    finalize_debug_trajectory,
+    init_debug_trajectory,
+    save_debug_trajectory,
+)
 
 
 class TestCUAAdapterResponse:
@@ -989,3 +999,252 @@ class TestGeminiUsageExtraction:
 
         result = adapter._parse_response(data)
         assert result.usage is None
+
+
+# ── Helpers ──────────────────────────────────────────────────────
+
+# 1x1 red PNG, base64 encoded (valid minimal image)
+_TINY_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8BQDwAEgAF/pooBPQAAAABJRU5ErkJggg=="
+
+
+def _make_trajectory(num_steps: int = 2, initial_screenshot: str = _TINY_PNG_B64) -> CUATrajectory:
+    steps = []
+    for i in range(num_steps):
+        steps.append(
+            CUAStep(
+                action=BrowserAction(action_type="click", coordinate=[10 * i, 20 * i]),
+                screenshot_after=_TINY_PNG_B64,
+                current_url=f"https://example.com/page{i}",
+                raw_provider_response={"step": i, "image": f"data:image/png;base64,{_TINY_PNG_B64}"},
+            )
+        )
+    return CUATrajectory(
+        steps=steps,
+        task_prompt="Do the thing",
+        initial_screenshot=initial_screenshot,
+        final_message="All done",
+    )
+
+
+# ── TrajectoryWriter tests ───────────────────────────────────────
+
+
+class TestStripBase64Fields:
+    def test_replaces_data_uri(self):
+        obj = {"img": "data:image/png;base64,abc123"}
+        result = _strip_base64_fields(obj)
+        assert result["img"] == "<base64_image>"
+
+    def test_replaces_long_base64_string(self):
+        long_b64 = "A" * 600
+        result = _strip_base64_fields({"data": long_b64})
+        assert result["data"] == "<base64_image>"
+
+    def test_preserves_short_strings(self):
+        result = _strip_base64_fields({"text": "hello"})
+        assert result["text"] == "hello"
+
+    def test_recurses_into_lists(self):
+        result = _strip_base64_fields([{"img": "data:image/png;base64,x"}, "short"])
+        assert result[0]["img"] == "<base64_image>"
+        assert result[1] == "short"
+
+    def test_preserves_non_string_values(self):
+        result = _strip_base64_fields({"count": 42, "flag": True, "empty": None})
+        assert result == {"count": 42, "flag": True, "empty": None}
+
+
+class TestLooksLikeBase64:
+    def test_valid_base64(self):
+        assert _looks_like_base64("A" * 200) is True
+
+    def test_short_string(self):
+        assert _looks_like_base64("abc") is False
+
+    def test_non_base64_chars(self):
+        assert _looks_like_base64("!" * 200) is False
+
+
+class TestInitDebugTrajectory:
+    def test_creates_directory_and_files(self, tmp_path):
+        rollout_dir = init_debug_trajectory(
+            output_dir=str(tmp_path),
+            env_id="test-env-001",
+            initial_screenshot=_TINY_PNG_B64,
+            task_prompt="Click the button",
+            adapter_type="openai",
+            model_name="computer-use-preview",
+        )
+
+        assert rollout_dir == tmp_path / "test-env-001"
+        assert (rollout_dir / "screenshots" / "00_initial.png").exists()
+        assert (rollout_dir / "screenshots" / "00_initial.png").stat().st_size > 0
+
+        jsonl_path = rollout_dir / "conversation.jsonl"
+        assert jsonl_path.exists()
+        header = json.loads(jsonl_path.read_text().strip())
+        assert header["type"] == "header"
+        assert header["env_id"] == "test-env-001"
+        assert header["task_prompt"] == "Click the button"
+        assert header["adapter_type"] == "openai"
+        assert header["model"] == "computer-use-preview"
+
+
+class TestAppendDebugStep:
+    def test_appends_step_and_screenshot(self, tmp_path):
+        rollout_dir = tmp_path / "env-append"
+        screenshots_dir = rollout_dir / "screenshots"
+        screenshots_dir.mkdir(parents=True)
+        (rollout_dir / "conversation.jsonl").write_text("")
+
+        action = BrowserAction(action_type="click", coordinate=[100, 200])
+        append_debug_step(
+            rollout_dir=rollout_dir,
+            step_idx=1,
+            action=action,
+            screenshot_after=_TINY_PNG_B64,
+            current_url="https://example.com",
+            raw_provider_response={"id": "resp_1"},
+        )
+
+        assert (screenshots_dir / "01_after.png").exists()
+
+        lines = (rollout_dir / "conversation.jsonl").read_text().strip().split("\n")
+        assert len(lines) == 1
+        step = json.loads(lines[0])
+        assert step["type"] == "step"
+        assert step["step"] == 1
+        assert step["action"]["action_type"] == "click"
+        assert step["current_url"] == "https://example.com"
+
+    def test_strips_base64_from_raw_response(self, tmp_path):
+        rollout_dir = tmp_path / "env-strip"
+        (rollout_dir / "screenshots").mkdir(parents=True)
+        (rollout_dir / "conversation.jsonl").write_text("")
+
+        action = BrowserAction(action_type="screenshot")
+        append_debug_step(
+            rollout_dir=rollout_dir,
+            step_idx=1,
+            action=action,
+            screenshot_after=_TINY_PNG_B64,
+            current_url="https://example.com",
+            raw_provider_response={"image": f"data:image/png;base64,{_TINY_PNG_B64}"},
+        )
+
+        step = json.loads((rollout_dir / "conversation.jsonl").read_text().strip())
+        assert step["raw_provider_response"]["image"] == "<base64_image>"
+
+
+class TestFinalizeDebugTrajectory:
+    def test_writes_conversation_and_verification(self, tmp_path):
+        rollout_dir = tmp_path / "env-finalize"
+        rollout_dir.mkdir(parents=True)
+        trajectory = _make_trajectory(num_steps=1)
+
+        result = finalize_debug_trajectory(
+            rollout_dir=rollout_dir,
+            env_id="env-finalize",
+            trajectory=trajectory,
+            reward=1.0,
+            local_storage_dump='{"key": "value"}',
+            adapter_type="anthropic",
+            model_name="claude-sonnet",
+            verifier_metadata={"task_id": "TASK-001"},
+            verification_result={"assertions": [{"result": "pass"}]},
+        )
+
+        assert result == str(rollout_dir)
+
+        conv = json.loads((rollout_dir / "conversation.json").read_text())
+        assert conv["env_id"] == "env-finalize"
+        assert conv["task_prompt"] == "Do the thing"
+        assert conv["final_message"] == "All done"
+        assert conv["num_steps"] == 1
+        assert len(conv["steps"]) == 1
+        assert conv["steps"][0]["action"]["action_type"] == "click"
+
+        verif = json.loads((rollout_dir / "verification.json").read_text())
+        assert verif["reward"] == 1.0
+        assert verif["local_storage_dump"] == {"key": "value"}
+        assert verif["verifier_metadata"]["task_id"] == "TASK-001"
+        assert verif["get_actual_state_response"]["assertions"][0]["result"] == "pass"
+
+    def test_handles_invalid_local_storage_json(self, tmp_path):
+        rollout_dir = tmp_path / "env-bad-ls"
+        rollout_dir.mkdir(parents=True)
+        trajectory = _make_trajectory(num_steps=0)
+
+        finalize_debug_trajectory(
+            rollout_dir=rollout_dir,
+            env_id="env-bad-ls",
+            trajectory=trajectory,
+            local_storage_dump="not-valid-json{",
+        )
+
+        verif = json.loads((rollout_dir / "verification.json").read_text())
+        assert verif["local_storage_dump"] == "not-valid-json{"
+
+
+class TestSaveDebugTrajectory:
+    def test_normal_write(self, tmp_path):
+        trajectory = _make_trajectory(num_steps=2)
+
+        result = save_debug_trajectory(
+            output_dir=str(tmp_path),
+            env_id="env-full",
+            trajectory=trajectory,
+            reward=1.0,
+            local_storage_dump='{"done": true}',
+            adapter_type="gemini",
+            model_name="gemini-2.5-cu",
+            verifier_metadata={"task_id": "T-001"},
+        )
+
+        rollout_dir = Path(result)
+        assert rollout_dir.exists()
+        assert (rollout_dir / "screenshots" / "00_initial.png").exists()
+        assert (rollout_dir / "screenshots" / "01_after.png").exists()
+        assert (rollout_dir / "screenshots" / "02_after.png").exists()
+        assert (rollout_dir / "conversation.json").exists()
+        assert (rollout_dir / "verification.json").exists()
+
+        conv = json.loads((rollout_dir / "conversation.json").read_text())
+        assert conv["num_steps"] == 2
+        assert conv["adapter_type"] == "gemini"
+
+        verif = json.loads((rollout_dir / "verification.json").read_text())
+        assert verif["reward"] == 1.0
+
+    def test_empty_trajectory(self, tmp_path):
+        trajectory = _make_trajectory(num_steps=0, initial_screenshot="")
+
+        result = save_debug_trajectory(
+            output_dir=str(tmp_path),
+            env_id="env-empty",
+            trajectory=trajectory,
+        )
+
+        rollout_dir = Path(result)
+        assert rollout_dir.exists()
+        assert not (rollout_dir / "screenshots" / "00_initial.png").exists()
+
+        conv = json.loads((rollout_dir / "conversation.json").read_text())
+        assert conv["num_steps"] == 0
+        assert conv["steps"] == []
+
+        verif = json.loads((rollout_dir / "verification.json").read_text())
+        assert verif["reward"] is None
+
+    def test_permission_error(self, tmp_path):
+        trajectory = _make_trajectory(num_steps=1)
+
+        with patch(
+            "responses_api_agents.browser_agent.trajectory_writer.Path.mkdir", side_effect=PermissionError("denied")
+        ):
+            with pytest.raises(PermissionError, match="denied"):
+                save_debug_trajectory(
+                    output_dir=str(tmp_path),
+                    env_id="env-permerr",
+                    trajectory=trajectory,
+                )
