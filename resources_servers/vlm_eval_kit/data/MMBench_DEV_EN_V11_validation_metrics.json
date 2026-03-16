@@ -47,7 +47,7 @@
         "unique_count": 20,
         "total_count": 4876
     },
-    "eval_fn": {
+    "benchmark_name": {
         "unique_count": 1,
         "total_count": 4876
     },

@@ -167,7 +167,7 @@ class VlmEvalKitResourcesServer(SimpleResourcesServer):
             "mean/OCRBench",
             "MMBench_DEV_EN_V11",
         ]
-        return {k: agent_metrics[k] for k in keys}
+        return {k: agent_metrics[k] for k in keys if k in agent_metrics}
 
 
 if __name__ == "__main__":
