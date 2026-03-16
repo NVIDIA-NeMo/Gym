@@ -4,32 +4,17 @@ Use any [OpenEnv](https://github.com/meta-pytorch/OpenEnv) environment as a NeMo
 
 ## Included Environments
 
-| Environment | Type | Status | Description |
-|-------------|------|--------|-------------|
-| **Echo** | MCP | Working | Echoes messages back with length-based rewards. Tools: `echo_message`, `echo_with_length` |
-| **Chess** | Non-MCP | WIP (needs upstream patch) | Play chess against the moonfish engine. Tool: `step` (UCI notation moves) |
-| **Coding** | Non-MCP | Working | Execute Python code, get stdout/stderr. Tool: `step` (code string) |
-| **Maze** | Non-MCP | Working | Navigate an 8x8 maze to find the exit. Tool: `step` (direction: 0-3) |
-| **Git** | Non-MCP | WIP (needs upstream patch + Docker) | Git operations against a Gitea server. Tool: `step` (action_type, repo_name, command, etc.) |
-
-> **Chess and Git:** These environments require a `pyproject.toml` to be added upstream to the
-> [OpenEnv repo](https://github.com/meta-pytorch/OpenEnv). A patch is in progress. Until merged,
-> uncomment their lines in `requirements.txt` and ensure your local OpenEnv clone has the
-> `pyproject.toml` files in `envs/chess_env/` and `envs/git_env/`.
+| Environment | Type | Description |
+|-------------|------|-------------|
+| **Echo** | MCP | Echoes messages back with length-based rewards. Tools: `echo_message`, `echo_with_length` |
+| **Coding** | Non-MCP | Execute Python code, get stdout/stderr. Tool: `step` (code string) |
+| **Maze** | Non-MCP | Navigate an 8x8 maze to find the exit. Tool: `step` (direction: 0-3) |
 
 ## Quick Start
 
 All commands below should be run from the **NeMo-Gym repository root** (the directory containing the top-level `pyproject.toml`).
 
-### 1. Clone OpenEnv
-
-The environment packages are installed from a local clone of the OpenEnv repository. Clone it into `3rdparty/`:
-
-```bash
-git clone https://github.com/meta-pytorch/OpenEnv.git 3rdparty/OpenEnv
-```
-
-### 2. Install Dependencies
+### 1. Setup
 
 ```bash
 # Set up the project venv
@@ -37,9 +22,7 @@ uv venv --python 3.12 && source .venv/bin/activate
 uv sync --extra dev
 ```
 
-Each OpenEnv environment is a separate package. The adapter's `requirements.txt` references them as editable installs from `3rdparty/OpenEnv/envs/<env>`. You do not need to install them manually -- `ng_run` handles server venv creation automatically.
-
-### 3. Configure API Credentials
+### 2. Configure API Credentials
 
 Create an `env.yaml` file at the repo root (auto-loaded by NeMo-Gym, already gitignored):
 
@@ -49,7 +32,7 @@ policy_api_key: <your-api-key>
 policy_model_name: <your-model-name>
 ```
 
-### 4. Start Servers and Collect Rollouts
+### 3. Start Servers and Collect Rollouts
 
 Running an environment is a **two-step process**:
 
@@ -69,24 +52,6 @@ ng_collect_rollouts \
   +agent_name=openenv_echo_simple_agent \
   +input_jsonl_fpath=resources_servers/openenv/data/echo/example.jsonl \
   +output_jsonl_fpath=output_echo.jsonl \
-  +num_samples_in_parallel=5
-```
-
-#### Chess
-
-> Requires upstream patch to add `pyproject.toml` to `envs/chess_env/`. See note above.
-
-```bash
-# Terminal 1: Start servers
-source .venv/bin/activate
-ng_run "+config_paths=[resources_servers/openenv/configs/openenv_chess.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
-
-# Terminal 2: Collect rollouts
-source .venv/bin/activate
-ng_collect_rollouts \
-  +agent_name=openenv_chess_simple_agent \
-  +input_jsonl_fpath=resources_servers/openenv/data/chess/example.jsonl \
-  +output_jsonl_fpath=output_chess.jsonl \
   +num_samples_in_parallel=5
 ```
 
@@ -121,35 +86,6 @@ ng_collect_rollouts \
   +output_jsonl_fpath=output_maze.jsonl \
   +num_samples_in_parallel=5
 ```
-
-#### Git -- Requires Docker
-
-> Requires upstream patch to add `pyproject.toml` to `envs/git_env/`. See note above.
-
-The git environment also needs a running Gitea server. Start it first using the Docker Compose file from OpenEnv:
-
-<!-- TODO(ahmadki): need a cleaner process for this example -->
-```bash
-# Start Gitea
-docker compose -f 3rdparty/OpenEnv/envs/git_env/docker-compose.gitea.yml up -d
-
-# Terminal 1: Start servers
-source .venv/bin/activate
-ng_run "+config_paths=[resources_servers/openenv/configs/openenv_git.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
-
-# Terminal 2: Collect rollouts
-source .venv/bin/activate
-ng_collect_rollouts \
-  +agent_name=openenv_git_simple_agent \
-  +input_jsonl_fpath=resources_servers/openenv/data/git/example.jsonl \
-  +output_jsonl_fpath=output_git.jsonl \
-  +num_samples_in_parallel=2
-
-# When done, stop Gitea
-docker compose -f 3rdparty/OpenEnv/envs/git_env/docker-compose.gitea.yml down
-```
-
-Available model server configs are in `responses_api_models/`. See the [NeMo-Gym docs](../../docs/) for model server configuration details.
 
 ## Adding a New Environment
 
@@ -231,10 +167,10 @@ Create `resources_servers/openenv/data/<name>/example.jsonl` with 5+ examples:
 
 ### Step 3: Add Dependencies and Run
 
-Add the environment's package to `resources_servers/openenv/requirements.txt` as an editable install from the local OpenEnv clone:
+Add the environment's package to `resources_servers/openenv/requirements.txt`:
 
 ```
--e openenv-my-env @ ../../3rdparty/OpenEnv/envs/my_env
+openenv-my-env @ git+https://github.com/meta-pytorch/OpenEnv.git#subdirectory=envs/my_env
 ```
 
 Then start servers and collect rollouts:
@@ -255,21 +191,14 @@ ng_collect_rollouts \
 
 ## How It Works
 
-The adapter bridges OpenEnv's `reset()`/`step()` API to NeMo-Gym's HTTP endpoint model:
+1. **`POST /seed_session`** — Creates an environment instance and calls `env.reset()`.
+2. **`POST /<tool_name>`** (MCP) or **`POST /step`** (non-MCP) — Calls `env.step(action)` and accumulates reward.
+3. **`POST /verify`** — Returns accumulated reward, closes the environment, cleans up session. If `verifier_metadata.expected_output` is present, checks stdout match instead.
 
-1. **`POST /seed_session`** -- Creates an environment instance and calls `env.reset()`. Stores the env in per-session state.
-2. **`POST /<tool_name>`** (MCP) or **`POST /step`** (non-MCP) -- Looks up the session's env, constructs the appropriate Action, calls `env.step(action)`, and accumulates the reward.
-3. **`POST /verify`** -- Returns the total accumulated reward across all steps, closes the environment, and cleans up session state.
+For MCP environments, tool endpoints are discovered at startup via `ListToolsAction`.
 
-For MCP environments, tool endpoints are discovered at startup by calling `ListToolsAction` on a temporary environment instance. Each tool's JSON schema is converted to a Pydantic request model for validation.
-
-## Running Tests
-
-From the **repo root**, with the project venv activated:
+## Tests
 
 ```bash
-source .venv/bin/activate
 python -m pytest resources_servers/openenv/tests/test_app.py -v
 ```
-
-See [README-DEV.md](README-DEV.md) for detailed test structure and development notes.

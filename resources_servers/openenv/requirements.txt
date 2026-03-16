@@ -1,7 +1,7 @@
 -e nemo-gym[dev] @ ../../
-openenv-core[core]>=0.2.0
--e openenv-echo-env @ ../../3rdparty/OpenEnv/envs/echo_env
--e openenv-coding_env @ ../../3rdparty/OpenEnv/envs/coding_env
--e openenv-maze-env @ ../../3rdparty/OpenEnv/envs/maze_env
-# -e openenv-chess-env @ ../../3rdparty/OpenEnv/envs/chess_env
-# -e openenv-git-env @ ../../3rdparty/OpenEnv/envs/git_env
+openenv-core[core]>=0.2.1
+openenv-echo-env @ git+https://github.com/meta-pytorch/OpenEnv.git#subdirectory=envs/echo_env
+# chess_env requires openenv.core.rubrics which isn't in openenv-core==0.2.1 yet
+# openenv-chess-env @ git+https://github.com/meta-pytorch/OpenEnv.git#subdirectory=envs/chess_env
+openenv-coding_env @ git+https://github.com/meta-pytorch/OpenEnv.git#subdirectory=envs/coding_env
+openenv-maze-env @ git+https://github.com/meta-pytorch/OpenEnv.git#subdirectory=envs/maze_env
