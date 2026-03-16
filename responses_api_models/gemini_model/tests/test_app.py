@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+
 pytest.importorskip("google.genai", reason="google-genai SDK not installed")
 
 from nemo_gym.server_utils import ServerClient

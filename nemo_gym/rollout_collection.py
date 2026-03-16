@@ -53,7 +53,8 @@ from nemo_gym.server_utils import (
 class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     num_samples_in_parallel: Optional[int] = Field(
-        default=10, description="Limit the number of concurrent samples running at once. Set to null/None for unlimited."
+        default=10,
+        description="Limit the number of concurrent samples running at once. Set to null/None for unlimited.",
     )
     responses_create_params: Dict[str, Any] = Field(
         default_factory=dict,

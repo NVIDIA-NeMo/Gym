@@ -17,7 +17,7 @@ import pytest
 
 from nemo_gym.server_utils import ServerClient
 from resources_servers.browser_gym.app import BrowserGymResourcesServer
-from resources_servers.browser_gym.browser_pool import PLAYWRIGHT_KEY_MAP, BrowserPool, _normalize_key
+from resources_servers.browser_gym.browser_pool import BrowserPool, _normalize_key
 from resources_servers.browser_gym.schemas import (
     BrowserAction,
     BrowserGymResourcesServerConfig,
@@ -92,9 +92,7 @@ class TestBrowserAction:
         assert action.scroll_y == 100
 
     def test_drag_action(self):
-        action = BrowserAction(
-            action_type="drag", start_coordinate=[10, 20], end_coordinate=[100, 200]
-        )
+        action = BrowserAction(action_type="drag", start_coordinate=[10, 20], end_coordinate=[100, 200])
         assert action.start_coordinate == [10, 20]
         assert action.end_coordinate == [100, 200]
 
@@ -254,9 +252,7 @@ class TestVerifyEndpoint:
 
             mock_response = AsyncMock()
             mock_response.status = 200
-            mock_response.json = AsyncMock(
-                return_value={"assertions": [{"result": "pass"}, {"result": "pass"}]}
-            )
+            mock_response.json = AsyncMock(return_value={"assertions": [{"result": "pass"}, {"result": "pass"}]})
             mock_response.__aenter__ = AsyncMock(return_value=mock_response)
             mock_response.__aexit__ = AsyncMock(return_value=None)
 
@@ -300,9 +296,7 @@ class TestVerifyEndpoint:
 
             mock_response = AsyncMock()
             mock_response.status = 200
-            mock_response.json = AsyncMock(
-                return_value={"assertions": [{"result": "pass"}, {"result": "fail"}]}
-            )
+            mock_response.json = AsyncMock(return_value={"assertions": [{"result": "pass"}, {"result": "fail"}]})
             mock_response.__aenter__ = AsyncMock(return_value=mock_response)
             mock_response.__aexit__ = AsyncMock(return_value=None)
 
