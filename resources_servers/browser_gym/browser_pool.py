@@ -173,7 +173,8 @@ class BrowserPool:
             await page.goto(start_url, wait_until="domcontentloaded", timeout=30000)
 
             session = BrowserSession(context=context, page=page, viewport_width=vw, viewport_height=vh)
-            self._sessions[env_id] = session
+            async with self._lock:
+                self._sessions[env_id] = session
 
             screenshot_bytes = await page.screenshot(type="png", full_page=False)
             return base64.b64encode(screenshot_bytes).decode("utf-8")
@@ -214,7 +215,8 @@ class BrowserPool:
         Attempts page.close() then context.close(), each with a timeout.
         Always releases the semaphore regardless of cleanup success.
         """
-        session = self._sessions.pop(env_id, None)
+        async with self._lock:
+            session = self._sessions.pop(env_id, None)
         if session is None:
             return False
 
@@ -241,7 +243,8 @@ class BrowserPool:
 
     async def shutdown(self):
         """Close all sessions and the browser."""
-        env_ids = list(self._sessions.keys())
+        async with self._lock:
+            env_ids = list(self._sessions.keys())
         for env_id in env_ids:
             await self.close_session(env_id)
         if self._browser:
