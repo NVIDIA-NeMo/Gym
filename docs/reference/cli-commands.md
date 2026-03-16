@@ -482,13 +482,13 @@ Upload a JSONL dataset to HuggingFace Hub with optional GitLab deletion after su
   - Alphanumeric collection slug found at the end of the collection URI.
 * - `dataset_name`
   - str
-  - Name of the dataset. Will be combined with domain and resource server name.
+  - Name of the dataset. Will be combined with domain and resources server name.
 * - `input_jsonl_fpath`
   - str
   - Path to the local JSONL file to upload.
 * - `resource_config_path`
   - str
-  - Path to resource server config file. Used to extract domain for naming convention.
+  - Path to resources server config file. Used to extract domain for naming convention.
 * - `hf_dataset_prefix`
   - str
   - Prefix prepended to dataset name. Default: `NeMo-Gym`.

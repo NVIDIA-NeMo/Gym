@@ -12,8 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from argparse import ArgumentParser
 from collections import defaultdict
 from copy import deepcopy
+from importlib import import_module
 from os import environ, getenv
 from pathlib import Path
 from platform import python_version
@@ -133,6 +135,28 @@ class GlobalConfigDictParserConfig(BaseModel):
 
 class GlobalConfigDictParser(BaseModel):
     def parse_global_config_dict_from_cli(self) -> DictConfig:
+        # We need to monkeypatch hydra here so that it doesn't use Hydra help so that we can use our own help down the line
+        hydra_main_module = import_module("hydra.main")
+        original_get_args_parser = hydra_main_module.get_args_parser
+
+        def new_get_args_parser():
+            parser: ArgumentParser = original_get_args_parser()
+            # Set the conflict handlers to resolve so we can disable the help.
+            parser.conflict_handler = "resolve"
+            for action_group in parser._action_groups:
+                action_group.conflict_handler = "resolve"
+
+            parser.add_argument("--help", "-h", action="store_false", default=False)
+
+            # Reset to the original conflict_handler error scheme
+            parser.conflict_handler = "error"
+            for action_group in parser._action_groups:
+                action_group.conflict_handler = "error"
+
+            return parser
+
+        hydra_main_module.get_args_parser = new_get_args_parser
+
         # This function is just to get the config object out of the hydra main call.
         # Need a closure. We simply use an outer ref of a list
         config_list = []
@@ -156,9 +180,10 @@ class GlobalConfigDictParser(BaseModel):
         extra_configs: List[DictConfig] = []
         for config_path in config_paths:
             config_path = Path(config_path)
-            # Assume relative to the parent dir
+            # Check cwd first for user's local configs, then install location
             if not config_path.is_absolute():
-                config_path = PARENT_DIR / config_path
+                cwd_path = Path.cwd() / config_path
+                config_path = cwd_path if cwd_path.exists() else PARENT_DIR / config_path
 
             extra_config = OmegaConf.load(config_path)
             for new_config_path in extra_config.get(CONFIG_PATHS_KEY_NAME) or []:
@@ -292,7 +317,13 @@ class GlobalConfigDictParser(BaseModel):
         global_config_dict: DictConfig = OmegaConf.merge(initial_global_config_dict, global_config_dict)
 
         # Load the env.yaml config. We load it early so that people can use it to conveniently store config paths.
-        dotenv_path = parse_config.dotenv_path or PARENT_DIR / "env.yaml"
+        # Check cwd first for user's local env.yaml, then fall back to PARENT_DIR
+        if parse_config.dotenv_path:
+            dotenv_path = parse_config.dotenv_path
+        else:
+            cwd_env_yaml = Path.cwd() / "env.yaml"
+            dotenv_path = cwd_env_yaml if cwd_env_yaml.exists() else PARENT_DIR / "env.yaml"
+
         dotenv_extra_config = DictConfig({})
         if dotenv_path.exists() and not parse_config.skip_load_from_dotenv:
             dotenv_extra_config = OmegaConf.load(dotenv_path)

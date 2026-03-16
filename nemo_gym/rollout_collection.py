@@ -23,10 +23,12 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
+from omegaconf import OmegaConf
 from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
 from wandb import Table
 
+from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
@@ -35,7 +37,7 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     get_wandb_run,
 )
-from nemo_gym.reward_profile import RewardProfiler
+from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
@@ -113,6 +115,10 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=False,
         description="If the same command is run multiple times, check the materialized inputs and current outputs and remove the inputs that have already been run",
     )
+    prompt_config: Optional[str] = Field(
+        default=None,
+        description="Path to a prompt YAML file. Builds responses_create_params.input from the template at rollout time. Mutually exclusive with pre-populated responses_create_params.input in the JSONL data.",
+    )
 
     @property
     def materialized_jsonl_fpath(self) -> Path:
@@ -140,19 +146,28 @@ class RolloutCollectionHelper(BaseModel):
         if num_repeats:
             print(f"Repeating rows {num_repeats} times (in a pattern of abc to aabbcc)!")
 
-        input_file = open(config.input_jsonl_fpath)
-        rows_iterator: Iterator[str] = input_file
-        rows_iterator: Iterator[str] = tqdm(rows_iterator, desc="Reading rows")
-        rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
+        # Load prompt config if specified
+        prompt_cfg = None
+        if config.prompt_config:
+            prompt_cfg = load_prompt_config(config.prompt_config)
+            print(f"Using prompt config: {config.prompt_config}")
+
+        with open(config.input_jsonl_fpath) as input_file:
+            rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
+            rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
+            raw_rows = [(row_idx, row_str, orjson.loads(row_str)) for row_idx, row_str in rows_iterator]
+
+        # Validate and apply prompt config before per-row processing
+        if prompt_cfg is not None:
+            validate_prompt_compatibility([row for _, _, row in raw_rows], prompt_cfg)
+            raw_rows = [(idx, s, apply_prompt_to_row(row, prompt_cfg)) for idx, s, row in raw_rows]
 
         # For ng_reward_profile to match rollouts to tasks
         row_to_task_idx: Dict[str, int] = dict()
         task_idx_to_rollout_idx: Dict[int, int] = Counter()
         row_idxs_missing_agent_ref: List[int] = []
         rows: List[Dict] = []
-        for row_idx, row_str in rows_iterator:
-            row = orjson.loads(row_str)
-
+        for row_idx, row_str, row in raw_rows:
             # Resolve agent name
             if config.agent_name:
                 row.setdefault(AGENT_REF_KEY_NAME, {"name": config.agent_name})
@@ -160,14 +175,13 @@ class RolloutCollectionHelper(BaseModel):
                 row_idxs_missing_agent_ref.append(row_idx)
 
             # Responses create params
-            row[RESPONSES_CREATE_PARAMS_KEY_NAME] = (
-                row[RESPONSES_CREATE_PARAMS_KEY_NAME] | config.responses_create_params
-            )
+            overrides = OmegaConf.to_container(OmegaConf.create(config.responses_create_params), resolve=True)
+            row[RESPONSES_CREATE_PARAMS_KEY_NAME] = row[RESPONSES_CREATE_PARAMS_KEY_NAME] | overrides
 
             # Resolve task index
             row[TASK_INDEX_KEY_NAME] = row_to_task_idx.setdefault(row_str, len(row_to_task_idx))
 
-            for repeat_idx in range(num_repeats):
+            for _ in range(num_repeats):
                 row = deepcopy(row)
 
                 # Resolve rollout index
@@ -178,8 +192,6 @@ class RolloutCollectionHelper(BaseModel):
                     row[RESPONSES_CREATE_PARAMS_KEY_NAME]["seed"] = row[ROLLOUT_INDEX_KEY_NAME]
 
                 rows.append(row)
-
-        input_file.close()
 
         if row_idxs_missing_agent_ref:
             raise ValueError(
@@ -254,6 +266,8 @@ class RolloutCollectionHelper(BaseModel):
 
         output_fpath.parent.mkdir(exist_ok=True, parents=True)
 
+        pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
+        counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
         results_file = output_fpath.open("ab")
         for future in self.run_examples(input_rows, semaphore=semaphore):
             row, result = await future
@@ -265,54 +279,131 @@ class RolloutCollectionHelper(BaseModel):
             results.append(result)
             result_strs.append([orjson.dumps(result)])
             results_file.write(result_strs[-1][0] + b"\n")
+
+            counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
+            if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
+                counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
+
+            current_pct = 100 * len(results) / len(input_rows)
+            if pcts_to_print and current_pct >= pcts_to_print[0]:
+                while pcts_to_print and current_pct >= pcts_to_print[0]:
+                    pcts_to_print.pop(0)
+
+                top_left = counts_left.most_common(5)  # Fix to top 3 for now.
+                if top_left:
+                    top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
+                    print(f"Examples left:\n{top_left_str}")
+
         results_file.close()
 
         if get_wandb_run():  # pragma: no cover
+            print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
             get_wandb_run().log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
         del result_strs
 
-        # Sort to ensure consistent ordering
+        print("Sorting results to ensure consistent ordering")
         rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
         results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
 
-        rp = RewardProfiler()
-        group_level_metrics, agent_level_metrics = rp.profile_from_data(rows, results)
-        reward_profiling_fpath, agent_level_metrics_fpath = rp.write_to_disk(
-            group_level_metrics, agent_level_metrics, output_fpath
-        )
-
-        if get_wandb_run():  # pragma: no cover
-            agent_level_metrics_to_log = dict()
-            for agent_metrics in agent_level_metrics:
-                agent_name = agent_metrics[AGENT_REF_KEY_NAME]["name"]
-                for key, value in agent_metrics.items():
-                    agent_level_metrics_to_log[f"{agent_name}/{key}"] = value
-
-                agent_level_metrics_to_log.pop(f"{agent_name}/{AGENT_REF_KEY_NAME}")
-
-            get_wandb_run().log(agent_level_metrics_to_log)
-
-        agent_level_metrics: List[Dict] = orjson.loads(agent_level_metrics_fpath.read_text())
-        agent_level_metrics_to_print: List[Dict] = []
-        for agent_metrics in agent_level_metrics:
-            agent_metrics_to_print = {AGENT_REF_KEY_NAME: agent_metrics[AGENT_REF_KEY_NAME]}
-            for k, v in agent_metrics.items():
-                if not k.startswith("mean/"):
-                    continue
-
-                agent_metrics_to_print[k] = v
-
-            agent_level_metrics_to_print.append(agent_metrics_to_print)
-
-        print("Agent level metrics (mean only):\n" + json.dumps(agent_level_metrics_to_print, indent=4))
+        # Compute and write aggregate metrics via /aggregate_metrics on each agent server
+        print("Computing aggregate metrics")
+        aggregate_metrics_fpath = await self._call_aggregate_metrics(results, rows, output_fpath)
 
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
-Reward profiling outputs: {reward_profiling_fpath}
-Agent-level metrics: {agent_level_metrics_fpath}""")
+Aggregate metrics: {aggregate_metrics_fpath}""")
 
         return results
+
+    async def _call_aggregate_metrics(
+        self,
+        results: List[Dict],
+        rows: List[Dict],
+        output_fpath: Path,
+    ) -> Optional[Path]:
+        """Call /aggregate_metrics on each agent server after rollouts complete.
+
+        Writes a single _aggregate_metrics.json with one entry per agent (same shape
+        as the old _agent_metrics.json). Returns the file path.
+        """
+        if not results:
+            return None
+
+        # Group results by agent name
+        agent_results: Dict[str, List[Dict]] = {}
+        for row, result in zip(rows, results):
+            agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+            if not agent_name:
+                continue
+            agent_results.setdefault(agent_name, []).append(result)
+
+        server_client = self.setup_server_client()
+
+        async def _fetch_agent_metrics(agent_name: str, agent_result_list: List[Dict]) -> Dict:
+            # Strip heavyweight fields before sending, but preserve response.usage
+            stripped = []
+            for r in agent_result_list:
+                entry = {k: v for k, v in r.items() if k not in ("response", "responses_create_params")}
+                usage = (r.get("response") or {}).get("usage")
+                if usage:
+                    entry["response"] = {"usage": usage}
+                stripped.append(entry)
+
+            agg_request = AggregateMetricsRequest(verify_responses=stripped)
+            agg_response = await server_client.post(
+                server_name=agent_name,
+                url_path="/aggregate_metrics",
+                json=agg_request,
+            )
+            await raise_for_status(agg_response)
+            agg_result = AggregateMetrics.model_validate(await get_response_json(agg_response))
+
+            agent_entry = {
+                AGENT_REF_KEY_NAME: {"name": agent_name},
+                "agent_metrics": agg_result.agent_metrics,
+                "key_metrics": agg_result.key_metrics,
+                "group_level_metrics": agg_result.group_level_metrics,
+            }
+            return agent_entry
+
+        all_agent_metrics: List[Dict] = []
+        tasks = [_fetch_agent_metrics(name, results_list) for name, results_list in agent_results.items()]
+        for coro in asyncio.as_completed(tasks):
+            agent_entry = await coro
+            all_agent_metrics.append(agent_entry)
+
+            agent_name = agent_entry[AGENT_REF_KEY_NAME]["name"]
+            key_metrics = agent_entry.get("key_metrics", {})
+            print(f"\nKey metrics for {agent_name}:\n" + json.dumps(key_metrics, indent=4))
+
+        primitive_types = (bool, int, float, str, type(None))
+        metrics_to_log = dict()
+        for agent_entry in all_agent_metrics:
+            agent_name = agent_entry[AGENT_REF_KEY_NAME]["name"]
+            metrics_to_log.update(
+                {
+                    f"{agent_name}/{k}": v
+                    for k, v in agent_entry["agent_metrics"].items()
+                    if isinstance(v, primitive_types)
+                }
+            )
+            metrics_to_log.update(
+                {
+                    f"key_metrics/{k}": v
+                    for k, v in agent_entry["key_metrics"].items()
+                    if isinstance(v, primitive_types)
+                }
+            )
+
+        if get_wandb_run():  # pragma: no cover
+            get_wandb_run().log(metrics_to_log)
+
+        # Write single file with all agents
+        metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
+        metrics_fpath.write_bytes(orjson.dumps(all_agent_metrics, option=orjson.OPT_INDENT_2))
+
+        return metrics_fpath
 
     def run_examples(
         self,
@@ -333,7 +424,11 @@ Agent-level metrics: {agent_level_metrics_fpath}""")
                 return row, await get_response_json(res)
 
         return tqdm.as_completed(
-            map(_post_subroutine, examples), desc="Collecting rollouts", miniters=10, total=len(examples)
+            map(_post_subroutine, examples),
+            desc="Collecting rollouts",
+            miniters=10,
+            total=len(examples),
+            maxinterval=60,
         )
 
     def setup_server_client(

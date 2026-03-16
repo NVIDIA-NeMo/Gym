@@ -34,7 +34,7 @@
 NeMo Gym is designed to run on standard development machines without specialized hardware:
 
 - **GPU**: Not required for NeMo Gym library operation
-  - GPU may be needed for specific resource servers or model inference (see individual server documentation). E.g. if you are intending to train your model with NeMo-RL, GPU resources are required (see training documentation)
+  - GPU may be needed for specific resources servers or model inference (see individual server documentation). E.g. if you are intending to train your model with NeMo-RL, GPU resources are required (see training documentation)
 - **CPU**: Any modern x86_64 or ARM64 processor (e.g., Intel, AMD, Apple Silicon)
 - **RAM**: Minimum 8 GB (16 GB+ recommended for larger environments and datasets)
 - **Storage**: Minimum 2 GB free disk space for installation and basic usage
@@ -74,7 +74,7 @@ The following configurations have been tested and verified:
 | Windows 11 | x86_64 (via WSL2) | 3.12 | ✅ Verified |
 
 :::{note}
-While NeMo Gym itself does not require a GPU, some resource servers (particularly those involving local model inference or training) may have GPU requirements. Check the individual resource server documentation for specific requirements.
+While NeMo Gym itself does not require a GPU, some resources servers (particularly those involving local model inference or training) may have GPU requirements. Check the individual resources server documentation for specific requirements.
 :::
 
 ---
@@ -420,6 +420,6 @@ Continue to Rollout Collection →
 :::
 
 :::{note}
-Rollout collection is required before proceeding to tutorials like {doc}`/environment-tutorials/creating-training-environment` or training workflows. Complete it next.
+Rollout collection is required before proceeding to tutorials like {doc}`/environment-tutorials/index` or training workflows. Complete it next.
 :::
 
