@@ -13,12 +13,8 @@ spider2_lite_resources_server:
       sql_execution_timeout_s: 30.0
       domain: coding
       verified: false
-      description: >
-        Text-to-SQL with execution-based evaluation on Spider 2.0-Lite (135 SQLite tasks).
-        Binary reward based on result-set equivalence.
-      value: >
-        Improve text-to-SQL capabilities for real-world enterprise queries
-        using execution-based binary reward without an LLM judge.
+      description: Text-to-SQL with execution-based evaluation on Spider 2.0-Lite (135 SQLite tasks). Binary reward based on result-set equivalence.
+      value: Improve text-to-SQL capabilities for real-world enterprise queries using execution-based binary reward without an LLM judge.
 
 spider2_lite_simple_agent:
   responses_api_agents:
