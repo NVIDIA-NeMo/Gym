@@ -1,0 +1,6 @@
+policy_model:
+  responses_api_models:
+    gemini_model:
+      entrypoint: app.py
+      gemini_api_key: ${policy_api_key}
+      gemini_model: ${policy_model_name}
