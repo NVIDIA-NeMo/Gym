@@ -181,7 +181,7 @@ class RolloutCollectionHelper(BaseModel):
             # Resolve task index
             row[TASK_INDEX_KEY_NAME] = row_to_task_idx.setdefault(row_str, len(row_to_task_idx))
 
-            for repeat_idx in range(num_repeats):
+            for _ in range(num_repeats):
                 row = deepcopy(row)
 
                 # Resolve rollout index
@@ -297,14 +297,16 @@ class RolloutCollectionHelper(BaseModel):
         results_file.close()
 
         if get_wandb_run():  # pragma: no cover
+            print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
             get_wandb_run().log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
         del result_strs
 
-        # Sort to ensure consistent ordering
+        print("Sorting results to ensure consistent ordering")
         rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
         results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
 
         # Compute and write aggregate metrics via /aggregate_metrics on each agent server
+        print("Computing aggregate metrics")
         aggregate_metrics_fpath = await self._call_aggregate_metrics(results, rows, output_fpath)
 
         print(f"""Finished rollout collection! View results at:
@@ -363,16 +365,6 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                 "key_metrics": agg_result.key_metrics,
                 "group_level_metrics": agg_result.group_level_metrics,
             }
-
-            # Log to W&B
-            if get_wandb_run():  # pragma: no cover
-                # Exclude per_sample_aggregate — it's a nested dict of lists (per-rollout-index
-                # accuracies), not a scalar metric, so it can't be logged to W&B.
-                wandb_metrics = {
-                    f"{agent_name}/{k}": v for k, v in agg_result.agent_metrics.items() if k != "per_sample_aggregate"
-                }
-                get_wandb_run().log(wandb_metrics)
-
             return agent_entry
 
         all_agent_metrics: List[Dict] = []
@@ -384,6 +376,28 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
             agent_name = agent_entry[AGENT_REF_KEY_NAME]["name"]
             key_metrics = agent_entry.get("key_metrics", {})
             print(f"\nKey metrics for {agent_name}:\n" + json.dumps(key_metrics, indent=4))
+
+        primitive_types = (bool, int, float, str, type(None))
+        metrics_to_log = dict()
+        for agent_entry in all_agent_metrics:
+            agent_name = agent_entry[AGENT_REF_KEY_NAME]["name"]
+            metrics_to_log.update(
+                {
+                    f"{agent_name}/{k}": v
+                    for k, v in agent_entry["agent_metrics"].items()
+                    if isinstance(v, primitive_types)
+                }
+            )
+            metrics_to_log.update(
+                {
+                    f"key_metrics/{k}": v
+                    for k, v in agent_entry["key_metrics"].items()
+                    if isinstance(v, primitive_types)
+                }
+            )
+
+        if get_wandb_run():  # pragma: no cover
+            get_wandb_run().log(metrics_to_log)
 
         # Write single file with all agents
         metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
