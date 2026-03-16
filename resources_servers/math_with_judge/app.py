@@ -40,7 +40,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.reward_profile import compute_pass_majority_metrics
 from nemo_gym.server_utils import get_response_json
 
 
@@ -112,32 +111,6 @@ Example output: "My final verdict is different [[A!=B]]"."""
                 LatexExtractionConfig(),
             ),
         )
-
-    @staticmethod
-    def _math_score_fn(r):
-        scores = {}
-        if "library_reward" in r:
-            scores["symbolic_accuracy"] = r["library_reward"]
-        if "judge_evaluations" in r and r["judge_evaluations"] is not None:
-            scores["judge_accuracy"] = r["reward"]
-        scores["accuracy"] = r["reward"]
-        return scores
-
-    def compute_metrics(self, tasks):
-        return compute_pass_majority_metrics(
-            tasks,
-            score_fn=self._math_score_fn,
-            answer_key="extracted_answer",
-        )
-
-    def get_key_metrics(self, agent_metrics):
-        key_metrics = {}
-        for k in sorted(agent_metrics):
-            if k.startswith(("pass@", "majority@")):
-                key_metrics[k] = agent_metrics[k]
-        if "mean/reward" in agent_metrics:
-            key_metrics["mean/reward"] = agent_metrics["mean/reward"]
-        return key_metrics
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
