@@ -26,7 +26,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     BaseVerifyResponse,
 )
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseOutputItem
+from nemo_gym.openai_utils import NeMoGymResponse
 
 
 ########################################

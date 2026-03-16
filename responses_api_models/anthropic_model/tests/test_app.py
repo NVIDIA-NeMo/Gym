@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+
 pytest.importorskip("anthropic", reason="anthropic SDK not installed")
 
 from nemo_gym.server_utils import ServerClient
