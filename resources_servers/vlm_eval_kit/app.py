@@ -36,7 +36,7 @@ class VLMEvalKitVerifyRequest(BaseVerifyRequest):
     # We allow extra inputs here since there are many VLMEvalKit benchmarks that are run through the same resources server.
     model_config = ConfigDict(extra="allow")
 
-    eval_fn: str
+    benchmark_name: str
     category: str
     answer: Any
 
@@ -83,7 +83,7 @@ class VlmEvalKitResourcesServer(SimpleResourcesServer):
         vlmeval.utils.matching_util
 
     async def verify(self, body: VLMEvalKitVerifyRequest) -> VLMEvalKitVerifyResponse:
-        score_fn = getattr(self, body.eval_fn)
+        score_fn = getattr(self, f"_score_{body.benchmark_name}")
 
         score_dict = await score_fn(body)
 
@@ -113,7 +113,7 @@ class VlmEvalKitResourcesServer(SimpleResourcesServer):
                     reward = 1.0
                     break
 
-        return {f"OCRBench/{category}": reward, "reward": reward}
+        return {f"OCRBench/{category}": reward, "OCRBench": reward, "reward": reward}
 
     async def _score_MMBench_DEV_EN_V11(self, body: BaseVerifyRequest) -> Dict[str, Any]:
         # Reformatted from https://github.com/open-compass/VLMEvalKit/blob/00804217f868058f871f5ff252a7b9623c3475d9/vlmeval/dataset/image_mcq.py#L294
@@ -140,7 +140,34 @@ class VlmEvalKitResourcesServer(SimpleResourcesServer):
         # Just take the first one since that's what we set
         reward = coordinator.rewards[0]
 
-        return {f"MMBench_DEV_EN_V11/{category}": reward, "reward": reward}
+        # We need to return a group-level reward. Here we mark the returned reward as unweighted.
+        return {f"MMBench_DEV_EN_V11/unweighted/{category}": reward, "reward": reward}
+
+    def _aggregate_MMBench_DEV_EN_V11(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        grouped_tasks: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+        for group in tasks:
+            for task in group:
+                if task["benchmark_name"] == "MMBench_DEV_EN_V11":
+                    grouped_tasks[task["group"]].append(task)
+
+        if not grouped_tasks:
+            return dict()
+
+        # All rewards are the same for items within a group
+        rewards = [group[0]["reward"] for group in grouped_tasks.values()]
+        return {
+            "MMBench_DEV_EN_V11": sum(rewards) / len(rewards),
+        }
+
+    def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        return self._aggregate_MMBench_DEV_EN_V11(tasks)
+
+    def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        keys = [
+            "mean/OCRBench",
+            "MMBench_DEV_EN_V11",
+        ]
+        return {k: agent_metrics[k] for k in keys}
 
 
 if __name__ == "__main__":

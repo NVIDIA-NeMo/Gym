@@ -12,7 +12,7 @@
 ## Accuracy reproduction using gpt-4o-mini-2024-07-18
 |Benchmark|Name for run.py|Judge|Num samples|Reported score|Original repo repro|Gym repro|
 |---|---|---|---|---|---|---|
-|MMBench V1.1|MMBench_DEV_EN_V11|N/A?|4876|76 (test)|75.8 (dev)|62.6|
+|MMBench V1.1|MMBench_DEV_EN_V11|N/A?|4876|76 (test)|75.8 (dev)|62.6 (dev)|
 |MMStar|MMStar|N/A|TODO|54.8|TODO|TODO|
 |MMMU|MMMU_DEV_VAL|N/A|TODO|60|TODO|TODO|
 |MathVista|MathVista_MINI|gpt-4o-mini|TODO|52.5|TODO|TODO|

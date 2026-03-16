@@ -59,7 +59,7 @@ def prepare_OCRBench():
             },
             "answer": eval(vlmevalkit_row["answer"]),
             "category": vlmevalkit_row["category"],
-            "eval_fn": f"_score_{dataset_name}",
+            "benchmark_name": dataset_name,
         }
         f.write(orjson.dumps(gym_row) + b"\n")
 
@@ -137,7 +137,7 @@ Data head:
             },
             "answer": vlmevalkit_row["answer"],
             "category": vlmevalkit_row["category"],
-            "eval_fn": f"_score_{dataset_name}",
+            "benchmark_name": dataset_name,
             "group": group,
             "group_size": group_counts[group],
             # Choices is built here https://github.com/open-compass/VLMEvalKit/blob/00804217f868058f871f5ff252a7b9623c3475d9/vlmeval/dataset/utils/multiple_choice.py#L337
