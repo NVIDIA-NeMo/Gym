@@ -70,10 +70,6 @@ def prepare_MMBench_DEV_EN_V11():
     dataset = ImageMCQDataset(dataset=dataset_name)
     data: DataFrame = dataset.load_data(dataset_name)
 
-    # Uncomment these lines to test a single sample
-    # samples = [3757, 1003757, 2003757, 3003757]
-    # data = data[data["index"].isin(samples)]
-
     print(f"""Columns: {data.columns}
 Data:
 {data}
